@@ -1,0 +1,20 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - misspell
+    - unconvert
+    - unparam
+    - nilerr
+    - errorlint
+    - copyloopvar
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        - G404 # math/rand is fine for non-crypto uses; crypto paths reviewed manually
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

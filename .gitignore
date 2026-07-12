@@ -1,0 +1,24 @@
+# Binaries
+/conch
+/conchd
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# SQLite
+*.db
+*.db-wal
+*.db-shm
+
+# Environment / local config
+.env
+.env.*
+
+# Editor
+.idea/
+.vscode/
+*.swp

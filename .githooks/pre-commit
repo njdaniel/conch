@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Conch pre-commit hook: the local copy of the deterministic enforcement layer.
+# CI (.github/workflows/ci.yml) runs the same checks remotely.
+# Install with: make hooks-install
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: gofmt"
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+    echo "gofmt needed on:"
+    echo "$unformatted"
+    exit 1
+fi
+
+echo "pre-commit: go vet"
+go vet ./...
+
+echo "pre-commit: golangci-lint"
+if command -v golangci-lint >/dev/null 2>&1; then
+    golangci-lint run
+else
+    echo "warning: golangci-lint not installed locally — CI will enforce it" >&2
+fi
+
+echo "pre-commit: go test"
+go test ./...
+
+echo "pre-commit: schema compatibility"
+./scripts/schema-compat.sh
+
+echo "pre-commit: dependency gate"
+./scripts/depgate.sh
+
+echo "pre-commit: OK"

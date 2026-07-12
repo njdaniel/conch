@@ -1,0 +1,10 @@
+# Direct go.mod dependencies approved by Nick (ADR-000).
+# One module path per line; comments and blank lines ignored.
+# Adding a line here requires Nick's sign-off in the same PR.
+#
+# Pre-approved by the founding handoff (D2, D5):
+modernc.org/sqlite
+github.com/charmbracelet/bubbletea
+github.com/charmbracelet/lipgloss
+# MCP SDK: to be selected by protocol-designer in P1 and approved by Nick
+# before being added here.

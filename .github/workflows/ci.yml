@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # schema-compat diffs against the merge base
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: schema compatibility
+        env:
+          SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: ./scripts/schema-compat.sh
+
+      - name: dependency gate
+        run: ./scripts/depgate.sh
