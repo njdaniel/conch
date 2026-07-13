@@ -15,8 +15,9 @@ import (
 
 // Config configures a Server. It is populated from conchd's flags/environment.
 type Config struct {
-	// DataDir is the directory holding the SQLite database. Reported by
-	// /healthz for operator context; the store itself is opened by the caller.
+	// DataDir is the directory holding the SQLite database. It is provided for
+	// operator context and future endpoints/logging; the store itself is opened
+	// by the caller.
 	DataDir string
 	// Listen is the TCP address the HTTP server binds to (e.g. ":8080").
 	Listen string
