@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrNotFound is returned when a requested store entity does not exist.
@@ -17,10 +18,11 @@ var ErrNotFound = errors.New("store: not found")
 // constraint (e.g. a channel or principal name that already exists).
 var ErrDuplicate = errors.New("store: duplicate")
 
-// isUniqueConstraintErr reports whether err is a SQLite UNIQUE/PK constraint failure.
+// isUniqueConstraintErr reports whether err is a SQLite UNIQUE constraint
+// failure. Error.Code carries the extended result code.
 func isUniqueConstraintErr(err error) bool {
 	var sqliteErr *sqlite.Error
-	return errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode() == sqlite.SQLITE_CONSTRAINT_UNIQUE
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 }
 
 // PrincipalKind distinguishes humans from agents (ADR-000 D1).
