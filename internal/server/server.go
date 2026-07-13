@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/hub"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -24,14 +25,14 @@ type Config struct {
 	Listen string
 	// Version is the build version, reported by /healthz.
 	Version string
-	// Broadcaster receives each message after it has been persisted. When nil,
-	// message posting uses a no-op broadcaster.
+	// Broadcaster, when set, receives each message after it has been persisted
+	// and delivered to the server's own WebSocket hub — an additional tap for
+	// tests and future integrations (e.g. ntfy), not a replacement for the hub.
 	Broadcaster Broadcaster
 }
 
-// Broadcaster is the realtime delivery seam used after a message is persisted.
-// The P0 REST server supplies a no-op implementation; the WebSocket hub can
-// implement this interface without changing the message handlers.
+// Broadcaster is the delivery seam invoked after a message is persisted.
+// The server's WebSocket hub implements it; Config.Broadcaster taps it.
 type Broadcaster interface {
 	BroadcastMessage(context.Context, schema.MessageV0)
 }
@@ -49,6 +50,7 @@ const shutdownTimeout = 10 * time.Second
 type Server struct {
 	cfg         Config
 	store       *store.Store
+	hub         *hub.Hub
 	broadcaster Broadcaster
 	http        *http.Server
 	ln          net.Listener
@@ -61,9 +63,10 @@ func New(cfg Config, st *store.Store) *Server {
 	if broadcaster == nil {
 		broadcaster = noopBroadcaster{}
 	}
-	s := &Server{cfg: cfg, store: st, broadcaster: broadcaster}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), broadcaster: broadcaster}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /v0/ws", s.handleWS)
 	mux.HandleFunc("POST /v0/channels", s.handleCreateChannel)
 	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
@@ -110,6 +113,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := s.Listen(); err != nil {
 		return err
 	}
+	// WebSocket connections are hijacked, so http.Server.Shutdown neither
+	// waits for nor closes them; closing the hub makes every WS handler drop
+	// its subscription, close its connection, and return.
+	defer s.hub.Close()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

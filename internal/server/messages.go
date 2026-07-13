@@ -66,6 +66,9 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	message := messageFromStore(stored)
+	// Persist-then-broadcast: the message is durable before anyone hears
+	// about it, so a crash here loses delivery, never data.
+	s.hub.BroadcastMessage(ctx, message)
 	s.broadcaster.BroadcastMessage(ctx, message)
 	writeJSON(w, http.StatusCreated, schema.PostMessageResponse{Message: message})
 }
