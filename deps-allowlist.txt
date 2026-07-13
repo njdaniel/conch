@@ -6,5 +6,7 @@
 modernc.org/sqlite
 github.com/charmbracelet/bubbletea
 github.com/charmbracelet/lipgloss
+# WS library for the hub (issue #4): approved by Nick 2026-07-13.
+github.com/coder/websocket
 # MCP SDK: to be selected by protocol-designer in P1 and approved by Nick
 # before being added here.
