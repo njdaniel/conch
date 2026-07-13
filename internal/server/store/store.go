@@ -100,6 +100,11 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Ping verifies that the database is reachable and accepting queries.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 // migrate applies every migration past the database's current schema version,
 // each in its own transaction, bumping PRAGMA user_version as it goes.
 func (s *Store) migrate(ctx context.Context) error {
