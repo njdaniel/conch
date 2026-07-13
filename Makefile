@@ -1,5 +1,6 @@
 GO      ?= go
-LINT    ?= golangci-lint
+# Override GNU Make's built-in LINT=lint; command-line overrides still work.
+LINT    = golangci-lint
 
 .PHONY: build test lint vet fmt fmt-check check schema-compat depgate hooks-install clean
 

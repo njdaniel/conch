@@ -1,0 +1,9 @@
+{
+  "message": {
+    "id": 42,
+    "channel_id": 7,
+    "author_id": 3,
+    "body": "hello, conch",
+    "created_at": "2026-07-13T12:34:56Z"
+  }
+}

@@ -16,6 +16,11 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newTestServerWithConfig(t, Config{})
+}
+
+func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
+	t.Helper()
 	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -25,7 +30,10 @@ func newTestServer(t *testing.T) *Server {
 			t.Errorf("store.Close: %v", err)
 		}
 	})
-	return New(Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Version: "v1.2.3-test"}, st)
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Version = "v1.2.3-test"
+	return New(cfg, st)
 }
 
 func TestHealthzOK(t *testing.T) {
