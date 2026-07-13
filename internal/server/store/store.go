@@ -100,6 +100,15 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Ping verifies the database is reachable, acquiring a connection from the
+// pool. It is used by the server's health endpoint.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.db.PingContext(ctx); err != nil {
+		return fmt.Errorf("store: ping: %w", err)
+	}
+	return nil
+}
+
 // migrate applies every migration past the database's current schema version,
 // each in its own transaction, bumping PRAGMA user_version as it goes.
 func (s *Store) migrate(ctx context.Context) error {
