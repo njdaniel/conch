@@ -77,7 +77,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := writeWSMessage(ctx, conn, msg); err != nil {
-				_ = conn.Close(websocket.StatusAbnormalClosure, "write failed")
+				// 1011: RFC 6455 reserves StatusAbnormalClosure for reporting;
+				// it must not go out in a close frame. CloseNow guards against
+				// the close handshake blocking on an already-dead peer.
+				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				_ = conn.CloseNow()
 				return
 			}
 		}
