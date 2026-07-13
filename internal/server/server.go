@@ -24,7 +24,21 @@ type Config struct {
 	Listen string
 	// Version is the build version, reported by /healthz.
 	Version string
+	// Broadcaster receives each message after it has been persisted. When nil,
+	// message posting uses a no-op broadcaster.
+	Broadcaster Broadcaster
 }
+
+// Broadcaster is the realtime delivery seam used after a message is persisted.
+// The P0 REST server supplies a no-op implementation; the WebSocket hub can
+// implement this interface without changing the message handlers.
+type Broadcaster interface {
+	BroadcastMessage(context.Context, schema.MessageV0)
+}
+
+type noopBroadcaster struct{}
+
+func (noopBroadcaster) BroadcastMessage(context.Context, schema.MessageV0) {}
 
 // shutdownTimeout bounds how long Serve waits for in-flight requests to drain
 // on shutdown before forcing connections closed.
@@ -33,18 +47,25 @@ const shutdownTimeout = 10 * time.Second
 // Server is conchd's HTTP server wrapped around the store. It owns the HTTP
 // listener and mux; the store's lifecycle belongs to the caller.
 type Server struct {
-	cfg   Config
-	store *store.Store
-	http  *http.Server
-	ln    net.Listener
+	cfg         Config
+	store       *store.Store
+	broadcaster Broadcaster
+	http        *http.Server
+	ln          net.Listener
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
 // Listen (or Serve, which binds lazily) to start accepting connections.
 func New(cfg Config, st *store.Store) *Server {
-	s := &Server{cfg: cfg, store: st}
+	broadcaster := cfg.Broadcaster
+	if broadcaster == nil {
+		broadcaster = noopBroadcaster{}
+	}
+	s := &Server{cfg: cfg, store: st, broadcaster: broadcaster}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
+	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,

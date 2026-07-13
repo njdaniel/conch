@@ -2,9 +2,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrNotFound is returned when a requested store entity does not exist.
+var ErrNotFound = errors.New("store: not found")
 
 // PrincipalKind distinguishes humans from agents (ADR-000 D1).
 type PrincipalKind string
@@ -86,10 +91,51 @@ func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error)
 	return Channel{ID: id, Name: name, CreatedAt: now}, nil
 }
 
+// ChannelByName returns the channel with name. It returns ErrNotFound when no
+// such channel exists.
+func (s *Store) ChannelByName(ctx context.Context, name string) (Channel, error) {
+	var ch Channel
+	var createdAt int64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, name, created_at FROM channels WHERE name = ?", name,
+	).Scan(&ch.ID, &ch.Name, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, err)
+	}
+	ch.CreatedAt = time.UnixMilli(createdAt)
+	return ch, nil
+}
+
+// PrincipalByID returns the principal with id. It returns ErrNotFound when no
+// such principal exists.
+func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) {
+	var p Principal
+	var kind string
+	var createdAt int64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, kind, name, created_at FROM principals WHERE id = ?", id,
+	).Scan(&p.ID, &kind, &p.Name, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, err)
+	}
+	p.Kind = PrincipalKind(kind)
+	p.CreatedAt = time.UnixMilli(createdAt)
+	return p, nil
+}
+
 // InsertMessage appends a message to a channel. The channel and author must
 // exist (enforced by foreign keys).
 func (s *Store) InsertMessage(ctx context.Context, channelID, authorID int64, body string) (Message, error) {
-	now := time.Now()
+	// SQLite stores message timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a POST response exactly describes
+	// what a subsequent read returns.
+	now := time.Now().Truncate(time.Millisecond)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO messages (channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?)",
 		channelID, authorID, body, now.UnixMilli())
