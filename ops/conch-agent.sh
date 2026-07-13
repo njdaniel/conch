@@ -111,8 +111,7 @@ fi
 OPEN_PRS=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
     --jq '.closedByPullRequestsReferences | length')
 if [ "$OPEN_PRS" != "0" ]; then
-    log "issue #$ISSUE already has an open PR; marking in-progress and exiting"
-    gh issue edit "$ISSUE" --add-label "$IN_PROGRESS_LABEL"
+    log "issue #$ISSUE already has an open PR; skipping"
     exit 0
 fi
 
