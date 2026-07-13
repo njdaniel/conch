@@ -83,10 +83,10 @@ gh label create "$IN_PROGRESS_LABEL" \
     --description "conch-agent is working this issue" --color BFDADC \
     2>/dev/null || true
 
-# Pick one issue: open, not labeled blocked, not already being worked, and no
-# still-open issue referenced in its "## Blocked by" section. Priority from
+# Candidate issues: open, not labeled blocked, not already being worked, and
+# no still-open issue referenced in the "## Blocked by" section. Priority from
 # the "P<n>" title prefix (P0 first), then oldest.
-ISSUE=$(gh issue list --state open --limit 100 \
+CANDIDATES=$(gh issue list --state open --limit 100 \
         --json number,title,labels,body |
     jq -r --arg wip "$IN_PROGRESS_LABEL" '
         . as $all
@@ -103,18 +103,23 @@ ISSUE=$(gh issue list --state open --limit 100 \
           | . + {prio: ((.title | capture("^P(?<p>[0-9])") | .p) // "9")}
         ]
         | sort_by(.prio, .number)
-        | .[0].number // empty')
+        | .[].number')
+
+# Take the first candidate that no PR already links via a closing keyword
+# ("Closes #12"), so an externally-opened PR doesn't stall the whole queue.
+ISSUE=""
+for cand in $CANDIDATES; do
+    LINKED=$(gh issue view "$cand" --json closedByPullRequestsReferences \
+        --jq '.closedByPullRequestsReferences | length')
+    if [ "$LINKED" = "0" ]; then
+        ISSUE=$cand
+        break
+    fi
+    log "issue #$cand already has an open PR; trying next candidate"
+done
 
 if [ -z "$ISSUE" ]; then
     log "no eligible open issues; nothing to do"
-    exit 0
-fi
-
-# Skip if a PR already links this issue via a closing keyword ("Closes #12").
-OPEN_PRS=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
-    --jq '.closedByPullRequestsReferences | length')
-if [ "$OPEN_PRS" != "0" ]; then
-    log "issue #$ISSUE already has an open PR; skipping"
     exit 0
 fi
 
