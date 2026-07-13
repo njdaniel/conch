@@ -15,57 +15,53 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// migrations is the ordered list of schema migrations. The schema version of
-// a database (PRAGMA user_version) is the number of migrations applied, so
-// entries must never be edited or reordered once released — only appended.
-var migrations = []string{
+// migrations is the ordered list of schema migrations. Each migration is a
+// slice of individual SQL statements executed sequentially in a single
+// transaction. The schema version of a database (PRAGMA user_version) is the
+// number of migrations applied, so entries must never be edited or reordered
+// once released — only appended.
+var migrations = [][]string{
 	// 1: P0 baseline — principals, channels, messages, audit_events.
 	// Message payload columns are deferred to P1 (issue #2).
-	`
-CREATE TABLE principals (
+	{
+		`CREATE TABLE principals (
 	id         INTEGER PRIMARY KEY,
 	kind       TEXT    NOT NULL CHECK (kind IN ('human', 'agent')),
 	name       TEXT    NOT NULL UNIQUE,
 	created_at INTEGER NOT NULL
-);
-
-CREATE TABLE channels (
+)`,
+		`CREATE TABLE channels (
 	id         INTEGER PRIMARY KEY,
 	name       TEXT    NOT NULL UNIQUE,
 	created_at INTEGER NOT NULL
-);
-
-CREATE TABLE messages (
+)`,
+		`CREATE TABLE messages (
 	id         INTEGER PRIMARY KEY,
 	channel_id INTEGER NOT NULL REFERENCES channels (id),
 	author_id  INTEGER NOT NULL REFERENCES principals (id),
 	body       TEXT    NOT NULL,
 	created_at INTEGER NOT NULL
-);
-
-CREATE INDEX messages_by_channel ON messages (channel_id, id);
-
--- No foreign keys: the audit log must outlive whatever it refers to, so the
--- actor is recorded as text (e.g. "principal:3" or "system").
-CREATE TABLE audit_events (
+)`,
+		`CREATE INDEX messages_by_channel ON messages (channel_id, id)`,
+		// No foreign keys: the audit log must outlive whatever it refers to, so
+		// the actor is recorded as text (e.g. "principal:3" or "system").
+		`CREATE TABLE audit_events (
 	id         INTEGER PRIMARY KEY,
 	actor      TEXT    NOT NULL,
 	action     TEXT    NOT NULL,
 	subject    TEXT    NOT NULL DEFAULT '',
 	detail     TEXT    NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL
-);
-
-CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events
+)`,
+		`CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events
 BEGIN
 	SELECT RAISE(ABORT, 'audit_events is append-only');
-END;
-
-CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events
+END`,
+		`CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events
 BEGIN
 	SELECT RAISE(ABORT, 'audit_events is append-only');
-END;
-`,
+END`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
@@ -130,8 +126,10 @@ func (s *Store) applyMigration(ctx context.Context, i int) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
-		return err
+	for _, stmt := range migrations[i] {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	// PRAGMA does not accept bound parameters; i+1 is a trusted integer.
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
