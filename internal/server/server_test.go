@@ -81,8 +81,8 @@ func TestHealthzDegradedWhenStoreClosed(t *testing.T) {
 	if h.Status != schema.HealthDegraded {
 		t.Errorf("status = %q, want %q", h.Status, schema.HealthDegraded)
 	}
-	if h.DB == schema.HealthOK {
-		t.Errorf("db = %q, want a failure description", h.DB)
+	if h.DB != schema.HealthDegraded {
+		t.Errorf("db = %q, want %q", h.DB, schema.HealthDegraded)
 	}
 }
 

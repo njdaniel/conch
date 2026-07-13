@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -123,8 +124,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
+		// The wire body carries only the stable "degraded" marker; the
+		// underlying error may embed driver detail or filesystem paths.
+		slog.ErrorContext(ctx, "healthz: store ping failed", "error", err)
 		h.Status = schema.HealthDegraded
-		h.DB = err.Error()
+		h.DB = schema.HealthDegraded
 		code = http.StatusServiceUnavailable
 	}
 

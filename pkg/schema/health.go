@@ -9,7 +9,8 @@ type Health struct {
 	Status string `json:"status"`
 	// Version is the conchd build version.
 	Version string `json:"version"`
-	// DB is "ok" when the store is reachable, otherwise a short error string.
+	// DB is "ok" when the store is reachable, otherwise "degraded". Failure
+	// detail stays in the server log; it is never put on the wire.
 	DB string `json:"db"`
 }
 
