@@ -1,0 +1,13 @@
+[Unit]
+Description=Conch autonomous issue agent (one issue -> one PR per run)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/conch-agent run
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CONCH_REPO=%h/code/github.com/njdaniel/conch
+# Hard ceiling on a wedged session; the script also applies its own timeout.
+RuntimeMaxSec=5400
+Nice=10
