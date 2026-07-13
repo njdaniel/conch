@@ -80,14 +80,23 @@ gh label create "$IN_PROGRESS_LABEL" \
     --description "conch-agent is working this issue" --color BFDADC \
     2>/dev/null || true
 
-# Pick one issue: open, not blocked, not already being worked, no open PR
-# linked. Priority from the "P<n>" title prefix (P0 first), then oldest.
+# Pick one issue: open, not labeled blocked, not already being worked, and no
+# still-open issue referenced in its "## Blocked by" section. Priority from
+# the "P<n>" title prefix (P0 first), then oldest.
 ISSUE=$(gh issue list --state open --limit 100 \
-        --json number,title,labels,assignees |
+        --json number,title,labels,body |
     jq -r --arg wip "$IN_PROGRESS_LABEL" '
-        [ .[]
+        . as $all
+        | [ $all[].number ] as $open
+        | [ $all[]
           | select(.labels | map(.name) | index("blocked") | not)
           | select(.labels | map(.name) | index($wip) | not)
+          | select(
+              (((.body // "") |
+                capture("(?i)##\\s*blocked by(?<s>[\\s\\S]*?)(\\n##|$)") | .s) // "")
+              | [scan("#([0-9]+)") | .[0] | tonumber]
+              | map(. as $n | $open | index($n) != null) | any | not
+            )
           | . + {prio: ((.title | capture("^P(?<p>[0-9])") | .p) // "9")}
         ]
         | sort_by(.prio, .number)
