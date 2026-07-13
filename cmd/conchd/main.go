@@ -77,11 +77,15 @@ func runServe(args []string) error {
 		return fmt.Errorf("serve: create data dir: %w", err)
 	}
 
-	// Signal-aware context: the first SIGINT/SIGTERM triggers graceful
-	// shutdown; a second restores default handling so a stuck drain can be
-	// force-killed.
+	// Signal-aware context: the first SIGINT/SIGTERM triggers graceful shutdown.
+	// Once canceled, restore default handling so a second signal can terminate a
+	// stuck drain.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+	}()
 
 	st, err := store.Open(ctx, filepath.Join(*dataDir, "conch.db"))
 	if err != nil {
