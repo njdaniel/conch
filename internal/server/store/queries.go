@@ -76,7 +76,10 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	if kind != PrincipalHuman && kind != PrincipalAgent {
 		return Principal{}, fmt.Errorf("store: invalid principal kind %q", kind)
 	}
-	now := time.Now()
+	// SQLite stores timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a create response exactly
+	// describes what a subsequent read returns.
+	now := time.Now().Truncate(time.Millisecond)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO principals (kind, name, created_at) VALUES (?, ?, ?)",
 		string(kind), name, now.UnixMilli())
@@ -95,7 +98,10 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 
 // CreateChannel creates a named channel. Names are unique.
 func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error) {
-	now := time.Now()
+	// SQLite stores timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a create response exactly
+	// describes what a subsequent read returns.
+	now := time.Now().Truncate(time.Millisecond)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO channels (name, created_at) VALUES (?, ?)",
 		name, now.UnixMilli())
