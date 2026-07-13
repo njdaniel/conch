@@ -167,6 +167,7 @@ if [ -n "$PR_URL" ]; then
     log "success: $PR_URL (issue #$ISSUE)"
 else
     log "no PR created for issue #$ISSUE; releasing it for a future run"
+    git push origin --delete "$BRANCH" 2>/dev/null || true
     gh issue edit "$ISSUE" --remove-label "$IN_PROGRESS_LABEL" || true
     exit 1
 fi
