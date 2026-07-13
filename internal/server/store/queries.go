@@ -6,10 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 // ErrNotFound is returned when a requested store entity does not exist.
 var ErrNotFound = errors.New("store: not found")
+
+// ErrDuplicate is returned when a create operation violates a uniqueness
+// constraint (e.g. a channel or principal name that already exists).
+var ErrDuplicate = errors.New("store: duplicate")
+
+// sqliteConstraintUnique is SQLITE_CONSTRAINT_UNIQUE (sqlite3.h): a UNIQUE or
+// PRIMARY KEY constraint failed.
+const sqliteConstraintUnique = 2067
+
+func isUniqueConstraintErr(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqliteConstraintUnique
+}
 
 // PrincipalKind distinguishes humans from agents (ADR-000 D1).
 type PrincipalKind string
@@ -65,6 +80,9 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO principals (kind, name, created_at) VALUES (?, ?, ?)",
 		string(kind), name, now.UnixMilli())
+	if isUniqueConstraintErr(err) {
+		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, ErrDuplicate)
+	}
 	if err != nil {
 		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
 	}
@@ -81,6 +99,9 @@ func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO channels (name, created_at) VALUES (?, ?)",
 		name, now.UnixMilli())
+	if isUniqueConstraintErr(err) {
+		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, ErrDuplicate)
+	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, err)
 	}

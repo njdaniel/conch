@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -133,6 +134,9 @@ func TestCreatePrincipal(t *testing.T) {
 				if err == nil {
 					t.Fatalf("CreatePrincipal(%q, %q) succeeded, want error", tt.kind, tt.pname)
 				}
+				if tt.name == "duplicate name" && !errors.Is(err, ErrDuplicate) {
+					t.Errorf("CreatePrincipal(%q, %q) error = %v, want ErrDuplicate", tt.kind, tt.pname, err)
+				}
 				return
 			}
 			if err != nil {
@@ -152,8 +156,8 @@ func TestCreateChannelDuplicateName(t *testing.T) {
 	if _, err := s.CreateChannel(ctx, "general"); err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
-	if _, err := s.CreateChannel(ctx, "general"); err == nil {
-		t.Fatal("duplicate CreateChannel succeeded, want error")
+	if _, err := s.CreateChannel(ctx, "general"); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate CreateChannel error = %v, want ErrDuplicate", err)
 	}
 }
 
