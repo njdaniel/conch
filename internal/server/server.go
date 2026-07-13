@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 const databaseFilename = "conch.db"
@@ -102,13 +103,8 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-type healthResponse struct {
-	Version string `json:"version"`
-	DB      string `json:"db"`
-}
-
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	response := healthResponse{Version: s.version, DB: "ok"}
+	response := schema.Health{Version: s.version, DB: "ok"}
 	status := http.StatusOK
 	if err := s.store.Ping(r.Context()); err != nil {
 		response.DB = "error"
