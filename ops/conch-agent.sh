@@ -98,9 +98,9 @@ if [ -z "$ISSUE" ]; then
     exit 0
 fi
 
-# Skip if an open PR already references this issue (e.g. "Closes #12").
-OPEN_PRS=$(gh pr list --state open --json title,body \
-    --jq "[.[] | select((.title + \" \" + .body) | test(\"#$ISSUE\\\\b\"))] | length")
+# Skip if a PR already links this issue via a closing keyword ("Closes #12").
+OPEN_PRS=$(gh issue view "$ISSUE" --json closedByPullRequestsReferences \
+    --jq '.closedByPullRequestsReferences | length')
 if [ "$OPEN_PRS" != "0" ]; then
     log "issue #$ISSUE already has an open PR; marking in-progress and exiting"
     gh issue edit "$ISSUE" --add-label "$IN_PROGRESS_LABEL"
