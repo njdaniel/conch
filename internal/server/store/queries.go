@@ -17,13 +17,10 @@ var ErrNotFound = errors.New("store: not found")
 // constraint (e.g. a channel or principal name that already exists).
 var ErrDuplicate = errors.New("store: duplicate")
 
-// sqliteConstraintUnique is SQLITE_CONSTRAINT_UNIQUE (sqlite3.h): a UNIQUE or
-// PRIMARY KEY constraint failed.
-const sqliteConstraintUnique = 2067
-
+// isUniqueConstraintErr reports whether err is a SQLite UNIQUE/PK constraint failure.
 func isUniqueConstraintErr(err error) bool {
 	var sqliteErr *sqlite.Error
-	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqliteConstraintUnique
+	return errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode() == sqlite.SQLITE_CONSTRAINT_UNIQUE
 }
 
 // PrincipalKind distinguishes humans from agents (ADR-000 D1).
