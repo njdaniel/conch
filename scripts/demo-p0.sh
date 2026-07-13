@@ -14,6 +14,10 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 MESSAGES=${MESSAGES:-10}
+if ! [[ "$MESSAGES" =~ ^[0-9]+$ ]] || [ "$MESSAGES" -le 0 ] || [ "$MESSAGES" -gt 100 ]; then
+    echo "demo-p0: FAIL — MESSAGES must be an integer between 1 and 100 (server limit); got ${MESSAGES}" >&2
+    exit 1
+fi
 WORK=$(mktemp -d)
 SERVER_PID=""
 TAIL_PID=""
