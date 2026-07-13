@@ -6,10 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // ErrNotFound is returned when a requested store entity does not exist.
 var ErrNotFound = errors.New("store: not found")
+
+// ErrDuplicate is returned when a create operation violates a uniqueness
+// constraint (e.g. a channel or principal name that already exists).
+var ErrDuplicate = errors.New("store: duplicate")
+
+// isUniqueConstraintErr reports whether err is a SQLite UNIQUE constraint
+// failure. Error.Code carries the extended result code.
+func isUniqueConstraintErr(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+}
 
 // PrincipalKind distinguishes humans from agents (ADR-000 D1).
 type PrincipalKind string
@@ -61,10 +75,16 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	if kind != PrincipalHuman && kind != PrincipalAgent {
 		return Principal{}, fmt.Errorf("store: invalid principal kind %q", kind)
 	}
-	now := time.Now()
+	// SQLite stores timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a create response exactly
+	// describes what a subsequent read returns.
+	now := time.Now().Truncate(time.Millisecond)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO principals (kind, name, created_at) VALUES (?, ?, ?)",
 		string(kind), name, now.UnixMilli())
+	if isUniqueConstraintErr(err) {
+		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, ErrDuplicate)
+	}
 	if err != nil {
 		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
 	}
@@ -77,10 +97,16 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 
 // CreateChannel creates a named channel. Names are unique.
 func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error) {
-	now := time.Now()
+	// SQLite stores timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a create response exactly
+	// describes what a subsequent read returns.
+	now := time.Now().Truncate(time.Millisecond)
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO channels (name, created_at) VALUES (?, ?)",
 		name, now.UnixMilli())
+	if isUniqueConstraintErr(err) {
+		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, ErrDuplicate)
+	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, err)
 	}

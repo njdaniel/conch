@@ -64,6 +64,8 @@ func New(cfg Config, st *store.Store) *Server {
 	s := &Server{cfg: cfg, store: st, broadcaster: broadcaster}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("POST /v0/channels", s.handleCreateChannel)
+	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
 	s.http = &http.Server{
