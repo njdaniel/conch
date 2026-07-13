@@ -15,6 +15,8 @@
 #   CONCH_REPO             repo checkout (default: this script's repo)
 #   CONCH_AGENT_LOG_DIR    logs + lock  (default: ~/.local/state/conch-agent)
 #   CONCH_AGENT_TIMEOUT    per-session timeout (default: 3600 seconds)
+#   CONCH_AGENT_MODEL      model for the session (default: claude-opus-4-8;
+#                          e.g. claude-fable-5 for schema/approval design work)
 #   CLAUDE_BIN             claude binary (default: claude)
 
 set -euo pipefail
@@ -26,6 +28,7 @@ REPO_DIR="${CONCH_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 LOG_DIR="${CONCH_AGENT_LOG_DIR:-$HOME/.local/state/conch-agent}"
 LOCK_FILE="$LOG_DIR/agent.lock"
 TIMEOUT="${CONCH_AGENT_TIMEOUT:-3600}"
+CLAUDE_MODEL="${CONCH_AGENT_MODEL:-claude-opus-4-8}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 IN_PROGRESS_LABEL="agent/in-progress"
 WORKTREE_ROOT="$LOG_DIR/worktrees"
@@ -154,6 +157,7 @@ log "starting claude session (timeout ${TIMEOUT}s), log: $LOG_FILE"
 set +e
 ( cd "$WORKTREE" &&
   timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$PROMPT" \
+      --model "$CLAUDE_MODEL" \
       --dangerously-skip-permissions \
       --output-format text ) >>"$LOG_FILE" 2>&1
 STATUS=$?
