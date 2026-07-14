@@ -87,8 +87,9 @@ step "fake agent (curl): posting $MESSAGES messages while tail streams"
 total_latency_ms=0
 max_latency_ms=0
 for i in $(seq 1 "$MESSAGES"); do
-    t0=$(date +%s%N)
+    t0=$("$WORK/now_ns")
     curl -fsS -X POST "$BASE/v0/channels/general/messages" \
+        -H "Content-Type: application/json" \
         -d "{\"author_id\":$AUTHOR_ID,\"body\":\"demo message $i\"}" > /dev/null \
         || fail "post message $i"
     # Latency = post issued -> line visible in tail's stdout.
@@ -97,7 +98,7 @@ for i in $(seq 1 "$MESSAGES"); do
         sleep 0.01
     done
     grep -q "demo message $i\$" "$WORK/tail.out" || fail "message $i never reached tail"
-    ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+    ms=$(( ($("$WORK/now_ns") - t0) / 1000000 ))
     total_latency_ms=$((total_latency_ms + ms))
     [ "$ms" -gt "$max_latency_ms" ] && max_latency_ms=$ms
 done
