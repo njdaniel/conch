@@ -153,14 +153,14 @@ func TestWSV1SubscriberReceivesPayload(t *testing.T) {
 	conn := wsDial(t, ctx, base+"/v1/ws?channel=general")
 	httpBase := "http" + strings.TrimPrefix(base, "ws")
 	body := fmt.Sprintf(`{"author_id":%d,"body":"alert","payload":{"schema":"acme.alert.v1","data":{"level":2}}}`, principal.ID)
-resp, err := http.Post(httpBase+"/v1/channels/general/messages", "application/json", strings.NewReader(body)) //nolint:gosec // test-local URL
-if err != nil {
-	t.Fatalf("POST v1: %v", err)
-}
-defer func() { _ = resp.Body.Close() }()
-if resp.StatusCode != http.StatusCreated {
-	t.Fatalf("POST v1 status = %d, want %d", resp.StatusCode, http.StatusCreated)
-}
+	resp, err := http.Post(httpBase+"/v1/channels/general/messages", "application/json", strings.NewReader(body)) //nolint:gosec // test-local URL
+	if err != nil {
+		t.Fatalf("POST v1: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST v1 status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
 	var got schema.MessageV1
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
