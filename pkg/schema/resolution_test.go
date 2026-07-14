@@ -35,6 +35,11 @@ func TestResolutionValidate(t *testing.T) {
 			r.OptionID = ""
 			r.Decisions = []Decision{}
 		}, wantErr: false},
+		{name: "expired with nil decisions", mutate: func(r *ApprovalResolutionV1) {
+			r.Outcome = OutcomeExpired
+			r.OptionID = ""
+			r.Decisions = nil
+		}, wantErr: true},
 		{name: "expired with dissenting decisions", mutate: func(r *ApprovalResolutionV1) {
 			r.Outcome = OutcomeExpired
 			r.OptionID = ""
