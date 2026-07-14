@@ -1,0 +1,73 @@
+---
+name: dispatch
+description: Dispatch one issue to a worker — pick the worker, write the brief, isolate, then run the mandatory five-gate review before anything is committed. Use whenever delegating issue work to codex or a Claude agent.
+---
+
+# dispatch
+
+Operational procedure for assigning one issue to one worker and getting its
+output safely into a PR. Rationale, worker registry, and the hazard evidence
+live in [docs/design/agent-dispatch.md](../../../docs/design/agent-dispatch.md) —
+read it once per session before the first dispatch. The dispatcher (this
+session) owns every step below except step 4; the review gate is never
+delegated.
+
+## Procedure
+
+1. **Pick the worker** from the decision table in the design doc. Hard stops:
+   - Approval-path code, kill-criterion verdicts, release calls → do it
+     yourself; never dispatch.
+   - Wire shapes / schemas / MCP tool definitions → protocol-designer (opus).
+   - Codex only when acceptance criteria are crisp and no design questions
+     remain — and only after the user has explicitly authorized full-auto
+     this session.
+   - Parallel dispatch only for disjoint file areas; one worker per file area.
+
+2. **Write the brief** to a scratchpad file (not committed), exactly these
+   sections:
+   1. *Task* — issue number, one-line goal, "read CLAUDE.md first".
+   2. *Scope* — files/packages the worker may touch.
+   3. *Explicitly out of scope* — always: "no new go.mod dependencies
+      (depgate fails the build)"; for code workers: "do not commit, push, or
+      use gh".
+   4. *Required tests* — from the issue, adjusted for the sandbox: tell codex
+      which tests it cannot run (no loopback sockets) so it reports the gap
+      instead of faking a pass.
+   5. *Verify before finishing* — `make check` (note the golangci-lint PATH
+      requirement for local runs).
+   6. *Conventions* — concrete existing files to imitate.
+
+3. **Isolate, then launch.**
+   - Claude agents: `isolation: worktree`, always.
+   - Codex: create `issue-N/codex` in the main working tree *before* launch;
+     do not touch the tree while it runs.
+   - Branch naming `issue-N/<worker>`.
+
+4. **Worker executes the brief.** Do not build on its output until step 5
+   passes in full.
+
+5. **Review gate — all five, every dispatch:**
+   1. Full local test run: `make check` and `go test -race ./...`. Worker
+      sandboxes lie by omission (codex cannot open sockets).
+   2. Line-by-line diff review. Wire-level judgment is where workers fail;
+      read everything.
+   3. End-to-end verification against real binaries — drive the flow the
+      issue ships (curl, conch, a WS client), not only the test suite.
+   4. Bot-commit check before any push: fetch the PR branch, diff every
+      commit that appeared since your last fetch (Copilot autofix pushes
+      unreviewed commits — some defective, some correct, so read them).
+      Push only with `--force-with-lease` pinned to the head you inspected;
+      on a stale-lease failure, fetch and inspect — never retry blind.
+   5. Attribution: commit trailer `Co-Authored-By: Claude Fable 5
+      <noreply@anthropic.com>`; PR body carries an Attribution section naming
+      the worker, its version, what was unverified at handoff, and what the
+      reviewer amended.
+
+6. **Open the PR referencing the issue.** Never merge — merges are Nick's;
+   verify merge state with `gh pr view`, never assume it.
+
+## Stop conditions
+
+Stop and get Nick's sign-off before proceeding if the worker's output needs a
+new go.mod dependency (`deps-allowlist.txt` entry required), a schema version
+bump, or anything on the Tier-H list in ADR-000.
