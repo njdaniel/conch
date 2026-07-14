@@ -247,8 +247,8 @@ func TestMessagesV1PayloadRoundTrip(t *testing.T) {
 				if got.Payload != nil {
 					t.Errorf("payload = %+v, want nil", got.Payload)
 				}
-			} else if got.Payload == nil || string(got.Payload.Data) != tt.wantData {
-				t.Errorf("payload = %+v, want data %s", got.Payload, tt.wantData)
+			} else if got.Payload == nil || got.Payload.Schema != "acme.alert.v1" || string(got.Payload.Data) != tt.wantData {
+				t.Errorf("payload = %+v, want schema %s and data %s", got.Payload, "acme.alert.v1", tt.wantData)
 			}
 		})
 	}
