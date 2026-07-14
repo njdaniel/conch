@@ -1,0 +1,10 @@
+{
+  "message": {
+    "schema": "conch.message.v1",
+    "id": 42,
+    "channel_id": 7,
+    "author_id": 3,
+    "created_at": "2026-07-13T12:34:56.789Z",
+    "body": "hello, conch"
+  }
+}
