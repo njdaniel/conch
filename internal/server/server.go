@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/hub"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -51,6 +52,7 @@ type Server struct {
 	cfg         Config
 	store       *store.Store
 	hub         *hub.Hub
+	approvals   *approvals.Manager
 	broadcaster Broadcaster
 	http        *http.Server
 	ln          net.Listener
@@ -63,7 +65,7 @@ func New(cfg Config, st *store.Store) *Server {
 	if broadcaster == nil {
 		broadcaster = noopBroadcaster{}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), broadcaster: broadcaster}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, nil), broadcaster: broadcaster}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /v0/ws", s.handleWS)
@@ -71,6 +73,9 @@ func New(cfg Config, st *store.Store) *Server {
 	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
+	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
+	mux.HandleFunc("GET /v1/approvals", s.handleListOpenApprovals)
+	mux.HandleFunc("POST /v1/approvals/{id}/decisions", s.handleCastDecision)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,
@@ -113,10 +118,17 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := s.Listen(); err != nil {
 		return err
 	}
+	// Deadline and escalation timers survive restarts by rehydrating from the
+	// store before the listener starts accepting traffic.
+	if err := s.approvals.Rehydrate(ctx); err != nil {
+		return fmt.Errorf("server: rehydrate approvals: %w", err)
+	}
 	// WebSocket connections are hijacked, so http.Server.Shutdown neither
 	// waits for nor closes them; closing the hub makes every WS handler drop
 	// its subscription, close its connection, and return.
 	defer s.hub.Close()
+	// Stop approval timers on shutdown; open approvals re-arm on next boot.
+	defer s.approvals.Close()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

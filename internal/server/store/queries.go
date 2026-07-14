@@ -135,6 +135,24 @@ func (s *Store) ChannelByName(ctx context.Context, name string) (Channel, error)
 	return ch, nil
 }
 
+// ChannelByID returns the channel with id. It returns ErrNotFound when no
+// such channel exists.
+func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {
+	var ch Channel
+	var createdAt int64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, name, created_at FROM channels WHERE id = ?", id,
+	).Scan(&ch.ID, &ch.Name, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, err)
+	}
+	ch.CreatedAt = time.UnixMilli(createdAt)
+	return ch, nil
+}
+
 // PrincipalByID returns the principal with id. It returns ErrNotFound when no
 // such principal exists.
 func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) {

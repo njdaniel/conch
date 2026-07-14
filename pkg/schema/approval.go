@@ -56,6 +56,36 @@ func (e EscalationTarget) Validate() error {
 	return nil
 }
 
+// validateApprovalOptions enforces the option rules shared by ApprovalV1 and
+// CreateApprovalRequestV1: a non-empty set of well-formed options with unique
+// ids, including at least one approve and one reject option.
+func validateApprovalOptions(options []Option) error {
+	if len(options) == 0 {
+		return errors.New("schema: approval requires at least one option")
+	}
+	seen := make(map[string]struct{}, len(options))
+	var hasApprove, hasReject bool
+	for i, o := range options {
+		if err := o.Validate(); err != nil {
+			return fmt.Errorf("schema: approval option %d: %w", i, err)
+		}
+		if _, dup := seen[o.ID]; dup {
+			return fmt.Errorf("schema: approval option id %q is duplicated", o.ID)
+		}
+		seen[o.ID] = struct{}{}
+		switch o.Kind {
+		case OptionKindApprove:
+			hasApprove = true
+		case OptionKindReject:
+			hasReject = true
+		}
+	}
+	if !hasApprove || !hasReject {
+		return errors.New("schema: approval options must include at least one approve and one reject option")
+	}
+	return nil
+}
+
 // ApprovalV1 is the wire representation of an approval object
 // (approval-object.md §1). It is a first-class entity with its own lifecycle:
 // a message may reference an approval to render it in a channel, but the
@@ -109,28 +139,8 @@ func (a ApprovalV1) Validate() error {
 	if a.Body == "" {
 		return errors.New("schema: approval body is required")
 	}
-	if len(a.Options) == 0 {
-		return errors.New("schema: approval requires at least one option")
-	}
-	seen := make(map[string]struct{}, len(a.Options))
-	var hasApprove, hasReject bool
-	for i, o := range a.Options {
-		if err := o.Validate(); err != nil {
-			return fmt.Errorf("schema: approval option %d: %w", i, err)
-		}
-		if _, dup := seen[o.ID]; dup {
-			return fmt.Errorf("schema: approval option id %q is duplicated", o.ID)
-		}
-		seen[o.ID] = struct{}{}
-		switch o.Kind {
-		case OptionKindApprove:
-			hasApprove = true
-		case OptionKindReject:
-			hasReject = true
-		}
-	}
-	if !hasApprove || !hasReject {
-		return errors.New("schema: approval options must include at least one approve and one reject option")
+	if err := validateApprovalOptions(a.Options); err != nil {
+		return err
 	}
 	if a.Deadline.IsZero() {
 		return errors.New("schema: approval deadline is required")

@@ -1,0 +1,23 @@
+{
+  "decision": {
+    "principal_id": 5,
+    "option_id": "approve",
+    "reason": "Risk within limits; size is small.",
+    "at": "2026-07-14T12:30:00.000Z"
+  },
+  "state": "resolved",
+  "resolution": {
+    "approval_id": 42,
+    "outcome": "approved",
+    "option_id": "approve",
+    "decisions": [
+      {
+        "principal_id": 5,
+        "option_id": "approve",
+        "reason": "Risk within limits; size is small.",
+        "at": "2026-07-14T12:30:00.000Z"
+      }
+    ],
+    "resolved_at": "2026-07-14T12:30:05.000Z"
+  }
+}
