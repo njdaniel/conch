@@ -229,6 +229,9 @@ func TestMessagesV1PayloadRoundTrip(t *testing.T) {
 
 			get := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/v1/channels/general/messages", nil))
+			if get.Code != http.StatusOK {
+				t.Fatalf("GET status = %d, want %d; body = %s", get.Code, http.StatusOK, get.Body.String())
+			}
 			var listed schema.ListMessagesResponseV1
 			if err := json.Unmarshal(get.Body.Bytes(), &listed); err != nil {
 				t.Fatalf("decode GET: %v", err)
