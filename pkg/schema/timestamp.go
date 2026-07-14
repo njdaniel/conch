@@ -62,7 +62,7 @@ func (ts *Timestamp) UnmarshalJSON(data []byte) error {
 	}
 	parsed, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return err
+		return errors.New("schema: invalid timestamp: " + err.Error())
 	}
 	*ts = NewTimestamp(parsed)
 	return nil
