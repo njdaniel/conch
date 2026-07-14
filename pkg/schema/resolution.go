@@ -72,6 +72,7 @@ func (r ApprovalResolutionV1) Validate() error {
 		return errors.New("schema: resolution decisions must be present (use an empty array when there are none)")
 	}
 	if r.Outcome == OutcomeExpired {
+		if r.OptionID != "" {
 			return errors.New("schema: expired resolution must not carry an option_id")
 		}
 	} else {
