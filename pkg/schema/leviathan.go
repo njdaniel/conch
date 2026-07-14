@@ -52,7 +52,7 @@ func (s LeviathanTradeSignalV1) Validate() error {
 	if s.Quantity == "" {
 		return errors.New("schema: trade signal quantity is required")
 	}
-	if s.Confidence < 0 || s.Confidence > 1 {
+	if s.Confidence != s.Confidence || s.Confidence < 0 || s.Confidence > 1 {
 		return fmt.Errorf("schema: trade signal confidence must be in [0,1], got %v", s.Confidence)
 	}
 	if s.Strategy == "" {
