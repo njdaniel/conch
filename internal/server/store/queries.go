@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/njdaniel/conch/pkg/schema"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -48,13 +49,14 @@ type Channel struct {
 	CreatedAt time.Time
 }
 
-// Message is a single rendered message in a channel. Typed machine payloads
-// (D8) are deferred to P1.
+// Message is a single rendered message in a channel, with an optional typed
+// machine payload.
 type Message struct {
 	ID        int64
 	ChannelID int64
 	AuthorID  int64
 	Body      string
+	Payload   *schema.Payload
 	CreatedAt time.Time
 }
 
@@ -158,13 +160,33 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 // InsertMessage appends a message to a channel. The channel and author must
 // exist (enforced by foreign keys).
 func (s *Store) InsertMessage(ctx context.Context, channelID, authorID int64, body string) (Message, error) {
+	return s.InsertMessageV1(ctx, channelID, authorID, body, nil)
+}
+
+// InsertMessageV1 appends a message and its author-attributed audit event in
+// one transaction. The payload is stored opaquely for forward compatibility.
+func (s *Store) InsertMessageV1(
+	ctx context.Context, channelID, authorID int64, body string, payload *schema.Payload,
+) (Message, error) {
 	// SQLite stores message timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a POST response exactly describes
 	// what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
-	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO messages (channel_id, author_id, body, created_at) VALUES (?, ?, ?, ?)",
-		channelID, authorID, body, now.UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: begin insert message in channel %d: %w", channelID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var payloadSchema any
+	var payloadJSON any
+	if payload != nil {
+		payloadSchema = payload.Schema
+		payloadJSON = []byte(payload.Data)
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		channelID, authorID, body, now.UnixMilli(), payloadSchema, payloadJSON)
 	if err != nil {
 		return Message{}, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
 	}
@@ -172,7 +194,15 @@ func (s *Store) InsertMessage(ctx context.Context, channelID, authorID int64, bo
 	if err != nil {
 		return Message{}, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
 	}
-	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, CreatedAt: now}, nil
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, '', ?)`,
+		fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
+		return Message{}, fmt.Errorf("store: audit inserted message %d: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Message{}, fmt.Errorf("store: commit inserted message %d: %w", id, err)
+	}
+	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now}, nil
 }
 
 // ListMessages returns up to limit messages in channelID with ID greater than
@@ -183,7 +213,7 @@ func (s *Store) ListMessages(ctx context.Context, channelID int64, afterID int64
 		return nil, fmt.Errorf("store: list messages: limit must be positive, got %d", limit)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, channel_id, author_id, body, created_at
+		`SELECT id, channel_id, author_id, body, payload_schema, payload_json, created_at
 		 FROM messages WHERE channel_id = ? AND id > ?
 		 ORDER BY id ASC LIMIT ?`,
 		channelID, afterID, limit)
@@ -195,11 +225,16 @@ func (s *Store) ListMessages(ctx context.Context, channelID int64, afterID int64
 	var msgs []Message
 	for rows.Next() {
 		var m Message
+		var payloadSchema sql.NullString
+		var payloadJSON []byte
 		var createdAt int64
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
 		}
 		m.CreatedAt = time.UnixMilli(createdAt)
+		if payloadSchema.Valid {
+			m.Payload = &schema.Payload{Schema: payloadSchema.String, Data: payloadJSON}
+		}
 		msgs = append(msgs, m)
 	}
 	if err := rows.Err(); err != nil {

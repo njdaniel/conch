@@ -22,6 +22,7 @@ type Hub struct {
 	mu     sync.Mutex
 	closed bool
 	subs   map[int64]map[*Subscription]struct{}
+	subsV1 map[int64]map[*SubscriptionV1]struct{}
 }
 
 // Subscription is one subscriber's membership in a channel. Receive from
@@ -32,9 +33,44 @@ type Subscription struct {
 	msgs      chan schema.MessageV0
 }
 
+// SubscriptionV1 is a typed-envelope channel subscription.
+type SubscriptionV1 struct {
+	hub       *Hub
+	channelID int64
+	msgs      chan schema.MessageV1
+}
+
 // New returns an empty hub ready for subscriptions.
 func New() *Hub {
-	return &Hub{subs: make(map[int64]map[*Subscription]struct{})}
+	return &Hub{subs: make(map[int64]map[*Subscription]struct{}), subsV1: make(map[int64]map[*SubscriptionV1]struct{})}
+}
+
+// SubscribeV1 registers a MessageV1 subscription.
+func (h *Hub) SubscribeV1(channelID int64, buffer int) *SubscriptionV1 {
+	sub := &SubscriptionV1{hub: h, channelID: channelID, msgs: make(chan schema.MessageV1, buffer)}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		close(sub.msgs)
+		return sub
+	}
+	members := h.subsV1[channelID]
+	if members == nil {
+		members = make(map[*SubscriptionV1]struct{})
+		h.subsV1[channelID] = members
+	}
+	members[sub] = struct{}{}
+	return sub
+}
+
+// Messages yields MessageV1 broadcasts.
+func (s *SubscriptionV1) Messages() <-chan schema.MessageV1 { return s.msgs }
+
+// Cancel unsubscribes the V1 subscription.
+func (s *SubscriptionV1) Cancel() {
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
+	s.hub.dropV1Locked(s)
 }
 
 // Subscribe registers a subscription for messages broadcast to channelID from
@@ -88,6 +124,19 @@ func (h *Hub) BroadcastMessage(_ context.Context, msg schema.MessageV0) {
 	}
 }
 
+// BroadcastMessageV1 delivers a typed envelope to V1 subscriptions.
+func (h *Hub) BroadcastMessageV1(_ context.Context, msg schema.MessageV1) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subsV1[msg.ChannelID] {
+		select {
+		case sub.msgs <- msg:
+		default:
+			h.dropV1Locked(sub)
+		}
+	}
+}
+
 // Closed reports whether Close has been called, letting subscribers
 // distinguish hub shutdown from a slow-consumer drop after their message
 // channel closes.
@@ -108,7 +157,25 @@ func (h *Hub) Close() {
 			close(sub.msgs)
 		}
 	}
+	for _, members := range h.subsV1 {
+		for sub := range members {
+			close(sub.msgs)
+		}
+	}
 	h.subs = make(map[int64]map[*Subscription]struct{})
+	h.subsV1 = make(map[int64]map[*SubscriptionV1]struct{})
+}
+
+func (h *Hub) dropV1Locked(sub *SubscriptionV1) {
+	members := h.subsV1[sub.channelID]
+	if _, ok := members[sub]; !ok {
+		return
+	}
+	delete(members, sub)
+	if len(members) == 0 {
+		delete(h.subsV1, sub.channelID)
+	}
+	close(sub.msgs)
 }
 
 // dropLocked removes sub from the hub and closes its channel exactly once;

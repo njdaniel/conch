@@ -62,6 +62,12 @@ BEGIN
 	SELECT RAISE(ABORT, 'audit_events is append-only');
 END`,
 	},
+	// 2: MessageV1 typed payload persistence. NULL columns represent a message
+	// without a payload.
+	{
+		`ALTER TABLE messages ADD COLUMN payload_schema TEXT`,
+		`ALTER TABLE messages ADD COLUMN payload_json BLOB`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

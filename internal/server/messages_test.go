@@ -198,6 +198,59 @@ func TestPostMessageBodyTooLarge(t *testing.T) {
 	assertAPIError(t, rec, http.StatusRequestEntityTooLarge, "request_too_large")
 }
 
+func TestMessagesV1PayloadRoundTrip(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantStatus int
+		wantData   string
+	}{
+		{name: "with payload", payload: `,"payload":{"schema":"acme.alert.v1","data":{"level":2}}`, wantStatus: http.StatusCreated, wantData: `{"level":2}`},
+		{name: "without payload", wantStatus: http.StatusCreated},
+		{name: "malformed payload", payload: `,"payload":{"schema":"bad-name","data":{}}`, wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			_, principal := createTestChannelAndPrincipal(t, srv)
+			body := fmt.Sprintf(`{"author_id":%d,"body":"hello"%s}`, principal.ID, tt.payload)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/channels/general/messages", strings.NewReader(body)))
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("POST status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantStatus != http.StatusCreated {
+				return
+			}
+			var posted schema.PostMessageResponseV1
+			if err := json.Unmarshal(rec.Body.Bytes(), &posted); err != nil {
+				t.Fatalf("decode POST: %v", err)
+			}
+
+			get := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/v1/channels/general/messages", nil))
+			var listed schema.ListMessagesResponseV1
+			if err := json.Unmarshal(get.Body.Bytes(), &listed); err != nil {
+				t.Fatalf("decode GET: %v", err)
+			}
+			if len(listed.Messages) != 1 {
+				t.Fatalf("GET messages = %d, want 1", len(listed.Messages))
+			}
+			got := listed.Messages[0]
+			if got.Schema != schema.MessageSchemaV1 || got.CreatedAt.Time().Location() != time.UTC {
+				t.Errorf("GET envelope = %+v", got)
+			}
+			if tt.wantData == "" {
+				if got.Payload != nil {
+					t.Errorf("payload = %+v, want nil", got.Payload)
+				}
+			} else if got.Payload == nil || string(got.Payload.Data) != tt.wantData {
+				t.Errorf("payload = %+v, want data %s", got.Payload, tt.wantData)
+			}
+		})
+	}
+}
+
 func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
 	t.Helper()
 	if rec.Code != wantStatus {

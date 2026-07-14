@@ -144,3 +144,27 @@ func TestWSHandlerExitsOnClientDisconnect(t *testing.T) {
 	}
 	assertNoGoroutineLeak(t, before)
 }
+
+func TestWSV1SubscriberReceivesPayload(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+	_, principal := createTestChannelAndPrincipal(t, srv)
+	base := wsTestServer(t, srv)
+	conn := wsDial(t, ctx, base+"/v1/ws?channel=general")
+	httpBase := "http" + strings.TrimPrefix(base, "ws")
+	body := fmt.Sprintf(`{"author_id":%d,"body":"alert","payload":{"schema":"acme.alert.v1","data":{"level":2}}}`, principal.ID)
+	resp, err := http.Post(httpBase+"/v1/channels/general/messages", "application/json", strings.NewReader(body)) //nolint:gosec // test-local URL
+	if err != nil {
+		t.Fatalf("POST v1: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var got schema.MessageV1
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := wsjson.Read(rctx, conn, &got); err != nil {
+		t.Fatalf("read V1 frame: %v", err)
+	}
+	if got.Schema != schema.MessageSchemaV1 || got.Payload == nil || string(got.Payload.Data) != `{"level":2}` {
+		t.Fatalf("V1 frame = %+v", got)
+	}
+}
