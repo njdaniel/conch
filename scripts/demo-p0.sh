@@ -62,10 +62,10 @@ step "conchd is up at $BASE"
 # The fake agent is curl: provision a channel and an agent principal via the
 # public REST API alone.
 step "fake agent (curl): creating channel 'general' and principal 'fake-agent'"
-curl -fsS -X POST "$BASE/v0/channels" -d '{"name":"general"}' > /dev/null \
+curl -fsS -X POST "$BASE/v0/channels" -H "Content-Type: application/json" -d '{"name":"general"}' > /dev/null \
     || fail "create channel"
-AUTHOR_ID=$(curl -fsS -X POST "$BASE/v0/principals" -d '{"kind":"agent","name":"fake-agent"}' \
-    | sed -n 's/.*"id": *\([0-9]*\).*/\1/p')
+AUTHOR_ID=$(curl -fsS -X POST "$BASE/v0/principals" -H "Content-Type: application/json" -d '{"kind":"agent","name":"fake-agent"}' \
+    | sed -n 's/.*"id": *\([0-9][0-9]*\).*/\1/p')
 [ -n "$AUTHOR_ID" ] || fail "create principal returned no id"
 
 step "starting conch tail on 'general'"
