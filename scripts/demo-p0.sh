@@ -43,6 +43,14 @@ step "building conchd and conch"
 go build -o "$WORK/conchd" ./cmd/conchd
 go build -o "$WORK/conch" ./cmd/conch
 
+# Portable high-resolution clock for latency measurement (avoids GNU date %N).
+cat >"$WORK/now_ns.go" <<'EOF'
+package main
+import ("fmt"; "time")
+func main() { fmt.Print(time.Now().UnixNano()) }
+EOF
+go build -o "$WORK/now_ns" "$WORK/now_ns.go"
+
 step "starting conchd against $WORK/data"
 "$WORK/conchd" serve --data "$WORK/data" --listen 127.0.0.1:0 > "$WORK/conchd.log" 2>&1 &
 SERVER_PID=$!
