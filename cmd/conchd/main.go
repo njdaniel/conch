@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/njdaniel/conch/internal/server"
@@ -56,6 +58,7 @@ Usage:
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
+  --mcp-token token=principal_id mapping for MCP bearer auth; repeatable or comma-separate (env CONCHD_MCP_TOKENS)
 `)
 }
 
@@ -63,11 +66,16 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
+	mcpTokensRaw := fs.String("mcp-token", os.Getenv("CONCHD_MCP_TOKENS"), "comma-separated token=agent_principal_id mappings for MCP bearer auth")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return errors.New("serve: --data (or CONCHD_DATA) is required")
+	}
+	mcpTokens, err := parseMCPTokens(*mcpTokensRaw)
+	if err != nil {
+		return err
 	}
 
 	// The data directory is an operator-supplied path by design; conchd runs
@@ -91,9 +99,10 @@ func runServe(args []string) error {
 	defer func() { _ = st.Close() }()
 
 	srv := server.New(server.Config{
-		DataDir: *dataDir,
-		Listen:  *listen,
-		Version: version,
+		DataDir:         *dataDir,
+		Listen:          *listen,
+		Version:         version,
+		MCPBearerTokens: mcpTokens,
 	}, st)
 	if err := srv.Listen(); err != nil {
 		return err
@@ -108,4 +117,24 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseMCPTokens(raw string) (map[string]int64, error) {
+	mappings := make(map[string]int64)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		token, idRaw, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(token) == "" || strings.TrimSpace(idRaw) == "" {
+			return nil, fmt.Errorf("serve: invalid --mcp-token %q, want token=agent_principal_id", part)
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(idRaw), 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("serve: invalid MCP principal id %q", idRaw)
+		}
+		mappings[strings.TrimSpace(token)] = id
+	}
+	return mappings, nil
 }
