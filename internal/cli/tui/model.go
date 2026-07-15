@@ -309,9 +309,15 @@ func clip(value string, width int) string {
 }
 
 func clipTail(value string, width int) string {
+	if width < 1 {
+		return ""
+	}
 	runes := []rune(value)
 	if len(runes) <= width {
 		return value
+	}
+	if width == 1 {
+		return "…"
 	}
 	return "…" + string(runes[len(runes)-width+1:])
 }
