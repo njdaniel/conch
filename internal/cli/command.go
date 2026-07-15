@@ -68,7 +68,7 @@ Environment:
 
 func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	fs := newFlagSet("send", stderr)
-	server := fs.String("server", envOr("CONCH_SERVER", defaultServer), "conchd HTTP URL")
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	author := fs.String("author", os.Getenv("CONCH_AUTHOR"), "message author ID")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("cli: send: %w", err)
@@ -93,7 +93,7 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 
 func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("tail", stderr)
-	server := fs.String("server", envOr("CONCH_SERVER", defaultServer), "conchd HTTP URL")
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("cli: tail: %w", err)
 	}
@@ -126,11 +126,11 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
-func envOr(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+func serverEnvOr() string {
+	if value := os.Getenv("CONCH_SERVER"); value != "" {
 		return value
 	}
-	return fallback
+	return defaultServer
 }
 
 func runApprovals(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -147,7 +147,7 @@ func runApprovals(ctx context.Context, args []string, stdout, stderr io.Writer) 
 
 func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("approvals list", stderr)
-	server := fs.String("server", envOr("CONCH_SERVER", defaultServer), "conchd HTTP URL")
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("cli: approvals list: %w", err)
 	}
@@ -180,7 +180,7 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 
 func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.Writer, defaultOption string) error {
 	fs := newFlagSet(defaultOption, stderr)
-	server := fs.String("server", envOr("CONCH_SERVER", defaultServer), "conchd HTTP URL")
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	author := fs.String("author", os.Getenv("CONCH_AUTHOR"), "human principal ID")
 	reason := fs.String("reason", "", "reason for decision")
 	optionID := fs.String("option", defaultOption, "option ID to select")
