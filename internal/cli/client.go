@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/coder/websocket"
@@ -21,6 +22,90 @@ import (
 type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
+}
+
+// ListMessages returns one forward page of v1 messages from channel.
+func (c *Client) ListMessages(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
+	endpoint := c.resolve("v1", "channels", channel, "messages")
+	query := endpoint.Query()
+	query.Set("after", strconv.FormatInt(after, 10))
+	query.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: create list messages request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: list messages: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.ListMessagesResponseV1{}, decodeServerError(resp)
+	}
+	var result schema.ListMessagesResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: decode list messages response: %w", err)
+	}
+	return result, nil
+}
+
+// SendMessage posts a rendered v1 message to channel.
+func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64, body string) (schema.MessageV1, error) {
+	requestBody, err := json.Marshal(schema.PostMessageRequestV1{AuthorID: authorID, Body: body})
+	if err != nil {
+		return schema.MessageV1{}, fmt.Errorf("cli: encode v1 post message request: %w", err)
+	}
+	endpoint := c.resolve("v1", "channels", channel, "messages")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(requestBody))
+	if err != nil {
+		return schema.MessageV1{}, fmt.Errorf("cli: create v1 post message request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.MessageV1{}, fmt.Errorf("cli: post v1 message: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.MessageV1{}, decodeServerError(resp)
+	}
+	var result schema.PostMessageResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.MessageV1{}, fmt.Errorf("cli: decode v1 post message response: %w", err)
+	}
+	return result.Message, nil
+}
+
+// Subscribe connects to channel's v1 stream and calls receive for every message.
+func (c *Client) Subscribe(ctx context.Context, channel string, receive func(schema.MessageV1) error) error {
+	endpoint := c.resolve("v1", "ws")
+	if endpoint.Scheme == "http" {
+		endpoint.Scheme = "ws"
+	} else {
+		endpoint.Scheme = "wss"
+	}
+	query := endpoint.Query()
+	query.Set("channel", channel)
+	endpoint.RawQuery = query.Encode()
+	conn, resp, err := websocket.Dial(ctx, endpoint.String(), &websocket.DialOptions{HTTPClient: c.httpClient})
+	if err != nil {
+		if resp != nil {
+			defer func() { _ = resp.Body.Close() }()
+			return decodeServerError(resp)
+		}
+		return fmt.Errorf("cli: connect subscription: %w", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	for {
+		var message schema.MessageV1
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			return fmt.Errorf("cli: read subscription: %w", err)
+		}
+		if err := receive(message); err != nil {
+			return fmt.Errorf("cli: receive subscription message: %w", err)
+		}
+	}
 }
 
 // NewClient creates a client for server, which must be an HTTP or HTTPS URL.
