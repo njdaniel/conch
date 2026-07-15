@@ -23,7 +23,7 @@ type mcpPostMessageInput struct {
 type mcpReadChannelInput struct {
 	Channel string `json:"channel" jsonschema:"channel name"`
 	After   int64  `json:"after,omitempty" jsonschema:"return messages with id greater than this cursor"`
-	Limit   int64  `json:"limit,omitempty" jsonschema:"page size, default 50, max 100"`
+	Limit   *int64 `json:"limit,omitempty" jsonschema:"page size, default 50, max 100"`
 }
 
 func (s *Server) mcpHandler() http.Handler {
