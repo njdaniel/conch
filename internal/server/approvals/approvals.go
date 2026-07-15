@@ -30,8 +30,8 @@ const (
 var ErrInvalid = errors.New("approvals: invalid approval")
 
 // Notifier delivers approval lifecycle notifications (approval-object.md §5).
-// Implementations must be safe for concurrent use. The ntfy notifier (issue
-// #14) implements this; NoopNotifier stands in until then.
+// Implementations must be safe for concurrent use. A nil Notifier means
+// notifications are unconfigured and remain completely silent.
 type Notifier interface {
 	// ApprovalCreated announces a new approval on the approvals topic.
 	ApprovalCreated(ctx context.Context, a store.Approval) error
@@ -39,18 +39,6 @@ type Notifier interface {
 	ApprovalEscalated(ctx context.Context, a store.Approval) error
 	// ApprovalResolved closes the loop with the terminal resolution.
 	ApprovalResolved(ctx context.Context, a store.Approval, r schema.ApprovalResolutionV1) error
-}
-
-// NoopNotifier is the default Notifier when no notification integration is
-// configured: every delivery succeeds without doing anything.
-type NoopNotifier struct{}
-
-func (NoopNotifier) ApprovalCreated(context.Context, store.Approval) error { return nil }
-func (NoopNotifier) ApprovalEscalated(context.Context, store.Approval) error {
-	return nil
-}
-func (NoopNotifier) ApprovalResolved(context.Context, store.Approval, schema.ApprovalResolutionV1) error {
-	return nil
 }
 
 // Manager drives approvals through their lifecycle: it creates them, accepts
@@ -69,11 +57,8 @@ type Manager struct {
 	inflight sync.WaitGroup
 }
 
-// New builds a Manager on st. A nil notifier defaults to NoopNotifier.
+// New builds a Manager on st. A nil notifier leaves notifications unconfigured.
 func New(st *store.Store, notifier Notifier) *Manager {
-	if notifier == nil {
-		notifier = NoopNotifier{}
-	}
 	return &Manager{store: st, notifier: notifier, timers: make(map[int64]*time.Timer)}
 }
 
@@ -275,6 +260,9 @@ func (m *Manager) forget(id int64) {
 // notify_sent / notify_failed audit event. Delivery failure is recorded, never
 // propagated: notifications are reachability, not correctness (ADR-002).
 func (m *Manager) notify(ctx context.Context, event string, a store.Approval, deliver func() error) {
+	if m.notifier == nil {
+		return
+	}
 	action := AuditNotifySent
 	detail := "event=" + event
 	if err := deliver(); err != nil {
