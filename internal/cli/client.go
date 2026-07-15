@@ -130,6 +130,55 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 	return result.Message, nil
 }
 
+// ListApprovals returns a list of open approvals.
+func (c *Client) ListApprovals(ctx context.Context) (schema.ListApprovalsResponseV1, error) {
+	endpoint := c.resolve("v1", "approvals")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: create list approvals request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: list approvals: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.ListApprovalsResponseV1{}, decodeServerError(resp)
+	}
+	var result schema.ListApprovalsResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: decode list approvals response: %w", err)
+	}
+	return result, nil
+}
+
+// CastDecision posts a decision for an approval.
+func (c *Client) CastDecision(ctx context.Context, approvalID int64, decision schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error) {
+	requestBody, err := json.Marshal(decision)
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: encode cast decision request: %w", err)
+	}
+	endpoint := c.resolve("v1", "approvals", strconv.FormatInt(approvalID, 10), "decisions")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(requestBody))
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: create cast decision request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: cast decision: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.CastDecisionResponseV1{}, decodeServerError(resp)
+	}
+	var result schema.CastDecisionResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: decode cast decision response: %w", err)
+	}
+	return result, nil
+}
+
 // Subscribe connects to channel's v1 stream and calls receive for every message.
 func (c *Client) Subscribe(ctx context.Context, channel string, receive func(schema.MessageV1) error) error {
 	endpoint := c.resolve("v1", "ws")
