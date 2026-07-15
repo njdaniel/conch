@@ -14,8 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server"
+	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/store"
 )
 
@@ -52,13 +54,19 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprint(w, `conchd — the Conch server
 
 Usage:
-  conchd serve [--data <dir>] [--listen <addr>]
+  conchd serve [--data <dir>] [--listen <addr>] [--ntfy-server <url>]
   conchd version
 
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
+<<<<<<< HEAD
   --mcp-token token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
+=======
+  --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
+  --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
+  --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
+>>>>>>> origin/main
 `)
 }
 
@@ -66,7 +74,13 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
+<<<<<<< HEAD
 	mcpTokensRaw := fs.String("mcp-token", os.Getenv("CONCHD_MCP_TOKENS"), "comma-separated token=agent_principal_id mappings for MCP bearer auth")
+=======
+	ntfyServer := fs.String("ntfy-server", os.Getenv("CONCHD_NTFY_SERVER"), "ntfy server URL")
+	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
+	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
+>>>>>>> origin/main
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -99,10 +113,22 @@ func runServe(args []string) error {
 	defer func() { _ = st.Close() }()
 
 	srv := server.New(server.Config{
+<<<<<<< HEAD
 		DataDir:         *dataDir,
 		Listen:          *listen,
 		Version:         version,
 		MCPBearerTokens: mcpTokens,
+=======
+		DataDir: *dataDir,
+		Listen:  *listen,
+		Version: version,
+		Ntfy: approvals.NtfyConfig{
+			Server:         *ntfyServer,
+			ApprovalsTopic: *ntfyTopic,
+			UrgentTopic:    *ntfyUrgentTopic,
+			Timeout:        2 * time.Second,
+		},
+>>>>>>> origin/main
 	}, st)
 	if err := srv.Listen(); err != nil {
 		return err
