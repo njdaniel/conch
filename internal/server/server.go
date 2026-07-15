@@ -74,14 +74,11 @@ func New(cfg Config, st *store.Store) *Server {
 	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
-<<<<<<< HEAD
+	mux.HandleFunc("POST /v1/channels/{channel}/messages", s.handlePostMessageV1)
+	mux.HandleFunc("GET /v1/channels/{channel}/messages", s.handleListMessagesV1)
 	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
 	mux.HandleFunc("GET /v1/approvals", s.handleListOpenApprovals)
 	mux.HandleFunc("POST /v1/approvals/{id}/decisions", s.handleCastDecision)
-=======
-	mux.HandleFunc("POST /v1/channels/{channel}/messages", s.handlePostMessageV1)
-	mux.HandleFunc("GET /v1/channels/{channel}/messages", s.handleListMessagesV1)
->>>>>>> origin/main
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,
