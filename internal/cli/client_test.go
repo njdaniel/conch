@@ -230,7 +230,7 @@ func TestClientCastDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	got, err := client.CastDecision(context.Background(), 42, 7, "approve", "LGTM")
+	got, err := client.CastDecision(context.Background(), 42, schema.CastDecisionRequestV1{PrincipalID: 7, OptionID: "approve", Reason: "LGTM"})
 	if err != nil {
 		t.Fatalf("cast decision: %v", err)
 	}

@@ -214,7 +214,11 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 		return err
 	}
 
-	resp, err := client.CastDecision(ctx, approvalID, principalID, *optionID, *reason)
+	resp, err := client.CastDecision(ctx, approvalID, schema.CastDecisionRequestV1{
+		PrincipalID: principalID,
+		OptionID:    *optionID,
+		Reason:      *reason,
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "invalid_state") || strings.Contains(err.Error(), "terminal") {
 			_, _ = fmt.Fprintf(stderr, "conch: approval %d is no longer open\n", approvalID)
