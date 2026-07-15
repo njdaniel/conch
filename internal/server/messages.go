@@ -20,6 +20,41 @@ const (
 )
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
+	var req schema.PostMessageRequest
+	if !s.decodePostRequest(w, r, &req) {
+		return
+	}
+	s.postMessage(w, r, req.AuthorID, req.Body, nil, false)
+}
+
+func (s *Server) handlePostMessageV1(w http.ResponseWriter, r *http.Request) {
+	var req schema.PostMessageRequestV1
+	if !s.decodePostRequest(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	s.postMessage(w, r, req.AuthorID, req.Body, req.Payload, true)
+}
+
+func (s *Server) decodePostRequest(w http.ResponseWriter, r *http.Request, req any) bool {
+	if err := decodeJSONBody(w, r, req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
+		return false
+	}
+	return true
+}
+
+func (s *Server) postMessage(
+	w http.ResponseWriter, r *http.Request, authorID int64, body string, payload *schema.Payload, v1 bool,
+) {
 	ctx := r.Context()
 	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -32,25 +67,15 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req schema.PostMessageRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
-		return
-	}
-	if req.AuthorID <= 0 {
+	if authorID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request", "author_id must be positive")
 		return
 	}
-	if strings.TrimSpace(req.Body) == "" {
+	if strings.TrimSpace(body) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
-	if _, err := s.store.PrincipalByID(ctx, req.AuthorID); errors.Is(err, store.ErrNotFound) {
+	if _, err := s.store.PrincipalByID(ctx, authorID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "author_not_found", "author not found")
 		return
 	} else if err != nil {
@@ -59,21 +84,35 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.store.InsertMessage(ctx, channel.ID, req.AuthorID, req.Body)
+	stored, err := s.store.InsertMessageV1(ctx, channel.ID, authorID, body, payload)
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	message := messageFromStore(stored)
+	messageV1 := messageV1FromStore(stored)
 	// Persist-then-broadcast: the message is durable before anyone hears
 	// about it, so a crash here loses delivery, never data.
-	s.hub.BroadcastMessage(ctx, message)
-	s.broadcaster.BroadcastMessage(ctx, message)
-	writeJSON(w, http.StatusCreated, schema.PostMessageResponse{Message: message})
+	s.hub.BroadcastMessageV1(ctx, messageV1)
+	messageV0 := messageV0FromStore(stored)
+	s.hub.BroadcastMessage(ctx, messageV0)
+	s.broadcaster.BroadcastMessage(ctx, messageV0)
+	if v1 {
+		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV1{Message: messageV1})
+		return
+	}
+	writeJSON(w, http.StatusCreated, schema.PostMessageResponse{Message: messageV0})
 }
 
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	s.listMessages(w, r, false)
+}
+
+func (s *Server) handleListMessagesV1(w http.ResponseWriter, r *http.Request) {
+	s.listMessages(w, r, true)
+}
+
+func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, v1 bool) {
 	ctx := r.Context()
 	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 	if errors.Is(err, store.ErrNotFound) {
@@ -112,9 +151,17 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		stored = stored[:limit]
 		nextAfter = stored[len(stored)-1].ID
 	}
+	if v1 {
+		messages := make([]schema.MessageV1, len(stored))
+		for i, message := range stored {
+			messages[i] = messageV1FromStore(message)
+		}
+		writeJSON(w, http.StatusOK, schema.ListMessagesResponseV1{Messages: messages, NextAfter: nextAfter})
+		return
+	}
 	messages := make([]schema.MessageV0, len(stored))
 	for i, message := range stored {
-		messages[i] = messageFromStore(message)
+		messages[i] = messageV0FromStore(message)
 	}
 	writeJSON(w, http.StatusOK, schema.ListMessagesResponse{
 		Messages:  messages,
@@ -122,7 +169,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func messageFromStore(message store.Message) schema.MessageV0 {
+func messageV0FromStore(message store.Message) schema.MessageV0 {
 	return schema.MessageV0{
 		ID:        message.ID,
 		ChannelID: message.ChannelID,
@@ -132,6 +179,12 @@ func messageFromStore(message store.Message) schema.MessageV0 {
 		// local zone.
 		CreatedAt: message.CreatedAt.UTC(),
 	}
+}
+
+func messageV1FromStore(message store.Message) schema.MessageV1 {
+	return schema.MessageV1{Schema: schema.MessageSchemaV1, ID: message.ID, ChannelID: message.ChannelID,
+		AuthorID: message.AuthorID, Body: message.Body, Payload: message.Payload,
+		CreatedAt: schema.NewTimestamp(message.CreatedAt)}
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {

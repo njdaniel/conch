@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -21,6 +24,46 @@ func openTestStore(t *testing.T) *Store {
 		}
 	})
 	return s
+}
+
+func TestMessagePayloadMigrationRoundTripAndAudit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations) {
+		t.Fatalf("schema version = %d, want %d", version, len(migrations))
+	}
+	ch, err := s.CreateChannel(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.CreatePrincipal(ctx, PrincipalAgent, "leviathan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := &schema.Payload{Schema: "acme.alert.v1", Data: json.RawMessage(`{"nested":{"x":1}}`)}
+	inserted, err := s.InsertMessageV1(ctx, ch.ID, p.ID, "alert", payload)
+	if err != nil {
+		t.Fatalf("InsertMessageV1: %v", err)
+	}
+	listed, err := s.ListMessages(ctx, ch.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Payload == nil || string(listed[0].Payload.Data) != string(payload.Data) {
+		t.Fatalf("round trip = %+v", listed)
+	}
+	events, err := s.ListAuditEvents(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Actor != fmt.Sprintf("principal:%d", p.ID) ||
+		events[0].Action != "message.post" || events[0].Subject != fmt.Sprintf("message:%d", inserted.ID) {
+		t.Fatalf("audit events = %+v", events)
+	}
 }
 
 func TestOpenPragmas(t *testing.T) {
