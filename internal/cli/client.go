@@ -24,6 +24,59 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// ListApprovals returns all open (pending or escalated) approvals.
+func (c *Client) ListApprovals(ctx context.Context) (schema.ListApprovalsResponseV1, error) {
+	endpoint := c.resolve("v1", "approvals")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: create list approvals request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: list approvals: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.ListApprovalsResponseV1{}, decodeServerError(resp)
+	}
+	var result schema.ListApprovalsResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: decode list approvals response: %w", err)
+	}
+	return result, nil
+}
+
+// CastDecision casts a decision on an approval.
+func (c *Client) CastDecision(ctx context.Context, approvalID int64, principalID int64, optionID, reason string) (schema.CastDecisionResponseV1, error) {
+	requestBody, err := json.Marshal(schema.CastDecisionRequestV1{
+		PrincipalID: principalID,
+		OptionID:    optionID,
+		Reason:      reason,
+	})
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: encode cast decision request: %w", err)
+	}
+	endpoint := c.resolve("v1", "approvals", strconv.FormatInt(approvalID, 10), "decisions")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(requestBody))
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: create cast decision request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: cast decision: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.CastDecisionResponseV1{}, decodeServerError(resp)
+	}
+	var result schema.CastDecisionResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: decode cast decision response: %w", err)
+	}
+	return result, nil
+}
+
 // ListMessages returns one forward page of v1 messages from channel.
 func (c *Client) ListMessages(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
 	endpoint := c.resolve("v1", "channels", channel, "messages")
