@@ -73,7 +73,7 @@ func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) 
 	}
 	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s",
 		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Body)
-	return n.post(ctx, n.urgentTopic, "URGENT approval escalated: "+a.Title, "urgent", body)
+	return n.post(ctx, n.urgentTopic, "URGENT approval escalated: "+a.Title, "max", body)
 }
 
 func (n *NtfyNotifier) ApprovalResolved(ctx context.Context, a store.Approval, r schema.ApprovalResolutionV1) error {
