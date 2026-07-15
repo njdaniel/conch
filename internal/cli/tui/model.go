@@ -20,6 +20,8 @@ type API interface {
 	ListMessages(context.Context, string, int64, int) (schema.ListMessagesResponseV1, error)
 	SendMessage(context.Context, string, int64, string) (schema.MessageV1, error)
 	Subscribe(context.Context, string, func(schema.MessageV1) error) error
+	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
+	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
 }
 
 type messagesLoaded struct {
@@ -36,22 +38,41 @@ type subscriptionEnded struct {
 	err     error
 }
 type messageSent struct{ err error }
+type approvalsLoaded struct {
+	approvals []schema.ApprovalV1
+	err       error
+}
+type decisionCast struct {
+	err error
+}
+
+type mode int
+
+const (
+	modeChannels mode = iota
+	modeInbox
+	modeDecision
+)
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
 // keeping state transitions deterministic and independently testable.
 type Model struct {
-	ctx        context.Context
-	api        API
-	authorID   int64
-	channels   []string
-	selected   int
-	messages   map[string][]schema.MessageV1
-	subscribed map[string]bool
-	input      string
-	status     string
-	width      int
-	height     int
-	events     chan tea.Msg
+	ctx         context.Context
+	api         API
+	authorID    int64
+	channels    []string
+	selected    int
+	messages    map[string][]schema.MessageV1
+	subscribed  map[string]bool
+	input       string
+	status      string
+	width       int
+	height      int
+	events      chan tea.Msg
+	mode        mode
+	approvals   []schema.ApprovalV1
+	selApproval int
+	selOption   int
 }
 
 // NewModel constructs a model for the configured channels.
@@ -70,7 +91,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 	}
 	return Model{ctx: ctx, api: api, authorID: authorID, channels: clean,
 		messages: make(map[string][]schema.MessageV1), subscribed: map[string]bool{clean[0]: true},
-		events: make(chan tea.Msg, 64)}
+		events: make(chan tea.Msg, 64), mode: modeChannels}
 }
 
 // Init starts REST backfill and the live subscription for the selected channel.
@@ -86,23 +107,83 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
+			if m.mode == modeDecision {
+				m.mode = modeInbox
+				m.input = ""
+				m.status = "canceled decision"
+				return m, nil
+			}
 			return m, tea.Quit
+		case "tab":
+			if m.mode == modeChannels {
+				m.mode = modeInbox
+				m.status = "loading approvals…"
+				return m, m.loadApprovals()
+			} else if m.mode == modeInbox {
+				m.mode = modeChannels
+				m.status = ""
+				return m, nil
+			}
 		case "up":
-			return m.selectChannel(-1)
+			if m.mode == modeChannels {
+				return m.selectChannel(-1)
+			} else if m.mode == modeInbox {
+				m.selApproval = max(0, m.selApproval-1)
+				return m, nil
+			} else if m.mode == modeDecision {
+				m.selOption = max(0, m.selOption-1)
+				return m, nil
+			}
 		case "down":
-			return m.selectChannel(1)
+			if m.mode == modeChannels {
+				return m.selectChannel(1)
+			} else if m.mode == modeInbox {
+				if len(m.approvals) > 0 {
+					m.selApproval = min(len(m.approvals)-1, m.selApproval+1)
+				}
+				return m, nil
+			} else if m.mode == modeDecision {
+				app := m.approvals[m.selApproval]
+				m.selOption = min(len(app.Options)-1, m.selOption+1)
+				return m, nil
+			}
 		case "enter":
-			body := strings.TrimSpace(m.input)
-			if body == "" {
-				return m, nil
+			if m.mode == modeChannels {
+				body := strings.TrimSpace(m.input)
+				if body == "" {
+					return m, nil
+				}
+				if m.authorID <= 0 {
+					m.status = "set CONCH_AUTHOR to send"
+					return m, nil
+				}
+				m.input = ""
+				m.status = "sending…"
+				return m, m.send(body)
+			} else if m.mode == modeInbox {
+				if len(m.approvals) > 0 {
+					m.mode = modeDecision
+					m.selOption = 0
+					m.input = ""
+					m.status = "type reason to decide"
+					return m, nil
+				}
+			} else if m.mode == modeDecision {
+				reason := strings.TrimSpace(m.input)
+				if reason == "" {
+					m.status = "reason is required"
+					return m, nil
+				}
+				if m.authorID <= 0 {
+					m.status = "set CONCH_AUTHOR to decide"
+					return m, nil
+				}
+				app := m.approvals[m.selApproval]
+				opt := app.Options[m.selOption]
+				m.input = ""
+				m.status = "casting decision…"
+				return m, m.castDecision(app.ID, opt.ID, reason)
 			}
-			if m.authorID <= 0 {
-				m.status = "set CONCH_AUTHOR to send"
-				return m, nil
-			}
-			m.input = ""
-			m.status = "sending…"
-			return m, m.send(body)
 		case "backspace":
 			if m.input != "" {
 				_, size := utf8.DecodeLastRuneInString(m.input)
@@ -111,8 +192,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			// A lone space arrives as KeySpace, not KeyRunes; both carry Runes.
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				m.input += string(msg.Runes)
+				if m.mode == modeChannels || m.mode == modeDecision {
+					m.input += string(msg.Runes)
+				}
 			}
+		}
+	case approvalsLoaded:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+		} else {
+			m.approvals = msg.approvals
+			m.selApproval = 0
+			m.status = "inbox loaded"
+		}
+	case decisionCast:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+		} else {
+			m.status = "decision cast"
+			m.mode = modeInbox
+			return m, m.loadApprovals()
 		}
 	case messagesLoaded:
 		if msg.err != nil {
@@ -215,6 +314,20 @@ func (m Model) send(body string) tea.Cmd {
 	}
 }
 
+func (m Model) loadApprovals() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := m.api.ListApprovals(m.ctx)
+		return approvalsLoaded{approvals: resp.Approvals, err: err}
+	}
+}
+
+func (m Model) castDecision(approvalID int64, optionID string, reason string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := m.api.CastDecision(m.ctx, approvalID, schema.CastDecisionRequestV1{PrincipalID: m.authorID, OptionID: optionID, Reason: reason})
+		return decisionCast{err: err}
+	}
+}
+
 func mergeMessages(existing, incoming []schema.MessageV1) []schema.MessageV1 {
 	byID := make(map[int64]schema.MessageV1, len(existing)+len(incoming))
 	for _, message := range existing {
@@ -229,6 +342,19 @@ func mergeMessages(existing, incoming []schema.MessageV1) []schema.MessageV1 {
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
 	return merged
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 var (
@@ -257,41 +383,109 @@ func (m Model) View() string {
 		contentHeight = 4
 	}
 
-	channelLines := make([]string, len(m.channels))
-	for i, channel := range m.channels {
-		channel = clip(channel, leftWidth-4)
-		prefix := "  "
-		if i == m.selected {
-			prefix = activeStyle.Render("› ")
+	var panes string
+	if m.mode == modeInbox || m.mode == modeDecision {
+		inboxLines := []string{}
+		for i, app := range m.approvals {
+			prefix := "  "
+			if i == m.selApproval {
+				prefix = activeStyle.Render("› ")
+			}
+			esc := ""
+			if app.State == schema.ApprovalStateEscalated {
+				esc = badgeStyle.Render(" [ESC]")
+			}
+			title := clip(fmt.Sprintf("%d: %s", app.RequesterID, app.Title), leftWidth-4-utf8.RuneCountInString(esc))
+			inboxLines = append(inboxLines, prefix+title+esc)
 		}
-		channelLines[i] = prefix + channel
-	}
-	channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(channelLines, "\n"))
-	messageLines := make([]string, 0, len(m.messages[m.current()]))
-	for _, message := range m.messages[m.current()] {
-		badge := ""
-		badgeWidth := 0
-		if message.Payload != nil {
-			badgeText := "[" + clip(message.Payload.Schema, rightWidth/3) + "]"
-			badgeWidth = utf8.RuneCountInString(badgeText) + 1
-			badge = " " + badgeStyle.Render(badgeText)
+		if len(inboxLines) == 0 {
+			inboxLines = append(inboxLines, statusStyle.Render("No pending approvals"))
 		}
-		prefix := fmt.Sprintf("%d", message.AuthorID)
-		bodyWidth := rightWidth - utf8.RuneCountInString(prefix) - badgeWidth - 7
-		messageLines = append(messageLines, fmt.Sprintf("%s%s  %s", prefix, badge, clip(strings.ReplaceAll(message.Body, "\n", " ↵ "), bodyWidth)))
+		inbox := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(inboxLines, "\n"))
+
+		detailsLines := []string{}
+		if len(m.approvals) > 0 && m.selApproval < len(m.approvals) {
+			app := m.approvals[m.selApproval]
+			detailsLines = append(detailsLines, activeStyle.Render(app.Title))
+			detailsLines = append(detailsLines, fmt.Sprintf("Requester: %d  Deadline: %s", app.RequesterID, app.Deadline.Time().Format("Jan 02 15:04")))
+			if app.Payload != nil {
+				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", app.Payload.Schema)))
+			}
+			detailsLines = append(detailsLines, "", app.Body, "")
+			if m.mode == modeDecision {
+				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
+				for i, opt := range app.Options {
+					prefix := "  "
+					if i == m.selOption {
+						prefix = activeStyle.Render("› ")
+					}
+					detailsLines = append(detailsLines, prefix+opt.Label)
+				}
+			} else {
+				for _, opt := range app.Options {
+					detailsLines = append(detailsLines, "  - "+opt.Label)
+				}
+			}
+		}
+		visible := contentHeight - 1
+		if len(detailsLines) > visible {
+			detailsLines = detailsLines[:visible]
+		}
+		details := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(detailsLines, "\n"))
+		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
+	} else {
+		channelLines := make([]string, len(m.channels))
+		for i, channel := range m.channels {
+			channel = clip(channel, leftWidth-4)
+			prefix := "  "
+			if i == m.selected {
+				prefix = activeStyle.Render("› ")
+			}
+			channelLines[i] = prefix + channel
+		}
+		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(channelLines, "\n"))
+		messageLines := make([]string, 0, len(m.messages[m.current()]))
+		for _, message := range m.messages[m.current()] {
+			badge := ""
+			badgeWidth := 0
+			if message.Payload != nil {
+				badgeText := "[" + clip(message.Payload.Schema, rightWidth/3) + "]"
+				badgeWidth = utf8.RuneCountInString(badgeText) + 1
+				badge = " " + badgeStyle.Render(badgeText)
+			}
+			prefix := fmt.Sprintf("%d", message.AuthorID)
+			bodyWidth := rightWidth - utf8.RuneCountInString(prefix) - badgeWidth - 7
+			messageLines = append(messageLines, fmt.Sprintf("%s%s  %s", prefix, badge, clip(strings.ReplaceAll(message.Body, "\n", " ↵ "), bodyWidth)))
+		}
+		if len(messageLines) == 0 {
+			messageLines = append(messageLines, statusStyle.Render("No messages"))
+		}
+		visible := contentHeight - 1
+		if len(messageLines) > visible {
+			messageLines = messageLines[len(messageLines)-visible:]
+		}
+		messages := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(messageLines, "\n"))
+		panes = lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
 	}
-	if len(messageLines) == 0 {
-		messageLines = append(messageLines, statusStyle.Render("No messages"))
+
+	var inputStr string
+	if m.mode == modeDecision || m.mode == modeChannels {
+		inputStr = lipgloss.NewStyle().Width(width).Render("> " + clipTail(m.input, width-3))
+	} else {
+		inputStr = lipgloss.NewStyle().Width(width).Render("")
 	}
-	visible := contentHeight - 1
-	if len(messageLines) > visible {
-		messageLines = messageLines[len(messageLines)-visible:]
+
+	var statusKeys string
+	if m.mode == modeDecision {
+		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
+	} else if m.mode == modeInbox {
+		statusKeys = "  ↑/↓ approvals • enter decide • tab channels • esc quit"
+	} else {
+		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
-	messages := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(messageLines, "\n"))
-	panes := lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
-	input := lipgloss.NewStyle().Width(width).Render("> " + clipTail(m.input, width-3))
-	status := statusStyle.Width(width).Render(m.status + "  ↑/↓ channels • enter send • esc quit")
-	return panes + "\n" + input + "\n" + status
+
+	status := statusStyle.Width(width).Render(m.status + statusKeys)
+	return panes + "\n" + inputStr + "\n" + status
 }
 
 func clip(value string, width int) string {
