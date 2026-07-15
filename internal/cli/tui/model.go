@@ -425,7 +425,7 @@ func (m Model) View() string {
 			if app.Payload != nil {
 				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", app.Payload.Schema)))
 			}
-			detailsLines = append(detailsLines, "", app.Body, "")
+			detailsLines = append(detailsLines, "", strings.ReplaceAll(app.Body, "\n", " ↵ "), "")
 			if m.mode == modeDecision {
 				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
 				for i, opt := range app.Options {
