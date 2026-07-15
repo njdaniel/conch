@@ -132,7 +132,7 @@ Adding a new direct dependency requires:
 - `github.com/charmbracelet/lipgloss` — TUI styling
 - `github.com/coder/websocket` — WebSocket hub
 
-The MCP SDK is **not yet chosen or added** — it is a P1 item requiring protocol-designer work and Nick's sign-off before it lands in `go.mod`.
+The MCP SDK is **not yet chosen or added** — it is a P1 item. The protocol-designer role (`.claude/agents/protocol-designer.md`) selects the SDK using the `mcp-sdk-selection` design doc; Nick must sign off before it lands in `go.mod` and `deps-allowlist.txt`.
 
 ---
 
@@ -196,7 +196,7 @@ States: `pending` → `escalated` → `resolved` (terminal) or `expired` (termin
 - Terminal states never transition.
 - Every state transition writes an audit event **in the same transaction**.
 - Decisions serialize through the SQLite single-writer; quorum check is inside the transaction.
-- A decision cast against a resolved or expired approval is a protocol error (4xx).
+- A decision cast against a resolved or expired approval is a protocol error (`409 Conflict`).
 - Decisions are cast only by **human** principals; agents request and observe.
 - `reason` is required and non-empty on every decision (enforced at the API layer and the DB `CHECK` constraint).
 
