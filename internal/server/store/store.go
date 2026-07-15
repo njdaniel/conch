@@ -68,6 +68,50 @@ END`,
 		`ALTER TABLE messages ADD COLUMN payload_schema TEXT`,
 		`ALTER TABLE messages ADD COLUMN payload_json BLOB`,
 	},
+	// 3: P1 approvals (issue #12) — first-class approval entity with its own
+	// state machine (docs/design/approval-object.md), decisions, and the shared
+	// resolution store. Timestamps are unix milliseconds UTC throughout.
+	{
+		`CREATE TABLE approvals (
+	id             INTEGER PRIMARY KEY,
+	requester_id   INTEGER NOT NULL REFERENCES principals (id),
+	channel_id     INTEGER NOT NULL REFERENCES channels (id),
+	title          TEXT    NOT NULL,
+	body           TEXT    NOT NULL,
+	payload_schema TEXT    NOT NULL DEFAULT '',
+	payload_json   TEXT    NOT NULL DEFAULT '',
+	options_json   TEXT    NOT NULL,
+	deadline       INTEGER NOT NULL,
+	grace_deadline INTEGER NOT NULL,
+	quorum         INTEGER NOT NULL CHECK (quorum >= 1),
+	escalation_kind         TEXT    NOT NULL DEFAULT '',
+	escalation_principal_id INTEGER NOT NULL DEFAULT 0,
+	escalation_topic        TEXT    NOT NULL DEFAULT '',
+	state          TEXT    NOT NULL CHECK (state IN ('pending', 'escalated', 'resolved', 'expired')),
+	created_at     INTEGER NOT NULL
+)`,
+		`CREATE INDEX approvals_open_by_deadline ON approvals (state, deadline)`,
+		`CREATE TABLE approval_decisions (
+	id           INTEGER PRIMARY KEY,
+	approval_id  INTEGER NOT NULL REFERENCES approvals (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	option_id    TEXT    NOT NULL,
+	reason       TEXT    NOT NULL CHECK (reason <> ''),
+	created_at   INTEGER NOT NULL,
+	UNIQUE (approval_id, principal_id)
+)`,
+		// The shared resolution store (approval-object.md §3): exactly one
+		// resolution event per approval, stored as canonical
+		// approval.resolution.v1 JSON — what waiters, pollers, and the audit
+		// trail all read.
+		`CREATE TABLE approval_resolutions (
+	approval_id     INTEGER PRIMARY KEY REFERENCES approvals (id),
+	outcome         TEXT    NOT NULL CHECK (outcome IN ('approved', 'rejected', 'custom', 'expired')),
+	option_id       TEXT    NOT NULL DEFAULT '',
+	resolution_json TEXT    NOT NULL,
+	resolved_at     INTEGER NOT NULL
+)`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
