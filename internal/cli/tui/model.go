@@ -265,7 +265,7 @@ func (m Model) chronicleTips() string {
 		return "chronicle: no messages from you yet — type something and press Enter to send"
 	case total > 0 && own*5 < total:
 		return fmt.Sprintf("chronicle: you sent %d of %d messages in #%s — try ↑/↓ to explore other channels", own, total, m.current())
-	case own > 0 && totalLen/own > 80:
+	case own > 0 && totalLen/own > 80: // own > 0 guard prevents division by zero
 		return fmt.Sprintf("chronicle: avg message length %d chars — longer content wraps in the messages pane", totalLen/own)
 	case len(m.channels) > 1:
 		return fmt.Sprintf("chronicle: %d channels available — use ↑/↓ to switch, Enter to send", len(m.channels))

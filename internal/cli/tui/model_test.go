@@ -95,8 +95,10 @@ func TestModelUpdate(t *testing.T) {
 				{ID: 2, AuthorID: 7, Body: "world"},
 			}
 		}, want: func(t *testing.T, got Model) {
-			if !strings.HasPrefix(got.status, "chronicle:") {
-				t.Errorf("status = %q", got.status)
+			// authorID=7 sent 2 short messages; 2 channels available → channel-nav tip.
+			want := "chronicle: 2 channels available — use ↑/↓ to switch, Enter to send"
+			if got.status != want {
+				t.Errorf("status = %q, want %q", got.status, want)
 			}
 		}},
 	}
