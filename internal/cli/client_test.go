@@ -129,3 +129,57 @@ func TestClientTailReceivesMessage(t *testing.T) {
 		t.Errorf("message = %+v, want %+v", got, want)
 	}
 }
+
+func TestClientListMessagesV1(t *testing.T) {
+	want := schema.MessageV1{Schema: schema.MessageSchemaV1, ID: 3, ChannelID: 2, AuthorID: 7, Body: "hello"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/v1/channels/team%2Fops/messages" {
+			t.Errorf("request = %s %s", r.Method, r.URL.EscapedPath())
+		}
+		if r.URL.Query().Get("after") != "4" || r.URL.Query().Get("limit") != "25" {
+			t.Errorf("query = %s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(schema.ListMessagesResponseV1{Messages: []schema.MessageV1{want}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	got, err := client.ListMessages(context.Background(), "team/ops", 4, 25)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].ID != want.ID {
+		t.Errorf("messages = %+v", got.Messages)
+	}
+}
+
+func TestClientSendMessageV1(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/channels/general/messages" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var request schema.PostMessageRequestV1
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if request.AuthorID != 7 || request.Body != "hello" {
+			t.Errorf("request = %+v", request)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(schema.PostMessageResponseV1{Message: schema.MessageV1{ID: 9, Body: "hello"}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	got, err := client.SendMessage(context.Background(), "general", 7, "hello")
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	if got.ID != 9 {
+		t.Errorf("message = %+v", got)
+	}
+}

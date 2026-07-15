@@ -53,6 +53,7 @@ Usage:
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)
   CONCH_AUTHOR  author ID for send
+  CONCH_CHANNELS comma-separated TUI channels (default general)
 `)
 }
 
