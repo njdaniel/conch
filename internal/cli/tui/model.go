@@ -96,6 +96,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if body == "" {
 				return m, nil
 			}
+			if cmd, ok := strings.CutPrefix(body, "/"); ok {
+				m.input = ""
+				m.status = m.handleSlashCommand(cmd)
+				return m, nil
+			}
 			if m.authorID <= 0 {
 				m.status = "set CONCH_AUTHOR to send"
 				return m, nil
@@ -229,6 +234,44 @@ func mergeMessages(existing, incoming []schema.MessageV1) []schema.MessageV1 {
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
 	return merged
+}
+
+// handleSlashCommand processes a slash command (the leading "/" has been
+// stripped). It returns the status string to display.
+func (m Model) handleSlashCommand(cmd string) string {
+	switch strings.TrimSpace(cmd) {
+	case "chronicle tips":
+		return m.chronicleTips()
+	default:
+		return fmt.Sprintf("unknown command: /%s", cmd)
+	}
+}
+
+// chronicleTips inspects the messages already loaded for the current channel
+// and returns a personalised usage tip based on the author's patterns.
+func (m Model) chronicleTips() string {
+	msgs := m.messages[m.current()]
+	total := len(msgs)
+	var own, totalLen int
+	for _, msg := range msgs {
+		if msg.AuthorID == m.authorID {
+			own++
+			totalLen += len(msg.Body)
+		}
+	}
+
+	switch {
+	case own == 0:
+		return "chronicle: no messages from you yet — type something and press Enter to send"
+	case total > 0 && own*5 < total:
+		return fmt.Sprintf("chronicle: you sent %d of %d messages in #%s — try ↑/↓ to explore other channels", own, total, m.current())
+	case own > 0 && totalLen/own > 80:
+		return fmt.Sprintf("chronicle: avg message length %d chars — longer content wraps in the messages pane", totalLen/own)
+	case len(m.channels) > 1:
+		return fmt.Sprintf("chronicle: %d channels available — use ↑/↓ to switch, Enter to send", len(m.channels))
+	default:
+		return fmt.Sprintf("chronicle: %d messages sent in #%s — Esc or Ctrl+C to quit", own, m.current())
+	}
 }
 
 var (

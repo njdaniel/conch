@@ -72,6 +72,33 @@ func TestModelUpdate(t *testing.T) {
 				t.Errorf("status/input = %q/%q", got.status, got.input)
 			}
 		}},
+		{name: "slash unknown", msg: tea.KeyMsg{Type: tea.KeyEnter}, prep: func(m *Model) { m.input = "/nope" }, want: func(t *testing.T, got Model) {
+			if got.input != "" {
+				t.Errorf("input not cleared: %q", got.input)
+			}
+			if !strings.HasPrefix(got.status, "unknown command:") {
+				t.Errorf("status = %q", got.status)
+			}
+		}},
+		{name: "chronicle tips no messages", msg: tea.KeyMsg{Type: tea.KeyEnter}, prep: func(m *Model) { m.input = "/chronicle tips" }, want: func(t *testing.T, got Model) {
+			if got.input != "" {
+				t.Errorf("input not cleared: %q", got.input)
+			}
+			if !strings.HasPrefix(got.status, "chronicle:") {
+				t.Errorf("status = %q", got.status)
+			}
+		}},
+		{name: "chronicle tips with own messages", msg: tea.KeyMsg{Type: tea.KeyEnter}, prep: func(m *Model) {
+			m.input = "/chronicle tips"
+			m.messages["general"] = []schema.MessageV1{
+				{ID: 1, AuthorID: 7, Body: "hello"},
+				{ID: 2, AuthorID: 7, Body: "world"},
+			}
+		}, want: func(t *testing.T, got Model) {
+			if !strings.HasPrefix(got.status, "chronicle:") {
+				t.Errorf("status = %q", got.status)
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
