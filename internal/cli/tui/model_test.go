@@ -111,6 +111,39 @@ func TestModelUpdate(t *testing.T) {
 				t.Errorf("expected 'reason is required', got %q", got.status)
 			}
 		}},
+		// A slower ListApprovals response can land after the user has
+		// already moved into modeDecision on a stale (nonempty) list — e.g.
+		// re-entering the inbox re-triggers a load, the user presses enter
+		// on the old list before it resolves, and the fresh response comes
+		// back empty because the approval was resolved elsewhere meanwhile.
+		// Regression test for a panic previously reachable this way.
+		{name: "empty refresh while deciding falls back to inbox", msg: approvalsLoaded{approvals: nil}, prep: func(m *Model) {
+			m.mode = modeDecision
+			m.approvals = []schema.ApprovalV1{{ID: 1, Options: []schema.Option{{ID: "opt1"}}}}
+			m.selApproval = 0
+		}, want: func(t *testing.T, got Model) {
+			if got.mode != modeInbox {
+				t.Errorf("expected modeInbox after empty refresh, got %d", got.mode)
+			}
+		}},
+		{name: "down in decision mode with no approvals does not panic", msg: tea.KeyMsg{Type: tea.KeyDown}, prep: func(m *Model) {
+			m.mode = modeDecision
+			m.approvals = nil
+		}, want: func(t *testing.T, got Model) {
+			if got.mode != modeDecision {
+				t.Errorf("mode = %d", got.mode)
+			}
+		}},
+		{name: "enter in decision mode with no approvals does not panic", msg: tea.KeyMsg{Type: tea.KeyEnter}, prep: func(m *Model) {
+			m.mode = modeDecision
+			m.approvals = nil
+			m.authorID = 7
+			m.input = "reason"
+		}, want: func(t *testing.T, got Model) {
+			if got.mode != modeInbox {
+				t.Errorf("expected fallback to modeInbox, got %d", got.mode)
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
