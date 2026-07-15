@@ -75,12 +75,19 @@ ensure_labels() {
     gh label create "$IN_PROGRESS_LABEL" \
         --description "conch-agent is working this issue" --color BFDADC \
         2>/dev/null || true
-    gh label create "$TODO_LABEL" \
+    if ! gh label create "$TODO_LABEL" \
         --description "approved for conch-agent — needs doing" --color 0E8A16 \
-        2>/dev/null || true
-    gh label create "$READY_LABEL" \
+        2>/dev/null; then
+        gh label edit "$TODO_LABEL" \
+            --description "approved for conch-agent — needs doing" --color 0E8A16 >/dev/null
+    fi
+    if ! gh label create "$READY_LABEL" \
         --description "unblocked — ready to be worked now (auto-managed)" \
-        --color BFD4F2 2>/dev/null || true
+        --color BFD4F2 2>/dev/null; then
+        gh label edit "$READY_LABEL" \
+            --description "unblocked — ready to be worked now (auto-managed)" \
+            --color BFD4F2 >/dev/null
+    fi
 }
 
 fetch_open_issues() {
