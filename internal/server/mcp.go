@@ -101,6 +101,9 @@ func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostM
 	if strings.TrimSpace(in.Channel) == "" {
 		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
+	if strings.TrimSpace(in.Body) == "" {
+		return schema.PostMessageResponseV1{}, schema.Error{Code: "invalid_request", Message: "body must not be empty"}
+	}
 	req := schema.PostMessageRequestV1{AuthorID: authorID, Body: in.Body, Payload: in.Payload}
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
