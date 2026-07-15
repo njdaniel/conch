@@ -58,7 +58,7 @@ Usage:
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
-  --mcp-token token=principal_id mapping for MCP bearer auth; repeatable or comma-separate (env CONCHD_MCP_TOKENS)
+  --mcp-token token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
 `)
 }
 

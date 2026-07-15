@@ -33,7 +33,7 @@ func (s *Server) mcpHandler() http.Handler {
 			return nil
 		}
 		return s.mcpServerForPrincipal(principalID)
-	}, &mcp.StreamableHTTPOptions{SessionTimeout: shutdownTimeout, JSONResponse: true})
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authenticateMCP(r); !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="conch-mcp"`)
@@ -88,9 +88,7 @@ func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 	return server
 }
 
-type mcpToolErr struct{ schema.Error }
-
-func mcpToolError(err schema.Error) *mcp.CallToolResult {
+func mcpToolError(err *schema.Error) *mcp.CallToolResult {
 	b, marshalErr := json.Marshal(err)
 	text := err.Message
 	if marshalErr == nil {
@@ -99,61 +97,61 @@ func mcpToolError(err schema.Error) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, StructuredContent: err, IsError: true}
 }
 
-func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostMessageInput) (schema.PostMessageResponseV1, schema.Error) {
+func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostMessageInput) (schema.PostMessageResponseV1, *schema.Error) {
 	if strings.TrimSpace(in.Channel) == "" {
-		return schema.PostMessageResponseV1{}, schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
+		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
 	req := schema.PostMessageRequestV1{AuthorID: authorID, Body: in.Body, Payload: in.Payload}
 	if err := req.Validate(); err != nil {
-		return schema.PostMessageResponseV1{}, schema.Error{Code: "invalid_request", Message: err.Error()}
+		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
 	channel, err := s.store.ChannelByName(ctx, in.Channel)
 	if errors.Is(err, store.ErrNotFound) {
-		return schema.PostMessageResponseV1{}, schema.Error{Code: "channel_not_found", Message: "channel not found"}
+		return schema.PostMessageResponseV1{}, &schema.Error{Code: "channel_not_found", Message: "channel not found"}
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: find channel failed", "error", err)
-		return schema.PostMessageResponseV1{}, schema.Error{Code: "internal_error", Message: "internal server error"}
+		return schema.PostMessageResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
 	}
 	stored, err := s.store.InsertMessageV1(ctx, channel.ID, authorID, in.Body, in.Payload)
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: insert failed", "error", err)
-		return schema.PostMessageResponseV1{}, schema.Error{Code: "internal_error", Message: "internal server error"}
+		return schema.PostMessageResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
 	}
 	messageV1 := messageV1FromStore(stored)
 	s.hub.BroadcastMessageV1(ctx, messageV1)
 	messageV0 := messageV0FromStore(stored)
 	s.hub.BroadcastMessage(ctx, messageV0)
 	s.broadcaster.BroadcastMessage(ctx, messageV0)
-	return schema.PostMessageResponseV1{Message: messageV1}, schema.Error{}
+	return schema.PostMessageResponseV1{Message: messageV1}, nil
 }
 
-func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (schema.ListMessagesResponseV1, schema.Error) {
+func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (schema.ListMessagesResponseV1, *schema.Error) {
 	if strings.TrimSpace(in.Channel) == "" {
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
 	if in.After < 0 {
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "invalid_request", Message: "after must be a non-negative integer"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "invalid_request", Message: "after must be a non-negative integer"}
 	}
 	limit := in.Limit
 	if limit == 0 {
 		limit = defaultMessageLimit
 	}
 	if limit < 0 || limit > maxMessageLimit {
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "invalid_request", Message: "limit must be between 1 and 100"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "invalid_request", Message: "limit must be between 1 and 100"}
 	}
 	channel, err := s.store.ChannelByName(ctx, in.Channel)
 	if errors.Is(err, store.ErrNotFound) {
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "channel_not_found", Message: "channel not found"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "channel_not_found", Message: "channel not found"}
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: find channel failed", "error", err)
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "internal_error", Message: "internal server error"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
 	}
 	stored, err := s.store.ListMessages(ctx, channel.ID, in.After, int(limit)+1)
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: list failed", "error", err)
-		return schema.ListMessagesResponseV1{}, schema.Error{Code: "internal_error", Message: "internal server error"}
+		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
 	}
 	nextAfter := int64(0)
 	if len(stored) > int(limit) {
@@ -164,5 +162,5 @@ func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (sc
 	for i, message := range stored {
 		messages[i] = messageV1FromStore(message)
 	}
-	return schema.ListMessagesResponseV1{Messages: messages, NextAfter: nextAfter}, schema.Error{}
+	return schema.ListMessagesResponseV1{Messages: messages, NextAfter: nextAfter}, nil
 }
