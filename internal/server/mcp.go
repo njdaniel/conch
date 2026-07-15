@@ -69,10 +69,10 @@ func (s *Server) authenticateMCP(r *http.Request) (int64, bool) {
 
 func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "conchd", Version: s.cfg.Version}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent."},
+mcp.AddTool(server, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpPostMessageInput) (*mcp.CallToolResult, schema.PostMessageResponseV1, error) {
 			out, serr := s.postMessageMCP(ctx, principalID, in)
-			if serr != nil {
+			if serr.Code != "" {
 				return mcpToolError(serr), schema.PostMessageResponseV1{}, nil
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("posted message %d", out.Message.ID)}}}, out, nil
@@ -80,7 +80,7 @@ func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "read_channel", Description: "Read one paginated page of messages from a Conch channel."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpReadChannelInput) (*mcp.CallToolResult, schema.ListMessagesResponseV1, error) {
 			out, serr := s.readChannelMCP(ctx, in)
-			if serr != nil {
+			if serr.Code != "" {
 				return mcpToolError(serr), schema.ListMessagesResponseV1{}, nil
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read %d messages", len(out.Messages))}}}, out, nil
