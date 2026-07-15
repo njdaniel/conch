@@ -324,7 +324,7 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 	// Let both deadlines pass while "down".
 	time.Sleep(30 * time.Millisecond)
 
-	m2 := New(s, nil)
+	m2 := New(s, &recordingNotifier{})
 	defer m2.Close()
 	if err := m2.Rehydrate(ctx); err != nil {
 		t.Fatalf("Rehydrate: %v", err)
@@ -336,7 +336,7 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 		got, err := s.ApprovalByID(ctx, missed.ID)
 		return err == nil && got.State == schema.ApprovalStateExpired
 	})
-	want := []string{store.AuditApprovalCreated, AuditNotifySent, store.AuditApprovalEscalated, AuditNotifySent, store.AuditApprovalExpired, AuditNotifySent}
+	want := []string{store.AuditApprovalCreated, store.AuditApprovalEscalated, AuditNotifySent, store.AuditApprovalExpired, AuditNotifySent}
 	waitFor(t, time.Second, func() bool {
 		return len(auditChain(t, s, fmt.Sprintf("approval:%d", missed.ID))) >= len(want)
 	})
@@ -392,4 +392,18 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestUnconfiguredNotifierIsSilent(t *testing.T) {
+	s := openTestStore(t)
+	m := New(s, nil)
+	defer m.Close()
+	channelID, agentID, _ := fixture(t, s)
+	a, err := m.Create(context.Background(), params(channelID, agentID, time.Now().Add(time.Hour), time.Time{}))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := auditChain(t, s, fmt.Sprintf("approval:%d", a.ID)); !equal(got, []string{store.AuditApprovalCreated}) {
+		t.Fatalf("audit chain = %v, want only approval_created", got)
+	}
 }
