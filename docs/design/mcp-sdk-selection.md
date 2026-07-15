@@ -83,9 +83,9 @@ Honest reading:
   violation. State this plainly so the `asm` dep is not mistaken for a blocker.
 - **The official SDK's *extra* footprint over mark3labs is** `segmentio/encoding`
   (+`asm`) unconditionally, plus `golang.org/x/oauth2` (+`cloud.google.com/go/compute/metadata`)
-  and `golang-jwt/jwt/v5` **only if we import its auth subpackage.** P1 uses a
-  simple bearer token (issue #11) and does **not** need the OAuth/JWT
-  machinery, so those two need not enter the build graph in P1.
+  and `golang-jwt/jwt/v5` in its module deps.
+  P1’s simple bearer token does not require importing the SDK auth subpackages, so
+  those deps should not be linked into the `conchd` binary in P1.
 - **Both now depend on the same `google/jsonschema-go` and `uritemplate/v3`.**
   The community SDK converged on the official schema library, so the
   schema-generation surface is effectively shared.
