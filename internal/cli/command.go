@@ -169,11 +169,11 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(stdout, "%-6s | %-12s | %-15s | %-20s | %s\n", "ID", "STATE", "DEADLINE", "REQUESTER", "TITLE")
-	_, _ = fmt.Fprintln(stdout, strings.Repeat("-", 80))
+	_, _ = fmt.Fprintf(stdout, "%-6s | %-12s | %-20s | %-20s | %s\n", "ID", "STATE", "DEADLINE", "REQUESTER", "TITLE")
+	_, _ = fmt.Fprintln(stdout, strings.Repeat("-", 90))
 	for _, a := range resp.Approvals {
 		deadline := a.Deadline.Time().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-15s | %-20d | %s\n", a.ID, a.State, deadline, a.RequesterID, a.Title)
+		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, a.State, deadline, a.RequesterID, a.Title)
 	}
 	return nil
 }
