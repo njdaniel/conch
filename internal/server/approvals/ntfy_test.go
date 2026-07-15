@@ -55,7 +55,7 @@ func TestNtfyNotifierLifecycleTopicsPriorityAndBody(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("requests = %d, want 3: %+v", len(got), got)
 	}
-	checks := []struct{ path, priority, contains string }{{"/approvals", "default", "Please review"}, {"/approvals-urgent", "urgent", "Deadline passed"}, {"/approvals", "default", "resolved: approved"}}
+	checks := []struct{ path, priority, contains string }{{"/approvals", "default", "Please review"}, {"/approvals-urgent", "max", "Deadline passed"}, {"/approvals", "default", "resolved: approved"}}
 	for i, c := range checks {
 		if got[i].Path != c.path || got[i].Priority != c.priority || !strings.Contains(got[i].Body, c.contains) || got[i].Title == "" {
 			t.Fatalf("request %d = %+v, want path %s priority %s body containing %q", i, got[i], c.path, c.priority, c.contains)
