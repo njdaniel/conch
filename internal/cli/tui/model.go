@@ -184,7 +184,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "set CONCH_AUTHOR to decide"
 					return m, nil
 				}
+				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
+					m.status = "no approval selected"
+					return m, nil
+				}
 				app := m.approvals[m.selApproval]
+				if len(app.Options) == 0 || m.selOption < 0 || m.selOption >= len(app.Options) {
+					m.status = "select a decision option"
+					return m, nil
+				}
 				opt := app.Options[m.selOption]
 				m.input = ""
 				m.status = "casting decision…"
