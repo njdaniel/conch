@@ -11,13 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/njdaniel/conch/internal/server"
-	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/store"
 )
 
@@ -54,16 +50,12 @@ func usage(w *os.File) {
 	_, _ = fmt.Fprint(w, `conchd — the Conch server
 
 Usage:
-  conchd serve [--data <dir>] [--listen <addr>] [--ntfy-server <url>]
+  conchd serve [--data <dir>] [--listen <addr>]
   conchd version
 
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
-  --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
-  --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
-  --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
-  --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
 `)
 }
 
@@ -71,19 +63,11 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
-	mcpTokensRaw := fs.String("mcp-token", os.Getenv("CONCHD_MCP_TOKENS"), "comma-separated token=agent_principal_id mappings for MCP bearer auth")
-	ntfyServer := fs.String("ntfy-server", os.Getenv("CONCHD_NTFY_SERVER"), "ntfy server URL")
-	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
-	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return errors.New("serve: --data (or CONCHD_DATA) is required")
-	}
-	mcpTokens, err := parseMCPTokens(*mcpTokensRaw)
-	if err != nil {
-		return err
 	}
 
 	// The data directory is an operator-supplied path by design; conchd runs
@@ -107,16 +91,9 @@ func runServe(args []string) error {
 	defer func() { _ = st.Close() }()
 
 	srv := server.New(server.Config{
-		DataDir:         *dataDir,
-		Listen:          *listen,
-		Version:         version,
-		MCPBearerTokens: mcpTokens,
-		Ntfy: approvals.NtfyConfig{
-			Server:         *ntfyServer,
-			ApprovalsTopic: *ntfyTopic,
-			UrgentTopic:    *ntfyUrgentTopic,
-			Timeout:        2 * time.Second,
-		},
+		DataDir: *dataDir,
+		Listen:  *listen,
+		Version: version,
 	}, st)
 	if err := srv.Listen(); err != nil {
 		return err
@@ -131,24 +108,4 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func parseMCPTokens(raw string) (map[string]int64, error) {
-	mappings := make(map[string]int64)
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		token, idRaw, ok := strings.Cut(part, "=")
-		if !ok || strings.TrimSpace(token) == "" || strings.TrimSpace(idRaw) == "" {
-			return nil, fmt.Errorf("serve: invalid --mcp-token %q, want token=agent_principal_id", part)
-		}
-		id, err := strconv.ParseInt(strings.TrimSpace(idRaw), 10, 64)
-		if err != nil || id <= 0 {
-			return nil, fmt.Errorf("serve: invalid MCP principal id %q", idRaw)
-		}
-		mappings[strings.TrimSpace(token)] = id
-	}
-	return mappings, nil
 }

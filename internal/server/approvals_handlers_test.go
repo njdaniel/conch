@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -178,79 +176,4 @@ func TestCastDecisionErrors(t *testing.T) {
 	}
 	late := postJSON(t, srv, decideURL, fmt.Sprintf(`{"principal_id":%d,"option_id":"reject","reason":"too late"}`, human.ID))
 	assertAPIError(t, late, http.StatusConflict, "approval_terminal")
-}
-
-func TestApprovalRESTNtfyFailureDegradesFullChain(t *testing.T) {
-	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer ntfy.Close()
-	runApprovalRESTNtfyFailureFullChain(t, ntfy.URL, "status 500")
-}
-
-func TestApprovalRESTNtfyConnectionRefusedDegradesFullChain(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	url := "http://" + ln.Addr().String()
-	_ = ln.Close()
-	runApprovalRESTNtfyFailureFullChain(t, url, "")
-}
-
-func runApprovalRESTNtfyFailureFullChain(t *testing.T, ntfyURL, wantDetail string) {
-	t.Helper()
-	srv := newTestServerWithConfig(t, Config{Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 200 * time.Millisecond}})
-	channel, agent, human := approvalTestFixture(t, srv)
-
-	rec := postJSON(t, srv, "/v1/approvals", createApprovalBody(channel.ID, agent.ID))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var created schema.CreateApprovalResponseV1
-	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-		t.Fatal(err)
-	}
-
-	decision := fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"risk is fine"}`, human.ID)
-	decideRec := postJSON(t, srv, fmt.Sprintf("/v1/approvals/%d/decisions", created.Approval.ID), decision)
-	if decideRec.Code != http.StatusOK {
-		t.Fatalf("decide status = %d, body = %s", decideRec.Code, decideRec.Body.String())
-	}
-
-	events, err := srv.store.ListAuditEvents(context.Background(), 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var actions []string
-	var failedDetail string
-	subject := fmt.Sprintf("approval:%d", created.Approval.ID)
-	for _, e := range events {
-		if e.Subject != subject {
-			continue
-		}
-		actions = append(actions, e.Action)
-		if e.Action == approvals.AuditNotifyFailed && failedDetail == "" {
-			failedDetail = e.Detail
-		}
-	}
-	want := []string{store.AuditApprovalCreated, approvals.AuditNotifyFailed, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifyFailed}
-	if !equalStringSlices(actions, want) {
-		t.Fatalf("audit chain = %v, want %v", actions, want)
-	}
-	if wantDetail != "" && !strings.Contains(failedDetail, wantDetail) {
-		t.Fatalf("notify_failed detail %q, want containing %q", failedDetail, wantDetail)
-	}
-}
-
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

@@ -115,50 +115,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "tab":
-			switch m.mode {
-			case modeChannels:
+			if m.mode == modeChannels {
 				m.mode = modeInbox
 				m.status = "loading approvals…"
 				return m, m.loadApprovals()
-			case modeInbox:
+			} else if m.mode == modeInbox {
 				m.mode = modeChannels
 				m.status = ""
 				return m, nil
 			}
 		case "up":
-			switch m.mode {
-			case modeChannels:
+			if m.mode == modeChannels {
 				return m.selectChannel(-1)
-			case modeInbox:
+			} else if m.mode == modeInbox {
 				m.selApproval = max(0, m.selApproval-1)
 				return m, nil
-			case modeDecision:
+			} else if m.mode == modeDecision {
 				m.selOption = max(0, m.selOption-1)
 				return m, nil
 			}
 		case "down":
-			switch m.mode {
-			case modeChannels:
+			if m.mode == modeChannels {
 				return m.selectChannel(1)
-			case modeInbox:
+			} else if m.mode == modeInbox {
 				if len(m.approvals) > 0 {
 					m.selApproval = min(len(m.approvals)-1, m.selApproval+1)
 				}
 				return m, nil
-			case modeDecision:
-				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
-					return m, nil
-				}
+			} else if m.mode == modeDecision {
 				app := m.approvals[m.selApproval]
-				if len(app.Options) == 0 {
-					return m, nil
-				}
 				m.selOption = min(len(app.Options)-1, m.selOption+1)
 				return m, nil
 			}
 		case "enter":
-			switch m.mode {
-			case modeChannels:
+			if m.mode == modeChannels {
 				body := strings.TrimSpace(m.input)
 				if body == "" {
 					return m, nil
@@ -170,7 +160,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input = ""
 				m.status = "sending…"
 				return m, m.send(body)
-			case modeInbox:
+			} else if m.mode == modeInbox {
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
 					m.selOption = 0
@@ -178,7 +168,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "type reason to decide"
 					return m, nil
 				}
-			case modeDecision:
+			} else if m.mode == modeDecision {
 				reason := strings.TrimSpace(m.input)
 				if reason == "" {
 					m.status = "reason is required"
@@ -188,16 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "set CONCH_AUTHOR to decide"
 					return m, nil
 				}
-				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
-					m.status = "no approval selected"
-					m.mode = modeInbox
-					return m, nil
-				}
 				app := m.approvals[m.selApproval]
-				if len(app.Options) == 0 || m.selOption < 0 || m.selOption >= len(app.Options) {
-					m.status = "select a decision option"
-					return m, nil
-				}
 				opt := app.Options[m.selOption]
 				m.input = ""
 				m.status = "casting decision…"
@@ -223,13 +204,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.approvals = msg.approvals
 			m.selApproval = 0
 			m.status = "inbox loaded"
-			// A slower load can land after the user has already moved into
-			// modeDecision on a stale (now-refreshed) list; if the refresh
-			// came back empty there is nothing left to decide on.
-			if m.mode == modeDecision && len(m.approvals) == 0 {
-				m.mode = modeInbox
-				m.status = "no open approvals"
-			}
 		}
 	case decisionCast:
 		if msg.err != nil {
@@ -502,12 +476,11 @@ func (m Model) View() string {
 	}
 
 	var statusKeys string
-	switch m.mode {
-	case modeDecision:
+	if m.mode == modeDecision {
 		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
-	case modeInbox:
+	} else if m.mode == modeInbox {
 		statusKeys = "  ↑/↓ approvals • enter decide • tab channels • esc quit"
-	default:
+	} else {
 		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
 
