@@ -30,14 +30,11 @@ type Config struct {
 	// and delivered to the server's own WebSocket hub — an additional tap for
 	// tests and future integrations (e.g. ntfy), not a replacement for the hub.
 	Broadcaster Broadcaster
-<<<<<<< HEAD
 	// MCPBearerTokens maps bearer tokens to agent principal IDs for the MCP endpoint.
 	MCPBearerTokens map[string]int64
-=======
 	// Ntfy configures optional approval lifecycle push notifications. When
 	// unconfigured, notification hooks are silent and append no audit rows.
 	Ntfy approvals.NtfyConfig
->>>>>>> origin/main
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
