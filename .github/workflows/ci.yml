@@ -44,3 +44,22 @@ jobs:
 
       - name: dependency gate
         run: ./scripts/depgate.sh
+
+  dogfood-check:
+    # The P1 release canary (ROADMAP success criterion,
+    # .claude/skills/dogfood-check/): runs on every push to main (the closest
+    # proxy to "before releases" — there is no separate release workflow)
+    # and on any PR labeled approval-path, per issue #19's acceptance
+    # criteria. A release does not ship, and an approval-path PR does not
+    # merge, on a failing dogfood-check.
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'approval-path')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: dogfood-check
+        run: go run ./e2e/dogfood
