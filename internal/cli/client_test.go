@@ -183,3 +183,58 @@ func TestClientSendMessageV1(t *testing.T) {
 		t.Errorf("message = %+v", got)
 	}
 }
+
+func TestClientListApprovals(t *testing.T) {
+	want := schema.ApprovalV1{ID: 42, Title: "Deploy to prod", State: schema.ApprovalStatePending}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/approvals" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(schema.ListApprovalsResponseV1{Approvals: []schema.ApprovalV1{want}})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	got, err := client.ListApprovals(context.Background())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(got.Approvals) != 1 || got.Approvals[0].ID != want.ID {
+		t.Errorf("approvals = %+v, want ID %d", got.Approvals, want.ID)
+	}
+}
+
+func TestClientCastDecision(t *testing.T) {
+	want := schema.CastDecisionResponseV1{
+		Decision: schema.Decision{PrincipalID: 7, OptionID: "approve", Reason: "LGTM"},
+		State:    schema.ApprovalStateResolved,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/approvals/42/decisions" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var request schema.CastDecisionRequestV1
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if request.PrincipalID != 7 || request.OptionID != "approve" || request.Reason != "LGTM" {
+			t.Errorf("request = %+v", request)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(want)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	got, err := client.CastDecision(context.Background(), 42, schema.CastDecisionRequestV1{PrincipalID: 7, OptionID: "approve", Reason: "LGTM"})
+	if err != nil {
+		t.Fatalf("cast decision: %v", err)
+	}
+	if got.Decision.PrincipalID != want.Decision.PrincipalID || got.State != want.State {
+		t.Errorf("response = %+v, want %+v", got, want)
+	}
+}
