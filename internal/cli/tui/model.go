@@ -143,7 +143,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			} else if m.mode == modeDecision {
+				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
+					return m, nil
+				}
 				app := m.approvals[m.selApproval]
+				if len(app.Options) == 0 {
+					return m, nil
+				}
 				m.selOption = min(len(app.Options)-1, m.selOption+1)
 				return m, nil
 			}
