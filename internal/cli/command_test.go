@@ -115,6 +115,86 @@ func TestApprovalsDecision(t *testing.T) {
 	}
 }
 
+func TestApprovalsReject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/v1/approvals/1/decisions") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req schema.CastDecisionRequestV1
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.PrincipalID != 42 || req.Reason != "not ready" || req.OptionID != "reject" {
+			t.Errorf("request = %+v", req)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(schema.CastDecisionResponseV1{
+			Decision:   schema.Decision{PrincipalID: 42, OptionID: "reject", Reason: "not ready"},
+			State:      schema.ApprovalStateResolved,
+			Resolution: &schema.ApprovalResolutionV1{},
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"reject", "--server", server.URL, "--author", "42", "--reason", "not ready", "1"}, &stdout, &stderr, "vtest")
+	if err != nil {
+		t.Fatalf("run failed: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "resolved") {
+		t.Errorf("expected resolved message, got: %q", stdout.String())
+	}
+}
+
+func TestApprovalsDecisionCustomOption(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req schema.CastDecisionRequestV1
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.OptionID != "escalate-to-vp" {
+			t.Errorf("optionID = %q, want custom option honored", req.OptionID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(schema.CastDecisionResponseV1{
+			Decision: schema.Decision{PrincipalID: 42, OptionID: "escalate-to-vp", Reason: "needs VP"},
+			State:    schema.ApprovalStatePending,
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"approve", "--server", server.URL, "--author", "42", "--reason", "needs VP", "--option", "escalate-to-vp", "1"}, &stdout, &stderr, "vtest")
+	if err != nil {
+		t.Fatalf("run failed: %v\nstderr: %s", err, stderr.String())
+	}
+}
+
+func TestApprovalsDecisionNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(schema.Error{
+			Code:    "approval_not_found",
+			Message: "approval not found",
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := Run(context.Background(), []string{"approve", "--server", server.URL, "--author", "42", "--reason", "LGTM", "999"}, &stdout, &stderr, "vtest")
+	if err == nil {
+		t.Fatal("expected error for unknown id")
+	}
+	if !strings.Contains(err.Error(), "approval 999 not found") {
+		t.Errorf("expected helpful not-found error, got: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no direct stderr output, got: %q", stderr.String())
+	}
+}
+
 func TestApprovalsDecisionMissingReason(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := Run(context.Background(), []string{"approve", "--author", "42", "1"}, &stdout, &stderr, "vtest")
@@ -141,9 +221,12 @@ func TestApprovalsDecisionTerminalState(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for terminal state")
 	}
-
-	out := stderr.String()
-	if !strings.Contains(out, "approval 1 is no longer open") {
-		t.Errorf("expected helpful terminal state error, got: %q", out)
+	if !strings.Contains(err.Error(), "approval 1 is no longer open") {
+		t.Errorf("expected helpful terminal state error, got: %v", err)
+	}
+	// Run itself must not also print to stderr — cmd/conch's wrapper prints
+	// the returned error, so writing here too would show the message twice.
+	if stderr.Len() != 0 {
+		t.Errorf("expected no direct stderr output, got: %q", stderr.String())
 	}
 }

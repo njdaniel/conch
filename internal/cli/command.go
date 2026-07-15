@@ -220,13 +220,14 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 		Reason:      *reason,
 	})
 	if err != nil {
+		// Rewrite into a single clear message rather than writing to stderr
+		// directly: cmd/conch's Run wrapper already prints the returned
+		// error, so writing here as well would print it twice.
 		if strings.Contains(err.Error(), "invalid_state") || strings.Contains(err.Error(), "terminal") {
-			_, _ = fmt.Fprintf(stderr, "conch: approval %d is no longer open\n", approvalID)
-			return err
+			return fmt.Errorf("approval %d is no longer open", approvalID)
 		}
 		if strings.Contains(err.Error(), "approval_not_found") || strings.Contains(err.Error(), "not found") {
-			_, _ = fmt.Fprintf(stderr, "conch: approval %d not found\n", approvalID)
-			return err
+			return fmt.Errorf("approval %d not found", approvalID)
 		}
 		return err
 	}
