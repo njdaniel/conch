@@ -218,7 +218,8 @@ implementation issue must close for the tools to ship parity-clean.
   [approval-object.md](approval-object.md).
 - Agent manifests, per-tool capability enforcement, rate limits — P2 (#20). P1
   auth is a bearer token mapped to one agent principal (§2).
-- OAuth/JWT auth via the SDK's auth subpackage — deferred with P2 (keeps
-  `oauth2`/`jwt` out of the P1 build graph; see [mcp-sdk-selection.md](mcp-sdk-selection.md) §3).
+- OAuth/JWT auth via the SDK's auth subpackage — deferred with P2 (P1 should avoid importing the
+  SDK auth subpackages so `oauth2`/`jwt` aren’t linked into the `conchd` binary; see
+  [mcp-sdk-selection.md](mcp-sdk-selection.md) §3).
 - Any `pkg/schema`, `go.mod`, or `internal/server` edit — this is the design;
   the code lands in the #11 implementation PR after Nick's SDK sign-off.
