@@ -95,6 +95,15 @@ Mandatory, dispatcher-owned. No worker output reaches a commit without all of:
    the worker, its version, what was unverified at handoff, and what the
    reviewer amended.
 
+## Unattended runner
+
+`ops/conch-agent.sh` (systemd timer, 3×/day) is a separate, headless path that
+dispatches issues without a dispatcher session. It is **opt-in**: it only
+considers open issues a human has labeled `agent/ready`. The label survives
+failed runs (auto-retry on the next firing); a session that finds an issue
+not executable removes `agent/ready` along with adding `blocked`, so a
+rewritten issue needs fresh approval before the runner touches it again.
+
 ## Authorization boundaries
 
 - **Codex full-auto** disables its approval gate; the user must name that mode

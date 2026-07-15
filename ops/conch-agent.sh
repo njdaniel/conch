@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # conch-agent.sh — unattended issue runner for the conch repo.
 #
-# Picks one open, unblocked GitHub issue (highest priority first), creates an
-# isolated git worktree + branch, runs a headless Claude Code session to
-# implement it per CLAUDE.md, and expects that session to push and open a PR.
+# Picks one open, unblocked GitHub issue (highest priority first) from those a
+# human has approved with the "agent/ready" label, creates an isolated git
+# worktree + branch, runs a headless Claude Code session to implement it per
+# CLAUDE.md, and expects that session to push and open a PR.
 # One issue = one branch = one PR = one session (CLAUDE.md rule 5).
 #
 # Usage:
@@ -31,6 +32,7 @@ TIMEOUT="${CONCH_AGENT_TIMEOUT:-3600}"
 CLAUDE_MODEL="${CONCH_AGENT_MODEL:-claude-opus-4-8}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 IN_PROGRESS_LABEL="agent/in-progress"
+READY_LABEL="agent/ready"
 WORKTREE_ROOT="$LOG_DIR/worktrees"
 
 mkdir -p "$LOG_DIR" "$WORKTREE_ROOT"
@@ -78,20 +80,27 @@ fi
 cd "$REPO_DIR"
 git fetch origin --prune
 
-# Make sure the label used as an in-progress marker exists (idempotent).
+# Make sure the labels the agent relies on exist (idempotent).
 gh label create "$IN_PROGRESS_LABEL" \
     --description "conch-agent is working this issue" --color BFDADC \
     2>/dev/null || true
+gh label create "$READY_LABEL" \
+    --description "approved for conch-agent to pick up" --color 0E8A16 \
+    2>/dev/null || true
 
-# Candidate issues: open, not labeled blocked, not already being worked, and
-# no still-open issue referenced in the "## Blocked by" section. Priority from
-# the "P<n>" title prefix (P0 first), then oldest.
+# Candidate issues: opt-in only — a human must have applied $READY_LABEL.
+# Within that set: not labeled blocked, not already being worked, and no
+# still-open issue referenced in the "## Blocked by" section. Priority from
+# the "P<n>" title prefix (P0 first), then oldest. The gate is applied in jq
+# (not gh --label) so $open still covers ALL open issues for the blocked-by
+# check, including ones not yet approved.
 CANDIDATES=$(gh issue list --state open --limit 100 \
         --json number,title,labels,body |
-    jq -r --arg wip "$IN_PROGRESS_LABEL" '
+    jq -r --arg wip "$IN_PROGRESS_LABEL" --arg ready "$READY_LABEL" '
         . as $all
         | [ $all[].number ] as $open
         | [ $all[]
+          | select(.labels | map(.name) | index($ready))
           | select(.labels | map(.name) | index("blocked") | not)
           | select(.labels | map(.name) | index($wip) | not)
           | select(
@@ -155,8 +164,9 @@ $BRANCH. Your task is GitHub issue #$ISSUE of this repository.
    area/* labels (plus 'approval-path' if the approval path is touched).
 6. If the issue is not executable as written (missing acceptance criteria,
    actually blocked), do NOT guess: comment your findings on the issue with
-   'gh issue comment $ISSUE', add the 'blocked' label, and stop without
-   pushing anything."
+   'gh issue comment $ISSUE', add the 'blocked' label, remove the
+   'agent/ready' label so the issue needs fresh approval once rewritten, and
+   stop without pushing anything."
 
 log "starting claude session (timeout ${TIMEOUT}s), log: $LOG_FILE"
 set +e
