@@ -98,11 +98,26 @@ Mandatory, dispatcher-owned. No worker output reaches a commit without all of:
 ## Unattended runner
 
 `ops/conch-agent.sh` (systemd timer, 3×/day) is a separate, headless path that
-dispatches issues without a dispatcher session. It is **opt-in**: it only
-considers open issues a human has labeled `agent/ready`. The label survives
-failed runs (auto-retry on the next firing); a session that finds an issue
-not executable removes `agent/ready` along with adding `blocked`, so a
-rewritten issue needs fresh approval before the runner touches it again.
+dispatches issues without a dispatcher session. Work state is a two-tag model:
+
+| Label | Managed by | Meaning |
+|---|---|---|
+| `agent/todo` | human | approved / needs doing — phase scoping happens by labeling just the current phase's issues |
+| `agent/ready` | auto (`sync`) | not labeled `blocked` and nothing in its `## Blocked by` is still open — ready to work *now* |
+
+The runner is **opt-in**: it picks from `agent/todo` ∩ unblocked (it recomputes
+blocked-ness live; the `agent/ready` label is a materialized view of that same
+computation, refreshed at the start of every run and via `conch-agent sync`).
+Issues carrying both tags are up for grabs; two both-tagged issues with
+disjoint `area/*` labels may be worked in parallel (see Isolation above).
+`conch-agent queue` prints this view: up for grabs (with same-area serialize
+warnings), approved-but-blocked with their blockers, awaiting approval, and
+busy issues.
+
+`agent/todo` survives failed runs (auto-retry on the next firing); a session
+that finds an issue not executable removes `agent/todo` along with adding
+`blocked`, so a rewritten issue needs fresh approval before the runner touches
+it again.
 
 ## Authorization boundaries
 
