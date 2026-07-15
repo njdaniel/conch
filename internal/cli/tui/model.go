@@ -125,7 +125,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV1{msg.message})
 		return m, m.waitEvent()
 	case subscriptionEnded:
-		if !errors.Is(msg.err, context.Canceled) {
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
 			m.status = "live updates: " + msg.err.Error()
 		}
 		return m, m.waitEvent()
