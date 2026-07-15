@@ -58,8 +58,8 @@ Direct requires of each SDK's published `go.mod`. Test-only deps (pulled into
 | `github.com/google/jsonschema-go` v0.4.3 | JSON Schema generation (its only dep is go-cmp *(test)*) |
 | `github.com/yosida95/uritemplate/v3` v3.0.2 | RFC 6570 URI templates (resources) |
 | `github.com/segmentio/encoding` v0.5.4 | Fast JSON; pulls `github.com/segmentio/asm` v1.1.3 |
-| `golang.org/x/oauth2` v0.35.0 | OAuth client; pulls `cloud.google.com/go/compute/metadata` — **only if the auth subpackage is imported** |
-| `github.com/golang-jwt/jwt/v5` v5.3.1 | JWT for the auth subpackage — **only if imported** |
+| `golang.org/x/oauth2` v0.35.0 | OAuth client; transitively pulls `cloud.google.com/go/compute/metadata` (download), but isn’t linked unless the SDK auth subpackages are imported |
+| `github.com/golang-jwt/jwt/v5` v5.3.1 | JWT support used by the SDK auth subpackages; downloaded via `go.mod`, but isn’t linked unless those packages are imported |
 | `github.com/google/go-cmp` v0.7.0 *(test/build)* | |
 | `golang.org/x/tools` v0.42.0 *(test/build)* | |
 
