@@ -78,9 +78,16 @@ func TestHookIngestPostsBroadcastsAndAudits(t *testing.T) {
 			if (message.Payload != nil) != tt.wantPayload {
 				t.Errorf("payload = %+v, want present %v", message.Payload, tt.wantPayload)
 			}
-			broadcast := <-sub.Messages()
-			if broadcast.ID != message.ID || broadcast.AuthorID != principal.ID {
-				t.Errorf("broadcast = %+v, want posted message %+v", broadcast, message)
+			select {
+			case broadcast, ok := <-sub.Messages():
+				if !ok {
+					t.Fatal("subscription closed, want a message")
+				}
+				if broadcast.ID != message.ID || broadcast.AuthorID != principal.ID {
+					t.Errorf("broadcast = %+v, want posted message %+v", broadcast, message)
+				}
+			default:
+				t.Fatal("no message buffered, want one")
 			}
 			events, err := srv.store.ListAuditEvents(context.Background(), 0, 10)
 			if err != nil {
