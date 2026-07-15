@@ -8,5 +8,5 @@ github.com/charmbracelet/bubbletea
 github.com/charmbracelet/lipgloss
 # WS library for the hub (issue #4): approved by Nick 2026-07-13.
 github.com/coder/websocket
-# MCP SDK: to be selected by protocol-designer in P1 and approved by Nick
-# before being added here.
+# MCP SDK for issue #11: approved by Nick 2026-07-15.
+github.com/modelcontextprotocol/go-sdk

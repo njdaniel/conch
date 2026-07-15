@@ -30,6 +30,8 @@ type Config struct {
 	// and delivered to the server's own WebSocket hub — an additional tap for
 	// tests and future integrations (e.g. ntfy), not a replacement for the hub.
 	Broadcaster Broadcaster
+	// MCPBearerTokens maps bearer tokens to agent principal IDs for the MCP endpoint.
+	MCPBearerTokens map[string]int64
 	// Ntfy configures optional approval lifecycle push notifications. When
 	// unconfigured, notification hooks are silent and append no audit rows.
 	Ntfy approvals.NtfyConfig
@@ -88,6 +90,7 @@ func New(cfg Config, st *store.Store) *Server {
 	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
 	mux.HandleFunc("GET /v1/approvals", s.handleListOpenApprovals)
 	mux.HandleFunc("POST /v1/approvals/{id}/decisions", s.handleCastDecision)
+	mux.Handle("/mcp", s.mcpHandler())
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           mux,
