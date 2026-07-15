@@ -62,6 +62,7 @@ BEGIN
 	SELECT RAISE(ABORT, 'audit_events is append-only');
 END`,
 	},
+<<<<<<< HEAD
 	// 2: P1 approvals (issue #12) — first-class approval entity with its own
 	// state machine (docs/design/approval-object.md), decisions, and the shared
 	// resolution store. Timestamps are unix milliseconds UTC throughout.
@@ -105,6 +106,13 @@ END`,
 	resolution_json TEXT    NOT NULL,
 	resolved_at     INTEGER NOT NULL
 )`,
+=======
+	// 2: MessageV1 typed payload persistence. NULL columns represent a message
+	// without a payload.
+	{
+		`ALTER TABLE messages ADD COLUMN payload_schema TEXT`,
+		`ALTER TABLE messages ADD COLUMN payload_json BLOB`,
+>>>>>>> origin/main
 	},
 }
 
