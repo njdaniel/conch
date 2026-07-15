@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,6 +50,12 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	}
 	if post.Result.StructuredContent.Message.ChannelID != channel.ID {
 		t.Fatalf("MCP channel ID = %d, want %d", post.Result.StructuredContent.Message.ChannelID, channel.ID)
+	}
+	if post.Result.StructuredContent.Message.Payload == nil {
+		t.Fatal("MCP payload is nil, want object payload")
+	}
+	if got := string(post.Result.StructuredContent.Message.Payload.Data); got != `{"side":"buy","symbol":"BTC"}` {
+		t.Fatalf("MCP payload data = %s, want object payload", got)
 	}
 
 	var read struct {
@@ -110,15 +117,24 @@ func mcpPost(t *testing.T, baseURL, sessionID string, id int, method string, par
 	if err != nil {
 		t.Fatalf("post %s: %v", method, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close %s response: %v", method, err)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("post %s status = %d", method, resp.StatusCode)
 	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s response: %v", method, err)
+	}
 	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			t.Fatalf("decode %s: %v", method, err)
+		if err := json.Unmarshal(responseBody, out); err != nil {
+			t.Fatalf("decode %s response %s: %v", method, responseBody, err)
 		}
 	}
+	t.Logf("%s response: %s", method, responseBody)
 	if sessionID == "" {
 		return resp.Header.Get("Mcp-Session-Id")
 	}
