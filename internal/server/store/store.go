@@ -112,6 +112,16 @@ END`,
 	resolved_at     INTEGER NOT NULL
 )`,
 	},
+	// 4: Webhook tokens map unauthenticated ingest requests to an existing
+	// channel and principal identity.
+	{
+		`CREATE TABLE hooks (
+	token        TEXT PRIMARY KEY,
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	created_at   INTEGER NOT NULL
+)`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
