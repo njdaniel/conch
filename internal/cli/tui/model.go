@@ -143,13 +143,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			} else if m.mode == modeDecision {
-				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
-					return m, nil
-				}
 				app := m.approvals[m.selApproval]
-				if len(app.Options) == 0 {
-					return m, nil
-				}
 				m.selOption = min(len(app.Options)-1, m.selOption+1)
 				return m, nil
 			}
@@ -184,15 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "set CONCH_AUTHOR to decide"
 					return m, nil
 				}
-				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
-					m.status = "no approval selected"
-					return m, nil
-				}
 				app := m.approvals[m.selApproval]
-				if len(app.Options) == 0 || m.selOption < 0 || m.selOption >= len(app.Options) {
-					m.status = "select a decision option"
-					return m, nil
-				}
 				opt := app.Options[m.selOption]
 				m.input = ""
 				m.status = "casting decision…"
@@ -425,7 +411,7 @@ func (m Model) View() string {
 			if app.Payload != nil {
 				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", app.Payload.Schema)))
 			}
-			detailsLines = append(detailsLines, "", strings.ReplaceAll(app.Body, "\n", " ↵ "), "")
+			detailsLines = append(detailsLines, "", app.Body, "")
 			if m.mode == modeDecision {
 				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
 				for i, opt := range app.Options {
