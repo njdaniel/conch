@@ -38,12 +38,111 @@ Pre-alpha. The project charter is [ADR-000](docs/adr/ADR-000-charter.md); work i
 
 ## Quickstart
 
-Not yet — `conchd` and `conch` are placeholders until the P0 spike lands. This section will contain a single-binary install + run once there is something real to run.
+Every command below has been run against real `bin/conchd`/`bin/conch` builds. Paths and IDs are examples — substitute your own.
+
+### 1. Build
 
 ```sh
 make build   # builds bin/conchd and bin/conch
-make check   # fmt, vet, lint, tests, schema-compat, dependency gate
+make check   # fmt, vet, lint, tests, schema-compat, dependency gate — run before opening any PR
 ```
+
+### 2. Start `conchd`
+
+```sh
+mkdir -p /tmp/conch-data
+bin/conchd serve --data /tmp/conch-data --listen :8080
+```
+
+- `--data` (or `CONCHD_DATA`) is required — directory for the embedded SQLite database.
+- `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`.
+- `--mcp-token token=principal_id` (or `CONCHD_MCP_TOKENS`, comma-separated) maps MCP bearer tokens to agent principal IDs — see step 3, since the ID doesn't exist until you bootstrap it.
+- `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the single-binary invariant (ADR-002) requires no other external process for core function.
+
+### 3. Bootstrap a channel and principals
+
+There's no admin CLI yet — a channel and its principals (human and agent) are created directly via the `/v0` REST API:
+
+```sh
+curl -s -X POST localhost:8080/v0/channels \
+  -H 'Content-Type: application/json' -d '{"name":"ops"}'
+# {"channel":{"id":1,"name":"ops", ...}}
+
+curl -s -X POST localhost:8080/v0/principals \
+  -H 'Content-Type: application/json' -d '{"kind":"agent","name":"deploy-bot"}'
+# {"principal":{"id":1,"kind":"agent", ...}}
+
+curl -s -X POST localhost:8080/v0/principals \
+  -H 'Content-Type: application/json' -d '{"kind":"human","name":"nick"}'
+# {"principal":{"id":2,"kind":"human", ...}}
+```
+
+The agent principal's returned `id` is what `--mcp-token` must reference. Restart `conchd` (same `--data` dir, so nothing is lost) with the mapping filled in:
+
+```sh
+bin/conchd serve --data /tmp/conch-data --listen :8080 --mcp-token mytoken=1
+```
+
+### 4. Human side: `conch`
+
+`conch` with no arguments launches the TUI (needs a real terminal):
+
+```sh
+CONCH_SERVER=http://127.0.0.1:8080 CONCH_AUTHOR=2 CONCH_CHANNELS=ops bin/conch
+```
+
+- `CONCH_SERVER` — conchd URL (default `http://127.0.0.1:8080`).
+- `CONCH_AUTHOR` — principal ID used as the message author.
+- `CONCH_CHANNELS` — comma-separated channels the TUI opens.
+
+For scripting, `conch` also has plain subcommands:
+
+```sh
+bin/conch send --author 2 ops "deploying release 42"
+bin/conch tail ops
+bin/conch approvals list
+bin/conch approve --author 2 --reason "looks good" 1
+bin/conch reject  --author 2 --reason "not yet" 1
+```
+
+`--server`/`CONCH_SERVER` works the same way on every subcommand.
+
+### 5. Agent side: MCP
+
+Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the token from step 3. Five tools are registered:
+
+- `post_message` — post a message to a channel as the authenticated agent.
+- `read_channel` — read one paginated page of messages from a channel.
+- `request_approval` — raise an approval as the authenticated agent.
+- `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
+- `check_decision` — read an approval's current state/resolution immediately, without blocking.
+
+A raw JSON-RPC example (most agents will instead use an MCP client SDK):
+
+```sh
+curl -s -X POST localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Authorization: Bearer mytoken' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18",
+        "clientInfo":{"name":"my-agent","version":"1"},
+        "capabilities":{}}}'
+# note the returned Mcp-Session-Id response header — pass it on every subsequent call
+```
+
+### 6. Verify your install
+
+```sh
+go run ./e2e/dogfood
+```
+
+This drives the full loop live against freshly built binaries — agent posts via MCP, requests approval, ntfy fires, a human resolves via `conch approve` with a reason, `await_decision` returns the structured outcome, the audit log shows the whole chain — then reruns the approval half with ntfy unreachable to prove it still resolves (ADR-002). Exits nonzero on any assertion failure.
+
+### Known limitations
+
+- No REST/TUI authentication beyond MCP bearer tokens today. Don't expose `conchd` past localhost/VPN without your own reverse-proxy auth in front of it.
+- No per-agent capability enforcement yet — any valid MCP token can call any registered tool.
 
 ## License
 
