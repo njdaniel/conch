@@ -1,0 +1,70 @@
+name: Release
+
+# Tag-triggered: only Nick pushes v* tags (releases are Tier-H, ADR-000), so
+# the tag push is the sign-off act. Procedure: .claude/skills/release/.
+# Re-runs the full gate plus dogfood-check (a release does not ship on a
+# failing dogfood-check), builds both binaries, and creates a DRAFT release —
+# publishing stays human.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5
+
+      - name: go test
+        run: go test -race ./...
+
+      # schema-compat is a diff-based PR/main gate; a tag has no base to
+      # diff against, and everything tagged already passed it pre-merge.
+
+      - name: dependency gate
+        run: ./scripts/depgate.sh
+
+      - name: dogfood-check
+        run: go run ./e2e/dogfood
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w" \
+              -o "dist/conchd_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conchd
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w" \
+              -o "dist/conch_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conch
+          done
+          (cd dist && sha256sum ./* > checksums.txt)
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Draft — Nick publishes. dogfood-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

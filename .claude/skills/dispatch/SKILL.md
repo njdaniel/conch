@@ -17,7 +17,10 @@ delegated.
 1. **Pick the worker** from the decision table in the design doc. Hard stops:
    - Approval-path code, kill-criterion verdicts, release calls → do it
      yourself; never dispatch.
-   - Wire shapes / schemas / MCP tool definitions → protocol-designer (opus).
+   - Wire shapes / schemas / MCP tool definitions → protocol-designer (fable).
+   - Auth, capability-enforcement, or otherwise security-sensitive code →
+     server-engineer or principal, never codex full-auto; the review gate
+     additionally includes a security-reviewer pass.
    - Codex only when acceptance criteria are crisp and no design questions
      remain — and only after the user has explicitly authorized full-auto
      this session.
@@ -65,6 +68,26 @@ delegated.
 
 6. **Open the PR referencing the issue.** Never merge — merges are Nick's;
    verify merge state with `gh pr view`, never assume it.
+
+## Externally-originated PRs
+
+PRs produced by automation outside this loop (Jules, codex cloud tasks, any
+bot) are worker output that arrived as a PR instead of a diff — they get the
+same treatment, not a pass (P1 receipts: #59 reopened a real panic, #60
+shipped a live UX bug, #63 carried an MCP-only parity regression; none had
+been gate-reviewed):
+
+- Run the full five-gate review (step 5) against the PR branch before merge.
+  Gate 3's end-to-end verification runs against binaries built from that
+  branch.
+- When all five gates pass, apply the **`gate:reviewed`** label — CI
+  (`process-checks.yml`) holds externally-originated PRs (bot authors, or
+  automation branch patterns — Jules and codex cloud open PRs as Nick's own
+  account) until it's present. Findings
+  get fixed on the PR branch (gate 4 rules apply) or block the merge.
+- Never push to a branch while its automation may still be running — #60 was
+  clobbered three times mid-fix. Fix-ups wait until the task is confirmed
+  done, or go on a fresh branch.
 
 ## Stop conditions
 
