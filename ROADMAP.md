@@ -16,7 +16,7 @@ Typed messages, approval objects, MCP endpoint, minimal TUI + CLI, webhook inges
 
 ## P2 — Hardening
 
-Agent identity manifests + server-side capability enforcement, audit export, FTS5 search, file uploads, auth (OIDC + local), threads, `principal-review` running on cadence.
+Agent identity manifests + server-side capability enforcement, audit export, FTS5 search, file uploads, auth (OIDC + local), threads, `principal-review` running on cadence, `conch-bot` auto-reply agent (#71, added 2026-07-21 by Nick's direct request).
 
 ## P3 — Only if earned
 

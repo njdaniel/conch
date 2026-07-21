@@ -107,6 +107,24 @@ bin/conch reject  --author 2 --reason "not yet" 1
 
 `--server`/`CONCH_SERVER` works the same way on every subcommand.
 
+### Optional: auto-reply bot
+
+`conch-bot` watches one channel and replies to new human messages using the
+local `claude -p` command. Give it an MCP token mapped to its own agent
+principal and that principal's ID:
+
+```sh
+CONCH_BOT_TOKEN=mytoken \
+CONCH_BOT_PRINCIPAL_ID=1 \
+CONCH_BOT_CHANNEL=ops \
+bin/conch-bot
+```
+
+It skips messages already present when it starts and ignores its own replies.
+Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
+`CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
+`CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`.
+
 ### 5. Agent side: MCP
 
 Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the token from step 3. Five tools are registered:
