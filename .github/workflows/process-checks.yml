@@ -21,10 +21,10 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          if printf '%s' "$PR_BODY" | grep -qiE '(close[sd]?|fixe?[sd]?|resolve[sd]?) #[0-9]+'; then
+          if printf '%s' "$PR_BODY" | grep -qiE '(close[sd]?|fixe?[sd]?|resolve[sd]?|refs?|issue) *#[0-9]+'; then
             echo "ok: issue reference found"
           else
-            echo "::error::PR body must reference its issue (e.g. 'Closes #42') — one issue = one PR (CLAUDE.md rule 5)."
+            echo "::error::PR body must reference its issue (e.g. 'Closes #42', 'Issue #42', or 'Refs #42') — one issue = one PR (CLAUDE.md rule 5)."
             exit 1
           fi
 
@@ -40,7 +40,7 @@ jobs:
         run: |
           touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' | while read -r f; do
             case "$f" in
-              internal/server/approvals/*|internal/server/approvals_handlers.go|internal/server/mcp.go|pkg/schema/approval*|pkg/schema/resolution.go|pkg/schema/decision.go|pkg/schema/mcp_approval.go|e2e/dogfood/*)
+              internal/server/approvals/*|internal/server/approvals_handlers*.go|internal/server/mcp*.go|internal/server/store/approvals*.go|pkg/schema/approval*|pkg/schema/resolution*.go|pkg/schema/decision*.go|pkg/schema/mcp_approval*.go|pkg/schema/testdata/*approval*|pkg/schema/testdata/*decision*|pkg/schema/testdata/*resolution*|e2e/dogfood/*)
                 echo "$f" ;;
             esac
           done)
