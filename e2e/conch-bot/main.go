@@ -49,10 +49,7 @@ func run() error {
 	if err := build(h.bot, "./cmd/conch-bot"); err != nil {
 		return err
 	}
-	if err := os.WriteFile(h.claude, []byte("#!/bin/sh\nprintf 'canned bot reply\\n'\n"), 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(h.claude, 0o700); err != nil { // #nosec G302 -- fake Claude must be executable by this test
+	if err := os.WriteFile(h.claude, []byte("#!/bin/sh\nprintf 'canned bot reply\\n'\n"), 0o700); err != nil { //nolint:gosec // fake Claude must be executable by this test
 		return err
 	}
 	if err := os.MkdirAll(h.data, 0o700); err != nil {
