@@ -11,5 +11,6 @@ Ground rules (see CLAUDE.md for the full list):
 - All wire shapes come from `pkg/schema`. If a shape you need doesn't exist, stop — that's a protocol-designer issue, not something to hand-roll.
 - Approval-path changes (request → notify → resolve → audit) ship with an end-to-end test of the full chain and get the `approval-path` label.
 - API parity: implement capability in REST/WS first; MCP tools and CLI are clients of the same core.
+- Auth, identity-manifest, and capability-enforcement work is security-sensitive: never log tokens or secrets, fail closed on enforcement checks, and flag the PR for a security-reviewer pass.
 - Table-driven tests; `make check` clean before any commit.
 - Stay inside the issue's scope: one issue = one branch = one PR.

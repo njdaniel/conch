@@ -16,6 +16,7 @@ Conch is an MCP-native, self-hosted chat platform: `conchd` (server) + `conch` (
 
 - Build/verify: `make check` (fmt, vet, lint, test, schema-compat, depgate). Install local hooks once with `make hooks-install`.
 - GitHub work (issues, PRs, milestones) goes through the `gh` CLI, not a GitHub MCP server.
+- Security-sensitive PRs (authn/authz, tokens, capability enforcement, webhook ingest) get a `security-reviewer` agent pass before merge.
 - New `go.mod` dependencies require Nick's sign-off and an entry in `deps-allowlist.txt` (enforced by `scripts/depgate.sh`).
 - Who decides what: Fable (Principal Engineer) owns issues, reviews, refactors, and roadmap *proposals*; Nick (Tier-H) signs off on ADRs, schema version bumps, new dependencies, releases, roadmap changes, and merges approval-path PRs. Full table in ADR-000.
 - Merge rule: green CI + reviewer approval on everything; approval-path PRs additionally merged by Nick himself.

@@ -21,8 +21,8 @@ This loop is what "Fable owns the project" means operationally (ADR-000 §6). Ou
    - Merged work summary (one line per PR).
    - Invariant status (per rule: OK or drift found + issue filed).
    - Backlog delta (issues written/closed/re-scoped).
-   - **Decisions needed from Nick** — proposed ADRs, dependency requests, release readiness. Explicit list, even if empty.
-6. Post-P1: also post the report into Conch itself (the build org is tenant #2) and raise release approvals as Conch approval objects.
+   - **Decisions needed from Nick** — proposed ADRs, dependency requests, release readiness (assessed against the `release` skill's preconditions). Explicit list, even if empty.
+6. Post the report into Conch itself (the build org is tenant #2) and raise release approvals as Conch approval objects.
 
 ## Cadence
 

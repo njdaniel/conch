@@ -1,0 +1,85 @@
+name: Process checks
+
+# Enforces the dev-process rules that CI proper can't see (CLAUDE.md rules 3
+# and 5, dispatch skill): every PR references an issue, approval-path PRs
+# carry their label, and externally-produced PRs don't merge before the
+# five-gate dispatch review (docs/design/agent-dispatch.md).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  issue-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body references an issue
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$PR_BODY" | grep -qiE '(close[sd]?|fixe?[sd]?|resolve[sd]?|refs?|issue) *#[0-9]+'; then
+            echo "ok: issue reference found"
+          else
+            echo "::error::PR body must reference its issue (e.g. 'Closes #42', 'Issue #42', or 'Refs #42') — one issue = one PR (CLAUDE.md rule 5)."
+            exit 1
+          fi
+
+  approval-path-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Approval-path changes carry the approval-path label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'approval-path') }}
+        run: |
+          touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' | while read -r f; do
+            case "$f" in
+              internal/server/approvals/*|internal/server/approvals_handlers*.go|internal/server/mcp*.go|internal/server/store/approvals*.go|pkg/schema/approval*|pkg/schema/resolution*.go|pkg/schema/decision*.go|pkg/schema/mcp_approval*.go|pkg/schema/testdata/*approval*|pkg/schema/testdata/*decision*|pkg/schema/testdata/*resolution*|e2e/dogfood/*)
+                echo "$f" ;;
+            esac
+          done)
+          if [ -z "$touched" ]; then
+            echo "ok: no approval-path files touched"
+          elif [ "$HAS_LABEL" = "true" ]; then
+            echo "ok: approval-path files touched and label present:"
+            echo "$touched"
+          else
+            echo "::error::This PR touches the approval path but lacks the 'approval-path' label (CLAUDE.md rule 3: E2E chain test required, Nick merges). Touched:"
+            echo "$touched"
+            exit 1
+          fi
+
+  gate-review-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: External-automation PRs need the gate:reviewed label
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'gate:reviewed') }}
+        run: |
+          # Automation that opens PRs without going through the dispatch
+          # loop's five-gate review (dispatch skill, "Externally-originated
+          # PRs"). Jules and codex cloud open PRs as Nick's own account
+          # (verified on #58-#61), so the head branch is the signal:
+          # codex cloud uses codex/*, Jules appends a long numeric suffix.
+          # Dispatch-loop branches are issue-N/<worker>. Extend as new
+          # automation appears.
+          external=false
+          case "$AUTHOR" in *\[bot\]) external=true ;; esac
+          case "$BRANCH" in codex/*) external=true ;; esac
+          if printf '%s' "$BRANCH" | grep -qE -- '-[0-9]{12,}$'; then external=true; fi
+          if [ "$external" = "false" ]; then
+            echo "ok: dispatch-loop or human PR ($AUTHOR, $BRANCH); gate handled by the dispatch loop"
+          elif [ "$HAS_LABEL" = "true" ]; then
+            echo "ok: externally-originated PR ($AUTHOR, $BRANCH) has passed the five-gate review"
+          else
+            echo "::error::PR from external automation ($AUTHOR, branch $BRANCH). It needs the full five-gate dispatch review; the reviewer applies 'gate:reviewed' when it passes (docs/design/agent-dispatch.md)."
+            exit 1
+          fi
