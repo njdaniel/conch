@@ -29,6 +29,7 @@ type botLoop struct {
 	claude   ClaudeRunner
 	lastSeen int64
 	sleep    func(context.Context, time.Duration) error
+	recent   []schema.MessageV1 // rolling window of the last cfg.ContextMessages messages seen (any author), oldest first
 }
 
 func (b *botLoop) seed(ctx context.Context) error {
@@ -37,6 +38,7 @@ func (b *botLoop) seed(ctx context.Context) error {
 		return err
 	}
 	b.advance(messages)
+	b.remember(messages)
 	return nil
 }
 
@@ -46,7 +48,12 @@ func (b *botLoop) pollOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Snapshot the rolling context buffer before folding this iteration's
+	// messages into it, so "history" never includes the very messages we're
+	// about to reply to.
+	history := b.recentSnapshot()
 	b.advance(messages)
+	b.remember(messages)
 	if len(messages) == 0 {
 		return nil
 	}
@@ -61,13 +68,6 @@ func (b *botLoop) pollOnce(ctx context.Context) error {
 		return nil
 	}
 
-	var history []schema.MessageV1
-	if len(human) < b.cfg.ContextMessages {
-		history, err = b.historyBefore(ctx, previous)
-		if err != nil {
-			return err
-		}
-	}
 	prompt := buildPrompt(history, human, b.cfg.ContextMessages)
 	reply, err := b.claude.Reply(ctx, prompt)
 	if err != nil {
@@ -104,29 +104,38 @@ func (b *botLoop) drain(ctx context.Context, after int64) ([]schema.MessageV1, e
 	return messages, nil
 }
 
-func (b *botLoop) historyBefore(ctx context.Context, before int64) ([]schema.MessageV1, error) {
-	if b.cfg.ContextMessages == 0 || before == 0 {
-		return nil, nil
-	}
-	all, err := b.drain(ctx, 0)
-	if err != nil {
-		return nil, fmt.Errorf("read prompt context: %w", err)
-	}
-	history := all[:0]
-	for _, message := range all {
-		if message.ID <= before {
-			history = append(history, message)
-		}
-	}
-	return history, nil
-}
-
 func (b *botLoop) advance(messages []schema.MessageV1) {
 	for _, message := range messages {
 		if message.ID > b.lastSeen {
 			b.lastSeen = message.ID
 		}
 	}
+}
+
+// remember folds newly drained messages into the rolling context buffer,
+// capped at cfg.ContextMessages. This replaces re-draining the channel from
+// message id 0 on every poll: the bot already sees every message exactly
+// once as it drains new ones, so it can keep its own bounded window instead
+// of asking conchd to replay the whole channel each time it needs context.
+func (b *botLoop) remember(messages []schema.MessageV1) {
+	if b.cfg.ContextMessages == 0 || len(messages) == 0 {
+		return
+	}
+	b.recent = append(b.recent, messages...)
+	if len(b.recent) > b.cfg.ContextMessages {
+		trimmed := make([]schema.MessageV1, b.cfg.ContextMessages)
+		copy(trimmed, b.recent[len(b.recent)-b.cfg.ContextMessages:])
+		b.recent = trimmed
+	}
+}
+
+func (b *botLoop) recentSnapshot() []schema.MessageV1 {
+	if len(b.recent) == 0 {
+		return nil
+	}
+	out := make([]schema.MessageV1, len(b.recent))
+	copy(out, b.recent)
+	return out
 }
 
 func buildPrompt(history, messages []schema.MessageV1, contextLimit int) string {

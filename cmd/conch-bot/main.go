@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -77,14 +78,17 @@ func (c commandClaude) Reply(ctx context.Context, prompt string) (string, error)
 	replyCtx, cancel := context.WithTimeout(ctx, c.cfg.ReplyTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(replyCtx, c.cfg.ClaudeBin, "-p", prompt, "--model", c.cfg.Model, "--dangerously-skip-permissions", "--output-format", "text") // #nosec G204 -- operator explicitly configures the local Claude executable
-	output, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
 		if errors.Is(replyCtx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("claude timed out after %s", c.cfg.ReplyTimeout)
 		}
-		return "", fmt.Errorf("claude: %w: %s", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("claude: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return string(output), nil
+	return stdout.String(), nil
 }
 
 type envLookup func(string) (string, bool)

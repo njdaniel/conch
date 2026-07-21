@@ -123,6 +123,48 @@ func TestPollOnceWhitespaceReplyDoesNotPost(t *testing.T) {
 	}
 }
 
+func TestPollOnceContextComesFromRollingBufferNotFullReplay(t *testing.T) {
+	mcp := &fakeMCP{pages: map[int64]schema.ListMessagesResponseV1{
+		0: {Messages: []schema.MessageV1{message(1, 5, "seed one"), message(2, 5, "seed two")}},
+		2: {Messages: []schema.MessageV1{message(3, 4, "first human line")}},
+		3: {Messages: []schema.MessageV1{message(4, 4, "second human line")}},
+	}}
+	claude := &fakeClaude{reply: "ack"}
+	loop := &botLoop{cfg: testConfig(), mcp: mcp, claude: claude}
+
+	if err := loop.seed(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The channel's true start (cursor 0) must be read exactly once, during
+	// seed — never again on later polls, even though every poll here needs
+	// context (each new batch is a single message, well under
+	// ContextMessages=20). A regression back to re-draining from 0 for
+	// context would show up here as extra 0 reads.
+	wantReads := []int64{0, 2, 3}
+	if !reflect.DeepEqual(mcp.reads, wantReads) {
+		t.Fatalf("reads = %v, want %v (context must come from the in-memory rolling buffer, not a full re-drain)", mcp.reads, wantReads)
+	}
+	if len(claude.prompts) != 2 {
+		t.Fatalf("Claude calls = %d, want 2", len(claude.prompts))
+	}
+	// The second poll's prompt must carry the seeded backlog plus the first
+	// poll's message as rolling context, proving the buffer actually
+	// accumulates rather than just replacing itself.
+	second := claude.prompts[1]
+	for _, want := range []string{"5: seed one", "5: seed two", "4: first human line", "4: second human line"} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second prompt missing %q:\n%s", want, second)
+		}
+	}
+}
+
 func TestBuildPromptTruncatesContextAndPreservesOrdering(t *testing.T) {
 	prompt := buildPrompt(
 		[]schema.MessageV1{message(1, 1, "first"), message(2, 2, "second"), message(3, 3, "third")},
