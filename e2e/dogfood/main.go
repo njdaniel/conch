@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -277,104 +278,6 @@ func postJSON(url string, body, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// -------------------------------------------------------------------- MCP
-
-type mcpClient struct {
-	baseURL   string
-	token     string
-	sessionID string
-	nextID    int
-	mu        sync.Mutex
-}
-
-func newMCPClient(baseURL, token string) *mcpClient {
-	return &mcpClient{baseURL: baseURL, token: token}
-}
-
-func (c *mcpClient) initialize() error {
-	_, err := c.call("initialize", map[string]any{
-		"protocolVersion": "2025-06-18",
-		"clientInfo":      map[string]any{"name": "dogfood-check", "version": "1"},
-		"capabilities":    map[string]any{},
-	})
-	return err
-}
-
-func (c *mcpClient) toolsCall(name string, arguments map[string]any) (json.RawMessage, error) {
-	return c.call("tools/call", map[string]any{"name": name, "arguments": arguments})
-}
-
-// call posts one JSON-RPC request and returns its raw "result" field. Every
-// call after initialize carries the session id conchd assigned.
-func (c *mcpClient) call(method string, params map[string]any) (json.RawMessage, error) {
-	c.mu.Lock()
-	c.nextID++
-	id := c.nextID
-	c.mu.Unlock()
-
-	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/mcp", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if c.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", c.sessionID)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		c.sessionID = sid
-	}
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, respBody)
-	}
-	var envelope struct {
-		Result struct {
-			IsError bool `json:"isError"`
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-			StructuredContent json.RawMessage `json:"structuredContent"`
-		} `json:"result"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, fmt.Errorf("decode mcp %s response: %w (body=%s)", method, err, respBody)
-	}
-	if envelope.Error != nil {
-		return nil, fmt.Errorf("mcp %s rpc error: %s", method, envelope.Error.Message)
-	}
-	if envelope.Result.IsError {
-		var text string
-		if len(envelope.Result.Content) > 0 {
-			text = envelope.Result.Content[0].Text
-		}
-		return nil, fmt.Errorf("mcp %s tool error: %s", method, text)
-	}
-	return envelope.Result.StructuredContent, nil
-}
-
-func decodeInto[T any](raw json.RawMessage) (T, error) {
-	var out T
-	err := json.Unmarshal(raw, &out)
-	return out, err
-}
-
 // ------------------------------------------------------------------ paths
 
 func happyPath(bin binaries) error {
@@ -400,14 +303,14 @@ func happyPath(bin binaries) error {
 		return fmt.Errorf("create human principal: %w", err)
 	}
 
-	client := newMCPClient(proc.baseURL, mcpToken)
-	if err := client.initialize(); err != nil {
+	client := mcpclient.New(proc.baseURL, mcpToken)
+	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
 		return fmt.Errorf("mcp initialize: %w", err)
 	}
 
 	// Step 2: post a typed message via MCP; verify via read_channel and REST
 	// (parity, ADR-001).
-	postRaw, err := client.toolsCall("post_message", map[string]any{
+	postRaw, err := client.CallTool(context.Background(), "post_message", map[string]any{
 		"channel": "ops",
 		"body":    "deploy candidate ready",
 		"payload": map[string]any{"schema": "leviathan.deploy.v1", "data": map[string]any{"env": "prod"}},
@@ -415,7 +318,7 @@ func happyPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("post_message: %w", err)
 	}
-	posted, err := decodeInto[schema.PostMessageResponseV1](postRaw)
+	posted, err := mcpclient.Decode[schema.PostMessageResponseV1](postRaw)
 	if err != nil {
 		return err
 	}
@@ -423,11 +326,11 @@ func happyPath(bin binaries) error {
 		return fmt.Errorf("posted message author = %d, want authenticated agent %d", posted.Message.AuthorID, agentID)
 	}
 
-	readRaw, err := client.toolsCall("read_channel", map[string]any{"channel": "ops"})
+	readRaw, err := client.CallTool(context.Background(), "read_channel", map[string]any{"channel": "ops"})
 	if err != nil {
 		return fmt.Errorf("read_channel: %w", err)
 	}
-	read, err := decodeInto[schema.ListMessagesResponseV1](readRaw)
+	read, err := mcpclient.Decode[schema.ListMessagesResponseV1](readRaw)
 	if err != nil {
 		return err
 	}
@@ -445,7 +348,7 @@ func happyPath(bin binaries) error {
 	// Step 3: request_approval, then await_decision (blocking) and
 	// check_decision (polling) against the same approval.
 	deadline := time.Now().Add(time.Hour).Format(time.RFC3339)
-	reqRaw, err := client.toolsCall("request_approval", map[string]any{
+	reqRaw, err := client.CallTool(context.Background(), "request_approval", map[string]any{
 		"channel_id": channelID, "title": "Deploy prod", "body": "Ship release 42",
 		"options": []map[string]any{
 			{"id": "approve", "kind": "approve", "label": "Approve"},
@@ -456,7 +359,7 @@ func happyPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("request_approval: %w", err)
 	}
-	created, err := decodeInto[schema.RequestApprovalOutput](reqRaw)
+	created, err := mcpclient.Decode[schema.RequestApprovalOutput](reqRaw)
 	if err != nil {
 		return err
 	}
@@ -464,11 +367,11 @@ func happyPath(bin binaries) error {
 		return fmt.Errorf("request_approval = %+v, want a pending approval id", created)
 	}
 
-	checkRaw, err := client.toolsCall("check_decision", map[string]any{"approval_id": created.ID})
+	checkRaw, err := client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": created.ID})
 	if err != nil {
 		return fmt.Errorf("check_decision (pending): %w", err)
 	}
-	pendingCheck, err := decodeInto[schema.CheckDecisionOutput](checkRaw)
+	pendingCheck, err := mcpclient.Decode[schema.CheckDecisionOutput](checkRaw)
 	if err != nil {
 		return err
 	}
@@ -482,12 +385,12 @@ func happyPath(bin binaries) error {
 	}
 	awaitCh := make(chan awaitResult, 1)
 	go func() {
-		raw, err := client.toolsCall("await_decision", map[string]any{"approval_id": created.ID, "timeout_ms": 5000})
+		raw, err := client.CallTool(context.Background(), "await_decision", map[string]any{"approval_id": created.ID, "timeout_ms": 5000})
 		if err != nil {
 			awaitCh <- awaitResult{err: err}
 			return
 		}
-		out, err := decodeInto[schema.AwaitDecisionOutput](raw)
+		out, err := mcpclient.Decode[schema.AwaitDecisionOutput](raw)
 		awaitCh <- awaitResult{out: out, err: err}
 	}()
 	// Give await_decision time to actually start blocking before resolving,
@@ -520,11 +423,11 @@ func happyPath(bin binaries) error {
 		awaited.out.Resolution.Decisions[0].PrincipalID != humanID || awaited.out.Resolution.Decisions[0].Reason != "dogfood" {
 		return fmt.Errorf("resolution = %+v, want approve by %d with reason %q", awaited.out.Resolution, humanID, "dogfood")
 	}
-	checkRaw, err = client.toolsCall("check_decision", map[string]any{"approval_id": created.ID})
+	checkRaw, err = client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": created.ID})
 	if err != nil {
 		return fmt.Errorf("check_decision (resolved): %w", err)
 	}
-	resolvedCheck, err := decodeInto[schema.CheckDecisionOutput](checkRaw)
+	resolvedCheck, err := mcpclient.Decode[schema.CheckDecisionOutput](checkRaw)
 	if err != nil {
 		return err
 	}
@@ -579,13 +482,13 @@ func degradedPath(bin binaries) error {
 		return fmt.Errorf("create human principal: %w", err)
 	}
 
-	client := newMCPClient(proc.baseURL, mcpToken)
-	if err := client.initialize(); err != nil {
+	client := mcpclient.New(proc.baseURL, mcpToken)
+	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
 		return fmt.Errorf("mcp initialize: %w", err)
 	}
 
 	deadline := time.Now().Add(time.Hour).Format(time.RFC3339)
-	reqRaw, err := client.toolsCall("request_approval", map[string]any{
+	reqRaw, err := client.CallTool(context.Background(), "request_approval", map[string]any{
 		"channel_id": channelID, "title": "Deploy staging", "body": "ntfy is down, must still work",
 		"options": []map[string]any{
 			{"id": "approve", "kind": "approve", "label": "Approve"},
@@ -596,7 +499,7 @@ func degradedPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("request_approval with ntfy unreachable: %w", err)
 	}
-	created, err := decodeInto[schema.RequestApprovalOutput](reqRaw)
+	created, err := mcpclient.Decode[schema.RequestApprovalOutput](reqRaw)
 	if err != nil {
 		return err
 	}
@@ -607,11 +510,11 @@ func degradedPath(bin binaries) error {
 		return fmt.Errorf("conch approve with ntfy unreachable: %w", err)
 	}
 
-	checkRaw, err := client.toolsCall("check_decision", map[string]any{"approval_id": created.ID})
+	checkRaw, err := client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": created.ID})
 	if err != nil {
 		return fmt.Errorf("check_decision: %w", err)
 	}
-	checked, err := decodeInto[schema.CheckDecisionOutput](checkRaw)
+	checked, err := mcpclient.Decode[schema.CheckDecisionOutput](checkRaw)
 	if err != nil {
 		return err
 	}
