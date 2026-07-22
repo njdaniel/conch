@@ -4,7 +4,7 @@ Conch is an MCP-native, self-hosted chat platform: `conchd` (server) + `conch` (
 
 ## Golden rules
 
-1. **Single-binary invariant.** Core function (messaging, approvals, audit) requires no external processes. Any change introducing a *required* external process is rejected. Integrations (ntfy, Litestream) must degrade gracefully. (ADR-002)
+1. **Deployment invariant.** Single-server, dependency-free core: `conchd` requires no external process for messaging, approvals, or audit. Any change introducing a *required* external process for core function is rejected. Clients (`conch` TUI/CLI) and optional runtime adapters run as separate processes; ntfy, Litestream, and later LiveKit are optional integrations that must degrade gracefully. (ADR-002)
 2. **Schema-first.** All wire shapes — messages, payloads, approval objects, resolutions — come from `pkg/schema`. Never hand-roll JSON shapes elsewhere. Schema breaking changes need a version bump and Nick's sign-off; use the `schema-change` skill.
 3. **Approval-path changes ship with an end-to-end test** exercising the full request → notify → resolve → audit chain. No exceptions. PRs touching the approval path are labeled `approval-path` and merged by Nick personally.
 4. **API parity.** Anything the CLI/TUI can do exists in the REST/WS API first. `conch` is a client of the public API; agents get MCP; both front the same core. (ADR-001)
