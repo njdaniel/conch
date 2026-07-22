@@ -24,10 +24,14 @@ It is *not* an open-source Slack clone. The wedge is agent-native chat ops: type
 ### Explicit non-goals
 
 - No E2EE (server-trust model; E2EE kills search, bots, and agent participation).
-- No federation; no custom protocol. If interop ever matters, a Matrix bridge, later.
-- No voice/video before P3, and then only via LiveKit integration, never bespoke WebRTC.
+- No federation; no custom protocol. If interop ever matters, a Matrix bridge, later (P10+).
+- No voice/video before P8, and then only via LiveKit integration, never bespoke WebRTC.
+  Reversing this non-goal requires its own ADR at P8 (see [ROADMAP.md](../../ROADMAP.md)).
 - No multi-tenancy. One binary = one org.
-- Web UI is P3 at earliest, possibly never. CLI/TUI is the human interface.
+- No full multi-human Slack-style GUI before P7, and reversing this non-goal requires its
+  own ADR at that point (see ROADMAP.md). A minimal read-only dashboard GUI over the
+  existing API is a narrower, decoupled exception and may be built as early as P3. CLI/TUI
+  remains the primary human interface through P6.
 
 ## Founding decisions (locked)
 
@@ -37,7 +41,7 @@ These are settled. Reopening any requires a new ADR approved by Nick (use the "A
 |---|----------|
 | D1 | Language: Go, single module, two binaries: `conchd` (server) and `conch` (CLI/TUI). |
 | D2 | Storage: SQLite embedded via `modernc.org/sqlite` (pure Go, no cgo), WAL mode, FTS5 for search. Litestream as *optional* backup sidecar. Postgres driver is a possible future, not MVP. |
-| D3 | **Single-binary invariant:** core function requires no external processes. Integrations (ntfy, Litestream) must degrade gracefully — if they're down, messaging and approvals still work. |
+| D3 | **Deployment invariant** (formerly "single-binary invariant"): single-server, dependency-free core — `conchd` requires no external process for messaging, approvals, or audit. Clients (`conch` TUI/CLI) and optional runtime adapters run as separate processes; that has always been true and is not a reversal. Integrations (ntfy, Litestream, later LiveKit) must degrade gracefully — if they're down, messaging and approvals still work. |
 | D4 | Agent interface: native **MCP server endpoint** exposed by `conchd`. Tools include (at minimum): `post_message`, `read_channel`, `request_approval`, `await_decision`, `check_decision`. |
 | D5 | Human interface: Go TUI (Bubble Tea + Lipgloss) **plus** a plain scriptable CLI mode (`conch send`, `conch approvals list`, `conch approve <id> --reason "..."`). Usable over SSH. |
 | D6 | API parity rule: anything the CLI/TUI can do exists in the REST/WS API first. CLI is a client of the public API. Agents get MCP; both front the same core. |
@@ -46,7 +50,7 @@ These are settled. Reopening any requires a new ADR approved by Nick (use the "A
 | D9 | Approval objects are a first-class entity, not a message subtype: requester, typed options, deadline, quorum, escalation target, resolution event with required reason. `await_decision` supports **both** blocking-with-timeout and async polling via `check_decision` (shared resolution store). See [docs/design/approval-object.md](../design/approval-object.md). |
 | D10 | Agent identity: distinct principal type with a manifest — name, declared capabilities (which MCP tools it may call), per-channel permissions, rate limits, tier tag (C/A/H). **Capability enforcement is server-side** (protocol error, not polite refusal). |
 | D11 | No separate "team" abstraction. A pipeline = a channel + identities + an approval object with quorum/escalation. Revisit only if channels demonstrably can't express a real need. |
-| D12 | Scope at MVP: channels + threads. No DMs before P3. Single-tenant. |
+| D12 | Scope at MVP: channels + threads. No DMs before P6 (agent DMs) / P7 (human DMs). Single-tenant. |
 | D13 | License: **AGPL-3.0**. |
 | D14 | Work management: **GitHub issues** are the unit of work. One issue = one branch = one PR = one implementation session. No drive-by changes outside an issue's scope. |
 | D15 | Issue creation/management via `gh` CLI, not the GitHub MCP server. |

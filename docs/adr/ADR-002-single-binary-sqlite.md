@@ -1,4 +1,4 @@
-# ADR-002: Single-binary invariant and embedded SQLite
+# ADR-002: Deployment invariant and embedded SQLite
 
 - **Status:** Accepted
 - **Date:** 2026-07-12
@@ -10,16 +10,17 @@ Conch targets self-hosters and small orgs running agent operations. Its credibil
 
 ## Decision
 
-### Single-binary invariant (D3)
+### Deployment invariant (D3), formerly "single-binary invariant"
 
-**Core function — messaging, approvals, audit — requires no external processes.** `conchd` alone, pointed at a data directory, is a complete working system.
+**Single-server, dependency-free core: messaging, approvals, audit require no external process.** `conchd` alone, pointed at a data directory, is a complete working system. Clients (`conch` TUI/CLI) and optional runtime adapters run as separate processes — that was always true of a client/server split and is not a reversal of the invariant; the rename just makes that explicit instead of implying "conchd is the only process that may ever run."
 
 Integrations are optional and must **degrade gracefully**:
 
 - **ntfy** (approval push notifications, D7): if unreachable, approvals still work — creation, listing, resolution, audit are unaffected; the notification failure itself is recorded in the audit log.
 - **Litestream** (streaming backup): an optional sidecar the operator may run; conchd neither knows nor cares.
+- **LiveKit** (voice/PTT, screen sharing — P8/P9, each requiring its own future ADR): an optional second server process; text/approval core runs without it.
 
-Review rule: any change introducing a *required* external process is rejected outright (CLAUDE.md rule 1). "Required" means core function breaks without it.
+Review rule: any change introducing a *required* external process for core messaging, approvals, or audit is rejected outright (CLAUDE.md rule 1). "Required" means core function breaks without it.
 
 ### Embedded SQLite via modernc.org/sqlite (D2)
 
