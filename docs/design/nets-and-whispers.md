@@ -80,7 +80,7 @@ The filter belongs in **one store-level predicate** ("visible to principal P"), 
 ## 5. Audit and oversight
 
 - **Discretion, not secrecy.** There is no E2EE (standing non-goal). Every scoped message is in the audit log with its audience and its resolved recipient list. Clients must say so wherever a whisper is composed.
-- **No agent-only audiences.** An audience must contain at least one human principal; a net or whisper made up only of agents is rejected. Agents cannot hold a conversation no human receives.
+- **Agent-only audiences are allowed.** A net or whisper may consist entirely of agents, so layered comms can be exercised with AI participants alone. Oversight is the audit log, not a human in every audience — which makes a way to *read* the audit log (export, #21) a practical prerequisite.
 - **Human-to-human scoping is real.** With several humans on an instance ([ADR-003](../adr/ADR-003-multi-human-access.md)), a human outside the audience does not receive the utterance. The audit log remains the complete record.
 - **What cannot be enforced:** the server controls who *receives* a message, not what an agent repeats afterward. A whisper to an agent is discretion only.
 

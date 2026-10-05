@@ -16,7 +16,7 @@ Every message in a channel goes to everyone in it. Layered comms — squads with
 - **Visibility is fixed at post time.** Joining later reveals no history; leaving hides nothing already received.
 - **Server-side, fail closed.** A principal outside the audience never receives the utterance on any path. One store-level visibility predicate serves every read path.
 - **Discretion, not secrecy.** No E2EE. Every scoped utterance is in the audit log with its audience and resolved recipients.
-- **No agent-only audiences.** An audience must contain at least one human principal. Agents cannot hold a conversation no human receives.
+- **Agent-only audiences are allowed.** A net or whisper may consist entirely of agents, so layered comms can be exercised with AI participants alone. Oversight is the audit log, which records every scoped utterance; no human needs to be in the audience.
 - **Capability-gated** through the D10 manifest: transmitting on a net and whispering are per-channel grants.
 - **Approvals stay channel-wide.** This decision does not touch the approval path.
 - **Voice uses the same audience model** ([ADR-004](ADR-004-voice-via-livekit.md)).
