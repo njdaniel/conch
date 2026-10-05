@@ -1,6 +1,6 @@
 # ADR-006: A Rust voice client, `conch-voice`
 
-- **Status:** Proposed — accepted when Nick merges the PR for #85
+- **Status:** Accepted (Nick merged #86, 2026-10-05)
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #84 · **Amends:** [ADR-000](ADR-000-charter.md) D1
@@ -21,10 +21,13 @@ Voice ([ADR-004](ADR-004-voice-via-livekit.md)) needs a native client: low-laten
 - **Dependencies:** a Rust allowlist enforced by `cargo-deny`, mirroring `deps-allowlist.txt` and `scripts/depgate.sh`. New crates need Nick's sign-off. `dmn-audio` is a git dependency pinned to a commit.
 - **Platform:** Linux with PipeWire. Other platforms need a different audio layer and a later decision.
 - `make check` gains a Rust leg (fmt, clippy, test, deny) once `voice/` exists.
+- **Build toolchain:** the LiveKit SDK's prebuilt libwebrtc requires **clang 21 or newer**. Ubuntu/Pop!_OS 24.04 ships 18 and packages at most 20, so CI installs a pinned LLVM release (cached) and the repo documents the same step for contributors.
 
 ## Consequences
 
-- Two toolchains in one repo and longer CI. The LiveKit SDK brings a prebuilt libwebrtc; its build weight is measured in the V0 spike.
+- Two toolchains in one repo and longer CI. Measured in the V0 spike (#87): a clean release build of a minimal client took about 41 s on 16 cores across 316 crates (libwebrtc is downloaded prebuilt), producing a 36.7 MB binary that links only libc, libm, and libgcc.
+- The clang requirement is a standing cost for anyone building `voice/`; it does not affect building `conchd` or `conch`.
+- The spike bypassed `dmn-audio` (it piped `pw-record`/`pw-play`), so integrating it remains unproven V4 work.
 - The deployment invariant (D3) is unaffected: text, approvals, and audit need neither `conch-voice` nor LiveKit.
 - Conch is coupled to `daemon`'s `dmn-audio`, which must first gain a configurable sample rate and an output stream. If both projects keep changing it, extract it to its own repo.
 - CLAUDE.md rule 6 ("Idiomatic Go") and the worker agent definitions need Rust counterparts when the crate lands.

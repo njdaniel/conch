@@ -1,6 +1,6 @@
 # Design: nets and whispers — audience-scoped speaking
 
-- **Status:** Draft. Governing decision: [ADR-005](../adr/ADR-005-nets-and-whispers.md) — **Proposed**; nothing here may be implemented until it is accepted.
+- **Status:** Draft. Governing decision: [ADR-005](../adr/ADR-005-nets-and-whispers.md) (Accepted).
 - **Touches:** D11 (no team abstraction), D12 (no DMs before P6/P7), D8 (typed messages), D10 (capabilities) in [ADR-000](../adr/ADR-000-charter.md); the nets-and-voice track in [ROADMAP.md](../../ROADMAP.md).
 - **Owner:** protocol-designer (schemas), server-engineer (visibility enforcement)
 - **Issue:** #82
@@ -105,7 +105,7 @@ Denials are protocol errors and are audited, the same as any other capability de
 
 Governed by [ADR-004](../adr/ADR-004-voice-via-livekit.md). The client is `conch-voice` ([ADR-006](../adr/ADR-006-rust-voice-client.md)).
 
-- A net or whisper is audio only its audience may receive. Whether that is one LiveKit room per channel with server-controlled subscriptions, or one room per net, is settled by the V0 spike (ADR-004) — **not verified for this note**.
+- A net is one LiveKit room; only its members hold tokens for it (ADR-004, spike findings). How a whisper maps onto rooms is still open.
 - One push-to-talk key per transmit target (squad, command, whisper).
 - Simultaneous monitoring needs priority ducking (command over squad) and per-net volume. Per-net stereo placement — squad in one ear, command in the other — is the usual radio answer and is cheap to add.
 - Transcripts posted as typed messages carry the same audience as the audio they transcribe.
