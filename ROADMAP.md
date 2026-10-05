@@ -9,6 +9,10 @@ log — a "Slack 2.0" whose differentiator is *agents as persistent, governed wo
 members*, with Discord-style real-time features (PTT, screen sharing) added at the end
 via LiveKit, never bespoke WebRTC.
 
+> **Amended 2026-10-05:** a parallel **nets-and-voice track** (V0–V6) now runs alongside
+> the numbered phases — see [its section](#parallel-track--nets-and-voice-v0v6). It pulls
+> P2 auth and multi-human access forward and starts voice before P8.
+
 **Two invariants hold the whole way:**
 
 - **Usable at every phase.** Each phase ends in a deployment you actually run, not
@@ -54,8 +58,9 @@ search, file uploads, auth (OIDC + local), threads, `principal-review` on cadenc
 first runtime adapter (see P3).
 
 > **Why P2 gates everything below:** capability manifests and real auth are
-> prerequisites for agent sessions (P3), floor control (P4), and multi-human access (P7).
-> Don't skip ahead of them.
+> prerequisites for agent sessions (P3), floor control (P4), and multi-human access. The
+> nets-and-voice track takes P2's auth and capability issues as its first phase (V1)
+> rather than skipping them.
 
 *Deployment: dependency-free core, localhost, Nick + one or more agents in the TUI.*
 
@@ -114,6 +119,39 @@ Ships:
 > place* — as early as alongside P3 — and is deliberately **decoupled** from the
 > Slack-style multi-human GUI in P7. The TUI stays first-class for ops and approvals.
 
+### Parallel track — nets and voice (V0–V6)
+
+Layered comms: several **nets** inside one channel (two squads of four plus a command net
+the leads bridge), heard at once and transmitted on one at a time, plus **whispers** to
+specific people — in text and in voice. `conchd` decides who may hear what and logs it.
+Governed by ADR-003 (multi-human access), ADR-004 (voice via LiveKit), ADR-005 (nets and
+whispers), ADR-006 (Rust voice client).
+
+| Phase | Ships | Usable result |
+| ----- | ----- | ------------- |
+| V0 | ADRs signed; throwaway LiveKit spike (audience mapping, Rust SDK fit, echo cancellation, Wayland push-to-talk) | Two machines talking with hold-to-talk; spike report |
+| V1 | Human accounts and sessions, agent credential binding, capability enforcement, channel membership (P2: #24, #77–#79, #57) | Separate logins; non-members cannot read or post |
+| V2 | Text nets and whispers: message envelope v2, visibility predicate on every read path, CLI/TUI/MCP | The 2×4 squad layout in text |
+| V3 | Voice control plane in `conchd`: optional LiveKit config, session tokens, voice presence, audit | Headless client joins; core unaffected with LiveKit down |
+| V4 | `conch-voice` MVP: PipeWire capture and playback, one push-to-talk key, mixing | Three people on Linux talking in a channel |
+| V5 | Layered voice: a key per net, simultaneous listening with ducking and stereo placement, whisper | The 2×4 scenario in voice |
+| V6 | Reconnect, noise suppression, setup doctor, CI and packaging | Something you leave running |
+
+```text
+V0 ──► V1 ──► V2 ───────────────┐
+        └───► V3 ──► V4 ──► V5 ─┴─► V6      (V5 needs V2)
+```
+
+Later, unscheduled: agents in voice (live transcription posted as typed messages with the
+audio's audience; TTS behind `publish:audio`), Windows/macOS clients.
+
+> **What this displaces.** V1 *is* the bulk of P2, so P2's remaining items (search,
+> uploads, threads, audit export) and P3 (agent presence) wait behind it or share
+> attention with V3–V5. That is a deliberate trade, not free.
+
+*Deployment: `conchd` alone through V2; `conchd` + optional LiveKit from V3; Linux/PipeWire
+clients; a few humans plus agents.*
+
 ### P4 — Assemblies (floor-controlled multi-agent rooms)
 Multiple agent principals in one channel reading the **shared** log, so each sees the
 others' contributions. Brainstorm with several models at once instead of tabbing between
@@ -140,6 +178,8 @@ Ships:
   capability gates agent-to-agent chatter.
 - **Typed proposals.** Brainstorm output uses a typed schema (idea / rationale / risk),
   rankable in P5.
+- **Per-net floors.** Where a channel has nets (track phase V2), each net carries its own
+  floor token, so teams take bounded turns in parallel.
 - **Facilitator.** First a deterministic round-robin loop (testable, cost-bounded) — but
   *not the long-term model*. The eventual facilitator decides which agents have relevant
   capabilities, whether another response is needed, who critiques whom, and when the
@@ -171,34 +211,32 @@ media — just make the single-user-plus-agents experience excellent.
 happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 ### P7 — Small-team multi-human + Slack-style GUI ⚠️ *charter amendment*
-Open the instance to a handful of humans (Nick + collaborators). Presence, human DMs,
-per-principal permissions, auth hardening for real multi-user — plus the full graphical
+Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 adds what
+is left: presence, human DMs, per-principal permissions polish — plus the full graphical
 client (web SPA over the existing API, TUI still first-class beside it). This is the GUI
 that's genuinely justified by having humans to use it, as distinct from the P3 dashboard.
 
-> Reverses the "web UI possibly never" and "single human" leanings. Requires an ADR.
+> Reverses the "web UI possibly never" leaning. The GUI requires its own ADR; ADR-003
+> does not cover it.
 > Single-tenant still holds — one binary = one org, no multi-tenancy.
 
 *Deployment: small self-hosted instance, a few humans + the agents, TUI and GUI. Still no
 media.*
 
-### P8 — Voice / PTT via LiveKit ⚠️ *charter amendment*
-A LiveKit room bound per channel; push-to-talk as an audio track. **Agents are eligible
+### P8 — Agents in voice
+Human voice and push-to-talk now ship in the nets-and-voice track (V3–V6, ADR-004). What
+remains here is agent participation. **Agents are eligible
 room participants** under the same capability model: an agent can join, transcribe in
 real time and post the transcript as typed messages (voice becomes searchable and
 auditable), or hold a `publish:audio` capability and speak via TTS.
 
 > LiveKit is an optional external process; text/approval core runs without it (ADR-002).
-> Reverses "no voice before P3"; requires an ADR.
->
-> **Implementation note:** a browser client handles in-app PTT, but reliable *system-wide*
-> PTT hotkeys push toward a desktop wrapper with OS-level key handling — lean Wails
-> (Go-first), with the web client sharing most of the UI.
+> Agent voice capabilities are outside ADR-004 and need their own decision.
 
-*Deployment: self-hosted `conchd` + LiveKit. First phase needing a second server process.*
+*Deployment: self-hosted `conchd` + LiveKit, as established by the track.*
 
 ### P9 — Screen sharing + session media
-Screen-share is a second track type on the same LiveKit rooms from P8 — one design, not
+Screen-share is a second track type on the same LiveKit rooms as voice — one design, not
 two. Agents can watch a share and raise a `request_approval` off what they see. Session
 recording/transcription flows into the audit log.
 
@@ -220,7 +258,8 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |
 | P7 | Small-team multi-human + Slack-style GUI ⚠️ | Small self-hosted, humans+agents |
-| P8 | Voice rooms / PTT via LiveKit ⚠️ | Self-hosted + LiveKit |
+| V0–V6 | Nets and voice track (parallel): auth, membership, text nets, PTT voice | Core, then + optional LiveKit |
+| P8 | Agents in voice | Self-hosted + LiveKit |
 | P9 | Screen sharing, recording, agent visual participation | Self-hosted + LiveKit |
 | P10+ | Mobile, bridges, broader reach | As earned |
 

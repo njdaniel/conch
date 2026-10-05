@@ -18,7 +18,7 @@ Integrations are optional and must **degrade gracefully**:
 
 - **ntfy** (approval push notifications, D7): if unreachable, approvals still work — creation, listing, resolution, audit are unaffected; the notification failure itself is recorded in the audit log.
 - **Litestream** (streaming backup): an optional sidecar the operator may run; conchd neither knows nor cares.
-- **LiveKit** (voice/PTT, screen sharing — P8/P9, each requiring its own future ADR): an optional second server process; text/approval core runs without it.
+- **LiveKit** (voice/PTT per [ADR-004](ADR-004-voice-via-livekit.md); screen sharing at P9, requiring its own future ADR): an optional second server process; text/approval core runs without it.
 
 Review rule: any change introducing a *required* external process for core messaging, approvals, or audit is rejected outright (CLAUDE.md rule 1). "Required" means core function breaks without it.
 

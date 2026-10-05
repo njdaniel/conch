@@ -25,13 +25,15 @@ It is *not* an open-source Slack clone. The wedge is agent-native chat ops: type
 
 - No E2EE (server-trust model; E2EE kills search, bots, and agent participation).
 - No federation; no custom protocol. If interop ever matters, a Matrix bridge, later (P10+).
-- No voice/video before P8, and then only via LiveKit integration, never bespoke WebRTC.
-  Reversing this non-goal requires its own ADR at P8 (see [ROADMAP.md](../../ROADMAP.md)).
+- No bespoke WebRTC: voice only via LiveKit integration, from now, as a parallel track
+  ([ADR-004](ADR-004-voice-via-livekit.md)). No video or screen sharing before P9 (see
+  [ROADMAP.md](../../ROADMAP.md)).
 - No multi-tenancy. One binary = one org.
 - No full multi-human Slack-style GUI before P7, and reversing this non-goal requires its
   own ADR at that point (see ROADMAP.md). A minimal read-only dashboard GUI over the
   existing API is a narrower, decoupled exception and may be built as early as P3. CLI/TUI
-  remains the primary human interface through P6.
+  remains the primary human interface through P6. Multi-human *access* through the
+  TUI/CLI and voice client is permitted now ([ADR-003](ADR-003-multi-human-access.md)).
 
 ## Founding decisions (locked)
 
@@ -39,7 +41,7 @@ These are settled. Reopening any requires a new ADR approved by Nick (use the "A
 
 | # | Decision |
 |---|----------|
-| D1 | Language: Go, single module, two binaries: `conchd` (server) and `conch` (CLI/TUI). |
+| D1 | Language: Go, single module, two binaries: `conchd` (server) and `conch` (CLI/TUI). *Amended by [ADR-006](ADR-006-rust-voice-client.md):* plus one Rust binary, `conch-voice`, for native audio. |
 | D2 | Storage: SQLite embedded via `modernc.org/sqlite` (pure Go, no cgo), WAL mode, FTS5 for search. Litestream as *optional* backup sidecar. Postgres driver is a possible future, not MVP. |
 | D3 | **Deployment invariant** (formerly "single-binary invariant"): single-server, dependency-free core — `conchd` requires no external process for messaging, approvals, or audit. Clients (`conch` TUI/CLI) and optional runtime adapters run as separate processes; that has always been true and is not a reversal. Integrations (ntfy, Litestream, later LiveKit) must degrade gracefully — if they're down, messaging and approvals still work. |
 | D4 | Agent interface: native **MCP server endpoint** exposed by `conchd`. Tools include (at minimum): `post_message`, `read_channel`, `request_approval`, `await_decision`, `check_decision`. |
@@ -49,8 +51,8 @@ These are settled. Reopening any requires a new ADR approved by Nick (use the "A
 | D8 | Typed messages: every message has a rendered form plus optional machine payload with a declared, versioned schema (e.g. `leviathan.trade_signal.v1`). Canonical types live in `pkg/schema`; nothing hand-rolls JSON shapes. |
 | D9 | Approval objects are a first-class entity, not a message subtype: requester, typed options, deadline, quorum, escalation target, resolution event with required reason. `await_decision` supports **both** blocking-with-timeout and async polling via `check_decision` (shared resolution store). See [docs/design/approval-object.md](../design/approval-object.md). |
 | D10 | Agent identity: distinct principal type with a manifest — name, declared capabilities (which MCP tools it may call), per-channel permissions, rate limits, tier tag (C/A/H). **Capability enforcement is server-side** (protocol error, not polite refusal). |
-| D11 | No separate "team" abstraction. A pipeline = a channel + identities + an approval object with quorum/escalation. Revisit only if channels demonstrably can't express a real need. |
-| D12 | Scope at MVP: channels + threads. No DMs before P6 (agent DMs) / P7 (human DMs). Single-tenant. |
+| D11 | No separate "team" abstraction. A pipeline = a channel + identities + an approval object with quorum/escalation. Revisit only if channels demonstrably can't express a real need. *Amended by [ADR-005](ADR-005-nets-and-whispers.md):* no team abstraction *above* the channel; nets are subsets within one. |
+| D12 | Scope at MVP: channels + threads. No DMs before P6 (agent DMs) / P7 (human DMs). Single-tenant. *Amended by ADR-005:* in-channel whispers ship with nets. *Amended by [ADR-003](ADR-003-multi-human-access.md):* several human principals per instance are permitted now. |
 | D13 | License: **AGPL-3.0**. |
 | D14 | Work management: **GitHub issues** are the unit of work. One issue = one branch = one PR = one implementation session. No drive-by changes outside an issue's scope. |
 | D15 | Issue creation/management via `gh` CLI, not the GitHub MCP server. |
