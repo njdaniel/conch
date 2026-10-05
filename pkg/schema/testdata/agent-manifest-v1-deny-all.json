@@ -1,0 +1,8 @@
+{
+  "schema": "conch.agent_manifest.v1",
+  "principal_id": 4,
+  "display_name": "Unprovisioned agent",
+  "tier": "C",
+  "created_at": "2026-10-05T12:34:56.789Z",
+  "updated_at": "2026-10-05T12:34:56.789Z"
+}

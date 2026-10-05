@@ -1,0 +1,38 @@
+{
+  "display_name": "Leviathan",
+  "tier": "A",
+  "capabilities": [
+    "messages.read",
+    "messages.post",
+    "approvals.request",
+    "approvals.await",
+    "approvals.check"
+  ],
+  "channels": [
+    {
+      "channel_id": 7,
+      "permissions": [
+        "read",
+        "post"
+      ]
+    },
+    {
+      "channel_id": 9,
+      "permissions": [
+        "read"
+      ]
+    }
+  ],
+  "rate_limits": [
+    {
+      "capability": "messages.post",
+      "max": 60,
+      "window_seconds": 60
+    },
+    {
+      "capability": "approvals.request",
+      "max": 10,
+      "window_seconds": 3600
+    }
+  ]
+}
