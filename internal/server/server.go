@@ -86,6 +86,10 @@ func New(cfg Config, st *store.Store) *Server {
 	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
 	mux.HandleFunc("POST /v1/channels/{channel}/messages", s.handlePostMessageV1)
 	mux.HandleFunc("GET /v1/channels/{channel}/messages", s.handleListMessagesV1)
+	// Agent manifests are open like the other admin endpoints today; they
+	// become operator-only under issue #89.
+	mux.HandleFunc("PUT /v1/principals/{id}/manifest", s.handlePutManifest)
+	mux.HandleFunc("GET /v1/principals/{id}/manifest", s.handleGetManifest)
 	mux.HandleFunc("POST /v1/hooks", s.handleCreateHook)
 	mux.HandleFunc("POST /v1/hooks/{token}", s.handleIngestHook)
 	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
