@@ -2,11 +2,15 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -75,4 +79,65 @@ func TestCreateChannelValidation(t *testing.T) {
 			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
 		})
 	}
+}
+
+func TestListChannels(t *testing.T) {
+	tests := []struct {
+		name   string
+		create []string
+		want   []string
+	}{
+		{name: "empty", want: []string{}},
+		{name: "several ordered by id", create: []string{"zeta", "alpha", "general"}, want: []string{"zeta", "alpha", "general"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			for _, name := range tt.create {
+				req := httptest.NewRequest(http.MethodPost, "/v0/channels", bytes.NewBufferString(`{"name":"`+name+`"}`))
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, req)
+				if rec.Code != http.StatusCreated {
+					t.Fatalf("create %q status = %d", name, rec.Code)
+				}
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/channels", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d; body = %s", rec.Code, rec.Body.String())
+			}
+			if len(tt.want) == 0 && strings.TrimSpace(rec.Body.String()) != `{"channels":[]}` {
+				t.Errorf("empty body = %s, want {\"channels\":[]}", rec.Body.String())
+			}
+			var got schema.ListChannelsResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(got.Channels) != len(tt.want) {
+				t.Fatalf("channels = %+v, want %v", got.Channels, tt.want)
+			}
+			for i, name := range tt.want {
+				if got.Channels[i].Name != name {
+					t.Errorf("channels[%d] = %q, want %q", i, got.Channels[i].Name, name)
+				}
+				if i > 0 && got.Channels[i].ID <= got.Channels[i-1].ID {
+					t.Errorf("ids not ascending: %+v", got.Channels)
+				}
+			}
+		})
+	}
+}
+
+func TestListChannelsStoreFailure(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+	srv := New(Config{Version: "v0", Listen: "127.0.0.1:0"}, st)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/channels", nil))
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error")
 }

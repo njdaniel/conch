@@ -14,6 +14,12 @@ type CreateChannelRequest struct {
 	Name string `json:"name"`
 }
 
+// ListChannelsResponse is the response body for listing every channel,
+// ordered by id ascending. Channels is always a JSON array, never null.
+type ListChannelsResponse struct {
+	Channels []ChannelV0 `json:"channels"`
+}
+
 // CreateChannelResponse is the response body after a channel is created.
 type CreateChannelResponse struct {
 	Channel ChannelV0 `json:"channel"`

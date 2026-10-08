@@ -204,6 +204,42 @@ func TestCreateChannelDuplicateName(t *testing.T) {
 	}
 }
 
+func TestListChannels(t *testing.T) {
+	tests := []struct {
+		name   string
+		create []string
+	}{
+		{name: "empty"},
+		{name: "several ordered by id", create: []string{"zeta", "alpha", "general"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+			for _, name := range tt.create {
+				if _, err := s.CreateChannel(ctx, name); err != nil {
+					t.Fatalf("CreateChannel(%q): %v", name, err)
+				}
+			}
+			got, err := s.ListChannels(ctx)
+			if err != nil {
+				t.Fatalf("ListChannels: %v", err)
+			}
+			if got == nil || len(got) != len(tt.create) {
+				t.Fatalf("channels = %#v, want %d non-nil entries", got, len(tt.create))
+			}
+			for i, name := range tt.create {
+				if got[i].Name != name {
+					t.Errorf("channels[%d] = %q, want %q", i, got[i].Name, name)
+				}
+				if i > 0 && got[i].ID <= got[i-1].ID {
+					t.Errorf("ids not ascending: %+v", got)
+				}
+			}
+		})
+	}
+}
+
 func TestInsertMessageForeignKeys(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

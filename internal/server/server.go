@@ -80,6 +80,7 @@ func New(cfg Config, st *store.Store) *Server {
 	mux.HandleFunc("GET /v0/ws", s.handleWS)
 	mux.HandleFunc("GET /v1/ws", s.handleWSV1)
 	mux.HandleFunc("POST /v0/channels", s.handleCreateChannel)
+	mux.HandleFunc("GET /v1/channels", s.handleListChannels)
 	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
 	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
