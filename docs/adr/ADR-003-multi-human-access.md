@@ -1,6 +1,6 @@
 # ADR-003: Multi-human access without the GUI
 
-- **Status:** Proposed — accepted when Nick merges the PR for #85
+- **Status:** Accepted (Nick merged #86, 2026-10-05)
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #75 · **Amends:** [ADR-000](ADR-000-charter.md) non-goals (multi-human GUI line), D12
