@@ -206,6 +206,47 @@ func TestClientListApprovals(t *testing.T) {
 	}
 }
 
+func TestClientListChannels(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+		want    []string
+	}{
+		{name: "success", status: http.StatusOK, body: `{"channels":[{"id":1,"name":"general","created_at":"2026-07-13T12:34:56Z"},{"id":2,"name":"ops","created_at":"2026-07-13T12:34:56Z"}]}`, want: []string{"general", "ops"}},
+		{name: "server error", status: http.StatusInternalServerError, body: `{"code":"internal_error","message":"internal server error"}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/channels" {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, server.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			got, err := client.ListChannels(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(got.Channels) != len(tt.want) {
+				t.Fatalf("channels = %+v, want %v", got.Channels, tt.want)
+			}
+			for i, name := range tt.want {
+				if got.Channels[i].Name != name {
+					t.Errorf("channels[%d] = %q, want %q", i, got.Channels[i].Name, name)
+				}
+			}
+		})
+	}
+}
+
 func TestClientCastDecision(t *testing.T) {
 	want := schema.CastDecisionResponseV1{
 		Decision: schema.Decision{PrincipalID: 7, OptionID: "approve", Reason: "LGTM"},

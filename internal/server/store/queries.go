@@ -137,6 +137,30 @@ func (s *Store) ChannelByName(ctx context.Context, name string) (Channel, error)
 	return ch, nil
 }
 
+// ListChannels returns every channel ordered by id ascending. It returns an
+// empty, non-nil slice when there are none.
+func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id, name, created_at FROM channels ORDER BY id ASC")
+	if err != nil {
+		return nil, fmt.Errorf("store: list channels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	channels := []Channel{}
+	for rows.Next() {
+		var ch Channel
+		var createdAt int64
+		if err := rows.Scan(&ch.ID, &ch.Name, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan channel: %w", err)
+		}
+		ch.CreatedAt = time.UnixMilli(createdAt)
+		channels = append(channels, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list channels: %w", err)
+	}
+	return channels, nil
+}
+
 // ChannelByID returns the channel with id. It returns ErrNotFound when no
 // such channel exists.
 func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {

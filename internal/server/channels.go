@@ -41,6 +41,21 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponse{Channel: channelFromStore(channel)})
 }
 
+func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	channels, err := s.store.ListChannels(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "channels: list failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	resp := schema.ListChannelsResponse{Channels: make([]schema.ChannelV0, 0, len(channels))}
+	for _, ch := range channels {
+		resp.Channels = append(resp.Channels, channelFromStore(ch))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func channelFromStore(channel store.Channel) schema.ChannelV0 {
 	return schema.ChannelV0{
 		ID:   channel.ID,
