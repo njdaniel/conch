@@ -122,6 +122,23 @@ END`,
 	created_at   INTEGER NOT NULL
 )`,
 	},
+	// 5: Agent capability manifests (issue #77, docs/design/agent-manifest.md).
+	// One row per agent principal; the three policy lists are JSON text and the
+	// manifest is always read whole. Creates the table only: existing agent
+	// principals get no manifest, which means no access once enforcement lands
+	// (#79). Timestamps are unix milliseconds UTC.
+	{
+		`CREATE TABLE agent_manifests (
+	principal_id INTEGER PRIMARY KEY REFERENCES principals (id),
+	display_name TEXT    NOT NULL,
+	tier         TEXT    NOT NULL,
+	capabilities TEXT    NOT NULL,
+	channels     TEXT    NOT NULL,
+	rate_limits  TEXT    NOT NULL,
+	created_at   INTEGER NOT NULL,
+	updated_at   INTEGER NOT NULL
+)`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
