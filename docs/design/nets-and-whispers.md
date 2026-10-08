@@ -1,6 +1,6 @@
 # Design: nets and whispers — audience-scoped speaking
 
-- **Status:** Draft. Governing decision: [ADR-005](../adr/ADR-005-nets-and-whispers.md) (Accepted).
+- **Status:** Draft for V2 implementation (governing decision: [ADR-005](../adr/ADR-005-nets-and-whispers.md), Accepted).
 - **Touches:** D11 (no team abstraction), D12 (no DMs before P6/P7), D8 (typed messages), D10 (capabilities) in [ADR-000](../adr/ADR-000-charter.md); the nets-and-voice track in [ROADMAP.md](../../ROADMAP.md).
 - **Owner:** protocol-designer (schemas), server-engineer (visibility enforcement)
 - **Issue:** #82

@@ -14,8 +14,8 @@ ADR-000 barred voice before P8. Nick wants layered voice — several nets heard 
 - **Voice starts now.** Video and screen sharing remain at P9.
 - **LiveKit only**, self-hosted, as an optional process. Never bespoke WebRTC.
 - **`conchd` is the only authority** on who may publish and who may hear. It issues short-lived LiveKit tokens and controls room access. LiveKit only moves audio.
-- **One LiveKit room per net.** Channel-wide voice is one more room. A client joins a room for each net it may hear; the room name is inside the token `conchd` signs, so an outsider has nothing to request.
-- **No LiveKit Go dependency.** `conchd` mints tokens and calls the room API with the standard library.
+- **One LiveKit room per net** (settled by the V0 spike, as this ADR provided; accepted by Nick, 2026-10-05). Channel-wide voice is one more room. A client joins a room for each net it may hear; the room name is inside the token `conchd` signs, so an outsider has nothing to request.
+- **No LiveKit Go dependency** (same basis). `conchd` mints tokens and calls the room API with the standard library.
 - **Graceful degradation:** with LiveKit absent or down, voice endpoints report "voice not configured/unavailable" and messaging, approvals, and audit are unaffected.
 - **Client:** the native Linux binary `conch-voice` ([ADR-006](ADR-006-rust-voice-client.md)). No browser client.
 - **Push-to-talk** is the default transmit mode.
@@ -36,6 +36,8 @@ From the V0 spike (#87; report `docs/reports/2026-10-05-voice-spike.md`, LiveKit
 | Global push-to-talk | COSMIC exposes no global-shortcuts portal, so the client reads the keyboard through `evdev`. That needs read access to the input device, which lets the process see every keystroke; setup must say so. |
 
 Not yet verified: hold-to-talk end to end, two machines on a LAN, echo cancellation by ear, publishing into several rooms from one process, token expiry and refresh, and anything beyond loopback (NAT, loss).
+
+V0's stated exit in [ROADMAP.md](../../ROADMAP.md) — two machines talking with hold-to-talk — is therefore **not yet met**. Those manual checks stay open under #87. They do not block V1 or V2, which involve no voice, and must be closed before V4.
 
 **Whisper mapping is proposed, not decided.** The spike suggests a per-principal "inbox" room in which only the owner can subscribe, with whispers sent on a publish-only token; it is assembled from tested behaviours but was not run as a whole. It gets its own test before V5 commits to it.
 
