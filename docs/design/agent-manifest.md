@@ -66,7 +66,7 @@ Type `ChannelPermission`: `read` or `post`. A `ChannelGrant` is `{channel_id, pe
 
 A capability and a channel permission are **both** required; neither substitutes for the other. `messages.post` with no channel grant can post nowhere, and a `post` grant without `messages.post` is inert. Capabilities say *what kind of thing* an agent may do; channel grants say *where*.
 
-The schema does not check that a channel exists. A grant naming a deleted or not-yet-created channel is valid and inert.
+The schema does not check that a channel exists; the store does, on write. `PUT` rejects a grant naming a channel id that does not exist (400 `channel_not_found`). Channel ids are sequential, so accepting a grant for a channel that is not there yet would silently hand the agent whatever channel later receives that id. A grant already stored for a channel that is deleted afterwards stays valid and is inert.
 
 ## 5. Rate limits
 
@@ -104,9 +104,9 @@ Errors use the existing `schema.Error` body (`{code, message}`); a failed `Valid
 
 ## 8. What the consuming issues are expected to do
 
-- **#77 (store and REST).** Persist one row per agent principal; reject a manifest for a missing or non-agent principal; validate on write; set the timestamps; give existing agent principals an explicit default. The schema's position on that default is that "no manifest" means deny, so preserving P1 behaviour needs a manifest that is written out, not an exemption in code.
+- **#77 (store and REST).** Persist one row per agent principal; reject a manifest for a missing or non-agent principal, or for a channel that does not exist; validate on write and again on read; set the timestamps. **Upgrade policy:** the migration creates the table and no rows. An agent that existed before has no manifest, and "no manifest" means deny once #79 enforces. No full-access manifest is generated automatically, because that would be a broad grant nobody wrote. Keeping an existing agent working across #79 therefore takes a manifest an operator writes out with `PUT`, not an exemption in code.
 - **#78 (credentials).** Resolve each token to a principal id. That id is the manifest's address; there is no separate manifest id to carry.
-- **#79 (enforcement).** For each MCP call: look up `MCPToolCapability(tool)` and deny when `ok` is false; deny unless `manifest.Allows(capability)`; deny unless `manifest.AllowsChannel(channel, permission)` for the channel the call targets; and apply channel membership (#90) alongside. Deny when the manifest is missing or invalid. Use those helpers and do not re-derive the rules.
+- **#79 (enforcement).** Because the upgrade is deny-by-default, `conchd` should say at startup how many agent principals have no manifest, so an operator is not surprised. For each MCP call: look up `MCPToolCapability(tool)` and deny when `ok` is false; deny unless `manifest.Allows(capability)`; deny unless `manifest.AllowsChannel(channel, permission)` for the channel the call targets; and apply channel membership (#90) alongside. Deny when the manifest is missing or invalid. Use those helpers and do not re-derive the rules.
 - **#80 (rate limits).** Read `manifest.RateLimitFor(capability)`. `ok == false` means do not limit on the manifest's account. Otherwise allow at most `max` uses per `window_seconds` for that principal and capability. The counting algorithm (fixed or sliding window, how a burst is bounded), restart behaviour, and the retry metadata are #80's to choose and document; the manifest only states the budget.
 
 ## 9. Explicitly out of scope
