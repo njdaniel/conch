@@ -215,6 +215,7 @@ func TestClientListChannels(t *testing.T) {
 		want    []string
 	}{
 		{name: "success", status: http.StatusOK, body: `{"channels":[{"id":1,"name":"general","created_at":"2026-07-13T12:34:56Z"},{"id":2,"name":"ops","created_at":"2026-07-13T12:34:56Z"}]}`, want: []string{"general", "ops"}},
+		{name: "empty list", status: http.StatusOK, body: `{"channels":[]}`, want: []string{}},
 		{name: "server error", status: http.StatusInternalServerError, body: `{"code":"internal_error","message":"internal server error"}`, wantErr: true},
 	}
 	for _, tt := range tests {
