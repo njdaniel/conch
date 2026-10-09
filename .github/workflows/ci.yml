@@ -82,10 +82,14 @@ jobs:
   nets-check:
     # The V2 exit proof (issue #121): the 2x4 squad layout through real
     # conchd/conch binaries, asserting the exact set of message ids every
-    # participant sees on every read path. Unlike dogfood-check it runs on
-    # every pull request and every push to main, because any server change
-    # can open a read path that leaks a scoped message.
+    # participant sees on each message read path the server has (MCP
+    # read_channel; the REST v2, v1 and v0 lists; the v2, v1 and v0
+    # WebSockets; conch tail). Unlike dogfood-check it runs on every pull
+    # request and every push to main, because any server change can open a
+    # read path that leaks a scoped message. A new read path must be added to
+    # the program: it cannot find one it does not know about.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -77,7 +78,88 @@ func (h *harness) compare(who, surface string, got, want idSet) error {
 	return nil
 }
 
+// messageKeys and audienceKeys are every field a v2 message, and the audience
+// in it, may have on the wire. They are written out here, not taken from
+// pkg/schema, on purpose: this program is built with the same schema package
+// as the server, so a field added to the type there (a message's resolved
+// recipients, say, which only the audit log may hold) would pass any decoder
+// that asks the type what is allowed.
+var (
+	messageKeys  = map[string]bool{"schema": true, "id": true, "channel_id": true, "author_id": true, "created_at": true, "body": true, "payload": true, "audience": true}
+	audienceKeys = map[string]bool{"kind": true, "net_id": true, "principal_ids": true}
+)
+
+// closedMessage fails when one v2 message, as it came off the wire, has a
+// field outside those lists. The error names the field, never its content.
+func closedMessage(raw json.RawMessage) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("a v2 message is not a JSON object: %w", err)
+	}
+	for key := range fields {
+		if !messageKeys[key] {
+			return fmt.Errorf("a v2 message on the wire has a field %q, which the v2 envelope does not have", key)
+		}
+	}
+	if aud, ok := fields["audience"]; ok {
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(aud, &inner); err != nil {
+			return fmt.Errorf("a v2 message's audience is not a JSON object: %w", err)
+		}
+		for key := range inner {
+			if !audienceKeys[key] {
+				return fmt.Errorf("a v2 message's audience on the wire has a field %q, which an audience does not have", key)
+			}
+		}
+	}
+	return nil
+}
+
+// closedMessages applies closedMessage to a response body that holds v2
+// messages under key: an array for a list, one object for a post.
+func closedMessages(body []byte, key string) error {
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(body, &outer); err != nil {
+		return err
+	}
+	raw, ok := outer[key]
+	if !ok {
+		return nil
+	}
+	var many []json.RawMessage
+	if json.Unmarshal(raw, &many) != nil {
+		many = []json.RawMessage{raw}
+	}
+	for _, one := range many {
+		if err := closedMessage(one); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ------------------------------------------------------------- list reads
+
+// ascending checks one page of a list read: its ids rise strictly from the
+// cursor it was asked for. A page that does not move the cursor would make
+// the reader below loop for ever, and a repeated id would vanish in a set.
+func ascending(what string, after int64, ids []int64) error {
+	for _, id := range ids {
+		if id <= after {
+			return fmt.Errorf("%s: a page asked for after id %d holds id %d (ids must rise; this one repeats or goes back)", what, after, id)
+		}
+		after = id
+	}
+	return nil
+}
+
+func idsV2(msgs []schema.MessageV2) []int64 {
+	out := make([]int64, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.ID
+	}
+	return out
+}
 
 // mcpRead reads the whole channel through read_channel, page by page.
 func (h *harness) mcpRead(p *person) ([]schema.MessageV2, error) {
@@ -96,6 +178,9 @@ func (h *harness) mcpRead(p *person) ([]schema.MessageV2, error) {
 				return nil, fmt.Errorf("read_channel returned an invalid message: %w", err)
 			}
 		}
+		if err := ascending("read_channel", after, idsV2(page.Messages)); err != nil {
+			return nil, err
+		}
 		all = append(all, page.Messages...)
 		after = page.Messages[len(page.Messages)-1].ID
 	}
@@ -108,8 +193,12 @@ func (h *harness) restV2(p *person) ([]schema.MessageV2, error) {
 	for {
 		var page schema.ListMessagesResponseV2
 		path := fmt.Sprintf("/v2/channels/%s/messages?limit=%d&after=%d", channelName, pageSize, after)
-		if err := h.as(p).call(http.MethodGet, path, nil, &page); err != nil {
+		raw, err := h.as(p).callRaw(http.MethodGet, path, nil, &page)
+		if err != nil {
 			return nil, err
+		}
+		if err := closedMessages(raw, "messages"); err != nil {
+			return nil, fmt.Errorf("REST v2 list: %w", err)
 		}
 		if len(page.Messages) == 0 {
 			return all, nil
@@ -118,6 +207,9 @@ func (h *harness) restV2(p *person) ([]schema.MessageV2, error) {
 			if err := m.Validate(); err != nil {
 				return nil, fmt.Errorf("GET %s returned an invalid message: %w", path, err)
 			}
+		}
+		if err := ascending("REST v2 list", after, idsV2(page.Messages)); err != nil {
+			return nil, err
 		}
 		all = append(all, page.Messages...)
 		after = page.Messages[len(page.Messages)-1].ID
@@ -137,9 +229,57 @@ func (h *harness) restV1(p *person) ([]schema.MessageV1, error) {
 		if len(page.Messages) == 0 {
 			return all, nil
 		}
+		ids := make([]int64, len(page.Messages))
+		for i, m := range page.Messages {
+			ids[i] = m.ID
+		}
+		if err := ascending("REST v1 list", after, ids); err != nil {
+			return nil, err
+		}
 		all = append(all, page.Messages...)
 		after = page.Messages[len(page.Messages)-1].ID
 	}
+}
+
+// restV0 reads the whole channel from GET /v0/channels/ops/messages.
+func (h *harness) restV0(p *person) (idSet, error) {
+	out := make(idSet)
+	var after int64
+	for {
+		var page schema.ListMessagesResponse
+		path := fmt.Sprintf("/v0/channels/%s/messages?limit=%d&after=%d", channelName, pageSize, after)
+		if err := h.as(p).call(http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+		if len(page.Messages) == 0 {
+			return out, nil
+		}
+		ids := make([]int64, len(page.Messages))
+		for i, m := range page.Messages {
+			ids[i] = m.ID
+			out[m.ID] = true
+		}
+		if err := ascending("REST v0 list", after, ids); err != nil {
+			return nil, err
+		}
+		after = page.Messages[len(page.Messages)-1].ID
+	}
+}
+
+// checkAudiences fails when a message read back does not carry the audience
+// its table row addresses: a scoped message without one reads as channel-wide.
+func (h *harness) checkAudiences(who, surface string, msgs []schema.MessageV2) error {
+	for _, got := range msgs {
+		for _, m := range h.posted {
+			if m.id != got.ID {
+				continue
+			}
+			if err := h.checkEcho(m, got.Audience); err != nil {
+				return fmt.Errorf("%s on %s: %w", who, surface, err)
+			}
+		}
+	}
+	return nil
 }
 
 // checkReads compares every participant's list reads with the table, once
@@ -155,12 +295,25 @@ func (h *harness) checkReads() error {
 			if err := h.compare(p.name, "MCP read_channel", idsOf(msgs), want2); err != nil {
 				return err
 			}
+			if err := h.checkAudiences(p.name, "MCP read_channel", msgs); err != nil {
+				return err
+			}
 		}
 		msgs, err := h.restV2(p)
 		if err != nil {
 			return fmt.Errorf("%s: REST v2 list: %w", p.name, err)
 		}
 		if err := h.compare(p.name, "REST v2 list", idsOf(msgs), want2); err != nil {
+			return err
+		}
+		if err := h.checkAudiences(p.name, "REST v2 list", msgs); err != nil {
+			return err
+		}
+		got0, err := h.restV0(p)
+		if err != nil {
+			return fmt.Errorf("%s: REST v0 list: %w", p.name, err)
+		}
+		if err := h.compare(p.name, "REST v0 list", got0, want1); err != nil {
 			return err
 		}
 		v1, err := h.restV1(p)
@@ -175,7 +328,21 @@ func (h *harness) checkReads() error {
 			return err
 		}
 	}
-	step("exact id sets on every list surface: MCP read_channel (agents), REST v2 and v1 list (all %d participants)", len(h.people))
+	// The ids this run was given are 1..n with none missing. Message ids are
+	// handed out in order, so a refused post that was stored after all, with
+	// an audience nobody is in, would have taken one: the "nothing stored"
+	// checks read as every participant and could not see such a row.
+	ids := make([]int64, 0, len(h.posted))
+	for _, m := range h.posted {
+		ids = append(ids, m.id)
+	}
+	slices.Sort(ids)
+	for i, id := range ids {
+		if id != int64(i+1) {
+			return fmt.Errorf("message ids of the %d messages this run posted are %v: id %d is missing, so the server stored a message no participant can see (a refused post?)", len(ids), ids, i+1)
+		}
+	}
+	step("exact id sets on every list surface: MCP read_channel (agents), REST v2, v1 and v0 list (all %d participants), each scoped message with its audience; ids 1..%d with no gap", len(h.people), len(ids))
 	return nil
 }
 
@@ -183,9 +350,10 @@ func (h *harness) checkReads() error {
 
 type sock struct {
 	who     *person
-	version string // "v1" or "v2"
+	version string // "v0", "v1" or "v2"
 	conn    *websocket.Conn
 	got     idSet
+	frames  []schema.MessageV2
 	err     error
 	done    chan struct{}
 }
@@ -216,7 +384,10 @@ func (h *harness) dialWS(p *person, version string) (*sock, error) {
 	return s, nil
 }
 
-// collect reads frames until the last message of the run arrives.
+// collect reads frames until the last message of the run arrives. Each frame
+// must be exactly the message shape of its protocol version, with no field
+// besides: a v0 or v1 frame has no audience to carry, and no frame has
+// anywhere to put a recipient list. A frame delivered twice is an error.
 func (s *sock) collect() {
 	defer close(s.done)
 	ctx, cancel := withDeadline()
@@ -227,21 +398,38 @@ func (s *sock) collect() {
 			s.err = fmt.Errorf("%s on %s: the last message never arrived: %w", s.who.name, s.surface(), err)
 			return
 		}
-		var frame struct {
-			ID       int64           `json:"id"`
-			Body     string          `json:"body"`
-			Audience json.RawMessage `json:"audience"`
+		var id int64
+		var body string
+		switch s.version {
+		case "v2":
+			var m schema.MessageV2
+			if err = decodeStrict(data, &m); err == nil {
+				err = m.Validate()
+			}
+			if err == nil {
+				err = closedMessage(data)
+			}
+			id, body = m.ID, m.Body
+			s.frames = append(s.frames, m)
+		case "v1":
+			var m schema.MessageV1
+			err = decodeStrict(data, &m)
+			id, body = m.ID, m.Body
+		default:
+			var m schema.MessageV0
+			err = decodeStrict(data, &m)
+			id, body = m.ID, m.Body
 		}
-		if err := json.Unmarshal(data, &frame); err != nil {
-			s.err = fmt.Errorf("%s on %s: undecodable frame: %w", s.who.name, s.surface(), err)
+		if err != nil {
+			s.err = fmt.Errorf("%s on %s: a frame is not a %s message and nothing else: %w", s.who.name, s.surface(), s.version, err)
 			return
 		}
-		if s.version == "v1" && frame.Audience != nil {
-			s.err = fmt.Errorf("%s on %s: frame %d carries an audience, which the v1 wire cannot express", s.who.name, s.surface(), frame.ID)
+		if s.got[id] {
+			s.err = fmt.Errorf("%s on %s: message %d was delivered twice", s.who.name, s.surface(), id)
 			return
 		}
-		s.got[frame.ID] = true
-		if frame.Body == lastBody {
+		s.got[id] = true
+		if body == lastBody {
 			return
 		}
 	}
@@ -250,7 +438,7 @@ func (s *sock) collect() {
 func (h *harness) openSockets() ([]*sock, error) {
 	var socks []*sock
 	for _, p := range h.people {
-		for _, version := range []string{"v1", "v2"} {
+		for _, version := range []string{"v0", "v1", "v2"} {
 			s, err := h.dialWS(p, version)
 			if err != nil {
 				closeSockets(socks)
@@ -292,6 +480,9 @@ func (h *harness) checkSockets(early, late []*sock) error {
 		if err := h.compare(s.who.name, s.surface()+" (live)", s.got, h.want(s.who.name, s.version == "v2")); err != nil {
 			return err
 		}
+		if err := h.checkAudiences(s.who.name, s.surface()+" (live)", s.frames); err != nil {
+			return err
+		}
 	}
 	// A subscription that starts late must not be sent history: only the
 	// last message, which was posted after it began.
@@ -305,7 +496,7 @@ func (h *harness) checkSockets(early, late []*sock) error {
 			return err
 		}
 	}
-	step("exact id sets on %d live WebSocket subscriptions (v1 and v2, every participant) and %d late ones, read until the sentinel", len(early), len(late))
+	step("exact id sets on %d live WebSocket subscriptions (v0, v1 and v2, every participant) and %d late ones, read until the sentinel; every v2 frame carries its audience", len(early), len(late))
 	return nil
 }
 
@@ -313,6 +504,7 @@ func (h *harness) checkSockets(early, late []*sock) error {
 
 type tailProc struct {
 	cmd    *exec.Cmd
+	once   sync.Once
 	cancel context.CancelFunc
 	lines  chan string
 	stderr *bytes.Buffer
@@ -323,8 +515,10 @@ type tailProc struct {
 }
 
 func (t *tailProc) stop() {
-	t.cancel()
-	_ = t.cmd.Wait()
+	t.once.Do(func() {
+		t.cancel()
+		_ = t.cmd.Wait()
+	})
 }
 
 // startTail runs `conch tail ops` as lead, and posts channel-wide probes
@@ -370,6 +564,7 @@ func (h *harness) startTail() (*tailProc, error) {
 			select {
 			case line, ok := <-t.lines:
 				if !ok {
+					t.stop()
 					return nil, fmt.Errorf("conch tail exited (stderr: %s)", t.stderr.String())
 				}
 				t.got = append(t.got, line)
@@ -469,6 +664,26 @@ func (h *harness) labelByLine(line string) string {
 // no token is anywhere in the log.
 func (h *harness) checkAudit() error {
 	h.proc.halt()
+	// The files are searched as the server left them, before this program
+	// opens the database itself (which may fold the write-ahead log in).
+	files, err := filepath.Glob(filepath.Join(h.proc.dataDir, "conch.db*"))
+	if err != nil {
+		return fmt.Errorf("audit: list the database files: %w", err)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("audit: found no database files under the data directory")
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f) // #nosec G304 -- the database of this harness's own conchd, under its temp directory
+		if err != nil {
+			return err
+		}
+		for i, tok := range h.secrets {
+			if bytes.Contains(data, []byte(tok)) {
+				return fmt.Errorf("audit: credential %d of this run is stored in plain text in %s", i, filepath.Base(f))
+			}
+		}
+	}
 	events, err := h.proc.auditEvents()
 	if err != nil {
 		return fmt.Errorf("read the audit log: %w", err)
@@ -508,20 +723,21 @@ func (h *harness) checkAudit() error {
 	}
 	// An agent's refused post is itself in the log (issue #149), with why it
 	// was refused and nothing the agent chose: b3's two net refusals leave the
-	// same row, so the log does not say which of the two nets exists either.
+	// same row, subject and detail, so the log does not say which of the two
+	// nets exists either, and holds no number the agent picked.
 	denied := make(map[string][]string)
 	for _, e := range events {
 		if e.Action == "access_denied" {
-			denied[e.Actor] = append(denied[e.Actor], e.Detail)
+			denied[e.Actor] = append(denied[e.Actor], e.Subject+" "+e.Detail)
 		}
 	}
 	wantDenied := map[string][]string{
 		fmt.Sprintf("principal:%d", h.person("b3").id): {
-			fmt.Sprintf("capability=messages.post target=channel:%d reason=net_not_on", h.channelID),
-			fmt.Sprintf("capability=messages.post target=channel:%d reason=net_not_on", h.channelID),
+			fmt.Sprintf("mcp:post_message capability=messages.post target=channel:%d reason=net_not_on", h.channelID),
+			fmt.Sprintf("mcp:post_message capability=messages.post target=channel:%d reason=net_not_on", h.channelID),
 		},
 		fmt.Sprintf("principal:%d", h.person("a1").id): {
-			fmt.Sprintf("capability=messages.post target=channel:%d reason=audience_not_granted", h.channelID),
+			fmt.Sprintf("mcp:post_message capability=messages.post target=channel:%d reason=audience_not_granted", h.channelID),
 		},
 	}
 	if len(denied) != len(wantDenied) {
@@ -536,26 +752,9 @@ func (h *harness) checkAudit() error {
 	if strings.Contains(text, "MSG-") {
 		return fmt.Errorf("audit: a message body is in the audit log")
 	}
-	for _, m := range h.posted {
-		if strings.Contains(text, m.body()) {
-			return fmt.Errorf("audit: the body of message %d (%s) is in the audit log", m.id, m.key)
-		}
-	}
 	for i, tok := range h.secrets {
 		if strings.Contains(text, tok) {
 			return fmt.Errorf("audit: credential %d of this run is in the audit log", i)
-		}
-	}
-	files, _ := filepath.Glob(filepath.Join(h.proc.dataDir, "conch.db*"))
-	for _, f := range files {
-		data, err := os.ReadFile(f) // #nosec G304 -- the database of this harness's own conchd, under its temp directory
-		if err != nil {
-			return err
-		}
-		for i, tok := range h.secrets {
-			if bytes.Contains(data, []byte(tok)) {
-				return fmt.Errorf("audit: credential %d of this run is stored in plain text in %s", i, filepath.Base(f))
-			}
 		}
 	}
 	step("audit: %d message_scoped events, one per scoped message, with their recipients; the 3 refused agent posts recorded with their reasons; no body and no token among %d events", count, len(events))

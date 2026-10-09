@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/njdaniel/conch/internal/mcpclient"
@@ -15,6 +16,18 @@ import (
 )
 
 const channelName = "ops"
+
+// padCredentials, padChannels and padNets are how many credentials, channels
+// and nets are created only to use up low ids, so that no two things in the
+// scenario share a number: principals are 1..10, then come the credentials,
+// then the channel, then the nets (setUp checks it). On a fresh instance they
+// would otherwise all start at 1, and a server that looked a reader, a
+// channel or a net up by the wrong kind of id would go unnoticed.
+const (
+	padCredentials = 10
+	padChannels    = 25
+	padNets        = 40
+)
 
 // person is one participant. The operator and lead are humans; the eight
 // squad members are agents, driven over MCP.
@@ -62,6 +75,9 @@ type harness struct {
 	table  []*message
 	posted []*message // in post order, the table's rows and any probes
 	cli    *conchUser
+
+	cleanupMu sync.Mutex
+	cleanups  []func()
 }
 
 func (h *harness) secret(t string) {
@@ -132,7 +148,7 @@ func scenario(h *harness) (err error) {
 	if err != nil {
 		return err
 	}
-	defer h.cli.cleanup()
+	h.onCleanup(h.cli.cleanup)
 	if _, err := h.cli.run(h.person("lead").token+"\n", "login"); err != nil {
 		return fmt.Errorf("lead: conch login: %w", err)
 	}
@@ -147,7 +163,7 @@ func scenario(h *harness) (err error) {
 		return err
 	}
 	defer closeSockets(socks)
-	step("%d WebSocket subscriptions open (v1 for everyone, v2 for everyone)", len(socks))
+	step("%d WebSocket subscriptions open (v0, v1 and v2 for every participant)", len(socks))
 
 	// Phase 1: one message into every audience.
 	for _, key := range []string{"wide-op", "wide-a2", "alpha-1", "bravo-1", "command-1", "whisper-a3-b2", "whisper-a1-lead"} {
@@ -174,7 +190,7 @@ func scenario(h *harness) (err error) {
 	if err != nil {
 		return err
 	}
-	defer tail.stop()
+	h.onCleanup(tail.stop)
 	if err := h.cliPhase(); err != nil {
 		return err
 	}
@@ -222,13 +238,56 @@ func (h *harness) setUp() error {
 	if me.Role != schema.RoleOperator {
 		return fmt.Errorf("the bootstrapped principal has role %q, want operator", me.Role)
 	}
+	// Credentials first use up the numbers the principals will have, and the
+	// operator then works with a new one: on a fresh instance credential n
+	// would belong to principal n for everyone, and a server that identified
+	// the reader by the wrong one of the two would show everyone exactly the
+	// right messages.
+	var second schema.CreateCredentialResponseV1
+	for i := 0; i <= padCredentials; i++ {
+		if err := op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", me.ID), schema.CreateCredentialRequestV1{Label: fmt.Sprintf("operator-%d", i+2)}, &second); err != nil {
+			return fmt.Errorf("issue an operator credential: %w", err)
+		}
+		h.secret(second.Token)
+	}
+	h.proc.operatorToken = second.Token
+	op = h.op()
 	h.add(&person{name: "operator", id: me.ID, token: op.token})
+	used := map[int64]string{me.ID: "principal operator", second.Credential.ID: "credential of operator"}
+	// claim records an id the scenario uses and fails if another kind of
+	// thing already has that number.
+	claim := func(id int64, what string) error {
+		if other, taken := used[id]; taken {
+			return fmt.Errorf("%s has id %d, which is also the id of %s: the layout must keep its id spaces apart", what, id, other)
+		}
+		used[id] = what
+		return nil
+	}
 
+	// For the same reason the channel and the nets get ids no principal or
+	// credential has: channels and nets made only to use up the low numbers.
+	for i := 1; i <= padChannels; i++ {
+		var pad schema.CreateChannelResponse
+		if err := op.call(http.MethodPost, "/v0/channels", schema.CreateChannelRequest{Name: fmt.Sprintf("pad-%d", i)}, &pad); err != nil {
+			return fmt.Errorf("create padding channel: %w", err)
+		}
+		if i > 1 {
+			continue
+		}
+		for j := 1; j <= padNets; j++ {
+			if err := op.call(http.MethodPost, "/v1/channels/pad-1/nets", schema.CreateNetRequestV1{Name: fmt.Sprintf("pad-%d", j)}, nil); err != nil {
+				return fmt.Errorf("create padding net: %w", err)
+			}
+		}
+	}
 	var ch schema.CreateChannelResponse
 	if err := op.call(http.MethodPost, "/v0/channels", schema.CreateChannelRequest{Name: channelName}, &ch); err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}
 	h.channelID = ch.Channel.ID
+	if err := claim(h.channelID, "channel "+channelName); err != nil {
+		return err
+	}
 
 	read := schema.ChannelPermissionRead
 	netPerm := schema.ChannelPermissionPostNet
@@ -262,6 +321,12 @@ func (h *harness) setUp() error {
 		}
 		p.token = cred.Token
 		h.secret(p.token)
+		if err := claim(p.id, "principal "+p.name); err != nil {
+			return err
+		}
+		if err := claim(cred.Credential.ID, "credential of "+p.name); err != nil {
+			return err
+		}
 		if err := op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", channelName, p.id), nil, nil); err != nil {
 			return fmt.Errorf("add %s to %s: %w", p.name, channelName, err)
 		}
@@ -296,6 +361,9 @@ func (h *harness) setUp() error {
 			return fmt.Errorf("create net %s: %w", n.name, err)
 		}
 		h.netIDs[n.name] = created.Net.ID
+		if err := claim(created.Net.ID, "net "+n.name); err != nil {
+			return err
+		}
 		h.roster[n.name] = make(map[string]schema.NetRole)
 		for _, name := range sortedKeys(n.seats) {
 			if err := h.seat(n.name, name, n.seats[name]); err != nil {
@@ -347,30 +415,50 @@ func (h *harness) unseat(netName, who string) error {
 	return nil
 }
 
-// checkNetList compares what the API says the nets are with the harness's
-// own record of them.
+// checkNetList compares what the API tells each participant the nets are
+// with the harness's own record: the operator is shown every net, everyone
+// else exactly the nets they are on, each with its whole roster. Who is on a
+// net a participant is not on, and that the net exists, is not theirs to see.
 func (h *harness) checkNetList() error {
-	var list schema.ListNetsResponseV1
-	if err := h.op().call(http.MethodGet, "/v1/channels/"+channelName+"/nets", nil, &list); err != nil {
-		return fmt.Errorf("list nets: %w", err)
-	}
-	if len(list.Nets) != len(h.roster) {
-		return fmt.Errorf("the operator lists %d nets, want %d", len(list.Nets), len(h.roster))
-	}
-	for _, n := range list.Nets {
-		want := h.roster[n.Name]
-		if h.netIDs[n.Name] != n.ID || len(n.Members) != len(want) {
-			return fmt.Errorf("net %s is %+v, want id %d and %d seats", n.Name, n, h.netIDs[n.Name], len(want))
+	for _, p := range h.people {
+		var list schema.ListNetsResponseV1
+		if err := h.as(p).call(http.MethodGet, "/v1/channels/"+channelName+"/nets", nil, &list); err != nil {
+			return fmt.Errorf("%s: list nets: %w", p.name, err)
 		}
-		for _, m := range n.Members {
-			var name string
-			for _, p := range h.people {
-				if p.id == m.PrincipalID {
-					name = p.name
+		want := make(map[string]bool)
+		for name, seats := range h.roster {
+			if _, on := seats[p.name]; on || p.name == "operator" {
+				want[name] = true
+			}
+		}
+		got := make(map[string]bool)
+		for _, n := range list.Nets {
+			if got[n.Name] {
+				return fmt.Errorf("%s is shown net %s twice", p.name, n.Name)
+			}
+			got[n.Name] = true
+			if !want[n.Name] {
+				return fmt.Errorf("%s is shown net %q (id %d), which it is not on", p.name, n.Name, n.ID)
+			}
+			seats := h.roster[n.Name]
+			if h.netIDs[n.Name] != n.ID || len(n.Members) != len(seats) {
+				return fmt.Errorf("%s is shown net %s as id %d with %d seats, want id %d and %d seats", p.name, n.Name, n.ID, len(n.Members), h.netIDs[n.Name], len(seats))
+			}
+			for _, m := range n.Members {
+				var name string
+				for _, q := range h.people {
+					if q.id == m.PrincipalID {
+						name = q.name
+					}
+				}
+				if seats[name] != m.Role || name == "" {
+					return fmt.Errorf("%s is shown net %s with principal %d as %q, want %q", p.name, n.Name, m.PrincipalID, m.Role, seats[name])
 				}
 			}
-			if want[name] != m.Role || name == "" {
-				return fmt.Errorf("net %s has principal %d as %q, want %q", n.Name, m.PrincipalID, m.Role, want[name])
+		}
+		for name := range want {
+			if !got[name] {
+				return fmt.Errorf("%s is not shown net %s, which it is on", p.name, name)
 			}
 		}
 	}
@@ -397,6 +485,11 @@ func (h *harness) newTable() []*message {
 		// After lead was promoted from monitor to member of command.
 		{key: "cli-net", author: "lead", via: "cli", net: "command", viewers: []string{"a1", "b1", "b4", "lead"}},
 		{key: "cli-whisper", author: "lead", via: "cli", to: []string{"a1"}, viewers: []string{"a1", "lead"}},
+		// Posted while lead's `conch tail` is running, to audiences lead is
+		// not in: without them nothing the tail must not show is ever sent
+		// during its lifetime, and its check could not fail on a leak.
+		{key: "bravo-2", author: "b3", net: "bravo", viewers: bravo},
+		{key: "whisper-a3-b2-2", author: "a3", to: []string{"b2"}, viewers: []string{"a3", "b2"}},
 		{key: "sentinel-1", author: "operator", viewers: everyone},
 		{key: "sentinel-2", author: "operator", viewers: everyone},
 	}
@@ -471,7 +564,11 @@ func (h *harness) post(m *message) error {
 	default:
 		var resp schema.PostMessageResponseV2
 		req := schema.PostMessageRequestV2{Body: m.body(), Audience: m.audience(h)}
-		if err := h.as(author).call(http.MethodPost, "/v2/channels/"+channelName+"/messages", req, &resp); err != nil {
+		raw, err := h.as(author).callRaw(http.MethodPost, "/v2/channels/"+channelName+"/messages", req, &resp)
+		if err != nil {
+			return fmt.Errorf("%s: REST post as %s: %w", m.key, m.author, err)
+		}
+		if err := closedMessages(raw, "message"); err != nil {
 			return fmt.Errorf("%s: REST post as %s: %w", m.key, m.author, err)
 		}
 		posted = resp.Message
@@ -702,10 +799,19 @@ func (h *harness) snapshotChanges() error {
 
 func (h *harness) cliPhase() error {
 	// As a monitor, lead's `conch send --net command` is refused.
+	for _, key := range []string{"bravo-2", "whisper-a3-b2-2"} {
+		if err := h.post(h.row(key)); err != nil {
+			return err
+		}
+	}
 	if err := h.refused("lead (a monitor) runs conch send --net command", func() error {
 		out, err := h.cli.run("", "send", "--net", "command", channelName, "MSG-refused-cli-text")
 		if err == nil {
 			return fmt.Errorf("the CLI sent to a net on which lead only monitors (output: %s)", out)
+		}
+		// Refused by the server for that reason, not failed for another.
+		if !strings.Contains(out, "forbidden") {
+			return fmt.Errorf("conch send --net as a monitor failed, but not with the server's refusal (output: %s)", out)
 		}
 		return nil
 	}); err != nil {

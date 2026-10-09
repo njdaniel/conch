@@ -222,7 +222,7 @@ A message goes to the whole channel, to a **net** (a named subset of the channel
 This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and the `OP` and `J` variables from step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
 
 ```sh
-umask 077; mkdir -p /tmp/squads-tokens
+umask 077; T=$(mktemp -d)        # a private directory for the tokens; removed at the end
 
 curl -s -X POST localhost:8080/v0/channels -H "$OP" -H "$J" -d '{"name":"squads"}'
 curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"lead"}'
@@ -232,14 +232,14 @@ done
 
 # a credential (kept in a private file, never printed) and channel membership for each of the nine
 for id in 2 3 4 5 6 7 8 9 10; do
-  curl -s -X POST localhost:8080/v1/principals/$id/credentials -H "$OP" -H "$J" -d '{"label":"squads"}' \
-    | sed 's/.*"token":"\([^"]*\)".*/\1/' > /tmp/squads-tokens/$id.token
-  curl -s -o /dev/null -X PUT localhost:8080/v1/channels/squads/members/$id -H "$OP"
+  curl -fsS -X POST localhost:8080/v1/principals/$id/credentials -H "$OP" -H "$J" -d '{"label":"squads"}' \
+    | sed 's/.*"token":"\([^"]*\)".*/\1/' > "$T/$id.token"
+  curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/members/$id -H "$OP"
 done
 
 # agents are deny-by-default: read the channel, and speak on a net they belong to
 for id in 3 4 5 6 7 8 9 10; do
-  curl -s -o /dev/null -X PUT localhost:8080/v1/principals/$id/manifest -H "$OP" -H "$J" -d '{
+  curl -fsS -o /dev/null -X PUT localhost:8080/v1/principals/$id/manifest -H "$OP" -H "$J" -d '{
       "display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
       "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}'
 done
@@ -249,9 +249,9 @@ The nets are created empty; members are added one at a time. Net management is a
 
 ```sh
 for net in alpha bravo command; do
-  curl -s -o /dev/null -X POST localhost:8080/v1/channels/squads/nets -H "$OP" -H "$J" -d "{\"name\":\"$net\"}"
+  curl -fsS -o /dev/null -X POST localhost:8080/v1/channels/squads/nets -H "$OP" -H "$J" -d "{\"name\":\"$net\"}"
 done
-net() { curl -s -o /dev/null -X PUT localhost:8080/v1/channels/squads/nets/$1/members/$2 -H "$OP" -H "$J" -d "{\"role\":\"$3\"}"; }
+net() { curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/nets/$1/members/$2 -H "$OP" -H "$J" -d "{\"role\":\"$3\"}"; }
 for id in 3 4 5 6;  do net alpha   $id member; done
 for id in 7 8 9 10; do net bravo   $id member; done
 net command 3 member; net command 7 member     # the two squad leads, a1 and b1
@@ -262,8 +262,9 @@ curl -s localhost:8080/v1/channels/squads/nets -H "$OP"   # the nets, with their
 Now speak. The human uses the CLI, signed in with her token as in step 4:
 
 ```sh
-bin/conch login --server http://127.0.0.1:8080 < /tmp/squads-tokens/2.token
+bin/conch login --server http://127.0.0.1:8080 < "$T/2.token"
 bin/conch tail squads &                                   # scoped messages carry [net:command] or [whisper:...] markers
+sleep 1                                                   # tail shows what arrives after it has connected, not what came before
 bin/conch send --to 3 squads "a word before you brief the squad"    # a whisper to a1
 ```
 
@@ -273,7 +274,7 @@ An agent speaks on a net over MCP by sending the net's id as the `audience` (her
 curl -s -X POST localhost:8080/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H "Authorization: Bearer $(cat /tmp/squads-tokens/3.token)" \
+  -H "Authorization: Bearer $(cat "$T/3.token")" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
         "name":"post_message","arguments":{"channel":"squads","body":"alpha: hold position",
         "audience":{"kind":"net","net_id":1}}}}'
@@ -283,7 +284,9 @@ Transmitting on a net needs the `post_net` grant in the agent's manifest, whispe
 
 **Scoped messages are discretion, not secrecy.** There is no end-to-end encryption: the server controls who *receives* a message, not what a recipient repeats, and the operator of the instance holds the database. Every scoped message, whisper or net, is written to the audit log with its audience and the principals it reached (never its text), and `conch send --to` says so each time.
 
-The whole layout is also a test. This builds it with real binaries, posts into every audience, and asserts the exact set of message ids each participant sees over every surface it uses (MCP, REST v1 and v2, WebSocket v1 and v2, `conch tail`), the refusals, the audit log, and that nothing scoped leaks onto the v1 wire:
+When you are done, `rm -rf "$T"` removes the token files.
+
+The whole layout is also a test. This builds it with real binaries, posts into every audience, and asserts the exact set of message ids each participant sees over every surface there is (MCP `read_channel`; the REST v2, v1 and v0 lists; the v2, v1 and v0 WebSockets; `conch tail`), that every scoped message read back still carries its audience, the net list each participant is shown, the refusals, the audit log, and that nothing scoped reaches the v1 or v0 wire:
 
 ```sh
 go run ./e2e/nets

@@ -25,8 +25,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -35,6 +37,16 @@ import (
 
 func main() {
 	h := &harness{}
+	// An interrupted run still removes what it made: the server process and
+	// the temporary directories, one of which holds a signed-in CLI config.
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-interrupted
+		h.cleanup()
+		fmt.Fprintln(os.Stderr, "nets-check: interrupted")
+		os.Exit(130)
+	}()
 	if err := run(h); err != nil {
 		fmt.Fprintln(os.Stderr, "nets-check: FAIL:", h.redact(err.Error()))
 		os.Exit(1)
@@ -43,21 +55,40 @@ func main() {
 }
 
 func run(h *harness) error {
+	defer h.cleanup()
 	bin, err := buildBinaries()
 	if err != nil {
 		return fmt.Errorf("build binaries: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(bin.dir) }()
+	h.onCleanup(func() { _ = os.RemoveAll(bin.dir) })
 	h.bin = bin
 
 	proc, err := startConchd(h, bin)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = proc.Stop() }()
+	h.onCleanup(func() { _ = proc.Stop() })
 	h.proc = proc
 
 	return scenario(h)
+}
+
+// onCleanup registers something to undo when the run ends, however it ends.
+func (h *harness) onCleanup(fn func()) {
+	h.cleanupMu.Lock()
+	defer h.cleanupMu.Unlock()
+	h.cleanups = append(h.cleanups, fn)
+}
+
+// cleanup undoes everything registered, last first, once.
+func (h *harness) cleanup() {
+	h.cleanupMu.Lock()
+	fns := h.cleanups
+	h.cleanups = nil
+	h.cleanupMu.Unlock()
+	for i := len(fns) - 1; i >= 0; i-- {
+		fns[i]()
+	}
 }
 
 // step logs a passed step.
@@ -254,7 +285,7 @@ func (a api) do(method, path string, body any) (int, []byte, error) {
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -270,17 +301,45 @@ func (a api) do(method, path string, body any) (int, []byte, error) {
 // out when out is non-nil. A failure quotes the status and the error code
 // only, never the body: a body can hold message text.
 func (a api) call(method, path string, body, out any) error {
+	_, err := a.callRaw(method, path, body, out)
+	return err
+}
+
+// callRaw is call, and also returns the response body as it arrived, for a
+// caller that checks the wire itself.
+func (a api) callRaw(method, path string, body, out any) ([]byte, error) {
 	status, respBody, err := a.do(method, path, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("%s %s: status %d (%s)", method, path, status, errorCode(respBody))
+		return nil, fmt.Errorf("%s %s: status %d (%s)", method, path, status, errorCode(respBody))
 	}
 	if out == nil {
-		return nil
+		return respBody, nil
 	}
-	return json.Unmarshal(respBody, out)
+	if err := decodeStrict(respBody, out); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	return respBody, nil
+}
+
+// httpClient bounds every request, so a server that stops answering fails the
+// run instead of hanging it.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+// decodeStrict decodes a response or a frame and refuses a field the schema
+// type does not have. The wire shapes are closed: a server that began sending,
+// say, a message's resolved recipients in an extra field would be telling
+// readers something the schema does not let it say, and a lenient decoder
+// would never notice. The error names the field, never the content.
+func decodeStrict(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
+		return fmt.Errorf("the answer does not fit %T: %w", out, err)
+	}
+	return nil
 }
 
 // errorCode is the schema.Error code of a response body, or a marker.
