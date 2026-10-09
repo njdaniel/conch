@@ -57,7 +57,7 @@ func TestHookIngestPostsBroadcastsAndAudits(t *testing.T) {
 			if _, err := srv.store.CreateHook(context.Background(), token, channel.ID, principal.ID); err != nil {
 				t.Fatalf("CreateHook: %v", err)
 			}
-			sub := srv.hub.SubscribeV1(channel.ID, 1)
+			sub := srv.hub.SubscribeV1(channel.ID, 0, 1)
 			defer sub.Cancel()
 
 			req := httptest.NewRequest(http.MethodPost, "/v1/hooks/"+token, strings.NewReader(tt.body))

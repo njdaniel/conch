@@ -24,6 +24,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessages)),
 		rt("POST /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV1)),
 		rt("GET /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessagesV1)),
+		// Members of the channel and operators (checked in the handler); anyone
+		// else gets the channel-not-found response.
+		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
+		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handlePutChannelMember)),
+		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handleDeleteChannelMember)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),
