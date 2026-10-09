@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -464,5 +466,225 @@ func TestUnauthenticatedHintKeepsServerPath(t *testing.T) {
 	want := "not logged in to " + server.URL + "/Conch-A: run 'conch login'"
 	if err == nil || err.Error() != want {
 		t.Errorf("err = %v, want %q", err, want)
+	}
+}
+
+// recordedRequest is what the fake server saw of one call.
+type recordedRequest struct {
+	method, path, rawQuery, auth, body string
+}
+
+func recordingServer(t *testing.T, status int, response any) (*httptest.Server, *recordedRequest) {
+	t.Helper()
+	got := &recordedRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		*got = recordedRequest{r.Method, r.URL.EscapedPath(), r.URL.RawQuery, r.Header.Get("Authorization"), string(raw)}
+		w.WriteHeader(status)
+		if response != nil {
+			_ = json.NewEncoder(w).Encode(response)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, got
+}
+
+func TestClientV2AndNetsMethods(t *testing.T) {
+	ts := schema.NewTimestamp(time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC))
+	scoped := schema.MessageV2{
+		Schema: schema.MessageSchemaV2, ID: 5, ChannelID: 2, AuthorID: 7, CreatedAt: ts, Body: "psst",
+		Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{3, 7}},
+	}
+	netV1 := schema.NetV1{ID: 4, ChannelID: 2, Name: "alpha", CreatedAt: ts,
+		Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMember}}}
+	tests := []struct {
+		name       string
+		status     int
+		response   any
+		call       func(*Client) (any, error)
+		wantMethod string
+		wantPath   string
+		wantQuery  string
+		wantBody   string
+		want       any
+	}{
+		{
+			name: "post channel-wide", status: http.StatusCreated,
+			response: schema.PostMessageResponseV2{Message: schema.MessageV2{Schema: schema.MessageSchemaV2, ID: 1, Body: "hi"}},
+			call: func(c *Client) (any, error) {
+				return c.PostMessageV2(context.Background(), "general", 7, "hi", nil)
+			},
+			wantMethod: http.MethodPost, wantPath: "/v2/channels/general/messages",
+			wantBody: `{"author_id":7,"body":"hi"}`,
+			want:     schema.MessageV2{Schema: schema.MessageSchemaV2, ID: 1, Body: "hi"},
+		},
+		{
+			name: "post to a net", status: http.StatusCreated,
+			response: schema.PostMessageResponseV2{Message: scoped},
+			call: func(c *Client) (any, error) {
+				return c.PostMessageV2(context.Background(), "general", 0, "hi", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4})
+			},
+			wantMethod: http.MethodPost, wantPath: "/v2/channels/general/messages",
+			wantBody: `{"body":"hi","audience":{"kind":"net","net_id":4}}`,
+			want:     scoped,
+		},
+		{
+			name: "post whisper", status: http.StatusCreated,
+			response: schema.PostMessageResponseV2{Message: scoped},
+			call: func(c *Client) (any, error) {
+				return c.PostMessageV2(context.Background(), "general", 0, "hi", &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{3}})
+			},
+			wantMethod: http.MethodPost, wantPath: "/v2/channels/general/messages",
+			wantBody: `{"body":"hi","audience":{"kind":"principals","principal_ids":[3]}}`,
+			want:     scoped,
+		},
+		{
+			name: "list messages", status: http.StatusOK,
+			response: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+			call: func(c *Client) (any, error) {
+				return c.ListMessagesV2(context.Background(), "general", 3, 50)
+			},
+			wantMethod: http.MethodGet, wantPath: "/v2/channels/general/messages", wantQuery: "after=3&limit=50",
+			want: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+		},
+		{
+			name: "list nets", status: http.StatusOK,
+			response:   schema.ListNetsResponseV1{Nets: []schema.NetV1{netV1}},
+			call:       func(c *Client) (any, error) { return c.ListNets(context.Background(), "general") },
+			wantMethod: http.MethodGet, wantPath: "/v1/channels/general/nets",
+			want: schema.ListNetsResponseV1{Nets: []schema.NetV1{netV1}},
+		},
+		{
+			name: "create net", status: http.StatusCreated,
+			response:   schema.CreateNetResponseV1{Net: netV1},
+			call:       func(c *Client) (any, error) { return c.CreateNet(context.Background(), "general", "alpha") },
+			wantMethod: http.MethodPost, wantPath: "/v1/channels/general/nets",
+			wantBody: `{"name":"alpha"}`, want: netV1,
+		},
+		{
+			name: "archive net", status: http.StatusNoContent,
+			call:       func(c *Client) (any, error) { return nil, c.ArchiveNet(context.Background(), "general", "alpha") },
+			wantMethod: http.MethodDelete, wantPath: "/v1/channels/general/nets/alpha",
+		},
+		{
+			name: "put member", status: http.StatusNoContent,
+			call: func(c *Client) (any, error) {
+				return nil, c.PutNetMember(context.Background(), "general", "alpha", 9, schema.NetRoleMonitor)
+			},
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/general/nets/alpha/members/9",
+			wantBody: `{"role":"monitor"}`,
+		},
+		{
+			name: "remove member", status: http.StatusNoContent,
+			call: func(c *Client) (any, error) {
+				return nil, c.RemoveNetMember(context.Background(), "general", "alpha", 9)
+			},
+			wantMethod: http.MethodDelete, wantPath: "/v1/channels/general/nets/alpha/members/9",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, got := recordingServer(t, tt.status, tt.response)
+			client, err := NewClient(server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := tt.call(client.WithToken("tok"))
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			if got.method != tt.wantMethod || got.path != tt.wantPath || got.rawQuery != tt.wantQuery {
+				t.Errorf("request = %s %s?%s, want %s %s?%s", got.method, got.path, got.rawQuery, tt.wantMethod, tt.wantPath, tt.wantQuery)
+			}
+			if got.auth != "Bearer tok" {
+				t.Errorf("Authorization = %q", got.auth)
+			}
+			if tt.wantBody == "" && got.body != "" {
+				t.Errorf("body = %q, want none", got.body)
+			}
+			if tt.wantBody != "" && strings.TrimSpace(got.body) != tt.wantBody {
+				t.Errorf("body = %s, want %s", got.body, tt.wantBody)
+			}
+			if !reflect.DeepEqual(result, tt.want) {
+				t.Errorf("result = %+v, want %+v", result, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientV2AndNetsErrorMapping(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"post":    func(c *Client) error { _, err := c.PostMessageV2(context.Background(), "g", 1, "x", nil); return err },
+		"list":    func(c *Client) error { _, err := c.ListMessagesV2(context.Background(), "g", 0, 10); return err },
+		"nets":    func(c *Client) error { _, err := c.ListNets(context.Background(), "g"); return err },
+		"create":  func(c *Client) error { _, err := c.CreateNet(context.Background(), "g", "a"); return err },
+		"archive": func(c *Client) error { return c.ArchiveNet(context.Background(), "g", "a") },
+		"put":     func(c *Client) error { return c.PutNetMember(context.Background(), "g", "a", 1, schema.NetRoleMember) },
+		"remove":  func(c *Client) error { return c.RemoveNetMember(context.Background(), "g", "a", 1) },
+		"subscribe": func(c *Client) error {
+			return c.SubscribeV2(context.Background(), "g", func(schema.MessageV2) error { return nil })
+		},
+	}
+	for name, call := range calls {
+		for _, code := range []string{"net_not_found", "forbidden", "invalid_audience"} {
+			t.Run(name+"/"+code, func(t *testing.T) {
+				server, _ := recordingServer(t, http.StatusForbidden, schema.Error{Code: code, Message: "nope"})
+				client, err := NewClient(server.URL, server.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = call(client)
+				if err == nil || !strings.Contains(err.Error(), code) || !strings.Contains(err.Error(), "nope") {
+					t.Fatalf("err = %v, want server code %q and message", err, code)
+				}
+			})
+		}
+	}
+	t.Run("401 is the login hint", func(t *testing.T) {
+		server, _ := recordingServer(t, http.StatusUnauthorized, schema.Error{Code: "unauthenticated"})
+		client, _ := NewClient(server.URL, server.Client())
+		if _, err := client.ListNets(context.Background(), "g"); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("err = %v, want ErrUnauthenticated", err)
+		}
+	})
+}
+
+func TestClientSubscribeV2ReceivesScopedMessageWithBearer(t *testing.T) {
+	want := schema.MessageV2{
+		Schema: schema.MessageSchemaV2, ID: 4, ChannelID: 2, AuthorID: 7, Body: "psst",
+		CreatedAt: schema.NewTimestamp(time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)),
+		Audience:  &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/ws" || r.URL.Query().Get("channel") != "general" {
+			t.Errorf("subscribe URL = %s", r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q", got)
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		_ = wsjson.Write(r.Context(), conn, want)
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got schema.MessageV2
+	errStop := errors.New("stop")
+	err = client.WithToken("tok").SubscribeV2(context.Background(), "general", func(m schema.MessageV2) error {
+		got = m
+		return errStop
+	})
+	if !errors.Is(err, errStop) {
+		t.Fatalf("err = %v, want stop", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("message = %+v, want %+v", got, want)
 	}
 }

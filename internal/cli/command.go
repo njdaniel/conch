@@ -37,6 +37,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runSend(ctx, args[1:], stderr)
 	case "tail":
 		return runTail(ctx, args[1:], stdout, stderr)
+	case "nets":
+		return runNets(ctx, args[1:], stdout, stderr)
 	case "approvals":
 		return runApprovals(ctx, args[1:], stdout, stderr)
 	case "approve":
@@ -66,8 +68,13 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `conch — the Conch command-line client
 
 Usage:
-  conch send [--server <url>] [--author <id>] <channel> <text>
+  conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...]] <channel> <text>
   conch tail [--server <url>] <channel>
+  conch nets list [--server <url>] <channel>
+  conch nets create [--server <url>] <channel> <name>
+  conch nets archive [--server <url>] <channel> <name>
+  conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
+  conch nets remove [--server <url>] <channel> <name> <principal-id>
   conch approvals list [--server <url>]
   conch approve [flags] <id>
   conch reject [flags] <id>
@@ -75,6 +82,11 @@ Usage:
   conch logout [--server <url>]
   conch whoami [--server <url>]
   conch version
+
+Scope:
+  send with no flag posts to the whole channel. --net posts to the named net;
+  --to whispers to the listed principals (recorded in the audit log). Giving
+  both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>].
 
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)
@@ -84,16 +96,40 @@ Environment:
 `)
 }
 
+// whisperNotice is printed on stderr after a whisper is sent: a whisper is
+// discretion, not secrecy, and users should not mistake it for the latter.
+const whisperNotice = "note: whispers are recorded in the audit log"
+
 func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	fs := newFlagSet("send", stderr)
 	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	author := fs.String("author", os.Getenv("CONCH_AUTHOR"), "message author ID")
+	netName := fs.String("net", "", "send to the named net instead of the whole channel")
+	to := fs.String("to", "", "whisper to these principal IDs (comma-separated) instead of the whole channel")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("cli: send: %w", err)
 	}
 	if fs.NArg() != 2 {
 		return errors.New("cli: send: expected <channel> <text>")
 	}
+	// Scope mistakes are the classic failure of this feature, so every flag
+	// problem is rejected before the first request leaves the machine.
+	var whisper []int64
+	switch {
+	case *netName != "" && *to != "":
+		return errors.New("cli: send: --net and --to cannot be used together")
+	case *netName != "":
+		if err := schema.ValidateNetName(*netName); err != nil {
+			return fmt.Errorf("cli: send: --net: %w", err)
+		}
+	case *to != "":
+		ids, err := parsePrincipalIDs(*to)
+		if err != nil {
+			return fmt.Errorf("cli: send: --to: %w", err)
+		}
+		whisper = ids
+	}
+	channel := fs.Arg(0)
 	client, hasCredential, err := NewAuthClient(*server)
 	if err != nil {
 		return err
@@ -102,8 +138,87 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = client.Send(ctx, fs.Arg(0), authorID, fs.Arg(1))
-	return err
+	var audience *schema.Audience
+	switch {
+	case *netName != "":
+		netID, err := lookupNetID(ctx, client, channel, *netName)
+		if err != nil {
+			return err
+		}
+		audience = &schema.Audience{Kind: schema.AudienceKindNet, NetID: netID}
+	case whisper != nil:
+		audience = &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: whisper}
+	}
+	if _, err := client.PostMessageV2(ctx, channel, authorID, fs.Arg(1), audience); err != nil {
+		return err
+	}
+	if whisper != nil {
+		_, _ = fmt.Fprintln(stderr, whisperNotice)
+	}
+	return nil
+}
+
+// parsePrincipalIDs reads a comma-separated list of positive, distinct
+// principal ids.
+func parsePrincipalIDs(list string) ([]int64, error) {
+	var ids []int64
+	seen := make(map[int64]bool)
+	for _, field := range strings.Split(list, ",") {
+		id, err := strconv.ParseInt(field, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("%q is not a positive principal id", field)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("principal id %d is listed twice", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	audience := schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}
+	if err := audience.Validate(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// lookupNetID resolves a net name to its id from the caller's net list.
+func lookupNetID(ctx context.Context, client *Client, channel, name string) (int64, error) {
+	nets, err := client.ListNets(ctx, channel)
+	if err != nil {
+		return 0, err
+	}
+	for _, n := range nets.Nets {
+		if n.Name == name {
+			return n.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("cli: send: no net %q in channel %q", name, channel)
+}
+
+// scopeMarker is the prefix that makes a message's audience visible on every
+// output line; a channel-wide message has none. Net names are resolved from
+// names where the caller could, and fall back to the net id.
+func scopeMarker(audience *schema.Audience, names map[int64]string) string {
+	if audience == nil {
+		return ""
+	}
+	switch audience.Kind {
+	case schema.AudienceKindNet:
+		if name, ok := names[audience.NetID]; ok {
+			return "[net:" + name + "] "
+		}
+		return "[net:" + strconv.FormatInt(audience.NetID, 10) + "] "
+	case schema.AudienceKindPrincipals:
+		ids := make([]string, len(audience.PrincipalIDs))
+		for i, id := range audience.PrincipalIDs {
+			ids[i] = strconv.FormatInt(id, 10)
+		}
+		return "[whisper:" + strings.Join(ids, ",") + "] "
+	default:
+		// An audience kind this client does not know is still scoped; never
+		// print it as if it were channel-wide.
+		return "[" + string(audience.Kind) + "] "
+	}
 }
 
 func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -119,9 +234,21 @@ func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	err = client.Tail(ctx, fs.Arg(0), func(message schema.MessageV0) error {
+	// Net names are resolved once; a net the caller cannot list, or one
+	// created after the tail started, is shown by id.
+	names := make(map[int64]string)
+	nets, err := client.ListNets(ctx, fs.Arg(0))
+	if errors.Is(err, ErrUnauthenticated) {
+		return err
+	}
+	if err == nil {
+		for _, n := range nets.Nets {
+			names[n.ID] = n.Name
+		}
+	}
+	err = client.SubscribeV2(ctx, fs.Arg(0), func(message schema.MessageV2) error {
 		body := strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(message.Body)
-		_, writeErr := fmt.Fprintf(stdout, "%s %d %s\n", message.CreatedAt.Format(time.RFC3339Nano), message.AuthorID, body)
+		_, writeErr := fmt.Fprintf(stdout, "%s %d %s%s\n", message.CreatedAt.Time().Format(time.RFC3339Nano), message.AuthorID, scopeMarker(message.Audience, names), body)
 		return writeErr
 	})
 	if websocket.CloseStatus(err) == websocket.StatusGoingAway {
@@ -133,6 +260,119 @@ func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return nil
 	}
 	return err
+}
+
+func runNets(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("cli: nets requires a subcommand (list, create, archive, add, remove)")
+	}
+	switch args[0] {
+	case "list", "create", "archive", "add", "remove":
+		return runNetsSubcommand(ctx, args[0], args[1:], stdout, stderr)
+	default:
+		return fmt.Errorf("cli: unknown nets subcommand %q", args[0])
+	}
+}
+
+// netsArity names the positional arguments of each nets subcommand.
+var netsArity = map[string][]string{
+	"list":    {"channel"},
+	"create":  {"channel", "name"},
+	"archive": {"channel", "name"},
+	"add":     {"channel", "name", "principal-id"},
+	"remove":  {"channel", "name", "principal-id"},
+}
+
+func runNetsSubcommand(ctx context.Context, verb string, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("nets "+verb, stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	var monitor *bool
+	if verb == "add" {
+		monitor = fs.Bool("monitor", false, "add as a monitor (listens only) instead of a member")
+	}
+	// Flags may follow the positionals (`nets add c n 5 --monitor`), which the
+	// flag package alone does not allow.
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: nets %s: %w", verb, err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	want := netsArity[verb]
+	if len(positional) != len(want) {
+		return fmt.Errorf("cli: nets %s: expected <%s>", verb, strings.Join(want, "> <"))
+	}
+	channel := positional[0]
+	var principalID int64
+	if len(want) == 3 {
+		id, err := strconv.ParseInt(positional[2], 10, 64)
+		if err != nil || id <= 0 {
+			return fmt.Errorf("cli: nets %s: principal-id must be a positive integer", verb)
+		}
+		principalID = id
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	switch verb {
+	case "list":
+		nets, err := client.ListNets(ctx, channel)
+		if err != nil {
+			return err
+		}
+		for _, n := range nets.Nets {
+			_, _ = fmt.Fprintln(stdout, formatNet(n))
+		}
+		return nil
+	case "create":
+		n, err := client.CreateNet(ctx, channel, positional[1])
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "created net %s (id %d) in %s\n", n.Name, n.ID, channel)
+		return err
+	case "archive":
+		if err := client.ArchiveNet(ctx, channel, positional[1]); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "archived net %s in %s\n", positional[1], channel)
+		return err
+	case "add":
+		role := schema.NetRoleMember
+		if *monitor {
+			role = schema.NetRoleMonitor
+		}
+		if err := client.PutNetMember(ctx, channel, positional[1], principalID, role); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "added %d to net %s as %s\n", principalID, positional[1], role)
+		return err
+	default: // remove
+		if err := client.RemoveNetMember(ctx, channel, positional[1], principalID); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "removed %d from net %s\n", principalID, positional[1])
+		return err
+	}
+}
+
+// formatNet renders a net as `<name>  <id>:<role> ...`, members in the order
+// the server sent them.
+func formatNet(n schema.NetV1) string {
+	if len(n.Members) == 0 {
+		return n.Name + "  (empty)"
+	}
+	members := make([]string, len(n.Members))
+	for i, m := range n.Members {
+		members[i] = strconv.FormatInt(m.PrincipalID, 10) + ":" + string(m.Role)
+	}
+	return n.Name + "  " + strings.Join(members, " ")
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {

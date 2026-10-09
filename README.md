@@ -123,6 +123,22 @@ bin/conch reject  --reason "not yet" 1
 bin/conch logout
 ```
 
+#### Nets and whispers
+
+A message goes to the whole channel, to a net (a named subset of the channel's members), or to a list of principals (a whisper). With no flag `send` posts channel-wide, so name the scope you mean:
+
+```sh
+bin/conch send --net alpha ops "alpha team: hold the deploy"   # to the net named alpha
+bin/conch send --to 3,5 ops "quick question"                   # whisper to principals 3 and 5
+bin/conch nets list ops                                        # name  id:role id:role ...
+bin/conch nets create ops alpha
+bin/conch nets add ops alpha 5            # add --monitor to listen only
+bin/conch nets remove ops alpha 5
+bin/conch nets archive ops alpha
+```
+
+`--net` and `--to` cannot be combined. `tail` marks scoped messages: `[net:alpha]` for a net, `[whisper:3,5,7]` for a whisper (the ids listed are everyone who can see it); channel-wide messages have no marker. Whispers are discretion, not secrecy: they are recorded in the audit log, and `send --to` says so on stderr. Net management is an operator action; anyone else gets the server's refusal.
+
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
 - `CONCH_CHANNELS` — optional comma-separated override for which channels the TUI opens.
