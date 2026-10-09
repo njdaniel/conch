@@ -118,7 +118,13 @@ func (m *Manager) Create(ctx context.Context, params store.ApprovalParams) (stor
 	if err != nil {
 		return store.Approval{}, err
 	}
-	m.notify(ctx, "created", a, func() error { return m.notifier.ApprovalCreated(ctx, a) })
+	// The approval exists now. What follows from that must not depend on the
+	// caller still being there (issue #155): a client that hangs up cancels
+	// ctx, and on ctx the notification would not be sent and its audit row
+	// would not be written, leaving an approval nobody was told about and a
+	// log that does not say so. The notifier's own timeout bounds the call.
+	after := context.WithoutCancel(ctx)
+	m.notify(after, "created", a, func() error { return m.notifier.ApprovalCreated(after, a) })
 	m.schedule(a.ID, time.Until(a.Deadline), m.onDeadline)
 	return a, nil
 }
@@ -133,8 +139,11 @@ func (m *Manager) Decide(ctx context.Context, approvalID, principalID int64, opt
 	}
 	if r != nil {
 		m.cancel(approvalID)
-		if a, err := m.store.ApprovalByID(ctx, approvalID); err == nil {
-			m.notify(ctx, "resolved", a, func() error { return m.notifier.ApprovalResolved(ctx, a, *r) })
+		// The decision is committed: as in Create, the notification and its
+		// audit row no longer depend on the caller (issue #155).
+		after := context.WithoutCancel(ctx)
+		if a, err := m.store.ApprovalByID(after, approvalID); err == nil {
+			m.notify(after, "resolved", a, func() error { return m.notifier.ApprovalResolved(after, a, *r) })
 		} else {
 			slog.ErrorContext(ctx, "approvals: load resolved approval for notification failed", "approval", approvalID, "error", err)
 		}
