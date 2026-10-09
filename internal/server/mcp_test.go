@@ -342,7 +342,7 @@ func newMCPAuthFixture(t *testing.T, cfg Config) mcpAuthFixture {
 
 func (f mcpAuthFixture) issue(t *testing.T, principalID int64, expiresAt *time.Time) (schema.CredentialV1, string) {
 	t.Helper()
-	cred, token, err := f.srv.store.CreateCredential(context.Background(), principalID, "test", expiresAt)
+	cred, token, err := f.srv.store.CreateCredential(context.Background(), "system", principalID, "test", expiresAt)
 	if err != nil {
 		t.Fatalf("CreateCredential: %v", err)
 	}
@@ -408,11 +408,11 @@ func TestMCPRejectsInvalidCredentialsIdentically(t *testing.T) {
 	f.srv.cfg.MCPBearerTokens = map[string]int64{staticShaped: f.agent.ID}
 
 	revokedCred, revokedToken := f.issue(t, f.agent.ID, nil)
-	if err := f.srv.store.RevokeCredential(context.Background(), revokedCred.ID); err != nil {
+	if err := f.srv.store.RevokeCredential(context.Background(), "system", revokedCred.ID); err != nil {
 		t.Fatal(err)
 	}
 	rotatedCred, rotatedOld := f.issue(t, f.agent.ID, nil)
-	if _, _, err := f.srv.store.RotateCredential(context.Background(), rotatedCred.ID); err != nil {
+	if _, _, err := f.srv.store.RotateCredential(context.Background(), "system", rotatedCred.ID); err != nil {
 		t.Fatal(err)
 	}
 	_, humanToken := f.issue(t, f.human.ID, nil)
@@ -479,7 +479,7 @@ func TestMCPRotationTakesEffectWithoutRestart(t *testing.T) {
 	if rec := f.post(t, "Bearer "+oldToken); rec.Code != http.StatusOK {
 		t.Fatalf("before rotation: status = %d", rec.Code)
 	}
-	_, newToken, err := f.srv.store.RotateCredential(context.Background(), cred.ID)
+	_, newToken, err := f.srv.store.RotateCredential(context.Background(), "system", cred.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
