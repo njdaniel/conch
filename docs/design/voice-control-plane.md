@@ -1,6 +1,6 @@
 # Design: voice control plane
 
-- **Status:** Draft for V3 implementation (governing decision: [ADR-004](../adr/ADR-004-voice-via-livekit.md), Accepted).
+- **Status:** Adopted for V3 implementation, 2026-10-09 (governing decision: [ADR-004](../adr/ADR-004-voice-via-livekit.md), Accepted). §10 lists LiveKit behaviours still to be verified by #125.
 - **Touches:** [ADR-002](../adr/ADR-002-single-binary-sqlite.md) (optional processes degrade gracefully), [ADR-003](../adr/ADR-003-multi-human-access.md) (authenticated humans, channel membership), [ADR-005](../adr/ADR-005-nets-and-whispers.md) (audiences), [ADR-006](../adr/ADR-006-rust-voice-client.md) (the client).
 - **Owner:** protocol-designer (schemas), server-engineer (control plane)
 - **Issues:** epic #122, this note #123
@@ -126,7 +126,7 @@ A snapshot is the whole state, not a delta, so a client that misses one loses no
 
 The actor is the principal. No audio and no token is ever recorded.
 
-**Resolution limit, stated plainly:** these events are observed by polling, so their times are accurate to one interval, and a transmission shorter than the interval between two passes can be missed entirely. ADR-004 says audit "records join, leave, and transmit start/stop". This is a weaker guarantee than those words read strictly, and it is Nick's call whether it meets them. See §9, question 1.
+**Resolution limit, stated plainly:** these events are observed by polling, so their times are accurate to one interval, and a transmission shorter than the interval between two passes can be missed entirely. ADR-004 says audit "records join, leave, and transmit start/stop". Polling alone is a weaker guarantee than those words read strictly, so it is not the whole answer: from V4 the client also reports each press, and the poller checks the reports (§9, decision 1). Events the poller writes carry `source=observed` so that reported ones can be told apart.
 
 ## 8. Wire shapes
 
@@ -134,11 +134,13 @@ Canonical types land in `pkg/schema` through the `schema-change` skill: the sess
 
 API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapshot. Joining is `conch-voice`'s job in V4, using the same session endpoint.
 
-## 9. Open questions for Nick
+## 9. Decisions on the open questions
 
-1. **Does half-second audit resolution for transmit events satisfy ADR-004?** A press shorter than the poll interval can go unrecorded. Exact start and stop would need either the client to report each press, which a modified client can skip, or `conchd` to grant and revoke publishing per press, which adds a round trip to every push-to-talk and clips speech. The proposal is to ship polling, with the limit documented. If Nick reads the ADR as requiring every transmission, #127 must not start until one of the alternatives is chosen.
-2. **Is the one-second rejoin window in §5 acceptable**, or should a membership change rotate the room?
-3. **One connection per principal per room** means a second device displaces the first. Acceptable for V3?
+Nick delegated these to the principal engineer on 2026-10-09 ("use your best judgment"). They are recorded here with their reasons, and he can reopen any of them.
+
+1. **Transmit audit: polling in V3, plus client reports from V4.** Polling alone can miss a press shorter than the interval, which is weaker than ADR-004's "audit records transmit start/stop" read strictly. V3 has no real client, only a headless test participant, so polling is all it can use and all it needs. From V4, `conch-voice` reports each press and release to `conchd`, which audits them with exact times. The poller keeps running as the check on the client: a transmission it observes with no matching report is audited as `voice_transmit_unreported`. The result is exact records for the official client, and detection at poll resolution of anything a modified client leaves out. What remains unrecorded is a burst shorter than the interval from a client that was altered not to report it. Granting and revoking publishing on every press was rejected: it would make `conchd` exact against any client, but it adds a round trip to every push-to-talk and clips speech. The report endpoint is designed with V4.
+2. **The rejoin window stays.** A removed principal holding a token under a minute old can rejoin for at most about a second before the poller removes them, and that removal is audited. Rotating the room on every membership change would close the window by disconnecting everyone in the room each time. ADR-005 describes scoped speech as discretion, not secrecy; a logged one-second window is consistent with that, and a reconnect for the whole room is not worth it.
+3. **One connection per principal per room.** A second device displaces the first. Presence stays unambiguous and nobody is listed twice. Listening on two devices at once can be added later with a per-device identity suffix without changing anything stored.
 
 ## 10. Assumptions not yet verified
 
