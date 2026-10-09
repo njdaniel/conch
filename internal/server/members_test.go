@@ -140,13 +140,19 @@ func TestChannelContentLeak(t *testing.T) {
 		{"v1 websocket", "GET", "/v1/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// Listing members is allowed to members and to operators only.
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
+		// Listing nets: members see their own nets, operators all of them.
+		{"net list", "GET", "/v1/channels/%s/nets", "", false, [4]int{ok, notFound, notFound, ok}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
 	// A new channel route added without a decision fails this test.
 	notContent := map[string]string{
-		"PUT /v1/channels/{channel}/members/{principal_id}":    "operator-only membership write; covered by the role matrix",
-		"DELETE /v1/channels/{channel}/members/{principal_id}": "operator-only membership write; covered by the role matrix",
+		"PUT /v1/channels/{channel}/members/{principal_id}":               "operator-only membership write; covered by the role matrix",
+		"DELETE /v1/channels/{channel}/members/{principal_id}":            "operator-only membership write; covered by the role matrix",
+		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
 	}
 	covered := make(map[string]bool, len(rows))
 	for _, row := range rows {

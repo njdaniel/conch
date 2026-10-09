@@ -29,6 +29,13 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
 		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handlePutChannelMember)),
 		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handleDeleteChannelMember)),
+		// Nets (issue #115). Management is operator-only; the list is open to
+		// authenticated callers and filtered to the nets they are on.
+		rt("POST /v1/channels/{channel}/nets", accessOperator, hf(s.handleCreateNet)),
+		rt("GET /v1/channels/{channel}/nets", accessAuthenticated, hf(s.handleListNets)),
+		rt("DELETE /v1/channels/{channel}/nets/{net}", accessOperator, hf(s.handleArchiveNet)),
+		rt("PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessOperator, hf(s.handlePutNetMember)),
+		rt("DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessOperator, hf(s.handleDeleteNetMember)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),
