@@ -6,6 +6,11 @@
 // program drives that loop against real conchd/conch binaries and asserts
 // every step, then reruns the approval half with ntfy unreachable to prove
 // graceful degradation. Nonzero exit on any assertion failure.
+//
+// The happy path authenticates the agent with a credential issued through
+// the REST API (issues #78, #97) and ends by revoking it and asserting the
+// next MCP call is refused. The degraded path keeps using the deprecated
+// static --mcp-token mapping, so both mechanisms stay covered end to end.
 package main
 
 import (
@@ -154,9 +159,13 @@ type conchdProc struct {
 	dataDir string
 }
 
-const mcpToken = "dogfood-token"
+// staticMCPToken is the deprecated --mcp-token mapping the degraded path uses.
+const staticMCPToken = "dogfood-token"
 
-func startConchd(bin binaries, ntfyServerURL string) (*conchdProc, error) {
+// startConchd starts a fresh conchd. With staticToken it maps staticMCPToken
+// to principal 1 through the deprecated --mcp-token flag; without it the
+// agent must authenticate with an issued credential.
+func startConchd(bin binaries, ntfyServerURL string, staticToken bool) (*conchdProc, error) {
 	dataDir, err := os.MkdirTemp("", "dogfood-data-")
 	if err != nil {
 		return nil, err
@@ -165,7 +174,10 @@ func startConchd(bin binaries, ntfyServerURL string) (*conchdProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"serve", "--data", dataDir, "--listen", addr, "--mcp-token", mcpToken + "=1"}
+	args := []string{"serve", "--data", dataDir, "--listen", addr}
+	if staticToken {
+		args = append(args, "--mcp-token", staticMCPToken+"=1")
+	}
 	if ntfyServerURL != "" {
 		args = append(args, "--ntfy-server", ntfyServerURL, "--ntfy-topic", "approvals", "--ntfy-urgent-topic", "approvals-urgent")
 	}
@@ -244,6 +256,37 @@ func createPrincipal(baseURL string, kind schema.PrincipalKind, name string) (in
 	return resp.Principal.ID, nil
 }
 
+// issueCredential creates a bearer credential for a principal through the
+// REST API and returns its id and the token (shown once).
+func issueCredential(baseURL string, principalID int64, label string) (int64, string, error) {
+	var resp schema.CreateCredentialResponseV1
+	url := fmt.Sprintf("%s/v1/principals/%d/credentials", baseURL, principalID)
+	if err := postJSON(url, schema.CreateCredentialRequestV1{Label: label}, &resp); err != nil {
+		return 0, "", err
+	}
+	if resp.Token == "" || resp.Credential.ID == 0 {
+		return 0, "", fmt.Errorf("create credential returned no token or id")
+	}
+	return resp.Credential.ID, resp.Token, nil
+}
+
+func revokeCredential(baseURL string, credentialID int64) error {
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/v1/credentials/%d", baseURL, credentialID), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE credential status %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
 func restListMessages(baseURL, channel string) (schema.ListMessagesResponseV1, error) {
 	var resp schema.ListMessagesResponseV1
 	r, err := http.Get(baseURL + "/v1/channels/" + channel + "/messages")
@@ -284,7 +327,7 @@ func happyPath(bin binaries) error {
 	ntfy := newFakeNtfy()
 	defer ntfy.Close()
 
-	proc, err := startConchd(bin, ntfy.srv.URL)
+	proc, err := startConchd(bin, ntfy.srv.URL, false)
 	if err != nil {
 		return err
 	}
@@ -303,9 +346,18 @@ func happyPath(bin binaries) error {
 		return fmt.Errorf("create human principal: %w", err)
 	}
 
-	client := mcpclient.New(proc.baseURL, mcpToken)
+	// Step 1: the agent authenticates with a credential issued through the
+	// REST API; no static token is configured on this conchd.
+	credentialID, agentToken, err := issueCredential(proc.baseURL, agentID, "dogfood")
+	if err != nil {
+		return fmt.Errorf("issue agent credential: %w", err)
+	}
+	if err := mcpclient.New(proc.baseURL, staticMCPToken).Initialize(context.Background(), "dogfood-check"); err == nil {
+		return fmt.Errorf("mcp accepted the static token although none is configured")
+	}
+	client := mcpclient.New(proc.baseURL, agentToken)
 	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
-		return fmt.Errorf("mcp initialize: %w", err)
+		return fmt.Errorf("mcp initialize with issued credential: %w", err)
 	}
 
 	// Step 2: post a typed message via MCP; verify via read_channel and REST
@@ -451,7 +503,21 @@ func happyPath(bin binaries) error {
 		return err
 	}
 
-	fmt.Println("happy path: OK (message parity, request/await/check, CLI approve, ntfy fired, audit chain in order)")
+	// Step 8: revoke the agent's credential; the very next MCP call is
+	// refused, with no restart.
+	if err := revokeCredential(proc.baseURL, credentialID); err != nil {
+		return fmt.Errorf("revoke agent credential: %w", err)
+	}
+	if _, err := client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": created.ID}); err == nil {
+		return fmt.Errorf("mcp call succeeded with a revoked credential")
+	} else if !strings.Contains(err.Error(), "status 401") {
+		return fmt.Errorf("mcp call with a revoked credential: want a 401, got: %w", err)
+	}
+	if err := assertCredentialAudit(proc, agentID, agentToken); err != nil {
+		return err
+	}
+
+	fmt.Println("happy path: OK (issued credential, message parity, request/await/check, CLI approve, ntfy fired, audit chain in order, revoked credential refused)")
 	return nil
 }
 
@@ -464,7 +530,7 @@ func degradedPath(bin binaries) error {
 		return err
 	}
 
-	proc, err := startConchd(bin, "http://"+unreachable)
+	proc, err := startConchd(bin, "http://"+unreachable, true)
 	if err != nil {
 		return err
 	}
@@ -482,9 +548,9 @@ func degradedPath(bin binaries) error {
 		return fmt.Errorf("create human principal: %w", err)
 	}
 
-	client := mcpclient.New(proc.baseURL, mcpToken)
+	client := mcpclient.New(proc.baseURL, staticMCPToken)
 	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
-		return fmt.Errorf("mcp initialize: %w", err)
+		return fmt.Errorf("mcp initialize with the deprecated static token: %w", err)
 	}
 
 	deadline := time.Now().Add(time.Hour).Format(time.RFC3339)
@@ -546,6 +612,29 @@ func assertAuditChain(proc *conchdProc, approvalID int64, want []string) error {
 	}
 	if !reflect.DeepEqual(got, want) {
 		return fmt.Errorf("audit chain for %s = %v, want %v", subject, got, want)
+	}
+	return nil
+}
+
+// assertCredentialAudit checks the agent's credential was audited as created
+// then revoked, and that the token itself appears nowhere in the audit log.
+func assertCredentialAudit(proc *conchdProc, agentID int64, token string) error {
+	events, err := proc.auditEvents()
+	if err != nil {
+		return fmt.Errorf("read audit events: %w", err)
+	}
+	subject := fmt.Sprintf("principal:%d", agentID)
+	var got []string
+	for _, e := range events {
+		if strings.Contains(e.Actor+e.Action+e.Subject+e.Detail, token) {
+			return fmt.Errorf("audit event %q contains the agent's token", e.Action)
+		}
+		if e.Subject == subject && strings.HasPrefix(e.Action, "credential_") {
+			got = append(got, e.Action)
+		}
+	}
+	if want := []string{"credential_created", "credential_revoked"}; !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("credential audit for %s = %v, want %v", subject, got, want)
 	}
 	return nil
 }

@@ -106,24 +106,38 @@ type mcpListMessagesOutput struct {
 	NextAfter int64              `json:"next_after,omitempty"`
 }
 
+// mcpPrincipalKey carries the authenticated agent principal id from the /mcp
+// wrapper to the per-request server factory, so a request is authenticated
+// exactly once.
+type mcpPrincipalKey struct{}
+
 func (s *Server) mcpHandler() http.Handler {
+	if n := len(s.cfg.MCPBearerTokens); n > 0 {
+		slog.Warn("mcp: static --mcp-token mappings are deprecated; issue credentials with POST /v1/principals/{id}/credentials instead", "mappings", n)
+	}
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		principalID, ok := s.authenticateMCP(r)
+		principalID, ok := r.Context().Value(mcpPrincipalKey{}).(int64)
 		if !ok {
 			return nil
 		}
 		return s.mcpServerForPrincipal(principalID)
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := s.authenticateMCP(r); !ok {
+		principalID, ok := s.authenticateMCP(r)
+		if !ok {
+			// One response for every failure: missing, malformed, unknown,
+			// expired, revoked, wrong principal kind, or a store error.
 			w.Header().Set("WWW-Authenticate", `Bearer realm="conch-mcp"`)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
-		h.ServeHTTP(w, r)
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpPrincipalKey{}, principalID)))
 	})
 }
 
+// authenticateMCP resolves the request's bearer token to an agent principal.
+// Stored credentials (issue #78) are tried first; the static --mcp-token map
+// is a deprecated fallback. It never logs the token.
 func (s *Server) authenticateMCP(r *http.Request) (int64, bool) {
 	raw := r.Header.Get("Authorization")
 	if !strings.HasPrefix(raw, "Bearer ") {
@@ -133,15 +147,43 @@ func (s *Server) authenticateMCP(r *http.Request) (int64, bool) {
 	if token == "" {
 		return 0, false
 	}
+	ctx := r.Context()
+
+	principal, err := s.store.ResolveCredential(ctx, token)
+	switch {
+	case err == nil:
+		// MCP is the agent front-end: a human's credential is not accepted here.
+		if principal.Kind != store.PrincipalAgent {
+			return 0, false
+		}
+		return principal.ID, true
+	case !errors.Is(err, store.ErrCredentialInvalid):
+		// The store failed. Fail closed rather than fall through to the map.
+		slog.ErrorContext(ctx, "mcp: resolve credential failed", "error", err)
+		return 0, false
+	}
+
+	// A token shaped like a stored credential is never honoured through the
+	// static map, so configuration cannot bring a revoked or expired
+	// credential back to life.
+	if strings.HasPrefix(token, schema.CredentialTokenPrefix) {
+		return 0, false
+	}
 	principalID, ok := s.cfg.MCPBearerTokens[token]
 	if !ok || principalID <= 0 {
 		return 0, false
 	}
-	principal, err := s.store.PrincipalByID(r.Context(), principalID)
-	if err != nil || principal.Kind != store.PrincipalAgent {
+	static, err := s.store.PrincipalByID(ctx, principalID)
+	if err != nil || static.Kind != store.PrincipalAgent {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			slog.ErrorContext(r.Context(), "mcp: authenticate principal failed", "error", err)
+			slog.ErrorContext(ctx, "mcp: authenticate principal failed", "error", err)
 		}
+		return 0, false
+	}
+	// A static mapping is configuration, not a credential row, so disabling
+	// the principal (issue #101) revokes nothing here. Check it explicitly:
+	// a disabled agent must not keep MCP access through the deprecated flag.
+	if static.DisabledAt != nil {
 		return 0, false
 	}
 	return principalID, true
