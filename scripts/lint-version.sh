@@ -9,7 +9,9 @@ set -eu
 
 [ "$#" -gt 0 ] || set -- golangci-lint
 
-want=$(tr -d '[:space:]' <"$(dirname "$0")/../.golangci-lint-version")
+pin="$(dirname "$0")/../.golangci-lint-version"
+[ -r "$pin" ] || { echo "lint: .golangci-lint-version is missing; it names the golangci-lint version to use" >&2; exit 1; }
+want=$(tr -d '[:space:]' <"$pin")
 want=${want#v}
 [ -n "$want" ] || { echo "lint: .golangci-lint-version is empty" >&2; exit 1; }
 
