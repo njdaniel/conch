@@ -80,13 +80,13 @@ func TestModelUpdate(t *testing.T) {
 			}
 		}},
 		{name: "load error", msg: messagesLoaded{channel: "general", err: errBoom}, want: func(t *testing.T, got Model) {
-			if got.status != "boom" {
-				t.Errorf("status = %q", got.status)
+			if got.status() != "boom" {
+				t.Errorf("status = %q", got.status())
 			}
 		}},
 		{name: "send needs author", msg: tea.KeyMsg{Type: tea.KeyEnter}, prep: func(m *Model) { m.input = "hello"; m.authorID = 0 }, want: func(t *testing.T, got Model) {
-			if got.status != "set CONCH_AUTHOR to send" || got.input != "hello" {
-				t.Errorf("status/input = %q/%q", got.status, got.input)
+			if got.status() != "set CONCH_AUTHOR to send" || got.input != "hello" {
+				t.Errorf("status/input = %q/%q", got.status(), got.input)
 			}
 		}},
 		{name: "switch to inbox", msg: tea.KeyMsg{Type: tea.KeyTab}, want: func(t *testing.T, got Model) {
@@ -118,8 +118,8 @@ func TestModelUpdate(t *testing.T) {
 			m.mode = modeDecision
 			m.approvals = []schema.ApprovalV1{{ID: 1, Options: []schema.Option{{ID: "opt1"}}}}
 		}, want: func(t *testing.T, got Model) {
-			if got.status != "reason is required" {
-				t.Errorf("expected 'reason is required', got %q", got.status)
+			if got.status() != "reason is required" {
+				t.Errorf("expected 'reason is required', got %q", got.status())
 			}
 		}},
 		// A slower ListApprovals response can land after the user has
@@ -251,8 +251,8 @@ func TestModelChannelsLoaded(t *testing.T) {
 			if strings.Join(got.channels, ",") != strings.Join(tt.wantList, ",") || got.selected != 0 {
 				t.Fatalf("channels = %v selected %d, want %v", got.channels, got.selected, tt.wantList)
 			}
-			if got.status != tt.wantStatus {
-				t.Errorf("status = %q, want %q", got.status, tt.wantStatus)
+			if got.status() != tt.wantStatus {
+				t.Errorf("status = %q, want %q", got.status(), tt.wantStatus)
 			}
 			msgs := runCmd(cmd)
 			var loaded messagesLoaded
@@ -278,7 +278,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 			if tt.wantStatus != "" {
 				wantAfter = tt.wantStatus
 			}
-			if s := after.(Model).status; s != wantAfter {
+			if s := after.(Model).status(); s != wantAfter {
 				t.Errorf("status after backfill = %q, want %q", s, wantAfter)
 			}
 			// ...and the fallback channel's own errors, which would otherwise
@@ -288,7 +288,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 			if tt.wantStatus != "" {
 				wantFailed = tt.wantStatus
 			}
-			if s := failed.(Model).status; s != wantFailed {
+			if s := failed.(Model).status(); s != wantFailed {
 				t.Errorf("status after failed backfill = %q, want %q", s, wantFailed)
 			}
 			ended, _ := got.Update(subscriptionEnded{channel: tt.wantList[0], err: errors.New("gone")})
@@ -296,7 +296,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 			if tt.wantStatus != "" {
 				wantEnded = tt.wantStatus
 			}
-			if s := ended.(Model).status; s != wantEnded {
+			if s := ended.(Model).status(); s != wantEnded {
 				t.Errorf("status after subscription end = %q, want %q", s, wantEnded)
 			}
 		})
@@ -361,7 +361,7 @@ func TestModelEmptyChannelListIsSafe(t *testing.T) {
 	if cmd != nil {
 		t.Error("send with no channels must not issue a command")
 	}
-	if s := updated.(Model).status; !strings.Contains(s, "no channel") {
+	if s := updated.(Model).status(); !strings.Contains(s, "no channel") {
 		t.Errorf("status = %q, want no-channel message", s)
 	}
 	if !strings.Contains(m.View(), "loading") {
@@ -472,24 +472,27 @@ func TestModelUnauthenticated(t *testing.T) {
 	hint := "not logged in to http://h:1: run 'conch login'"
 	tests := []struct {
 		name string
+		mode mode // the mode the result belongs to, where the hint is visible
 		msg  tea.Msg
 	}{
-		{"whoami", whoAmILoaded{err: unauth}},
-		{"messages", messagesLoaded{channel: "general", err: unauth}},
-		{"approvals", approvalsLoaded{err: unauth}},
-		{"send", messageSent{err: unauth}},
-		{"decision", decisionCast{err: unauth}},
-		{"subscription", subscriptionEnded{channel: "general", err: unauth}},
+		{"whoami", modeChannels, whoAmILoaded{err: unauth}},
+		{"messages", modeChannels, messagesLoaded{channel: "general", err: unauth}},
+		{"approvals", modeInbox, approvalsLoaded{err: unauth}},
+		{"send", modeChannels, messageSent{err: unauth}},
+		{"decision", modeInbox, decisionCast{err: unauth}},
+		{"subscription", modeChannels, subscriptionEnded{channel: "general", err: unauth}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			model := NewModel(context.Background(), stubAPI{}, 0, []string{"general"}).WithCredential()
+			model.mode = tt.mode
 			updated, _ := model.Update(tt.msg)
 			got := updated.(Model)
-			if got.status != hint {
-				t.Fatalf("status = %q, want %q", got.status, hint)
+			if got.status() != hint {
+				t.Fatalf("status = %q, want %q", got.status(), hint)
 			}
 			// Still usable: keys are accepted and the view renders.
+			got.mode = modeChannels
 			next, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 			if next.(Model).input != "x" {
 				t.Error("model stopped accepting input after 401")
@@ -501,7 +504,7 @@ func TestModelUnauthenticated(t *testing.T) {
 	t.Run("channel list", func(t *testing.T) {
 		model := NewModel(context.Background(), stubAPI{}, 0, nil).WithCredential()
 		updated, _ := model.Update(channelsLoaded{err: unauth})
-		if got := updated.(Model).status; got != hint {
+		if got := updated.(Model).status(); got != hint {
 			t.Errorf("status = %q, want %q", got, hint)
 		}
 	})
@@ -510,8 +513,8 @@ func TestModelUnauthenticated(t *testing.T) {
 		model := NewModel(context.Background(), stubAPI{}, 0, []string{"general"}).WithCredential()
 		model.input = "hi"
 		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		if cmd != nil || !strings.Contains(updated.(Model).status, "identity") {
-			t.Errorf("status = %q cmd = %v", updated.(Model).status, cmd)
+		if cmd != nil || !strings.Contains(updated.(Model).status(), "identity") {
+			t.Errorf("status = %q cmd = %v", updated.(Model).status(), cmd)
 		}
 	})
 }
@@ -558,7 +561,7 @@ func TestModelIdentityStatusStates(t *testing.T) {
 				if cmd != nil {
 					t.Error("nothing should be sent")
 				}
-				if got := updated.(Model).status; !strings.Contains(got, tt.want) {
+				if got := updated.(Model).status(); !strings.Contains(got, tt.want) {
 					t.Errorf("status = %q, want containing %q", got, tt.want)
 				}
 			})
@@ -681,8 +684,8 @@ func TestSubscriptionEndedClearsFlag(t *testing.T) {
 			if (len(*timers) == 1) != tt.wantTimer {
 				t.Errorf("timers = %d, want timer=%v", len(*timers), tt.wantTimer)
 			}
-			if m.status != tt.wantState {
-				t.Errorf("status = %q, want %q", m.status, tt.wantState)
+			if m.status() != tt.wantState {
+				t.Errorf("status = %q, want %q", m.status(), tt.wantState)
 			}
 		})
 	}
@@ -832,12 +835,12 @@ func TestBackfillDoesNotClaimConnectedWhileReconnecting(t *testing.T) {
 	m, _, _ := resubModel(t)
 	// The subscription fails at once; the first backfill is still in flight.
 	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
-	if m.status != statusReconnecting {
-		t.Fatalf("status after the drop = %q", m.status)
+	if m.status() != statusReconnecting {
+		t.Fatalf("status after the drop = %q", m.status())
 	}
 	m, _ = update(m, messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}})
-	if m.status != statusReconnecting {
-		t.Errorf("status after a backfill during the outage = %q, want %q", m.status, statusReconnecting)
+	if m.status() != statusReconnecting {
+		t.Errorf("status after a backfill during the outage = %q, want %q", m.status(), statusReconnecting)
 	}
 	if len(m.messages["general"]) != 1 {
 		t.Errorf("the backfill was not merged: %+v", m.messages["general"])
@@ -845,8 +848,8 @@ func TestBackfillDoesNotClaimConnectedWhileReconnecting(t *testing.T) {
 	// The retry fires and resubscribes; its backfill may now say connected.
 	m, _ = update(m, resubscribeDue{channel: "general"})
 	m, _ = update(m, messagesLoaded{channel: "general"})
-	if m.status != "connected" {
-		t.Errorf("status after the reconnect's backfill = %q, want connected", m.status)
+	if m.status() != "connected" {
+		t.Errorf("status after the reconnect's backfill = %q, want connected", m.status())
 	}
 }
 
@@ -866,11 +869,132 @@ func TestStaleBackfillKeepsStatus(t *testing.T) {
 			m, _, _ := resubModel(t)
 			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // ops, status "loading…"
 			m, _ = update(m, tt.msg)
-			if m.status != tt.want {
-				t.Errorf("status = %q, want %q", m.status, tt.want)
+			if m.status() != tt.want {
+				t.Errorf("status = %q, want %q", m.status(), tt.want)
 			}
 			if len(tt.msg.messages) > 0 && len(m.messages["general"]) != 1 {
 				t.Errorf("stale messages not merged: %+v", m.messages["general"])
+			}
+		})
+	}
+}
+
+// A result that belongs to one mode must not change the status line of
+// another, and the mode must show its current state when the user returns.
+func TestStatusBelongsToMode(t *testing.T) {
+	key := func(k tea.KeyType) tea.Msg { return tea.KeyMsg{Type: k} }
+	apps := approvalsLoaded{approvals: []schema.ApprovalV1{{ID: 1}}}
+	eof := errors.New("eof")
+	// A model with the "ops" backfill outstanding, as after selecting it.
+	opsSelected := func(t *testing.T) Model {
+		m, _, _ := resubModel(t)
+		m, _ = update(m, key(tea.KeyDown))
+		return m
+	}
+	noChannels := func(t *testing.T) Model {
+		return NewModel(context.Background(), stubAPI{}, 7, nil)
+	}
+	// toDecision enters the inbox and opens a decision prompt.
+	toDecision := []tea.Msg{key(tea.KeyTab), apps, key(tea.KeyEnter)}
+	tab := []tea.Msg{key(tea.KeyTab)}
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) Model
+		enter []tea.Msg // moves the user out of channels
+		msg   tea.Msg   // the background result
+		away  string    // visible status after msg, unchanged from before it
+		back  []tea.Msg // returns the user to channels
+		want  string    // status after the user returns to the mode (case 3: re-enters the inbox)
+	}{
+		{"1 messagesLoaded in inbox", opsSelected, tab,
+			messagesLoaded{channel: "ops"}, "loading approvals…", tab, "connected"},
+		{"1 messagesLoaded error in inbox", opsSelected, tab,
+			messagesLoaded{channel: "ops", err: errors.New("boom")}, "loading approvals…", tab, "boom"},
+		{"1 messagesLoaded in decision", opsSelected, toDecision,
+			messagesLoaded{channel: "ops"}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab)}, "connected"},
+		{"2 subscriptionEnded in inbox", opsSelected, tab,
+			subscriptionEnded{channel: "ops", err: eof}, "loading approvals…", tab, statusReconnecting},
+		{"2 subscriptionEnded in decision", opsSelected, toDecision,
+			subscriptionEnded{channel: "ops", err: eof}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab)}, statusReconnecting},
+		{"2 backfill during an outage keeps reconnecting", opsSelected,
+			[]tea.Msg{subscriptionEnded{channel: "ops", err: eof}, key(tea.KeyTab)},
+			messagesLoaded{channel: "ops"}, "loading approvals…", tab, statusReconnecting},
+		{"3 approvalsLoaded after returning to channels", opsSelected,
+			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab)},
+			apps, "loading…", tab, "loading approvals…"},
+		{"3 approvalsLoaded error after returning to channels", opsSelected,
+			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab)},
+			approvalsLoaded{err: errors.New("boom")}, "loading…", tab, "loading approvals…"},
+		{"4 channelsLoaded error in inbox", noChannels, tab,
+			channelsLoaded{err: errors.New("boom")}, "loading approvals…", tab, "channel list: boom"},
+		{"4 channelsLoaded empty in inbox", noChannels, tab,
+			channelsLoaded{channels: []schema.ChannelV0{}}, "loading approvals…", tab, "no channels on server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := tt.setup(t)
+			for _, msg := range tt.enter {
+				m, _ = update(m, msg)
+			}
+			// In case 3 the user is already back in channels when the result lands.
+			before := m.status()
+			m, _ = update(m, tt.msg)
+			if got := m.status(); got != tt.away || got != before {
+				t.Errorf("visible status after the result = %q (before %q), want %q", got, before, tt.away)
+			}
+			for _, msg := range tt.back {
+				m, _ = update(m, msg)
+			}
+			if got := m.status(); got != tt.want {
+				t.Errorf("status after returning = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The inbox keeps its own last status while channel results land.
+func TestInboxStatusSurvivesChannelResults(t *testing.T) {
+	m, _, _ := resubModel(t)
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = update(m, approvalsLoaded{approvals: []schema.ApprovalV1{{ID: 1}}})
+	if got := m.status(); got != "inbox loaded" {
+		t.Fatalf("inbox status = %q", got)
+	}
+	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+	m, _ = update(m, messagesLoaded{channel: "general"})
+	if got := m.status(); got != "inbox loaded" {
+		t.Errorf("inbox status after channel results = %q, want inbox loaded", got)
+	}
+}
+
+// The decision prompt shares the inbox's status, so a slow approvals refresh
+// must not replace the prompt the user is answering. An empty refresh still
+// ends the decision, and a failed one is still shown.
+func TestApprovalsRefreshKeepsTheDecisionPrompt(t *testing.T) {
+	open := []schema.ApprovalV1{{ID: 1, Title: "deploy", Options: []schema.Option{{ID: "approve", Label: "Approve"}}}}
+	tests := []struct {
+		name     string
+		msg      approvalsLoaded
+		wantMode mode
+		want     string
+	}{
+		{"refresh with approvals", approvalsLoaded{approvals: open}, modeDecision, "type reason to decide"},
+		{"refresh came back empty", approvalsLoaded{}, modeInbox, "no open approvals"},
+		{"refresh failed", approvalsLoaded{err: errors.New("boom")}, modeDecision, "boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, _ := resubModel(t)
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+			m, _ = update(m, approvalsLoaded{approvals: open})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+			if m.mode != modeDecision || m.status() != "type reason to decide" {
+				t.Fatalf("setup: mode %v status %q", m.mode, m.status())
+			}
+			m, _ = update(m, tt.msg)
+			if m.mode != tt.wantMode || m.status() != tt.want {
+				t.Errorf("mode %v status %q, want mode %v status %q", m.mode, m.status(), tt.wantMode, tt.want)
 			}
 		})
 	}
