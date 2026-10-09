@@ -1353,3 +1353,348 @@ func TestVoicePollerRejoinRemovalIsAudited(t *testing.T) {
 		t.Errorf("a non-member was shown: %q", got)
 	}
 }
+
+// A pass that could not clear a room keeps it polled. Without that, a room
+// whose only occupant could not be removed (or could not be checked) dropped
+// out of "in use" and was not looked at again until the next sweep, half a
+// minute later.
+func TestVoicePollerKeepsPollingARoomItCouldNotClear(t *testing.T) {
+	tests := []struct {
+		name   string
+		break_ func(f *presenceFixture)
+		mend   func(f *presenceFixture)
+	}{
+		{"removal failing",
+			func(f *presenceFixture) { f.lk.setRemoveStatus(http.StatusInternalServerError) },
+			func(f *presenceFixture) { f.lk.setRemoveStatus(0) }},
+		{"entitlement unreadable",
+			func(f *presenceFixture) {
+				f.srv.voice.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
+					id, _ := parseVoiceIdentity(identity)
+					return id, "", errors.New("store unavailable")
+				}
+			},
+			func(f *presenceFixture) { f.srv.voice.entitle = f.srv.voiceEntitlement }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			room := f.room(t, f.ops) // no session: only a sweep knows the room
+			bob := f.identity("bob") // not a member
+			f.lk.setRoom(room, fakeParticipant{identity: bob, joinedMs: 1_000})
+			f.sweep(t)
+			tt.break_(f)
+			for i := 0; i < 4; i++ {
+				f.clock.Advance(voicePollInterval)
+				before := f.lk.count("ListParticipants")
+				f.pass(t)
+				if f.lk.count("ListParticipants") != before+1 {
+					t.Fatalf("pass %d did not poll the room: it dropped out of use with someone still in it", i)
+				}
+				if got := f.who(t, f.ops); got != "" && got != "-" {
+					t.Fatalf("pass %d showed %q", i, got)
+				}
+				if !f.lk.in(room, bob) {
+					t.Fatalf("pass %d: the fake dropped bob although nothing could remove him", i)
+				}
+			}
+			if d := f.srv.voice.nextDelay(); d != voicePollInterval {
+				t.Errorf("next delay = %v, want the polling interval", d)
+			}
+			tt.mend(f)
+			f.clock.Advance(voicePollInterval)
+			f.pass(t)
+			if f.lk.in(room, bob) {
+				t.Error("bob was not removed once it was possible")
+			}
+			// With him gone the room is no longer in use.
+			f.clock.Advance(voicePollInterval)
+			f.pass(t)
+			if f.srv.voice.anyInUse() {
+				t.Error("the empty room is still in use")
+			}
+		})
+	}
+}
+
+// The bar after a revoke-all does not depend on knowing the principal's
+// rooms. If that read fails, she still leaves presence at once, and the next
+// pass removes her although her membership is intact.
+func TestVoiceRevokeAllWhenTheRoomListCannotBeRead(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	ann := f.identity("ann")
+	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000, published: true}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann*,ann2" {
+		t.Fatalf("before: %q", got)
+	}
+	f.srv.voice.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
+	before := f.lk.count("RemoveParticipant")
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids["ann"]), f.rootTok); code != 200 {
+		t.Fatalf("revoke-all = %d: a store failure in the voice hook must not fail the request", code)
+	}
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("right after revoke-all: %q, want ann out of presence at once", got)
+	}
+	if f.lk.count("RemoveParticipant") != before {
+		t.Fatal("RemoveParticipant was called although the rooms could not be read")
+	}
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if f.lk.in(room, ann) {
+		t.Error("the pass did not remove ann: the bar was not applied")
+	}
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("after the pass: %q", got)
+	}
+	var left, removed int
+	for _, e := range f.audit(t) {
+		if e.Actor == f.actor("ann") && e.Action == store.AuditVoiceLeft {
+			left++
+		}
+		if e.Action == store.AuditVoiceParticipantRemoved && strings.Contains(e.Detail, "reason="+voiceReasonCredsRevoked) {
+			removed++
+		}
+	}
+	if left != 1 || removed != 1 {
+		t.Errorf("voice_left for ann = %d, removals for revoked credentials = %d; want one of each", left, removed)
+	}
+}
+
+// Asking for sessions in a loop does not make the poller run faster than its
+// interval: only a room the loop was not watching wakes it.
+func TestVoicePollerSessionsDoNotSpinTheLoop(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	r, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.srv.voice.wakeLoop); n != 0 {
+		t.Fatalf("wake-ups pending before any session = %d", n)
+	}
+	f.srv.voice.noteSession(r)
+	if n := len(f.srv.voice.wakeLoop); n != 1 {
+		t.Fatalf("the first session for an idle room left %d wake-ups, want 1", n)
+	}
+	<-f.srv.voice.wakeLoop // the loop takes it
+	for i := 0; i < 100; i++ {
+		f.srv.voice.noteSession(r)
+	}
+	if n := len(f.srv.voice.wakeLoop); n != 0 {
+		t.Errorf("100 more sessions for a room already in use left %d wake-ups, want 0", n)
+	}
+	// Once the room has gone quiet again, the next session wakes the loop.
+	f.clock.Advance(voiceSessionRecent + time.Second)
+	f.srv.voice.noteSession(r)
+	if n := len(f.srv.voice.wakeLoop); n != 1 {
+		t.Errorf("a session after the room went idle left %d wake-ups, want 1", n)
+	}
+}
+
+// A member removed while a pass is in flight is not put back by that pass.
+// The pass had already read her as entitled; without the eviction count it
+// then installed what it saw, showing her again after the 204 and auditing a
+// join that never happened.
+func TestVoicePollerRemovalDuringAPassIsNotUndone(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	ann := f.identity("ann")
+	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann,ann2" {
+		t.Fatalf("before: %q", got)
+	}
+	// The removal lands in the middle of the next pass: after the pass has
+	// read ann's entitlement, before it applies what it saw. LiveKit is slow
+	// to drop her, so the pass's own list still had her.
+	real := f.srv.voice.entitle
+	fired := false
+	f.srv.voice.entitle = func(ctx context.Context, identity string, channelID int64) (int64, string, error) {
+		id, reason, err := real(ctx, identity, channelID)
+		if identity == ann && !fired {
+			fired = true
+			if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok); code != 204 {
+				t.Errorf("removal = %d", code)
+			}
+		}
+		return id, reason, err // the answer from before the removal
+	}
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if !fired {
+		t.Fatal("the removal never ran")
+	}
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("after the pass that was in flight: %q, want ann2 only", got)
+	}
+	f.srv.voice.entitle = real
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("a pass later: %q", got)
+	}
+	var mine []string
+	for _, e := range f.audit(t) {
+		if e.Actor == f.actor("ann") && strings.HasPrefix(e.Action, "voice_") {
+			mine = append(mine, e.Action)
+		}
+	}
+	if got := strings.Join(mine, ","); got != store.AuditVoiceJoined+","+store.AuditVoiceLeft {
+		t.Errorf("ann's voice events = %s, want one join and one leave", got)
+	}
+}
+
+// A person removed before any pass had seen them was still removed, and the
+// audit says so; someone who was not connected at all is not reported removed.
+func TestVoiceImmediateRemovalIsAuditedWhenLiveKitHadThem(t *testing.T) {
+	for _, connected := range []bool{true, false} {
+		t.Run(fmt.Sprintf("connected=%v", connected), func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			room := f.inUse(t, f.ops)
+			if connected {
+				f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+			} else {
+				f.lk.setRoom(room)
+			}
+			// No pass: the poller has not seen her.
+			if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok); code != 204 {
+				t.Fatalf("removal = %d", code)
+			}
+			if f.lk.count("RemoveParticipant") != 1 {
+				t.Fatalf("RemoveParticipant calls = %d, want 1", f.lk.count("RemoveParticipant"))
+			}
+			want := 0
+			if connected {
+				want = 1
+			}
+			if n := len(f.audits(t, store.AuditVoiceParticipantRemoved)); n != want {
+				t.Errorf("voice_participant_removed = %d, want %d", n, want)
+			}
+		})
+	}
+}
+
+// Recovery from an outage through a sweep does not show what was seen before
+// the outage. Presence is available again as soon as LiveKit answers, but a
+// room shows nobody until it has been read.
+func TestVoicePollerRecoveryThroughASweepShowsNobodyUntilRead(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true})
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann*" {
+		t.Fatalf("before: %q", got)
+	}
+	f.lk.setListStatus(http.StatusServiceUnavailable)
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if s := f.snap(t, f.ops); s.Available || len(s.Rooms) != 0 {
+		t.Fatalf("during the outage: %+v", s)
+	}
+	// She leaves during the outage. LiveKit comes back and the next thing
+	// that reaches it is a sweep.
+	f.lk.setRoom(room)
+	f.lk.setListStatus(0)
+	f.clock.Advance(voiceSweepInterval + voiceBackoffMax)
+	f.sweep(t)
+	s := f.snap(t, f.ops)
+	if !s.Available {
+		t.Fatal("presence is not available after LiveKit answered the sweep")
+	}
+	if got := f.who(t, f.ops); got != "" && got != "-" {
+		t.Errorf("after the sweep, before any pass: %q, want nobody (she left during the outage)", got)
+	}
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "" && got != "-" {
+		t.Errorf("after the pass: %q", got)
+	}
+	if n := len(f.audits(t, store.AuditVoiceLeft)); n != 1 {
+		t.Errorf("voice_left = %d, want 1", n)
+	}
+}
+
+// One room LiveKit cannot answer for is that room's problem. The others are
+// still read and enforced, presence stays available, and the unreadable room
+// shows nobody until it can be read again.
+func TestVoicePollerOneUnreadableRoomIsNotAnOutage(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	bad, good := f.inUse(t, f.ops), f.inUse(t, f.ops2)
+	f.lk.setRoom(bad, fakeParticipant{identity: f.identity("ann2"), joinedMs: 1_000})
+	f.lk.setRoom(good, fakeParticipant{identity: f.identity("ann"), joinedMs: 2_000})
+	f.pass(t)
+	if f.who(t, f.ops) != "ann2" || f.who(t, f.ops2) != "ann" {
+		t.Fatalf("before: %q / %q", f.who(t, f.ops), f.who(t, f.ops2))
+	}
+	f.lk.config(func(l *scriptedLiveKit) { l.listFail = map[string]bool{bad: true} })
+	// Someone who must not be there walks into the good room.
+	f.lk.setRoom(good, fakeParticipant{identity: f.identity("ann"), joinedMs: 2_000}, fakeParticipant{identity: f.identity("bob"), joinedMs: 3_000})
+	for i := 0; i < 3; i++ {
+		f.clock.Advance(voicePollInterval)
+		before := f.lk.count("ListParticipants")
+		f.pass(t)
+		if got := f.lk.count("ListParticipants") - before; got != 2 {
+			t.Fatalf("pass %d polled %d rooms, want both: the unreadable room must not hold the other back", i, got)
+		}
+	}
+	if f.lk.in(good, f.identity("bob")) {
+		t.Error("the non-member in the readable room was not removed")
+	}
+	if s := f.snap(t, f.ops2); !s.Available || f.who(t, f.ops2) != "ann" {
+		t.Errorf("readable room: available=%v who=%q", s.Available, f.who(t, f.ops2))
+	}
+	if got := f.who(t, f.ops); got != "" && got != "-" {
+		t.Errorf("unreadable room shows %q, want nobody", got)
+	}
+	if n := len(f.audits(t, store.AuditVoiceEnforcementUnavailable)); n != 0 {
+		t.Errorf("voice_enforcement_unavailable = %d, want 0: LiveKit was answering", n)
+	}
+	// It becomes readable again: its occupant is shown, with no second join.
+	f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil })
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("once readable again: %q", got)
+	}
+	joins := 0
+	for _, e := range f.audits(t, store.AuditVoiceJoined) {
+		if e.Actor == f.actor("ann2") {
+			joins++
+		}
+	}
+	if joins != 1 {
+		t.Errorf("voice_joined for ann2 = %d, want 1", joins)
+	}
+	// Every room unreadable is an outage.
+	f.lk.setListStatus(http.StatusServiceUnavailable)
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if s := f.snap(t, f.ops2); s.Available {
+		t.Error("presence still available with every room unreadable")
+	}
+}
+
+// The removal hooks do their work even if the operator's client has gone:
+// the change is committed, and what follows from it is not optional.
+func TestVoiceHooksIgnoreTheCallersCancellation(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann2"]); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.voiceMemberRemoved(gone, f.ops.ID, f.ids["ann2"])
+	if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.ids["ann"]); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.voicePrincipalLostAccess(gone, f.ids["ann"], voiceReasonCredsRevoked)
+	if f.lk.in(room, f.identity("ann")) || f.lk.in(room, f.identity("ann2")) {
+		t.Errorf("still connected after the hooks ran on a cancelled context: ann=%v ann2=%v", f.lk.in(room, f.identity("ann")), f.lk.in(room, f.identity("ann2")))
+	}
+	if got := f.who(t, f.ops); got != "" && got != "-" {
+		t.Errorf("presence = %q", got)
+	}
+}

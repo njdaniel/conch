@@ -102,6 +102,17 @@ type voiceRoomState struct {
 	// pass whatever else is true, and the mark is cleared once polled.
 	marked       bool
 	participants map[int64]voiceSeen
+	// stale means participants is what was last seen, not what is known: a
+	// LiveKit call for this room failed and it has not been read since.
+	// Presence shows nobody in a stale room.
+	stale bool
+	// seq counts evictions from this room and evicted records, per principal,
+	// the count at their last one. A pass notes seq before it asks LiveKit
+	// and does not put back anyone evicted after that: without it a pass in
+	// flight when a member is removed would show them again, and audit a
+	// join that never happened.
+	seq     uint64
+	evicted map[int64]uint64
 }
 
 func (r *voiceRoomState) inUse(now time.Time) bool {
@@ -130,6 +141,10 @@ type voicePoller struct {
 	// make the store fail; nothing else may.
 	entitle     func(ctx context.Context, identity string, channelID int64) (int64, string, error)
 	storedRooms func(ctx context.Context) ([]store.VoiceRoom, error)
+	// memberRooms is Store.VoiceRoomsForMember, the read behind the
+	// immediate removal of a disabled or signed-out principal. A test seam
+	// like the two above.
+	memberRooms func(ctx context.Context, principalID int64) ([]store.VoiceRoom, error)
 
 	// pass is set while a pass runs, so one that has not finished is not
 	// started again.
@@ -142,12 +157,15 @@ type voicePoller struct {
 
 	mu    sync.Mutex
 	rooms map[string]*voiceRoomState
-	// pending lists, per room, identities that must be removed whatever
-	// membership says: a principal whose credentials were all revoked. An
-	// entry holds until the identity has been removed (or seen gone) at
-	// least once AND voiceRevokeBar has passed, so a failed removal is
-	// retried and a rejoin on an old token is removed again.
-	pending map[string]map[string]*voiceBar
+	// pending lists, per room, identities whose removal is still owed
+	// whatever membership says: a revoke-all removal that failed. Cleared
+	// when the removal succeeds or the identity is seen absent.
+	pending map[string]map[string]struct{}
+	// barred holds, per identity, the time until which it is removed on
+	// sight in every room: voiceRevokeBar after a revoke-all. It is set
+	// before anything that can fail, so the bar holds even when the rooms
+	// to evict from could not be read.
+	barred map[string]time.Time
 	// removed remembers recent successful removals for audit de-duplication.
 	removed map[string]time.Time
 	// contacted is whether LiveKit has answered at least once; down is the
@@ -163,21 +181,17 @@ type voicePoller struct {
 	closed bool
 }
 
-// voiceBar is one pending entry: see voicePoller.pending.
-type voiceBar struct {
-	until time.Time // remove on sight until then
-	gone  bool      // removed, or seen absent, at least once
-}
-
 func newVoicePoller(s *Server) *voicePoller {
 	return &voicePoller{
 		s:           s,
 		now:         time.Now,
 		entitle:     s.voiceEntitlement,
 		storedRooms: s.store.ListVoiceRooms,
+		memberRooms: s.store.VoiceRoomsForMember,
 		wakeLoop:    make(chan struct{}, 1),
 		rooms:       make(map[string]*voiceRoomState),
-		pending:     make(map[string]map[string]*voiceBar),
+		pending:     make(map[string]map[string]struct{}),
+		barred:      make(map[string]time.Time),
 		removed:     make(map[string]time.Time),
 		subs:        make(map[*voiceSub]struct{}),
 	}
@@ -333,9 +347,18 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 	if room.NetID != 0 {
 		return // net rooms arrive with V5; see roomLocked
 	}
+	now := p.now()
 	p.mu.Lock()
-	p.roomLocked(room).lastSession = p.now()
+	r := p.roomLocked(room)
+	wasInUse := r.inUse(now)
+	r.lastSession = now
 	p.mu.Unlock()
+	// A room already in use is being polled every interval; only a room the
+	// loop was not watching needs it woken. So a member asking for sessions
+	// in a loop cannot make the poller run faster than its interval.
+	if wasInUse {
+		return
+	}
 	select {
 	case p.wakeLoop <- struct{}{}:
 	default: // a wake-up is already pending
@@ -350,7 +373,7 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 	r := p.rooms[room.RoomName]
 	if r == nil {
-		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}}
+		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}}
 		p.rooms[room.RoomName] = r
 	}
 	return r
@@ -446,6 +469,7 @@ func (p *voicePoller) runPass(ctx context.Context) bool {
 		wg      sync.WaitGroup
 		errMu   sync.Mutex
 		failure error
+		failed  []*voiceRoomState
 		sem     = make(chan struct{}, voicePollConcurrency)
 	)
 	for _, r := range due {
@@ -457,6 +481,7 @@ func (p *voicePoller) runPass(ctx context.Context) bool {
 			if err := p.pollRoom(ctx, r); err != nil {
 				errMu.Lock()
 				failure = errors.Join(failure, err)
+				failed = append(failed, r)
 				errMu.Unlock()
 			}
 		}()
@@ -465,10 +490,29 @@ func (p *voicePoller) runPass(ctx context.Context) bool {
 	switch {
 	case ctx.Err() != nil:
 		// Shutting down: a cancelled call is not an outage.
-	case failure != nil:
+	case len(failed) == len(due):
+		// Nothing could be read: LiveKit is not answering.
 		p.fail(ctx, failure)
 	default:
+		// LiveKit answered for at least one room, so it is reachable. A room
+		// it could not answer for (one bad response must not stop enforcement
+		// everywhere) is hidden from presence and tried again next pass.
 		p.succeed()
+		if len(failed) > 0 {
+			slog.WarnContext(ctx, "voice: some rooms could not be read; they are hidden and retried", "rooms", len(failed), "error", failure)
+			p.mu.Lock()
+			var channels []int64
+			for _, r := range failed {
+				if !r.stale && len(r.participants) > 0 {
+					channels = append(channels, r.channelID)
+				}
+				r.stale, r.marked = true, true
+			}
+			p.mu.Unlock()
+			for _, id := range channels {
+				p.notify(id)
+			}
+		}
 	}
 	return true
 }
@@ -477,6 +521,9 @@ func (p *voicePoller) runPass(ctx context.Context) bool {
 // folds the rest into the room's state. A returned error means LiveKit could
 // not be asked. No lock is held across a LiveKit or store call.
 func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
+	p.mu.Lock()
+	since := r.seq
+	p.mu.Unlock()
 	parts, err := p.s.lk.ListParticipants(ctx, r.name)
 	if err != nil {
 		return err
@@ -485,6 +532,11 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 	seen := make(map[int64]livekit.Participant, len(parts))
 	// undecided holds the principals whose entitlement could not be read.
 	undecided := make(map[int64]struct{})
+	// again is set when this pass left someone in the room it could not deal
+	// with: a removal that failed, or an entitlement it could not read. The
+	// room is then polled on the next pass whatever its state says, instead
+	// of waiting for the next sweep to notice it is still occupied.
+	again := false
 	for _, part := range parts {
 		present[part.Identity] = struct{}{}
 		pid, reason, err := p.entitle(ctx, part.Identity, r.channelID)
@@ -499,36 +551,44 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 			if pid > 0 {
 				undecided[pid] = struct{}{}
 			}
+			again = true
 			continue
 		}
 		if reason == "" && p.isPending(r.name, part.Identity) {
 			reason = voiceReasonCredsRevoked
 		}
 		if reason != "" {
-			p.removeObserved(ctx, r, part, pid, reason)
+			if !p.removeObserved(ctx, r, part, pid, reason) {
+				again = true
+			}
 			continue
 		}
 		seen[pid] = part
 	}
-	p.applyRoom(ctx, r, seen, present, undecided)
+	p.applyRoom(ctx, r, seen, present, undecided, again, since)
 	return nil
 }
 
 // removeObserved removes a participant a pass found who must not be there.
 // A failure is logged and left to the next pass, which finds them again: the
 // participant is never added to the room's state, so no snapshot shows them.
-func (p *voicePoller) removeObserved(ctx context.Context, r *voiceRoomState, part livekit.Participant, pid int64, reason string) {
+// It reports whether the removal succeeded.
+func (p *voicePoller) removeObserved(ctx context.Context, r *voiceRoomState, part livekit.Participant, pid int64, reason string) bool {
 	identity := part.Identity
-	if err := p.s.lk.RemoveParticipant(ctx, r.name, identity); err != nil {
+	removed, err := p.s.lk.Evict(ctx, r.name, identity)
+	if err != nil {
 		if ctx.Err() == nil {
 			slog.WarnContext(ctx, "voice: removal failed; the next pass retries", "channel", r.channelID, "principal", pid, "reason", reason, "error", err)
 		}
-		return
+		return false
 	}
 	p.clearPending(r.name, identity)
-	if p.firstRemoval(r.name, identity, part.JoinedAt) {
+	// Audited when LiveKit actually disconnected someone: a participant who
+	// left by themselves between the list and the call was not removed.
+	if removed && p.firstRemoval(r.name, identity, part.JoinedAt) {
 		p.writeEvents(ctx, p.removedEvent(r.channelID, pid, reason))
 	}
+	return true
 }
 
 // removedEvent builds the voice_participant_removed row. The actor is the
@@ -555,8 +615,10 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string) voiceEve
 //
 // keep names principals whose entitlement could not be read on this pass: one
 // who was in the room's state stays in it unchanged, and one who was not is
-// not added.
-func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, present map[string]struct{}, keep map[int64]struct{}) {
+// not added. again keeps the room marked for the next pass. since is the
+// room's eviction count when the pass asked LiveKit: anyone evicted after that
+// is left out, because what the pass saw of them is older than their removal.
+func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, present map[string]struct{}, keep map[int64]struct{}, again bool, since uint64) {
 	now := p.now()
 	next := make(map[int64]voiceSeen, len(seen))
 
@@ -565,6 +627,15 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	for pid := range keep {
 		if o, ok := old[pid]; ok {
 			next[pid] = o
+		}
+	}
+	for pid, at := range r.evicted {
+		if at > since {
+			delete(seen, pid)
+			// Still connected as far as this pass saw: look again at once.
+			again = true
+		} else {
+			delete(r.evicted, pid)
 		}
 	}
 	for pid, part := range seen {
@@ -631,15 +702,18 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 		}
 	}
 	r.participants = next
-	r.marked = false
-	// An identity that is not in the room has gone; its bar still holds
-	// until it runs out, in case it comes back.
-	for id, bar := range p.pending[r.name] {
+	r.stale = false
+	r.marked = again
+	// An identity that is no longer in the room needs no further removal
+	// there; if it comes back inside the bar it is removed on sight.
+	for id := range p.pending[r.name] {
 		if _, ok := present[id]; !ok {
-			bar.gone = true
-		}
-		if bar.gone && !now.Before(bar.until) {
 			delete(p.pending[r.name], id)
+		}
+	}
+	for id, until := range p.barred {
+		if !now.Before(until) {
+			delete(p.barred, id)
 		}
 	}
 	p.mu.Unlock()
@@ -669,6 +743,12 @@ func (p *voicePoller) fail(ctx context.Context, err error) {
 	}
 	p.retryAt = now.Add(p.backoff)
 	wait := p.backoff
+	// What was last seen is no longer known. It stays hidden after LiveKit
+	// answers again until each room has been read: a sweep can end the
+	// outage before any room is polled.
+	for _, r := range p.rooms {
+		r.stale = true
+	}
 	p.mu.Unlock()
 	if first {
 		slog.WarnContext(ctx, "voice: livekit unreachable; enforcement and presence are unavailable", "error", err)
@@ -698,40 +778,42 @@ func (p *voicePoller) succeed() {
 // ---------------------------------------------------------------------------
 // Removal bookkeeping
 
-// isPending reports whether identity must be removed from room on sight.
+// isPending reports whether identity must be removed from room on sight:
+// its removal from that room is still owed, or it is barred everywhere.
 func (p *voicePoller) isPending(room, identity string) bool {
 	now := p.now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	bar, ok := p.pending[room][identity]
-	return ok && (!bar.gone || now.Before(bar.until))
+	if _, ok := p.pending[room][identity]; ok {
+		return true
+	}
+	until, ok := p.barred[identity]
+	return ok && now.Before(until)
 }
 
-// addPending bars identity from room after a revoke-all.
-func (p *voicePoller) addPending(room, identity string) {
+// bar starts the remove-on-sight window for identity (a revoke-all).
+func (p *voicePoller) bar(identity string) {
 	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.barred[identity] = now.Add(voiceRevokeBar)
+}
+
+// addPending records that identity's removal from room is owed.
+func (p *voicePoller) addPending(room, identity string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.pending[room] == nil {
-		p.pending[room] = map[string]*voiceBar{}
+		p.pending[room] = map[string]struct{}{}
 	}
-	p.pending[room][identity] = &voiceBar{until: now.Add(voiceRevokeBar)}
+	p.pending[room][identity] = struct{}{}
 }
 
-// clearPending records that identity was removed from room. The bar itself
-// stays until it runs out.
+// clearPending records that identity was removed from room.
 func (p *voicePoller) clearPending(room, identity string) {
-	now := p.now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	bar, ok := p.pending[room][identity]
-	if !ok {
-		return
-	}
-	bar.gone = true
-	if !now.Before(bar.until) {
-		delete(p.pending[room], identity)
-	}
+	delete(p.pending[room], identity)
 }
 
 // firstRemoval reports whether a successful removal of identity's connection
@@ -798,7 +880,7 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 		p.addPending(room.RoomName, identity)
 	}
 	was, ok := p.forget(room.RoomName, principalID)
-	err := p.s.lk.RemoveParticipant(ctx, room.RoomName, identity)
+	removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 	var events []voiceEvent
 	if err != nil {
 		slog.WarnContext(ctx, "voice: immediate removal failed; passes retry", "channel", room.ChannelID, "principal", principalID, "reason", reason, "error", err)
@@ -808,7 +890,10 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 		if was.joinedKnown {
 			joined = was.joinedAt
 		}
-		if ok && p.firstRemoval(room.RoomName, identity, joined) {
+		// Audited when LiveKit disconnected someone, whether or not a pass
+		// had seen them yet: a person removed a moment after joining was
+		// still removed.
+		if removed && p.firstRemoval(room.RoomName, identity, joined) {
 			events = append(events, p.removedEvent(room.ChannelID, principalID, reason))
 		}
 	}
@@ -824,6 +909,38 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	p.writeEvents(ctx, events...)
 }
 
+// forgetEverywhere takes principalID out of presence in every room the
+// poller has them in, with the events of their leaving, without calling
+// LiveKit: used when the rooms to evict from could not be read.
+func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
+	var events []voiceEvent
+	var channels []int64
+	p.mu.Lock()
+	for _, r := range p.rooms {
+		was, ok := r.participants[principalID]
+		if !ok {
+			continue
+		}
+		delete(r.participants, principalID)
+		r.seq++
+		r.evicted[principalID] = r.seq
+		// Someone is still connected there: keep the room polled.
+		r.marked = true
+		actor := fmt.Sprintf("principal:%d", principalID)
+		detail := fmt.Sprintf("channel=%d audience=channel source=observed", r.channelID)
+		if was.transmitting {
+			events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceTransmitStopped, channelID: r.channelID, detail: detail})
+		}
+		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: r.channelID, detail: detail})
+		channels = append(channels, r.channelID)
+	}
+	p.mu.Unlock()
+	p.writeEvents(ctx, events...)
+	for _, id := range channels {
+		p.notify(id)
+	}
+}
+
 // forget takes principalID out of the room's presence, reporting what it
 // held. ok is false when the poller did not believe the principal was there.
 func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, bool) {
@@ -835,6 +952,10 @@ func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, bool) {
 	}
 	s, ok := r.participants[principalID]
 	delete(r.participants, principalID)
+	// Recorded even when the poller had not seen them: a pass in flight may
+	// be about to.
+	r.seq++
+	r.evicted[principalID] = r.seq
 	return s, ok
 }
 
@@ -883,7 +1004,7 @@ func (p *voicePoller) snapshotLocked(channelID int64) schema.VoicePresenceV1 {
 	snap.Available = true
 	room := schema.VoicePresenceRoom{Participants: []schema.VoiceParticipant{}}
 	for _, r := range p.rooms {
-		if r.channelID != channelID {
+		if r.channelID != channelID || r.stale {
 			continue
 		}
 		for pid, s := range r.participants {
@@ -1048,6 +1169,9 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	if s.lk == nil {
 		return
 	}
+	// The removal is committed; an operator's client hanging up now must not
+	// stop what follows from it.
+	ctx = context.WithoutCancel(ctx)
 	rooms, err := s.store.VoiceRoomsForChannel(ctx, channelID)
 	if err != nil {
 		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "channel", channelID, "error", err)
@@ -1065,9 +1189,20 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 	if s.lk == nil {
 		return
 	}
-	rooms, err := s.store.VoiceRoomsForMember(ctx, principalID)
+	// The bar comes first and needs nothing that can fail: if the rooms
+	// cannot be read below, passes still remove this identity wherever they
+	// meet it. A disabled principal needs no bar; entitlement refuses it.
+	if reason == voiceReasonCredsRevoked {
+		s.voice.bar(voiceIdentity(principalID))
+	}
+	ctx = context.WithoutCancel(ctx)
+	rooms, err := s.voice.memberRooms(ctx, principalID)
 	if err != nil {
+		// Which rooms to call LiveKit for is unknown. The principal still
+		// leaves presence at once, from every room the poller has them in,
+		// and the next pass removes them (by entitlement, or by the bar).
 		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "principal", principalID, "error", err)
+		s.voice.forgetEverywhere(ctx, principalID)
 		return
 	}
 	s.voice.evict(ctx, rooms, principalID, reason)

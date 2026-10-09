@@ -75,8 +75,11 @@ type scriptedLiveKit struct {
 	reportedCount int
 	// listStatus is the status of ListRooms and ListParticipants; 0 means 200.
 	listStatus int
-	// removeStatus is the status of RemoveParticipant; 0 means 200.
+	// removeStatus is the status of RemoveParticipant; 0 means 200, or 404
+	// not_found when the identity is not in the room, as LiveKit answers.
 	removeStatus int
+	// listFail names rooms whose ListParticipants fails while others answer.
+	listFail map[string]bool
 	// keepAfterRemove makes RemoveParticipant answer 200 without dropping the
 	// participant, as when LiveKit is slow to close the connection.
 	keepAfterRemove bool
@@ -150,6 +153,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.inflight++
 		f.maxInflight = max(f.maxInflight, f.inflight)
 		status, hold := f.listStatus, f.holdList
+		if f.listFail[req.Room] {
+			status = http.StatusInternalServerError
+		}
 		f.mu.Unlock()
 		defer func() {
 			f.mu.Lock()
@@ -183,6 +189,10 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if status != 0 {
 			writeFakeJSON(w, status, map[string]any{"code": "internal"})
+			return
+		}
+		if !f.in(req.Room, req.Identity) {
+			writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "not_found", "msg": "participant does not exist"})
 			return
 		}
 		if !keep {
