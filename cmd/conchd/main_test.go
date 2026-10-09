@@ -202,8 +202,29 @@ func TestDefaultAuthModeIsRequired(t *testing.T) {
 	if defaultAuthMode != server.AuthRequired {
 		t.Fatalf("defaultAuthMode = %q, want %q", defaultAuthMode, server.AuthRequired)
 	}
-	t.Setenv("CONCHD_AUTH", "")
-	if got := envOr("CONCHD_AUTH", string(defaultAuthMode)); got != string(server.AuthRequired) {
-		t.Fatalf("resolved default = %q, want required", got)
+	// What serve actually resolves, through the same flag set runServe uses.
+	tests := []struct {
+		name string
+		args []string
+		env  string
+		want server.AuthMode
+	}{
+		{"nothing given", nil, "", server.AuthRequired},
+		{"flag off", []string{"--auth", "off"}, "", server.AuthOff},
+		{"env off", nil, "off", server.AuthOff},
+		{"flag required beats env off", []string{"--auth", "required"}, "off", server.AuthRequired},
+		{"flag off beats env required", []string{"--auth=off"}, "required", server.AuthOff},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCHD_AUTH", tt.env)
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.authMode != tt.want {
+				t.Errorf("auth mode = %q, want %q", opts.authMode, tt.want)
+			}
+		})
 	}
 }

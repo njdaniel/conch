@@ -83,7 +83,21 @@ Flags for serve:
 `)
 }
 
-func runServe(args []string) error {
+// serveOptions is what `conchd serve` resolved from its flags and environment.
+type serveOptions struct {
+	dataDir         string
+	listen          string
+	authMode        server.AuthMode
+	mcpTokens       map[string]int64
+	ntfyServer      string
+	ntfyTopic       string
+	ntfyUrgentTopic string
+}
+
+// parseServeArgs resolves the serve flags and their environment fallbacks.
+// It is separate from runServe so the resolved values — the authentication
+// mode above all — can be tested without starting a server.
+func parseServeArgs(args []string) (serveOptions, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
@@ -93,16 +107,27 @@ func runServe(args []string) error {
 	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return serveOptions{}, err
 	}
 	if *dataDir == "" {
-		return errors.New("serve: --data (or CONCHD_DATA) is required")
+		return serveOptions{}, errors.New("serve: --data (or CONCHD_DATA) is required")
 	}
 	authMode, err := server.ParseAuthMode(*authFlag)
 	if err != nil {
-		return fmt.Errorf("serve: --auth: %w", err)
+		return serveOptions{}, fmt.Errorf("serve: --auth: %w", err)
 	}
 	mcpTokens, err := parseMCPTokens(*mcpTokensRaw)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	return serveOptions{
+		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
+		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
+	}, nil
+}
+
+func runServe(args []string) error {
+	opts, err := parseServeArgs(args)
 	if err != nil {
 		return err
 	}
@@ -110,7 +135,7 @@ func runServe(args []string) error {
 	// The data directory is an operator-supplied path by design; conchd runs
 	// with the operator's own privileges, so this is configuration, not a
 	// traversal vector.
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
+	if err := os.MkdirAll(opts.dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
 		return fmt.Errorf("serve: create data dir: %w", err)
 	}
 
@@ -121,22 +146,22 @@ func runServe(args []string) error {
 	defer stop()
 	context.AfterFunc(ctx, stop)
 
-	st, err := store.Open(ctx, filepath.Join(*dataDir, "conch.db"))
+	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
 
 	srv := server.New(server.Config{
-		DataDir:         *dataDir,
-		Listen:          *listen,
+		DataDir:         opts.dataDir,
+		Listen:          opts.listen,
 		Version:         version,
-		MCPBearerTokens: mcpTokens,
-		AuthMode:        authMode,
+		MCPBearerTokens: opts.mcpTokens,
+		AuthMode:        opts.authMode,
 		Ntfy: approvals.NtfyConfig{
-			Server:         *ntfyServer,
-			ApprovalsTopic: *ntfyTopic,
-			UrgentTopic:    *ntfyUrgentTopic,
+			Server:         opts.ntfyServer,
+			ApprovalsTopic: opts.ntfyTopic,
+			UrgentTopic:    opts.ntfyUrgentTopic,
 			Timeout:        2 * time.Second,
 		},
 	}, st)
@@ -144,7 +169,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), *dataDir)
+	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), opts.dataDir)
 	return srv.Serve(ctx)
 }
 

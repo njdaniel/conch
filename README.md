@@ -52,12 +52,13 @@ make check   # fmt, vet, lint, tests, schema-compat, dependency gate — run bef
 `conchd` requires authentication by default, so the first step is an operator — the one principal who can administer the instance:
 
 ```sh
+umask 077   # everything created in this shell — the data directory and the token file — is readable only by you
 mkdir -p /tmp/conch-data
-bin/conchd bootstrap-operator --data /tmp/conch-data --name nick > /tmp/conch-operator.token
+bin/conchd bootstrap-operator --data /tmp/conch-data --name nick > /tmp/conch-data/operator.token
 bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 ```
 
-- `bootstrap-operator` works offline on the data directory. It prints the operator's token once, alone on stdout (captured to a file above — keep it private), and refuses to run again once an operator exists.
+- `bootstrap-operator` works offline on the data directory. It prints the operator's token once, alone on stdout, and refuses to run again once an operator exists. The token can administer the whole instance: the `umask 077` above is what keeps the file it is captured to private, so do not skip it, and never write a token to a file other users can read.
 - `--data` (or `CONCHD_DATA`) is required — directory for the embedded SQLite database.
 - `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
 - `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
@@ -68,7 +69,7 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 There's no admin CLI yet; the operator does this through the REST API with their token:
 
 ```sh
-OP="Authorization: Bearer $(cat /tmp/conch-operator.token)"
+OP="Authorization: Bearer $(cat /tmp/conch-data/operator.token)"
 J='Content-Type: application/json'
 
 curl -s -X POST localhost:8080/v0/channels   -H "$OP" -H "$J" -d '{"name":"ops"}'
@@ -88,6 +89,8 @@ curl -s -X POST localhost:8080/v1/principals/3/credentials -H "$OP" -H "$J" -d '
 curl -s -X PUT localhost:8080/v1/channels/ops/members/2 -H "$OP"
 curl -s -X PUT localhost:8080/v1/channels/ops/members/3 -H "$OP"
 ```
+
+On a machine you share, a header given with `-H "..."` is visible in the process list while `curl` runs. Put the header line in a private file and pass `-H @that-file` instead.
 
 A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. Other operator actions: `DELETE /v1/credentials/{id}` revokes one credential, `POST /v1/credentials/{id}/rotate` replaces one, `POST /v1/principals/{id}/disable` switches a principal off entirely (and `/enable` back on), and `DELETE /v1/channels/{channel}/members/{id}` removes a member.
 
