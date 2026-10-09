@@ -12,6 +12,7 @@ import (
 
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/hub"
+	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -38,6 +39,9 @@ type Config struct {
 	// AuthMode selects REST/WebSocket authentication. Unset means
 	// AuthRequired; only an explicit AuthOff opens the server. See auth.go.
 	AuthMode AuthMode
+	// LiveKit configures optional voice. The zero value means voice is not
+	// configured; nothing contacts LiveKit at startup either way.
+	LiveKit livekit.Config
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -94,6 +98,11 @@ func New(cfg Config, st *store.Store) *Server {
 		s.mux.Handle(rt.pattern, s.guard(rt))
 	}
 	s.logAgentsWithoutManifest(context.Background())
+	if s.VoiceConfigured() {
+		slog.Info("voice: configured", "livekit", cfg.LiveKit)
+	} else {
+		slog.Info("voice: not configured")
+	}
 	var handler http.Handler = s.mux
 	if cfg.authRequired() {
 		handler = s.authMiddleware(handler)
@@ -107,6 +116,10 @@ func New(cfg Config, st *store.Store) *Server {
 	}
 	return s
 }
+
+// VoiceConfigured reports whether LiveKit settings were supplied. Later voice
+// endpoints answer voice_not_configured when it is false.
+func (s *Server) VoiceConfigured() bool { return s.cfg.LiveKit.Configured() }
 
 // Handler returns the HTTP handler, for use with httptest and future mounts.
 func (s *Server) Handler() http.Handler {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/njdaniel/conch/internal/server"
 	"github.com/njdaniel/conch/internal/server/approvals"
+	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
 )
 
@@ -58,6 +59,7 @@ func usage(w *os.File) {
 
 Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
+                     [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -80,6 +82,14 @@ Flags for serve:
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
   --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
   --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
+  --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
+  --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
+                         default: --livekit-url with ws->http, wss->https)
+
+Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
+off; set some but not all and serve refuses to start. The signing key pair is
+read only from the environment, never a flag: CONCHD_LIVEKIT_API_KEY and
+CONCHD_LIVEKIT_API_SECRET. Startup does not contact LiveKit.
 `)
 }
 
@@ -92,6 +102,7 @@ type serveOptions struct {
 	ntfyServer      string
 	ntfyTopic       string
 	ntfyUrgentTopic string
+	livekit         livekit.Config
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -106,6 +117,8 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyServer := fs.String("ntfy-server", os.Getenv("CONCHD_NTFY_SERVER"), "ntfy server URL")
 	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
+	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
+	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
 	if err := fs.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
@@ -120,7 +133,13 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, err
 	}
+	// The key pair has no flag on purpose: a flag would show in the process list.
+	lk, err := livekit.ParseConfig(*livekitURL, *livekitAPIURL, os.Getenv(livekit.EnvAPIKey), os.Getenv(livekit.EnvAPISecret))
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: %w", err)
+	}
 	return serveOptions{
+		livekit: lk,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -158,6 +177,7 @@ func runServe(args []string) error {
 		Version:         version,
 		MCPBearerTokens: opts.mcpTokens,
 		AuthMode:        opts.authMode,
+		LiveKit:         opts.livekit,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
