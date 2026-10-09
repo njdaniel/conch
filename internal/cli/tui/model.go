@@ -93,20 +93,26 @@ type Model struct {
 	authenticated bool
 	userName      string
 	// whoErr is why whoami failed; nil while it is pending or after success.
-	whoErr      error
-	channels    []string
-	selected    int
-	messages    map[string][]schema.MessageV1
-	subscribed  map[string]bool
-	input       string
-	status      string
-	width       int
-	height      int
-	events      chan tea.Msg
-	mode        mode
-	approvals   []schema.ApprovalV1
-	selApproval int
-	selOption   int
+	whoErr     error
+	channels   []string
+	selected   int
+	messages   map[string][]schema.MessageV1
+	subscribed map[string]bool
+	input      string
+	// channelStatus and inboxStatus are the status line of each mode. A
+	// background result writes the status of the mode it belongs to, so it
+	// cannot replace what the user is looking at in another mode. The decision
+	// prompt shares inboxStatus: it is entered from the inbox, esc returns to
+	// it, and a refresh of the approvals it decides on reports there.
+	channelStatus string
+	inboxStatus   string
+	width         int
+	height        int
+	events        chan tea.Msg
+	mode          mode
+	approvals     []schema.ApprovalV1
+	selApproval   int
+	selOption     int
 	// loadingChannels is true while the channel list is being fetched from the
 	// server; the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
@@ -123,6 +129,23 @@ type Model struct {
 	// after schedules msg to be delivered once d has elapsed. Injectable so
 	// tests can observe the delay instead of sleeping through it.
 	after func(d time.Duration, msg tea.Msg) tea.Cmd
+}
+
+// setStatus records status for mode; modeDecision shares the inbox's.
+func (m *Model) setStatus(mode mode, status string) {
+	if mode == modeChannels {
+		m.channelStatus = status
+		return
+	}
+	m.inboxStatus = status
+}
+
+// status is the status line of the mode the user is in.
+func (m Model) status() string {
+	if m.mode == modeChannels {
+		return m.channelStatus
+	}
+	return m.inboxStatus
 }
 
 func tickAfter(d time.Duration, msg tea.Msg) tea.Cmd {
@@ -188,7 +211,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == modeDecision {
 				m.mode = modeInbox
 				m.input = ""
-				m.status = "canceled decision"
+				m.setStatus(modeInbox, "canceled decision")
 				return m, nil
 			}
 			return m, tea.Quit
@@ -196,11 +219,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 			case modeChannels:
 				m.mode = modeInbox
-				m.status = "loading approvals…"
+				m.setStatus(modeInbox, "loading approvals…")
 				return m, m.loadApprovals()
 			case modeInbox:
+				// The channel status is left as it is: results that landed
+				// while the user was away are already recorded in it.
 				m.mode = modeChannels
-				m.status = ""
 				return m, nil
 			}
 		case "up":
@@ -242,47 +266,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if len(m.channels) == 0 {
-					m.status = "no channel selected yet"
+					m.setStatus(modeChannels, "no channel selected yet")
 					return m, nil
 				}
 				if m.authorID <= 0 {
-					m.status = m.noAuthorStatus("send")
+					m.setStatus(modeChannels, m.noAuthorStatus("send"))
 					return m, nil
 				}
 				m.input = ""
-				m.status = "sending…"
+				m.setStatus(modeChannels, "sending…")
 				return m, m.send(body)
 			case modeInbox:
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
 					m.selOption = 0
 					m.input = ""
-					m.status = "type reason to decide"
+					m.setStatus(modeInbox, "type reason to decide")
 					return m, nil
 				}
 			case modeDecision:
 				reason := strings.TrimSpace(m.input)
 				if reason == "" {
-					m.status = "reason is required"
+					m.setStatus(modeInbox, "reason is required")
 					return m, nil
 				}
 				if m.authorID <= 0 {
-					m.status = m.noAuthorStatus("decide")
+					m.setStatus(modeInbox, m.noAuthorStatus("decide"))
 					return m, nil
 				}
 				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
-					m.status = "no approval selected"
+					m.setStatus(modeInbox, "no approval selected")
 					m.mode = modeInbox
 					return m, nil
 				}
 				app := m.approvals[m.selApproval]
 				if len(app.Options) == 0 || m.selOption < 0 || m.selOption >= len(app.Options) {
-					m.status = "select a decision option"
+					m.setStatus(modeInbox, "select a decision option")
 					return m, nil
 				}
 				opt := app.Options[m.selOption]
 				m.input = ""
-				m.status = "casting decision…"
+				m.setStatus(modeInbox, "casting decision…")
 				return m, m.castDecision(app.ID, opt.ID, reason)
 			}
 		case "backspace":
@@ -301,33 +325,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case whoAmILoaded:
 		if msg.err != nil {
 			m.whoErr = msg.err
-			m.status = whoErrText(msg.err)
+			m.setStatus(modeChannels, whoErrText(msg.err))
 			return m, nil
 		}
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
-		m.status = "signed in as " + msg.who.Name
+		m.setStatus(modeChannels, "signed in as "+msg.who.Name)
 	case approvalsLoaded:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(modeInbox, msg.err.Error())
 		} else {
 			m.approvals = msg.approvals
 			m.selApproval = 0
-			m.status = "inbox loaded"
+			m.setStatus(modeInbox, "inbox loaded")
 			// A slower load can land after the user has already moved into
 			// modeDecision on a stale (now-refreshed) list; if the refresh
 			// came back empty there is nothing left to decide on.
 			if m.mode == modeDecision && len(m.approvals) == 0 {
 				m.mode = modeInbox
-				m.status = "no open approvals"
+				m.setStatus(modeInbox, "no open approvals")
 			}
 		}
 	case decisionCast:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(modeInbox, msg.err.Error())
 		} else {
-			m.status = "decision cast"
+			m.setStatus(modeInbox, "decision cast")
 			m.mode = modeInbox
 			return m, m.loadApprovals()
 		}
@@ -353,7 +377,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "no channels on server"
 			names = []string{"general"}
 		}
-		m.status = m.notice
+		m.setStatus(modeChannels, m.notice)
 		m.channels = names
 		m.selected = 0
 		m.subscribed[names[0]] = true
@@ -369,9 +393,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A channel-list notice explains the failure better than the
 			// fallback channel's own load error does.
 			if m.notice != "" {
-				m.status = m.notice
+				m.setStatus(modeChannels, m.notice)
 			} else {
-				m.status = msg.err.Error()
+				m.setStatus(modeChannels, msg.err.Error())
 			}
 		} else {
 			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], msg.messages)
@@ -380,13 +404,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch {
 			case m.notice != "":
-				m.status = m.notice
+				m.setStatus(modeChannels, m.notice)
 			case m.retryPending[msg.channel]:
 				// History loaded, but the live subscription is down and a
 				// retry is waiting: "connected" would be untrue.
-				m.status = statusReconnecting
+				m.setStatus(modeChannels, statusReconnecting)
 			default:
-				m.status = "connected"
+				m.setStatus(modeChannels, "connected")
 			}
 		}
 	case messageReceived:
@@ -411,9 +435,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
 	case messageSent:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			m.setStatus(modeChannels, msg.err.Error())
 		} else {
-			m.status = "sent"
+			m.setStatus(modeChannels, "sent")
 		}
 	}
 	return m, nil
@@ -433,7 +457,7 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 		// Retrying cannot fix a missing login; the user must act, and
 		// re-selecting the channel will try again afterwards.
 		if selected && m.notice == "" {
-			m.status = msg.err.Error()
+			m.setStatus(modeChannels, msg.err.Error())
 		}
 		return m, wait
 	}
@@ -445,7 +469,7 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 		return m, wait
 	}
 	if m.notice == "" {
-		m.status = statusReconnecting
+		m.setStatus(modeChannels, statusReconnecting)
 	}
 	delay, ok := m.backoff[msg.channel]
 	if !ok {
@@ -465,7 +489,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected = next
-	m.status = "loading…"
+	m.setStatus(modeChannels, "loading…")
 	commands := []tea.Cmd{m.loadCurrent()}
 	// A pending retry timer will start the subscription itself.
 	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
@@ -757,7 +781,7 @@ func (m Model) View() string {
 		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
 
-	status := m.status + statusKeys
+	status := m.status() + statusKeys
 	if m.userName != "" {
 		status = m.userName + " | " + status
 	}
