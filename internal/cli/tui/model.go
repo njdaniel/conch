@@ -20,10 +20,15 @@ type API interface {
 	ListMessages(context.Context, string, int64, int) (schema.ListMessagesResponseV1, error)
 	SendMessage(context.Context, string, int64, string) (schema.MessageV1, error)
 	Subscribe(context.Context, string, func(schema.MessageV1) error) error
+	ListChannels(context.Context) (schema.ListChannelsResponse, error)
 	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
 	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
 }
 
+type channelsLoaded struct {
+	channels []schema.ChannelV0
+	err      error
+}
 type messagesLoaded struct {
 	channel  string
 	messages []schema.MessageV1
@@ -73,9 +78,17 @@ type Model struct {
 	approvals   []schema.ApprovalV1
 	selApproval int
 	selOption   int
+	// loadingChannels is true while the channel list is being fetched from the
+	// server; the model has no channels until channelsLoaded arrives.
+	loadingChannels bool
+	// notice is a channel-list problem that must survive the "connected"
+	// status the first backfill would otherwise write.
+	notice string
 }
 
-// NewModel constructs a model for the configured channels.
+// NewModel constructs a model for the configured channels. When channels is
+// empty (after trimming) the model starts with no channels and asks the server
+// for the list in Init.
 func NewModel(ctx context.Context, api API, authorID int64, channels []string) Model {
 	clean := make([]string, 0, len(channels))
 	seen := make(map[string]bool)
@@ -86,16 +99,24 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 			seen[channel] = true
 		}
 	}
-	if len(clean) == 0 {
-		clean = []string{"general"}
-	}
-	return Model{ctx: ctx, api: api, authorID: authorID, channels: clean,
-		messages: make(map[string][]schema.MessageV1), subscribed: map[string]bool{clean[0]: true},
+	m := Model{ctx: ctx, api: api, authorID: authorID,
+		messages: make(map[string][]schema.MessageV1), subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels}
+	if len(clean) == 0 {
+		m.loadingChannels = true
+		return m
+	}
+	m.channels = clean
+	m.subscribed[clean[0]] = true
+	return m
 }
 
-// Init starts REST backfill and the live subscription for the selected channel.
+// Init starts REST backfill and the live subscription for the selected
+// channel, or fetches the channel list first when none was configured.
 func (m Model) Init() tea.Cmd {
+	if m.loadingChannels {
+		return tea.Batch(m.loadChannels(), m.waitEvent())
+	}
 	return tea.Batch(m.loadCurrent(), m.startSubscription(), m.waitEvent())
 }
 
@@ -161,6 +182,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeChannels:
 				body := strings.TrimSpace(m.input)
 				if body == "" {
+					return m, nil
+				}
+				if len(m.channels) == 0 {
+					m.status = "no channel selected yet"
 					return m, nil
 				}
 				if m.authorID <= 0 {
@@ -239,18 +264,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeInbox
 			return m, m.loadApprovals()
 		}
+	case channelsLoaded:
+		if !m.loadingChannels {
+			return m, nil
+		}
+		m.loadingChannels = false
+		names := make([]string, 0, len(msg.channels))
+		for _, channel := range msg.channels {
+			if name := strings.TrimSpace(channel.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+		switch {
+		case msg.err != nil:
+			m.notice = "channel list: " + msg.err.Error()
+			names = []string{"general"}
+		case len(names) == 0:
+			m.notice = "no channels on server"
+			names = []string{"general"}
+		}
+		m.status = m.notice
+		m.channels = names
+		m.selected = 0
+		m.subscribed[names[0]] = true
+		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
 	case messagesLoaded:
 		if msg.err != nil {
-			m.status = msg.err.Error()
+			// A channel-list notice explains the failure better than the
+			// fallback channel's own load error does.
+			if m.notice != "" {
+				m.status = m.notice
+			} else {
+				m.status = msg.err.Error()
+			}
 		} else {
 			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], msg.messages)
-			m.status = "connected"
+			if m.notice != "" {
+				m.status = m.notice
+			} else {
+				m.status = "connected"
+			}
 		}
 	case messageReceived:
 		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV1{msg.message})
 		return m, m.waitEvent()
 	case subscriptionEnded:
-		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) && m.notice == "" {
 			m.status = "live updates: " + msg.err.Error()
 		}
 		return m, m.waitEvent()
@@ -279,10 +338,26 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(commands...)
 }
 
-func (m Model) current() string { return m.channels[m.selected] }
+// current returns the selected channel, or "" while there are no channels.
+func (m Model) current() string {
+	if m.selected < 0 || m.selected >= len(m.channels) {
+		return ""
+	}
+	return m.channels[m.selected]
+}
+
+func (m Model) loadChannels() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := m.api.ListChannels(m.ctx)
+		return channelsLoaded{channels: resp.Channels, err: err}
+	}
+}
 
 func (m Model) loadCurrent() tea.Cmd {
 	channel := m.current()
+	if channel == "" {
+		return nil
+	}
 	return func() tea.Msg {
 		var messages []schema.MessageV1
 		var after int64
@@ -302,6 +377,9 @@ func (m Model) loadCurrent() tea.Cmd {
 
 func (m Model) startSubscription() tea.Cmd {
 	channel := m.current()
+	if channel == "" {
+		return nil
+	}
 	return func() tea.Msg {
 		go func() {
 			err := m.api.Subscribe(m.ctx, channel, func(message schema.MessageV1) error {
@@ -334,6 +412,9 @@ func (m Model) waitEvent() tea.Cmd {
 
 func (m Model) send(body string) tea.Cmd {
 	channel := m.current()
+	if channel == "" {
+		return nil
+	}
 	return func() tea.Msg {
 		_, err := m.api.SendMessage(m.ctx, channel, m.authorID, body)
 		return messageSent{err: err}
@@ -468,6 +549,9 @@ func (m Model) View() string {
 				prefix = activeStyle.Render("› ")
 			}
 			channelLines[i] = prefix + channel
+		}
+		if len(channelLines) == 0 && m.loadingChannels {
+			channelLines = append(channelLines, statusStyle.Render("loading…"))
 		}
 		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(channelLines, "\n"))
 		messageLines := make([]string, 0, len(m.messages[m.current()]))

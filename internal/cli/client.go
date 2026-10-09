@@ -77,6 +77,28 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 	return result.Message, nil
 }
 
+// ListChannels returns every channel on the server, ordered by id.
+func (c *Client) ListChannels(ctx context.Context) (schema.ListChannelsResponse, error) {
+	endpoint := c.resolve("v1", "channels")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return schema.ListChannelsResponse{}, fmt.Errorf("cli: create list channels request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return schema.ListChannelsResponse{}, fmt.Errorf("cli: list channels: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.ListChannelsResponse{}, decodeServerError(resp)
+	}
+	var result schema.ListChannelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.ListChannelsResponse{}, fmt.Errorf("cli: decode list channels response: %w", err)
+	}
+	return result, nil
+}
+
 // ListApprovals returns a list of open approvals.
 func (c *Client) ListApprovals(ctx context.Context) (schema.ListApprovalsResponseV1, error) {
 	endpoint := c.resolve("v1", "approvals")

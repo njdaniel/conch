@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -20,6 +22,9 @@ func (stubAPI) SendMessage(context.Context, string, int64, string) (schema.Messa
 	return schema.MessageV1{}, nil
 }
 func (stubAPI) Subscribe(context.Context, string, func(schema.MessageV1) error) error { return nil }
+func (stubAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
+	return schema.ListChannelsResponse{}, nil
+}
 func (stubAPI) ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error) {
 	return schema.ListApprovalsResponseV1{}, nil
 }
@@ -158,6 +163,203 @@ func TestModelUpdate(t *testing.T) {
 			}
 			test.want(t, got)
 		})
+	}
+}
+
+// listAPI records channel-list, backfill and subscribe calls.
+type listAPI struct {
+	stubAPI
+	resp      schema.ListChannelsResponse
+	err       error
+	mu        sync.Mutex
+	lists     int
+	listed    []string
+	subscribe chan string
+}
+
+func (a *listAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
+	a.mu.Lock()
+	a.lists++
+	a.mu.Unlock()
+	return a.resp, a.err
+}
+
+func (a *listAPI) ListMessages(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV1, error) {
+	a.mu.Lock()
+	a.listed = append(a.listed, channel)
+	a.mu.Unlock()
+	return schema.ListMessagesResponseV1{}, nil
+}
+
+func (a *listAPI) Subscribe(_ context.Context, channel string, _ func(schema.MessageV1) error) error {
+	a.subscribe <- channel
+	return nil
+}
+
+func (a *listAPI) listCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lists
+}
+
+// runCmd executes cmd (flattening tea.Batch) and returns the messages produced.
+func runCmd(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, runCmd(c)...)
+		}
+		return out
+	}
+	return []tea.Msg{msg}
+}
+
+func TestModelChannelsLoaded(t *testing.T) {
+	ch := func(names ...string) []schema.ChannelV0 {
+		out := make([]schema.ChannelV0, 0, len(names))
+		for i, n := range names {
+			out = append(out, schema.ChannelV0{ID: int64(i + 1), Name: n})
+		}
+		return out
+	}
+	tests := []struct {
+		name       string
+		msg        channelsLoaded
+		wantList   []string
+		wantStatus string
+	}{
+		{name: "populated", msg: channelsLoaded{channels: ch("ops", "dev")}, wantList: []string{"ops", "dev"}},
+		{name: "api error", msg: channelsLoaded{err: errors.New("boom")}, wantList: []string{"general"}, wantStatus: "channel list: boom"},
+		{name: "zero channels", msg: channelsLoaded{channels: []schema.ChannelV0{}}, wantList: []string{"general"}, wantStatus: "no channels on server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &listAPI{subscribe: make(chan string, 4)}
+			model := NewModel(context.Background(), api, 7, nil)
+			updated, cmd := model.Update(tt.msg)
+			got := updated.(Model)
+			if strings.Join(got.channels, ",") != strings.Join(tt.wantList, ",") || got.selected != 0 {
+				t.Fatalf("channels = %v selected %d, want %v", got.channels, got.selected, tt.wantList)
+			}
+			if got.status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", got.status, tt.wantStatus)
+			}
+			msgs := runCmd(cmd)
+			var loaded messagesLoaded
+			for _, m := range msgs {
+				if l, ok := m.(messagesLoaded); ok {
+					loaded = l
+				}
+			}
+			if loaded.channel != tt.wantList[0] {
+				t.Errorf("backfill channel = %q, want %q", loaded.channel, tt.wantList[0])
+			}
+			select {
+			case sub := <-api.subscribe:
+				if sub != tt.wantList[0] {
+					t.Errorf("subscribed %q, want %q", sub, tt.wantList[0])
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("no subscription started")
+			}
+			// The notice must survive the first backfill's "connected".
+			after, _ := got.Update(loaded)
+			wantAfter := "connected"
+			if tt.wantStatus != "" {
+				wantAfter = tt.wantStatus
+			}
+			if s := after.(Model).status; s != wantAfter {
+				t.Errorf("status after backfill = %q, want %q", s, wantAfter)
+			}
+			// ...and the fallback channel's own errors, which would otherwise
+			// hide why the fallback happened.
+			failed, _ := got.Update(messagesLoaded{channel: tt.wantList[0], err: errors.New("channel not found")})
+			wantFailed := "channel not found"
+			if tt.wantStatus != "" {
+				wantFailed = tt.wantStatus
+			}
+			if s := failed.(Model).status; s != wantFailed {
+				t.Errorf("status after failed backfill = %q, want %q", s, wantFailed)
+			}
+			ended, _ := got.Update(subscriptionEnded{channel: tt.wantList[0], err: errors.New("gone")})
+			wantEnded := "live updates: gone"
+			if tt.wantStatus != "" {
+				wantEnded = tt.wantStatus
+			}
+			if s := ended.(Model).status; s != wantEnded {
+				t.Errorf("status after subscription end = %q, want %q", s, wantEnded)
+			}
+		})
+	}
+}
+
+func TestModelInitChannelSource(t *testing.T) {
+	t.Run("explicit list never calls ListChannels", func(t *testing.T) {
+		api := &listAPI{subscribe: make(chan string, 4)}
+		model := NewModel(context.Background(), api, 7, []string{"general", "ops"})
+		// Batch order is backfill, subscribe, waitEvent; the subscription
+		// goroutine ends immediately, which unblocks waitEvent.
+		msgs := runCmd(model.Init())
+		if n := api.listCalls(); n != 0 {
+			t.Errorf("ListChannels called %d times, want 0", n)
+		}
+		var backfilled bool
+		for _, m := range msgs {
+			if l, ok := m.(messagesLoaded); ok && l.channel == "general" {
+				backfilled = true
+			}
+		}
+		if !backfilled {
+			t.Errorf("no backfill for general in %#v", msgs)
+		}
+	})
+	t.Run("empty list loads from API", func(t *testing.T) {
+		api := &listAPI{resp: schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "ops"}}}, subscribe: make(chan string, 4)}
+		model := NewModel(context.Background(), api, 7, []string{" ", ""})
+		if !model.loadingChannels || len(model.channels) != 0 {
+			t.Fatalf("model = %+v, want loading with no channels", model)
+		}
+		msg := model.loadChannels()()
+		loaded, ok := msg.(channelsLoaded)
+		if !ok || len(loaded.channels) != 1 || api.listCalls() != 1 {
+			t.Fatalf("msg = %#v, calls = %d", msg, api.listCalls())
+		}
+	})
+}
+
+func TestModelEmptyChannelListIsSafe(t *testing.T) {
+	keys := []tea.KeyMsg{
+		{Type: tea.KeyUp}, {Type: tea.KeyDown}, {Type: tea.KeyTab}, {Type: tea.KeyTab},
+		{Type: tea.KeyBackspace}, {Type: tea.KeyRunes, Runes: []rune("hi")}, {Type: tea.KeyEnter},
+	}
+	model := NewModel(context.Background(), stubAPI{}, 7, nil)
+	var current tea.Model = model
+	current, _ = current.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_ = current.View()
+	for _, key := range keys {
+		var cmd tea.Cmd
+		current, cmd = current.Update(key)
+		if key.Type == tea.KeyTab {
+			_ = cmd // inbox load is a command; not executed here
+		}
+		_ = current.View()
+	}
+	// Send with no channels: status message, no command.
+	m := model
+	m.input = "hello"
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("send with no channels must not issue a command")
+	}
+	if s := updated.(Model).status; !strings.Contains(s, "no channel") {
+		t.Errorf("status = %q, want no-channel message", s)
+	}
+	if !strings.Contains(m.View(), "loading") {
+		t.Errorf("view should show loading:\n%s", m.View())
 	}
 }
 
