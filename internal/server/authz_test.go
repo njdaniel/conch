@@ -116,19 +116,29 @@ func (o mcpOutcome) result() string {
 
 func (f *authzFixture) call(t *testing.T, agent, tool string, arguments map[string]any) mcpOutcome {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
+	out, err := f.callWithToken("tok-"+agent, tool, arguments)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return out
+}
+
+// callWithToken is call with an explicit bearer token and no testing.T, so it
+// is safe to use from a goroutine.
+func (f *authzFixture) callWithToken(token, tool string, arguments map[string]any) (mcpOutcome, error) {
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
+	if err != nil {
+		return mcpOutcome{}, err
+	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok-"+agent)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	f.srv.Handler().ServeHTTP(rec, req)
 	out := mcpOutcome{status: rec.Code, body: rec.Body.String()}
 	if rec.Code != http.StatusOK {
-		return out
+		return out, nil
 	}
 	// A tool error carries its schema.Error as JSON in the first text content
 	// (the SDK fills structuredContent with the tool's typed output).
@@ -141,17 +151,17 @@ func (f *authzFixture) call(t *testing.T, agent, tool string, arguments map[stri
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode %s response %s: %v", tool, rec.Body.String(), err)
+		return out, fmt.Errorf("decode %s response %s: %w", tool, rec.Body.String(), err)
 	}
 	out.isError = response.Result.IsError
 	if out.isError && len(response.Result.Content) > 0 {
 		var serr schema.Error
 		if err := json.Unmarshal([]byte(response.Result.Content[0].Text), &serr); err != nil {
-			t.Fatalf("decode %s tool error %q: %v", tool, response.Result.Content[0].Text, err)
+			return out, fmt.Errorf("decode %s tool error %q: %w", tool, response.Result.Content[0].Text, err)
 		}
 		out.code = serr.Code
 	}
-	return out
+	return out, nil
 }
 
 func (f *authzFixture) denials(t *testing.T) []store.AuditEvent {
@@ -306,7 +316,7 @@ func TestMCPToolAuthorizationMatrix(t *testing.T) {
 // A tool with no capability mapping has no access, whatever the manifest says.
 func TestUnmappedToolFailsClosed(t *testing.T) {
 	f := newAuthzFixture(t)
-	scope, serr := f.srv.newAgentScope(context.Background(), f.agents[agFull].ID, "delete_everything")
+	scope, serr := f.srv.newAgentScope(context.Background(), mcpIdentity{principalID: f.agents[agFull].ID}, "delete_everything")
 	if scope != nil || serr == nil || serr.Code != "forbidden" {
 		t.Fatalf("newAgentScope for an unmapped tool = %v, %v; want nil and forbidden", scope, serr)
 	}
@@ -354,45 +364,131 @@ func TestEveryMCPToolIsMapped(t *testing.T) {
 	}
 }
 
-// The MCP tools must reach channels and approvals only through agentScope,
-// and register only through addAgentTool. This pins that structurally: a
-// direct store lookup or a bare mcp.AddTool in mcp.go would bypass the policy.
+// The MCP tools must reach data only through agentScope and register only
+// through addAgentTool. This pins that structurally: mcp.go, which holds the
+// tools, must not reference the store at all (authentication lives in
+// mcp_auth.go and authorization in authz.go), and must call mcp.AddTool in
+// exactly one place.
 func TestMCPToolsOnlyUseTheAuthorizationScope(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("mcp.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	code := string(src)
-	for _, forbidden := range []string{"s.store.ChannelByName(", "s.store.ChannelByID(", "s.store.ApprovalByID(", "s.store.IsChannelMember(", "s.store.AgentManifestByPrincipal("} {
+	for _, forbidden := range []string{"s.store", ".store.", "store.Open", "*store.Store"} {
 		if strings.Contains(code, forbidden) {
-			t.Errorf("mcp.go calls %s directly; channels, approvals, membership and manifests must go through agentScope (authz.go)", forbidden)
+			t.Errorf("mcp.go contains %q; the MCP tools must reach data only through agentScope (authz.go)", forbidden)
 		}
 	}
 	if n := strings.Count(code, "mcp.AddTool("); n != 1 {
 		t.Errorf("mcp.go has %d mcp.AddTool calls, want exactly 1 (inside addAgentTool)", n)
 	}
+	if n := strings.Count(code, "addAgentTool(s, server, identity,"); n != len(schema.MCPToolCapabilities()) {
+		t.Errorf("mcp.go registers %d tools through addAgentTool, want %d (one per mapped tool)", n, len(schema.MCPToolCapabilities()))
+	}
 }
 
-// An agent waiting on an approval stops being told about it as soon as it is
-// removed from the approval's channel.
-func TestAwaitDecisionEndsWhenMembershipIsRemoved(t *testing.T) {
-	f := newAuthzFixture(t)
-	done := make(chan mcpOutcome, 1)
-	go func() {
-		done <- f.call(t, agFull, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 30000})
-	}()
-	// Let the wait start polling, then remove the agent from the channel.
-	time.Sleep(50 * time.Millisecond)
-	if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.alpha.ID, f.agents[agFull].ID); err != nil {
-		t.Fatal(err)
+// An in-flight await_decision is re-authorized on every poll. Whatever is
+// taken away while it waits — channel membership, the manifest grant, the
+// credential, or the principal itself — ends the wait on the next poll with
+// the matching error instead of letting it run to its timeout and deliver a
+// resolution.
+func TestAwaitDecisionEndsWhenAuthorizationIsWithdrawn(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		issued   bool // authenticate with an issued credential instead of the static token
+		withdraw func(t *testing.T, f *authzFixture, credentialID int64)
+		want     string
+	}{
+		{"removed from the channel", false, func(t *testing.T, f *authzFixture, _ int64) {
+			if _, err := f.srv.store.RemoveChannelMember(ctx, "system", f.alpha.ID, f.agents[agFull].ID); err != nil {
+				t.Fatal(err)
+			}
+		}, "approval_not_found"},
+		{"manifest loses the channel grant", false, func(t *testing.T, f *authzFixture, _ int64) {
+			setAgentManifest(t, f.srv, f.agents[agFull].ID, nil)
+		}, "forbidden"},
+		{"manifest loses the capability", false, func(t *testing.T, f *authzFixture, _ int64) {
+			setAgentManifest(t, f.srv, f.agents[agFull].ID, []schema.Capability{schema.CapabilityMessagesRead}, f.alpha.ID)
+		}, "forbidden"},
+		{"credential revoked", true, func(t *testing.T, f *authzFixture, credentialID int64) {
+			if err := f.srv.store.RevokeCredential(ctx, "system", credentialID); err != nil {
+				t.Fatal(err)
+			}
+		}, "unauthenticated"},
+		{"principal disabled, issued credential", true, func(t *testing.T, f *authzFixture, _ int64) {
+			if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.agents[agFull].ID); err != nil {
+				t.Fatal(err)
+			}
+		}, "unauthenticated"},
+		{"principal disabled, static token", false, func(t *testing.T, f *authzFixture, _ int64) {
+			if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.agents[agFull].ID); err != nil {
+				t.Fatal(err)
+			}
+		}, "unauthenticated"},
 	}
-	select {
-	case got := <-done:
-		if got.result() != "approval_not_found" {
-			t.Fatalf("await after removal = %s, want approval_not_found (body %s)", got.result(), got.body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAuthzFixture(t)
+			token, credentialID := "tok-"+agFull, int64(0)
+			if tt.issued {
+				cred, issued, err := f.srv.store.CreateCredential(ctx, "system", f.agents[agFull].ID, "test", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, credentialID = issued, cred.ID
+			}
+			type result struct {
+				out mcpOutcome
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				out, err := f.callWithToken(token, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 30000})
+				done <- result{out, err}
+			}()
+			// Let the wait start polling, then take the authorization away.
+			time.Sleep(50 * time.Millisecond)
+			tt.withdraw(t, f, credentialID)
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+				if got.out.result() != tt.want {
+					t.Fatalf("await ended with %s, want %s (body %s)", got.out.result(), tt.want, got.out.body)
+				}
+				if strings.Contains(got.out.body, "resolution") && strings.Contains(got.out.body, "decisions") {
+					t.Errorf("the refused wait still carried a resolution: %s", got.out.body)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("await_decision kept waiting after its authorization was withdrawn")
+			}
+		})
+	}
+}
+
+// However short the timeout, await_decision authorizes before it answers: it
+// must never return a successful, empty result for an approval the agent may
+// not observe or that does not exist.
+func TestAwaitDecisionAuthorizesBeforeItTimesOut(t *testing.T) {
+	f := newAuthzFixture(t)
+	for i := 0; i < 20; i++ {
+		if got := f.call(t, agOutsider, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "approval_not_found" {
+			t.Fatalf("non-member await with a 1 ms timeout = %s, want approval_not_found (body %s)", got.result(), got.body)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("await_decision kept waiting after the agent was removed from the channel")
+		if got := f.call(t, agFull, "await_decision", map[string]any{"approval_id": 9999, "timeout_ms": 1}); got.result() != "approval_not_found" {
+			t.Fatalf("await on an unknown approval with a 1 ms timeout = %s, want approval_not_found", got.result())
+		}
+		if got := f.call(t, agMessagesOnly, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "forbidden" {
+			t.Fatalf("await without the capability and a 1 ms timeout = %s, want forbidden", got.result())
+		}
+	}
+	// An authorized agent with the same tiny timeout gets the pending state.
+	got := f.call(t, agFull, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1})
+	if got.result() != "ok" || !strings.Contains(got.body, `"state":"pending"`) {
+		t.Fatalf("authorized await with a 1 ms timeout = %s, body %s", got.result(), got.body)
 	}
 }
 
@@ -470,9 +566,21 @@ func TestAgentWithoutManifestAndApprovalRoutes(t *testing.T) {
 	if rec := f.do(t, "GET", "/v1/channels/general/messages", bareTok, ""); rec.Code != http.StatusForbidden {
 		t.Errorf("agent with no manifest: read = %d, want 403", rec.Code)
 	}
-	// A channel it is not in still looks like it does not exist.
+	// A channel it is not in still looks like it does not exist — and the
+	// probe is recorded, as it would be over MCP.
 	if rec := f.do(t, "GET", "/v1/channels/alpha/messages", bareTok, ""); rec.Code != http.StatusNotFound {
 		t.Errorf("agent with no manifest, not a member: read = %d, want 404", rec.Code)
+	}
+	if rec := f.do(t, "GET", "/v1/channels/alpha/members", bareTok, ""); rec.Code != http.StatusNotFound {
+		t.Errorf("agent, not a member: member list = %d, want 404", rec.Code)
+	}
+	// Who is in a channel is channel content: a member agent needs the read
+	// grant for the member list too.
+	if rec := f.do(t, "GET", "/v1/channels/general/members", bareTok, ""); rec.Code != http.StatusForbidden {
+		t.Errorf("member agent with no manifest: member list = %d, want 403", rec.Code)
+	}
+	if rec := f.do(t, "GET", "/v1/channels/general/members", f.botTok, ""); rec.Code != http.StatusOK {
+		t.Errorf("member agent with the read grant: member list = %d, want 200", rec.Code)
 	}
 	for _, c := range []struct{ method, path, body string }{
 		{"GET", "/v1/approvals", ""},
@@ -492,6 +600,19 @@ func TestAgentWithoutManifestAndApprovalRoutes(t *testing.T) {
 	// A human can still use them.
 	if rec := f.do(t, "GET", "/v1/approvals", f.aliceTok, ""); rec.Code != 200 {
 		t.Errorf("human approvals list = %d", rec.Code)
+	}
+
+	// Every one of those refusals left an audit row naming the agent.
+	reasons := map[string]int{}
+	for _, e := range f.audit(t) {
+		if e.Action != "access_denied" || e.Actor != fmt.Sprintf("principal:%d", bare.ID) {
+			continue
+		}
+		reasons[e.Detail[strings.Index(e.Detail, "reason=")+len("reason="):]]++
+	}
+	want := map[string]int{denyNoManifest: 2, denyNotMember: 2, denyAgentOnHumanRoute: 3}
+	if fmt.Sprint(reasons) != fmt.Sprint(want) {
+		t.Errorf("audited refusals for the agent = %v, want %v", reasons, want)
 	}
 }
 
@@ -559,5 +680,49 @@ func TestStartupReportsAgentsWithoutManifest(t *testing.T) {
 	New(Config{Listen: "127.0.0.1:0"}, st)
 	if !strings.Contains(logs.buf.String(), "agents=1") {
 		t.Errorf("startup log = %q, want it to report 1 agent without a manifest", logs.buf.String())
+	}
+}
+
+// Replacing an agent's manifest closes the WebSocket subscriptions the new
+// manifest no longer permits, and only those: a socket on a channel it may
+// still read stays open.
+func TestManifestChangeDropsRevokedSubscriptions(t *testing.T) {
+	f := newMemberFixture(t) // bot: manifest allows general and alpha
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/alpha/members/%d", f.bot.ID), f.rootTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("add bot to alpha = %d %s", rec.Code, rec.Body)
+	}
+	base := wsTestServer(t, f.srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	general := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=general", f.botTok))
+	alpha := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=alpha", f.botTok))
+
+	// The operator narrows the manifest to general only.
+	body := fmt.Sprintf(`{"display_name":"bot","tier":"C","capabilities":["messages.read","messages.post"],"channels":[{"channel_id":%d,"permissions":["read","post"]}]}`, f.general.ID)
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/principals/%d/manifest", f.bot.ID), f.rootTok, body); rec.Code != http.StatusOK {
+		t.Fatalf("put manifest = %d %s", rec.Code, rec.Body)
+	}
+	err := alpha.waitClosed(t)
+	if err == nil || !strings.Contains(err.Error(), "manifest no longer permits reading this channel") {
+		t.Errorf("alpha socket close = %v, want the manifest reason", err)
+	}
+
+	// The socket on general is untouched and still receives.
+	rec := f.do(t, "POST", "/v1/channels/general/messages", f.aliceTok, `{"body":"still here"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("post = %d %s", rec.Code, rec.Body)
+	}
+	general.waitForID(t, decodeBody[schema.PostMessageResponseV1](t, rec).Message.ID)
+
+	// Nothing posted to alpha afterwards reached the closed socket.
+	rec = f.do(t, "POST", "/v1/channels/alpha/messages", f.aliceTok, `{"body":"after the manifest change"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("post = %d %s", rec.Code, rec.Body)
+	}
+	id := decodeBody[schema.PostMessageResponseV1](t, rec).Message.ID
+	for _, seen := range alpha.seen() {
+		if seen == id {
+			t.Errorf("a message posted after the manifest change reached the revoked socket")
+		}
 	}
 }

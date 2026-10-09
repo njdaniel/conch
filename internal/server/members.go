@@ -66,6 +66,7 @@ func (s *Server) channelForCaller(w http.ResponseWriter, r *http.Request, name s
 		return store.Channel{}, false
 	}
 	if !member {
+		s.auditAgentNonMember(r, capability, channel.ID)
 		writeChannelNotFound(w)
 		return store.Channel{}, false
 	}
@@ -98,9 +99,15 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !member {
+			s.auditAgentNonMember(r, schema.CapabilityMessagesRead, channel.ID)
 			writeChannelNotFound(w)
 			return
 		}
+	}
+	// Who else is in a channel is channel content: an agent needs the same
+	// grant to see it as to read the channel's messages (issue #79).
+	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+		return
 	}
 	members, err := s.store.ListChannelMembers(ctx, channel.ID)
 	if err != nil {

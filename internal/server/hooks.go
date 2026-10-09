@@ -113,20 +113,17 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !member {
+			if hookPrincipal.Kind == store.PrincipalAgent {
+				s.auditAgentDenial(ctx, hookPrincipal.ID, r.Pattern, schema.CapabilityMessagesPost, hook.ChannelID, denyNotMember)
+			}
 			writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")
 			return
 		}
 		// A hook bound to an agent posts as that agent, so it is also held to
 		// the agent's manifest (issue #79). A refusal is audited and looks
 		// like an unknown token to the sender.
-		principal, err := s.store.PrincipalByID(ctx, hook.PrincipalID)
-		if err != nil {
-			slog.ErrorContext(ctx, "hooks: find principal failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-			return
-		}
-		if principal.Kind == store.PrincipalAgent {
-			allowed, err := s.agentManifestAllows(ctx, principal.ID, r.Pattern, schema.CapabilityMessagesPost, hook.ChannelID, schema.ChannelPermissionPost)
+		if hookPrincipal.Kind == store.PrincipalAgent {
+			allowed, err := s.agentManifestAllows(ctx, hookPrincipal.ID, r.Pattern, schema.CapabilityMessagesPost, hook.ChannelID, schema.ChannelPermissionPost)
 			if err != nil {
 				slog.ErrorContext(ctx, "hooks: load manifest failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

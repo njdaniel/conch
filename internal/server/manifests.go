@@ -59,6 +59,10 @@ func (s *Server) handlePutManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// A WebSocket subscription was authorized against the manifest as it was
+	// when the socket opened; close the ones the new manifest no longer
+	// permits, or a revoked read grant would keep streaming (issue #79).
+	s.dropAgentSubscriptionsRevokedBy(ctx, id, manifest)
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated

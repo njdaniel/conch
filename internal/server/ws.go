@@ -114,6 +114,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		return
 	}
 	if !member {
+		s.auditAgentNonMember(r, schema.CapabilityMessagesRead, channel.ID)
 		writeChannelNotFound(w)
 		return
 	}
@@ -253,6 +254,10 @@ func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channel
 	if principalID != 0 {
 		if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
 			_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+			return
+		}
+		if s.agentMayNoLongerRead(bg, principalID, channelID) {
+			_ = conn.Close(websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
 			return
 		}
 	}
