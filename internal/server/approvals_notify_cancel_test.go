@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,9 @@ func (n *slowNtfy) done() int {
 }
 
 type notifyFixture struct {
+	// gone receives "METHOD path" each time the server sees a request's
+	// context end: when the request completes, or when its client hangs up.
+	gone    chan string
 	st      *store.Store
 	srv     *Server
 	addr    string
@@ -79,7 +83,7 @@ func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	f := &notifyFixture{st: st, ids: map[string]int64{}, tokens: map[string]string{}}
+	f := &notifyFixture{st: st, ids: map[string]int64{}, tokens: map[string]string{}, gone: make(chan string, 64)}
 	f.srv = New(Config{AuthMode: AuthRequired, DataDir: t.TempDir(), Listen: "127.0.0.1:0", Version: "test",
 		Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 5 * time.Second}}, st)
 	if f.channel, err = st.CreateChannel(ctx, "ops"); err != nil {
@@ -99,7 +103,14 @@ func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 		}
 		f.ids[name], f.tokens[name] = p.ID, tok
 	}
-	web := httptest.NewServer(f.srv.Handler())
+	handler := f.srv.Handler()
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		go func(ctx context.Context, what string) {
+			<-ctx.Done()
+			f.gone <- what
+		}(r.Context(), r.Method+" "+r.URL.Path)
+		handler.ServeHTTP(w, r)
+	}))
 	t.Cleanup(web.Close)
 	f.base, f.addr = web.URL, strings.TrimPrefix(web.URL, "http://")
 	return f
@@ -126,6 +137,24 @@ func hangUp(conn net.Conn) {
 		_ = tcp.SetLinger(0)
 	}
 	_ = conn.Close()
+}
+
+// waitGone blocks until the server has seen the context of the request what
+// ("METHOD path") end. After a hang-up on a request whose handler is still
+// running, that is the moment the server noticed the client was gone.
+func (f *notifyFixture) waitGone(t *testing.T, what string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case got := <-f.gone:
+			if got == what {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("the server never saw %q end", what)
+		}
+	}
 }
 
 // chain waits until the audit events about subject are want, and fails with
@@ -190,6 +219,7 @@ func TestHangUpDuringNotificationDoesNotSuppressIt(t *testing.T) {
 			f := newNotifyFixture(t, ntfy.URL)
 			wantDone := 1
 
+			abandoned := "POST /v1/approvals"
 			conn := f.send(t, "POST", "/v1/approvals", "ann", createApprovalBody(f.channel.ID, f.ids["ann"]))
 			if tt.resolve {
 				// Let the creation through whole; the hang-up is on the decision.
@@ -200,6 +230,7 @@ func TestHangUpDuringNotificationDoesNotSuppressIt(t *testing.T) {
 				}
 				_ = conn.Close()
 				id := f.onlyApproval(t)
+				abandoned = fmt.Sprintf("POST /v1/approvals/%d/decisions", id)
 				conn = f.send(t, "POST", fmt.Sprintf("/v1/approvals/%d/decisions", id), "bob",
 					fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, f.ids["bob"]))
 				wantDone = 2
@@ -211,8 +242,11 @@ func TestHangUpDuringNotificationDoesNotSuppressIt(t *testing.T) {
 				t.Fatal("the notification never reached ntfy")
 			}
 			hangUp(conn)
-			// Long enough for the server to notice the client is gone.
-			time.Sleep(100 * time.Millisecond)
+			// Not a sleep: ntfy answers only once the server has seen this
+			// request's context cancelled, while its handler is still inside
+			// the delivery. On the old code that cancellation aborted the
+			// delivery, however slow the machine.
+			f.waitGone(t, abandoned)
 			ntfy.release <- struct{}{}
 
 			var id int64
@@ -273,5 +307,80 @@ func TestNoNotificationWithoutACommit(t *testing.T) {
 		if strings.HasPrefix(e.Subject, "approval:") {
 			t.Errorf("audit row for an approval that was not created: %+v", e)
 		}
+	}
+}
+
+// Told if and only if committed, whenever the caller's deadline falls: before
+// the transaction, inside it, at the commit, or during the delivery. Every
+// approval that exists has exactly one "created" notification row, every call
+// that failed left nothing, and the two counts agree with what Create said.
+func TestNotificationMatchesCommitUnderRandomDeadlines(t *testing.T) {
+	ntfy := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	defer ntfy.Close()
+	f := newNotifyFixture(t, ntfy.URL)
+	bg := context.Background()
+	params := func() store.ApprovalParams {
+		deadline := time.Now().Add(time.Hour)
+		return store.ApprovalParams{
+			RequesterID: f.ids["ann"], ChannelID: f.channel.ID, Title: "t", Body: "b",
+			Options: []schema.Option{
+				{ID: "approve", Label: "Approve", Kind: schema.OptionKindApprove},
+				{ID: "reject", Label: "Reject", Kind: schema.OptionKindReject},
+			},
+			Deadline: deadline, GraceDeadline: deadline.Add(time.Hour), Quorum: 1,
+		}
+	}
+	// Deadlines are spread over twice the time one whole Create takes here.
+	started := time.Now()
+	if _, err := f.srv.approvals.Create(bg, params()); err != nil {
+		t.Fatal(err)
+	}
+	span := 2 * time.Since(started)
+	rng := rand.New(rand.NewSource(5)) // #nosec G404 -- test timing only
+	ok, failed := 1, 0
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
+		_, err := f.srv.approvals.Create(ctx, params())
+		cancel()
+		if err == nil {
+			ok++
+		} else {
+			failed++
+		}
+	}
+	events, err := f.st.ListAuditEvents(bg, 0, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, notified := map[string]int{}, map[string]int{}
+	for _, e := range events {
+		switch e.Action {
+		case store.AuditApprovalCreated:
+			created[e.Subject]++
+		case approvals.AuditNotifySent, approvals.AuditNotifyFailed:
+			notified[e.Subject]++
+		}
+	}
+	open, err := f.st.ListOpenApprovals(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != ok || len(created) != ok {
+		t.Errorf("Create succeeded %d times; %d approvals stored, %d approval_created subjects", ok, len(open), len(created))
+	}
+	for _, a := range open {
+		subject := fmt.Sprintf("approval:%d", a.ID)
+		if created[subject] != 1 || notified[subject] != 1 {
+			t.Errorf("%s: %d approval_created and %d notify rows, want one of each", subject, created[subject], notified[subject])
+		}
+	}
+	if len(notified) != ok {
+		t.Errorf("notify rows for %d approvals, want %d", len(notified), ok)
+	}
+	t.Logf("%d created, %d refused", ok, failed)
+	if failed == 0 || ok < 2 {
+		t.Errorf("created %d, refused %d: the deadlines exercised only one outcome", ok, failed)
 	}
 }
