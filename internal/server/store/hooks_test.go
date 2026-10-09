@@ -267,9 +267,7 @@ func seedSchema9WithHooks(t *testing.T, dir string, tokens []string, crashCopyDi
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(crashCopyDir, "conch.db"+suffix), data, 0o600); err != nil { // #nosec G703 -- this test's own temp directory
-				t.Fatal(err)
-			}
+			writeFileT(t, filepath.Join(crashCopyDir, "conch.db"+suffix), data, 0o600)
 		}
 	}
 	if err := db.Close(); err != nil {
@@ -326,8 +324,8 @@ func TestHookMigrationFromSchema9(t *testing.T) {
 				seedSchema9WithHooks(t, dir, tokens, copyDir)
 				dir = copyDir
 				path = filepath.Join(dir, "conch.db")
-				if data, err := os.ReadFile(path + "-wal"); err != nil || !bytes.Contains(data, []byte(tokens[0])) { // #nosec G304 -- temp dir
-					t.Fatalf("test setup: expected the plaintext token in the leftover WAL (err %v)", err)
+				if !bytes.Contains(readFileT(t, path+"-wal"), []byte(tokens[0])) {
+					t.Fatal("test setup: expected the plaintext token in the leftover WAL")
 				}
 			} else {
 				path = seedSchema9WithHooks(t, dir, tokens, "")
@@ -417,16 +415,14 @@ func TestOpenTruncatesTheWALOnEveryStart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(crashed, "conch.db"+suffix), data, 0o600); err != nil { // #nosec G703 -- temp dir
-			t.Fatal(err)
-		}
+		writeFileT(t, filepath.Join(crashed, "conch.db"+suffix), data, 0o600)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	wal := filepath.Join(crashed, "conch.db-wal")
-	if data, err := os.ReadFile(wal); err != nil || !bytes.Contains(data, []byte(marker)) { // #nosec G304 -- temp dir
-		t.Fatalf("test setup: expected the marker in the leftover WAL (err %v)", err)
+	if !bytes.Contains(readFileT(t, wal), []byte(marker)) {
+		t.Fatal("test setup: expected the marker in the leftover WAL")
 	}
 
 	reopened, err := Open(ctx, filepath.Join(crashed, "conch.db"))
@@ -529,12 +525,8 @@ func TestDatabasePathHazards(t *testing.T) {
 	t.Run("a symlinked database tightens the file it points to", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(t.TempDir(), "real.db")
-		if err := os.WriteFile(target, nil, 0o644); err != nil { // #nosec G306 -- the loose mode is the point
-			t.Fatal(err)
-		}
-		if err := os.Chmod(target, 0o644); err != nil { // #nosec G302 -- as above
-			t.Fatal(err)
-		}
+		writeFileT(t, target, nil, 0o644)
+		chmodT(t, target, 0o644)
 		path := filepath.Join(dir, "conch.db")
 		if err := os.Symlink(target, path); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
@@ -550,9 +542,7 @@ func TestDatabasePathHazards(t *testing.T) {
 	})
 	t.Run("a data directory writable by others is reported once", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := os.Chmod(dir, 0o777); err != nil { // #nosec G302 -- the loose mode is the point
-			t.Fatal(err)
-		}
+		chmodT(t, dir, 0o777)
 		logs := newLogCapture(t)
 		s, err := Open(ctx, filepath.Join(dir, "conch.db"))
 		if err != nil {
@@ -563,6 +553,37 @@ func TestDatabasePathHazards(t *testing.T) {
 			t.Errorf("warnings = %d, want 1: %q", n, logs.String())
 		}
 	})
+}
+
+// The three helpers below keep each file call on a line of its own. The lint
+// exceptions they need are honoured there by every gosec version in use; a
+// comment after the brace of an if statement is not.
+
+func readFileT(t *testing.T, p string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(p) // #nosec G304 -- a path inside this test's own temp directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// writeFileT and chmodT take whatever mode the test asks for, including
+// deliberately loose ones: tightening them is what is under test.
+func writeFileT(t *testing.T, p string, data []byte, mode os.FileMode) {
+	t.Helper()
+	err := os.WriteFile(p, data, mode) // #nosec G306,G703 -- test-chosen mode, in this test's own temp directory
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func chmodT(t *testing.T, p string, mode os.FileMode) {
+	t.Helper()
+	err := os.Chmod(p, mode) // #nosec G302 -- test-chosen mode, to exercise tightening
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDatabaseFileModes(t *testing.T) {
@@ -615,12 +636,8 @@ func TestDatabaseFileModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path+suffix, data, 0o644); err != nil { // #nosec G306,G703 -- deliberately loose, in this test's own temp directory
-				t.Fatal(err)
-			}
-			if err := os.Chmod(path+suffix, 0o644); err != nil { // #nosec G302 -- deliberately loose
-				t.Fatal(err)
-			}
+			writeFileT(t, path+suffix, data, 0o644)
+			chmodT(t, path+suffix, 0o644)
 		}
 		_ = first.Close()
 		logs.mu.Lock()
@@ -665,9 +682,7 @@ func TestDatabaseFileModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = s.Close()
-		if err := os.Chmod(path, 0o640); err != nil { // #nosec G302 -- deliberately loose
-			t.Fatal(err)
-		}
+		chmodT(t, path, 0o640)
 		s, err = Open(ctx, path)
 		if err != nil {
 			t.Fatal(err)
