@@ -1,6 +1,6 @@
 # Design: voice control plane
 
-- **Status:** Adopted for V3 implementation, 2026-10-09 (governing decision: [ADR-004](../adr/ADR-004-voice-via-livekit.md), Accepted). §10 lists LiveKit behaviours still to be verified by #125.
+- **Status:** Adopted for V3 implementation, 2026-10-09 (governing decision: [ADR-004](../adr/ADR-004-voice-via-livekit.md), Accepted). §10 records the LiveKit behaviours it relies on, as measured.
 - **Touches:** [ADR-002](../adr/ADR-002-single-binary-sqlite.md) (optional processes degrade gracefully), [ADR-003](../adr/ADR-003-multi-human-access.md) (authenticated humans, channel membership), [ADR-005](../adr/ADR-005-nets-and-whispers.md) (audiences), [ADR-006](../adr/ADR-006-rust-voice-client.md) (the client).
 - **Owner:** protocol-designer (schemas), server-engineer (control plane)
 - **Issues:** epic #122, this note #123
@@ -69,8 +69,8 @@ One LiveKit room per audience. In V3 the only audience is the whole channel.
 
 - **Identity** is `p<principal id>`. One principal holds one connection per room; LiveKit replaces an earlier connection with the same identity. That keeps presence unambiguous. A second device takes over from the first.
 - **Token grant:** join that one room; subscribe; publish a microphone track only if `can_publish`; no data publishing; no room administration.
-- **Lifetime is 60 seconds.** LiveKit checks a token when a client connects, not afterwards, so the lifetime only bounds how long a token can be used to *start* a connection. Clients ask for a session immediately before connecting and again before any reconnect.
-- **Clock skew.** The token's not-before time is set 30 seconds in the past, so a LiveKit clock that runs behind `conchd`'s does not reject it. A LiveKit clock more than about 50 seconds *ahead* would see the token as expired. `conchd` and LiveKit normally share a host; on separate hosts their clocks must be synchronised, and the deployment docs say so.
+- **The token expires 15 seconds after it is issued, and can start a connection for about 75.** LiveKit checks a token when a client connects, not afterwards, and it allows 60 seconds of leeway on both the expiry and the not-before time (§10, finding 6). So the expiry `conchd` writes is deliberately short: the leeway cannot be turned off from `conchd`, and it is added on top. Clients ask for a session immediately before connecting and again before any reconnect.
+- **Clock skew.** The same leeway means the two clocks may differ by up to about a minute in either direction before a fresh token is refused, so the not-before time is not backdated. `conchd` and LiveKit normally share a host; on separate hosts their clocks must be synchronised, and the deployment docs say so.
 - With nets (V5), a member of a net gets a publishing grant for its room and a monitor gets a listen-only grant. The shape above does not change; each grant gains the `audience` that ADR-005 defines.
 
 Each issued session writes one `voice_session_issued` audit event. The token is never logged or audited.
@@ -80,10 +80,10 @@ Each issued session writes one `voice_session_issued` audit event. The token is 
 A token cannot be revoked, and an established connection outlives it. So `conchd` enforces changes itself:
 
 - When a principal is removed from the channel, disabled, or has all credentials revoked, `conchd` calls `RemoveParticipant` for each of that principal's rooms. With nets, the same happens on leaving a net.
-- The poller (§6) compares every participant in every room with current membership on each pass, and removes anyone who should not be there. This closes the gap left by a token issued in the last 60 seconds before a removal.
+- The poller (§6) compares every participant in every room with current membership on each pass, and removes anyone who should not be there. This closes the gap left by a token issued in the 75 seconds before a removal.
 - Enforcement does not depend on `conchd`'s memory. After a restart the poller's first act is a sweep of every stored room (§6), so someone removed while `conchd` was down, or whose removal call failed just before it stopped, is still found.
 
-**Residual exposure, stated plainly:** a principal removed while holding a token under 60 seconds old can rejoin and hear audio until the next poll, at most about one second. Rotating the room name on every membership change would close that completely at the cost of reconnecting everyone; it is not proposed for V3.
+**Residual exposure, stated plainly:** a principal removed while holding a token under 75 seconds old can rejoin and hear audio until the next poll, at most about one second. Rotating the room name on every membership change would close that completely at the cost of reconnecting everyone; it is not proposed for V3.
 
 A failed `RemoveParticipant` is retried on the next pass and logged. If LiveKit is unreachable, `conchd` cannot enforce; presence says `available: false` and an audit event `voice_enforcement_unavailable` is written once per outage.
 
@@ -91,7 +91,7 @@ A failed `RemoveParticipant` is retried on the next pass and logged. If LiveKit 
 
 `conchd` learns who is connected and who is transmitting by **polling** LiveKit's `ListParticipants` for rooms that are in use: any room with a session issued in the last two minutes or a participant on the previous pass. The interval is 500 ms while in use.
 
-"In use" is held in memory, so it is rebuilt rather than trusted: **at startup, and every 30 seconds after, the poller sweeps** by asking LiveKit for its room list once and marking every stored room that has participants as in use. A room joined with a token issued before a restart is therefore picked up at startup, and nothing can stay connected unobserved for more than 30 seconds. With no room in use, the sweep is the only call `conchd` makes.
+"In use" is held in memory, so it is rebuilt rather than trusted: **at startup, and every 30 seconds after, the poller sweeps** by asking LiveKit for its room list once and marking every stored room that LiveKit currently has as in use for the next pass. The room list's participant count is not used: it lags a join by seconds (§10, finding 5), whereas a room exists in LiveKit only while someone is in it or for a short timeout after, so existence is the reliable signal and `ListParticipants` gives the truth. A room joined with a token issued before a restart is therefore picked up at startup, and nothing can stay connected unobserved for more than 30 seconds. With no room in use, the sweep is the only call `conchd` makes.
 
 Rooms are polled concurrently, at most eight at a time, and a pass that has not finished is not started again. This is sized for one self-hosted instance with tens of rooms, which is what Conch is (ADR-002).
 
@@ -139,20 +139,27 @@ API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapsho
 Nick delegated these to the principal engineer on 2026-10-09 ("use your best judgment"). They are recorded here with their reasons, and he can reopen any of them.
 
 1. **Transmit audit: polling in V3, plus client reports from V4.** Polling alone can miss a press shorter than the interval, which is weaker than ADR-004's "audit records transmit start/stop" read strictly. V3 has no real client, only a headless test participant, so polling is all it can use and all it needs. From V4, `conch-voice` reports each press and release to `conchd`, which audits them with exact times. The poller keeps running as the check on the client: a transmission it observes with no matching report is audited as `voice_transmit_unreported`. The result is exact records for the official client, and detection at poll resolution of anything a modified client leaves out. What remains unrecorded is a burst shorter than the interval from a client that was altered not to report it. Granting and revoking publishing on every press was rejected: it would make `conchd` exact against any client, but it adds a round trip to every push-to-talk and clips speech. The report endpoint is designed with V4.
-2. **The rejoin window stays.** A removed principal holding a token under a minute old can rejoin for at most about a second before the poller removes them, and that removal is audited. Rotating the room on every membership change would close the window by disconnecting everyone in the room each time. ADR-005 describes scoped speech as discretion, not secrecy; a logged one-second window is consistent with that, and a reconnect for the whole room is not worth it.
+2. **The rejoin window stays.** A removed principal holding a token under 75 seconds old can rejoin for at most about a second before the poller removes them, and that removal is audited. Rotating the room on every membership change would close the window by disconnecting everyone in the room each time. ADR-005 describes scoped speech as discretion, not secrecy; a logged one-second window is consistent with that, and a reconnect for the whole room is not worth it.
 3. **One connection per principal per room.** A second device displaces the first. Presence stays unambiguous and nobody is listed twice. Listening on two devices at once can be added later with a per-device identity suffix without changing anything stored.
 
-## 10. Assumptions not yet verified
+## 10. LiveKit behaviours this note relies on, as measured
 
-The spike verified token minting, `ListParticipants`, `RemoveParticipant` and `UpdateParticipant` against LiveKit 1.13.7. This note also relies on five behaviours it did **not** exercise. The first implementation issue (#125) must check each against a real server and record the result; if one is false, this note is corrected before work continues.
+Measured on 2026-10-09 against LiveKit server 1.13.7 (the `livekit/livekit-server` image, automatic room creation off, bound to localhost), with the spike's client and with `internal/server/livekit` (#125). The spike had already verified token minting, `ListParticipants`, `RemoveParticipant` and `UpdateParticipant`.
 
-1. `ListParticipants` shows whether a published microphone track is muted, and reflects a change within one poll interval.
-2. `CreateRoom` on a name that already exists succeeds without disturbing the room.
-3. With automatic room creation off, a valid token for a room that does not exist cannot be used to join.
-4. A second connection with the same identity replaces the first.
-5. `ListRooms` reports participant counts accurately enough for the 30-second sweep, and a room LiveKit closed for being empty is recreated by `CreateRoom` under the same name.
+| # | Behaviour | Result |
+|---|---|---|
+| 1 | `ListParticipants` shows whether a microphone track is muted | **Holds.** A mute and an unmute were each visible about 25 ms after the client made them. |
+| 2 | `CreateRoom` on an existing name leaves the room alone | **Holds.** Same room id returned; the participant in it was undisturbed. |
+| 3 | With automatic creation off, a token for a room that does not exist cannot join | **Holds.** The join is refused with 404, "requested room does not exist". |
+| 4 | A second connection with the same identity replaces the first | **Holds.** LiveKit drops the first with reason `DUPLICATE_IDENTITY`. |
+| 5 | The room list's participant count is usable for the sweep | **Does not hold as assumed.** The count read zero for about two seconds after a join. The sweep uses room existence instead (§6). An empty room is closed after its timeout and drops out of the list; `CreateRoom` brings the name back with a new room id; `ListParticipants` on a room LiveKit does not have is an empty list, not an error. |
+| 6 | A token is refused once expired | **Holds with 60 seconds of leeway**, which this note had not assumed. A token was accepted 55 seconds past its expiry and refused at 65, and the same for a not-before time in the future. §4 sets the lifetime with that in mind. |
+| 7 | An established connection outlives its token | **Holds.** A client that joined on an 8-second token was still connected 75 seconds later. This is why §5 enforces by removal. |
+| 8 | Removing a participant who has already left | Answers 404. `internal/server/livekit` treats that as success, so a participant leaving just before their removal is not mistaken for an outage. |
 
-Checked against LiveKit's documentation on 2026-10-09, not against a server: its webhooks have no mute event (§6).
+Wire details observed: field names are snake case (`joined_at_ms`, `num_participants`), 64-bit integers are strings, and enums are names (`"MICROPHONE"`, `"AUDIO"`). The token's `canPublishSources: ["microphone"]` is honoured. Each room call was accepted with only the grant it needs.
+
+Checked against LiveKit's documentation, not a server: its webhooks have no mute event (§6).
 
 ## 11. Out of scope
 
