@@ -115,9 +115,22 @@ Surfaces:
 - `GET /v1/channels/{channel}/voice` returns a snapshot: whether voice is configured and available, and for each room the caller may see, its participants with `transmitting` and `joined_at`.
 - `GET /v1/voice/ws?channel=` streams the same snapshot, as a `conch.voice_presence.v1` document, whenever it changes. A new route, because the existing sockets carry bare message envelopes and a client decoding those must not meet another type.
 
-Both require an authenticated **human member** of the channel, checked exactly as on the message routes: no credential is 401, a non-member gets the unknown-channel 404, and a presence socket is closed when its subscriber loses membership. Agent callers are refused with 403 in V3. ADR-004 defers agents in voice, and whether an agent may see who is talking is part of that decision, not this one.
+Both require an authenticated **human member** of the channel, checked exactly as on the message routes: no credential is 401, a non-member gets the unknown-channel 404, and a presence socket is closed when its subscriber loses membership. Agent callers are refused with 403 in V3. With `--auth off` both answer 400 `voice_requires_auth` before the channel is looked at, as the session endpoint does: voice is never anonymous. A server with voice not configured still answers a member with a snapshot (`configured: false`, `available: false`, no rooms), and the socket sends that document. ADR-004 defers agents in voice, and whether an agent may see who is talking is part of that decision, not this one.
 
 A snapshot never contains a room name or a token, so reading presence gives nothing that helps join a room.
+
+How the poller behaves where the text above leaves room (issue #127):
+
+- **Available** means LiveKit has answered at least once and the last call succeeded. Until the first sweep after a start has been answered, presence is `available: false`.
+- **Outage.** Any failed `ListRooms` or `ListParticipants` is an outage (a failed `RemoveParticipant` is not: it is logged and the next pass tries again). The first failure writes one `voice_enforcement_unavailable` event, including when no room is in use, because a failed sweep means conchd cannot tell. Retries wait 1 s, doubling to 30 s, and a recovery call that succeeds ends the outage.
+- **Recovery.** The poller keeps what it last saw through an outage, so on recovery a participant who stayed gets no second `voice_joined`; one who left gets `voice_left`, and one who reconnected gets `voice_left` then `voice_joined`. Those times are accurate to the outage, not to one interval.
+- **Immediate removal** takes the principal out of presence at once, then calls `RemoveParticipant`.
+- **After a revoke-all the principal is removed on sight for two minutes.** Their membership is unchanged, so the comparison with membership would not catch them, and a join token issued just before the revocation stays usable for about 75 seconds: without this they could walk straight back in and stay as long as they liked. The bar lasts until the identity has been removed (or seen gone) at least once and two minutes have passed, which also covers a removal that failed. A person given a new credential inside those two minutes has to wait them out.
+- **A removal is audited per connection.** Someone who rejoins on an old token and is removed again gets a second `voice_participant_removed`; the same connection listed twice because LiveKit was slow to drop it gets one. Connections are told apart by their join time.
+- **A session wakes the poller.** With no room in use the loop sleeps until the next sweep; issuing a session interrupts that wait, so the first people to join an idle server are seen, and checked, within a pass. (Measured against a real LiveKit: 1.0 s from joining to presence; before this the wait was up to 30 s.)
+- **If a participant's entitlement cannot be read** (a store error), that participant keeps the state they had, or stays unseen if new, and is not removed; everyone else in the room is handled on that pass as usual.
+- **If LiveKit answers a sweep but the stored rooms cannot be read**, the sweep is retried after one second, not on every tick.
+- A participant's join time is LiveKit's; a second connection with the same identity between two passes is recorded as a leave and a join.
 
 A snapshot is the whole state, not a delta, so a client that misses one loses nothing.
 
@@ -129,7 +142,7 @@ A snapshot is the whole state, not a delta, so a client that misses one loses no
 | `voice_joined`, `voice_left` | a participant appears or disappears between passes | channel, audience |
 | `voice_transmit_started`, `voice_transmit_stopped` | the microphone track becomes unmuted or muted between passes | channel, audience |
 | `voice_participant_removed` | `conchd` removes someone | channel, audience, reason |
-| `voice_enforcement_unavailable` | LiveKit becomes unreachable while rooms are in use | — |
+| `voice_enforcement_unavailable` | LiveKit becomes unreachable (once per outage; also when no room is in use, since a failed sweep means conchd cannot tell) | `source=observed` |
 
 The actor is the principal. No audio and no token is ever recorded.
 

@@ -43,6 +43,9 @@ func (s *Server) routeTable() []route {
 		rt("DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessOperator, hf(s.handleDeleteNetMember)),
 		// Voice (issue #126). Human members only; checked in the handler.
 		rt("POST /v1/channels/{channel}/voice/session", accessAuthenticated, hf(s.handleVoiceSession)),
+		// Voice presence (issue #127): the snapshot and its socket.
+		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
+		rt("GET /v1/voice/ws", accessAuthenticated, hf(s.handleVoiceWS)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),

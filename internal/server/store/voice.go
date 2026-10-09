@@ -21,6 +21,18 @@ import (
 // a room name.
 const AuditVoiceSessionIssued = "voice_session_issued"
 
+// Audit actions written by the voice presence poller (issue #127, design note
+// §7). Their times are accurate to one polling interval. The detail of each
+// carries source=observed; none carries a token or a room name.
+const (
+	AuditVoiceJoined                 = "voice_joined"
+	AuditVoiceLeft                   = "voice_left"
+	AuditVoiceTransmitStarted        = "voice_transmit_started"
+	AuditVoiceTransmitStopped        = "voice_transmit_stopped"
+	AuditVoiceParticipantRemoved     = "voice_participant_removed"
+	AuditVoiceEnforcementUnavailable = "voice_enforcement_unavailable"
+)
+
 // voiceRoomPrefix starts every room name. The rest is 128 random bits, never
 // derived from a channel or net name.
 const voiceRoomPrefix = "conch-"
@@ -109,4 +121,56 @@ func (s *Store) CountVoiceRooms(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("store: count voice rooms: %w", err)
 	}
 	return n, nil
+}
+
+// voiceRoomColumns is the select list queryVoiceRooms scans.
+const voiceRoomColumns = `id, channel_id, net_id, room_name, created_at`
+
+// ListVoiceRooms returns every stored voice room, oldest first. The presence
+// poller's sweep uses it to learn which of LiveKit's rooms are Conch's.
+func (s *Store) ListVoiceRooms(ctx context.Context) ([]VoiceRoom, error) {
+	return s.queryVoiceRooms(ctx, "list voice rooms",
+		`SELECT `+voiceRoomColumns+` FROM voice_rooms ORDER BY id ASC`)
+}
+
+// VoiceRoomsForChannel returns the stored voice rooms of channelID.
+func (s *Store) VoiceRoomsForChannel(ctx context.Context, channelID int64) ([]VoiceRoom, error) {
+	return s.queryVoiceRooms(ctx, fmt.Sprintf("list voice rooms of channel %d", channelID),
+		`SELECT `+voiceRoomColumns+` FROM voice_rooms WHERE channel_id = ? ORDER BY id ASC`, channelID)
+}
+
+// VoiceRoomsForMember returns the stored voice rooms of every channel
+// principalID is currently a member of: the rooms an immediate removal has to
+// cover when a principal is disabled or loses its credentials.
+func (s *Store) VoiceRoomsForMember(ctx context.Context, principalID int64) ([]VoiceRoom, error) {
+	return s.queryVoiceRooms(ctx, fmt.Sprintf("list voice rooms of principal %d", principalID),
+		`SELECT r.id, r.channel_id, r.net_id, r.room_name, r.created_at
+		 FROM voice_rooms r JOIN channel_members m ON m.channel_id = r.channel_id
+		 WHERE m.principal_id = ? ORDER BY r.id ASC`, principalID)
+}
+
+// queryVoiceRooms runs query and scans voice rooms; what names the operation
+// in errors (never a room name).
+func (s *Store) queryVoiceRooms(ctx context.Context, what, query string, args ...any) ([]VoiceRoom, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: %s: %w", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+	rooms := []VoiceRoom{}
+	for rows.Next() {
+		var r VoiceRoom
+		var net sql.NullInt64
+		var createdAt int64
+		if err := rows.Scan(&r.ID, &r.ChannelID, &net, &r.RoomName, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: %s: %w", what, err)
+		}
+		r.NetID = net.Int64
+		r.CreatedAt = time.UnixMilli(createdAt)
+		rooms = append(rooms, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: %s: %w", what, err)
+	}
+	return rooms, nil
 }

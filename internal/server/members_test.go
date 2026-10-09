@@ -155,6 +155,11 @@ func TestChannelContentLeak(t *testing.T) {
 		// is answered 503 voice_not_configured, and everyone else must still
 		// get the unknown-channel 404, with no hint that voice is not set up.
 		{"voice session", "POST", "/v1/channels/%s/voice/session", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// Voice presence (issue #127): who is connected and who is talking is
+		// channel content. Not configured is still a snapshot for a member
+		// (200, configured false); everyone else gets the unknown-channel 404.
+		{"voice presence", "GET", "/v1/channels/%s/voice", "", false, [4]int{ok, notFound, notFound, notFound}},
+		{"voice presence websocket", "GET", "/v1/voice/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
