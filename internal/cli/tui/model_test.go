@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,13 +18,16 @@ import (
 
 type stubAPI struct{}
 
-func (stubAPI) ListMessages(context.Context, string, int64, int) (schema.ListMessagesResponseV1, error) {
-	return schema.ListMessagesResponseV1{}, nil
+func (stubAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
+	return schema.ListMessagesResponseV2{}, nil
 }
-func (stubAPI) SendMessage(context.Context, string, int64, string) (schema.MessageV1, error) {
-	return schema.MessageV1{}, nil
+func (stubAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
+	return schema.MessageV2{}, nil
 }
-func (stubAPI) Subscribe(context.Context, string, func(schema.MessageV1) error) error { return nil }
+func (stubAPI) SubscribeV2(context.Context, string, func(schema.MessageV2) error) error { return nil }
+func (stubAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1, error) {
+	return schema.ListNetsResponseV1{}, nil
+}
 func (stubAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
 	return schema.ListChannelsResponse{}, nil
 }
@@ -71,8 +75,8 @@ func TestModelUpdate(t *testing.T) {
 				t.Errorf("selected = %d (%s)", got.selected, got.current())
 			}
 		}},
-		{name: "loaded merges duplicates", msg: messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 2, Body: "new"}, {ID: 1, Body: "first"}}}, prep: func(m *Model) {
-			m.messages["general"] = []schema.MessageV1{{ID: 2, Body: "old"}}
+		{name: "loaded merges duplicates", msg: messagesLoaded{channel: "general", messages: []schema.MessageV2{{ID: 2, Body: "new"}, {ID: 1, Body: "first"}}}, prep: func(m *Model) {
+			m.messages["general"] = []schema.MessageV2{{ID: 2, Body: "old"}}
 		}, want: func(t *testing.T, got Model) {
 			messages := got.messages["general"]
 			if len(messages) != 2 || messages[0].ID != 1 || messages[1].Body != "new" {
@@ -190,14 +194,14 @@ func (a *listAPI) ListChannels(context.Context) (schema.ListChannelsResponse, er
 	return a.resp, a.err
 }
 
-func (a *listAPI) ListMessages(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV1, error) {
+func (a *listAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.listed = append(a.listed, channel)
 	a.mu.Unlock()
-	return schema.ListMessagesResponseV1{}, nil
+	return schema.ListMessagesResponseV2{}, nil
 }
 
-func (a *listAPI) Subscribe(_ context.Context, channel string, _ func(schema.MessageV1) error) error {
+func (a *listAPI) SubscribeV2(_ context.Context, channel string, _ func(schema.MessageV2) error) error {
 	a.subscribe <- channel
 	return nil
 }
@@ -372,7 +376,7 @@ func TestModelEmptyChannelListIsSafe(t *testing.T) {
 func TestModelViewSmoke(t *testing.T) {
 	model := NewModel(context.Background(), stubAPI{}, 7, []string{"general", "ops"})
 	model.width, model.height = 80, 24
-	model.messages["general"] = []schema.MessageV1{
+	model.messages["general"] = []schema.MessageV2{
 		{ID: 1, AuthorID: 4, Body: "plain message"},
 		{ID: 2, AuthorID: 5, Body: "rendered alert", Payload: &schema.Payload{Schema: "acme.alert.v1"}},
 	}
@@ -401,11 +405,11 @@ func (a *identityAPI) WhoAmI(context.Context) (schema.WhoAmIResponseV1, error) {
 	return a.who, a.whoErr
 }
 
-func (a *identityAPI) SendMessage(_ context.Context, _ string, author int64, _ string) (schema.MessageV1, error) {
+func (a *identityAPI) PostMessageV2(_ context.Context, _ string, author int64, _ string, _ *schema.Audience) (schema.MessageV2, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sentAs = author
-	return schema.MessageV1{}, nil
+	return schema.MessageV2{}, nil
 }
 
 func (a *identityAPI) CastDecision(_ context.Context, _ int64, d schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error) {
@@ -583,14 +587,14 @@ func newResubAPI() *resubAPI {
 	return &resubAPI{backfills: map[string]int{}, subscribes: map[string]int{}, started: make(chan string, 16)}
 }
 
-func (a *resubAPI) ListMessages(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV1, error) {
+func (a *resubAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.backfills[channel]++
 	a.mu.Unlock()
-	return schema.ListMessagesResponseV1{}, nil
+	return schema.ListMessagesResponseV2{}, nil
 }
 
-func (a *resubAPI) Subscribe(ctx context.Context, channel string, _ func(schema.MessageV1) error) error {
+func (a *resubAPI) SubscribeV2(ctx context.Context, channel string, _ func(schema.MessageV2) error) error {
 	a.mu.Lock()
 	a.subscribes[channel]++
 	a.mu.Unlock()
@@ -739,7 +743,7 @@ func TestBackoffResetsAfterSuccessfulSubscription(t *testing.T) {
 	}{
 		{"no recovery keeps growing", func(m Model) Model { return m }, 4 * time.Second},
 		{"message received", func(m Model) Model {
-			m, _ = update(m, messageReceived{channel: "general", message: schema.MessageV1{ID: 1}})
+			m, _ = update(m, messageReceived{channel: "general", message: schema.MessageV2{ID: 1}})
 			return m
 		}, time.Second},
 	}
@@ -838,7 +842,7 @@ func TestBackfillDoesNotClaimConnectedWhileReconnecting(t *testing.T) {
 	if m.status() != statusReconnecting {
 		t.Fatalf("status after the drop = %q", m.status())
 	}
-	m, _ = update(m, messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}})
+	m, _ = update(m, messagesLoaded{channel: "general", messages: []schema.MessageV2{{ID: 1, Body: "a"}}})
 	if m.status() != statusReconnecting {
 		t.Errorf("status after a backfill during the outage = %q, want %q", m.status(), statusReconnecting)
 	}
@@ -859,7 +863,7 @@ func TestStaleBackfillKeepsStatus(t *testing.T) {
 		msg  messagesLoaded
 		want string
 	}{
-		{"stale success", messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}}, "loading…"},
+		{"stale success", messagesLoaded{channel: "general", messages: []schema.MessageV2{{ID: 1, Body: "a"}}}, "loading…"},
 		{"stale error", messagesLoaded{channel: "general", err: errors.New("boom")}, "loading…"},
 		{"selected success", messagesLoaded{channel: "ops"}, "connected"},
 		{"selected error", messagesLoaded{channel: "ops", err: errors.New("boom")}, "boom"},
@@ -997,5 +1001,802 @@ func TestApprovalsRefreshKeepsTheDecisionPrompt(t *testing.T) {
 				t.Errorf("mode %v status %q, want mode %v status %q", m.mode, m.status(), tt.wantMode, tt.want)
 			}
 		})
+	}
+}
+
+// The real client must satisfy the TUI's API, v2 methods included.
+var _ API = (*cli.Client)(nil)
+
+// postCall is one PostMessageV2 the fake saw.
+type postCall struct {
+	channel  string
+	author   int64
+	body     string
+	audience *schema.Audience
+}
+
+// scopeAPI is a fake server for the scoped-send tests. It records every call
+// by method name; the v1 message methods are not on API at all, so a call to
+// them cannot compile.
+type scopeAPI struct {
+	stubAPI
+	mu      sync.Mutex
+	calls   []string
+	posts   []postCall
+	roster  []schema.NetV1
+	netsErr error
+	postErr error
+	nextID  int64
+}
+
+func (a *scopeAPI) record(name string) {
+	a.mu.Lock()
+	a.calls = append(a.calls, name)
+	a.mu.Unlock()
+}
+
+func (a *scopeAPI) count(name string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, c := range a.calls {
+		if c == name {
+			n++
+		}
+	}
+	return n
+}
+
+func (a *scopeAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1, error) {
+	a.record("ListNets")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return schema.ListNetsResponseV1{Nets: a.roster}, a.netsErr
+}
+
+func (a *scopeAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
+	a.record("ListMessagesV2")
+	return schema.ListMessagesResponseV2{}, nil
+}
+
+func (a *scopeAPI) SubscribeV2(context.Context, string, func(schema.MessageV2) error) error {
+	a.record("SubscribeV2")
+	return nil
+}
+
+func (a *scopeAPI) PostMessageV2(_ context.Context, channel string, author int64, body string, audience *schema.Audience) (schema.MessageV2, error) {
+	a.record("PostMessageV2")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.posts = append(a.posts, postCall{channel, author, body, audience})
+	if a.postErr != nil {
+		return schema.MessageV2{}, a.postErr
+	}
+	a.nextID++
+	return schema.MessageV2{Schema: schema.MessageSchemaV2, ID: 100 + a.nextID, AuthorID: author, Body: body, Audience: audience}, nil
+}
+
+func (a *scopeAPI) postCalls() []postCall {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]postCall(nil), a.posts...)
+}
+
+func (a *scopeAPI) callNames() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.calls...)
+}
+
+// scopeRoster has alpha (viewer 7 transmits) and bravo (viewer 7 monitors).
+func scopeRoster() []schema.NetV1 {
+	return []schema.NetV1{
+		{ID: 3, Name: "alpha", Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMember}, {PrincipalID: 9, Role: schema.NetRoleMember}}},
+		{ID: 4, Name: "bravo", Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMonitor}, {PrincipalID: 9, Role: schema.NetRoleMember}}},
+	}
+}
+
+// scopeModel is a model on channel "ops" (then "general") as principal 7, with
+// the roster already loaded when loaded is true.
+func scopeModel(api *scopeAPI, loaded bool) Model {
+	m := NewModel(context.Background(), api, 7, []string{"ops", "general"})
+	if loaded {
+		m.nets["ops"] = api.roster
+	}
+	return m
+}
+
+// enter types text into the input and presses enter, then feeds every result
+// of the resulting command back into the model, like the runtime would.
+func enter(m Model, text string) Model {
+	m.input = text
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	for _, msg := range run(cmd) {
+		m, _ = update(m, msg)
+	}
+	return m
+}
+
+func TestTargetStateMachine(t *testing.T) {
+	type step struct {
+		input      string // typed then entered; empty with key set instead
+		key        tea.KeyType
+		wantPrompt string
+		wantStatus string // substring
+	}
+	tests := []struct {
+		name   string
+		roster []schema.NetV1 // the server's; the model starts with it unless stale
+		stale  bool           // the model's roster starts empty
+		netErr error
+		steps  []step
+	}{
+		{name: "net sets the target, bare /net clears it", roster: scopeRoster(), steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >", wantStatus: "transmitting to net alpha"},
+			{input: "/net", wantPrompt: "ops >", wantStatus: "whole channel"},
+		}},
+		{name: "channel switch resets the target", roster: scopeRoster(), steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >"},
+			{key: tea.KeyDown, wantPrompt: "general >"},
+			{key: tea.KeyUp, wantPrompt: "ops >"},
+		}},
+		{name: "whisper leaves the target unchanged", roster: scopeRoster(), steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >"},
+			{input: "/w 9 psst", wantPrompt: "ops/alpha >"},
+			{input: "hello", wantPrompt: "ops/alpha >"},
+		}},
+		{name: "unknown net leaves the target unchanged", roster: scopeRoster(), steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >"},
+			{input: "/net nope", wantPrompt: "ops/alpha >", wantStatus: `no net "nope"`},
+		}},
+		{name: "unknown net from the channel stays on the channel", roster: scopeRoster(), steps: []step{
+			{input: "/net nope", wantPrompt: "ops >", wantStatus: `no net "nope"`},
+		}},
+		{name: "a net you only monitor cannot be a target", roster: scopeRoster(), steps: []step{
+			{input: "/net bravo", wantPrompt: "ops >", wantStatus: "only monitor net bravo"},
+		}},
+		{name: "monitor refusal keeps the previous target", roster: scopeRoster(), steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >"},
+			{input: "/net bravo", wantPrompt: "ops/alpha >", wantStatus: "only monitor"},
+		}},
+		{name: "a net created after startup is found by reloading", roster: scopeRoster(), stale: true, steps: []step{
+			{input: "/net alpha", wantPrompt: "ops/alpha >", wantStatus: "transmitting to net alpha"},
+		}},
+		{name: "roster load failure leaves the target unchanged", netErr: errors.New("boom"), stale: true, steps: []step{
+			{input: "/net alpha", wantPrompt: "ops >", wantStatus: "boom"},
+		}},
+		{name: "invalid net name is rejected without a lookup", roster: scopeRoster(), steps: []step{
+			{input: "/net Bad!", wantPrompt: "ops >", wantStatus: "/net:"},
+			{input: "/net a b", wantPrompt: "ops >", wantStatus: "usage"},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: tt.roster, netsErr: tt.netErr}
+			m := scopeModel(api, !tt.stale)
+			for i, s := range tt.steps {
+				if s.key != 0 {
+					m, _ = update(m, tea.KeyMsg{Type: s.key})
+				} else {
+					m = enter(m, s.input)
+				}
+				got := m.prompt()
+				if got != s.wantPrompt {
+					t.Errorf("step %d (%q): prompt = %q, want %q", i, s.input, got, s.wantPrompt)
+				}
+				if strings.TrimSpace(got) == "" || strings.TrimSpace(got) == ">" {
+					t.Errorf("step %d: prompt is blank: %q", i, got)
+				}
+				if s.wantStatus != "" && !strings.Contains(m.status(), s.wantStatus) {
+					t.Errorf("step %d (%q): status = %q, want containing %q", i, s.input, m.status(), s.wantStatus)
+				}
+			}
+		})
+	}
+}
+
+func TestWhisperKeepsTargetOnTheNextSend(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	m = enter(m, "/w 9 psst")
+	enter(m, "hello")
+	posts := api.postCalls()
+	if len(posts) != 2 || posts[0].audience.Kind != schema.AudienceKindPrincipals || posts[1].audience.Kind != schema.AudienceKindNet {
+		t.Errorf("posts = %+v", posts)
+	}
+}
+
+func TestStaleRosterReloadsOnce(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, false)
+	m = enter(m, "/net alpha")
+	if n := api.count("ListNets"); n != 1 {
+		t.Errorf("ListNets calls = %d, want 1", n)
+	}
+	// Now cached: no second lookup.
+	m = enter(m, "/net")
+	enter(m, "/net alpha")
+	if n := api.count("ListNets"); n != 1 {
+		t.Errorf("ListNets calls after cached lookup = %d, want 1", n)
+	}
+}
+
+func TestPromptShownInView(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m.width, m.height = 80, 24
+	if !strings.Contains(m.View(), "ops > ") {
+		t.Errorf("channel prompt missing:\n%s", m.View())
+	}
+	m = enter(m, "/net alpha")
+	m.input = "typed"
+	if v := m.View(); !strings.Contains(v, "ops/alpha > typed") {
+		t.Errorf("net prompt missing:\n%s", v)
+	}
+	empty := NewModel(context.Background(), api, 7, nil)
+	if got := empty.prompt(); strings.TrimSpace(got) == "" || got == ">" {
+		t.Errorf("prompt with no channel = %q", got)
+	}
+}
+
+func TestSendAudience(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup string // a command entered first
+		input string
+		want  *schema.Audience
+		body  string
+	}{
+		{"channel", "", "hello", nil, "hello"},
+		{"net", "/net alpha", "hello", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}, "hello"},
+		{"whisper", "", "/w 9,11 hi there", &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{9, 11}}, "hi there"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, true)
+			if tt.setup != "" {
+				m = enter(m, tt.setup)
+			}
+			m = enter(m, tt.input)
+			posts := api.postCalls()
+			if len(posts) != 1 {
+				t.Fatalf("posts = %d, want exactly 1", len(posts))
+			}
+			p := posts[0]
+			if p.channel != "ops" || p.author != 7 || p.body != tt.body || fmt.Sprint(p.audience) != fmt.Sprint(tt.want) {
+				t.Errorf("post = %+v (audience %+v), want body %q audience %+v", p, p.audience, tt.body, tt.want)
+			}
+			if m.input != "" {
+				t.Errorf("input after accepted send = %q", m.input)
+			}
+			if got := len(m.messages["ops"]); got != 1 {
+				t.Fatalf("messages after send = %d, want 1", got)
+			}
+			// The server also pushes the message on the subscription: shown once.
+			echoed := m.messages["ops"][0]
+			m, _ = update(m, messageReceived{channel: "ops", message: echoed})
+			if got := len(m.messages["ops"]); got != 1 {
+				t.Errorf("messages after echo = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestSentMessageCarriesItsBadge(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	m = enter(m, "on the net")
+	line := m.messageLine("ops", m.messages["ops"][0], 60)
+	if !strings.HasPrefix(line, "[net:alpha] 7") || !strings.Contains(line, "on the net") {
+		t.Errorf("line = %q", line)
+	}
+}
+
+func TestRefusedSend(t *testing.T) {
+	for _, code := range []string{"forbidden", "net_not_found", "invalid_audience"} {
+		for _, input := range []string{"typed text", "/w 9 typed text"} {
+			t.Run(code+" "+input, func(t *testing.T) {
+				api := &scopeAPI{roster: scopeRoster(), postErr: fmt.Errorf("cli: server error %s: nope", code)}
+				m := scopeModel(api, true)
+				m = enter(m, "/net alpha")
+				m = enter(m, input)
+				posts := api.postCalls()
+				if len(posts) != 1 {
+					t.Fatalf("posts = %d, want exactly 1 (no fallback, no retry)", len(posts))
+				}
+				if posts[0].audience == nil {
+					t.Errorf("a scoped send went out channel-wide")
+				}
+				if m.input != input {
+					t.Errorf("input = %q, want it kept as %q", m.input, input)
+				}
+				if !strings.Contains(m.status(), code) {
+					t.Errorf("status = %q, want the server's error", m.status())
+				}
+				if len(m.messages["ops"]) != 0 {
+					t.Errorf("a refused message was displayed: %+v", m.messages["ops"])
+				}
+				if m.sending {
+					t.Error("still marked as sending after the refusal")
+				}
+				if m.prompt() != "ops/alpha >" {
+					t.Errorf("prompt = %q, want the target unchanged", m.prompt())
+				}
+			})
+		}
+	}
+}
+
+func TestArchivedTargetIsRefusedByServer(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	api.postErr = errors.New("cli: server error net_not_found: net archived")
+	m = enter(m, "still there?")
+	if len(api.postCalls()) != 1 || m.input != "still there?" || !strings.Contains(m.status(), "net_not_found") {
+		t.Errorf("posts %d input %q status %q", len(api.postCalls()), m.input, m.status())
+	}
+	// The target is kept (resetting is optional); nothing went channel-wide.
+	if p := api.postCalls()[0]; p.audience == nil {
+		t.Error("send went channel-wide")
+	}
+	if m.prompt() != "ops/alpha >" {
+		t.Errorf("prompt = %q", m.prompt())
+	}
+}
+
+func TestWhisperParsing(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantIDs []int64
+		wantBdy string
+		wantErr string // substring of the status; empty means it must send
+	}{
+		{input: "/w 3 hello", wantIDs: []int64{3}, wantBdy: "hello"},
+		{input: "/w 3,5 hello there", wantIDs: []int64{3, 5}, wantBdy: "hello there"},
+		{input: "/w   3,5    spaced   out", wantIDs: []int64{3, 5}, wantBdy: "spaced   out"},
+		{input: "/w", wantErr: "usage"},
+		{input: "/w 3", wantErr: "usage"},
+		{input: "/w hello", wantErr: "usage"},
+		{input: "/w x hello", wantErr: "not a positive principal id"},
+		{input: "/w 3,x hello", wantErr: "not a positive principal id"},
+		{input: "/w 3,,5 hello", wantErr: "not a positive principal id"},
+		{input: "/w 0 hello", wantErr: "not a positive principal id"},
+		{input: "/w -2 hello", wantErr: "not a positive principal id"},
+		{input: "/w 3,3 hello", wantErr: "listed twice"},
+		{input: "/w 7 hello", wantErr: "someone other than you"},
+		{input: "/w3 hello", wantErr: "unknown command"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := enter(scopeModel(api, true), tt.input)
+			posts := api.postCalls()
+			if tt.wantErr != "" {
+				if len(posts) != 0 {
+					t.Fatalf("sent %+v", posts)
+				}
+				if !strings.Contains(m.status(), tt.wantErr) || m.input != tt.input {
+					t.Errorf("status %q input %q", m.status(), m.input)
+				}
+				return
+			}
+			if len(posts) != 1 || posts[0].body != tt.wantBdy || posts[0].audience.Kind != schema.AudienceKindPrincipals ||
+				fmt.Sprint(posts[0].audience.PrincipalIDs) != fmt.Sprint(tt.wantIDs) {
+				t.Errorf("posts = %+v", posts)
+			}
+		})
+	}
+}
+
+func TestUnknownCommandAndLiteralSlash(t *testing.T) {
+	for _, input := range []string{"/foo bar", "/nets", "/", "/NET alpha"} {
+		t.Run("unknown "+input, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := enter(scopeModel(api, true), input)
+			if len(api.postCalls()) != 0 {
+				t.Fatalf("sent %+v", api.postCalls())
+			}
+			if !strings.Contains(m.status(), "unknown command") || !strings.Contains(m.status(), "//") || m.input != input {
+				t.Errorf("status %q input %q", m.status(), m.input)
+			}
+		})
+	}
+	literal := []struct{ input, want string }{{"//text", "/text"}, {"//net alpha", "/net alpha"}, {"// spaced", "/ spaced"}}
+	for _, tt := range literal {
+		t.Run("literal "+tt.input, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, true)
+			m = enter(m, "/net alpha")
+			enter(m, tt.input)
+			posts := api.postCalls()
+			if len(posts) != 1 || posts[0].body != tt.want {
+				t.Fatalf("posts = %+v, want body %q", posts, tt.want)
+			}
+			// A literal message still goes to the current target.
+			if posts[0].audience == nil || posts[0].audience.NetID != 3 {
+				t.Errorf("audience = %+v", posts[0].audience)
+			}
+		})
+	}
+}
+
+func TestAuditLogNotice(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "hello")
+	if strings.Contains(m.status(), "audit log") {
+		t.Errorf("plain send shows the notice: %q", m.status())
+	}
+	api.postErr = errors.New("cli: server error forbidden: no")
+	m = enter(m, "/w 9 refused")
+	if strings.Contains(m.status(), "audit log") || m.whisperNoted {
+		t.Errorf("a refused whisper used up the notice: %q", m.status())
+	}
+	api.postErr = nil
+	m = enter(m, "/w 9 first")
+	if !strings.Contains(m.status(), "note: whispers are recorded in the audit log") {
+		t.Errorf("first whisper status = %q", m.status())
+	}
+	m = enter(m, "/w 9 second")
+	if m.status() != "sent" {
+		t.Errorf("second whisper status = %q", m.status())
+	}
+}
+
+func TestDoubleEnterSendsOnce(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m.input = "hi"
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	_, again := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if again != nil {
+		t.Error("second enter produced a command while the first was in flight")
+	}
+	run(cmd)
+	if len(api.postCalls()) != 1 {
+		t.Errorf("posts = %d", len(api.postCalls()))
+	}
+}
+
+func TestInputTypedDuringSendSurvives(t *testing.T) {
+	tests := []struct {
+		name   string
+		during string // what the input holds when the post comes back
+		want   string
+	}{
+		{"nothing typed since", "first", ""},
+		// What was sent must not stay in the box to be sent a second time.
+		{"typed on after enter", "first and more", " and more"},
+		{"replaced with something else", "another thought", "another thought"},
+		{"edited so it no longer starts with what was sent", "firs", "firs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, true)
+			m.input = "first"
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(Model)
+			m.input = tt.during // typed while the post is in flight
+			for _, msg := range run(cmd) {
+				m, _ = update(m, msg)
+			}
+			if m.input != tt.want {
+				t.Errorf("input = %q, want %q", m.input, tt.want)
+			}
+			if len(api.posts) != 1 || api.posts[0].body != "first" {
+				t.Errorf("posts = %+v, want the one message as entered", api.posts)
+			}
+		})
+	}
+}
+
+func TestMessagesUseOnlyV2(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	run(m.loadCurrent())
+	run(m.startSubscription())
+	deadline := time.Now().Add(2 * time.Second)
+	for api.count("SubscribeV2") == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	enter(m, "hi")
+	for _, name := range []string{"ListMessagesV2", "SubscribeV2", "PostMessageV2"} {
+		if api.count(name) != 1 {
+			t.Errorf("%s calls = %d, want 1", name, api.count(name))
+		}
+	}
+	// ListMessages, SendMessage and Subscribe are not part of API, so the
+	// TUI cannot call them; the compile-time check above ties API to the
+	// real client.
+	for _, c := range api.callNames() {
+		if !strings.HasSuffix(c, "V2") && c != "ListNets" {
+			t.Errorf("unexpected call %s", c)
+		}
+	}
+}
+
+func TestNetsLoadedUpdatesRoster(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, false)
+	var got []netsLoaded
+	for _, msg := range run(m.loadNets(false, "")) {
+		if nl, ok := msg.(netsLoaded); ok {
+			got = append(got, nl)
+		}
+	}
+	if len(got) != 1 || got[0].channel != "ops" || len(got[0].nets) != 2 {
+		t.Fatalf("netsLoaded = %+v", got)
+	}
+	m, _ = update(m, got[0])
+	if len(m.nets["ops"]) != 2 {
+		t.Errorf("roster = %+v", m.nets)
+	}
+	// A failed plain refresh keeps the old roster and is silent.
+	before := m.status()
+	m, _ = update(m, netsLoaded{channel: "ops", err: errors.New("boom")})
+	if len(m.nets["ops"]) != 2 || m.status() != before {
+		t.Errorf("failed refresh changed state: %+v %q", m.nets, m.status())
+	}
+}
+
+func TestScopeBadges(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	net := &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}
+	whisper := schema.MessageV2{ID: 4, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{4, 7, 9}}}
+	tests := []struct {
+		name string
+		msg  schema.MessageV2
+		want string // exact prefix of the line
+	}{
+		{"channel-wide", schema.MessageV2{ID: 1, AuthorID: 4, Body: "plain"}, "4  plain"},
+		{"net by name", schema.MessageV2{ID: 2, AuthorID: 4, Body: "x", Audience: net}, "[net:alpha] 4  x"},
+		{"net unknown to the roster shows its id", schema.MessageV2{ID: 3, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 42}}, "[net:42] 4  x"},
+		{"whisper lists the others", whisper, "[whisper:4,9] 4  x"},
+		{"unknown kind is still scoped", schema.MessageV2{ID: 5, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: "future"}}, "[future] 4  x"},
+		{"payload badge after author", schema.MessageV2{ID: 6, AuthorID: 4, Body: "x", Payload: &schema.Payload{Schema: "acme.alert.v1"}}, "4 [acme.alert.v1]  x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := m.messageLine("ops", tt.msg, 70); !strings.HasPrefix(got, tt.want) {
+				t.Errorf("line = %q, want prefix %q", got, tt.want)
+			}
+		})
+	}
+	// Without knowing who the viewer is, a whisper shows every id.
+	m.authorID = 0
+	if got := m.messageLine("ops", whisper, 70); !strings.HasPrefix(got, "[whisper:4,7,9] ") {
+		t.Errorf("anonymous viewer line = %q", got)
+	}
+}
+
+func TestViewOrdersMessagesAndBadges(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m.width, m.height = 100, 24
+	m.messages["ops"] = mergeMessages(nil, []schema.MessageV2{
+		{ID: 3, AuthorID: 9, Body: "third", Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{7, 9}}},
+		{ID: 1, AuthorID: 4, Body: "first"},
+		{ID: 2, AuthorID: 9, Body: "second", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}},
+	})
+	view := m.View()
+	i1, i2, i3 := strings.Index(view, "first"), strings.Index(view, "second"), strings.Index(view, "third")
+	if i1 < 0 || i1 >= i2 || i2 >= i3 {
+		t.Fatalf("order wrong (%d %d %d):\n%s", i1, i2, i3, view)
+	}
+	for _, want := range []string{"[net:alpha]", "[whisper:9]"} {
+		if strings.Count(view, want) != 1 {
+			t.Errorf("view should show %s exactly once:\n%s", want, view)
+		}
+	}
+}
+
+// paneLines returns the text of the message pane (the right-hand box) for
+// every row of the view that has one, borders and padding removed.
+func paneLines(view string) []string {
+	var out []string
+	for _, line := range strings.Split(view, "\n") {
+		parts := strings.Split(line, "│")
+		if len(parts) >= 5 {
+			out = append(out, strings.TrimSpace(parts[3]))
+		}
+	}
+	return out
+}
+
+func TestForgedMarkersInBodies(t *testing.T) {
+	forged := []struct{ name, body string }{
+		{"net marker", "[net:alpha] hi"},
+		{"whisper marker", "[whisper:3,7] hi"},
+		{"newline then marker", "ok\n[net:alpha] hi"},
+		{"carriage return", "ok\r[whisper:3,7] hi"},
+		{"ansi colour", "\x1b[33m[net:alpha]\x1b[0m hi"},
+		{"ansi clear and home", "\x1b[2J\x1b[Hhi"},
+		{"c1 control", "\u009b31m[net:alpha] hi"},
+		{"payload lookalike", "[acme.alert.v1] hi"},
+	}
+	api := &scopeAPI{roster: scopeRoster()}
+	for _, tt := range forged {
+		t.Run(tt.name, func(t *testing.T) {
+			m := scopeModel(api, true)
+			m.width, m.height = 100, 24
+			m.messages["ops"] = []schema.MessageV2{{ID: 1, AuthorID: 4, Body: tt.body}}
+			line := m.messageLine("ops", m.messages["ops"][0], 80)
+			if strings.ContainsAny(line, "\n\r\x1b") || strings.ContainsRune(line, '\u009b') {
+				t.Fatalf("line has a control character: %q", line)
+			}
+			if !strings.HasPrefix(line, "4  ") {
+				t.Errorf("channel-wide line must start with the author id, got %q", line)
+			}
+			if strings.Contains(line, "  [") {
+				t.Errorf("body can open with a bare [ marker: %q", line)
+			}
+			// In the whole view the message is one pane row, and no row opens with a badge.
+			view := m.View()
+			rows := 0
+			for _, l := range paneLines(view) {
+				if strings.HasPrefix(l, "[") {
+					t.Errorf("pane row starts with a badge: %q", l)
+				}
+				if strings.HasPrefix(l, "4 ") {
+					rows++
+				}
+			}
+			if rows != 1 {
+				t.Errorf("message rendered on %d pane rows, want 1:\n%s", rows, view)
+			}
+		})
+	}
+	t.Run("a real badge is distinguishable from a forged one", func(t *testing.T) {
+		m := scopeModel(api, true)
+		real := m.messageLine("ops", schema.MessageV2{ID: 1, AuthorID: 4, Body: "hi", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}}, 80)
+		fake := m.messageLine("ops", schema.MessageV2{ID: 2, AuthorID: 4, Body: "[net:alpha] hi"}, 80)
+		if !strings.HasPrefix(real, "[net:alpha] ") || strings.HasPrefix(fake, "[") || real == fake {
+			t.Errorf("real %q fake %q", real, fake)
+		}
+	})
+	t.Run("hostile names from the server", func(t *testing.T) {
+		m := scopeModel(api, true)
+		m.nets["ops"] = []schema.NetV1{{ID: 3, Name: "al\x1b[31mpha\n"}}
+		line := m.messageLine("ops", schema.MessageV2{ID: 1, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}}, 80)
+		if strings.ContainsAny(line, "\n\x1b") {
+			t.Errorf("line = %q", line)
+		}
+	})
+}
+
+// A prompt that has to be shortened loses channel characters, never the net:
+// "ops-with-a-long-na…" would read as the whole channel.
+func TestPromptKeepsTheNetWhenClipped(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	m.target.channel = strings.Repeat("c", 60)
+	for _, width := range []int{200, 80, 40, 20, 12, 8, 2} {
+		got := m.promptWithin(width)
+		if !strings.HasSuffix(got, "/alpha >") {
+			t.Errorf("width %d: prompt %q lost the net", width, got)
+		}
+		if width >= 12 && utf8.RuneCountInString(got) > width {
+			t.Errorf("width %d: prompt %q is %d cells", width, got, utf8.RuneCountInString(got))
+		}
+	}
+	// Without a target the prompt is just clipped.
+	m.target = nil
+	if got := m.promptWithin(4); utf8.RuneCountInString(got) > 4 || got == "" {
+		t.Errorf("channel prompt clipped to 4 = %q", got)
+	}
+	// In the rendered view too.
+	m = enter(m, "/net alpha")
+	m.channels[m.selected] = strings.Repeat("c", 60)
+	m.target.channel = m.channels[m.selected]
+	m.width, m.height = 60, 24
+	if v := m.View(); !strings.Contains(v, "/alpha > ") {
+		t.Errorf("the view's prompt lost the net:\n%s", v)
+	}
+}
+
+// Only the lookup the user last asked for may change the target. "/net alpha"
+// that has to ask the server, then "/net" (or a switch, or another name)
+// before the answer arrives: the late answer must not move the target.
+func TestLateNetLookupDoesNotChangeTheTarget(t *testing.T) {
+	late := netsLoaded{channel: "ops", nets: scopeRoster(), resolve: true, want: "alpha"}
+	tests := []struct {
+		name       string
+		then       func(m Model) Model // what the user does before the answer arrives
+		wantPrompt string
+	}{
+		{"nothing: the lookup completes", func(m Model) Model { return m }, "ops/alpha >"},
+		{"/net back to the channel", func(m Model) Model { return enter(m, "/net") }, "ops >"},
+		{"switched channel and back", func(m Model) Model {
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyUp})
+			return m
+		}, "ops >"},
+		{"asked for another net that is known", func(m Model) Model {
+			m.nets["ops"] = []schema.NetV1{{ID: 9, Name: "zulu", Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMember}}}}
+			return enter(m, "/net zulu")
+		}, "ops/zulu >"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, false) // roster not loaded: /net alpha must ask
+			m.input = "/net alpha"
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // the lookup is now in flight
+			m = next.(Model)
+			if m.prompt() != "ops >" {
+				t.Fatalf("prompt while looking up = %q", m.prompt())
+			}
+			m = tt.then(m)
+			m, _ = update(m, late)
+			if got := m.prompt(); got != tt.wantPrompt {
+				t.Errorf("prompt after the late answer = %q, want %q", got, tt.wantPrompt)
+			}
+			// The roster is refreshed either way.
+			if _, ok := findNet(m.nets["ops"], "alpha"); !ok {
+				t.Error("the late answer did not refresh the roster")
+			}
+		})
+	}
+}
+
+// A channel list that arrives while a target is set (the channel on screen can
+// change under the user) resets the target, like a channel switch.
+func TestChannelListResetsTheTarget(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	if m.prompt() != "ops/alpha >" {
+		t.Fatalf("prompt = %q", m.prompt())
+	}
+	m.loadingChannels = true
+	m, _ = update(m, channelsLoaded{channels: []schema.ChannelV0{{ID: 2, Name: "general"}, {ID: 1, Name: "ops"}}})
+	if got := m.prompt(); strings.Contains(got, "alpha") || got != m.current()+" >" {
+		t.Errorf("prompt after the channel list changed = %q on channel %q", got, m.current())
+	}
+}
+
+// A scoped message always has a badge, even when its audience kind is empty or
+// blank: an empty badge would render it as a message to the whole channel.
+func TestScopedMessageWithoutAKindStillHasABadge(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	for _, tt := range []struct {
+		kind schema.AudienceKind
+		want string // the badge, "" for "any non-empty one"
+	}{{"", "[scoped]"}, {" ", "[scoped]"}, {"\t", "[scoped]"}, {"\x1b[2J", ""}, {"\n", ""}, {"future-kind", "[future-kind]"}} {
+		line := m.messageLine("ops", schema.MessageV2{ID: 1, AuthorID: 4, Body: "hi", Audience: &schema.Audience{Kind: tt.kind}}, 80)
+		if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[]") || !strings.Contains(line, "] 4  hi") {
+			t.Errorf("kind %q: line %q, want a badge before the author", tt.kind, line)
+		}
+		if tt.want != "" && !strings.HasPrefix(line, tt.want+" ") {
+			t.Errorf("kind %q: line %q, want badge %s", tt.kind, line, tt.want)
+		}
+		if strings.ContainsAny(line, "\x1b\n\r\t") {
+			t.Errorf("kind %q: line %q carries a control character", tt.kind, line)
+		}
+	}
+}
+
+// Error text from the server is shown in the status line without control
+// characters, like everything else that comes from outside.
+func TestServerErrorTextIsSanitized(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster(), postErr: errors.New("cli: server error forbidden: no\x1b[2J\nsecond line")}
+	m := scopeModel(api, true)
+	m = enter(m, "hello")
+	status := m.channelStatus
+	if strings.ContainsAny(status, "\x1b\n\r") || !strings.Contains(status, "forbidden") {
+		t.Errorf("status = %q", status)
+	}
+	if m.input != "hello" {
+		t.Errorf("input = %q, want it kept after the refusal", m.input)
 	}
 }

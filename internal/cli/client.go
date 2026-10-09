@@ -356,3 +356,139 @@ func (c *Client) decodeError(resp *http.Response) error {
 	}
 	return fmt.Errorf("cli: server error %s: %s", serverError.Code, serverError.Message)
 }
+
+// roundTrip sends one JSON request and, when out is non-nil, decodes the
+// response into it. Any status outside 2xx becomes the server's error. The
+// nets and v2 message methods share it so each stays a few lines.
+func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *url.URL, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		encoded, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("cli: encode %s request: %w", what, err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+	if err != nil {
+		return fmt.Errorf("cli: create %s request: %w", what, err)
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("cli: %s: %w", what, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return c.decodeError(resp)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("cli: decode %s response: %w", what, err)
+	}
+	return nil
+}
+
+// PostMessageV2 posts a message to channel through the v2 route. A nil
+// audience posts channel-wide; otherwise the message is scoped to a net or to
+// an explicit list of principals. The server binds the author when the client
+// has a credential.
+func (c *Client) PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error) {
+	request := schema.PostMessageRequestV2{AuthorID: authorID, Body: body, Audience: audience}
+	var result schema.PostMessageResponseV2
+	endpoint := c.resolve("v2", "channels", channel, "messages")
+	if err := c.roundTrip(ctx, "post v2 message", http.MethodPost, endpoint, request, &result); err != nil {
+		return schema.MessageV2{}, err
+	}
+	return result.Message, nil
+}
+
+// ListMessagesV2 returns one forward page of the v2 messages in channel that
+// the caller may see.
+func (c *Client) ListMessagesV2(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
+	endpoint := c.resolve("v2", "channels", channel, "messages")
+	query := endpoint.Query()
+	query.Set("after", strconv.FormatInt(after, 10))
+	query.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = query.Encode()
+	var result schema.ListMessagesResponseV2
+	if err := c.roundTrip(ctx, "list v2 messages", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListMessagesResponseV2{}, err
+	}
+	return result, nil
+}
+
+// SubscribeV2 connects to channel's v2 stream and calls receive for every
+// message the caller may see, scoped ones included. A server shutdown is
+// reported through websocket.StatusGoingAway.
+func (c *Client) SubscribeV2(ctx context.Context, channel string, receive func(schema.MessageV2) error) error {
+	endpoint := c.resolve("v2", "ws")
+	if endpoint.Scheme == "http" {
+		endpoint.Scheme = "ws"
+	} else {
+		endpoint.Scheme = "wss"
+	}
+	query := endpoint.Query()
+	query.Set("channel", channel)
+	endpoint.RawQuery = query.Encode()
+	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	if err != nil {
+		if resp != nil {
+			defer func() { _ = resp.Body.Close() }()
+			return c.decodeError(resp)
+		}
+		return fmt.Errorf("cli: connect v2 subscription: %w", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	for {
+		var message schema.MessageV2
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			return fmt.Errorf("cli: read v2 subscription: %w", err)
+		}
+		if err := receive(message); err != nil {
+			return fmt.Errorf("cli: receive v2 subscription message: %w", err)
+		}
+	}
+}
+
+// ListNets returns the nets of channel that the caller may see, with rosters.
+func (c *Client) ListNets(ctx context.Context, channel string) (schema.ListNetsResponseV1, error) {
+	endpoint := c.resolve("v1", "channels", channel, "nets")
+	var result schema.ListNetsResponseV1
+	if err := c.roundTrip(ctx, "list nets", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListNetsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// CreateNet creates the named net in channel.
+func (c *Client) CreateNet(ctx context.Context, channel, name string) (schema.NetV1, error) {
+	endpoint := c.resolve("v1", "channels", channel, "nets")
+	var result schema.CreateNetResponseV1
+	if err := c.roundTrip(ctx, "create net", http.MethodPost, endpoint, schema.CreateNetRequestV1{Name: name}, &result); err != nil {
+		return schema.NetV1{}, err
+	}
+	return result.Net, nil
+}
+
+// ArchiveNet archives the named net of channel.
+func (c *Client) ArchiveNet(ctx context.Context, channel, name string) error {
+	endpoint := c.resolve("v1", "channels", channel, "nets", name)
+	return c.roundTrip(ctx, "archive net", http.MethodDelete, endpoint, nil, nil)
+}
+
+// PutNetMember adds principalID to the named net, or changes its role there.
+func (c *Client) PutNetMember(ctx context.Context, channel, name string, principalID int64, role schema.NetRole) error {
+	endpoint := c.resolve("v1", "channels", channel, "nets", name, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "put net member", http.MethodPut, endpoint, schema.PutNetMemberRequestV1{Role: role}, nil)
+}
+
+// RemoveNetMember takes principalID off the named net.
+func (c *Client) RemoveNetMember(ctx context.Context, channel, name string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "nets", name, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "remove net member", http.MethodDelete, endpoint, nil, nil)
+}
