@@ -131,7 +131,8 @@ func (s *Store) AddChannelMember(ctx context.Context, actor string, channelID, p
 
 // RemoveChannelMember removes principalID from channelID. It is idempotent:
 // removing a non-member returns removed=false and writes nothing, including
-// no audit event. Errors are as for AddChannelMember. The caller must close
+// no audit event. Removing a member also takes them off every net of the
+// channel, each removal audited. Errors are as for AddChannelMember. The caller must close
 // the principal's live subscriptions after this returns.
 func (s *Store) RemoveChannelMember(ctx context.Context, actor string, channelID, principalID int64) (removed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
@@ -152,7 +153,12 @@ func (s *Store) RemoveChannelMember(ctx context.Context, actor string, channelID
 			return nil
 		}
 		removed = true
-		return appendAuditEventTx(ctx, tx, actor, AuditMemberRemoved, channelSubject(channelID), memberDetail(principalID), now)
+		if err := appendAuditEventTx(ctx, tx, actor, AuditMemberRemoved, channelSubject(channelID), memberDetail(principalID), now); err != nil {
+			return err
+		}
+		// A net member must be a channel member (ADR-005), so the net seats go
+		// in the same transaction.
+		return removeNetMembershipsTx(ctx, tx, actor, channelID, principalID, now)
 	})
 	if err != nil {
 		return false, err

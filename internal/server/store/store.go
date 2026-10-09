@@ -210,6 +210,33 @@ END`,
 )`,
 		`CREATE UNIQUE INDEX hooks_by_token_hash ON hooks (token_hash)`,
 	},
+	// 11: Nets (issue #115, ADR-005). A net is a named subset of one channel's
+	// members. Nets are archived, never deleted, so messages that reference a
+	// net keep a valid id; the partial unique index frees a name for reuse once
+	// its net is archived. net_members rows are kept when a net is archived
+	// (they record who was on it) and removed when the principal leaves the
+	// channel. Timestamps are unix milliseconds UTC. No data is backfilled: a
+	// database from before this migration has no nets.
+	{
+		`CREATE TABLE nets (
+	id          INTEGER PRIMARY KEY,
+	channel_id  INTEGER NOT NULL REFERENCES channels (id),
+	name        TEXT    NOT NULL,
+	created_by  INTEGER REFERENCES principals (id),
+	created_at  INTEGER NOT NULL,
+	archived_at INTEGER
+)`,
+		`CREATE UNIQUE INDEX nets_live_name ON nets (channel_id, name) WHERE archived_at IS NULL`,
+		`CREATE TABLE net_members (
+	net_id       INTEGER NOT NULL REFERENCES nets (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	role         TEXT    NOT NULL CHECK (role IN ('member','monitor')),
+	added_by     INTEGER REFERENCES principals (id),
+	created_at   INTEGER NOT NULL,
+	PRIMARY KEY (net_id, principal_id)
+)`,
+		`CREATE INDEX net_members_by_principal ON net_members (principal_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
