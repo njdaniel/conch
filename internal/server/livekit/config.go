@@ -25,6 +25,45 @@ const (
 	EnvAPISecret = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
 )
 
+// Secret holds the signing secret. It keeps the value behind a pointer, so
+// that no fmt verb, reflection walk, JSON encoder or structured logger can
+// print it: a struct that contains a Secret, at any depth and through exported
+// or unexported fields, shows at most an address. A String method alone does
+// not give that, because fmt cannot call methods on values it reaches through
+// unexported fields. Only this package can read the value back.
+type Secret struct{ v *string }
+
+// NewSecret wraps s. An empty s is the unset Secret.
+func NewSecret(s string) Secret {
+	if s == "" {
+		return Secret{}
+	}
+	return Secret{v: &s}
+}
+
+// IsSet reports whether a secret is present.
+func (s Secret) IsSet() bool { return s.v != nil }
+
+// reveal returns the secret for signing. It is unexported on purpose.
+func (s Secret) reveal() string {
+	if s.v == nil {
+		return ""
+	}
+	return *s.v
+}
+
+// String never prints the secret.
+func (s Secret) String() string { return presence(s.IsSet(), "[redacted]") }
+
+// GoString keeps %#v from printing the pointer's target.
+func (s Secret) GoString() string { return s.String() }
+
+// LogValue implements slog.LogValuer.
+func (s Secret) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+// MarshalText keeps the secret out of JSON and any other text encoding.
+func (s Secret) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
+
 // Config is the LiveKit connection settings. The zero value means voice is
 // not configured. Build it with ParseConfig, which enforces all-or-nothing.
 //
@@ -38,13 +77,13 @@ type Config struct {
 	// APIKey is the key half of the signing pair (the "iss" of every token).
 	APIKey string
 	// APISecret signs every token. It is read from the environment only.
-	APISecret string
+	APISecret Secret
 }
 
 // Configured reports whether voice is configured. ParseConfig guarantees a
 // Config is either entirely set or entirely empty.
 func (c Config) Configured() bool {
-	return c.URL != "" && c.APIURL != "" && c.APIKey != "" && c.APISecret != ""
+	return c.URL != "" && c.APIURL != "" && c.APIKey != "" && c.APISecret.IsSet()
 }
 
 // String renders the config with the secret redacted.
@@ -53,7 +92,7 @@ func (c Config) String() string {
 		return "livekit.Config{not configured}"
 	}
 	return fmt.Sprintf("livekit.Config{URL:%q APIURL:%q APIKey:%s APISecret:%s}",
-		c.URL, c.APIURL, presence(c.APIKey, "[set]"), presence(c.APISecret, "[redacted]"))
+		c.URL, c.APIURL, presence(c.APIKey != "", "[set]"), c.APISecret)
 }
 
 // GoString keeps %#v from printing the struct fields.
@@ -64,13 +103,13 @@ func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("url", c.URL),
 		slog.String("api_url", c.APIURL),
-		slog.String("api_key", presence(c.APIKey, "[set]")),
-		slog.String("api_secret", presence(c.APISecret, "[redacted]")),
+		slog.String("api_key", presence(c.APIKey != "", "[set]")),
+		slog.String("api_secret", c.APISecret.String()),
 	)
 }
 
-func presence(v, set string) string {
-	if v == "" {
+func presence(isSet bool, set string) string {
+	if !isSet {
 		return "[unset]"
 	}
 	return set
@@ -122,7 +161,7 @@ func ParseConfig(clientURL, apiURL, apiKey, apiSecret string) (Config, error) {
 		URL:       cu.String(),
 		APIURL:    strings.TrimRight(au.String(), "/"),
 		APIKey:    apiKey,
-		APISecret: apiSecret,
+		APISecret: NewSecret(apiSecret),
 	}, nil
 }
 
@@ -147,6 +186,11 @@ func parseAddr(raw, what string, schemes ...string) (*url.URL, error) {
 	// not be a place a credential can hide.
 	if u.User != nil {
 		return nil, errors.New("livekit: invalid " + what + ": must not contain a user or password")
+	}
+	// The room-API path is appended to the API address. A query or fragment
+	// would swallow it, and every call would then miss LiveKit's routes.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, errors.New("livekit: invalid " + what + ": must not contain a query or fragment")
 	}
 	return u, nil
 }

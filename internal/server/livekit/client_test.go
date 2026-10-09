@@ -56,8 +56,14 @@ func checkAdminToken(t *testing.T, rec *recorded, want map[string]any) {
 	if got := claims["exp"].(float64) - float64(testNow.Unix()); got != 60 {
 		t.Errorf("token life = %vs, want 60", got)
 	}
-	if !reflect.DeepEqual(claims["video"], want) {
-		t.Errorf("video grant = %v, want %v", claims["video"], want)
+	// Every admin grant also writes the three participant permissions as
+	// false, since LiveKit reads an absent one as true.
+	full := map[string]any{"canPublish": false, "canSubscribe": false, "canPublishData": false}
+	for k, v := range want {
+		full[k] = v
+	}
+	if !reflect.DeepEqual(claims["video"], full) {
+		t.Errorf("video grant = %v, want %v", claims["video"], full)
 	}
 }
 
@@ -226,9 +232,6 @@ func TestFailuresAreUnavailable(t *testing.T) {
 			if caseName == "wrong JSON types" && (opName == "CreateRoom" || opName == "RemoveParticipant") {
 				continue
 			}
-			if caseName == "HTTP 404" && opName == "RemoveParticipant" {
-				continue // already gone is success; see TestRemoveParticipantTreatsNotFoundAsDone
-			}
 			t.Run(caseName+"/"+opName, func(t *testing.T) {
 				c := testClient(t, url)
 				err := op(c)
@@ -372,9 +375,9 @@ func TestNoSecretOrTokenInLogsOrErrors(t *testing.T) {
 }
 
 // Removing a participant who has already left, or from a room LiveKit no
-// longer has, is success: the 404 means the outcome already holds. Every other
-// call still treats 404 as unavailable, and RemoveParticipant still reports
-// other statuses.
+// longer has, is success: LiveKit's own not_found answer means the outcome
+// already holds. Every other call still treats 404 as unavailable, and
+// RemoveParticipant still reports other statuses and any other kind of 404.
 func TestRemoveParticipantTreatsNotFoundAsDone(t *testing.T) {
 	ctx := context.Background()
 	gone, _ := fakeLiveKit(t, 404, `{"code":"not_found","msg":"participant does not exist"}`)
@@ -393,5 +396,74 @@ func TestRemoveParticipantTreatsNotFoundAsDone(t *testing.T) {
 		if err := testClient(t, srv.URL).RemoveParticipant(ctx, "r", "p7"); !errors.Is(err, ErrUnavailable) {
 			t.Errorf("RemoveParticipant on %d = %v, want ErrUnavailable", status, err)
 		}
+	}
+}
+
+// Only LiveKit's own "not_found" makes a 404 mean "already gone". A wrong
+// route, a proxy's 404 page, or a 404 with no body must stay a failure:
+// calling those success would record a removal that never happened. The
+// bodies are the ones LiveKit 1.13.7 returned for each case.
+func TestRemoveParticipantOnlyTrustsLiveKitsNotFound(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		status     int
+		wantDone   bool
+	}{
+		{"participant does not exist", `{"code":"not_found","msg":"twirp error unknown: participant does not exist"}`, 404, true},
+		{"unknown method", `{"code":"bad_route","msg":"no handler for path","meta":{"twirp_invalid_route":"POST /x"}}`, 404, false},
+		{"unknown path", "404 page not found\n", 404, false},
+		{"proxy page", "<html><body>Not Found</body></html>", 404, false},
+		{"empty body", "", 404, false},
+		{"not_found code on another status", `{"code":"not_found"}`, 500, false},
+		{"code of the wrong type", `{"code":404}`, 404, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := fakeLiveKit(t, tt.status, tt.body)
+			err := testClient(t, srv.URL).RemoveParticipant(context.Background(), "r", "p7")
+			if tt.wantDone {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("err = %v, want ErrUnavailable", err)
+			}
+			if strings.Contains(err.Error(), "bad_route") || strings.Contains(err.Error(), "Not Found") || strings.Contains(err.Error(), "no handler") {
+				t.Errorf("error repeats the response body: %v", err)
+			}
+		})
+	}
+}
+
+// An admin grant with no room named would be wider than any call needs, and a
+// removal with no identity names nobody. Neither is signed or sent.
+func TestRoomCallsRejectEmptyNames(t *testing.T) {
+	srv, rec := fakeLiveKit(t, 200, `{}`)
+	c := testClient(t, srv.URL)
+	ctx := context.Background()
+	calls := map[string]func() error{
+		"CreateRoom":                 func() error { return c.CreateRoom(ctx, "") },
+		"ListParticipants":           func() error { _, err := c.ListParticipants(ctx, ""); return err },
+		"RemoveParticipant no room":  func() error { return c.RemoveParticipant(ctx, "", "p7") },
+		"RemoveParticipant no ident": func() error { return c.RemoveParticipant(ctx, "r", "") },
+	}
+	for name, call := range calls {
+		if err := call(); err == nil || errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s: err = %v, want a refusal that is not ErrUnavailable", name, err)
+		}
+	}
+	if rec.path != "" {
+		t.Errorf("a request was sent to %s", rec.path)
+	}
+}
+
+// Room calls carry a bearer token; a proxy named in the environment must not
+// see them.
+func TestClientIgnoresEnvironmentProxy(t *testing.T) {
+	c := testClient(t, "http://127.0.0.1:1")
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("transport = %T with a proxy function set; want an *http.Transport with none", c.http.Transport)
 	}
 }

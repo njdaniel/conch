@@ -15,7 +15,7 @@ var testNow = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 
 func testClient(t *testing.T, apiURL string) *Client {
 	t.Helper()
-	c, err := New(Config{URL: "ws://lk.test", APIURL: apiURL, APIKey: "devkey", APISecret: "s3cret-value"})
+	c, err := New(Config{URL: "ws://lk.test", APIURL: apiURL, APIKey: "devkey", APISecret: NewSecret("s3cret-value")})
 	if err != nil {
 		t.Fatal(err)
 	}

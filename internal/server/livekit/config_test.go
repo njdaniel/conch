@@ -1,6 +1,7 @@
 package livekit
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,15 +20,15 @@ func TestParseConfig(t *testing.T) {
 		{name: "only whitespace", url: "  ", want: Config{}},
 		{
 			name: "full, api url defaults from ws", url: "ws://lk.local:7880", key: "k", secret: "s",
-			want: Config{URL: "ws://lk.local:7880", APIURL: "http://lk.local:7880", APIKey: "k", APISecret: "s"},
+			want: Config{URL: "ws://lk.local:7880", APIURL: "http://lk.local:7880", APIKey: "k", APISecret: NewSecret("s")},
 		},
 		{
 			name: "full, api url defaults from wss", url: "wss://voice.example", key: "k", secret: "s",
-			want: Config{URL: "wss://voice.example", APIURL: "https://voice.example", APIKey: "k", APISecret: "s"},
+			want: Config{URL: "wss://voice.example", APIURL: "https://voice.example", APIKey: "k", APISecret: NewSecret("s")},
 		},
 		{
 			name: "full, explicit api url", url: "wss://voice.example", apiURL: "http://127.0.0.1:7880/", key: "k", secret: "s",
-			want: Config{URL: "wss://voice.example", APIURL: "http://127.0.0.1:7880", APIKey: "k", APISecret: "s"},
+			want: Config{URL: "wss://voice.example", APIURL: "http://127.0.0.1:7880", APIKey: "k", APISecret: NewSecret("s")},
 		},
 		{name: "missing url", key: "k", secret: "s", wantErr: []string{EnvURL}, notErr: []string{EnvAPIKey, EnvAPISecret}},
 		{name: "missing key", url: "ws://h", secret: "s", wantErr: []string{EnvAPIKey}, notErr: []string{EnvURL, EnvAPISecret}},
@@ -64,7 +65,9 @@ func TestParseConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tt.want {
+			// Secrets are compared by value: each holds its own pointer.
+			if got.URL != tt.want.URL || got.APIURL != tt.want.APIURL || got.APIKey != tt.want.APIKey ||
+				got.APISecret.reveal() != tt.want.APISecret.reveal() {
 				t.Errorf("config = %#v, want %#v", got, tt.want)
 			}
 			if got.Configured() != (tt.want != Config{}) {
@@ -75,7 +78,7 @@ func TestParseConfig(t *testing.T) {
 }
 
 func TestConfigRedactsSecret(t *testing.T) {
-	cfg := Config{URL: "ws://h", APIURL: "http://h", APIKey: "key-id", APISecret: "do-not-leak"}
+	cfg := Config{URL: "ws://h", APIURL: "http://h", APIKey: "key-id", APISecret: NewSecret("do-not-leak")}
 	var sb strings.Builder
 	h := slog.NewTextHandler(&sb, nil)
 	slog.New(h).Info("cfg", "livekit", cfg)
@@ -115,5 +118,77 @@ func TestParseConfigRejectsCredentialsInAddresses(t *testing.T) {
 				t.Errorf("error repeats the credential: %v", err)
 			}
 		})
+	}
+}
+
+// The room-API path is appended to the API address, so a query or fragment in
+// either address would swallow it.
+func TestParseConfigRejectsQueryAndFragment(t *testing.T) {
+	for _, tt := range []struct{ name, url, api string }{
+		{"client query", "wss://voice.example/?project=1", ""},
+		{"client fragment", "wss://voice.example/#frag", ""},
+		{"client bare question mark", "wss://voice.example/?", ""},
+		{"api query", "wss://voice.example", "https://voice.example/?x=1"},
+		{"api fragment", "wss://voice.example", "https://voice.example/#frag"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ParseConfig(tt.url, tt.api, "k", "s"); err == nil || !strings.Contains(err.Error(), "query or fragment") {
+				t.Fatalf("err = %v, want a refusal", err)
+			}
+		})
+	}
+	// A path is fine: LiveKit behind a prefix on a reverse proxy.
+	cfg, err := ParseConfig("wss://voice.example/lk/", "", "k", "s")
+	if err != nil || cfg.APIURL != "https://voice.example/lk" {
+		t.Fatalf("config = %v, %v; want API address https://voice.example/lk", cfg, err)
+	}
+}
+
+// The secret cannot be printed by any route: not by formatting the config,
+// the client, or a struct that holds either in an unexported field (where fmt
+// cannot call a String method), not by a text or JSON log handler, and not by
+// encoding/json.
+func TestSecretCannotBePrinted(t *testing.T) {
+	const secret = "do-not-leak-0123456789"
+	cfg := Config{URL: "ws://h", APIURL: "http://h", APIKey: "key-id", APISecret: NewSecret(secret)}
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type holder struct {
+		cfg    Config
+		client *Client
+		byVal  Client
+		secret Secret
+	}
+	h := holder{cfg: cfg, client: client, byVal: *client, secret: cfg.APISecret} //nolint:govet // copying the client is the point: a copy must not leak either
+	values := map[string]any{
+		"config": cfg, "*config": &cfg, "secret": cfg.APISecret, "*secret": &cfg.APISecret,
+		"*client": client, "client by value": *client, "holder": h, "*holder": &h, //nolint:govet // as above
+	}
+	check := func(what, out string) {
+		t.Helper()
+		if strings.Contains(out, secret) || strings.Contains(out, secret[:10]) {
+			t.Errorf("%s leaks the secret: %s", what, out)
+		}
+	}
+	for name, v := range values {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d"} {
+			check(name+" "+verb, fmt.Sprintf(verb, v))
+		}
+		var text, js strings.Builder
+		slog.New(slog.NewTextHandler(&text, nil)).Info("x", "v", v)
+		slog.New(slog.NewJSONHandler(&js, nil)).Info("x", "v", v)
+		check(name+" slog text", text.String())
+		check(name+" slog json", js.String())
+		if raw, err := json.Marshal(v); err == nil {
+			check(name+" json", string(raw))
+		}
+	}
+	if got := fmt.Sprintf("%v", client); !strings.Contains(got, "[redacted]") {
+		t.Errorf("client prints as %q, want the redaction marker", got)
+	}
+	if NewSecret("").IsSet() || !NewSecret("x").IsSet() || NewSecret("").String() != "[unset]" {
+		t.Error("Secret set/unset reporting is wrong")
 	}
 }

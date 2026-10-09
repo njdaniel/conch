@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,7 +26,10 @@ const (
 	defaultTimeout = 2 * time.Second
 	// maxResponseBytes bounds how much of a response is read.
 	maxResponseBytes = 1 << 20
-	rpcPrefix        = "/twirp/livekit.RoomService/"
+	// maxErrorBodyBytes bounds how much of an error body is parsed for its
+	// Twirp code. LiveKit's error bodies are a few hundred bytes.
+	maxErrorBodyBytes = 4 << 10
+	rpcPrefix         = "/twirp/livekit.RoomService/"
 )
 
 // Client calls LiveKit's room API and signs tokens. It is safe for
@@ -42,9 +46,14 @@ func New(cfg Config) (*Client, error) {
 	if !cfg.Configured() {
 		return nil, errors.New("livekit: not configured")
 	}
+	// Room calls carry a bearer token and normally go to a LiveKit on the same
+	// host. An HTTP_PROXY in conchd's environment must not receive them.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	return &Client{
 		cfg: cfg,
 		http: &http.Client{
+			Transport: transport,
 			// Never follow a redirect: it could carry our bearer token
 			// somewhere else, and LiveKit does not redirect API calls.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -53,6 +62,16 @@ func New(cfg Config) (*Client, error) {
 		now:     time.Now,
 	}, nil
 }
+
+// String describes the client without its secret. The secret could not be
+// printed even without this method (see Secret); this keeps the output tidy.
+func (c *Client) String() string { return "livekit.Client{" + c.cfg.String() + "}" }
+
+// GoString is String, for %#v.
+func (c *Client) GoString() string { return c.String() }
+
+// LogValue implements slog.LogValuer.
+func (c *Client) LogValue() slog.Value { return c.cfg.LogValue() }
 
 // Room is a LiveKit room as the sweep needs it.
 type Room struct {
@@ -80,6 +99,9 @@ func (p Participant) Transmitting() bool { return p.MicrophonePublished && !p.Mi
 // success and leaves the room alone, so callers may call it before every
 // session.
 func (c *Client) CreateRoom(ctx context.Context, name string) error {
+	if name == "" {
+		return errors.New("livekit: CreateRoom needs a room name")
+	}
 	return c.call(ctx, "CreateRoom", adminGrant{RoomCreate: true}, map[string]any{"name": name}, nil)
 }
 
@@ -123,6 +145,11 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 			} `json:"tracks"`
 		} `json:"participants"`
 	}
+	// An admin grant with no room named is wider than this call needs, so an
+	// empty room never reaches the signer.
+	if room == "" {
+		return nil, errors.New("livekit: ListParticipants needs a room name")
+	}
 	grant := adminGrant{RoomAdmin: true, Room: room}
 	if err := c.call(ctx, "ListParticipants", grant, map[string]any{"room": room}, &resp); err != nil {
 		return nil, err
@@ -159,25 +186,37 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 // holder of an unexpired token from rejoining.
 //
 // Removing someone who is not in the room, or from a room LiveKit no longer
-// has, succeeds: LiveKit answers 404 (measured on 1.13.7), and the outcome the
-// caller wants already holds. Reporting that as ErrUnavailable would make a
-// participant leaving just before their removal look like a LiveKit outage.
+// has, succeeds: the outcome the caller wants already holds, and reporting it
+// as ErrUnavailable would make a participant leaving just before their removal
+// look like a LiveKit outage. LiveKit says so with a 404 whose body is the
+// Twirp error {"code":"not_found"} (measured on 1.13.7). Only that exact answer
+// counts. A 404 with any other body is a wrong route or a proxy in the way
+// (LiveKit answers "bad_route" for an unknown method, and plain text for an
+// unknown path), and treating it as done would record a removal that never
+// happened.
 func (c *Client) RemoveParticipant(ctx context.Context, room, identity string) error {
+	if room == "" || identity == "" {
+		return errors.New("livekit: RemoveParticipant needs a room name and an identity")
+	}
 	grant := adminGrant{RoomAdmin: true, Room: room}
 	err := c.call(ctx, "RemoveParticipant", grant, map[string]any{"room": room, "identity": identity}, nil)
 	var status httpStatusError
-	if errors.As(err, &status) && status == http.StatusNotFound {
+	if errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
 		return nil
 	}
 	return err
 }
 
 // httpStatusError is a non-2xx answer from LiveKit. It is always wrapped in
-// ErrUnavailable; it exists so a caller inside this package can tell a 404
-// from an outage.
-type httpStatusError int
+// ErrUnavailable; it exists so a caller inside this package can tell LiveKit's
+// "not found" from an outage. twirpCode is the "code" of a Twirp JSON error
+// body, or empty. It is never put in the error text: the body is not ours.
+type httpStatusError struct {
+	status    int
+	twirpCode string
+}
 
-func (e httpStatusError) Error() string { return "HTTP " + strconv.Itoa(int(e)) }
+func (e httpStatusError) Error() string { return "HTTP " + strconv.Itoa(e.status) }
 
 // call signs a fresh admin token carrying grant, POSTs req to the method, and
 // decodes the JSON answer into out (when non-nil). Every failure is wrapped
@@ -214,8 +253,17 @@ func (c *Client) call(ctx context.Context, method string, grant adminGrant, req,
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		status := httpStatusError{status: resp.StatusCode}
+		if raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes)); err == nil {
+			var twirp struct {
+				Code string `json:"code"`
+			}
+			if json.Unmarshal(raw, &twirp) == nil {
+				status.twirpCode = twirp.Code
+			}
+		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
-		return fmt.Errorf("%w: %s: %w", ErrUnavailable, method, httpStatusError(resp.StatusCode))
+		return fmt.Errorf("%w: %s: %w", ErrUnavailable, method, status)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {

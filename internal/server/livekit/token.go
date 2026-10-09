@@ -43,12 +43,18 @@ type joinGrant struct {
 }
 
 // adminGrant is the "video" grant for a room-API call. Each call sets only
-// what it needs; everything else stays off.
+// what it needs; everything else stays off. The three participant permissions
+// are always written as false: LiveKit treats an absent one as true, and
+// although a token without roomJoin cannot join a room (measured on 1.13.7),
+// an admin token should not rely on that alone.
 type adminGrant struct {
-	RoomCreate bool   `json:"roomCreate,omitempty"`
-	RoomList   bool   `json:"roomList,omitempty"`
-	RoomAdmin  bool   `json:"roomAdmin,omitempty"`
-	Room       string `json:"room,omitempty"`
+	RoomCreate     bool   `json:"roomCreate,omitempty"`
+	RoomList       bool   `json:"roomList,omitempty"`
+	RoomAdmin      bool   `json:"roomAdmin,omitempty"`
+	Room           string `json:"room,omitempty"`
+	CanPublish     bool   `json:"canPublish"`
+	CanSubscribe   bool   `json:"canSubscribe"`
+	CanPublishData bool   `json:"canPublishData"`
 }
 
 type claims struct {
@@ -115,7 +121,7 @@ func (c *Client) sign(cl claims) (string, error) {
 		return "", errors.New("livekit: encode token claims")
 	}
 	signing := jwtHeader + "." + base64.RawURLEncoding.EncodeToString(body)
-	mac := hmac.New(sha256.New, []byte(c.cfg.APISecret))
+	mac := hmac.New(sha256.New, []byte(c.cfg.APISecret.reveal()))
 	mac.Write([]byte(signing))
 	return signing + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
