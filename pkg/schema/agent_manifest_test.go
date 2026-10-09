@@ -24,6 +24,7 @@ func TestAgentManifestGoldenFixtures(t *testing.T) {
 	}{
 		{"agent-manifest-v1.json", func() any { return new(AgentManifestV1) }},
 		{"agent-manifest-v1-deny-all.json", func() any { return new(AgentManifestV1) }},
+		{"agent-manifest-v1-nets.json", func() any { return new(AgentManifestV1) }},
 		{"put-agent-manifest-request-v1.json", func() any { return new(PutAgentManifestRequestV1) }},
 		{"put-agent-manifest-response-v1.json", func() any { return new(PutAgentManifestResponseV1) }},
 		{"get-agent-manifest-response-v1.json", func() any { return new(GetAgentManifestResponseV1) }},
@@ -175,19 +176,54 @@ var manifestPolicyCases = []struct {
 		wantErr: "must list at least one permission",
 	},
 	{
+		name: "valid scoped-speaking permissions (ADR-005)",
+		mutate: func(m *AgentManifestV1) {
+			m.Channels[0].Permissions = []ChannelPermission{
+				ChannelPermissionRead, ChannelPermissionPost,
+				ChannelPermissionPostNet, ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
+			}
+		},
+	},
+	{
+		name:   "valid post_net alone",
+		mutate: func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{ChannelPermissionPostNet} },
+	},
+	{
+		name:   "valid whisper alone",
+		mutate: func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{ChannelPermissionWhisper} },
+	},
+	{
+		name: "valid whisper_agent alone",
+		mutate: func(m *AgentManifestV1) {
+			m.Channels[0].Permissions = []ChannelPermission{ChannelPermissionWhisperAgent}
+		},
+	},
+	{
 		name:    "unknown channel permission",
 		mutate:  func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{"admin"} },
-		wantErr: `channel permission "admin" is not one of read, post`,
+		wantErr: `channel permission "admin" is not one of read, post, post_net, whisper, whisper_agent`,
 	},
 	{
 		name:    "empty channel permission",
 		mutate:  func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{""} },
-		wantErr: `channel permission "" is not one of read, post`,
+		wantErr: `channel permission "" is not one of read, post, post_net, whisper, whisper_agent`,
 	},
 	{
 		name:    "wildcard channel permission",
 		mutate:  func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{"*"} },
-		wantErr: `channel permission "*" is not one of read, post`,
+		wantErr: `channel permission "*" is not one of read, post, post_net, whisper, whisper_agent`,
+	},
+	{
+		name:    "capability-style spelling is not a channel permission",
+		mutate:  func(m *AgentManifestV1) { m.Channels[0].Permissions = []ChannelPermission{"nets.post"} },
+		wantErr: `channel permission "nets.post" is not one of read, post, post_net, whisper, whisper_agent`,
+	},
+	{
+		name: "duplicate scoped-speaking permission",
+		mutate: func(m *AgentManifestV1) {
+			m.Channels[0].Permissions = []ChannelPermission{ChannelPermissionWhisper, ChannelPermissionWhisper}
+		},
+		wantErr: `lists permission "whisper" more than once`,
 	},
 	{
 		name: "duplicate channel permission",
@@ -313,7 +349,7 @@ func TestAgentManifestV1ZeroValueGrantsNothing(t *testing.T) {
 			t.Errorf("zero-value manifest allows %q", c)
 		}
 	}
-	for _, p := range []ChannelPermission{ChannelPermissionRead, ChannelPermissionPost} {
+	for _, p := range ChannelPermissions() {
 		if m.AllowsChannel(1, p) {
 			t.Errorf("zero-value manifest allows %q in channel 1", p)
 		}
@@ -353,6 +389,8 @@ func TestAgentManifestV1AllowsChannel(t *testing.T) {
 		{ChannelID: 7, Permissions: []ChannelPermission{ChannelPermissionRead, ChannelPermissionPost}},
 		{ChannelID: 9, Permissions: []ChannelPermission{ChannelPermissionRead}},
 		{ChannelID: 11, Permissions: []ChannelPermission{ChannelPermissionPost}},
+		{ChannelID: 13, Permissions: []ChannelPermission{ChannelPermissionRead, ChannelPermissionPostNet}},
+		{ChannelID: 15, Permissions: []ChannelPermission{ChannelPermissionWhisper}},
 	}
 
 	tests := []struct {
@@ -371,6 +409,15 @@ func TestAgentManifestV1AllowsChannel(t *testing.T) {
 		{"unlisted channel post", 8, ChannelPermissionPost, false},
 		{"zero channel id", 0, ChannelPermissionRead, false},
 		{"unknown permission", 7, "admin", false},
+		// Scoped-speaking grants are independent of post and of each other (ADR-005).
+		{"post_net where granted", 13, ChannelPermissionPostNet, true},
+		{"post_net does not imply post", 13, ChannelPermissionPost, false},
+		{"post does not imply post_net", 7, ChannelPermissionPostNet, false},
+		{"post does not imply whisper", 7, ChannelPermissionWhisper, false},
+		{"whisper where granted", 15, ChannelPermissionWhisper, true},
+		{"whisper does not imply whisper_agent", 15, ChannelPermissionWhisperAgent, false},
+		{"whisper does not imply read", 15, ChannelPermissionRead, false},
+		{"whisper does not imply post", 15, ChannelPermissionPost, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -509,12 +556,15 @@ func TestManifestVocabularyValid(t *testing.T) {
 			t.Errorf("tier %q should be invalid", tier)
 		}
 	}
-	for _, p := range []ChannelPermission{ChannelPermissionRead, ChannelPermissionPost} {
+	for _, p := range []ChannelPermission{
+		ChannelPermissionRead, ChannelPermissionPost,
+		ChannelPermissionPostNet, ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
+	} {
 		if !p.Valid() {
 			t.Errorf("channel permission %q should be valid", p)
 		}
 	}
-	for _, p := range []ChannelPermission{"", "READ", "write", "admin", "*"} {
+	for _, p := range []ChannelPermission{"", "READ", "write", "admin", "*", "post-net", "whisper.agent", "WHISPER"} {
 		if p.Valid() {
 			t.Errorf("channel permission %q should be invalid", p)
 		}
@@ -523,5 +573,37 @@ func TestManifestVocabularyValid(t *testing.T) {
 		if c.Valid() {
 			t.Errorf("capability %q should be invalid", c)
 		}
+	}
+}
+
+func TestChannelPermissionsListsTheWholeVocabulary(t *testing.T) {
+	all := ChannelPermissions()
+	want := []ChannelPermission{
+		ChannelPermissionRead,
+		ChannelPermissionPost,
+		ChannelPermissionPostNet,
+		ChannelPermissionWhisper,
+		ChannelPermissionWhisperAgent,
+	}
+	if len(all) != len(want) {
+		t.Fatalf("ChannelPermissions() = %v, want %v", all, want)
+	}
+	seen := map[ChannelPermission]struct{}{}
+	for i, p := range all {
+		if p != want[i] {
+			t.Errorf("ChannelPermissions()[%d] = %q, want %q", i, p, want[i])
+		}
+		if !p.Valid() {
+			t.Errorf("ChannelPermissions() contains %q, which is not Valid", p)
+		}
+		if _, dup := seen[p]; dup {
+			t.Errorf("ChannelPermissions() lists %q more than once", p)
+		}
+		seen[p] = struct{}{}
+	}
+	// The returned slice is a copy.
+	all[0] = "admin"
+	if ChannelPermissions()[0] != ChannelPermissionRead {
+		t.Error("mutating the returned slice changed the package vocabulary")
 	}
 }

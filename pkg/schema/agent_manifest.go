@@ -115,22 +115,59 @@ func MCPToolCapabilities() map[string]Capability {
 // The vocabulary is closed and grows only by adding constants.
 type ChannelPermission string
 
-// Channel permissions.
+// Channel permissions. They are independent: none implies another. The
+// scoped-speaking permissions (ADR-005) gate where an agent may transmit;
+// reading a scoped message needs only read plus being in its audience.
 const (
-	// ChannelPermissionRead permits reading the channel's contents.
+	// ChannelPermissionRead permits reading the channel's contents, including
+	// scoped messages whose audience the agent is in.
 	ChannelPermissionRead ChannelPermission = "read"
-	// ChannelPermissionPost permits writing into the channel.
+	// ChannelPermissionPost permits posting channel-wide: a message with no
+	// audience.
 	ChannelPermissionPost ChannelPermission = "post"
+	// ChannelPermissionPostNet permits posting to a net in the channel that
+	// the agent is a member (not merely a monitor) of.
+	ChannelPermissionPostNet ChannelPermission = "post_net"
+	// ChannelPermissionWhisper permits posting to an explicit list of human
+	// principals in the channel.
+	ChannelPermissionWhisper ChannelPermission = "whisper"
+	// ChannelPermissionWhisperAgent permits the whisper list to include other
+	// agents. It is a separate grant for the same reason reply-to-agent is:
+	// agent-to-agent traffic nobody reads is its own risk.
+	ChannelPermissionWhisperAgent ChannelPermission = "whisper_agent"
 )
 
 // Valid reports whether p is a recognized channel permission.
 func (p ChannelPermission) Valid() bool {
 	switch p {
-	case ChannelPermissionRead, ChannelPermissionPost:
+	case ChannelPermissionRead, ChannelPermissionPost,
+		ChannelPermissionPostNet, ChannelPermissionWhisper, ChannelPermissionWhisperAgent:
 		return true
 	default:
 		return false
 	}
+}
+
+// ChannelPermissions returns the full channel permission vocabulary in
+// declaration order. The slice is freshly allocated; callers may modify it.
+func ChannelPermissions() []ChannelPermission {
+	return []ChannelPermission{
+		ChannelPermissionRead,
+		ChannelPermissionPost,
+		ChannelPermissionPostNet,
+		ChannelPermissionWhisper,
+		ChannelPermissionWhisperAgent,
+	}
+}
+
+// channelPermissionNames renders the vocabulary for error messages.
+func channelPermissionNames() string {
+	all := ChannelPermissions()
+	names := make([]string, len(all))
+	for i, p := range all {
+		names[i] = string(p)
+	}
+	return strings.Join(names, ", ")
 }
 
 // ChannelGrant is an agent's permission set in one channel. A channel with no
@@ -154,7 +191,7 @@ func (g ChannelGrant) Validate() error {
 	seen := make(map[ChannelPermission]struct{}, len(g.Permissions))
 	for _, p := range g.Permissions {
 		if !p.Valid() {
-			return fmt.Errorf("schema: channel permission %q is not one of read, post", p)
+			return fmt.Errorf("schema: channel permission %q is not one of %s", p, channelPermissionNames())
 		}
 		if _, dup := seen[p]; dup {
 			return fmt.Errorf("schema: channel grant for channel %d lists permission %q more than once", g.ChannelID, p)
