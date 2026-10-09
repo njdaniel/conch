@@ -114,9 +114,16 @@ func auditChain(t *testing.T, s *store.Store, subject string) []string {
 
 // waitFor polls until cond is true or the deadline passes — timers fire on
 // their own goroutines, so tests wait on observable state, not sleeps.
-func waitFor(t *testing.T, d time.Duration, cond func() bool) {
+// waitBudget is how long waitFor polls before failing. It is only
+// reached on failure: a satisfied condition returns at once. It is generous
+// on purpose, because under the race detector on a shared CI runner the
+// trailing audit and notification events can land more than a second after
+// the state change they follow (issue #105).
+const waitBudget = 10 * time.Second
+
+func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(d)
+	deadline := time.Now().Add(waitBudget)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -168,7 +175,7 @@ func TestFullChainRequestNotifyResolveAudit(t *testing.T) {
 	}
 
 	// The resolution notification fired.
-	waitFor(t, time.Second, func() bool { return len(n.recorded()) == 2 })
+	waitFor(t, func() bool { return len(n.recorded()) == 2 })
 	if events := n.recorded(); events[1] != "resolved" {
 		t.Fatalf("notifications = %v, want [created resolved]", events)
 	}
@@ -233,7 +240,7 @@ func TestDeadlineEscalatesThenExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, func() bool {
 		got, err := s.ApprovalByID(ctx, a.ID)
 		return err == nil && got.State == schema.ApprovalStateExpired
 	})
@@ -253,7 +260,7 @@ func TestDeadlineEscalatesThenExpires(t *testing.T) {
 		store.AuditApprovalExpired,
 		AuditNotifySent, // expired confirmation
 	}
-	waitFor(t, time.Second, func() bool {
+	waitFor(t, func() bool {
 		return len(auditChain(t, s, fmt.Sprintf("approval:%d", a.ID))) == len(want)
 	})
 	if got := auditChain(t, s, fmt.Sprintf("approval:%d", a.ID)); !equal(got, want) {
@@ -273,7 +280,7 @@ func TestDecisionDuringEscalationStillResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, func() bool {
 		got, err := s.ApprovalByID(ctx, a.ID)
 		return err == nil && got.State == schema.ApprovalStateEscalated
 	})
@@ -333,12 +340,12 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 
 	// The fully-missed approval must walk escalated → expired with the
 	// complete audit chain, never skipping straight to expired.
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, func() bool {
 		got, err := s.ApprovalByID(ctx, missed.ID)
 		return err == nil && got.State == schema.ApprovalStateExpired
 	})
 	want := []string{store.AuditApprovalCreated, store.AuditApprovalEscalated, AuditNotifySent, store.AuditApprovalExpired, AuditNotifySent}
-	waitFor(t, time.Second, func() bool {
+	waitFor(t, func() bool {
 		return len(auditChain(t, s, fmt.Sprintf("approval:%d", missed.ID))) >= len(want)
 	})
 	if got := auditChain(t, s, fmt.Sprintf("approval:%d", missed.ID)); !equal(got, want) {
@@ -346,7 +353,7 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 	}
 
 	// The still-live approval escalates after restart when its deadline passes.
-	waitFor(t, 2*time.Second, func() bool {
+	waitFor(t, func() bool {
 		got, err := s.ApprovalByID(ctx, future.ID)
 		return err == nil && got.State == schema.ApprovalStateEscalated
 	})

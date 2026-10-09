@@ -1,0 +1,61 @@
+{
+  "messages": [
+    {
+      "schema": "conch.message.v2",
+      "id": 42,
+      "channel_id": 7,
+      "author_id": 3,
+      "created_at": "2026-07-13T12:34:56.789Z",
+      "body": "hello, conch"
+    },
+    {
+      "schema": "conch.message.v2",
+      "id": 43,
+      "channel_id": 7,
+      "author_id": 3,
+      "created_at": "2026-07-13T12:34:57.000Z",
+      "body": "SIGNAL buy 0.5 BTC-USD @ 65000.00 (momentum, conf 0.82)",
+      "payload": {
+        "schema": "leviathan.trade_signal.v1",
+        "data": {
+          "symbol": "BTC-USD",
+          "side": "buy",
+          "quantity": "0.5",
+          "limit_price": "65000.00",
+          "confidence": 0.82,
+          "strategy": "momentum",
+          "issued_at": "2026-07-13T12:34:56.500Z"
+        }
+      }
+    },
+    {
+      "schema": "conch.message.v2",
+      "id": 44,
+      "channel_id": 7,
+      "author_id": 3,
+      "created_at": "2026-10-08T12:00:00.000Z",
+      "body": "alpha, hold position",
+      "audience": {
+        "kind": "net",
+        "net_id": 3
+      }
+    },
+    {
+      "schema": "conch.message.v2",
+      "id": 45,
+      "channel_id": 7,
+      "author_id": 3,
+      "created_at": "2026-10-08T12:00:01.000Z",
+      "body": "a word to the two of you",
+      "audience": {
+        "kind": "principals",
+        "principal_ids": [
+          3,
+          4,
+          7
+        ]
+      }
+    }
+  ],
+  "next_after": 45
+}

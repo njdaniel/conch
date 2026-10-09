@@ -1,0 +1,16 @@
+{
+  "schema": "conch.message.v2",
+  "id": 45,
+  "channel_id": 7,
+  "author_id": 3,
+  "created_at": "2026-10-08T12:00:01.000Z",
+  "body": "a word to the two of you",
+  "audience": {
+    "kind": "principals",
+    "principal_ids": [
+      3,
+      4,
+      7
+    ]
+  }
+}
