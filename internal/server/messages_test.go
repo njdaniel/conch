@@ -39,7 +39,7 @@ func createTestChannelAndPrincipal(t *testing.T, srv *Server) (store.Channel, st
 
 func TestPostGetMessagesRoundTripAndBroadcast(t *testing.T) {
 	broadcaster := &recordingBroadcaster{}
-	srv := newTestServerWithConfig(t, Config{Broadcaster: broadcaster})
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Broadcaster: broadcaster})
 	channel, principal := createTestChannelAndPrincipal(t, srv)
 
 	body := fmt.Sprintf(`{"author_id":%d,"body":"hello"}`, principal.ID)

@@ -35,8 +35,8 @@ type Config struct {
 	// Ntfy configures optional approval lifecycle push notifications. When
 	// unconfigured, notification hooks are silent and append no audit rows.
 	Ntfy approvals.NtfyConfig
-	// AuthMode selects REST/WebSocket authentication: AuthOff (the default,
-	// also the empty value) or AuthRequired. See auth.go.
+	// AuthMode selects REST/WebSocket authentication. Unset means
+	// AuthRequired; only an explicit AuthOff opens the server. See auth.go.
 	AuthMode AuthMode
 }
 

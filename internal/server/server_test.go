@@ -16,7 +16,7 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	return newTestServerWithConfig(t, Config{})
+	return newTestServerWithConfig(t, Config{AuthMode: AuthOff})
 }
 
 func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
@@ -73,7 +73,7 @@ func TestHealthzDegradedWhenStoreClosed(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("store.Close: %v", err)
 	}
-	srv := New(Config{Version: "v0", Listen: "127.0.0.1:0"}, st)
+	srv := New(Config{AuthMode: AuthOff, Version: "v0", Listen: "127.0.0.1:0"}, st)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()

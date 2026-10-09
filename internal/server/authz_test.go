@@ -667,7 +667,7 @@ func TestStartupReportsAgentsWithoutManifest(t *testing.T) {
 	}
 
 	logs := captureLogs(t)
-	New(Config{Listen: "127.0.0.1:0"}, st)
+	New(Config{AuthMode: AuthOff, Listen: "127.0.0.1:0"}, st)
 	if !strings.Contains(logs.buf.String(), "agents=2") {
 		t.Errorf("startup log = %q, want it to report 2 agents without a manifest", logs.buf.String())
 	}
@@ -677,7 +677,7 @@ func TestStartupReportsAgentsWithoutManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs.buf.Reset()
-	New(Config{Listen: "127.0.0.1:0"}, st)
+	New(Config{AuthMode: AuthOff, Listen: "127.0.0.1:0"}, st)
 	if !strings.Contains(logs.buf.String(), "agents=1") {
 		t.Errorf("startup log = %q, want it to report 1 agent without a manifest", logs.buf.String())
 	}

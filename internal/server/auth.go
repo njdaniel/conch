@@ -25,9 +25,11 @@ import (
 type AuthMode string
 
 const (
-	// AuthOff leaves REST and WebSocket open, as before issue #89 (default).
+	// AuthOff leaves REST and WebSocket open to anyone who can reach the
+	// port. It must be chosen explicitly; it is never a default.
 	AuthOff AuthMode = "off"
 	// AuthRequired requires a bearer credential on every non-exempt route.
+	// It is what an unset mode means.
 	AuthRequired AuthMode = "required"
 )
 
@@ -42,10 +44,11 @@ func ParseAuthMode(s string) (AuthMode, error) {
 }
 
 // authRequired reports whether cfg demands authentication. It fails closed:
-// only the empty value (unset) and "off" disable it, so an unrecognized mode
-// that slipped past ParseAuthMode still requires credentials.
+// only an explicit "off" disables it, so an unset mode (a zero-value Config)
+// and an unrecognized one that slipped past ParseAuthMode both require
+// credentials (issue #92).
 func (c Config) authRequired() bool {
-	return c.AuthMode != "" && c.AuthMode != AuthOff
+	return c.AuthMode != AuthOff
 }
 
 // access is the authorization class of a route under AuthRequired. The zero
