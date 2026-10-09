@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,9 +21,13 @@ import (
 
 // API is the shared Conch client surface used by the TUI.
 type API interface {
-	ListMessages(context.Context, string, int64, int) (schema.ListMessagesResponseV1, error)
-	SendMessage(context.Context, string, int64, string) (schema.MessageV1, error)
-	Subscribe(context.Context, string, func(schema.MessageV1) error) error
+	// Messages travel through the v2 methods only: a v1 reader would render a
+	// scoped message as an open one, so the v1 methods are deliberately not
+	// part of this interface and the TUI cannot call them.
+	ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
+	PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error)
+	SubscribeV2(context.Context, string, func(schema.MessageV2) error) error
+	ListNets(context.Context, string) (schema.ListNetsResponseV1, error)
 	ListChannels(context.Context) (schema.ListChannelsResponse, error)
 	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
 	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
@@ -34,12 +40,29 @@ type channelsLoaded struct {
 }
 type messagesLoaded struct {
 	channel  string
-	messages []schema.MessageV1
+	messages []schema.MessageV2
 	err      error
 }
 type messageReceived struct {
 	channel string
-	message schema.MessageV1
+	message schema.MessageV2
+}
+
+// netsLoaded carries a channel's net roster. resolve is set when the load was
+// started by "/net <want>" because the name was not in the roster we had.
+type netsLoaded struct {
+	channel string
+	nets    []schema.NetV1
+	err     error
+	resolve bool
+	want    string
+}
+
+// netTarget is where plain messages go instead of the whole channel.
+type netTarget struct {
+	channel string
+	id      int64
+	name    string
 }
 type subscriptionEnded struct {
 	channel string
@@ -61,7 +84,15 @@ const (
 	maxResubscribeDelay = 30 * time.Second
 )
 
-type messageSent struct{ err error }
+// messageSent is the result of one post. raw is the text as typed, so the input
+// is cleared only if the user has not started something new since.
+type messageSent struct {
+	channel string
+	raw     string
+	whisper bool
+	message schema.MessageV2
+	err     error
+}
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
 	err       error
@@ -96,7 +127,7 @@ type Model struct {
 	whoErr     error
 	channels   []string
 	selected   int
-	messages   map[string][]schema.MessageV1
+	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
 	input      string
 	// channelStatus and inboxStatus are the status line of each mode. A
@@ -126,6 +157,18 @@ type Model struct {
 	// is what keeps "select away and back" from starting a second subscription
 	// while the timer is still going to start one.
 	retryPending map[string]bool
+	// nets is each channel's net roster as last loaded; it resolves "/net
+	// <name>" and the names shown in scope badges.
+	nets map[string][]schema.NetV1
+	// target is the net plain messages are sent to; nil means the channel.
+	// It is never carried across channels, and nothing ever falls back from a
+	// scoped send to a channel-wide one.
+	target *netTarget
+	// sending is true while a post is in flight, so a second enter cannot
+	// send the same text twice.
+	sending bool
+	// whisperNoted records that the audit-log notice was shown this session.
+	whisperNoted bool
 	// after schedules msg to be delivered once d has elapsed. Injectable so
 	// tests can observe the delay instead of sleeping through it.
 	after func(d time.Duration, msg tea.Msg) tea.Cmd
@@ -166,7 +209,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV1), subscribed: make(map[string]bool),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter}
 	if len(clean) == 0 {
@@ -197,7 +240,7 @@ func (m Model) Init() tea.Cmd {
 	if m.loadingChannels {
 		return tea.Batch(who, m.loadChannels(), m.waitEvent())
 	}
-	return tea.Batch(who, m.loadCurrent(), m.startSubscription(), m.waitEvent())
+	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -261,21 +304,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.mode {
 			case modeChannels:
-				body := strings.TrimSpace(m.input)
-				if body == "" {
-					return m, nil
-				}
-				if len(m.channels) == 0 {
-					m.setStatus(modeChannels, "no channel selected yet")
-					return m, nil
-				}
-				if m.authorID <= 0 {
-					m.setStatus(modeChannels, m.noAuthorStatus("send"))
-					return m, nil
-				}
-				m.input = ""
-				m.setStatus(modeChannels, "sending…")
-				return m, m.send(body)
+				return m.submit()
 			case modeInbox:
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
@@ -385,7 +414,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.channels = names
 		m.selected = 0
 		m.subscribed[names[0]] = true
-		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
+		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription())
+	case netsLoaded:
+		return m.netsLoaded(msg)
 	case messagesLoaded:
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
@@ -420,7 +451,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
-		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV1{msg.message})
+		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV2{msg.message})
 		return m, m.waitEvent()
 	case subscriptionEnded:
 		return m.subscriptionEnded(msg)
@@ -438,11 +469,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Backfill the gap; mergeMessages de-duplicates by id.
 		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
 	case messageSent:
+		m.sending = false
 		if msg.err != nil {
+			// The typed text stays so it can be fixed or retried by hand;
+			// nothing else is sent in its place.
 			m.setStatus(modeChannels, msg.err.Error())
-		} else {
-			m.setStatus(modeChannels, "sent")
+			return m, nil
 		}
+		if msg.message.ID > 0 {
+			// The same message also arrives on the subscription; ids dedupe.
+			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV2{msg.message})
+		}
+		if m.input == msg.raw {
+			m.input = ""
+		}
+		status := "sent"
+		if msg.whisper && !m.whisperNoted {
+			m.whisperNoted = true
+			status += ". " + whisperNotice
+		}
+		m.setStatus(modeChannels, status)
 	}
 	return m, nil
 }
@@ -493,8 +539,10 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected = next
+	// A target belongs to the channel it was chosen in.
+	m.target = nil
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadCurrent()}
+	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, "")}
 	// A pending retry timer will start the subscription itself.
 	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
 		m.subscribed[m.current()] = true
@@ -548,10 +596,10 @@ func (m Model) loadCurrent() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		var messages []schema.MessageV1
+		var messages []schema.MessageV2
 		var after int64
 		for {
-			page, err := m.api.ListMessages(m.ctx, channel, after, 100)
+			page, err := m.api.ListMessagesV2(m.ctx, channel, after, 100)
 			if err != nil {
 				return messagesLoaded{channel: channel, err: err}
 			}
@@ -572,7 +620,7 @@ func (m Model) startSubscription() tea.Cmd {
 	return func() tea.Msg {
 		go func() {
 			started := time.Now()
-			err := m.api.Subscribe(m.ctx, channel, func(message schema.MessageV1) error {
+			err := m.api.SubscribeV2(m.ctx, channel, func(message schema.MessageV2) error {
 				select {
 				case m.events <- messageReceived{channel: channel, message: message}:
 					return nil
@@ -600,14 +648,13 @@ func (m Model) waitEvent() tea.Cmd {
 	}
 }
 
-func (m Model) send(body string) tea.Cmd {
-	channel := m.current()
-	if channel == "" {
-		return nil
-	}
+// send posts body to channel with the given audience, once. There is no retry
+// and no fallback: whatever the server answers is reported as is.
+func (m Model) send(channel, raw, body string, audience *schema.Audience, whisper bool) tea.Cmd {
+	author := m.authorID
 	return func() tea.Msg {
-		_, err := m.api.SendMessage(m.ctx, channel, m.authorID, body)
-		return messageSent{err: err}
+		posted, err := m.api.PostMessageV2(m.ctx, channel, author, body, audience)
+		return messageSent{channel: channel, raw: raw, whisper: whisper, message: posted, err: err}
 	}
 }
 
@@ -625,15 +672,15 @@ func (m Model) castDecision(approvalID int64, optionID string, reason string) te
 	}
 }
 
-func mergeMessages(existing, incoming []schema.MessageV1) []schema.MessageV1 {
-	byID := make(map[int64]schema.MessageV1, len(existing)+len(incoming))
+func mergeMessages(existing, incoming []schema.MessageV2) []schema.MessageV2 {
+	byID := make(map[int64]schema.MessageV2, len(existing)+len(incoming))
 	for _, message := range existing {
 		byID[message.ID] = message
 	}
 	for _, message := range incoming {
 		byID[message.ID] = message
 	}
-	merged := make([]schema.MessageV1, 0, len(byID))
+	merged := make([]schema.MessageV2, 0, len(byID))
 	for _, message := range byID {
 		merged = append(merged, message)
 	}
@@ -746,16 +793,7 @@ func (m Model) View() string {
 		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(channelLines, "\n"))
 		messageLines := make([]string, 0, len(m.messages[m.current()]))
 		for _, message := range m.messages[m.current()] {
-			badge := ""
-			badgeWidth := 0
-			if message.Payload != nil {
-				badgeText := "[" + clip(message.Payload.Schema, rightWidth/3) + "]"
-				badgeWidth = utf8.RuneCountInString(badgeText) + 1
-				badge = " " + badgeStyle.Render(badgeText)
-			}
-			prefix := fmt.Sprintf("%d", message.AuthorID)
-			bodyWidth := rightWidth - utf8.RuneCountInString(prefix) - badgeWidth - 7
-			messageLines = append(messageLines, fmt.Sprintf("%s%s  %s", prefix, badge, clip(strings.ReplaceAll(message.Body, "\n", " ↵ "), bodyWidth)))
+			messageLines = append(messageLines, m.messageLine(m.current(), message, rightWidth))
 		}
 		if len(messageLines) == 0 {
 			messageLines = append(messageLines, statusStyle.Render("No messages"))
@@ -770,7 +808,11 @@ func (m Model) View() string {
 
 	var inputStr string
 	if m.mode == modeDecision || m.mode == modeChannels {
-		inputStr = lipgloss.NewStyle().Width(width).Render("> " + clipTail(m.input, width-3))
+		prompt := ">"
+		if m.mode == modeChannels {
+			prompt = m.promptWithin(width / 2)
+		}
+		inputStr = lipgloss.NewStyle().Width(width).Render(prompt + " " + clipTail(m.input, width-utf8.RuneCountInString(prompt)-2))
 	} else {
 		inputStr = lipgloss.NewStyle().Width(width).Render("")
 	}
@@ -819,4 +861,332 @@ func clipTail(value string, width int) string {
 		return "…"
 	}
 	return "…" + string(runes[len(runes)-width+1:])
+}
+
+// whisperNotice mirrors the plain CLI's note: a whisper is discretion, not
+// secrecy, and users should not mistake it for the latter.
+const whisperNotice = "note: whispers are recorded in the audit log"
+
+const slashHint = `commands: /net [name], /w <ids> <text>; start a message with // to send a literal /`
+
+// submit handles enter in the channel pane: a slash command, or a message sent
+// to the current target. Every refusal leaves the input as typed and sends
+// nothing.
+func (m Model) submit() (tea.Model, tea.Cmd) {
+	body := strings.TrimSpace(m.input)
+	if body == "" {
+		return m, nil
+	}
+	if len(m.channels) == 0 {
+		m.setStatus(modeChannels, "no channel selected yet")
+		return m, nil
+	}
+	if m.sending {
+		m.setStatus(modeChannels, "still sending the previous message…")
+		return m, nil
+	}
+	if !strings.HasPrefix(body, "/") {
+		return m.sendToTarget(body)
+	}
+	// "//text" is the escape for a message that really starts with "/".
+	if strings.HasPrefix(body, "//") {
+		return m.sendToTarget(body[1:])
+	}
+	name, rest := splitCommand(body)
+	switch name {
+	case "/net":
+		return m.netCommand(rest)
+	case "/w":
+		return m.whisperCommand(rest)
+	default:
+		m.setStatus(modeChannels, fmt.Sprintf("unknown command %q; %s", sanitize(name), slashHint))
+		return m, nil
+	}
+}
+
+// splitCommand cuts "/cmd rest" at the first whitespace.
+func splitCommand(body string) (name, rest string) {
+	i := strings.IndexFunc(body, unicode.IsSpace)
+	if i < 0 {
+		return body, ""
+	}
+	return body[:i], strings.TrimSpace(body[i:])
+}
+
+// sendToTarget posts text to the net target, or to the whole channel when
+// there is none. A target that does not belong to the channel on screen is
+// refused rather than sent anywhere else.
+func (m Model) sendToTarget(text string) (tea.Model, tea.Cmd) {
+	var audience *schema.Audience
+	if m.target != nil {
+		if m.target.channel != m.current() {
+			m.setStatus(modeChannels, "transmit target is not in this channel; send refused (use /net)")
+			return m, nil
+		}
+		audience = &schema.Audience{Kind: schema.AudienceKindNet, NetID: m.target.id}
+	}
+	return m.post(text, audience, false)
+}
+
+// post starts one send. The input is cleared only when the server accepts it.
+func (m Model) post(text string, audience *schema.Audience, whisper bool) (tea.Model, tea.Cmd) {
+	if m.authorID <= 0 {
+		m.setStatus(modeChannels, m.noAuthorStatus("send"))
+		return m, nil
+	}
+	m.sending = true
+	m.setStatus(modeChannels, "sending…")
+	return m, m.send(m.current(), m.input, text, audience, whisper)
+}
+
+// whisperCommand handles "/w <ids> <text>". The target is left alone: a
+// whisper is one-shot.
+func (m Model) whisperCommand(rest string) (tea.Model, tea.Cmd) {
+	idList, text := splitCommand(rest)
+	if idList == "" || text == "" {
+		m.setStatus(modeChannels, "usage: /w <id>[,<id>...] <text>")
+		return m, nil
+	}
+	ids, err := parsePrincipalIDs(idList)
+	if err != nil {
+		m.setStatus(modeChannels, "/w: "+err.Error())
+		return m, nil
+	}
+	if m.authorID > 0 && len(ids) == 1 && ids[0] == m.authorID {
+		m.setStatus(modeChannels, "/w: a whisper needs someone other than you")
+		return m, nil
+	}
+	return m.post(text, &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}, true)
+}
+
+// parsePrincipalIDs reads a comma-separated list of positive, distinct
+// principal ids. It repeats internal/cli's helper of the same name, which is
+// unexported and which this change may not touch.
+func parsePrincipalIDs(list string) ([]int64, error) {
+	var ids []int64
+	seen := make(map[int64]bool)
+	for _, field := range strings.Split(list, ",") {
+		field = strings.TrimSpace(field)
+		id, err := strconv.ParseInt(field, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("%q is not a positive principal id", sanitize(field))
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("principal id %d is listed twice", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	audience := schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}
+	if err := audience.Validate(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// netCommand handles "/net" (back to the channel) and "/net <name>".
+func (m Model) netCommand(rest string) (tea.Model, tea.Cmd) {
+	args := strings.Fields(rest)
+	switch len(args) {
+	case 0:
+		m.target = nil
+		m.input = ""
+		m.setStatus(modeChannels, "transmitting to the whole channel")
+		return m, nil
+	case 1:
+	default:
+		m.setStatus(modeChannels, "usage: /net [name]")
+		return m, nil
+	}
+	name := args[0]
+	if err := schema.ValidateNetName(name); err != nil {
+		m.setStatus(modeChannels, "/net: "+err.Error())
+		return m, nil
+	}
+	if n, ok := findNet(m.nets[m.current()], name); ok {
+		return m.useNet(n), nil
+	}
+	// Not in the roster we have: it may have been created since, so ask once
+	// before calling it unknown.
+	m.setStatus(modeChannels, "looking up net "+name+"…")
+	return m, m.loadNets(true, name)
+}
+
+func findNet(nets []schema.NetV1, name string) (schema.NetV1, bool) {
+	for _, n := range nets {
+		if n.Name == name {
+			return n, true
+		}
+	}
+	return schema.NetV1{}, false
+}
+
+// useNet makes n the target unless the caller only monitors it. A caller the
+// roster does not list at all is let through: the server decides, and its
+// refusal is shown on send.
+func (m Model) useNet(n schema.NetV1) Model {
+	for _, member := range n.Members {
+		if member.PrincipalID == m.authorID && member.Role == schema.NetRoleMonitor {
+			m.setStatus(modeChannels, fmt.Sprintf("you only monitor net %s; you cannot transmit to it", n.Name))
+			return m
+		}
+	}
+	m.target = &netTarget{channel: m.current(), id: n.ID, name: n.Name}
+	if f := strings.Fields(m.input); len(f) == 2 && f[0] == "/net" && f[1] == n.Name {
+		m.input = ""
+	}
+	m.setStatus(modeChannels, "transmitting to net "+n.Name)
+	return m
+}
+
+func (m Model) loadNets(resolve bool, want string) tea.Cmd {
+	channel := m.current()
+	if channel == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		resp, err := m.api.ListNets(m.ctx, channel)
+		return netsLoaded{channel: channel, nets: resp.Nets, err: err, resolve: resolve, want: want}
+	}
+}
+
+// netsLoaded records the roster and, for a "/net <name>" that had to wait for
+// it, finishes the command. A plain refresh that fails is silent: the roster
+// only names badges and resolves /net, and /net reports its own failures.
+func (m Model) netsLoaded(msg netsLoaded) (tea.Model, tea.Cmd) {
+	if msg.err == nil {
+		m.nets[msg.channel] = msg.nets
+	}
+	if !msg.resolve || msg.channel != m.current() {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.setStatus(modeChannels, "/net: "+msg.err.Error())
+		return m, nil
+	}
+	if n, ok := findNet(msg.nets, msg.want); ok {
+		return m.useNet(n), nil
+	}
+	m.setStatus(modeChannels, fmt.Sprintf("no net %q in channel %s", msg.want, sanitize(msg.channel)))
+	return m, nil
+}
+
+// sanitize makes server- or author-supplied text safe to put on one terminal
+// line: line breaks become a visible mark, tabs a space, and every other
+// control character (ESC included, so no escape sequence survives) is dropped.
+func sanitize(text string) string {
+	text = strings.NewReplacer("\r\n", " ↵ ", "\n", " ↵ ", "\r", " ↵ ", "\t", " ").Replace(text)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// netNames maps net ids of channel to names, from the roster.
+func (m Model) netNames(channel string) map[int64]string {
+	names := make(map[int64]string, len(m.nets[channel]))
+	for _, n := range m.nets[channel] {
+		names[n.ID] = n.Name
+	}
+	return names
+}
+
+// scopeText is the inside of a message's scope badge, "" for a channel-wide
+// message. A net shows its name (or its id when the roster lacks it); a
+// whisper lists the participants other than the viewer. An audience kind this
+// client does not know is still shown as scoped, never as channel-wide.
+func (m Model) scopeText(channel string, a *schema.Audience) string {
+	if a == nil {
+		return ""
+	}
+	switch a.Kind {
+	case schema.AudienceKindNet:
+		if name, ok := m.netNames(channel)[a.NetID]; ok {
+			return "net:" + sanitize(name)
+		}
+		return "net:" + strconv.FormatInt(a.NetID, 10)
+	case schema.AudienceKindPrincipals:
+		others := make([]string, 0, len(a.PrincipalIDs))
+		for _, id := range a.PrincipalIDs {
+			if m.authorID <= 0 || id != m.authorID {
+				others = append(others, strconv.FormatInt(id, 10))
+			}
+		}
+		if len(others) == 0 { // only the viewer: show the whole list rather than nothing
+			for _, id := range a.PrincipalIDs {
+				others = append(others, strconv.FormatInt(id, 10))
+			}
+		}
+		return "whisper:" + strings.Join(others, ",")
+	default:
+		return sanitize(string(a.Kind))
+	}
+}
+
+// messageLine renders one message on exactly one line of at most width cells.
+//
+// A message body must not be able to pass for a scope badge. That is
+// guaranteed three ways, none of which depends on colour (a pipe, NO_COLOR or
+// a monochrome terminal show no styling):
+//  1. Position: the scope badge is the first thing on the line, before the
+//     author id. Every other line starts with the author's digits, and the
+//     body is always rendered after the author id, never at column 0.
+//  2. One line: sanitize removes line breaks and every control character, so
+//     a body cannot start a second line (or an escape sequence) of its own.
+//  3. Escape: a body that starts with "[" is shown with a leading backslash,
+//     so even in the body's own position it never reads as a badge or as the
+//     payload badge.
+func (m Model) messageLine(channel string, message schema.MessageV2, width int) string {
+	badge, badgeWidth := "", 0
+	if inner := m.scopeText(channel, message.Audience); inner != "" {
+		text := "[" + clip(inner, width/3) + "]"
+		badgeWidth = utf8.RuneCountInString(text) + 1
+		badge = badgeStyle.Render(text) + " "
+	}
+	payload, payloadWidth := "", 0
+	if message.Payload != nil {
+		text := "[" + clip(sanitize(message.Payload.Schema), width/3) + "]"
+		payloadWidth = utf8.RuneCountInString(text) + 1
+		payload = " " + badgeStyle.Render(text)
+	}
+	author := strconv.FormatInt(message.AuthorID, 10)
+	body := sanitize(message.Body)
+	if strings.HasPrefix(body, "[") {
+		body = "\\" + body
+	}
+	bodyWidth := width - utf8.RuneCountInString(author) - badgeWidth - payloadWidth - 7
+	return badge + author + payload + "  " + clip(body, bodyWidth)
+}
+
+// promptWithin is prompt fitted to max cells. Only the channel name is ever
+// shortened: a clipped prompt that lost its "/net" would read as the whole
+// channel, which is the one mistake the prompt exists to prevent. On a
+// terminal too narrow for even that, the net is what stays.
+func (m Model) promptWithin(maxWidth int) string {
+	full := m.prompt()
+	if m.target == nil || utf8.RuneCountInString(full) <= maxWidth {
+		return clip(full, maxWidth)
+	}
+	suffix := "/" + sanitize(m.target.name) + " >"
+	room := maxWidth - utf8.RuneCountInString(suffix)
+	if room < 1 {
+		room = 1
+	}
+	return clip(sanitize(m.target.channel), room) + suffix
+}
+
+// prompt is the input prompt of the channel pane. It always names where the
+// next plain message goes: the channel, or channel/net. The channel name comes
+// from the server, so it is sanitized like everything else shown.
+func (m Model) prompt() string {
+	channel := sanitize(m.current())
+	if channel == "" {
+		channel = "(no channel)"
+	}
+	if m.target != nil {
+		return sanitize(m.target.channel) + "/" + sanitize(m.target.name) + " >"
+	}
+	return channel + " >"
 }
