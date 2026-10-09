@@ -28,11 +28,26 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # .golangci-lint-version is the one place the linter version is named;
+      # `make lint` and the pre-commit hook refuse to run any other. The
+      # release it names must be built with a Go >= the go directive in
+      # go.mod (1.25). golangci-lint-action@v8 has no version-file input, so
+      # the file is read here.
+      - name: golangci-lint version
+        id: lint-version
+        run: |
+          v=$(tr -d '[:space:]' < .golangci-lint-version)
+          echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          # Must be built with a Go >= the go directive in go.mod (1.25).
-          version: v2.5
+          version: ${{ steps.lint-version.outputs.version }}
+          # Off: `config verify` downloads a JSON schema, and the job failed
+          # when that download failed (#143). This step still fails on an
+          # unknown linter or config version, but not on a misspelled key:
+          # run `golangci-lint config verify` after editing .golangci.yml.
+          verify: false
 
       - name: go test
         run: go test -race ./...

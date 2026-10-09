@@ -1,5 +1,7 @@
 GO      ?= go
 # Override GNU Make's built-in LINT=lint; command-line overrides still work.
+# Whatever LINT names must be the version in .golangci-lint-version, the one
+# CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
 .PHONY: build test lint vet fmt fmt-check check schema-compat depgate hooks-install clean
@@ -14,6 +16,7 @@ test:
 	$(GO) test ./...
 
 lint:
+	@./scripts/lint-version.sh $(LINT)
 	$(LINT) run
 
 vet:
