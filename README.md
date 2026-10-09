@@ -159,6 +159,13 @@ bin/conch-bot
 ```
 
 It skips messages already present when it starts and ignores its own replies.
+It replies in kind: an answer to a net message goes to that net, an answer to
+a whisper goes to the same principals, and an answer to a channel-wide message
+is channel-wide. To reply on a net or to a whisper its manifest needs
+`post_net` or `whisper` (plus `whisper_agent` for a whisper that includes
+another agent). If the server refuses a scoped reply, the bot logs one line and
+posts nothing; it never falls back to a wider audience. It does not start
+scoped conversations.
 Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
 `CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
 `CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`. Like any
