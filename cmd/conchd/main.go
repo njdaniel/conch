@@ -63,9 +63,13 @@ Usage:
 
 bootstrap-operator works offline on the data directory: it creates the first
 operator (a human principal) and one credential, prints the token once, and
-refuses if an operator already exists. It also revokes every credential issued
-before the operator existed (they came from open endpoints) unless
---keep-existing-credentials is given.
+refuses if an operator already exists. It also revokes every credential and
+deletes every webhook hook created before the operator existed (they came from
+open endpoints) unless --keep-existing-credentials is given. Agent manifests
+are kept; it reports how many exist so you can review them.
+
+With --auth required, approval requests and decisions are not yet bound to the
+authenticated caller; that arrives with issue #92.
 
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
@@ -152,7 +156,7 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	name := fs.String("name", "", "name of the operator principal")
-	keep := fs.Bool("keep-existing-credentials", false, "do not revoke credentials that already exist")
+	keep := fs.Bool("keep-existing-credentials", false, "do not revoke credentials or delete webhook hooks that already exist")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -167,7 +171,12 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(*dataDir, "conch.db"))
+	dbPath := filepath.Join(*dataDir, "conch.db")
+	// A mistyped --data would otherwise bootstrap an empty database and look
+	// like success, leaving the real instance without an operator.
+	_, statErr := os.Stat(dbPath) // #nosec G703 -- trusted operator path
+	createdDB := errors.Is(statErr, os.ErrNotExist)
+	st, err := store.Open(ctx, dbPath)
 	if err != nil {
 		return err
 	}
@@ -184,8 +193,17 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintln(stdout, res.Token)
 	p := res.Principal
+	if createdDB {
+		_, _ = fmt.Fprintf(stderr, "note: no database existed at %s; a new one was created. If you meant an existing instance, check --data\n", dbPath)
+	}
 	if res.Revoked > 0 {
 		_, _ = fmt.Fprintf(stderr, "revoked %d existing credential(s); pass --keep-existing-credentials to keep them\n", res.Revoked)
+	}
+	if res.RevokedHooks > 0 {
+		_, _ = fmt.Fprintf(stderr, "deleted %d existing webhook hook(s); pass --keep-existing-credentials to keep them\n", res.RevokedHooks)
+	}
+	if res.Manifests > 0 {
+		_, _ = fmt.Fprintf(stderr, "note: %d agent manifest(s) already exist and were kept; they were writable by anyone until now, so review them\n", res.Manifests)
 	}
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created; the token printed on stdout will not be shown again\n", p.Name, p.ID)
 	return nil

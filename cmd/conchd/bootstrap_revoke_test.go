@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 func TestBootstrapOperatorExistingCredentials(t *testing.T) {
@@ -73,4 +74,68 @@ func TestBootstrapOperatorExistingCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBootstrapOperatorNotices(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("fresh directory says a database was created", func(t *testing.T) {
+		var out, errOut bytes.Buffer
+		dir := filepath.Join(t.TempDir(), "new")
+		if err := runBootstrapOperator([]string{"--data", dir, "--name", "root"}, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(errOut.String(), "a new one was created") {
+			t.Errorf("stderr = %q, want the new-database note", errOut.String())
+		}
+		if strings.Contains(errOut.String(), strings.TrimSpace(out.String())) {
+			t.Error("stderr contains the token")
+		}
+	})
+
+	t.Run("existing database: hooks deleted, manifests reported, no creation note", func(t *testing.T) {
+		dir := t.TempDir()
+		st, err := store.Open(ctx, filepath.Join(dir, "conch.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		channel, err := st.CreateChannel(ctx, "ops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent, err := st.CreatePrincipal(ctx, store.PrincipalAgent, "old")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := st.PutAgentManifest(ctx, "system", agent.ID, schema.PutAgentManifestRequestV1{DisplayName: "Old", Tier: schema.AgentTierC}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.CreateHook(ctx, "pre-operator-hook", channel.ID, agent.ID); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.Close()
+
+		var out, errOut bytes.Buffer
+		if err := runBootstrapOperator([]string{"--data", dir, "--name", "root"}, &out, &errOut); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"deleted 1 existing webhook hook(s)", "1 agent manifest(s) already exist"} {
+			if !strings.Contains(errOut.String(), want) {
+				t.Errorf("stderr = %q, want it to contain %q", errOut.String(), want)
+			}
+		}
+		for _, unwanted := range []string{"a new one was created", "pre-operator-hook"} {
+			if strings.Contains(errOut.String(), unwanted) {
+				t.Errorf("stderr = %q, must not contain %q", errOut.String(), unwanted)
+			}
+		}
+		st, err = store.Open(ctx, filepath.Join(dir, "conch.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		if _, err := st.HookByToken(ctx, "pre-operator-hook"); err == nil {
+			t.Error("the pre-operator hook still resolves")
+		}
+	})
 }

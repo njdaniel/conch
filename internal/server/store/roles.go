@@ -19,8 +19,9 @@ const BootstrapCredentialLabel = "bootstrap"
 
 // BootstrapOptions tunes BootstrapOperatorWith.
 type BootstrapOptions struct {
-	// KeepExistingCredentials skips revoking the credentials that exist
-	// before the operator does. By default they are all revoked.
+	// KeepExistingCredentials skips revoking the credentials and deleting the
+	// webhook hooks that exist before the operator does. By default every
+	// live credential is revoked and every hook is deleted.
 	KeepExistingCredentials bool
 }
 
@@ -32,6 +33,12 @@ type BootstrapResult struct {
 	Token string
 	// Revoked is the number of pre-existing live credentials revoked.
 	Revoked int
+	// RevokedHooks is the number of pre-existing webhook hooks deleted.
+	RevokedHooks int
+	// Manifests is the number of agent manifests that already existed. They
+	// are kept, but were writable by anyone before the operator existed, so
+	// the caller should tell the operator to review them.
+	Manifests int
 }
 
 // BootstrapOperator is BootstrapOperatorWith with default options: existing
@@ -54,8 +61,12 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // credential endpoints were open and any earlier credential could have been
 // minted by anyone who reached the port. Each gets a credential_revoked audit
 // event (actor system, detail noting the bootstrap); an already-revoked
-// credential keeps its original revoked_at. The operator's own credential is
-// created after, so it is never revoked. On success an operator_bootstrapped
+// credential keeps its original revoked_at. Webhook hooks are handled the
+// same way and for the same reason: a hook token is an unauthenticated posting
+// credential bound to a principal of its creator's choosing, so every existing
+// hook is deleted, with one hook_revoked audit event each (never containing
+// the token). Agent manifests are only counted. The operator's own credential
+// is created after, so it is never revoked. On success an operator_bootstrapped
 // event and the usual credential_created event are appended in the same
 // transaction; none carries a token.
 func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts BootstrapOptions) (BootstrapResult, error) {
@@ -91,6 +102,12 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now); err != nil {
 				return err
 			}
+			if res.RevokedHooks, err = deleteHooksTx(ctx, tx, now); err != nil {
+				return err
+			}
+		}
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_manifests").Scan(&res.Manifests); err != nil {
+			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
 		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil); err != nil {
 			return err
@@ -150,6 +167,44 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", "credential_revoked", principalActor(c.principalID),
 			credentialDetail(c.id, c.label)+" reason=revoked at bootstrap", now); err != nil {
+			return 0, err
+		}
+	}
+	return len(found), nil
+}
+
+// deleteHooksTx deletes every webhook hook, writing one hook_revoked event
+// each, and returns how many it deleted. The hook token is never read.
+func deleteHooksTx(ctx context.Context, tx execer, now time.Time) (int, error) {
+	type hook struct{ channelID, principalID int64 }
+	rows, err := tx.QueryContext(ctx, "SELECT channel_id, principal_id FROM hooks ORDER BY created_at, rowid")
+	if err != nil {
+		return 0, fmt.Errorf("store: bootstrap: list hooks: %w", err)
+	}
+	var found []hook
+	for rows.Next() {
+		var h hook
+		if err := rows.Scan(&h.channelID, &h.principalID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: bootstrap: scan hook: %w", err)
+		}
+		found = append(found, h)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("store: bootstrap: list hooks: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: bootstrap: list hooks: %w", err)
+	}
+	if len(found) == 0 {
+		return 0, nil
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM hooks"); err != nil {
+		return 0, fmt.Errorf("store: bootstrap: delete hooks: %w", err)
+	}
+	for _, h := range found {
+		if err := appendAuditEventTx(ctx, tx, "system", "hook_revoked", principalActor(h.principalID),
+			fmt.Sprintf("channel=%d reason=revoked at bootstrap", h.channelID), now); err != nil {
 			return 0, err
 		}
 	}

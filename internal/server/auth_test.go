@@ -805,3 +805,51 @@ func TestNoTokenInAuditEvents(t *testing.T) {
 }
 
 func hashOf(token string) string { return sha256Hex(token) }
+
+// Requests that try to reach a protected handler through path or method
+// tricks must all get the standard 401 under AuthRequired. This pins the
+// middleware's exemption lookup to the mux's own matching.
+func TestMuxEdgeCasesRequireAuth(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	for _, c := range []struct{ method, target string }{
+		{"GET", "//v1/whoami"},
+		{"GET", "/v1//whoami"},
+		{"GET", "/v1%2Fwhoami"},
+		{"GET", "/healthz/../v1/whoami"},
+		{"GET", "/mcp/../v1/whoami"},
+		{"GET", "/v1/whoami/"},
+		{"GET", "/mcp/"},
+		{"GET", "/mcp/v1/whoami"},
+		{"GET", "/healthz/"},
+		{"HEAD", "/v1/whoami"},
+		{"OPTIONS", "/v1/channels"},
+		{"POST", "/healthz"},
+		{"GET", "/v1/whoami?token=anything"},
+		{"GET", "/v1/whoami?access_token=anything"},
+	} {
+		t.Run(c.method+" "+c.target, func(t *testing.T) {
+			rec := f.do(t, c.method, c.target, "", "")
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="conch"` {
+				t.Errorf("WWW-Authenticate = %q", got)
+			}
+		})
+	}
+}
+
+// Turning authentication on does not yet bind approvals to the caller
+// (issue #92); the server must say so at startup, and only then.
+func TestRequiredModeWarnsThatApprovalsAreUnbound(t *testing.T) {
+	for _, tt := range []struct {
+		mode AuthMode
+		want bool
+	}{{AuthRequired, true}, {AuthOff, false}, {"", false}} {
+		logs := captureLogs(t)
+		newTestServerWithConfig(t, Config{AuthMode: tt.mode})
+		if got := strings.Contains(logs.buf.String(), "not yet bound to the authenticated caller"); got != tt.want {
+			t.Errorf("mode %q: warning logged = %v, want %v", tt.mode, got, tt.want)
+		}
+	}
+}

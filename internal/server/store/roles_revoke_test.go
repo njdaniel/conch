@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // seedPreOperatorCredentials makes two live credentials (one with a future
@@ -117,5 +120,106 @@ func TestRefusedBootstrapRevokesNothing(t *testing.T) {
 	}
 	if _, err := s2.ResolveCredential(ctx, live1); err != nil {
 		t.Errorf("a name-collision refusal revoked a credential: %v", err)
+	}
+}
+
+// seedPreOperatorHooks creates a channel, an agent with a manifest, and two
+// webhook hooks, returning the hook tokens.
+func seedPreOperatorHooks(t *testing.T, s *Store) []string {
+	t.Helper()
+	ctx := context.Background()
+	channel, err := s.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreatePrincipal(ctx, PrincipalAgent, "hooked-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.PutAgentManifest(ctx, "system", agent.ID, schema.PutAgentManifestRequestV1{DisplayName: "Hooked", Tier: schema.AgentTierC}); err != nil {
+		t.Fatal(err)
+	}
+	tokens := []string{"hook-token-one", "hook-token-two"}
+	for _, token := range tokens {
+		if _, err := s.CreateHook(ctx, token, channel.ID, agent.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return tokens
+}
+
+func TestBootstrapOperatorDeletesExistingHooks(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		opts      BootstrapOptions
+		wantHooks int
+		wantLive  bool
+	}{
+		{"deleted by default", BootstrapOptions{}, 2, false},
+		{"kept with the opt-out", BootstrapOptions{KeepExistingCredentials: true}, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			tokens := seedPreOperatorHooks(t, s)
+			res, err := s.BootstrapOperatorWith(ctx, "root", tt.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.RevokedHooks != tt.wantHooks {
+				t.Errorf("RevokedHooks = %d, want %d", res.RevokedHooks, tt.wantHooks)
+			}
+			if res.Manifests != 1 {
+				t.Errorf("Manifests = %d, want 1 (manifests are counted, never removed)", res.Manifests)
+			}
+			if _, err := s.AgentManifestByPrincipal(ctx, 1); err != nil {
+				t.Errorf("the pre-existing manifest was removed: %v", err)
+			}
+			for _, token := range tokens {
+				_, err := s.HookByToken(ctx, token)
+				if live := err == nil; live != tt.wantLive {
+					t.Errorf("hook resolves = %v (err %v), want %v", live, err, tt.wantLive)
+				}
+			}
+			events, err := s.ListAuditEvents(ctx, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var revoked int
+			for _, e := range events {
+				for _, token := range tokens {
+					if strings.Contains(e.Actor+e.Action+e.Subject+e.Detail, token) {
+						t.Errorf("audit event %q contains a hook token", e.Action)
+					}
+				}
+				if e.Action == "hook_revoked" {
+					revoked++
+					if e.Actor != "system" || e.Subject != "principal:1" || !strings.Contains(e.Detail, "revoked at bootstrap") {
+						t.Errorf("hook_revoked event = %+v", e)
+					}
+				}
+			}
+			if revoked != tt.wantHooks {
+				t.Errorf("hook_revoked events = %d, want %d", revoked, tt.wantHooks)
+			}
+		})
+	}
+}
+
+func TestRefusedBootstrapKeepsHooks(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.BootstrapOperatorWith(ctx, "root", BootstrapOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	tokens := seedPreOperatorHooks(t, s)
+	if _, err := s.BootstrapOperatorWith(ctx, "second", BootstrapOptions{}); !errors.Is(err, ErrOperatorExists) {
+		t.Fatalf("err = %v", err)
+	}
+	for _, token := range tokens {
+		if _, err := s.HookByToken(ctx, token); err != nil {
+			t.Errorf("a refused bootstrap deleted a hook: %v", err)
+		}
 	}
 }

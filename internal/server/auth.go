@@ -49,8 +49,8 @@ func (c Config) authRequired() bool {
 }
 
 // access is the authorization class of a route under AuthRequired. The zero
-// value is the strictest non-exempt class short of operator, so a route added
-// without a decision is never accidentally open.
+// value is accessAuthenticated, so a route added without a decision still
+// requires a credential and is never accidentally open.
 type access int
 
 const (
@@ -182,9 +182,12 @@ func (s *Server) guard(rt route) http.Handler {
 func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller store.Principal, code, message string) {
 	// The client may already be gone; the denial must still be recorded.
 	ctx := context.WithoutCancel(r.Context())
+	// The mux sets r.Pattern on every dispatched request. Never fall back to
+	// the request path: it is attacker-controlled and must not reach the
+	// audit log.
 	subject := r.Pattern
 	if subject == "" {
-		subject = r.Method + " " + r.URL.Path
+		subject = "<unmatched>"
 	}
 	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, code); err != nil {
 		slog.ErrorContext(ctx, "auth: audit access_denied failed", "principal", caller.ID, "error", err)
