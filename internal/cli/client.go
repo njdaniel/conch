@@ -22,6 +22,71 @@ import (
 type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
+	token      string
+}
+
+// ErrUnauthenticated matches the error returned when the server answers 401.
+var ErrUnauthenticated = errors.New("unauthenticated")
+
+// UnauthenticatedError reports that the server rejected the request's
+// credential, or that none was sent. Its text is the one-line login hint.
+type UnauthenticatedError struct{ Server string }
+
+func (e *UnauthenticatedError) Error() string {
+	return fmt.Sprintf("not logged in to %s: run 'conch login'", e.Server)
+}
+
+// Is makes errors.Is(err, ErrUnauthenticated) true.
+func (e *UnauthenticatedError) Is(target error) bool { return target == ErrUnauthenticated }
+
+// WithToken makes the client send token as a bearer credential on every
+// request, including the WebSocket upgrade. An empty token sends none.
+func (c *Client) WithToken(token string) *Client {
+	c.token = token
+	return c
+}
+
+// Server returns the normalised server URL (scheme and host).
+func (c *Client) Server() string {
+	return normalizeURL(c.baseURL)
+}
+
+// do sends req with the credential, when there is one.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	return c.httpClient.Do(req)
+}
+
+// WhoAmI returns the principal the client's credential resolves to.
+func (c *Client) WhoAmI(ctx context.Context) (schema.WhoAmIResponseV1, error) {
+	endpoint := c.resolve("v1", "whoami")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return schema.WhoAmIResponseV1{}, fmt.Errorf("cli: create whoami request: %w", err)
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return schema.WhoAmIResponseV1{}, fmt.Errorf("cli: whoami: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return schema.WhoAmIResponseV1{}, c.decodeError(resp)
+	}
+	var result schema.WhoAmIResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return schema.WhoAmIResponseV1{}, fmt.Errorf("cli: decode whoami response: %w", err)
+	}
+	return result, nil
+}
+
+func (c *Client) dialOptions() *websocket.DialOptions {
+	opts := &websocket.DialOptions{HTTPClient: c.httpClient}
+	if c.token != "" {
+		opts.HTTPHeader = http.Header{"Authorization": []string{"Bearer " + c.token}}
+	}
+	return opts
 }
 
 // ListMessages returns one forward page of v1 messages from channel.
@@ -35,13 +100,13 @@ func (c *Client) ListMessages(ctx context.Context, channel string, after int64, 
 	if err != nil {
 		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: create list messages request: %w", err)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: list messages: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.ListMessagesResponseV1{}, decodeServerError(resp)
+		return schema.ListMessagesResponseV1{}, c.decodeError(resp)
 	}
 	var result schema.ListMessagesResponseV1
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -62,13 +127,13 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 		return schema.MessageV1{}, fmt.Errorf("cli: create v1 post message request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.MessageV1{}, fmt.Errorf("cli: post v1 message: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.MessageV1{}, decodeServerError(resp)
+		return schema.MessageV1{}, c.decodeError(resp)
 	}
 	var result schema.PostMessageResponseV1
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -84,13 +149,13 @@ func (c *Client) ListChannels(ctx context.Context) (schema.ListChannelsResponse,
 	if err != nil {
 		return schema.ListChannelsResponse{}, fmt.Errorf("cli: create list channels request: %w", err)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.ListChannelsResponse{}, fmt.Errorf("cli: list channels: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.ListChannelsResponse{}, decodeServerError(resp)
+		return schema.ListChannelsResponse{}, c.decodeError(resp)
 	}
 	var result schema.ListChannelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -106,13 +171,13 @@ func (c *Client) ListApprovals(ctx context.Context) (schema.ListApprovalsRespons
 	if err != nil {
 		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: create list approvals request: %w", err)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.ListApprovalsResponseV1{}, fmt.Errorf("cli: list approvals: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.ListApprovalsResponseV1{}, decodeServerError(resp)
+		return schema.ListApprovalsResponseV1{}, c.decodeError(resp)
 	}
 	var result schema.ListApprovalsResponseV1
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -133,13 +198,13 @@ func (c *Client) CastDecision(ctx context.Context, approvalID int64, decision sc
 		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: create cast decision request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.CastDecisionResponseV1{}, fmt.Errorf("cli: cast decision: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.CastDecisionResponseV1{}, decodeServerError(resp)
+		return schema.CastDecisionResponseV1{}, c.decodeError(resp)
 	}
 	var result schema.CastDecisionResponseV1
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -159,11 +224,11 @@ func (c *Client) Subscribe(ctx context.Context, channel string, receive func(sch
 	query := endpoint.Query()
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), &websocket.DialOptions{HTTPClient: c.httpClient})
+	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
-			return decodeServerError(resp)
+			return c.decodeError(resp)
 		}
 		return fmt.Errorf("cli: connect subscription: %w", err)
 	}
@@ -191,9 +256,15 @@ func NewClient(server string, httpClient *http.Client) (*Client, error) {
 	if baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		return nil, errors.New("cli: server URL must not contain a query or fragment")
 	}
+	// Never follow redirects: the bearer token must only go where the user
+	// pointed --server. A caller-supplied client is copied, not trusted.
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{}
+	} else {
+		clone := *httpClient
+		httpClient = &clone
 	}
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{baseURL: baseURL, httpClient: httpClient}, nil
 }
 
@@ -210,13 +281,13 @@ func (c *Client) Send(ctx context.Context, channel string, authorID int64, body 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return schema.MessageV0{}, fmt.Errorf("cli: post message: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.MessageV0{}, decodeServerError(resp)
+		return schema.MessageV0{}, c.decodeError(resp)
 	}
 	var result schema.PostMessageResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -239,11 +310,11 @@ func (c *Client) Tail(ctx context.Context, channel string, receive func(schema.M
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
 
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), &websocket.DialOptions{HTTPClient: c.httpClient})
+	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
-			return decodeServerError(resp)
+			return c.decodeError(resp)
 		}
 		return fmt.Errorf("cli: connect tail: %w", err)
 	}
@@ -272,7 +343,13 @@ func (c *Client) resolve(parts ...string) *url.URL {
 	return &base
 }
 
-func decodeServerError(resp *http.Response) error {
+func (c *Client) decodeError(resp *http.Response) error {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", resp.Header.Get("Location"), resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return &UnauthenticatedError{Server: c.Server()}
+	}
 	var serverError schema.Error
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError); err != nil {
 		return fmt.Errorf("cli: server returned %s", resp.Status)

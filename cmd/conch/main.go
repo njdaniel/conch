@@ -35,17 +35,19 @@ func runTUI(ctx context.Context) error {
 	if server == "" {
 		server = "http://127.0.0.1:8080"
 	}
-	client, err := cli.NewClient(server, nil)
+	client, authenticated, err := cli.NewAuthClient(server)
 	if err != nil {
 		return err
 	}
 	var authorID int64
-	if raw := os.Getenv("CONCH_AUTHOR"); raw != "" {
+	// With a credential the server says who the user is (whoami); CONCH_AUTHOR
+	// only matters for a server running with auth off.
+	if raw := os.Getenv("CONCH_AUTHOR"); raw != "" && !authenticated {
 		authorID, err = strconv.ParseInt(raw, 10, 64)
 		if err != nil || authorID <= 0 {
 			return fmt.Errorf("CONCH_AUTHOR must be a positive integer")
 		}
 	}
 	channels := strings.Split(os.Getenv("CONCH_CHANNELS"), ",")
-	return tui.Run(ctx, client, authorID, channels, os.Stdin, os.Stdout)
+	return tui.Run(ctx, client, authorID, authenticated, channels, os.Stdin, os.Stdout)
 }

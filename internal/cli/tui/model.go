@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -23,6 +24,7 @@ type API interface {
 	ListChannels(context.Context) (schema.ListChannelsResponse, error)
 	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
 	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
+	WhoAmI(context.Context) (schema.WhoAmIResponseV1, error)
 }
 
 type channelsLoaded struct {
@@ -47,6 +49,10 @@ type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
 	err       error
 }
+type whoAmILoaded struct {
+	who schema.WhoAmIResponseV1
+	err error
+}
 type decisionCast struct {
 	err error
 }
@@ -62,9 +68,15 @@ const (
 // Model is the root Bubble Tea model. Network results enter Update as messages,
 // keeping state transitions deterministic and independently testable.
 type Model struct {
-	ctx         context.Context
-	api         API
-	authorID    int64
+	ctx      context.Context
+	api      API
+	authorID int64
+	// authenticated is true when the client sends a credential; the author is
+	// then whoever the server says it is, learned from whoami.
+	authenticated bool
+	userName      string
+	// whoErr is why whoami failed; nil while it is pending or after success.
+	whoErr      error
 	channels    []string
 	selected    int
 	messages    map[string][]schema.MessageV1
@@ -111,13 +123,26 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 	return m
 }
 
+// WithCredential marks the model as running with a bearer credential: Init
+// asks the server who the user is, and that answer replaces the author ID.
+func (m Model) WithCredential() Model {
+	m.authenticated = true
+	// Identity comes from the server only; never act as a caller-supplied id.
+	m.authorID = 0
+	return m
+}
+
 // Init starts REST backfill and the live subscription for the selected
 // channel, or fetches the channel list first when none was configured.
 func (m Model) Init() tea.Cmd {
-	if m.loadingChannels {
-		return tea.Batch(m.loadChannels(), m.waitEvent())
+	var who tea.Cmd
+	if m.authenticated {
+		who = m.loadWhoAmI()
 	}
-	return tea.Batch(m.loadCurrent(), m.startSubscription(), m.waitEvent())
+	if m.loadingChannels {
+		return tea.Batch(who, m.loadChannels(), m.waitEvent())
+	}
+	return tea.Batch(who, m.loadCurrent(), m.startSubscription(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -189,7 +214,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if m.authorID <= 0 {
-					m.status = "set CONCH_AUTHOR to send"
+					m.status = m.noAuthorStatus("send")
 					return m, nil
 				}
 				m.input = ""
@@ -210,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if m.authorID <= 0 {
-					m.status = "set CONCH_AUTHOR to decide"
+					m.status = m.noAuthorStatus("decide")
 					return m, nil
 				}
 				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
@@ -241,6 +266,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case whoAmILoaded:
+		if msg.err != nil {
+			m.whoErr = msg.err
+			m.status = whoErrText(msg.err)
+			return m, nil
+		}
+		m.whoErr = nil
+		m.authorID = msg.who.ID
+		m.userName = msg.who.Name
+		m.status = "signed in as " + msg.who.Name
 	case approvalsLoaded:
 		if msg.err != nil {
 			m.status = msg.err.Error()
@@ -278,6 +313,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.err != nil:
 			m.notice = "channel list: " + msg.err.Error()
+			if errors.Is(msg.err, cli.ErrUnauthenticated) {
+				m.notice = msg.err.Error()
+			}
 			names = []string{"general"}
 		case len(names) == 0:
 			m.notice = "no channels on server"
@@ -311,6 +349,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subscriptionEnded:
 		if msg.err != nil && !errors.Is(msg.err, context.Canceled) && m.notice == "" {
 			m.status = "live updates: " + msg.err.Error()
+			if errors.Is(msg.err, cli.ErrUnauthenticated) {
+				m.status = msg.err.Error()
+			}
 		}
 		return m, m.waitEvent()
 	case messageSent:
@@ -344,6 +385,30 @@ func (m Model) current() string {
 		return ""
 	}
 	return m.channels[m.selected]
+}
+
+func (m Model) noAuthorStatus(action string) string {
+	if m.authenticated {
+		if m.whoErr != nil {
+			return whoErrText(m.whoErr)
+		}
+		return "waiting for your identity from the server; cannot " + action + " yet"
+	}
+	return "set CONCH_AUTHOR to " + action
+}
+
+func whoErrText(err error) string {
+	if errors.Is(err, cli.ErrUnauthenticated) {
+		return err.Error()
+	}
+	return "whoami: " + err.Error()
+}
+
+func (m Model) loadWhoAmI() tea.Cmd {
+	return func() tea.Msg {
+		who, err := m.api.WhoAmI(m.ctx)
+		return whoAmILoaded{who: who, err: err}
+	}
 }
 
 func (m Model) loadChannels() tea.Cmd {
@@ -595,7 +660,11 @@ func (m Model) View() string {
 		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
 
-	status := statusStyle.Width(width).Render(m.status + statusKeys)
+	status := m.status + statusKeys
+	if m.userName != "" {
+		status = m.userName + " | " + status
+	}
+	status = statusStyle.Width(width).Render(status)
 	return panes + "\n" + inputStr + "\n" + status
 }
 
