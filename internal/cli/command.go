@@ -86,7 +86,8 @@ Usage:
 Scope:
   send with no flag posts to the whole channel. --net posts to the named net;
   --to whispers to the listed principals (recorded in the audit log). Giving
-  both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>].
+  both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>];
+  a message body that itself starts with [ is printed as \[.
 
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)
@@ -113,16 +114,20 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 		return errors.New("cli: send: expected <channel> <text>")
 	}
 	// Scope mistakes are the classic failure of this feature, so every flag
-	// problem is rejected before the first request leaves the machine.
+	// problem is rejected before the first request leaves the machine. A flag
+	// counts as given even when its value is empty: `--net "$NET"` with NET
+	// unset must fail, not post to the whole channel.
+	given := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	var whisper []int64
 	switch {
-	case *netName != "" && *to != "":
+	case given["net"] && given["to"]:
 		return errors.New("cli: send: --net and --to cannot be used together")
-	case *netName != "":
+	case given["net"]:
 		if err := schema.ValidateNetName(*netName); err != nil {
 			return fmt.Errorf("cli: send: --net: %w", err)
 		}
-	case *to != "":
+	case given["to"]:
 		ids, err := parsePrincipalIDs(*to)
 		if err != nil {
 			return fmt.Errorf("cli: send: --to: %w", err)
@@ -140,7 +145,7 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	var audience *schema.Audience
 	switch {
-	case *netName != "":
+	case given["net"]:
 		netID, err := lookupNetID(ctx, client, channel, *netName)
 		if err != nil {
 			return err
@@ -159,11 +164,13 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 }
 
 // parsePrincipalIDs reads a comma-separated list of positive, distinct
-// principal ids.
+// principal ids. Spaces around an id are allowed ("3, 5"); an empty element
+// is not.
 func parsePrincipalIDs(list string) ([]int64, error) {
 	var ids []int64
 	seen := make(map[int64]bool)
 	for _, field := range strings.Split(list, ",") {
+		field = strings.TrimSpace(field)
 		id, err := strconv.ParseInt(field, 10, 64)
 		if err != nil || id <= 0 {
 			return nil, fmt.Errorf("%q is not a positive principal id", field)
@@ -197,7 +204,8 @@ func lookupNetID(ctx context.Context, client *Client, channel, name string) (int
 
 // scopeMarker is the prefix that makes a message's audience visible on every
 // output line; a channel-wide message has none. Net names are resolved from
-// names where the caller could, and fall back to the net id.
+// names where the caller could, and fall back to the net id. Only a marker
+// may open the text with "[": tailBody escapes a body that does.
 func scopeMarker(audience *schema.Audience, names map[int64]string) string {
 	if audience == nil {
 		return ""
@@ -219,6 +227,18 @@ func scopeMarker(audience *schema.Audience, names map[int64]string) string {
 		// print it as if it were channel-wide.
 		return "[" + string(audience.Kind) + "] "
 	}
+}
+
+// tailBody is a message body as tail prints it: on one line, and never
+// starting with a bare "[". A body is written by its author, and without the
+// escape a channel-wide message "[whisper:3,7] ..." would read as a whisper.
+// Backslash is already the escape character here, so "\[" is unambiguous.
+func tailBody(body string) string {
+	body = strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(body)
+	if strings.HasPrefix(body, "[") {
+		return "\\" + body
+	}
+	return body
 }
 
 func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -247,8 +267,7 @@ func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		}
 	}
 	err = client.SubscribeV2(ctx, fs.Arg(0), func(message schema.MessageV2) error {
-		body := strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(message.Body)
-		_, writeErr := fmt.Fprintf(stdout, "%s %d %s%s\n", message.CreatedAt.Time().Format(time.RFC3339Nano), message.AuthorID, scopeMarker(message.Audience, names), body)
+		_, writeErr := fmt.Fprintf(stdout, "%s %d %s%s\n", message.CreatedAt.Time().Format(time.RFC3339Nano), message.AuthorID, scopeMarker(message.Audience, names), tailBody(message.Body))
 		return writeErr
 	})
 	if websocket.CloseStatus(err) == websocket.StatusGoingAway {

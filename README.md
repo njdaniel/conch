@@ -137,7 +137,7 @@ bin/conch nets remove ops alpha 5
 bin/conch nets archive ops alpha
 ```
 
-`--net` and `--to` cannot be combined. `tail` marks scoped messages: `[net:alpha]` for a net, `[whisper:3,5,7]` for a whisper (the ids listed are everyone who can see it); channel-wide messages have no marker. Whispers are discretion, not secrecy: they are recorded in the audit log, and `send --to` says so on stderr. Net management is an operator action; anyone else gets the server's refusal.
+`--net` and `--to` cannot be combined. `tail` marks scoped messages: `[net:alpha]` for a net, `[whisper:3,5,7]` for a whisper (the ids listed are everyone who can see it); channel-wide messages have no marker, and a message body that itself starts with `[` is printed as `\[` so that it cannot be mistaken for one. Whispers are discretion, not secrecy: they are recorded in the audit log, and `send --to` says so on stderr. Net management is an operator action; anyone else gets the server's refusal.
 
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.

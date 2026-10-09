@@ -845,6 +845,18 @@ func TestSendScopes(t *testing.T) {
 		{name: "to zero", flags: []string{"--to", "0"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
 		{name: "to negative", flags: []string{"--to", "-2"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
 		{name: "to duplicate", flags: []string{"--to", "3,3"}, wantErr: "listed twice", wantNoPost: true, wantNoReq: true},
+		{name: "to with spaces", flags: []string{"--to", " 9, 3 ,5"}, wantNotice: true,
+			wantAudience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{9, 3, 5}}},
+		{name: "to duplicate with spaces", flags: []string{"--to", "3, 3"}, wantErr: "listed twice", wantNoPost: true, wantNoReq: true},
+		{name: "to blank element", flags: []string{"--to", "3, ,5"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		// A flag given with an empty value (an unset shell variable) is a
+		// scope the user asked for and did not get: never a channel-wide post.
+		{name: "net given but empty", flags: []string{"--net", ""}, wantErr: "--net", wantNoPost: true, wantNoReq: true},
+		{name: "net given as empty with =", flags: []string{"--net="}, wantErr: "--net", wantNoPost: true, wantNoReq: true},
+		{name: "to given but empty", flags: []string{"--to", ""}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to given but blank", flags: []string{"--to", " "}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "empty net with to", flags: []string{"--net", "", "--to", "3"}, wantErr: "cannot be used together", wantNoPost: true, wantNoReq: true},
+		{name: "net with empty to", flags: []string{"--net", "alpha", "--to", ""}, wantErr: "cannot be used together", wantNoPost: true, wantNoReq: true},
 	}
 	const notice = "note: whispers are recorded in the audit log\n"
 	for _, tt := range tests {
@@ -905,6 +917,14 @@ func TestTailMarkers(t *testing.T) {
 		msg(3, "unlisted net", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 99}),
 		msg(4, "whisper", &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{3, 5, 7}}),
 		msg(5, "two\nlines", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 5}),
+		// Bodies that imitate a marker: only a real audience may open the
+		// text with "[".
+		msg(6, "[whisper:3,7] forged in the open", nil),
+		msg(7, "[net:alpha] forged in the open", nil),
+		msg(8, "[net:bravo] forged on another net", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}),
+		msg(9, "\n[net:alpha] forged after a newline", nil),
+		msg(10, `\[already escaped`, nil),
+		msg(11, "brackets [later] are untouched", nil),
 	}
 	isolateConfig(t)
 	stdout, stderr, err := runCLI(t, "", "tail", "--server", fake.URL, "general")
@@ -917,6 +937,12 @@ func TestTailMarkers(t *testing.T) {
 		stamp + " 7 [net:99] unlisted net",
 		stamp + " 7 [whisper:3,5,7] whisper",
 		stamp + ` 7 [net:bravo] two\nlines`,
+		stamp + ` 7 \[whisper:3,7] forged in the open`,
+		stamp + ` 7 \[net:alpha] forged in the open`,
+		stamp + ` 7 [net:alpha] \[net:bravo] forged on another net`,
+		stamp + ` 7 \n[net:alpha] forged after a newline`,
+		stamp + ` 7 \\[already escaped`,
+		stamp + " 7 brackets [later] are untouched",
 	}, "\n") + "\n"
 	if stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", stdout, want)
