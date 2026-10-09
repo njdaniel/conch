@@ -78,3 +78,20 @@ jobs:
 
       - name: dogfood-check
         run: go run ./e2e/dogfood
+
+  nets-check:
+    # The V2 exit proof (issue #121): the 2x4 squad layout through real
+    # conchd/conch binaries, asserting the exact set of message ids every
+    # participant sees on every read path. Unlike dogfood-check it runs on
+    # every pull request and every push to main, because any server change
+    # can open a read path that leaks a scoped message.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: nets-check
+        run: go run ./e2e/nets
