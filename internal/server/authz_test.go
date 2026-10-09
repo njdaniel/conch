@@ -375,7 +375,10 @@ func TestMCPToolsOnlyUseTheAuthorizationScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := string(src)
-	for _, forbidden := range []string{"s.store", ".store.", "store.Open", "*store.Store"} {
+	// Neither the store nor the approval service may be named here: a tool
+	// body that could call s.approvals directly could, for one, cast a
+	// decision as an agent.
+	for _, forbidden := range []string{"s.store", "store.", "internal/server/store", "s.approvals"} {
 		if strings.Contains(code, forbidden) {
 			t.Errorf("mcp.go contains %q; the MCP tools must reach data only through agentScope (authz.go)", forbidden)
 		}
@@ -471,24 +474,51 @@ func TestAwaitDecisionEndsWhenAuthorizationIsWithdrawn(t *testing.T) {
 
 // However short the timeout, await_decision authorizes before it answers: it
 // must never return a successful, empty result for an approval the agent may
-// not observe or that does not exist.
+// not observe or that does not exist. The wait's own deadline has already
+// passed when pollDecision is entered, which is the case a real 1 ms timeout
+// only hits by luck.
 func TestAwaitDecisionAuthorizesBeforeItTimesOut(t *testing.T) {
 	f := newAuthzFixture(t)
-	for i := 0; i < 20; i++ {
-		if got := f.call(t, agOutsider, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "approval_not_found" {
-			t.Fatalf("non-member await with a 1 ms timeout = %s, want approval_not_found (body %s)", got.result(), got.body)
+	ctx := context.Background()
+	expired, cancel := context.WithCancel(ctx)
+	cancel()
+
+	poll := func(agent string, approvalID int64) (schema.AwaitDecisionOutput, *schema.Error) {
+		t.Helper()
+		scope, serr := f.srv.newAgentScope(ctx, mcpIdentity{principalID: f.agents[agent].ID}, "await_decision")
+		if serr != nil {
+			return schema.AwaitDecisionOutput{}, serr
 		}
-		if got := f.call(t, agFull, "await_decision", map[string]any{"approval_id": 9999, "timeout_ms": 1}); got.result() != "approval_not_found" {
-			t.Fatalf("await on an unknown approval with a 1 ms timeout = %s, want approval_not_found", got.result())
-		}
-		if got := f.call(t, agMessagesOnly, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "forbidden" {
-			t.Fatalf("await without the capability and a 1 ms timeout = %s, want forbidden", got.result())
+		return f.srv.pollDecision(ctx, expired, scope, approvalID, 1)
+	}
+	for _, tt := range []struct {
+		name     string
+		agent    string
+		approval int64
+		want     string
+	}{
+		{"not a member of the approval's channel", agOutsider, f.approvalID, "approval_not_found"},
+		{"unknown approval", agFull, 9999, "approval_not_found"},
+		{"member without the channel grant", agMemberNoGrant, f.approvalID, "forbidden"},
+	} {
+		out, serr := poll(tt.agent, tt.approval)
+		if serr == nil || serr.Code != tt.want {
+			t.Errorf("%s: expired wait = %+v, %v; want %s", tt.name, out, serr, tt.want)
 		}
 	}
-	// An authorized agent with the same tiny timeout gets the pending state.
-	got := f.call(t, agFull, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1})
-	if got.result() != "ok" || !strings.Contains(got.body, `"state":"pending"`) {
-		t.Fatalf("authorized await with a 1 ms timeout = %s, body %s", got.result(), got.body)
+	// An authorized agent whose wait has expired gets the pending state from
+	// that one check, and no resolution.
+	out, serr := poll(agFull, f.approvalID)
+	if serr != nil || out.State != schema.ApprovalStatePending || out.Resolution != nil {
+		t.Fatalf("authorized expired wait = %+v, %v; want pending with no resolution", out, serr)
+	}
+
+	// The same over the wire with a real, tiny timeout.
+	if got := f.call(t, agOutsider, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "approval_not_found" {
+		t.Fatalf("non-member await with a 1 ms timeout = %s, want approval_not_found (body %s)", got.result(), got.body)
+	}
+	if got := f.call(t, agMessagesOnly, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 1}); got.result() != "forbidden" {
+		t.Fatalf("await without the capability and a 1 ms timeout = %s, want forbidden", got.result())
 	}
 }
 
@@ -724,5 +754,60 @@ func TestManifestChangeDropsRevokedSubscriptions(t *testing.T) {
 		if seen == id {
 			t.Errorf("a message posted after the manifest change reached the revoked socket")
 		}
+	}
+}
+
+// An agent probing a channel it is not in is recorded on every surface, not
+// only over MCP and the REST message routes: both WebSocket routes and
+// webhook ingest for a hook bound to it write the same not_a_member denial.
+func TestAgentNonMemberRefusalsAreAuditedOnWebSocketAndHooks(t *testing.T) {
+	ctx := context.Background()
+	f := newMemberFixture(t) // bot's manifest allows alpha, but it is not a member
+	base := wsTestServer(t, f.srv)
+	if _, err := f.srv.store.CreateHook(ctx, "alpha-hook", f.alpha.ID, f.bot.ID); err != nil {
+		t.Fatal(err)
+	}
+	notMember := func() map[string]int {
+		t.Helper()
+		bySubject := map[string]int{}
+		for _, e := range f.audit(t) {
+			if e.Action == "access_denied" && e.Actor == fmt.Sprintf("principal:%d", f.bot.ID) && strings.Contains(e.Detail, "reason="+denyNotMember) {
+				bySubject[e.Subject]++
+			}
+		}
+		return bySubject
+	}
+	if got := notMember(); len(got) != 0 {
+		t.Fatalf("denials before any request = %v", got)
+	}
+
+	for _, path := range []string{"/v0/ws?channel=alpha", "/v1/ws?channel=alpha"} {
+		if got := callWS(t, base, path, f.botTok); got.status != http.StatusNotFound {
+			t.Fatalf("%s as a non-member agent = %d, want 404", path, got.status)
+		}
+	}
+	if rec := f.do(t, "POST", "/v1/hooks/alpha-hook", "", `{"body":"x"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("hook for a non-member agent = %d %s, want 404", rec.Code, rec.Body)
+	}
+	got := notMember()
+	total := 0
+	for _, n := range got {
+		total += n
+	}
+	if len(got) != 3 || total != 3 {
+		t.Errorf("not_a_member denials by subject = %v, want one each for the two WebSocket routes and the hook route", got)
+	}
+
+	// A human in the same position is refused without an audit row: only
+	// agent probes are recorded.
+	if _, err := f.srv.store.CreateChannel(ctx, "sealed"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.audit(t))
+	if got := callWS(t, base, "/v1/ws?channel=sealed", f.aliceTok); got.status != http.StatusNotFound {
+		t.Fatalf("non-member human websocket = %d, want 404", got.status)
+	}
+	if n := len(f.audit(t)); n != before {
+		t.Errorf("a human non-member refusal wrote %d audit rows, want none", n-before)
 	}
 }
