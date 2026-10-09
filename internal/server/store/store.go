@@ -163,6 +163,25 @@ END`,
 	{
 		`ALTER TABLE principals ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('operator','member'))`,
 	},
+	// 8: Channel membership (issue #90, ADR-003). An explicit member list per
+	// channel. The backfill makes today's effective behaviour (every principal
+	// can use every channel) explicit for existing data: one row per existing
+	// (channel, principal) pair with added_by NULL. Channels and principals
+	// created afterwards are not auto-joined. Timestamps are unix milliseconds
+	// UTC.
+	{
+		`CREATE TABLE channel_members (
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	added_by     INTEGER REFERENCES principals (id),
+	created_at   INTEGER NOT NULL,
+	PRIMARY KEY (channel_id, principal_id)
+)`,
+		`CREATE INDEX channel_members_by_principal ON channel_members (principal_id)`,
+		`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at)
+	SELECT c.id, p.id, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000
+	FROM channels c CROSS JOIN principals p`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
