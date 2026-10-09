@@ -63,11 +63,45 @@ func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, l
 // PostMessage posts an untyped, channel-wide message through the
 // post_message tool.
 func (c *Client) PostMessage(ctx context.Context, channel, body string) (schema.PostMessageResponseV2, error) {
-	raw, err := c.CallTool(ctx, "post_message", map[string]any{"channel": channel, "body": body})
+	return c.PostMessageTo(ctx, channel, body, nil)
+}
+
+// PostMessageTo posts an untyped message through the post_message tool to the
+// given audience, which is sent as is; nil posts channel-wide. A refusal by
+// the server comes back as a *ToolError.
+func (c *Client) PostMessageTo(ctx context.Context, channel, body string, audience *schema.Audience) (schema.PostMessageResponseV2, error) {
+	arguments := map[string]any{"channel": channel, "body": body}
+	if audience != nil {
+		arguments["audience"] = audience
+	}
+	raw, err := c.CallTool(ctx, "post_message", arguments)
 	if err != nil {
 		return schema.PostMessageResponseV2{}, err
 	}
 	return Decode[schema.PostMessageResponseV2](raw)
+}
+
+// ToolError is a tool call the server answered with isError. Code is the
+// schema.Error code when the text carries one (for example forbidden or
+// net_not_found), so a caller can tell a refusal from a transport failure.
+type ToolError struct {
+	Method  string
+	Code    string
+	Message string
+	text    string
+}
+
+func (e *ToolError) Error() string {
+	return fmt.Sprintf("mcp %s tool error: %s", e.Method, e.text)
+}
+
+func newToolError(method, text string) *ToolError {
+	e := &ToolError{Method: method, text: text, Message: text}
+	var parsed schema.Error
+	if json.Unmarshal([]byte(text), &parsed) == nil && parsed.Code != "" {
+		e.Code, e.Message = parsed.Code, parsed.Message
+	}
+	return e
 }
 
 // Decode unmarshals a tool's structured content into a schema type.
@@ -138,7 +172,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		if len(envelope.Result.Content) > 0 {
 			text = envelope.Result.Content[0].Text
 		}
-		return nil, fmt.Errorf("mcp %s tool error: %s", method, text)
+		return nil, newToolError(method, text)
 	}
 	return envelope.Result.StructuredContent, nil
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,13 +15,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-const token = "conch-bot-e2e-token" // #nosec G101 -- test-only local bearer token
+const (
+	token         = "conch-bot-e2e-token"      // #nosec G101 -- test-only local bearer token
+	peerToken     = "conch-peer-e2e-token"     // #nosec G101 -- test-only local bearer token
+	outsiderToken = "conch-outsider-e2e-token" // #nosec G101 -- test-only local bearer token
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -33,7 +40,8 @@ func main() {
 type harness struct {
 	dir, conchd, bot, data, claude, lock, addr string
 	server, botProc                            *exec.Cmd
-	botID, humanID                             int64
+	botID, humanID, peerID, outsiderID, netID  int64
+	watchNetID                                 int64
 }
 
 func run() error {
@@ -79,17 +87,24 @@ func run() error {
 		Capabilities: []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
 		Channels: []schema.ChannelGrant{{
 			ChannelID:   channelID,
-			Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost},
+			Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionPostNet},
 		}},
 	}
 	if err := putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", h.url(), h.botID), manifest); err != nil {
+		return err
+	}
+	if err := h.setUpNet(channelID); err != nil {
 		return err
 	}
 	if h.humanID, err = createPrincipal(h.url(), schema.PrincipalHuman, "human"); err != nil {
 		return err
 	}
 	h.stopServer()
-	if err := h.startServer(token + "=" + strconv.FormatInt(h.botID, 10)); err != nil {
+	if err := h.startServer(strings.Join([]string{
+		token + "=" + strconv.FormatInt(h.botID, 10),
+		peerToken + "=" + strconv.FormatInt(h.peerID, 10),
+		outsiderToken + "=" + strconv.FormatInt(h.outsiderID, 10),
+	}, ",")); err != nil {
 		return err
 	}
 	defer h.stopServer()
@@ -130,7 +145,202 @@ func run() error {
 		return err
 	}
 	time.Sleep(250 * time.Millisecond)
-	return assertAgentCount(h.url(), h.botID, 2)
+	if err := assertAgentCount(h.url(), h.botID, 2); err != nil {
+		return err
+	}
+	if err := h.netExchange(); err != nil {
+		return err
+	}
+	return h.refusedNetExchange()
+}
+
+// setUpNet creates the principals and the net for the scoped exchange: a net
+// holding the bot and a peer agent, and an outsider agent that is in the
+// channel but not on the net. Agents are deny-by-default, so each gets a
+// manifest.
+func (h *harness) setUpNet(channelID int64) error {
+	var err error
+	if h.peerID, err = createPrincipal(h.url(), schema.PrincipalAgent, "net-peer"); err != nil {
+		return err
+	}
+	if h.outsiderID, err = createPrincipal(h.url(), schema.PrincipalAgent, "outsider"); err != nil {
+		return err
+	}
+	for _, id := range []int64{h.peerID, h.outsiderID} {
+		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/members/%d", h.url(), id), nil); err != nil {
+			return err
+		}
+		manifest := schema.PutAgentManifestRequestV1{
+			DisplayName:  "e2e-agent",
+			Tier:         schema.AgentTierC,
+			Capabilities: []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
+			Channels: []schema.ChannelGrant{{
+				ChannelID:   channelID,
+				Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionPostNet},
+			}},
+		}
+		if err := putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", h.url(), id), manifest); err != nil {
+			return err
+		}
+	}
+	var created schema.CreateNetResponseV1
+	if err := postJSON(h.url()+"/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "ops-net"}, &created); err != nil {
+		return err
+	}
+	h.netID = created.Net.ID
+	for _, id := range []int64{h.botID, h.peerID} {
+		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/nets/ops-net/members/%d", h.url(), id), schema.PutNetMemberRequestV1{Role: schema.NetRoleMember}); err != nil {
+			return err
+		}
+	}
+	// A second net the bot only monitors: it reads what is said there and the
+	// server refuses its replies.
+	if err := postJSON(h.url()+"/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "watch-net"}, &created); err != nil {
+		return err
+	}
+	h.watchNetID = created.Net.ID
+	for id, role := range map[int64]schema.NetRole{h.botID: schema.NetRoleMonitor, h.peerID: schema.NetRoleMember} {
+		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/nets/watch-net/members/%d", h.url(), id), schema.PutNetMemberRequestV1{Role: role}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// refusedNetExchange is the case the feature exists for. The peer speaks on a
+// net the bot only monitors. The bot reads the message and its reply is
+// refused by the real server; the bot must then post nothing anywhere, in
+// particular not in the open channel, and must carry on: the next channel-wide
+// message still gets its answer.
+func (h *harness) refusedNetExchange() error {
+	ctx := context.Background()
+	peer := mcpclient.New(h.url(), peerToken)
+	if err := peer.Initialize(ctx, "conch-bot-check-peer-2"); err != nil {
+		return fmt.Errorf("initialize peer: %w", err)
+	}
+	const prompt = "WATCH-NET-PROMPT-the-bot-may-not-answer"
+	posted, err := peer.PostMessageTo(ctx, "ops", prompt, &schema.Audience{Kind: schema.AudienceKindNet, NetID: h.watchNetID})
+	if err != nil {
+		return fmt.Errorf("peer post on the monitored net: %w", err)
+	}
+	// The bot polls every 50 ms; give it many polls to answer wrongly.
+	time.Sleep(time.Second)
+	page, err := peer.ReadChannel(ctx, "ops", posted.Message.ID, 100)
+	if err != nil {
+		return fmt.Errorf("peer read: %w", err)
+	}
+	for _, m := range page.Messages {
+		if m.AuthorID == h.botID {
+			return fmt.Errorf("the bot posted after a refused reply: %+v (audience %+v)", m, m.Audience)
+		}
+	}
+	if err := assertChannelWideBotReplies(h, 2); err != nil {
+		return fmt.Errorf("a refused net reply was sent to the open channel: %w", err)
+	}
+	// Not stuck in a retry or backoff: a channel-wide message is answered.
+	if err := postHuman(h.url(), h.humanID, "after the refusal"); err != nil {
+		return err
+	}
+	if err := waitForAgentCount(h.url(), h.botID, 3, 5*time.Second); err != nil {
+		return fmt.Errorf("the bot stopped answering after a refused reply: %w", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if err := assertChannelWideBotReplies(h, 3); err != nil {
+		return err
+	}
+	raw, err := httpGet(h.url() + "/v2/channels/ops/messages")
+	if err != nil {
+		return err
+	}
+	if strings.Contains(raw, "WATCH-NET-PROMPT") {
+		return fmt.Errorf("the monitored net's prompt is visible in the open channel: %s", raw)
+	}
+	return nil
+}
+
+// netExchange has the peer post a prompt on the net over MCP (with auth off a
+// human cannot post a scoped message over REST). The bot must answer on the
+// same net; the outsider, over MCP and over REST v1 and v2, must see neither.
+func (h *harness) netExchange() error {
+	ctx := context.Background()
+	netAudience := &schema.Audience{Kind: schema.AudienceKindNet, NetID: h.netID}
+	peer := mcpclient.New(h.url(), peerToken)
+	outsider := mcpclient.New(h.url(), outsiderToken)
+	for name, client := range map[string]*mcpclient.Client{"peer": peer, "outsider": outsider} {
+		if err := client.Initialize(ctx, "conch-bot-check-"+name); err != nil {
+			return fmt.Errorf("initialize %s: %w", name, err)
+		}
+	}
+	const prompt = "NET-PROMPT-for-the-bot"
+	if _, err := peer.PostMessageTo(ctx, "ops", prompt, netAudience); err != nil {
+		return fmt.Errorf("peer net post: %w", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var reply *schema.MessageV2
+	for reply == nil && time.Now().Before(deadline) {
+		page, err := peer.ReadChannel(ctx, "ops", 0, 100)
+		if err != nil {
+			return fmt.Errorf("peer read: %w", err)
+		}
+		for i, m := range page.Messages {
+			if m.AuthorID == h.botID && m.Audience != nil {
+				reply = &page.Messages[i]
+			}
+		}
+		if reply == nil {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if reply == nil {
+		return fmt.Errorf("the bot did not answer the net message")
+	}
+	if reply.Audience.Kind != schema.AudienceKindNet || reply.Audience.NetID != h.netID || reply.Body != "canned bot reply" {
+		return fmt.Errorf("net reply = %+v (audience %+v), want the canned reply on net %d", reply, reply.Audience, h.netID)
+	}
+	// Give a wrongly channel-wide reply time to show up before looking.
+	time.Sleep(300 * time.Millisecond)
+	if err := assertChannelWideBotReplies(h, 2); err != nil {
+		return fmt.Errorf("the net reply leaked into the open channel: %w", err)
+	}
+
+	page, err := outsider.ReadChannel(ctx, "ops", 0, 100)
+	if err != nil {
+		return fmt.Errorf("outsider read: %w", err)
+	}
+	if len(page.Messages) == 0 {
+		return fmt.Errorf("outsider sees no messages at all; the check would prove nothing")
+	}
+	for _, m := range page.Messages {
+		if m.Audience != nil || strings.Contains(m.Body, "NET-PROMPT") || m.ID == reply.ID {
+			return fmt.Errorf("outsider sees a scoped message over MCP: %+v", m)
+		}
+	}
+	for _, version := range []string{"v1", "v2"} {
+		raw, err := httpGet(fmt.Sprintf("%s/%s/channels/ops/messages", h.url(), version))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(raw, "NET-PROMPT") || strings.Contains(raw, fmt.Sprintf(`"id":%d,`, reply.ID)) {
+			return fmt.Errorf("REST %s shows the net exchange: %s", version, raw)
+		}
+	}
+	return nil
+}
+
+// assertChannelWideBotReplies checks the bot has exactly want channel-wide
+// replies in the open channel.
+func assertChannelWideBotReplies(h *harness, want int) error {
+	return assertAgentCount(h.url(), h.botID, want)
+}
+
+func httpGet(url string) (string, error) {
+	response, err := http.Get(url) // #nosec G107 -- test-local server
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = response.Body.Close() }()
+	data, err := io.ReadAll(response.Body)
+	return string(data), err
 }
 
 func build(out, pkg string) error {
