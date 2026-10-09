@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -807,5 +808,94 @@ func TestVoiceRoomsMigrationFromSchema13(t *testing.T) {
 	// A rotation works on the migrated data.
 	if _, rotated, err := s.RotateVoiceRoom(ctx, live[0].ID, VoiceRotateMemberRemoved); err != nil || !rotated {
 		t.Errorf("rotate on a migrated database: %v %v", rotated, err)
+	}
+}
+
+// PruneRetiredVoiceRooms deletes a retired room's row only when it is older
+// than the cut-off and not in the keep list; live rows and rows with a holder
+// are never touched.
+func TestPruneRetiredVoiceRooms(t *testing.T) {
+	ctx := context.Background()
+	hour := time.Hour.Milliseconds()
+	base := time.Now().UnixMilli()
+	cutoff := time.UnixMilli(base - 24*hour)
+	tests := []struct {
+		name    string
+		retired any // retired_at in ms, or nil for a live row
+		keep    bool
+		holder  bool
+		pruned  bool
+	}{
+		{"retired two days ago, LiveKit no longer lists it", base - 48*hour, false, false, true},
+		{"retired two days ago, LiveKit still lists it", base - 48*hour, true, false, false},
+		{"retired an hour ago", base - hour, false, false, false},
+		{"retired exactly at the cut-off", base - 24*hour, false, false, false},
+		{"live", nil, false, false, false},
+		{"retired two days ago with a holder still recorded", base - 48*hour, false, true, false},
+	}
+	s := openTestStore(t)
+	p, err := s.CreatePrincipal(ctx, PrincipalHuman, "ann")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, _, err := s.CreateCredential(ctx, "system", p.ID, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, len(tests))
+	var keep []int64
+	for i, tt := range tests {
+		ch, err := s.CreateChannel(ctx, fmt.Sprintf("ch%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.db.ExecContext(ctx,
+			"INSERT INTO voice_rooms (channel_id, net_id, room_name, created_at, retired_at) VALUES (?, NULL, ?, 1, ?)",
+			ch.ID, fmt.Sprintf("conch-prune-%d", i), tt.retired)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if ids[i], err = res.LastInsertId(); err != nil {
+			t.Fatal(err)
+		}
+		if tt.keep {
+			keep = append(keep, ids[i])
+		}
+		if tt.holder {
+			if _, err := s.db.ExecContext(ctx,
+				"INSERT INTO voice_room_holders (room_id, principal_id, credential_id, created_at) VALUES (?, ?, ?, 1)", ids[i], p.ID, cred.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	exists := func(id int64) bool {
+		var n int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM voice_rooms WHERE id = ?", id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	want := int64(0)
+	for _, tt := range tests {
+		if tt.pruned {
+			want++
+		}
+	}
+	n, err := s.PruneRetiredVoiceRooms(ctx, cutoff, keep)
+	if err != nil || n != want {
+		t.Fatalf("PruneRetiredVoiceRooms = %d, %v; want %d", n, err, want)
+	}
+	for i, tt := range tests {
+		if got := !exists(ids[i]); got != tt.pruned {
+			t.Errorf("%s: pruned = %v, want %v", tt.name, got, tt.pruned)
+		}
+	}
+	// With nothing to keep the statement has no IN list; it must still run.
+	if n, err := s.PruneRetiredVoiceRooms(ctx, cutoff, nil); err != nil || n != 1 {
+		t.Errorf("second prune with no keep list = %d, %v; want the one LiveKit had still listed", n, err)
+	}
+	var holders int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM voice_room_holders").Scan(&holders); err != nil || holders != 1 {
+		t.Errorf("holder rows = %d, %v; want the one recorded, untouched", holders, err)
 	}
 }

@@ -2244,3 +2244,84 @@ func TestVoiceSweepLogsAFailedHolderCheck(t *testing.T) {
 		t.Errorf("next delay = %v, want at most %v", d, voiceSweepRetry)
 	}
 }
+
+// A retired room's row is deleted by a sweep once it is a day old and LiveKit
+// no longer lists the room; one LiveKit still lists is kept (and deleted
+// there again), whatever its age; a sweep that could not ask LiveKit prunes
+// nothing (issue #167).
+func TestVoiceSweepPrunesRetiredRooms(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	gone := f.holder(t, "ann", f.ops)
+	listed := f.holder(t, "ann", f.ops2)
+	for _, room := range []store.VoiceRoom{gone, listed} {
+		if _, rotated, err := f.srv.store.RotateVoiceRoom(ctx, room.ID, store.VoiceRotateMemberRemoved); err != nil || !rotated {
+			t.Fatalf("rotate: %v, %v", rotated, err)
+		}
+	}
+	retired := func() []string {
+		rooms, err := f.srv.store.ListRetiredVoiceRooms(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(rooms))
+		for _, r := range rooms {
+			names = append(names, r.RoomName)
+		}
+		slices.Sort(names)
+		return names
+	}
+	both := []string{gone.RoomName, listed.RoomName}
+	slices.Sort(both)
+
+	// The store stamps a retirement with the wall clock, so the poller's
+	// clock is put on it too: what is tested is the distance between them.
+	f.clock.Set(time.Now())
+
+	// Young: nothing is pruned, listed by LiveKit or not.
+	f.lk.setRoom(listed.RoomName)
+	f.lk.setDeleteStatus(http.StatusInternalServerError) // LiveKit keeps listing it
+	f.sweep(t)
+	if got := retired(); !slices.Equal(got, both) {
+		t.Fatalf("retired rows after a sweep on the day of the rotation = %d, want both kept", len(got))
+	}
+
+	// A day and a bit later, with LiveKit not answering: nothing is pruned.
+	f.clock.Advance(voiceRetiredKeep + time.Hour)
+	f.lk.setListStatus(http.StatusServiceUnavailable)
+	f.srv.voice.runSweep(ctx)
+	if got := retired(); !slices.Equal(got, both) {
+		t.Fatalf("retired rows after a sweep LiveKit did not answer = %d, want both kept", len(got))
+	}
+
+	// LiveKit answers: the room it no longer lists loses its row, the one it
+	// still lists keeps it and is deleted there again.
+	f.lk.setListStatus(0)
+	f.clock.Advance(voiceBackoffMax + voiceSweepInterval)
+	deletes := f.lk.callsFor("DeleteRoom", listed.RoomName)
+	f.sweep(t)
+	if got := retired(); !slices.Equal(got, []string{listed.RoomName}) {
+		t.Fatalf("retired rows after a sweep a day later = %d, want only the room LiveKit still lists", len(got))
+	}
+	if got := f.lk.callsFor("DeleteRoom", listed.RoomName); got != deletes+1 {
+		t.Errorf("DeleteRoom calls for the room LiveKit still lists = %d, want %d", got, deletes+1)
+	}
+	if f.lk.callsFor("DeleteRoom", gone.RoomName) != 0 {
+		t.Error("DeleteRoom was called for a room LiveKit never listed")
+	}
+
+	// Once LiveKit lets it go, the next sweep prunes that one too. Live rooms
+	// are untouched throughout.
+	f.lk.setDeleteStatus(0)
+	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t)
+	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t)
+	if got := retired(); len(got) != 0 {
+		t.Errorf("retired rows at the end = %d, want none", len(got))
+	}
+	live, err := f.srv.store.ListVoiceRooms(ctx)
+	if err != nil || len(live) != 2 {
+		t.Errorf("live rooms = %d, %v; want the two channels' current rooms", len(live), err)
+	}
+}

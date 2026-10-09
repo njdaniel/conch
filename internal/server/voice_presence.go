@@ -36,6 +36,11 @@ const (
 	// voiceSweepInterval is how often the room list is re-read to rebuild "in
 	// use" (design note §6). With no room in use it is the only call made.
 	voiceSweepInterval = 30 * time.Second
+	// voiceRetiredKeep is how long a retired room's row is kept after LiveKit
+	// has stopped listing the room. LiveKit's own tokens for a room last ten
+	// minutes after the last connection and conchd never creates a room for a
+	// retired row, so a day is a wide margin, not a tuned value (issue #167).
+	voiceRetiredKeep = 24 * time.Hour
 	// voiceSessionRecent is how long after a session is issued its room counts
 	// as in use: long enough for the token to be used (it is accepted for
 	// about 75 seconds) and for the join to show up.
@@ -466,6 +471,21 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 		}
 	}
 	p.deleteRooms(ctx, stale)
+	// A retired room that LiveKit no longer lists, a day after it was
+	// retired, has nothing left to be found for: its row goes. Only when the
+	// retired rooms were read (and so compared with LiveKit's list) in this
+	// sweep.
+	if retiredErr == nil {
+		keep := make([]int64, 0, len(stale))
+		for _, rr := range stale {
+			keep = append(keep, rr.ID)
+		}
+		if n, err := p.s.store.PruneRetiredVoiceRooms(ctx, now.Add(-voiceRetiredKeep), keep); err != nil {
+			slog.ErrorContext(ctx, "voice: sweep could not prune retired rooms", "error", err)
+		} else if n > 0 {
+			slog.InfoContext(ctx, "voice: pruned retired rooms LiveKit no longer has", "rooms", n)
+		}
+	}
 	return true
 }
 

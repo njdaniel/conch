@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -163,6 +164,58 @@ func (s *Store) ListVoiceRooms(ctx context.Context) ([]VoiceRoom, error) {
 func (s *Store) ListRetiredVoiceRooms(ctx context.Context) ([]VoiceRoom, error) {
 	return s.queryVoiceRooms(ctx, "list retired voice rooms",
 		`SELECT `+voiceRoomColumns+` FROM voice_rooms r WHERE r.retired_at IS NOT NULL ORDER BY r.id ASC`)
+}
+
+// PruneRetiredVoiceRooms deletes the retired rooms that were retired before
+// cutoff, except those whose ids are in keep (the ones LiveKit still lists,
+// which the sweep is still deleting there), and returns how many it deleted.
+// A retired row exists so that the sweep can find a room LiveKit still has;
+// once LiveKit no longer lists it and the tokens for it have long expired
+// there is nothing left for the row to do. Room names are 128 random bits, so
+// a pruned name being generated again is not a case. Live rows are never
+// touched, nor a row that still has a holder recorded against it.
+func (s *Store) PruneRetiredVoiceRooms(ctx context.Context, cutoff time.Time, keep []int64) (int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM voice_rooms WHERE retired_at IS NOT NULL AND retired_at < ? ORDER BY id ASC`, cutoff.UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("store: prune retired voice rooms: %w", err)
+	}
+	var old []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: prune retired voice rooms: %w", err)
+		}
+		if !slices.Contains(keep, id) {
+			old = append(old, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("store: prune retired voice rooms: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: prune retired voice rooms: %w", err)
+	}
+	// Each delete repeats the conditions, so a row is judged as it is at the
+	// moment it goes, not as it was when listed.
+	var pruned int64
+	for _, id := range old {
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM voice_rooms
+			 WHERE id = ? AND retired_at IS NOT NULL AND retired_at < ?
+			   AND NOT EXISTS (SELECT 1 FROM voice_room_holders h WHERE h.room_id = voice_rooms.id)`,
+			id, cutoff.UnixMilli())
+		if err != nil {
+			return pruned, fmt.Errorf("store: prune retired voice rooms: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return pruned, fmt.Errorf("store: prune retired voice rooms: %w", err)
+		}
+		pruned += n
+	}
+	return pruned, nil
 }
 
 // VoiceRoomsForChannel returns the live voice rooms of channelID.
