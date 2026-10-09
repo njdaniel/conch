@@ -150,6 +150,8 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
 	"POST /v1/principals/{id}/credentials/revoke-all": {classOp, "/v1/principals/9999/credentials/revoke-all", "", 404},
 	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
+	"GET /v1/hooks":                                   {classOp, "/v1/hooks", "", 200},
+	"DELETE /v1/hooks/{id}":                           {classOp, "/v1/hooks/9999", "", 404},
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},

@@ -587,8 +587,8 @@ func TestDisableMigrationFromSchema8(t *testing.T) {
 		}
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 9 {
-		t.Errorf("user_version = %d (%v), want 9", version, err)
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
+		t.Errorf("user_version = %d (%v), want %d", version, err, len(migrations))
 	}
 	if changed, err := s.DisablePrincipal(ctx, "system", 2); err != nil || !changed {
 		t.Errorf("disable after migration = %v, %v", changed, err)

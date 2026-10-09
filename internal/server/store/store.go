@@ -11,6 +11,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
@@ -187,6 +189,33 @@ END`,
 	{
 		`ALTER TABLE principals ADD COLUMN disabled_at INTEGER`,
 	},
+	// 10: Hashed, revocable webhook hooks (issue #104). The plaintext token
+	// primary key is replaced by token_hash (lowercase hex SHA-256, as
+	// credentials), plus id, label and revoked_at. Existing rows are copied
+	// across by migrationSteps[10], which hashes each token in Go; hashing
+	// needs no new SQL function and the hook URLs already handed out keep
+	// working. The old table is dropped by that step, with secure_delete on
+	// (see Open) so its pages do not keep the plaintext tokens.
+	{
+		`ALTER TABLE hooks RENAME TO hooks_plaintext`,
+		`CREATE TABLE hooks (
+	id           INTEGER PRIMARY KEY,
+	token_hash   TEXT    NOT NULL,
+	label        TEXT    NOT NULL DEFAULT '',
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	created_at   INTEGER NOT NULL,
+	revoked_at   INTEGER
+)`,
+		`CREATE UNIQUE INDEX hooks_by_token_hash ON hooks (token_hash)`,
+	},
+}
+
+// migrationSteps holds Go code that runs inside a migration's transaction
+// after its SQL statements, for the rare change SQL cannot express. It is
+// keyed by the migration's 1-based number (the schema version it produces).
+var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
+	10: hashPlaintextHooks,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
@@ -199,13 +228,24 @@ type Store struct {
 // migrations. Migrations are idempotent: reopening an up-to-date database is
 // a no-op.
 func Open(ctx context.Context, path string) (*Store, error) {
+	// The database holds the hashes of every bearer credential and hook
+	// token and the whole message log, so it must never be readable by other
+	// local users. Doing this before SQLite touches the file also fixes the
+	// mode its -wal and -shm siblings are created with.
+	if err := securePermissions(path); err != nil {
+		return nil, err
+	}
+
 	// journal_mode is persistent but the other pragmas are per-connection,
 	// so they are set in the DSN to cover every pooled connection.
+	// secure_delete zeroes freed pages so a dropped or deleted secret does
+	// not linger in the file.
 	dsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=foreign_keys(1)" +
 		"&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)"
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=secure_delete(1)"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -218,6 +258,41 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// securePermissions creates the database file with mode 0600 if it does not
+// exist, and tightens it and its -wal/-shm siblings to 0600 if they are
+// accessible to group or others. A tightening is reported in exactly one log
+// line; a file that is already private logs nothing.
+func securePermissions(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-configured data directory
+	if err != nil {
+		return fmt.Errorf("store: open %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("store: open %s: %w", path, err)
+	}
+	var tightened []string
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("store: stat %s: %w", p, err)
+		}
+		if info.Mode().Perm()&0o077 == 0 {
+			continue
+		}
+		if err := os.Chmod(p, 0o600); err != nil {
+			return fmt.Errorf("store: restrict permissions of %s: %w", p, err)
+		}
+		tightened = append(tightened, fmt.Sprintf("%s (was %04o)", p, info.Mode().Perm()))
+	}
+	if len(tightened) > 0 {
+		slog.Warn("store: database files were readable by other users; restricted to owner only (0600)", "files", tightened)
+	}
+	return nil
 }
 
 // Close closes the underlying database.
@@ -250,6 +325,15 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("store: apply migration %d: %w", i+1, err)
 		}
 	}
+	// Migration 10 handled plaintext tokens. Their old page images can still
+	// sit in WAL frames, so fold the WAL into the database (where
+	// secure_delete already zeroed them) and truncate it. Nothing else holds
+	// the database open during startup, so the checkpoint is not blocked.
+	if version < 10 {
+		if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			return fmt.Errorf("store: checkpoint after hook migration: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -262,6 +346,11 @@ func (s *Store) applyMigration(ctx context.Context, i int) error {
 
 	for _, stmt := range migrations[i] {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if step, ok := migrationSteps[i+1]; ok {
+		if err := step(ctx, tx); err != nil {
 			return err
 		}
 	}
