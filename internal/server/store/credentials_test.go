@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -493,6 +495,10 @@ func TestCredentialAtRestAndAuditHoldNoPlaintext(t *testing.T) {
 	}
 	defer func() { _ = rows.Close() }()
 	hexHash := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	wantHashes := make(map[string]bool, len(tokens))
+	for _, tok := range tokens {
+		wantHashes[hashCredentialToken(tok)] = true
+	}
 	var seen int
 	for rows.Next() {
 		var id, pid, created int64
@@ -505,6 +511,12 @@ func TestCredentialAtRestAndAuditHoldNoPlaintext(t *testing.T) {
 		if !hexHash.MatchString(hash) {
 			t.Errorf("token_hash %q is not 64 lowercase hex chars", hash)
 		}
+		// The column must be exactly SHA-256(token) for one of the issued
+		// tokens, not merely something digest-shaped.
+		if !wantHashes[hash] {
+			t.Errorf("row %d token_hash is not the SHA-256 of an issued token", id)
+		}
+		delete(wantHashes, hash)
 		for _, tok := range tokens {
 			if strings.Contains(label, tok) || strings.Contains(hash, tok) || strings.Contains(hash, strings.TrimPrefix(tok, "conch_")) {
 				t.Errorf("row %d holds plaintext token material", id)
@@ -513,6 +525,9 @@ func TestCredentialAtRestAndAuditHoldNoPlaintext(t *testing.T) {
 	}
 	if seen != 3 {
 		t.Errorf("rows = %d, want 3", seen)
+	}
+	if len(wantHashes) != 0 {
+		t.Errorf("%d issued tokens have no row holding their hash", len(wantHashes))
 	}
 
 	events, err := s.ListAuditEvents(ctx, 0, 100)
@@ -631,6 +646,116 @@ func TestCredentialTokenHashIsUnique(t *testing.T) {
 		`INSERT INTO credentials (principal_id, label, token_hash, created_at) VALUES (?, 'a', 'h', 1), (?, 'b', 'h', 1)`,
 		agent.ID, agent.ID); err == nil {
 		t.Error("duplicate token_hash accepted; the unique index is missing")
+	}
+}
+
+// TestCredentialFilesHoldNoPlaintext scans every file SQLite leaves in the
+// data directory (database, WAL, shared memory) after the store is closed.
+func TestCredentialFilesHoldNoPlaintext(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, err := Open(ctx, filepath.Join(dir, "conch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreatePrincipal(ctx, PrincipalAgent, "bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, token, err := s.CreateCredential(ctx, agent.ID, "x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rotated, err := s.RotateCredential(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no database files to scan")
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name())) // #nosec G304 -- files from this test's own temp directory
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tok := range []string{token, rotated} {
+			if bytes.Contains(data, []byte(tok)) || bytes.Contains(data, []byte(strings.TrimPrefix(tok, schema.CredentialTokenPrefix))) {
+				t.Errorf("%s contains plaintext token material", e.Name())
+			}
+		}
+	}
+}
+
+// TestRotateRevokeConcurrent races a rotation against a revocation of the same
+// credential: whoever wins, the old token is dead and the operator's revoke
+// never leaves a live credential it did not expect.
+func TestRotateRevokeConcurrent(t *testing.T) {
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		s, agent, _ := credentialFixture(t)
+		old, oldToken, err := s.CreateCredential(ctx, agent.ID, "prod", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var (
+			wg          sync.WaitGroup
+			rotatedTok  string
+			rotateErr   error
+			revokeErr   error
+			start       = make(chan struct{})
+			rotatedCred schema.CredentialV1
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			rotatedCred, rotatedTok, rotateErr = s.RotateCredential(ctx, old.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			revokeErr = s.RevokeCredential(ctx, old.ID)
+		}()
+		close(start)
+		wg.Wait()
+
+		if revokeErr != nil {
+			t.Fatalf("iteration %d: revoke: %v", i, revokeErr)
+		}
+		if _, err := s.ResolveCredential(ctx, oldToken); !errors.Is(err, ErrCredentialInvalid) {
+			t.Fatalf("iteration %d: old token still resolves (err %v)", i, err)
+		}
+		var live int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM credentials WHERE revoked_at IS NULL").Scan(&live); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case rotateErr == nil:
+			// Rotation won: exactly its new credential is live.
+			if live != 1 {
+				t.Fatalf("iteration %d: rotate won but live = %d", i, live)
+			}
+			if p, err := s.ResolveCredential(ctx, rotatedTok); err != nil || p.ID != agent.ID {
+				t.Fatalf("iteration %d: rotated token: %v", i, err)
+			}
+			if rotatedCred.ID == old.ID {
+				t.Fatalf("iteration %d: rotation reused the old id", i)
+			}
+		case errors.Is(rotateErr, ErrCredentialRevoked):
+			// Revocation won: nothing is live.
+			if live != 0 {
+				t.Fatalf("iteration %d: revoke won but live = %d", i, live)
+			}
+		default:
+			t.Fatalf("iteration %d: unexpected rotate error: %v", i, rotateErr)
+		}
 	}
 }
 
