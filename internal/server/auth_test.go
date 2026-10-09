@@ -56,8 +56,20 @@ func newAuthFixture(t *testing.T, mode AuthMode) *authFixture {
 	}
 	f.alice, f.aliceTok = mk(store.PrincipalHuman, "alice")
 	f.bot, f.botTok = mk(store.PrincipalAgent, "bot")
-	if _, err := srv.store.CreateChannel(ctx, "general"); err != nil {
+	// A fourth principal that belongs to nothing, for membership routes.
+	if _, err := srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "ghost"); err != nil {
+		t.Fatalf("CreatePrincipal ghost: %v", err)
+	}
+	general, err := srv.store.CreateChannel(ctx, "general")
+	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
+	}
+	// Since issue #90 a new channel has no members; the route matrix below
+	// treats "general" as the channel every fixture caller may use.
+	for _, p := range []store.Principal{root, f.alice, f.bot} {
+		if _, err := srv.store.AddChannelMember(ctx, "system", general.ID, p.ID, 0); err != nil {
+			t.Fatalf("AddChannelMember %s: %v", p.Name, err)
+		}
 	}
 	return f
 }
@@ -107,29 +119,34 @@ type routeExpectation struct {
 // routeExpectations must name every pattern in the route table. {id} is the
 // operator's principal id (1) so operator-or-self is exercised from a member.
 var routeExpectations = map[string]routeExpectation{
-	"GET /healthz":                                {classExempt, "/healthz", "", 200},
-	"GET /v0/ws":                                  {classAuth, "/v0/ws", "", 400},
-	"GET /v1/ws":                                  {classAuth, "/v1/ws", "", 400},
-	"GET /v1/whoami":                              {classAuth, "/v1/whoami", "", 200},
-	"POST /v0/channels":                           {classOp, "/v0/channels", `{}`, 400},
-	"GET /v1/channels":                            {classAuth, "/v1/channels", "", 200},
-	"POST /v0/principals":                         {classOp, "/v0/principals", `{}`, 400},
-	"POST /v0/channels/{channel}/messages":        {classAuth, "/v0/channels/general/messages", `{}`, 400},
-	"GET /v0/channels/{channel}/messages":         {classAuth, "/v0/channels/general/messages", "", 200},
-	"POST /v1/channels/{channel}/messages":        {classAuth, "/v1/channels/general/messages", `{}`, 400},
-	"GET /v1/channels/{channel}/messages":         {classAuth, "/v1/channels/general/messages", "", 200},
-	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
-	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
-	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
-	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
-	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
-	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
-	"POST /v1/hooks":                              {classOp, "/v1/hooks", `{}`, 400},
-	"POST /v1/hooks/{token}":                      {classExempt, "/v1/hooks/nope", `{}`, 404},
-	"POST /v1/approvals":                          {classAuth, "/v1/approvals", `{}`, 400},
-	"GET /v1/approvals":                           {classAuth, "/v1/approvals", "", 200},
-	"POST /v1/approvals/{id}/decisions":           {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                        {classExempt, "/mcp", `{}`, 401},
+	"GET /healthz":      {classExempt, "/healthz", "", 200},
+	"GET /v0/ws":        {classAuth, "/v0/ws", "", 400},
+	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
+	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
+	"POST /v0/channels": {classOp, "/v0/channels", `{}`, 400},
+	"GET /v1/channels":  {classAuth, "/v1/channels", "", 200},
+	// Both membership writes are no-ops in the fixture (alice is already a
+	// member; ghost, id 4, is not), so they change nothing and audit nothing.
+	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
+	"PUT /v1/channels/{channel}/members/{principal_id}":    {classOp, "/v1/channels/general/members/2", "", 204},
+	"DELETE /v1/channels/{channel}/members/{principal_id}": {classOp, "/v1/channels/general/members/4", "", 204},
+	"POST /v0/principals":                                  {classOp, "/v0/principals", `{}`, 400},
+	"POST /v0/channels/{channel}/messages":                 {classAuth, "/v0/channels/general/messages", `{}`, 400},
+	"GET /v0/channels/{channel}/messages":                  {classAuth, "/v0/channels/general/messages", "", 200},
+	"POST /v1/channels/{channel}/messages":                 {classAuth, "/v1/channels/general/messages", `{}`, 400},
+	"GET /v1/channels/{channel}/messages":                  {classAuth, "/v1/channels/general/messages", "", 200},
+	"PUT /v1/principals/{id}/manifest":                     {classOp, "/v1/principals/1/manifest", `{}`, 400},
+	"GET /v1/principals/{id}/manifest":                     {classSelf, "/v1/principals/1/manifest", "", 404},
+	"POST /v1/principals/{id}/credentials":                 {classOp, "/v1/principals/1/credentials", `{}`, 400},
+	"GET /v1/principals/{id}/credentials":                  {classOp, "/v1/principals/1/credentials", "", 200},
+	"POST /v1/credentials/{credential_id}/rotate":          {classOp, "/v1/credentials/9999/rotate", "", 404},
+	"DELETE /v1/credentials/{credential_id}":               {classOp, "/v1/credentials/9999", "", 404},
+	"POST /v1/hooks":                                       {classOp, "/v1/hooks", `{}`, 400},
+	"POST /v1/hooks/{token}":                               {classExempt, "/v1/hooks/nope", `{}`, 404},
+	"POST /v1/approvals":                                   {classAuth, "/v1/approvals", `{}`, 400},
+	"GET /v1/approvals":                                    {classAuth, "/v1/approvals", "", 200},
+	"POST /v1/approvals/{id}/decisions":                    {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                                                 {classExempt, "/mcp", `{}`, 401},
 }
 
 func routeMethod(pattern string) string {
@@ -274,10 +291,11 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 			})
 		}
-		// Bootstrap writes 2 audit events and alice's and bot's credentials 1
-		// each; no request may add to that (in particular no access_denied).
-		if n := len(f.audit(t)); n != 4 {
-			t.Errorf("mode %q: audit events = %d, want 4", mode, n)
+		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
+		// and the fixture's three member_added events; no request may add to
+		// that (in particular no access_denied).
+		if n := len(f.audit(t)); n != 7 {
+			t.Errorf("mode %q: audit events = %d, want 7", mode, n)
 		}
 	}
 }

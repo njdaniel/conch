@@ -10,6 +10,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"github.com/njdaniel/conch/internal/server/hub"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -49,12 +50,43 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 	}
 	channel, err := s.store.ChannelByName(ctx, name)
 	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "channel_not_found", "channel not found")
+		writeChannelNotFound(w)
 		return
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: find channel failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	// Subscribe BEFORE checking membership. DropPrincipal (run when a member is
+	// removed, after the removal commits) only closes subscriptions that are
+	// registered, so checking first and subscribing second would let a
+	// subscription slip in between and outlive the removal. With this order
+	// either the check sees the removal (refused) or the subscription exists
+	// when the drop runs (closed). A refused request cancels the subscription
+	// before anything is sent on it.
+	var principalID int64
+	if caller, ok := callerFrom(ctx); ok {
+		principalID = caller.ID
+	}
+	var sub0 *hub.Subscription
+	var sub1 *hub.SubscriptionV1
+	if v1 {
+		sub1 = s.hub.SubscribeV1(channel.ID, principalID, wsSendBuffer)
+		defer sub1.Cancel()
+	} else {
+		sub0 = s.hub.Subscribe(channel.ID, principalID, wsSendBuffer)
+		defer sub0.Cancel()
+	}
+	member, err := s.callerIsMember(r, channel.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: check membership failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if !member {
+		writeChannelNotFound(w)
 		return
 	}
 
@@ -65,12 +97,10 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		return
 	}
 	if v1 {
-		s.streamWSV1(ctx, conn, channel.ID)
+		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID)
 		return
 	}
-
-	sub := s.hub.Subscribe(channel.ID, wsSendBuffer)
-	defer sub.Cancel()
+	sub := sub0
 
 	// The stream is server-to-client only; CloseRead discards client frames
 	// and cancels the context when the peer closes or errors.
@@ -85,11 +115,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 				// The hub dropped us — tell the client whether to blame
 				// itself (too slow) or the server (shutdown), so a client
 				// like conch tail knows whether reconnecting makes sense.
-				if s.hub.Closed() {
-					_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
-				} else {
-					_ = conn.Close(websocket.StatusPolicyViolation, "subscriber too slow")
-				}
+				s.closeDropped(ctx, conn, channel.ID, principalID)
 				return
 			}
 			if err := writeWSMessage(ctx, conn, msg); err != nil {
@@ -104,9 +130,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 	}
 }
 
-func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, channelID int64) {
-	sub := s.hub.SubscribeV1(channelID, wsSendBuffer)
-	defer sub.Cancel()
+func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, channelID, principalID int64) {
 	ctx = conn.CloseRead(ctx)
 	for {
 		select {
@@ -115,11 +139,7 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, channelID
 			return
 		case msg, ok := <-sub.Messages():
 			if !ok {
-				if s.hub.Closed() {
-					_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
-				} else {
-					_ = conn.Close(websocket.StatusPolicyViolation, "subscriber too slow")
-				}
+				s.closeDropped(ctx, conn, channelID, principalID)
 				return
 			}
 			if err := writeWSMessageV1(ctx, conn, msg); err != nil {
@@ -141,4 +161,22 @@ func writeWSMessageV1(ctx context.Context, conn *websocket.Conn, msg schema.Mess
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
 	return wsjson.Write(wctx, conn, msg)
+}
+
+// closeDropped closes conn after the hub dropped its subscription, telling the
+// client why: shutdown, removal from the channel, or falling too far behind.
+func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID int64) {
+	if s.hub.Closed() {
+		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
+	if principalID != 0 {
+		// The request context may already be done; the reason is advisory, so
+		// fall back to the slow-consumer wording on any error.
+		if member, err := s.store.IsChannelMember(context.WithoutCancel(ctx), channelID, principalID); err == nil && !member {
+			_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+			return
+		}
+	}
+	_ = conn.Close(websocket.StatusPolicyViolation, "subscriber too slow")
 }

@@ -43,11 +43,11 @@ func assertEmpty(t *testing.T, sub *Subscription) {
 
 func TestBroadcastFanout(t *testing.T) {
 	h := New()
-	sub1 := h.Subscribe(1, 4)
+	sub1 := h.Subscribe(1, 0, 4)
 	defer sub1.Cancel()
-	sub2 := h.Subscribe(1, 4)
+	sub2 := h.Subscribe(1, 0, 4)
 	defer sub2.Cancel()
-	other := h.Subscribe(2, 4)
+	other := h.Subscribe(2, 0, 4)
 	defer other.Cancel()
 
 	h.BroadcastMessage(context.Background(), msg(1, 10))
@@ -68,9 +68,9 @@ func TestBroadcastFanout(t *testing.T) {
 
 func TestSlowConsumerIsDroppedWithoutStallingOthers(t *testing.T) {
 	h := New()
-	slow := h.Subscribe(1, 1)
+	slow := h.Subscribe(1, 0, 1)
 	defer slow.Cancel()
-	fast := h.Subscribe(1, 4)
+	fast := h.Subscribe(1, 0, 4)
 	defer fast.Cancel()
 
 	// First fills slow's buffer; second overflows it and must drop slow while
@@ -94,7 +94,7 @@ func TestSlowConsumerIsDroppedWithoutStallingOthers(t *testing.T) {
 
 func TestCancelStopsDeliveryAndIsIdempotent(t *testing.T) {
 	h := New()
-	sub := h.Subscribe(1, 4)
+	sub := h.Subscribe(1, 0, 4)
 	sub.Cancel()
 	sub.Cancel() // must not panic (double close)
 
@@ -106,7 +106,7 @@ func TestCancelStopsDeliveryAndIsIdempotent(t *testing.T) {
 
 func TestCloseDropsAllAndClosesFutureSubscriptions(t *testing.T) {
 	h := New()
-	sub := h.Subscribe(1, 4)
+	sub := h.Subscribe(1, 0, 4)
 	h.Close()
 
 	if _, ok := <-sub.Messages(); ok {
@@ -114,7 +114,7 @@ func TestCloseDropsAllAndClosesFutureSubscriptions(t *testing.T) {
 	}
 	sub.Cancel() // must not panic after Close already dropped it
 
-	late := h.Subscribe(1, 4)
+	late := h.Subscribe(1, 0, 4)
 	if _, ok := <-late.Messages(); ok {
 		t.Error("subscription on a closed hub is open, want closed")
 	}
@@ -136,7 +136,7 @@ func TestConcurrentBroadcastSubscribe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				sub := h.Subscribe(1, 1)
+				sub := h.Subscribe(1, 0, 1)
 				sub.Cancel()
 			}
 		}()
