@@ -74,8 +74,11 @@ func TestJoinToken(t *testing.T) {
 			if !reflect.DeepEqual(header, map[string]any{"alg": "HS256", "typ": "JWT"}) {
 				t.Errorf("header = %v", header)
 			}
-			if got, want := len(claims), 5; got != want {
-				t.Errorf("claims = %v, want exactly iss, sub, nbf, exp, video", claims)
+			if got, want := len(claims), 6; got != want {
+				t.Errorf("claims = %v, want exactly iss, sub, jti, nbf, exp, video", claims)
+			}
+			if id, _ := claims["jti"].(string); len(id) != 16 {
+				t.Errorf("jti = %v, want 16 characters", claims["jti"])
 			}
 			if claims["iss"] != "devkey" || claims["sub"] != "p7" {
 				t.Errorf("iss/sub = %v/%v", claims["iss"], claims["sub"])
@@ -132,5 +135,44 @@ func TestJoinTokenRejectsBadParams(t *testing.T) {
 func TestNewRequiresConfig(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("New(Config{}) succeeded")
+	}
+}
+
+// Every join token is a distinct string, even for the same identity and room
+// at the same instant: the test client's clock is frozen, so only the random
+// "jti" can tell them apart. Admin tokens carry none.
+func TestJoinTokensAreDistinct(t *testing.T) {
+	// A client of its own, with another secret, and the clock frozen.
+	const secret = "another-s3cret"
+	c, err := New(Config{URL: "ws://lk.test", APIURL: "http://unused", APIKey: "devkey", APISecret: NewSecret(secret)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return testNow }
+	p := JoinParams{Identity: "p7", Room: "conch-room", CanPublish: true, Lifetime: 15 * time.Second}
+	seen := map[string]bool{}
+	ids := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		token, err := c.JoinToken(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[token] {
+			t.Fatalf("token %d repeats an earlier one", i)
+		}
+		seen[token] = true
+		_, cl := decodeJWT(t, token, secret)
+		id, _ := cl["jti"].(string)
+		if len(id) != 16 || ids[id] {
+			t.Fatalf("jti = %q: want 16 characters (96 random bits), never repeated", id)
+		}
+		ids[id] = true
+	}
+	admin, err := c.adminToken(adminGrant{RoomList: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, cl := decodeJWT(t, admin, secret); cl["jti"] != nil {
+		t.Errorf("an admin token carries jti %v", cl["jti"])
 	}
 }

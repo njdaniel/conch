@@ -66,8 +66,11 @@ type Server struct {
 	hub         *hub.Hub
 	approvals   *approvals.Manager
 	broadcaster Broadcaster
-	http        *http.Server
-	ln          net.Listener
+	// lk is the LiveKit client; nil when voice is not configured. It is built
+	// without contacting LiveKit (design note §2).
+	lk   *livekit.Client
+	http *http.Server
+	ln   net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -99,6 +102,11 @@ func New(cfg Config, st *store.Store) *Server {
 	}
 	s.logAgentsWithoutManifest(context.Background())
 	if s.VoiceConfigured() {
+		if s.lk, err = livekit.New(cfg.LiveKit); err != nil {
+			// Unreachable: Configured() was just checked. Fail closed anyway:
+			// with no client every voice endpoint answers voice_not_configured.
+			slog.Error("voice: client not built", "error", err)
+		}
 		slog.Info("voice: configured", "livekit", cfg.LiveKit)
 	} else {
 		slog.Info("voice: not configured")

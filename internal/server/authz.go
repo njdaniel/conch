@@ -42,6 +42,7 @@ const (
 	denyNotMember         = "not_a_member"
 	denyChannelPermission = "channel_permission_not_granted"
 	denyAgentOnHumanRoute = "agents_use_mcp"
+	denyAgentVoice        = "agents_no_voice"
 )
 
 var (
