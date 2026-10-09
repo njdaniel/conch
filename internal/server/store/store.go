@@ -139,6 +139,24 @@ END`,
 	updated_at   INTEGER NOT NULL
 )`,
 	},
+	// 6: Bearer credentials (issue #78). Each row binds one token to exactly
+	// one principal. Only the SHA-256 of the token (lowercase hex) is stored,
+	// never the token. Revocation is a timestamp, not a delete. Creates the
+	// table only: existing principals get no credentials. Timestamps are unix
+	// milliseconds UTC.
+	{
+		`CREATE TABLE credentials (
+	id           INTEGER PRIMARY KEY,
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	label        TEXT    NOT NULL,
+	token_hash   TEXT    NOT NULL,
+	created_at   INTEGER NOT NULL,
+	expires_at   INTEGER,
+	revoked_at   INTEGER
+)`,
+		`CREATE UNIQUE INDEX credentials_by_token_hash ON credentials (token_hash)`,
+		`CREATE INDEX credentials_by_principal ON credentials (principal_id)`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

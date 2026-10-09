@@ -90,6 +90,13 @@ func New(cfg Config, st *store.Store) *Server {
 	// become operator-only under issue #89.
 	mux.HandleFunc("PUT /v1/principals/{id}/manifest", s.handlePutManifest)
 	mux.HandleFunc("GET /v1/principals/{id}/manifest", s.handleGetManifest)
+	// Credential administration is open like the other admin endpoints today;
+	// it becomes operator-only under issue #89. Nothing authenticates with
+	// these credentials yet.
+	mux.HandleFunc("POST /v1/principals/{id}/credentials", s.handleCreateCredential)
+	mux.HandleFunc("GET /v1/principals/{id}/credentials", s.handleListCredentials)
+	mux.HandleFunc("POST /v1/credentials/{credential_id}/rotate", s.handleRotateCredential)
+	mux.HandleFunc("DELETE /v1/credentials/{credential_id}", s.handleRevokeCredential)
 	mux.HandleFunc("POST /v1/hooks", s.handleCreateHook)
 	mux.HandleFunc("POST /v1/hooks/{token}", s.handleIngestHook)
 	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
