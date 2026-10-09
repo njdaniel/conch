@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -656,5 +658,194 @@ func TestVoiceSessionCancelledCallerIsNotLoggedAsAnOutage(t *testing.T) {
 	// And the store is intact: the next caller is served.
 	if res := f.session(t, "ann2", "ops"); res.status != http.StatusOK {
 		t.Errorf("the next session = %d %s", res.status, res.body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Holders (issue #161)
+
+// A session records its holder: one row per (room, principal, credential),
+// the same row again on a repeat, and nothing at all for a request that is
+// refused before a room is looked at.
+func TestVoiceSessionRecordsTheHolder(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	holders := func() []store.VoiceHolder {
+		t.Helper()
+		var all []store.VoiceHolder
+		for _, ch := range []store.Channel{f.ops, f.ops2} {
+			rooms, err := f.srv.store.VoiceRoomsForChannel(ctx, ch.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range rooms {
+				h, err := f.srv.store.VoiceRoomHolders(ctx, r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				all = append(all, h...)
+			}
+		}
+		return all
+	}
+
+	steps := []struct {
+		name    string
+		who     string
+		channel string
+		status  int
+		want    int // holder rows after the step
+	}{
+		{"the first session", "ann", "ops", 200, 1},
+		{"the same session again", "ann", "ops", 200, 1},
+		{"another member", "ann2", "ops", 200, 2},
+		{"the same member in another channel", "ann", "ops2", 200, 3},
+		{"a non-member is refused", "bob", "ops", 404, 3},
+		{"an agent is refused", "robo", "ops", 403, 3},
+		{"a channel that does not exist", "ann", "nowhere", 404, 3},
+		{"a disabled principal", "dora", "ops", 401, 3},
+	}
+	for _, st := range steps {
+		res := f.session(t, st.who, st.channel)
+		if res.status != st.status {
+			t.Fatalf("%s: status = %d, want %d; %s", st.name, res.status, st.status, res.body)
+		}
+		if got := len(holders()); got != st.want {
+			t.Fatalf("%s: holder rows = %d, want %d", st.name, got, st.want)
+		}
+	}
+	room := f.room(t, f.ops)
+	_ = room
+	annCred := f.credID(t, "ann")
+	var found bool
+	for _, h := range holders() {
+		if h.PrincipalID == f.ids["ann"] && h.CredentialID == annCred {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ann's row does not name the credential she used")
+	}
+}
+
+// The holder is recorded before LiveKit is asked for the room and so before a
+// token exists; if it cannot be recorded no token is returned.
+func TestVoiceSessionHolderIsRecordedBeforeAnyToken(t *testing.T) {
+	t.Run("recorded first", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		real := f.srv.voice.recordHolder
+		calls := 0
+		f.srv.voice.recordHolder = func(ctx context.Context, room, principal, cred int64) error {
+			calls++
+			if n := f.lk.count("CreateRoom"); n != 0 {
+				t.Errorf("CreateRoom was called %d times before the holder was recorded", n)
+			}
+			return real(ctx, room, principal, cred)
+		}
+		decodeSession(t, f.session(t, "ann", "ops"))
+		if calls != 1 {
+			t.Errorf("recordHolder calls = %d, want 1", calls)
+		}
+	})
+	t.Run("recording fails", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		f.srv.voice.recordHolder = func(context.Context, int64, int64, int64) error { return errors.New("store unavailable") }
+		res := f.session(t, "ann", "ops")
+		if res.status != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; %s", res.status, res.body)
+		}
+		if strings.Contains(res.body, "token") || strings.Contains(res.body, "eyJ") {
+			t.Errorf("the failure carries a token: %s", res.body)
+		}
+		if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+			t.Errorf("voice_session_issued = %d, want 0", n)
+		}
+		if f.lk.count("CreateRoom") != 0 {
+			t.Error("LiveKit was asked for a room although the holder could not be recorded")
+		}
+	})
+}
+
+// A session request racing a rotation must not hand out a token for a retired
+// room: it starts over against the new room, and gives up (nothing issued)
+// when the room keeps changing.
+func TestVoiceSessionRacingARotation(t *testing.T) {
+	tests := []struct {
+		name      string
+		rotations int // rotations that land while CreateRoom is in flight
+		wantCode  int
+	}{
+		{"no rotation", 0, http.StatusOK},
+		{"one rotation", 1, http.StatusOK},
+		{"two rotations", 2, http.StatusOK},
+		{"the room keeps changing", voiceRoomAttempts, http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ctx := context.Background()
+			var left atomic.Int64
+			left.Store(int64(tt.rotations))
+			var seen []string
+			var mu sync.Mutex
+			f.lk.setOnCreate(func(room string) {
+				mu.Lock()
+				seen = append(seen, room)
+				mu.Unlock()
+				if left.Add(-1) < 0 {
+					return
+				}
+				cur, err := f.srv.store.ChannelVoiceRoom(ctx, f.ops.ID)
+				if err != nil {
+					t.Errorf("room: %v", err)
+					return
+				}
+				if _, _, err := f.srv.store.RotateVoiceRoom(ctx, cur.ID, store.VoiceRotateMemberRemoved); err != nil {
+					t.Errorf("rotate: %v", err)
+				}
+			})
+			res := f.session(t, "ann", "ops")
+			if res.status != tt.wantCode {
+				t.Fatalf("status = %d, want %d; %s", res.status, tt.wantCode, res.body)
+			}
+			cur := f.room(t, f.ops)
+			mu.Lock()
+			defer mu.Unlock()
+			if len(seen) != tt.rotations+1 && tt.wantCode == http.StatusOK || len(seen) != voiceRoomAttempts && tt.wantCode != http.StatusOK {
+				t.Errorf("CreateRoom calls = %d: %v", len(seen), len(seen))
+			}
+			if tt.wantCode != http.StatusOK {
+				if errCode(t, res.body) != schema.ErrorCodeVoiceUnavailable || strings.Contains(res.body, "eyJ") {
+					t.Errorf("answer = %s, want voice_unavailable and no token", res.body)
+				}
+				if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+					t.Errorf("voice_session_issued = %d, want 0", n)
+				}
+				return
+			}
+			g := decodeSession(t, res).Rooms[0]
+			if g.Room != cur {
+				t.Errorf("the token names %q, not the channel's current room", g.Room)
+			}
+			if len(seen) > 0 && seen[len(seen)-1] != cur {
+				t.Errorf("the last room asked of LiveKit was not the current one")
+			}
+			// Only the live room has the holder; the retired ones were never signed for.
+			live, err := f.srv.store.VoiceRoomsForChannel(context.Background(), f.ops.ID)
+			if err != nil || len(live) != 1 {
+				t.Fatalf("live rooms = %+v, %v", live, err)
+			}
+			if h, _ := f.srv.store.VoiceRoomHolders(context.Background(), live[0].ID); len(h) != 1 {
+				t.Errorf("holders of the live room = %+v, want ann", h)
+			}
+			// The poller keeps no state for a retired room.
+			f.srv.voice.mu.Lock()
+			defer f.srv.voice.mu.Unlock()
+			for _, name := range seen[:len(seen)-1] {
+				if f.srv.voice.rooms[name] != nil {
+					t.Error("the poller still tracks a retired room")
+				}
+			}
+		})
 	}
 }

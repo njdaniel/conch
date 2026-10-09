@@ -142,6 +142,12 @@ func TestRoomCalls(t *testing.T) {
 			},
 		},
 		{
+			name: "DeleteRoom", method: "DeleteRoom", response: `{}`,
+			call:      func(c *Client) (any, error) { return nil, c.DeleteRoom(context.Background(), "conch-a") },
+			wantBody:  map[string]any{"room": "conch-a"},
+			wantGrant: map[string]any{"roomCreate": true},
+		},
+		{
 			name: "RemoveParticipant", method: "RemoveParticipant", response: `{}`,
 			call:      func(c *Client) (any, error) { return nil, c.RemoveParticipant(context.Background(), "conch-a", "p7") },
 			wantBody:  map[string]any{"room": "conch-a", "identity": "p7"},
@@ -223,13 +229,14 @@ func TestFailuresAreUnavailable(t *testing.T) {
 		"ListRooms":         func(c *Client) error { _, err := c.ListRooms(context.Background()); return err },
 		"ListParticipants":  func(c *Client) error { _, err := c.ListParticipants(context.Background(), "r"); return err },
 		"RemoveParticipant": func(c *Client) error { return c.RemoveParticipant(context.Background(), "r", "p1") },
+		"DeleteRoom":        func(c *Client) error { return c.DeleteRoom(context.Background(), "r") },
 	}
 	for caseName, url := range failureCases(t) {
 		for opName, op := range ops {
-			if caseName == "malformed JSON" && opName == "RemoveParticipant" {
+			if caseName == "malformed JSON" && (opName == "RemoveParticipant" || opName == "DeleteRoom") {
 				continue // it ignores the body, so there is nothing to be malformed
 			}
-			if caseName == "wrong JSON types" && opName == "RemoveParticipant" {
+			if caseName == "wrong JSON types" && (opName == "RemoveParticipant" || opName == "DeleteRoom") {
 				continue
 			}
 			t.Run(caseName+"/"+opName, func(t *testing.T) {
@@ -445,6 +452,7 @@ func TestRoomCallsRejectEmptyNames(t *testing.T) {
 	calls := map[string]func() error{
 		"CreateRoom":                 func() error { return c.CreateRoom(ctx, "") },
 		"ListParticipants":           func() error { _, err := c.ListParticipants(ctx, ""); return err },
+		"DeleteRoom no room":         func() error { return c.DeleteRoom(ctx, "") },
 		"RemoveParticipant no room":  func() error { return c.RemoveParticipant(ctx, "", "p7") },
 		"RemoveParticipant no ident": func() error { return c.RemoveParticipant(ctx, "r", "") },
 	}
@@ -516,5 +524,43 @@ func TestEvictReportsWhetherSomeoneWasRemoved(t *testing.T) {
 	}
 	if removed, err := testClient(t, present.URL).Evict(ctx, "", "p7"); err == nil || removed {
 		t.Errorf("Evict without a room = %v, %v", removed, err)
+	}
+}
+
+// Deleting a room LiveKit no longer has is success, but only on LiveKit's own
+// not_found answer; every other failure is ErrUnavailable and repeats neither
+// the response body nor the secret.
+func TestDeleteRoomTreatsNotFoundAsDone(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		status     int
+		wantDone   bool
+	}{
+		{"ok", `{}`, 200, true},
+		{"room already gone", `{"code":"not_found","msg":"requested room does not exist"}`, 404, true},
+		{"unknown method", `{"code":"bad_route","msg":"no handler for path"}`, 404, false},
+		{"proxy page", "<html>Not Found</html>", 404, false},
+		{"empty 404", "", 404, false},
+		{"server error", `{"code":"internal","msg":"leaky detail"}`, 500, false},
+		{"unauthenticated", `{"code":"unauthenticated"}`, 401, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := fakeLiveKit(t, tt.status, tt.body)
+			err := testClient(t, srv.URL).DeleteRoom(context.Background(), "conch-a")
+			if tt.wantDone {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("err = %v, want ErrUnavailable", err)
+			}
+			for _, leak := range []string{"leaky", "bad_route", "Not Found", "s3cret-value"} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("error repeats %q: %v", leak, err)
+				}
+			}
+		})
 	}
 }
