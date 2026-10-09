@@ -169,6 +169,37 @@ func (h *Hub) DropPrincipal(channelID, principalID int64) int {
 	return n
 }
 
+// DropPrincipalAll closes every subscription, v0 and v1, that principalID holds
+// on any channel, and reports how many it closed. It is the hub half of
+// disabling a principal or revoking all its credentials. As with
+// DropPrincipal, a message broadcast after it returns is never delivered to a
+// dropped subscription, and a zero principalID (no caller) is a no-op.
+func (h *Hub) DropPrincipalAll(principalID int64) int {
+	if principalID == 0 {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, members := range h.subs {
+		for sub := range members {
+			if sub.principalID == principalID {
+				h.dropLocked(sub)
+				n++
+			}
+		}
+	}
+	for _, members := range h.subsV1 {
+		for sub := range members {
+			if sub.principalID == principalID {
+				h.dropV1Locked(sub)
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // Closed reports whether Close has been called, letting subscribers
 // distinguish hub shutdown from a slow-consumer drop after their message
 // channel closes.

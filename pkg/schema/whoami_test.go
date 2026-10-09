@@ -11,6 +11,7 @@ func TestWhoAmIGoldenFixtures(t *testing.T) {
 		new  func() any
 	}{
 		{"whoami-response-v1.json", func() any { return new(WhoAmIResponseV1) }},
+		{"revoke-all-credentials-response-v1.json", func() any { return new(RevokeAllCredentialsResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {

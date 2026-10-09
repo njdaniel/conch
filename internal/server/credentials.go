@@ -64,6 +64,9 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
+	case errors.Is(err, store.ErrPrincipalDisabled):
+		writeError(w, http.StatusConflict, "principal_disabled", "principal is disabled")
+		return
 	case errors.Is(err, store.ErrCredentialExpiryPast):
 		writeError(w, http.StatusBadRequest, "invalid_request", "credential expires_at must be in the future")
 		return
@@ -105,6 +108,9 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
 		return
+	case errors.Is(err, store.ErrPrincipalDisabled):
+		writeError(w, http.StatusConflict, "principal_disabled", "principal is disabled")
+		return
 	case errors.Is(err, store.ErrCredentialRevoked):
 		writeError(w, http.StatusConflict, "credential_revoked", "credential is revoked")
 		return
@@ -129,6 +135,9 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
+		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: revoke failed", "credential", id, "error", err)
