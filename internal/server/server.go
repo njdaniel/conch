@@ -35,6 +35,9 @@ type Config struct {
 	// Ntfy configures optional approval lifecycle push notifications. When
 	// unconfigured, notification hooks are silent and append no audit rows.
 	Ntfy approvals.NtfyConfig
+	// AuthMode selects REST/WebSocket authentication: AuthOff (the default,
+	// also the empty value) or AuthRequired. See auth.go.
+	AuthMode AuthMode
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -61,6 +64,11 @@ type Server struct {
 	broadcaster Broadcaster
 	http        *http.Server
 	ln          net.Listener
+	// routes is the route table (routes.go); mux and routeByPattern are
+	// derived from it and nothing else registers routes.
+	routes         []route
+	routeByPattern map[string]route
+	mux            *http.ServeMux
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -75,37 +83,20 @@ func New(cfg Config, st *store.Store) *Server {
 		slog.Error("server: ntfy disabled by invalid configuration", "error", err)
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /v0/ws", s.handleWS)
-	mux.HandleFunc("GET /v1/ws", s.handleWSV1)
-	mux.HandleFunc("POST /v0/channels", s.handleCreateChannel)
-	mux.HandleFunc("GET /v1/channels", s.handleListChannels)
-	mux.HandleFunc("POST /v0/principals", s.handleCreatePrincipal)
-	mux.HandleFunc("POST /v0/channels/{channel}/messages", s.handlePostMessage)
-	mux.HandleFunc("GET /v0/channels/{channel}/messages", s.handleListMessages)
-	mux.HandleFunc("POST /v1/channels/{channel}/messages", s.handlePostMessageV1)
-	mux.HandleFunc("GET /v1/channels/{channel}/messages", s.handleListMessagesV1)
-	// Agent manifests are open like the other admin endpoints today; they
-	// become operator-only under issue #89.
-	mux.HandleFunc("PUT /v1/principals/{id}/manifest", s.handlePutManifest)
-	mux.HandleFunc("GET /v1/principals/{id}/manifest", s.handleGetManifest)
-	// Credential administration is open like the other admin endpoints today;
-	// it becomes operator-only under issue #89. Nothing authenticates with
-	// these credentials yet.
-	mux.HandleFunc("POST /v1/principals/{id}/credentials", s.handleCreateCredential)
-	mux.HandleFunc("GET /v1/principals/{id}/credentials", s.handleListCredentials)
-	mux.HandleFunc("POST /v1/credentials/{credential_id}/rotate", s.handleRotateCredential)
-	mux.HandleFunc("DELETE /v1/credentials/{credential_id}", s.handleRevokeCredential)
-	mux.HandleFunc("POST /v1/hooks", s.handleCreateHook)
-	mux.HandleFunc("POST /v1/hooks/{token}", s.handleIngestHook)
-	mux.HandleFunc("POST /v1/approvals", s.handleCreateApproval)
-	mux.HandleFunc("GET /v1/approvals", s.handleListOpenApprovals)
-	mux.HandleFunc("POST /v1/approvals/{id}/decisions", s.handleCastDecision)
-	mux.Handle("/mcp", s.mcpHandler())
+	s.routes = s.routeTable()
+	s.routeByPattern = make(map[string]route, len(s.routes))
+	s.mux = http.NewServeMux()
+	for _, rt := range s.routes {
+		s.routeByPattern[rt.pattern] = rt
+		s.mux.Handle(rt.pattern, s.guard(rt))
+	}
+	var handler http.Handler = s.mux
+	if cfg.authRequired() {
+		handler = s.authMiddleware(handler)
+	}
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s

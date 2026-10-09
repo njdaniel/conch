@@ -42,7 +42,7 @@ func (s *Server) handlePutManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manifest, created, err := s.store.PutAgentManifest(ctx, id, req)
+	manifest, created, err := s.store.PutAgentManifest(ctx, auditActor(ctx), id, req)
 	var noChannel *store.ChannelNotFoundError
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):
@@ -70,6 +70,12 @@ func (s *Server) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := manifestPrincipalID(w, r)
 	if !ok {
+		return
+	}
+	// Operators and the agent the manifest belongs to only. Checked before any
+	// lookup so a forbidden caller cannot probe which manifests exist.
+	if caller, authed := callerFrom(ctx); authed && !isOperator(caller) && caller.ID != id {
+		s.denyForbidden(w, r, caller, "forbidden", "operator role or the manifest's own agent required")
 		return
 	}
 	manifest, err := s.store.AgentManifestByPrincipal(ctx, id)
