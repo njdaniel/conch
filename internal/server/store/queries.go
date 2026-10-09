@@ -321,6 +321,26 @@ func (s *Store) AppendAuditEvent(ctx context.Context, actor, action, subject, de
 	return AuditEvent{ID: id, Actor: actor, Action: action, Subject: subject, Detail: detail, CreatedAt: now}, nil
 }
 
+// LastAuditEvent returns the most recent audit event with the given action,
+// or ErrNotFound when there is none.
+func (s *Store) LastAuditEvent(ctx context.Context, action string) (AuditEvent, error) {
+	var e AuditEvent
+	var createdAt int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, actor, action, subject, detail, created_at
+		 FROM audit_events WHERE action = ?
+		 ORDER BY id DESC LIMIT 1`, action).
+		Scan(&e.ID, &e.Actor, &e.Action, &e.Subject, &e.Detail, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditEvent{}, fmt.Errorf("store: last audit event %q: %w", action, ErrNotFound)
+	}
+	if err != nil {
+		return AuditEvent{}, fmt.Errorf("store: last audit event %q: %w", action, err)
+	}
+	e.CreatedAt = time.UnixMilli(createdAt)
+	return e, nil
+}
+
 // ListAuditEvents returns up to limit audit events with ID greater than
 // afterID, in ascending ID order.
 func (s *Store) ListAuditEvents(ctx context.Context, afterID int64, limit int) ([]AuditEvent, error) {
