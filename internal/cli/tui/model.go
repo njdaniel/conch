@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,7 +44,19 @@ type messageReceived struct {
 type subscriptionEnded struct {
 	channel string
 	err     error
+	// lived is how long the subscription ran; one that stayed up for a while
+	// was healthy, so the next drop starts the backoff over.
+	lived time.Duration
 }
+
+// resubscribeDue fires when a dropped subscription's backoff delay elapses.
+type resubscribeDue struct{ channel string }
+
+const (
+	minResubscribeDelay = time.Second
+	maxResubscribeDelay = 30 * time.Second
+)
+
 type messageSent struct{ err error }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
@@ -96,6 +109,20 @@ type Model struct {
 	// notice is a channel-list problem that must survive the "connected"
 	// status the first backfill would otherwise write.
 	notice string
+	// backoff is the delay the next failure of a channel's subscription will
+	// wait; absent means minResubscribeDelay.
+	backoff map[string]time.Duration
+	// retryPending marks channels whose resubscribeDue timer is in flight. It
+	// is what keeps "select away and back" from starting a second subscription
+	// while the timer is still going to start one.
+	retryPending map[string]bool
+	// after schedules msg to be delivered once d has elapsed. Injectable so
+	// tests can observe the delay instead of sleeping through it.
+	after func(d time.Duration, msg tea.Msg) tea.Cmd
+}
+
+func tickAfter(d time.Duration, msg tea.Msg) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return msg })
 }
 
 // NewModel constructs a model for the configured channels. When channels is
@@ -113,7 +140,8 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
 		messages: make(map[string][]schema.MessageV1), subscribed: make(map[string]bool),
-		events: make(chan tea.Msg, 64), mode: modeChannels}
+		events: make(chan tea.Msg, 64), mode: modeChannels,
+		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter}
 	if len(clean) == 0 {
 		m.loadingChannels = true
 		return m
@@ -327,7 +355,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.subscribed[names[0]] = true
 		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
 	case messagesLoaded:
+		// The result of a channel the user has since left must not overwrite
+		// the status of the channel they are looking at.
+		stale := msg.channel != m.current()
 		if msg.err != nil {
+			if stale {
+				return m, nil
+			}
 			// A channel-list notice explains the failure better than the
 			// fallback channel's own load error does.
 			if m.notice != "" {
@@ -337,6 +371,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], msg.messages)
+			if stale {
+				return m, nil
+			}
 			if m.notice != "" {
 				m.status = m.notice
 			} else {
@@ -344,16 +381,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case messageReceived:
+		// Data flowing proves the subscription is healthy.
+		delete(m.backoff, msg.channel)
 		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV1{msg.message})
 		return m, m.waitEvent()
 	case subscriptionEnded:
-		if msg.err != nil && !errors.Is(msg.err, context.Canceled) && m.notice == "" {
-			m.status = "live updates: " + msg.err.Error()
-			if errors.Is(msg.err, cli.ErrUnauthenticated) {
-				m.status = msg.err.Error()
-			}
+		return m.subscriptionEnded(msg)
+	case resubscribeDue:
+		if !m.retryPending[msg.channel] {
+			// Superseded: the channel already resubscribed some other way.
+			return m, nil
 		}
-		return m, m.waitEvent()
+		delete(m.retryPending, msg.channel)
+		if msg.channel != m.current() || m.subscribed[msg.channel] {
+			// The user left; selectChannel resubscribes when they return.
+			return m, nil
+		}
+		m.subscribed[msg.channel] = true
+		// Backfill the gap; mergeMessages de-duplicates by id.
+		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
 	case messageSent:
 		if msg.err != nil {
 			m.status = msg.err.Error()
@@ -364,6 +410,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// subscriptionEnded clears the channel's subscribed flag so it can be started
+// again, and for the selected channel schedules that restart after a backoff
+// delay so a subscription that fails immediately cannot spin.
+func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
+	wait := m.waitEvent()
+	if errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
+		return m, wait
+	}
+	m.subscribed[msg.channel] = false
+	selected := msg.channel == m.current()
+	if errors.Is(msg.err, cli.ErrUnauthenticated) {
+		// Retrying cannot fix a missing login; the user must act, and
+		// re-selecting the channel will try again afterwards.
+		if selected && m.notice == "" {
+			m.status = msg.err.Error()
+		}
+		return m, wait
+	}
+	if msg.lived >= maxResubscribeDelay {
+		delete(m.backoff, msg.channel)
+	}
+	if !selected {
+		// Nobody is looking; selectChannel resubscribes on return.
+		return m, wait
+	}
+	if m.notice == "" {
+		m.status = "live updates: reconnecting…"
+	}
+	delay, ok := m.backoff[msg.channel]
+	if !ok {
+		delay = minResubscribeDelay
+	}
+	m.backoff[msg.channel] = delay * 2
+	if m.backoff[msg.channel] > maxResubscribeDelay {
+		m.backoff[msg.channel] = maxResubscribeDelay
+	}
+	m.retryPending[msg.channel] = true
+	return m, tea.Batch(wait, m.after(delay, resubscribeDue{channel: msg.channel}))
+}
+
 func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	next := m.selected + delta
 	if next < 0 || next >= len(m.channels) || next == m.selected {
@@ -372,7 +458,8 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.selected = next
 	m.status = "loading…"
 	commands := []tea.Cmd{m.loadCurrent()}
-	if !m.subscribed[m.current()] {
+	// A pending retry timer will start the subscription itself.
+	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
 		m.subscribed[m.current()] = true
 		commands = append(commands, m.startSubscription())
 	}
@@ -447,6 +534,7 @@ func (m Model) startSubscription() tea.Cmd {
 	}
 	return func() tea.Msg {
 		go func() {
+			started := time.Now()
 			err := m.api.Subscribe(m.ctx, channel, func(message schema.MessageV1) error {
 				select {
 				case m.events <- messageReceived{channel: channel, message: message}:
@@ -456,7 +544,7 @@ func (m Model) startSubscription() tea.Cmd {
 				}
 			})
 			select {
-			case m.events <- subscriptionEnded{channel: channel, err: err}:
+			case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
 			case <-m.ctx.Done():
 			}
 		}()
