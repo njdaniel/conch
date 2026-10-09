@@ -52,6 +52,10 @@ type subscriptionEnded struct {
 // resubscribeDue fires when a dropped subscription's backoff delay elapses.
 type resubscribeDue struct{ channel string }
 
+// statusReconnecting is shown while the selected channel's live subscription
+// is down and a retry is scheduled.
+const statusReconnecting = "live updates: reconnecting…"
+
 const (
 	minResubscribeDelay = time.Second
 	maxResubscribeDelay = 30 * time.Second
@@ -374,9 +378,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if stale {
 				return m, nil
 			}
-			if m.notice != "" {
+			switch {
+			case m.notice != "":
 				m.status = m.notice
-			} else {
+			case m.retryPending[msg.channel]:
+				// History loaded, but the live subscription is down and a
+				// retry is waiting: "connected" would be untrue.
+				m.status = statusReconnecting
+			default:
 				m.status = "connected"
 			}
 		}
@@ -436,7 +445,7 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 		return m, wait
 	}
 	if m.notice == "" {
-		m.status = "live updates: reconnecting…"
+		m.status = statusReconnecting
 	}
 	delay, ok := m.backoff[msg.channel]
 	if !ok {

@@ -825,6 +825,31 @@ func TestNoSecondSubscriptionWhileRetryPending(t *testing.T) {
 	}
 }
 
+// A backfill that completes while the selected channel's subscription is down
+// and a retry is pending must not report "connected": the history loaded, the
+// live feed did not. Once the retry has resubscribed, it may.
+func TestBackfillDoesNotClaimConnectedWhileReconnecting(t *testing.T) {
+	m, _, _ := resubModel(t)
+	// The subscription fails at once; the first backfill is still in flight.
+	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+	if m.status != statusReconnecting {
+		t.Fatalf("status after the drop = %q", m.status)
+	}
+	m, _ = update(m, messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}})
+	if m.status != statusReconnecting {
+		t.Errorf("status after a backfill during the outage = %q, want %q", m.status, statusReconnecting)
+	}
+	if len(m.messages["general"]) != 1 {
+		t.Errorf("the backfill was not merged: %+v", m.messages["general"])
+	}
+	// The retry fires and resubscribes; its backfill may now say connected.
+	m, _ = update(m, resubscribeDue{channel: "general"})
+	m, _ = update(m, messagesLoaded{channel: "general"})
+	if m.status != "connected" {
+		t.Errorf("status after the reconnect's backfill = %q, want connected", m.status)
+	}
+}
+
 func TestStaleBackfillKeepsStatus(t *testing.T) {
 	tests := []struct {
 		name string
