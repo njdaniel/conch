@@ -41,6 +41,8 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperator, hf(s.handleRevokeAllCredentials)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
+		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
+		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust
