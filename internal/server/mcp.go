@@ -11,7 +11,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/njdaniel/conch/internal/server/approvals"
-	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -310,11 +309,7 @@ func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in m
 	if serr != nil {
 		return schema.RequestApprovalOutput{}, serr
 	}
-	quorum := in.Quorum
-	if quorum == 0 {
-		quorum = 1
-	}
-	created, err := s.approvals.Create(ctx, store.ApprovalParams{RequesterID: requesterID, ChannelID: channel.id(), Title: in.Title, Body: in.Body, Payload: payload, Options: in.Options, Deadline: deadline, Quorum: quorum, Escalation: in.EscalationTarget})
+	created, err := channel.createApproval(ctx, req, deadline)
 	if errors.Is(err, approvals.ErrInvalid) {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
@@ -359,6 +354,14 @@ func (s *Server) awaitDecisionMCP(ctx context.Context, scope *agentScope, in mcp
 	effectiveMS := timeout.Milliseconds()
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	return s.pollDecision(ctx, waitCtx, scope, in.ApprovalID, effectiveMS)
+}
+
+// pollDecision polls an approval until it is terminal or waitCtx ends. ctx is
+// the tool call; waitCtx is the wait's own deadline. The first authorized
+// check runs even when waitCtx is already done, so no timeout — however short
+// — can produce an answer for an approval the agent may not observe.
+func (s *Server) pollDecision(ctx, waitCtx context.Context, scope *agentScope, approvalID, effectiveMS int64) (schema.AwaitDecisionOutput, *schema.Error) {
 	ticker := time.NewTicker(mcpPollInterval)
 	defer ticker.Stop()
 	for {
@@ -374,7 +377,7 @@ func (s *Server) awaitDecisionMCP(ctx context.Context, scope *agentScope, in mcp
 		if serr := scope.refresh(ctx); serr != nil {
 			return schema.AwaitDecisionOutput{}, serr
 		}
-		checked, serr := s.checkDecisionMCP(ctx, scope, mcpCheckDecisionInput{ApprovalID: in.ApprovalID})
+		checked, serr := s.checkDecisionMCP(ctx, scope, mcpCheckDecisionInput{ApprovalID: approvalID})
 		if serr != nil {
 			return schema.AwaitDecisionOutput{}, serr
 		}

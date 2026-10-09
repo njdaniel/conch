@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -205,9 +206,6 @@ type grantedChannel struct {
 	channel store.Channel
 }
 
-// id returns the channel's id.
-func (g *grantedChannel) id() int64 { return g.channel.ID }
-
 // insertMessage stores a message in the channel, authored by the agent.
 func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload *schema.Payload) (store.Message, error) {
 	return g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
@@ -216,6 +214,28 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 // listMessages reads one page of the channel's messages.
 func (g *grantedChannel) listMessages(ctx context.Context, after int64, limit int) ([]store.Message, error) {
 	return g.scope.s.store.ListMessages(ctx, g.channel.ID, after, limit)
+}
+
+// createApproval raises an approval in the channel on the agent's behalf. The
+// requester and the channel come from the grant, never from req, so a tool
+// body cannot raise an approval as another principal or in a channel it was
+// not granted.
+func (g *grantedChannel) createApproval(ctx context.Context, req schema.CreateApprovalRequestV1, deadline time.Time) (store.Approval, error) {
+	quorum := req.Quorum
+	if quorum == 0 {
+		quorum = 1
+	}
+	return g.scope.s.approvals.Create(ctx, store.ApprovalParams{
+		RequesterID: g.scope.identity.principalID,
+		ChannelID:   g.channel.ID,
+		Title:       req.Title,
+		Body:        req.Body,
+		Payload:     req.Payload,
+		Options:     req.Options,
+		Deadline:    deadline,
+		Quorum:      quorum,
+		Escalation:  req.EscalationTarget,
+	})
 }
 
 // grantedApproval is an approval the agent has been authorized to observe.
