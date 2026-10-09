@@ -97,6 +97,7 @@ Scope:
   it only reads presence and never joins. One line per participant, in
   principal id order:
     <id> <name|-> <talking|quiet> <joined-at, RFC 3339 UTC>
+  (a room narrower than the channel adds a fifth field naming it, net:<id>)
   The name is shown for yourself only (the API tells a non-operator no one
   else's) and is "-" when unknown; a name with spaces or odd characters is
   double-quoted and escaped. An empty room prints "nobody is connected" and
@@ -803,13 +804,19 @@ func voiceName(name string) string {
 }
 
 // writeVoicePresence prints the state of one presence document: one line per
-// participant in principal id order, or one line saying nobody is connected.
-// Rooms that carry a narrower audience than the channel are marked like a
-// scoped message; V3 servers send only the channel-wide room.
+// participant, in principal id order within each room, or one line saying
+// nobody is connected. The first four fields are always the same. A room that
+// carries a narrower audience than the channel adds a fifth, naming it
+// (net:<id>), so its people can never read as being in the channel-wide room;
+// V3 servers send only the channel-wide room.
 func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1, names map[int64]string) error {
 	lines := 0
 	for _, room := range doc.Rooms {
-		prefix := scopeMarker(room.Audience, nil)
+		scope := ""
+		if room.Audience != nil {
+			// The marker without its brackets and trailing space: one field.
+			scope = " " + strings.ReplaceAll(strings.Trim(scopeMarker(room.Audience, nil), "[] "), " ", "_")
+		}
 		people := append([]schema.VoiceParticipant(nil), room.Participants...)
 		sort.Slice(people, func(i, j int) bool { return people[i].PrincipalID < people[j].PrincipalID })
 		for _, p := range people {
@@ -817,7 +824,7 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 			if p.Transmitting {
 				state = "talking"
 			}
-			if _, err := fmt.Fprintf(w, "%s%d %s %s %s\n", prefix, p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339)); err != nil {
+			if _, err := fmt.Fprintf(w, "%d %s %s %s%s\n", p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339), scope); err != nil {
 				return err
 			}
 			lines++
@@ -921,6 +928,9 @@ func watchVoice(ctx context.Context, client *Client, channel string, stdout, std
 		return errVoiceNotConfigured
 	}
 	switch websocket.CloseStatus(err) {
+	case websocket.StatusNormalClosure:
+		// The server ended the stream in an orderly way: nothing failed.
+		return nil
 	case websocket.StatusGoingAway:
 		_, _ = fmt.Fprintln(stderr, "conch: server shutting down")
 		return nil

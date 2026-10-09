@@ -1340,6 +1340,14 @@ func TestVoiceStatusWatch(t *testing.T) {
 			wantStderr: "server shutting down",
 		},
 		{
+			name: "an orderly close by the server ends the watch without an error",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusNormalClosure, "")
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+		},
+		{
 			name: "unavailable and back is shown, not fatal",
 			socket: func(ctx context.Context, conn *websocket.Conn) {
 				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
@@ -1499,6 +1507,39 @@ func TestVoiceNameFields(t *testing.T) {
 	for _, tt := range tests {
 		if got := voiceName(tt.in); got != tt.want {
 			t.Errorf("voiceName(%q) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+// A room narrower than the channel (none before V5) adds a fifth field naming
+// its audience. The first four fields of every line stay what they are, and a
+// channel-wide line stays four fields, so a scoped room's people cannot read
+// as being in the channel's room.
+func TestVoicePresenceScopedRoomAddsAField(t *testing.T) {
+	at := schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC))
+	person := func(id int64, talking bool) schema.VoiceParticipant {
+		return schema.VoiceParticipant{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: at}
+	}
+	doc := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{
+		{Participants: []schema.VoiceParticipant{person(9, false), person(3, true)}},
+		{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipant{person(7, true), person(5, false)}},
+		{Audience: &schema.Audience{Kind: "future kind"}, Participants: []schema.VoiceParticipant{person(8, false)}},
+	}}
+	var out strings.Builder
+	if err := writeVoicePresence(&out, "general", doc, map[int64]string{3: "nick"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "3 nick talking 2026-10-09T08:30:00Z\n" +
+		"9 - quiet 2026-10-09T08:30:00Z\n" +
+		"5 - quiet 2026-10-09T08:30:00Z net:4\n" +
+		"7 - talking 2026-10-09T08:30:00Z net:4\n" +
+		"8 - quiet 2026-10-09T08:30:00Z future_kind\n"
+	if out.String() != want {
+		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if n := len(strings.Fields(line)); n != 4 && n != 5 {
+			t.Errorf("line %q has %d fields", line, n)
 		}
 	}
 }
