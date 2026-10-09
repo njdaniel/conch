@@ -135,6 +135,28 @@ Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <tok
 - `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
 - `check_decision` — read an approval's current state/resolution immediately, without blocking.
 
+**Agents are deny-by-default.** A token only says who the agent is. To do anything in a channel an agent needs both:
+
+- **membership** of the channel, and
+- a **manifest** granting the capability and the permission there.
+
+```sh
+# make the agent (principal 1) a member of "ops" (channel id 1)
+curl -s -X PUT localhost:8080/v1/channels/ops/members/1
+
+# let it read, post, and request/observe approvals in that channel
+curl -s -X PUT localhost:8080/v1/principals/1/manifest \
+  -H 'Content-Type: application/json' -d '{
+    "display_name": "deploy-bot", "tier": "A",
+    "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
+    "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
+  }'
+```
+
+Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`; each is granted separately. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
+
+**Upgrading:** agents that existed before this version have no manifest and can do nothing until you write one. `conchd` logs how many such agents there are at startup.
+
 A raw JSON-RPC example (most agents will instead use an MCP client SDK):
 
 ```sh
@@ -160,7 +182,6 @@ This drives the full loop live against freshly built binaries — agent posts vi
 ### Known limitations
 
 - No REST/TUI authentication beyond MCP bearer tokens today. Don't expose `conchd` past localhost/VPN without your own reverse-proxy auth in front of it.
-- No per-agent capability enforcement yet — any valid MCP token can call any registered tool.
 
 ## License
 

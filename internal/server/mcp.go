@@ -183,11 +183,30 @@ func (s *Server) authenticateMCP(r *http.Request) (int64, bool) {
 	return principalID, true
 }
 
+// addAgentTool registers one MCP tool behind the capability gate (authz.go).
+// Every tool must be registered through it: before the tool body runs, the
+// tool's name is mapped to a capability and checked against the calling
+// agent's manifest, and the body receives an agentScope, which is the only way
+// it can reach a channel or an approval. A tool with no capability mapping is
+// refused on every call.
+func addAgentTool[In, Out any](s *Server, server *mcp.Server, principalID int64, tool *mcp.Tool,
+	call func(ctx context.Context, scope *agentScope, in In) (*mcp.CallToolResult, Out, error),
+) {
+	mcp.AddTool(server, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		scope, serr := s.newAgentScope(ctx, principalID, tool.Name)
+		if serr != nil {
+			var zero Out
+			return mcpToolError(serr), zero, nil
+		}
+		return call(ctx, scope, in)
+	})
+}
+
 func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "conchd", Version: s.cfg.Version}, nil)
-	mcp.AddTool(server, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpPostMessageInput) (*mcp.CallToolResult, mcpPostMessageOutput, error) {
-			out, serr := s.postMessageMCP(ctx, principalID, in)
+	addAgentTool(s, server, principalID, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent."},
+		func(ctx context.Context, scope *agentScope, in mcpPostMessageInput) (*mcp.CallToolResult, mcpPostMessageOutput, error) {
+			out, serr := s.postMessageMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpPostMessageOutput{}, nil
 			}
@@ -197,9 +216,9 @@ func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("posted message %d", out.Message.ID)}}}, mcpPostMessageOutput{Message: message}, nil
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "read_channel", Description: "Read one paginated page of messages from a Conch channel."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpReadChannelInput) (*mcp.CallToolResult, mcpListMessagesOutput, error) {
-			out, serr := s.readChannelMCP(ctx, in)
+	addAgentTool(s, server, principalID, &mcp.Tool{Name: "read_channel", Description: "Read one paginated page of messages from a Conch channel."},
+		func(ctx context.Context, scope *agentScope, in mcpReadChannelInput) (*mcp.CallToolResult, mcpListMessagesOutput, error) {
+			out, serr := s.readChannelMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpListMessagesOutput{}, nil
 			}
@@ -213,18 +232,18 @@ func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read %d messages", len(out.Messages))}}}, mcpListMessagesOutput{Messages: messages, NextAfter: out.NextAfter}, nil
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "request_approval", Description: "Raise an approval as the authenticated agent."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpRequestApprovalInput) (*mcp.CallToolResult, mcpRequestApprovalOutput, error) {
-			out, serr := s.requestApprovalMCP(ctx, principalID, in)
+	addAgentTool(s, server, principalID, &mcp.Tool{Name: "request_approval", Description: "Raise an approval as the authenticated agent."},
+		func(ctx context.Context, scope *agentScope, in mcpRequestApprovalInput) (*mcp.CallToolResult, mcpRequestApprovalOutput, error) {
+			out, serr := s.requestApprovalMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpRequestApprovalOutput{}, nil
 			}
 			projected := mcpRequestApprovalOutput{ID: out.ID, Title: out.Title, State: out.State, Deadline: out.Deadline.Time().Format(time.RFC3339Nano)}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("requested approval %d", out.ID)}}}, projected, nil
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "await_decision", Description: "Wait for an approval resolution, polling persisted state. timeout_ms is clamped to a server-side maximum of 60000 ms."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpAwaitDecisionInput) (*mcp.CallToolResult, mcpAwaitDecisionOutput, error) {
-			out, serr := s.awaitDecisionMCP(ctx, in)
+	addAgentTool(s, server, principalID, &mcp.Tool{Name: "await_decision", Description: "Wait for an approval resolution, polling persisted state. timeout_ms is clamped to a server-side maximum of 60000 ms."},
+		func(ctx context.Context, scope *agentScope, in mcpAwaitDecisionInput) (*mcp.CallToolResult, mcpAwaitDecisionOutput, error) {
+			out, serr := s.awaitDecisionMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpAwaitDecisionOutput{}, nil
 			}
@@ -234,9 +253,9 @@ func (s *Server) mcpServerForPrincipal(principalID int64) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("approval %d is %s", in.ApprovalID, out.State)}}}, projected, nil
 		})
-	mcp.AddTool(server, &mcp.Tool{Name: "check_decision", Description: "Immediately read an approval's current persisted state and resolution, if terminal."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in mcpCheckDecisionInput) (*mcp.CallToolResult, mcpCheckDecisionOutput, error) {
-			out, serr := s.checkDecisionMCP(ctx, in)
+	addAgentTool(s, server, principalID, &mcp.Tool{Name: "check_decision", Description: "Immediately read an approval's current persisted state and resolution, if terminal."},
+		func(ctx context.Context, scope *agentScope, in mcpCheckDecisionInput) (*mcp.CallToolResult, mcpCheckDecisionOutput, error) {
+			out, serr := s.checkDecisionMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpCheckDecisionOutput{}, nil
 			}
@@ -270,7 +289,8 @@ func mcpToolError(err *schema.Error) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, StructuredContent: err, IsError: true}
 }
 
-func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostMessageInput) (schema.PostMessageResponseV1, *schema.Error) {
+func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPostMessageInput) (schema.PostMessageResponseV1, *schema.Error) {
+	authorID := scope.principalID
 	if strings.TrimSpace(in.Channel) == "" {
 		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
@@ -289,13 +309,9 @@ func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostM
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV1{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
-	channel, err := s.store.ChannelByName(ctx, in.Channel)
-	if errors.Is(err, store.ErrNotFound) {
-		return schema.PostMessageResponseV1{}, &schema.Error{Code: "channel_not_found", Message: "channel not found"}
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "mcp: find channel failed", "error", err)
-		return schema.PostMessageResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
+	channel, serr := scope.channelByName(ctx, in.Channel, schema.ChannelPermissionPost)
+	if serr != nil {
+		return schema.PostMessageResponseV1{}, serr
 	}
 	stored, err := s.store.InsertMessageV1(ctx, channel.ID, authorID, in.Body, schemaPayload)
 	if err != nil {
@@ -310,7 +326,7 @@ func (s *Server) postMessageMCP(ctx context.Context, authorID int64, in mcpPostM
 	return schema.PostMessageResponseV1{Message: messageV1}, nil
 }
 
-func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (schema.ListMessagesResponseV1, *schema.Error) {
+func (s *Server) readChannelMCP(ctx context.Context, scope *agentScope, in mcpReadChannelInput) (schema.ListMessagesResponseV1, *schema.Error) {
 	if strings.TrimSpace(in.Channel) == "" {
 		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
@@ -326,13 +342,9 @@ func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (sc
 	} else {
 		limitVal = *limit
 	}
-	channel, err := s.store.ChannelByName(ctx, in.Channel)
-	if errors.Is(err, store.ErrNotFound) {
-		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "channel_not_found", Message: "channel not found"}
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "mcp: find channel failed", "error", err)
-		return schema.ListMessagesResponseV1{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
+	channel, serr := scope.channelByName(ctx, in.Channel, schema.ChannelPermissionRead)
+	if serr != nil {
+		return schema.ListMessagesResponseV1{}, serr
 	}
 	stored, err := s.store.ListMessages(ctx, channel.ID, in.After, int(limitVal)+1)
 	if err != nil {
@@ -351,7 +363,8 @@ func (s *Server) readChannelMCP(ctx context.Context, in mcpReadChannelInput) (sc
 	return schema.ListMessagesResponseV1{Messages: messages, NextAfter: nextAfter}, nil
 }
 
-func (s *Server) requestApprovalMCP(ctx context.Context, requesterID int64, in mcpRequestApprovalInput) (schema.RequestApprovalOutput, *schema.Error) {
+func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in mcpRequestApprovalInput) (schema.RequestApprovalOutput, *schema.Error) {
+	requesterID := scope.principalID
 	deadline, err := time.Parse(time.RFC3339, in.Deadline)
 	if err != nil {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: "deadline must be an RFC3339 timestamp"}
@@ -368,11 +381,10 @@ func (s *Server) requestApprovalMCP(ctx context.Context, requesterID int64, in m
 	if err := req.Validate(); err != nil {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
-	if _, err := s.store.ChannelByID(ctx, in.ChannelID); errors.Is(err, store.ErrNotFound) {
-		return schema.RequestApprovalOutput{}, &schema.Error{Code: "channel_not_found", Message: "channel not found"}
-	} else if err != nil {
-		slog.ErrorContext(ctx, "mcp: find approval channel failed", "error", err)
-		return schema.RequestApprovalOutput{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
+	// Raising an approval writes into the channel, so it needs the post
+	// permission there (agent-manifest.md).
+	if _, serr := scope.channelByID(ctx, in.ChannelID, schema.ChannelPermissionPost); serr != nil {
+		return schema.RequestApprovalOutput{}, serr
 	}
 	quorum := in.Quorum
 	if quorum == 0 {
@@ -389,17 +401,16 @@ func (s *Server) requestApprovalMCP(ctx context.Context, requesterID int64, in m
 	return schema.RequestApprovalOutput{ID: created.ID, Title: created.Title, State: created.State, Deadline: schema.NewTimestamp(created.Deadline)}, nil
 }
 
-func (s *Server) checkDecisionMCP(ctx context.Context, in mcpCheckDecisionInput) (schema.CheckDecisionOutput, *schema.Error) {
+func (s *Server) checkDecisionMCP(ctx context.Context, scope *agentScope, in mcpCheckDecisionInput) (schema.CheckDecisionOutput, *schema.Error) {
 	if in.ApprovalID <= 0 {
 		return schema.CheckDecisionOutput{}, &schema.Error{Code: "invalid_request", Message: "approval_id must be a positive integer"}
 	}
-	approval, err := s.store.ApprovalByID(ctx, in.ApprovalID)
-	if errors.Is(err, store.ErrNotFound) {
-		return schema.CheckDecisionOutput{}, &schema.Error{Code: "approval_not_found", Message: "approval not found"}
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "mcp: check approval failed", "error", err)
-		return schema.CheckDecisionOutput{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
+	// Observing an approval reads from its channel, so it needs the read
+	// permission there. The scope re-checks membership on every call, which
+	// includes every poll of await_decision.
+	approval, serr := scope.approval(ctx, in.ApprovalID, schema.ChannelPermissionRead)
+	if serr != nil {
+		return schema.CheckDecisionOutput{}, serr
 	}
 	out := schema.CheckDecisionOutput{State: approval.State}
 	if approval.State.IsTerminal() {
@@ -413,7 +424,7 @@ func (s *Server) checkDecisionMCP(ctx context.Context, in mcpCheckDecisionInput)
 	return out, nil
 }
 
-func (s *Server) awaitDecisionMCP(ctx context.Context, in mcpAwaitDecisionInput) (schema.AwaitDecisionOutput, *schema.Error) {
+func (s *Server) awaitDecisionMCP(ctx context.Context, scope *agentScope, in mcpAwaitDecisionInput) (schema.AwaitDecisionOutput, *schema.Error) {
 	if in.TimeoutMS <= 0 {
 		return schema.AwaitDecisionOutput{}, &schema.Error{Code: "invalid_request", Message: "timeout_ms must be a positive integer"}
 	}
@@ -434,7 +445,7 @@ func (s *Server) awaitDecisionMCP(ctx context.Context, in mcpAwaitDecisionInput)
 			}
 			return schema.AwaitDecisionOutput{State: last.State, EffectiveTimeoutMS: effectiveMS}, nil
 		}
-		checked, serr := s.checkDecisionMCP(waitCtx, mcpCheckDecisionInput{ApprovalID: in.ApprovalID})
+		checked, serr := s.checkDecisionMCP(waitCtx, scope, mcpCheckDecisionInput{ApprovalID: in.ApprovalID})
 		if serr != nil {
 			return schema.AwaitDecisionOutput{}, serr
 		}

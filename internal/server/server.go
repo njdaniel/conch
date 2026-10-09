@@ -90,6 +90,7 @@ func New(cfg Config, st *store.Store) *Server {
 		s.routeByPattern[rt.pattern] = rt
 		s.mux.Handle(rt.pattern, s.guard(rt))
 	}
+	s.logAgentsWithoutManifest(context.Background())
 	var handler http.Handler = s.mux
 	if cfg.authRequired() {
 		handler = s.authMiddleware(handler)

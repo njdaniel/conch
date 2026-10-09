@@ -30,6 +30,7 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePrincipal agent: %v", err)
 	}
+	grantAgent(t, srv, agent.ID, channel.ID)
 	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID}
 
 	httpSrv := httptest.NewServer(srv.Handler())
@@ -323,11 +324,11 @@ func newMCPAuthFixture(t *testing.T, cfg Config) mcpAuthFixture {
 	t.Helper()
 	ctx := context.Background()
 	srv := newTestServerWithConfig(t, cfg)
-	if _, err := srv.store.CreateChannel(ctx, "general"); err != nil {
+	general, err := srv.store.CreateChannel(ctx, "general")
+	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
 	f := mcpAuthFixture{srv: srv}
-	var err error
 	if f.agent, err = srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-one"); err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
@@ -337,6 +338,10 @@ func newMCPAuthFixture(t *testing.T, cfg Config) mcpAuthFixture {
 	if f.human, err = srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "nick"); err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
+	// These tests are about authentication; both agents may do everything in
+	// the channel so that authorization never decides the outcome.
+	grantAgent(t, srv, f.agent.ID, general.ID)
+	grantAgent(t, srv, f.other.ID, general.ID)
 	return f
 }
 

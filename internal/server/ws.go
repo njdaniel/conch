@@ -89,6 +89,11 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		writeChannelNotFound(w)
 		return
 	}
+	// An agent subscribing over WebSocket is reading the channel, so its
+	// manifest must allow that here (issue #79).
+	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+		return
+	}
 
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {

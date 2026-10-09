@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -30,6 +32,12 @@ func TestAdminAuditActor(t *testing.T) {
 			if tt.mode == AuthRequired {
 				token = f.rootTok
 			}
+			// The fixture agent already has a manifest (issue #79); use a fresh
+			// agent so both manifest_created and manifest_replaced are written.
+			fresh, err := f.srv.store.CreatePrincipal(context.Background(), store.PrincipalAgent, "fresh-agent")
+			if err != nil {
+				t.Fatal(err)
+			}
 			baseline := len(f.audit(t))
 
 			created := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials", f.bot.ID), token, `{"label":"ci"}`)
@@ -45,7 +53,7 @@ func TestAdminAuditActor(t *testing.T) {
 			if rec := f.do(t, "DELETE", fmt.Sprintf("/v1/credentials/%d", newID), token, ""); rec.Code != http.StatusNoContent {
 				t.Fatalf("revoke = %d %s", rec.Code, rec.Body)
 			}
-			manifestPath := fmt.Sprintf("/v1/principals/%d/manifest", f.bot.ID)
+			manifestPath := fmt.Sprintf("/v1/principals/%d/manifest", fresh.ID)
 			for i := 0; i < 2; i++ { // create, then replace
 				if rec := f.do(t, "PUT", manifestPath, token, manifest); rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
 					t.Fatalf("put manifest = %d %s", rec.Code, rec.Body)

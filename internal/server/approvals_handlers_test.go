@@ -25,6 +25,8 @@ func approvalTestFixture(t *testing.T, srv *Server) (store.Channel, store.Princi
 	if err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
+	// The agent uses MCP in these tests, so it needs membership and a manifest.
+	grantAgent(t, srv, agent.ID, channel.ID)
 	return channel, agent, human
 }
 
