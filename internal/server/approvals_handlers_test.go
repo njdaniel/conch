@@ -25,6 +25,8 @@ func approvalTestFixture(t *testing.T, srv *Server) (store.Channel, store.Princi
 	if err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
+	// The agent uses MCP in these tests, so it needs membership and a manifest.
+	grantAgent(t, srv, agent.ID, channel.ID)
 	return channel, agent, human
 }
 
@@ -200,7 +202,7 @@ func TestApprovalRESTNtfyConnectionRefusedDegradesFullChain(t *testing.T) {
 
 func runApprovalRESTNtfyFailureFullChain(t *testing.T, ntfyURL, wantDetail string) {
 	t.Helper()
-	srv := newTestServerWithConfig(t, Config{Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 200 * time.Millisecond}})
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 200 * time.Millisecond}})
 	channel, agent, human := approvalTestFixture(t, srv)
 
 	rec := postJSON(t, srv, "/v1/approvals", createApprovalBody(channel.ID, agent.ID))

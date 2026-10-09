@@ -47,75 +47,93 @@ make build   # builds bin/conchd and bin/conch
 make check   # fmt, vet, lint, tests, schema-compat, dependency gate — run before opening any PR
 ```
 
-### 2. Start `conchd`
+### 2. Create the operator and start `conchd`
+
+`conchd` requires authentication by default, so the first step is an operator — the one principal who can administer the instance:
 
 ```sh
+umask 077   # everything created in this shell — the data directory and the token file — is readable only by you
 mkdir -p /tmp/conch-data
-bin/conchd serve --data /tmp/conch-data --listen :8080
+bin/conchd bootstrap-operator --data /tmp/conch-data --name nick > /tmp/conch-data/operator.token
+bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 ```
 
+- `bootstrap-operator` works offline on the data directory. It prints the operator's token once, alone on stdout, and refuses to run again once an operator exists. The token can administer the whole instance: the `umask 077` above is what keeps the file it is captured to private, so do not skip it, and never write a token to a file other users can read.
 - `--data` (or `CONCHD_DATA`) is required — directory for the embedded SQLite database.
-- `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`.
-- `--mcp-token token=principal_id` (or `CONCHD_MCP_TOKENS`, comma-separated) maps MCP bearer tokens to agent principal IDs — see step 3, since the ID doesn't exist until you bootstrap it.
-- `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the single-binary invariant (ADR-002) requires no other external process for core function.
+- `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
+- `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
+- `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the deployment invariant (ADR-002) requires no other external process for core function.
 
-### 3. Bootstrap a channel and principals
+### 3. Create a channel, people, and an agent
 
-There's no admin CLI yet — a channel and its principals (human and agent) are created directly via the `/v0` REST API:
+There's no admin CLI yet; the operator does this through the REST API with their token:
 
 ```sh
-curl -s -X POST localhost:8080/v0/channels \
-  -H 'Content-Type: application/json' -d '{"name":"ops"}'
-# {"channel":{"id":1,"name":"ops", ...}}
+OP="Authorization: Bearer $(cat /tmp/conch-data/operator.token)"
+J='Content-Type: application/json'
 
-curl -s -X POST localhost:8080/v0/principals \
-  -H 'Content-Type: application/json' -d '{"kind":"agent","name":"deploy-bot"}'
-# {"principal":{"id":1,"kind":"agent", ...}}
+curl -s -X POST localhost:8080/v0/channels   -H "$OP" -H "$J" -d '{"name":"ops"}'
+# {"channel":{"id":1,"name":"ops", ...}}       the operator, who created it, is its only member
 
-curl -s -X POST localhost:8080/v0/principals \
-  -H 'Content-Type: application/json' -d '{"kind":"human","name":"nick"}'
+curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"alice"}'
 # {"principal":{"id":2,"kind":"human", ...}}
+curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"agent","name":"deploy-bot"}'
+# {"principal":{"id":3,"kind":"agent", ...}}
+
+# a credential for each: the token is shown once, in this response
+curl -s -X POST localhost:8080/v1/principals/2/credentials -H "$OP" -H "$J" -d '{"label":"alice laptop"}'
+curl -s -X POST localhost:8080/v1/principals/3/credentials -H "$OP" -H "$J" -d '{"label":"deploy-bot"}'
+# {"credential":{"id":2, ...},"token":"conch_..."}
+
+# channel membership decides who can see a channel at all
+curl -s -X PUT localhost:8080/v1/channels/ops/members/2 -H "$OP"
+curl -s -X PUT localhost:8080/v1/channels/ops/members/3 -H "$OP"
 ```
 
-The agent principal's returned `id` is what `--mcp-token` must reference. Restart `conchd` (same `--data` dir, so nothing is lost) with the mapping filled in:
+On a machine you share, a header given with `-H "..."` is visible in the process list while `curl` runs. Put the header line in a private file and pass `-H @that-file` instead.
 
-```sh
-bin/conchd serve --data /tmp/conch-data --listen :8080 --mcp-token mytoken=1
-```
+A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. Other operator actions: `DELETE /v1/credentials/{id}` revokes one credential, `POST /v1/credentials/{id}/rotate` replaces one, `POST /v1/principals/{id}/disable` switches a principal off entirely (and `/enable` back on), and `DELETE /v1/channels/{channel}/members/{id}` removes a member.
 
 ### 4. Human side: `conch`
 
-`conch` with no arguments launches the TUI (needs a real terminal):
+Each person signs in once with the token the operator gave them. The token is read from stdin and stored under your user config directory, readable only by you:
 
 ```sh
-CONCH_SERVER=http://127.0.0.1:8080 CONCH_AUTHOR=2 CONCH_CHANNELS=ops bin/conch
+bin/conch login --server http://127.0.0.1:8080 < alice.token
+# logged in to http://127.0.0.1:8080 as alice (member)
+bin/conch whoami
 ```
 
-- `CONCH_SERVER` — conchd URL (default `http://127.0.0.1:8080`).
-- `CONCH_AUTHOR` — principal ID used as the message author.
-- `CONCH_CHANNELS` — comma-separated channels the TUI opens.
-
-For scripting, `conch` also has plain subcommands:
+Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as:
 
 ```sh
-bin/conch send --author 2 ops "deploying release 42"
+bin/conch
+```
+
+For scripting, `conch` also has plain subcommands. They act as whoever is logged in:
+
+```sh
+bin/conch send ops "deploying release 42"
 bin/conch tail ops
 bin/conch approvals list
-bin/conch approve --author 2 --reason "looks good" 1
-bin/conch reject  --author 2 --reason "not yet" 1
+bin/conch approve --reason "looks good" 1
+bin/conch reject  --reason "not yet" 1
+bin/conch logout
 ```
 
-`--server`/`CONCH_SERVER` works the same way on every subcommand.
+- `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
+- `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
+- `CONCH_CHANNELS` — optional comma-separated override for which channels the TUI opens.
+- `--author` / `CONCH_AUTHOR` are deprecated: identity comes from your login. They still work against a server running `--auth off`.
 
 ### Optional: auto-reply bot
 
 `conch-bot` watches one channel and replies to new human messages using the
-local `claude -p` command. Give it an MCP token mapped to its own agent
-principal and that principal's ID:
+local `claude -p` command. Give it its agent's token and principal ID:
 
 ```sh
-CONCH_BOT_TOKEN=mytoken \
-CONCH_BOT_PRINCIPAL_ID=1 \
+CONCH_BOT_TOKEN=<the agent's token> \
+CONCH_BOT_PRINCIPAL_ID=3 \
 CONCH_BOT_CHANNEL=ops \
 bin/conch-bot
 ```
@@ -123,11 +141,13 @@ bin/conch-bot
 It skips messages already present when it starts and ignores its own replies.
 Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
 `CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
-`CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`.
+`CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`. Like any
+agent it needs channel membership and a manifest (next section) allowing
+`messages.read` and `messages.post`.
 
 ### 5. Agent side: MCP
 
-Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the token from step 3. Five tools are registered:
+Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the agent's token from step 3. Five tools are registered:
 
 - `post_message` — post a message to a channel as the authenticated agent.
 - `read_channel` — read one paginated page of messages from a channel.
@@ -135,19 +155,30 @@ Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <tok
 - `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
 - `check_decision` — read an approval's current state/resolution immediately, without blocking.
 
+**Agents are deny-by-default.** A token only says who the agent is. To do anything in a channel an agent needs both **membership** of the channel (step 3) and a **manifest** granting the capability and the permission there:
+
+```sh
+curl -s -X PUT localhost:8080/v1/principals/3/manifest -H "$OP" -H "$J" -d '{
+    "display_name": "deploy-bot", "tier": "A",
+    "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
+    "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
+  }'
+```
+
+Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`; each is granted separately. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
+
 A raw JSON-RPC example (most agents will instead use an MCP client SDK):
 
 ```sh
 curl -s -X POST localhost:8080/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -H 'Authorization: Bearer mytoken' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-        "protocolVersion":"2025-06-18",
-        "clientInfo":{"name":"my-agent","version":"1"},
-        "capabilities":{}}}'
-# note the returned Mcp-Session-Id response header — pass it on every subsequent call
+  -H "Authorization: Bearer $(cat deploy-bot.token)" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"post_message","arguments":{"channel":"ops","body":"release 42 is built"}}}'
 ```
+
+Approvals are requested by agents over MCP and decided by humans with `conch approve` / `conch reject`; the decider is always the logged-in person and must be a member of the approval's channel.
 
 ### 6. Verify your install
 
@@ -155,12 +186,19 @@ curl -s -X POST localhost:8080/mcp \
 go run ./e2e/dogfood
 ```
 
-This drives the full loop live against freshly built binaries — agent posts via MCP, requests approval, ntfy fires, a human resolves via `conch approve` with a reason, `await_decision` returns the structured outcome, the audit log shows the whole chain — then reruns the approval half with ntfy unreachable to prove it still resolves (ADR-002). Exits nonzero on any assertion failure.
+This drives the full loop live against freshly built binaries, authenticated end to end: it bootstraps an operator, a human signs in with `conch login`, an agent with an issued credential and a manifest posts via MCP and requests approval, ntfy fires, the human resolves it with `conch approve` and a reason, `await_decision` returns the structured outcome, and the audit log shows the whole chain. Along the way it asserts what must be refused — no credential, a decision in someone else's name, a non-member reading, posting or deciding, a second agent reaching outside its grant — then reruns the approval half with ntfy unreachable to prove it still resolves (ADR-002). Exits nonzero on any assertion failure.
+
+### Upgrading an existing instance
+
+- **Authentication is now on by default.** Run `conchd bootstrap-operator` once against your existing data directory before starting the new `conchd`. It revokes credentials and deletes webhook hooks created before the operator existed, and tells you how many.
+- **Channels now have members.** The upgrade makes every existing principal a member of every existing channel, so nothing disappears; channels and principals created afterwards start with no memberships.
+- **Agents are deny-by-default.** An agent that existed before has no manifest and can do nothing until you write one; `conchd` logs how many such agents there are at startup. The static `--mcp-token token=principal_id` flag still works but is deprecated in favour of issued credentials.
 
 ### Known limitations
 
-- No REST/TUI authentication beyond MCP bearer tokens today. Don't expose `conchd` past localhost/VPN without your own reverse-proxy auth in front of it.
-- No per-agent capability enforcement yet — any valid MCP token can call any registered tool.
+- Tokens travel in the `Authorization` header in the clear unless you put TLS in front of `conchd`; keep it on localhost or a VPN, or behind a TLS-terminating reverse proxy.
+- `conch login` echoes the token if you type it at the prompt; pipe it from a file instead, as shown.
+- Webhook hook URLs cannot yet be revoked individually, and the database file is created readable by other local users (#104).
 
 ## License
 

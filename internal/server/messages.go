@@ -62,7 +62,7 @@ func (s *Server) postMessage(
 ) {
 	ctx := r.Context()
 	// Membership is enforced here: a non-member gets the unknown-channel 404.
-	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"))
+	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"), schema.CapabilityMessagesPost, schema.ChannelPermissionPost)
 	if !ok {
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) handleListMessagesV1(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, v1 bool) {
 	ctx := r.Context()
 	// Membership is enforced here: a non-member gets the unknown-channel 404.
-	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"))
+	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"), schema.CapabilityMessagesRead, schema.ChannelPermissionRead)
 	if !ok {
 		return
 	}

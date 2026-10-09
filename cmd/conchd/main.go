@@ -19,6 +19,7 @@ import (
 
 	"github.com/njdaniel/conch/internal/server"
 	"github.com/njdaniel/conch/internal/server/approvals"
+	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
 )
 
@@ -58,6 +59,7 @@ func usage(w *os.File) {
 
 Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
+                     [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -68,40 +70,83 @@ deletes every webhook hook created before the operator existed (they came from
 open endpoints) unless --keep-existing-credentials is given. Agent manifests
 are kept; it reports how many exist so you can review them.
 
-With --auth required, approval requests and decisions are not yet bound to the
-authenticated caller; that arrives with issue #92.
+Authentication is required by default: every REST and WebSocket request needs
+a bearer credential, so run bootstrap-operator first. --auth off opens every
+endpoint to anyone who can reach the port and is for local development only.
 
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
-  --auth    REST/WebSocket authentication: off or required (env CONCHD_AUTH, default off)
+  --auth    REST/WebSocket authentication: required or off (env CONCHD_AUTH, default required)
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
   --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
   --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
+  --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
+  --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
+                         default: --livekit-url with ws->http, wss->https)
+
+Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
+off; set some but not all and serve refuses to start. The signing key pair is
+read only from the environment, never a flag: CONCHD_LIVEKIT_API_KEY and
+CONCHD_LIVEKIT_API_SECRET. Startup does not contact LiveKit.
 `)
 }
 
-func runServe(args []string) error {
+// serveOptions is what `conchd serve` resolved from its flags and environment.
+type serveOptions struct {
+	dataDir         string
+	listen          string
+	authMode        server.AuthMode
+	mcpTokens       map[string]int64
+	ntfyServer      string
+	ntfyTopic       string
+	ntfyUrgentTopic string
+	livekit         livekit.Config
+}
+
+// parseServeArgs resolves the serve flags and their environment fallbacks.
+// It is separate from runServe so the resolved values — the authentication
+// mode above all — can be tested without starting a server.
+func parseServeArgs(args []string) (serveOptions, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
 	mcpTokensRaw := fs.String("mcp-token", os.Getenv("CONCHD_MCP_TOKENS"), "comma-separated token=agent_principal_id mappings for MCP bearer auth")
-	authFlag := fs.String("auth", envOr("CONCHD_AUTH", string(server.AuthOff)), "REST/WebSocket authentication: off or required")
+	authFlag := fs.String("auth", envOr("CONCHD_AUTH", string(defaultAuthMode)), "REST/WebSocket authentication: required or off")
 	ntfyServer := fs.String("ntfy-server", os.Getenv("CONCHD_NTFY_SERVER"), "ntfy server URL")
 	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
+	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
+	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return serveOptions{}, err
 	}
 	if *dataDir == "" {
-		return errors.New("serve: --data (or CONCHD_DATA) is required")
+		return serveOptions{}, errors.New("serve: --data (or CONCHD_DATA) is required")
 	}
 	authMode, err := server.ParseAuthMode(*authFlag)
 	if err != nil {
-		return fmt.Errorf("serve: --auth: %w", err)
+		return serveOptions{}, fmt.Errorf("serve: --auth: %w", err)
 	}
 	mcpTokens, err := parseMCPTokens(*mcpTokensRaw)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	// The key pair has no flag on purpose: a flag would show in the process list.
+	lk, err := livekit.ParseConfig(*livekitURL, *livekitAPIURL, os.Getenv(livekit.EnvAPIKey), os.Getenv(livekit.EnvAPISecret))
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: %w", err)
+	}
+	return serveOptions{
+		livekit: lk,
+		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
+		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
+	}, nil
+}
+
+func runServe(args []string) error {
+	opts, err := parseServeArgs(args)
 	if err != nil {
 		return err
 	}
@@ -109,7 +154,7 @@ func runServe(args []string) error {
 	// The data directory is an operator-supplied path by design; conchd runs
 	// with the operator's own privileges, so this is configuration, not a
 	// traversal vector.
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
+	if err := os.MkdirAll(opts.dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
 		return fmt.Errorf("serve: create data dir: %w", err)
 	}
 
@@ -120,22 +165,23 @@ func runServe(args []string) error {
 	defer stop()
 	context.AfterFunc(ctx, stop)
 
-	st, err := store.Open(ctx, filepath.Join(*dataDir, "conch.db"))
+	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
 
 	srv := server.New(server.Config{
-		DataDir:         *dataDir,
-		Listen:          *listen,
+		DataDir:         opts.dataDir,
+		Listen:          opts.listen,
 		Version:         version,
-		MCPBearerTokens: mcpTokens,
-		AuthMode:        authMode,
+		MCPBearerTokens: opts.mcpTokens,
+		AuthMode:        opts.authMode,
+		LiveKit:         opts.livekit,
 		Ntfy: approvals.NtfyConfig{
-			Server:         *ntfyServer,
-			ApprovalsTopic: *ntfyTopic,
-			UrgentTopic:    *ntfyUrgentTopic,
+			Server:         opts.ntfyServer,
+			ApprovalsTopic: opts.ntfyTopic,
+			UrgentTopic:    opts.ntfyUrgentTopic,
 			Timeout:        2 * time.Second,
 		},
 	}, st)
@@ -143,7 +189,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), *dataDir)
+	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), opts.dataDir)
 	return srv.Serve(ctx)
 }
 
@@ -208,6 +254,10 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created; the token printed on stdout will not be shown again\n", p.Name, p.ID)
 	return nil
 }
+
+// defaultAuthMode is what `conchd serve` uses when neither --auth nor
+// CONCHD_AUTH is given. Authentication is on unless it is switched off.
+const defaultAuthMode = server.AuthRequired
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

@@ -45,9 +45,12 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust
 		// the body's identity fields; binding them to the caller is issue #92.
-		rt("POST /v1/approvals", accessAuthenticated, hf(s.handleCreateApproval)),
-		rt("GET /v1/approvals", accessAuthenticated, hf(s.handleListOpenApprovals)),
-		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, hf(s.handleCastDecision)),
+		// These are the human surface for approvals. Agents request and observe
+		// approvals through MCP, where the manifest and membership gates apply,
+		// so an agent credential is refused here (issue #79).
+		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleCreateApproval))),
+		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleListOpenApprovals))),
+		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(hf(s.handleCastDecision))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
 	}
