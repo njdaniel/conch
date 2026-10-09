@@ -89,3 +89,44 @@ func TestToolErrorCarriesTheCode(t *testing.T) {
 		})
 	}
 }
+
+// Errors from this client end up in its callers' logs. A tool result can hold
+// message bodies, including ones addressed to a net or whispered, so an error
+// about a result that could not be read must not quote it.
+func TestErrorsDoNotQuoteToolResults(t *testing.T) {
+	const secret = "SECRET-whispered-body"
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantHas string
+	}{
+		{"truncated JSON holding a message", http.StatusOK,
+			`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"messages":[{"id":1,"body":"` + secret, "decode mcp tools/call response"},
+		{"not JSON at all", http.StatusOK, secret + " <html>", "decode mcp tools/call response"},
+		{"a long error page", http.StatusBadGateway, "upstream said no\n" + strings.Repeat("x", 500) + secret, "status 502: upstream said no"},
+		{"a one-line refusal", http.StatusUnauthorized, "Unauthorized\n", "status 401: Unauthorized"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+			_, err := New(srv.URL, "token-not-real").ReadChannel(context.Background(), "ops", 0, 10)
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if strings.Contains(err.Error(), "SECRET") {
+				t.Errorf("the error quotes the response: %v", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantHas) {
+				t.Errorf("err = %v, want it to contain %q", err, tt.wantHas)
+			}
+			if len(err.Error()) > 300 {
+				t.Errorf("the error is %d bytes long", len(err.Error()))
+			}
+		})
+	}
+}

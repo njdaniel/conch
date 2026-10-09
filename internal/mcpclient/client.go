@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -146,8 +147,11 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 	if err != nil {
 		return nil, err
 	}
+	// A response body can hold message bodies, scoped ones included, and
+	// callers log these errors: an error never quotes a tool result, and
+	// quotes only the start of a refusal from the HTTP layer.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, respBody)
+		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, excerpt(respBody))
 	}
 	var envelope struct {
 		Result struct {
@@ -162,7 +166,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, fmt.Errorf("decode mcp %s response: %w (body=%s)", method, err, respBody)
+		return nil, fmt.Errorf("decode mcp %s response (%d bytes): %w", method, len(respBody), err)
 	}
 	if envelope.Error != nil {
 		return nil, fmt.Errorf("mcp %s rpc error: %s", method, envelope.Error.Message)
@@ -175,4 +179,14 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		return nil, newToolError(method, text)
 	}
 	return envelope.Result.StructuredContent, nil
+}
+
+// excerpt is the first line of an HTTP error body, cut to 120 bytes.
+func excerpt(body []byte) string {
+	const limit = 120
+	line, _, _ := strings.Cut(strings.TrimSpace(string(body)), "\n")
+	if len(line) > limit {
+		return line[:limit] + "…"
+	}
+	return line
 }

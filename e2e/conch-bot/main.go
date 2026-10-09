@@ -260,7 +260,10 @@ func (h *harness) refusedNetExchange() error {
 
 // netExchange has the peer post a prompt on the net over MCP (with auth off a
 // human cannot post a scoped message over REST). The bot must answer on the
-// same net; the outsider, over MCP and over REST v1 and v2, must see neither.
+// same net. The outsider, an agent in the channel reading over MCP, must see
+// neither message: that is the check that matters. REST is also read, without
+// a credential (this server runs with authentication off), where no scoped
+// message may ever appear.
 func (h *harness) netExchange() error {
 	ctx := context.Background()
 	netAudience := &schema.Audience{Kind: schema.AudienceKindNet, NetID: h.netID}
@@ -321,7 +324,7 @@ func (h *harness) netExchange() error {
 			return err
 		}
 		if strings.Contains(raw, "NET-PROMPT") || strings.Contains(raw, fmt.Sprintf(`"id":%d,`, reply.ID)) {
-			return fmt.Errorf("REST %s shows the net exchange: %s", version, raw)
+			return fmt.Errorf("anonymous REST %s shows the net exchange: %s", version, raw)
 		}
 	}
 	return nil
