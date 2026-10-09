@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/coder/websocket"
 	"golang.org/x/term"
@@ -39,6 +41,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runTail(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "voice":
+		return runVoice(ctx, args[1:], stdout, stderr)
 	case "approvals":
 		return runApprovals(ctx, args[1:], stdout, stderr)
 	case "approve":
@@ -75,6 +79,7 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch voice status [--server <url>] [--watch] <channel>
   conch approvals list [--server <url>]
   conch approve [flags] <id>
   conch reject [flags] <id>
@@ -88,6 +93,16 @@ Scope:
   --to whispers to the listed principals (recorded in the audit log). Giving
   both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>];
   a message body that itself starts with [ is printed as \[.
+  voice status shows who is connected to a channel's voice and who is talking;
+  it only reads presence and never joins. One line per participant, in
+  principal id order:
+    <id> <name|-> <talking|quiet> <joined-at, RFC 3339 UTC>
+  The name is shown for yourself only (the API tells a non-operator no one
+  else's) and is "-" when unknown; a name with spaces or odd characters is
+  double-quoted and escaped. An empty room prints "nobody is connected" and
+  exits 0; voice not configured or unavailable prints one line and exits
+  nonzero. --watch prints "--- <time>" and then the state on every change,
+  until interrupted (exit 0).
 
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)
@@ -714,4 +729,210 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, who.Kind, who.Name, who.Role)
 	return err
+}
+
+// voiceNow is the clock for the "--- <time>" line that opens each --watch
+// block; a variable so tests can fix it.
+var voiceNow = time.Now
+
+func runVoice(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("cli: voice requires a subcommand (status)")
+	}
+	switch args[0] {
+	case "status":
+		return runVoiceStatus(ctx, args[1:], stdout, stderr)
+	default:
+		return fmt.Errorf("cli: unknown voice subcommand %q", args[0])
+	}
+}
+
+// Sentinel refusals that voice status reports as one line and a nonzero exit.
+var (
+	errVoiceNotConfigured = errors.New("voice is not configured on this server")
+	errVoiceUnavailable   = errors.New("voice is unavailable: the voice server cannot be reached right now")
+)
+
+// serverText is an error whose text may have come from the server. The text
+// is made safe for one terminal line, and the cause stays reachable to
+// errors.Is and errors.As.
+type serverText struct {
+	msg string
+	err error
+}
+
+func (e *serverText) Error() string { return e.msg }
+func (e *serverText) Unwrap() error { return e.err }
+
+// safeLine makes text from the server fit on one line: anything that is not a
+// printable character (newlines, escape and other control codes, bidi
+// overrides) becomes a visible \u escape, so it can neither start another
+// output line nor drive the terminal.
+func safeLine(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+			continue
+		}
+		q := strconv.QuoteToASCII(string(r))
+		b.WriteString(q[1 : len(q)-1])
+	}
+	return b.String()
+}
+
+// voiceName is a principal's name as a single field of a presence line:
+// "-" when unknown, bare when it is plain printable text without spaces, and
+// double-quoted and escaped otherwise, so a line always splits into exactly
+// four fields.
+func voiceName(name string) string {
+	if name == "" {
+		return "-"
+	}
+	plain := name != "-"
+	for _, r := range name {
+		if !unicode.IsPrint(r) || unicode.IsSpace(r) || r == '"' || r == '\\' {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return name
+	}
+	return strconv.QuoteToASCII(name)
+}
+
+// writeVoicePresence prints the state of one presence document: one line per
+// participant in principal id order, or one line saying nobody is connected.
+// Rooms that carry a narrower audience than the channel are marked like a
+// scoped message; V3 servers send only the channel-wide room.
+func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1, names map[int64]string) error {
+	lines := 0
+	for _, room := range doc.Rooms {
+		prefix := scopeMarker(room.Audience, nil)
+		people := append([]schema.VoiceParticipant(nil), room.Participants...)
+		sort.Slice(people, func(i, j int) bool { return people[i].PrincipalID < people[j].PrincipalID })
+		for _, p := range people {
+			state := "quiet"
+			if p.Transmitting {
+				state = "talking"
+			}
+			if _, err := fmt.Fprintf(w, "%s%d %s %s %s\n", prefix, p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339)); err != nil {
+				return err
+			}
+			lines++
+		}
+	}
+	if lines == 0 {
+		_, err := fmt.Fprintf(w, "nobody is connected to voice in %s\n", safeLine(channel))
+		return err
+	}
+	return nil
+}
+
+// voiceNames resolves principal ids to names with at most one request. The
+// API offers a member only whoami (its own name): the channel member list
+// carries ids alone and principal manifests are operator-or-self. Any failure
+// leaves the map empty, and every participant is then shown by id.
+func voiceNames(ctx context.Context, client *Client) map[int64]string {
+	who, err := client.WhoAmI(ctx)
+	if err != nil {
+		return nil
+	}
+	return map[int64]string{who.ID: who.Name}
+}
+
+func runVoiceStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("voice status", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	watch := fs.Bool("watch", false, "follow the presence socket and print on every change")
+	// Flags may follow the channel (`voice status general --watch`).
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: voice status: %w", err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(positional) != 1 {
+		return errors.New("cli: voice status: expected <channel>")
+	}
+	channel := positional[0]
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	if *watch {
+		return watchVoice(ctx, client, channel, stdout, stderr)
+	}
+	doc, err := client.VoicePresence(ctx, channel)
+	if err != nil {
+		return voiceFailure(err)
+	}
+	switch {
+	case !doc.Configured:
+		return errVoiceNotConfigured
+	case !doc.Available:
+		return errVoiceUnavailable
+	}
+	var names map[int64]string
+	if len(doc.Rooms) > 0 && len(doc.Rooms[0].Participants) > 0 {
+		names = voiceNames(ctx, client)
+	}
+	return writeVoicePresence(stdout, channel, doc, names)
+}
+
+// voiceFailure makes a client error safe to print on one line.
+func voiceFailure(err error) error {
+	return &serverText{msg: safeLine(err.Error()), err: err}
+}
+
+// watchVoice follows the presence socket. The first document decides whether
+// following makes sense: voice that is not configured will not become
+// configured while connected, so that ends in the same error as the snapshot.
+// Unavailable, on the other hand, comes and goes: it is printed like any other
+// state and the watch carries on.
+func watchVoice(ctx context.Context, client *Client, channel string, stdout, stderr io.Writer) error {
+	names := voiceNames(ctx, client)
+	first := true
+	err := client.SubscribeVoicePresence(ctx, channel, func(doc schema.VoicePresenceV1) error {
+		if first && !doc.Configured {
+			return errVoiceNotConfigured
+		}
+		first = false
+		if _, err := fmt.Fprintf(stdout, "--- %s\n", voiceNow().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+		switch {
+		case !doc.Configured:
+			_, err := fmt.Fprintln(stdout, errVoiceNotConfigured.Error())
+			return err
+		case !doc.Available:
+			_, err := fmt.Fprintln(stdout, errVoiceUnavailable.Error())
+			return err
+		}
+		return writeVoicePresence(stdout, channel, doc, names)
+	})
+	if errors.Is(err, errVoiceNotConfigured) {
+		return errVoiceNotConfigured
+	}
+	switch websocket.CloseStatus(err) {
+	case websocket.StatusGoingAway:
+		_, _ = fmt.Fprintln(stderr, "conch: server shutting down")
+		return nil
+	case websocket.StatusPolicyViolation:
+		return fmt.Errorf("voice presence for %s closed: you are no longer a member of the channel, or your credential is disabled or signed out", safeLine(channel))
+	}
+	// Interrupting a watch is how a user stops it; that is not a failure.
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	if err == nil {
+		return nil
+	}
+	return voiceFailure(err)
 }
