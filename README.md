@@ -47,6 +47,8 @@ make build   # builds bin/conchd and bin/conch
 make check   # fmt, vet, lint, tests, schema-compat, dependency gate — run before opening any PR
 ```
 
+`make check` lints with the `golangci-lint` version in `.golangci-lint-version` (the one CI runs) and refuses any other; install it with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(cat .golangci-lint-version)`.
+
 ### 2. Create the operator and start `conchd`
 
 `conchd` requires authentication by default, so the first step is an operator — the one principal who can administer the instance:

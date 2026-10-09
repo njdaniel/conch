@@ -31,10 +31,18 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Same pinned linter and settings as ci.yml; see the comments there.
+      - name: golangci-lint version
+        id: lint-version
+        run: |
+          v=$(tr -d '[:space:]' < .golangci-lint-version)
+          echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5
+          version: ${{ steps.lint-version.outputs.version }}
+          verify: false # network-dependent; see ci.yml
 
       - name: go test
         run: go test -race ./...

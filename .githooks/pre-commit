@@ -19,6 +19,7 @@ go vet ./...
 
 echo "pre-commit: golangci-lint"
 if command -v golangci-lint >/dev/null 2>&1; then
+    ./scripts/lint-version.sh # must be the version CI runs (.golangci-lint-version)
     golangci-lint run
 else
     echo "warning: golangci-lint not installed locally — CI will enforce it" >&2
