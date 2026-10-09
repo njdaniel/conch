@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -588,5 +590,151 @@ func TestHelpDoesNotMentionTokenFlag(t *testing.T) {
 	}
 	if _, _, err := runCLI(t, "", "login", "--token", "x"); err == nil {
 		t.Error("login must not accept --token")
+	}
+}
+
+// fakeTerminal makes readToken treat any *os.File as a terminal and routes the
+// no-echo read through read.
+func fakeTerminal(t *testing.T, read func(ctx context.Context, fd int) ([]byte, error)) *os.File {
+	t.Helper()
+	oldIs, oldRead := isTerminalFD, readSecret
+	isTerminalFD = func(int) bool { return true }
+	readSecret = read
+	t.Cleanup(func() { isTerminalFD, readSecret = oldIs, oldRead })
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+func TestReadTokenTerminal(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name    string
+		ctx     context.Context //nolint:containedctx // table field
+		read    func(context.Context, int) ([]byte, error)
+		want    string
+		wantErr string
+	}{
+		{name: "success", read: func(context.Context, int) ([]byte, error) { return []byte(" " + fakeToken + "\r"), nil }, want: fakeToken},
+		{name: "empty", read: func(context.Context, int) ([]byte, error) { return nil, nil }, wantErr: "no token provided"},
+		{name: "ctrl-d", read: func(context.Context, int) ([]byte, error) { return nil, io.EOF }, wantErr: "no token provided"},
+		{
+			name:    "read error",
+			read:    func(context.Context, int) ([]byte, error) { return nil, errors.New("input/output error") },
+			wantErr: "cannot read the token without echo (input/output error); use 'conch login < tokenfile'",
+		},
+		{
+			name:    "cannot disable echo",
+			read:    func(context.Context, int) ([]byte, error) { return nil, syscall.ENOTTY },
+			wantErr: "use 'conch login < tokenfile'",
+		},
+		{
+			name:    "interrupted",
+			ctx:     canceled,
+			read:    func(ctx context.Context, _ int) ([]byte, error) { return nil, ctx.Err() },
+			wantErr: context.Canceled.Error(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdin := fakeTerminal(t, tt.read)
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var stderr bytes.Buffer
+			got, err := readToken(ctx, stdin, &stderr)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if got != "" {
+					t.Errorf("token = %q on error", got)
+				}
+			} else if err != nil || got != tt.want {
+				t.Fatalf("readToken = %q, %v; want %q", got, err, tt.want)
+			}
+			if want := "Token: \n"; stderr.String() != want {
+				t.Errorf("stderr = %q, want %q", stderr.String(), want)
+			}
+			if strings.Contains(stderr.String(), fakeToken) || (err != nil && strings.Contains(err.Error(), fakeToken)) {
+				t.Error("token leaked to stderr or the error")
+			}
+		})
+	}
+}
+
+// A failed terminal read must neither store a credential nor reach the server,
+// and the token must not appear on any stream.
+func TestLoginTerminalPaths(t *testing.T) {
+	tests := []struct {
+		name       string
+		read       func(context.Context, int) ([]byte, error)
+		wantErr    string
+		wantStored bool
+	}{
+		{name: "success", read: func(context.Context, int) ([]byte, error) { return []byte(fakeToken), nil }, wantStored: true},
+		{name: "echo unavailable", read: func(context.Context, int) ([]byte, error) { return nil, syscall.ENOTTY }, wantErr: "conch login < tokenfile"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newAuthFake(t, true)
+			stdin := fakeTerminal(t, tt.read)
+			var out, errOut bytes.Buffer
+			err := RunWithStdin(context.Background(), []string{"login", "--server", fake.URL}, stdin, &out, &errOut, "vtest")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if len(fake.requests) != 0 {
+					t.Errorf("server was contacted: %v", fake.requests)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			stored, loadErr := LoadToken(fake.URL)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if tt.wantStored != (stored == fakeToken) {
+				t.Errorf("stored = %q, wantStored %v", stored, tt.wantStored)
+			}
+			if strings.Contains(out.String(), fakeToken) || strings.Contains(errOut.String(), fakeToken) || (err != nil && strings.Contains(err.Error(), fakeToken)) {
+				t.Errorf("token appears in output: stdout %q stderr %q err %v", out.String(), errOut.String(), err)
+			}
+			if strings.Contains(errOut.String(), "visible") {
+				t.Errorf("stale visible-token warning: %q", errOut.String())
+			}
+		})
+	}
+}
+
+// With stdin an *os.File that is not a terminal (conch login < tokenfile), the
+// no-echo path must not run and nothing extra is written to stderr.
+func TestReadTokenFileStdinIsNotATerminal(t *testing.T) {
+	oldRead := readSecret
+	readSecret = func(context.Context, int) ([]byte, error) {
+		t.Error("terminal read used for a regular file")
+		return nil, nil
+	}
+	t.Cleanup(func() { readSecret = oldRead })
+	path := filepath.Join(t.TempDir(), "tokenfile")
+	if err := os.WriteFile(path, []byte(fakeToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path) //nolint:gosec // test-local path
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	var stderr bytes.Buffer
+	got, err := readToken(context.Background(), f, &stderr)
+	if err != nil || got != fakeToken || stderr.Len() != 0 {
+		t.Fatalf("readToken = %q, %v, stderr %q", got, err, stderr.String())
 	}
 }

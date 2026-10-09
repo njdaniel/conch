@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/term"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -311,7 +312,7 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	if err != nil {
 		return err
 	}
-	token, err := readToken(stdin, stderr)
+	token, err := readToken(ctx, stdin, stderr)
 	if err != nil {
 		return err
 	}
@@ -329,19 +330,69 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	return err
 }
 
-// readToken reads one line from stdin. On a terminal it prompts on stderr.
-// Echo is not suppressed: golang.org/x/term is not a dependency of this module
-// and adding one needs sign-off, so the user is warned instead.
-func readToken(stdin io.Reader, stderr io.Writer) (string, error) {
-	if f, ok := stdin.(*os.File); ok {
-		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			_, _ = fmt.Fprintln(stderr, "warning: the token will be visible as you type; prefer 'conch login < tokenfile'")
-			_, _ = fmt.Fprint(stderr, "Token: ")
-		}
+// Seams for the terminal branch of readToken, so tests can drive it without a
+// real terminal. isTerminalFD reports whether fd is a terminal; readSecret
+// reads one line from it with echo off, and must restore the terminal before it
+// returns.
+var (
+	isTerminalFD = term.IsTerminal
+	readSecret   = readSecretNoEcho
+)
+
+// readSecretNoEcho reads a line from the terminal fd with echo disabled.
+// term.ReadPassword restores the terminal when it returns, but it does not
+// notice an interrupt: main turns SIGINT into a context cancel, so Ctrl-C would
+// be swallowed and the prompt would hang. On cancel the saved state is put back
+// here and the blocked read is abandoned; the process is about to exit, so the
+// goroutine does not outlive anything that matters.
+func readSecretNoEcho(ctx context.Context, fd int) ([]byte, error) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return nil, err
 	}
-	line, err := bufio.NewReader(io.LimitReader(stdin, 64<<10)).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("cli: login: read token: %w", err)
+	type result struct {
+		secret []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		secret, err := term.ReadPassword(fd)
+		done <- result{secret, err}
+	}()
+	select {
+	case r := <-done:
+		return r.secret, r.err
+	case <-ctx.Done():
+		_ = term.Restore(fd, state)
+		return nil, ctx.Err()
+	}
+}
+
+// readToken reads one line from stdin. On a terminal it prompts on stderr and
+// reads without echo; it never falls back to reading with echo on, because the
+// token is the whole credential and would land in scrollback and recordings.
+func readToken(ctx context.Context, stdin io.Reader, stderr io.Writer) (string, error) {
+	var line string
+	if f, ok := stdin.(*os.File); ok && isTerminalFD(int(f.Fd())) { //nolint:gosec // fds fit in int
+		_, _ = fmt.Fprint(stderr, "Token: ")
+		secret, err := readSecret(ctx, int(f.Fd())) //nolint:gosec // fds fit in int
+		// The user's Enter was not echoed either, so end the prompt line.
+		_, _ = fmt.Fprintln(stderr)
+		switch {
+		case errors.Is(err, io.EOF):
+			// Ctrl-D on an empty line: same as an empty stdin.
+		case ctx.Err() != nil:
+			return "", ctx.Err()
+		case err != nil:
+			return "", fmt.Errorf("cli: login: cannot read the token without echo (%w); use 'conch login < tokenfile'", err)
+		}
+		line = string(secret)
+	} else {
+		var err error
+		line, err = bufio.NewReader(io.LimitReader(stdin, 64<<10)).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("cli: login: read token: %w", err)
+		}
 	}
 	token := strings.TrimSpace(line)
 	if token == "" {

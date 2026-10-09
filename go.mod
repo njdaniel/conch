@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/modelcontextprotocol/go-sdk v1.6.1
+	golang.org/x/term v0.42.0
 	modernc.org/sqlite v1.53.0
 )
 
