@@ -872,17 +872,17 @@ func TestMuxEdgeCasesRequireAuth(t *testing.T) {
 	}
 }
 
-// Turning authentication on does not yet bind approvals to the caller
-// (issue #92); the server must say so at startup, and only then.
-func TestRequiredModeWarnsThatApprovalsAreUnbound(t *testing.T) {
+// Running without authentication is a deliberate, loud choice: the server
+// says so once at startup, and says nothing of the kind when it is required.
+func TestAuthOffWarnsAtStartup(t *testing.T) {
 	for _, tt := range []struct {
 		mode AuthMode
-		want bool
-	}{{AuthRequired, true}, {AuthOff, false}, {"", false}} {
+		want int
+	}{{AuthOff, 1}, {"", 1}, {AuthRequired, 0}} {
 		logs := captureLogs(t)
 		newTestServerWithConfig(t, Config{AuthMode: tt.mode})
-		if got := strings.Contains(logs.buf.String(), "not yet bound to the authenticated caller"); got != tt.want {
-			t.Errorf("mode %q: warning logged = %v, want %v", tt.mode, got, tt.want)
+		if got := strings.Count(logs.buf.String(), "authentication is OFF"); got != tt.want {
+			t.Errorf("mode %q: warnings logged = %d, want %d", tt.mode, got, tt.want)
 		}
 	}
 }

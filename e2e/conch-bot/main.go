@@ -153,8 +153,12 @@ func freeAddr() (string, error) {
 
 func (h *harness) url() string { return "http://" + h.addr }
 
+// startServer runs conchd with authentication off. This check is about the
+// bot's reply loop, which talks to /mcp (always authenticated with its own
+// token); the harness's own REST calls play the part of an unauthenticated
+// local development setup.
 func (h *harness) startServer(mapping string) error {
-	args := []string{"serve", "--data", h.data, "--listen", h.addr}
+	args := []string{"serve", "--data", h.data, "--listen", h.addr, "--auth", "off"}
 	if mapping != "" {
 		args = append(args, "--mcp-token", mapping)
 	}

@@ -97,10 +97,8 @@ func New(cfg Config, st *store.Store) *Server {
 	var handler http.Handler = s.mux
 	if cfg.authRequired() {
 		handler = s.authMiddleware(handler)
-		// Until issue #92 the approval handlers still take the requester and
-		// decider from the request body. Say so, rather than let an operator
-		// assume turning authentication on has bound them to the caller.
-		slog.Warn("auth: approval requests and decisions are not yet bound to the authenticated caller (issue #92)")
+	} else {
+		slog.Warn("auth: authentication is OFF: every endpoint is open to anyone who can reach this port, and request bodies are trusted for identity; use this for local development only")
 	}
 	s.http = &http.Server{
 		Addr:              cfg.Listen,

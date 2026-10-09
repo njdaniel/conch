@@ -195,3 +195,15 @@ func TestBootstrapOperatorUsage(t *testing.T) {
 		})
 	}
 }
+
+// With neither --auth nor CONCHD_AUTH, conchd requires authentication
+// (issue #92): the default must never silently become "off".
+func TestDefaultAuthModeIsRequired(t *testing.T) {
+	if defaultAuthMode != server.AuthRequired {
+		t.Fatalf("defaultAuthMode = %q, want %q", defaultAuthMode, server.AuthRequired)
+	}
+	t.Setenv("CONCHD_AUTH", "")
+	if got := envOr("CONCHD_AUTH", string(defaultAuthMode)); got != string(server.AuthRequired) {
+		t.Fatalf("resolved default = %q, want required", got)
+	}
+}

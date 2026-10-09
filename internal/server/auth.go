@@ -217,16 +217,26 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 // anything else is a 403 author_mismatch. It reports whether the request may
 // proceed.
 func (s *Server) bindAuthor(w http.ResponseWriter, r *http.Request, authorID *int64) bool {
+	return s.bindCallerID(w, r, authorID, "author_mismatch", "author_id does not match the authenticated principal")
+}
+
+// bindCallerID binds an identity field of a request body to the authenticated
+// caller. Without a caller (AuthOff, or an exempt route) it does nothing, so
+// the body is trusted as before. With one, an absent or zero id becomes the
+// caller's; the caller's own id is accepted; anything else is a 403 with the
+// given error code, audited. It reports whether the request may proceed. Call
+// it before validating the body, because validation rejects a zero id.
+func (s *Server) bindCallerID(w http.ResponseWriter, r *http.Request, id *int64, code, message string) bool {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		return true
 	}
-	switch *authorID {
+	switch *id {
 	case 0:
-		*authorID = caller.ID
+		*id = caller.ID
 	case caller.ID:
 	default:
-		s.denyForbidden(w, r, caller, "author_mismatch", "author_id does not match the authenticated principal")
+		s.denyForbidden(w, r, caller, code, message)
 		return false
 	}
 	return true

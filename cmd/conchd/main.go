@@ -68,13 +68,14 @@ deletes every webhook hook created before the operator existed (they came from
 open endpoints) unless --keep-existing-credentials is given. Agent manifests
 are kept; it reports how many exist so you can review them.
 
-With --auth required, approval requests and decisions are not yet bound to the
-authenticated caller; that arrives with issue #92.
+Authentication is required by default: every REST and WebSocket request needs
+a bearer credential, so run bootstrap-operator first. --auth off opens every
+endpoint to anyone who can reach the port and is for local development only.
 
 Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
-  --auth    REST/WebSocket authentication: off or required (env CONCHD_AUTH, default off)
+  --auth    REST/WebSocket authentication: required or off (env CONCHD_AUTH, default required)
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
   --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
@@ -87,7 +88,7 @@ func runServe(args []string) error {
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	listen := fs.String("listen", envOr("CONCHD_LISTEN", ":8080"), "HTTP listen address")
 	mcpTokensRaw := fs.String("mcp-token", os.Getenv("CONCHD_MCP_TOKENS"), "comma-separated token=agent_principal_id mappings for MCP bearer auth")
-	authFlag := fs.String("auth", envOr("CONCHD_AUTH", string(server.AuthOff)), "REST/WebSocket authentication: off or required")
+	authFlag := fs.String("auth", envOr("CONCHD_AUTH", string(defaultAuthMode)), "REST/WebSocket authentication: required or off")
 	ntfyServer := fs.String("ntfy-server", os.Getenv("CONCHD_NTFY_SERVER"), "ntfy server URL")
 	ntfyTopic := fs.String("ntfy-topic", os.Getenv("CONCHD_NTFY_TOPIC"), "normal approvals ntfy topic")
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
@@ -208,6 +209,10 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created; the token printed on stdout will not be shown again\n", p.Name, p.ID)
 	return nil
 }
+
+// defaultAuthMode is what `conchd serve` uses when neither --auth nor
+// CONCHD_AUTH is given. Authentication is on unless it is switched off.
+const defaultAuthMode = server.AuthRequired
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
