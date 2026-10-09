@@ -50,6 +50,9 @@ func newMemberFixture(t *testing.T) *memberFixture {
 	if _, m.carolTok, err = f.srv.store.CreateCredential(ctx, "system", m.carol.ID, "test", nil); err != nil {
 		t.Fatal(err)
 	}
+	// The fixture agent's manifest allows both channels, so that in these
+	// tests membership alone decides what it can reach.
+	setAgentManifest(t, f.srv, f.bot.ID, nil, m.general.ID, m.alpha.ID)
 	return m
 }
 

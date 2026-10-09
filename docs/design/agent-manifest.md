@@ -116,7 +116,18 @@ Errors use the existing `schema.Error` body (`{code, message}`); a failed `Valid
 
 - **#77 (store and REST).** Persist one row per agent principal; reject a manifest for a missing or non-agent principal, or for a channel that does not exist; validate on write and again on read; set the timestamps. **Upgrade policy:** the migration creates the table and no rows. An agent that existed before has no manifest, and "no manifest" means deny once #79 enforces. No full-access manifest is generated automatically, because that would be a broad grant nobody wrote. Keeping an existing agent working across #79 therefore takes a manifest an operator writes out with `PUT`, not an exemption in code.
 - **#78 (credentials).** Resolve each token to a principal id. That id is the manifest's address; there is no separate manifest id to carry.
-- **#79 (enforcement).** Because the upgrade is deny-by-default, `conchd` should say at startup how many agent principals have no manifest, so an operator is not surprised. For each MCP call: look up `MCPToolCapability(tool)` and deny when `ok` is false; deny unless `manifest.Allows(capability)`; deny unless `manifest.AllowsChannel(channel, permission)` for the channel the call targets; and apply channel membership (#90) alongside. Deny when the manifest is missing or invalid. Use those helpers and do not re-derive the rules.
+- **#79 (enforcement) — implemented in `internal/server/authz.go`.** An agent acts only where two gates both allow it, checked in this order:
+  1. **Capability.** The tool's name is mapped with `MCPToolCapability`; an unmapped tool is refused. The manifest must exist, be valid, and `Allows(capability)`. Refusal: `forbidden`. This runs before any lookup, so it reveals nothing about what exists.
+  2. **Membership** of the target channel (#90). A non-member gets `channel_not_found` (or `approval_not_found`), byte-identical to an unknown target.
+  3. **Channel permission.** `AllowsChannel(channel, permission)`. Refusal: `forbidden` — only members get this far.
+
+  The permission each tool needs: `post_message` → `post`; `read_channel` → `read`; `request_approval` → `post` on the target channel; `check_decision` and `await_decision` → `read` on the approval's channel. Being the requester of an approval grants nothing by itself; an agent removed from a channel can no longer watch the approvals it raised there, and an in-flight `await_decision` ends on its next poll.
+
+  Every denial is audited as `access_denied` (actor `principal:<id>`, subject `mcp:<tool>` or the route, detail `capability=… target=channel:<id> reason=…`). Reasons: `unmapped_tool`, `no_manifest`, `invalid_manifest`, `capability_not_granted`, `not_a_member`, `channel_permission_not_granted`, `agents_use_mcp`.
+
+  MCP always authenticates, so this applies to `/mcp` in every mode. Where the server only knows the caller under `--auth required`, the same manifest gate applies to an agent credential used on the REST message routes and the WebSocket routes, and to a webhook hook bound to an agent. The approval REST routes are the human surface: an agent credential is refused there and uses MCP instead.
+
+  Upgrading is deny-by-default, so `conchd` logs at startup how many agent principals have no manifest.
 - **#80 (rate limits).** Read `manifest.RateLimitFor(capability)`. `ok == false` means do not limit on the manifest's account. Otherwise allow at most `max` uses per `window_seconds` for that principal and capability. The counting algorithm (fixed or sliding window, how a burst is bounded), restart behaviour, and the retry metadata are #80's to choose and document; the manifest only states the budget.
 
 ## 9. Explicitly out of scope
@@ -130,7 +141,7 @@ Errors use the existing `schema.Error` body (`{code, message}`); a failed `Valid
 
 Each has a default taken in this slice, so nothing blocks; the dispatcher should confirm or overrule.
 
-1. **Which channel permission do the approval tools need?** The tool mapping fixes the capability only. Proposed for #79: `request_approval` needs `post` on the target channel; `await_decision` and `check_decision` need `read` on the approval's channel. Not encoded in `pkg/schema` yet, because it is an enforcement rule on the approval path and should be decided there. If confirmed, it can be added as a second lookup beside `MCPToolCapability`.
+1. **Which channel permission do the approval tools need?** Decided in #79 as proposed: `request_approval` needs `post` on the target channel; `await_decision` and `check_decision` need `read` on the approval's channel. It lives in the enforcement code (`authz.go` / `mcp.go`), not in `pkg/schema`.
 2. **What do the tiers mean?** D10 names `C/A/H` without defining them in this repository. The schema treats the tier as an opaque label with no permission attached. In particular an agent tagged `H` is accepted; if `H` is reserved for humans, tell me and the agent vocabulary shrinks to `C`, `A` before anything is published.
 3. **`display_name` and the principal's `name`.** `PrincipalV0.name` already exists. The manifest carries its own `display_name` because #77 lists it; they can disagree. Options: keep both (handle and label), or have the store copy one into the other. Default: keep both, no coupling.
 4. **Is "no entry means not rate limited" the right default?** The alternative is a server-wide default budget applied when the manifest is silent. That would be a `conchd` configuration matter in #80 and would not change this shape, but the note above would need to say "the server default applies" in place of "not rate limited".

@@ -71,6 +71,9 @@ func newAuthFixture(t *testing.T, mode AuthMode) *authFixture {
 			t.Fatalf("AddChannelMember %s: %v", p.Name, err)
 		}
 	}
+	// Since issue #79 an agent also needs a manifest; the fixture agent may do
+	// everything in "general".
+	setAgentManifest(t, srv, f.bot.ID, nil, general.ID)
 	return f
 }
 
@@ -252,6 +255,12 @@ func TestRoleMatrix(t *testing.T) {
 			if exp.class == classOp || exp.class == classSelf {
 				memberWant = http.StatusForbidden
 			}
+			// The approval REST routes are the human surface: an agent
+			// credential is refused there and uses MCP instead (issue #79).
+			agentWant := memberWant
+			if strings.Contains(rt.pattern, "/v1/approvals") {
+				agentWant = http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -259,7 +268,7 @@ func TestRoleMatrix(t *testing.T) {
 			}{
 				{"unauthenticated", "", http.StatusUnauthorized},
 				{"member human", f.aliceTok, memberWant},
-				{"member agent", f.botTok, memberWant},
+				{"member agent", f.botTok, agentWant},
 				{"operator", f.rootTok, exp.allowed},
 			}
 			for _, c := range cases {
@@ -276,7 +285,7 @@ func TestRoleMatrix(t *testing.T) {
 // the statuses are what the handlers gave before authentication existed, no
 // route reads a credential, and no role check applies.
 func TestAuthOffUnchanged(t *testing.T) {
-	for _, mode := range []AuthMode{"", AuthOff} {
+	for _, mode := range []AuthMode{AuthOff} {
 		f := newAuthFixture(t, mode)
 		for _, rt := range f.srv.routes {
 			exp := routeExpectations[rt.pattern]
@@ -297,10 +306,11 @@ func TestAuthOffUnchanged(t *testing.T) {
 			})
 		}
 		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
-		// and the fixture's three member_added events; no request may add to
-		// that (in particular no access_denied).
-		if n := len(f.audit(t)); n != 7 {
-			t.Errorf("mode %q: audit events = %d, want 7", mode, n)
+		// the fixture's three member_added events, and the fixture agent's
+		// manifest_created; no request may add to that (in particular no
+		// access_denied).
+		if n := len(f.audit(t)); n != 8 {
+			t.Errorf("mode %q: audit events = %d, want 8", mode, n)
 		}
 	}
 }
@@ -862,17 +872,43 @@ func TestMuxEdgeCasesRequireAuth(t *testing.T) {
 	}
 }
 
-// Turning authentication on does not yet bind approvals to the caller
-// (issue #92); the server must say so at startup, and only then.
-func TestRequiredModeWarnsThatApprovalsAreUnbound(t *testing.T) {
+// Running without authentication is a deliberate, loud choice: the server
+// says so once at startup, and says nothing of the kind when it is required —
+// which is also what an unset mode means.
+func TestAuthOffWarnsAtStartup(t *testing.T) {
 	for _, tt := range []struct {
 		mode AuthMode
-		want bool
-	}{{AuthRequired, true}, {AuthOff, false}, {"", false}} {
+		want int
+	}{{AuthOff, 1}, {"", 0}, {AuthRequired, 0}} {
 		logs := captureLogs(t)
 		newTestServerWithConfig(t, Config{AuthMode: tt.mode})
-		if got := strings.Contains(logs.buf.String(), "not yet bound to the authenticated caller"); got != tt.want {
-			t.Errorf("mode %q: warning logged = %v, want %v", tt.mode, got, tt.want)
+		if got := strings.Count(logs.buf.String(), "authentication is OFF"); got != tt.want {
+			t.Errorf("mode %q: warnings logged = %d, want %d", tt.mode, got, tt.want)
 		}
+	}
+}
+
+// A Config that never set AuthMode requires credentials (issue #92): the
+// zero value must not be an open server, and neither may a mode nobody
+// recognises. Only an explicit AuthOff opens it.
+func TestUnsetAuthModeRequiresCredentials(t *testing.T) {
+	for _, tt := range []struct {
+		mode AuthMode
+		want int
+	}{
+		{"", http.StatusUnauthorized},
+		{"Off", http.StatusUnauthorized},
+		{"none", http.StatusUnauthorized},
+		{AuthRequired, http.StatusUnauthorized},
+		{AuthOff, http.StatusOK},
+	} {
+		t.Run(fmt.Sprintf("%q", tt.mode), func(t *testing.T) {
+			srv := newTestServerWithConfig(t, Config{AuthMode: tt.mode})
+			rec := httptest.NewRecorder()
+			srv.http.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/channels", nil))
+			if rec.Code != tt.want {
+				t.Errorf("GET /v1/channels with no credential = %d, want %d", rec.Code, tt.want)
+			}
+		})
 	}
 }

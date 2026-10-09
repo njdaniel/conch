@@ -61,10 +61,28 @@ func run() error {
 	if err := h.startServer(""); err != nil {
 		return err
 	}
-	if _, err := createChannel(h.url(), "ops"); err != nil {
+	channelID, err := createChannel(h.url(), "ops")
+	if err != nil {
 		return err
 	}
 	if h.botID, err = createPrincipal(h.url(), schema.PrincipalAgent, "reply-bot"); err != nil {
+		return err
+	}
+	// Agents are deny-by-default (issue #79): the bot needs membership of the
+	// channel and a manifest that lets it read and post there.
+	if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/members/%d", h.url(), h.botID), nil); err != nil {
+		return err
+	}
+	manifest := schema.PutAgentManifestRequestV1{
+		DisplayName:  "reply-bot",
+		Tier:         schema.AgentTierC,
+		Capabilities: []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
+		Channels: []schema.ChannelGrant{{
+			ChannelID:   channelID,
+			Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost},
+		}},
+	}
+	if err := putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", h.url(), h.botID), manifest); err != nil {
 		return err
 	}
 	if h.humanID, err = createPrincipal(h.url(), schema.PrincipalHuman, "human"); err != nil {
@@ -135,8 +153,12 @@ func freeAddr() (string, error) {
 
 func (h *harness) url() string { return "http://" + h.addr }
 
+// startServer runs conchd with authentication off. This check is about the
+// bot's reply loop, which talks to /mcp (always authenticated with its own
+// token); the harness's own REST calls play the part of an unauthenticated
+// local development setup.
 func (h *harness) startServer(mapping string) error {
-	args := []string{"serve", "--data", h.data, "--listen", h.addr}
+	args := []string{"serve", "--data", h.data, "--listen", h.addr, "--auth", "off"}
 	if mapping != "" {
 		args = append(args, "--mcp-token", mapping)
 	}
@@ -213,6 +235,34 @@ func createPrincipal(baseURL string, kind schema.PrincipalKind, name string) (in
 
 func postHuman(baseURL string, authorID int64, body string) error {
 	return postJSON(baseURL+"/v1/channels/ops/messages", schema.PostMessageRequestV1{AuthorID: authorID, Body: body}, nil)
+}
+
+// putJSON sends a PUT with a JSON body (or none when body is nil) and expects
+// a 2xx.
+func putJSON(url string, body any) error {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequest(http.MethodPut, url, reader) // #nosec G107 -- test-local server
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT %s status %d: %s", url, resp.StatusCode, respBody)
+	}
+	return nil
 }
 
 func postJSON(url string, body, out any) error {

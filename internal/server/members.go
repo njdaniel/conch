@@ -42,7 +42,12 @@ func (s *Server) callerIsMember(r *http.Request, channelID int64) (bool, error) 
 // channel, a channel the caller is not a member of (both the identical 404),
 // or a store failure (500, failing closed). Every read or write path over
 // channel content must go through it.
-func (s *Server) channelForCaller(w http.ResponseWriter, r *http.Request, name string) (store.Channel, bool) {
+//
+// An agent caller must additionally pass its manifest (issue #79): capability
+// and permission say what the request does, and a member agent whose manifest
+// does not allow it gets 403. Membership is checked first, so a non-member
+// agent still learns nothing.
+func (s *Server) channelForCaller(w http.ResponseWriter, r *http.Request, name string, capability schema.Capability, permission schema.ChannelPermission) (store.Channel, bool) {
 	ctx := r.Context()
 	channel, err := s.store.ChannelByName(ctx, name)
 	if errors.Is(err, store.ErrNotFound) {
@@ -61,7 +66,11 @@ func (s *Server) channelForCaller(w http.ResponseWriter, r *http.Request, name s
 		return store.Channel{}, false
 	}
 	if !member {
+		s.auditAgentNonMember(r, capability, channel.ID)
 		writeChannelNotFound(w)
+		return store.Channel{}, false
+	}
+	if !s.agentCallerAllowed(w, r, capability, channel.ID, permission) {
 		return store.Channel{}, false
 	}
 	return channel, true
@@ -90,9 +99,15 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !member {
+			s.auditAgentNonMember(r, schema.CapabilityMessagesRead, channel.ID)
 			writeChannelNotFound(w)
 			return
 		}
+	}
+	// Who else is in a channel is channel content: an agent needs the same
+	// grant to see it as to read the channel's messages (issue #79).
+	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+		return
 	}
 	members, err := s.store.ListChannelMembers(ctx, channel.ID)
 	if err != nil {

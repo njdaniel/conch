@@ -220,3 +220,17 @@ func emptyToNil[T any](list []T) []T {
 	}
 	return list
 }
+
+// CountAgentsWithoutManifest returns how many agent principals have no
+// manifest row. Such an agent is denied everything once enforcement applies.
+func (s *Store) CountAgentsWithoutManifest(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM principals p
+		 WHERE p.kind = 'agent' AND NOT EXISTS (SELECT 1 FROM agent_manifests m WHERE m.principal_id = p.id)`,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count agents without a manifest: %w", err)
+	}
+	return n, nil
+}

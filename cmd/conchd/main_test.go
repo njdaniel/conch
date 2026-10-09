@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,5 +195,143 @@ func TestBootstrapOperatorUsage(t *testing.T) {
 				t.Errorf("err = %v, stdout = %q", err, out.String())
 			}
 		})
+	}
+}
+
+// With neither --auth nor CONCHD_AUTH, conchd requires authentication
+// (issue #92): the default must never silently become "off".
+func TestDefaultAuthModeIsRequired(t *testing.T) {
+	if defaultAuthMode != server.AuthRequired {
+		t.Fatalf("defaultAuthMode = %q, want %q", defaultAuthMode, server.AuthRequired)
+	}
+	// What serve actually resolves, through the same flag set runServe uses.
+	tests := []struct {
+		name string
+		args []string
+		env  string
+		want server.AuthMode
+	}{
+		{"nothing given", nil, "", server.AuthRequired},
+		{"flag off", []string{"--auth", "off"}, "", server.AuthOff},
+		{"env off", nil, "off", server.AuthOff},
+		{"flag required beats env off", []string{"--auth", "required"}, "off", server.AuthRequired},
+		{"flag off beats env required", []string{"--auth=off"}, "required", server.AuthOff},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCHD_AUTH", tt.env)
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.authMode != tt.want {
+				t.Errorf("auth mode = %q, want %q", opts.authMode, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseServeArgsLiveKit(t *testing.T) {
+	const secret = "never-printed-secret"
+	tests := []struct {
+		name       string
+		args       []string
+		env        map[string]string
+		wantErr    []string
+		wantConfig bool
+		wantAPI    string
+	}{
+		{name: "none"},
+		{
+			name: "full from flag and env, api url derived", args: []string{"--livekit-url", "wss://voice.example"},
+			env:        map[string]string{"CONCHD_LIVEKIT_API_KEY": "k", "CONCHD_LIVEKIT_API_SECRET": secret},
+			wantConfig: true, wantAPI: "https://voice.example",
+		},
+		{
+			name: "full from env only",
+			env: map[string]string{
+				"CONCHD_LIVEKIT_URL": "ws://lk:7880", "CONCHD_LIVEKIT_API_URL": "http://127.0.0.1:7880",
+				"CONCHD_LIVEKIT_API_KEY": "k", "CONCHD_LIVEKIT_API_SECRET": secret,
+			},
+			wantConfig: true, wantAPI: "http://127.0.0.1:7880",
+		},
+		{
+			name: "api url flag beats env", args: []string{"--livekit-api-url", "http://flag:1"},
+			env: map[string]string{
+				"CONCHD_LIVEKIT_URL": "ws://lk:7880", "CONCHD_LIVEKIT_API_URL": "http://env:2",
+				"CONCHD_LIVEKIT_API_KEY": "k", "CONCHD_LIVEKIT_API_SECRET": secret,
+			},
+			wantConfig: true, wantAPI: "http://flag:1",
+		},
+		{
+			name: "partial: secret missing", args: []string{"--livekit-url", "ws://lk"},
+			env:     map[string]string{"CONCHD_LIVEKIT_API_KEY": "k"},
+			wantErr: []string{"serve:", "CONCHD_LIVEKIT_API_SECRET"},
+		},
+		{
+			name: "partial: url and key missing", env: map[string]string{"CONCHD_LIVEKIT_API_SECRET": secret},
+			wantErr: []string{"CONCHD_LIVEKIT_URL", "CONCHD_LIVEKIT_API_KEY"},
+		},
+		{
+			name: "bad scheme", args: []string{"--livekit-url", "http://lk"},
+			env:     map[string]string{"CONCHD_LIVEKIT_API_KEY": "k", "CONCHD_LIVEKIT_API_SECRET": secret},
+			wantErr: []string{"client URL"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, k := range []string{"CONCHD_LIVEKIT_URL", "CONCHD_LIVEKIT_API_URL", "CONCHD_LIVEKIT_API_KEY", "CONCHD_LIVEKIT_API_SECRET"} {
+				t.Setenv(k, tt.env[k])
+			}
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("want an error")
+				}
+				for _, s := range tt.wantErr {
+					if !strings.Contains(err.Error(), s) {
+						t.Errorf("error %q missing %q", err, s)
+					}
+				}
+				if strings.Contains(err.Error(), secret) {
+					t.Error("error contains the secret")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.livekit.Configured() != tt.wantConfig || opts.livekit.APIURL != tt.wantAPI {
+				t.Errorf("livekit = %v, want configured=%v api=%q", opts.livekit, tt.wantConfig, tt.wantAPI)
+			}
+			if strings.Contains(opts.livekit.String(), secret) {
+				t.Error("config string contains the secret")
+			}
+		})
+	}
+}
+
+func TestLiveKitSecretHasNoFlag(t *testing.T) {
+	t.Setenv("CONCHD_LIVEKIT_URL", "")
+	for _, flagName := range []string{"--livekit-api-key", "--livekit-api-secret", "--livekit-secret", "--livekit-key"} {
+		if _, err := parseServeArgs([]string{"--data", t.TempDir(), flagName, "x"}); err == nil {
+			t.Errorf("%s was accepted", flagName)
+		}
+	}
+}
+
+// A partial LiveKit configuration must stop serve before it touches the data
+// directory or opens the database.
+func TestRunServePartialLiveKitFailsBeforeDatabase(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	t.Setenv("CONCHD_LIVEKIT_URL", "")
+	t.Setenv("CONCHD_LIVEKIT_API_KEY", "k")
+	t.Setenv("CONCHD_LIVEKIT_API_SECRET", "")
+	err := runServe([]string{"--data", dir, "--listen", "127.0.0.1:0"})
+	if err == nil || !strings.Contains(err.Error(), "CONCHD_LIVEKIT_URL") || !strings.Contains(err.Error(), "CONCHD_LIVEKIT_API_SECRET") {
+		t.Fatalf("err = %v, want one naming the missing settings", err)
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("data dir was created (stat err %v); serve should fail before opening anything", statErr)
 	}
 }

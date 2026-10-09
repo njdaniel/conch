@@ -25,9 +25,11 @@ import (
 type AuthMode string
 
 const (
-	// AuthOff leaves REST and WebSocket open, as before issue #89 (default).
+	// AuthOff leaves REST and WebSocket open to anyone who can reach the
+	// port. It must be chosen explicitly; it is never a default.
 	AuthOff AuthMode = "off"
 	// AuthRequired requires a bearer credential on every non-exempt route.
+	// It is what an unset mode means.
 	AuthRequired AuthMode = "required"
 )
 
@@ -42,10 +44,11 @@ func ParseAuthMode(s string) (AuthMode, error) {
 }
 
 // authRequired reports whether cfg demands authentication. It fails closed:
-// only the empty value (unset) and "off" disable it, so an unrecognized mode
-// that slipped past ParseAuthMode still requires credentials.
+// only an explicit "off" disables it, so an unset mode (a zero-value Config)
+// and an unrecognized one that slipped past ParseAuthMode both require
+// credentials (issue #92).
 func (c Config) authRequired() bool {
-	return c.AuthMode != "" && c.AuthMode != AuthOff
+	return c.AuthMode != AuthOff
 }
 
 // access is the authorization class of a route under AuthRequired. The zero
@@ -217,16 +220,26 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 // anything else is a 403 author_mismatch. It reports whether the request may
 // proceed.
 func (s *Server) bindAuthor(w http.ResponseWriter, r *http.Request, authorID *int64) bool {
+	return s.bindCallerID(w, r, authorID, "author_mismatch", "author_id does not match the authenticated principal")
+}
+
+// bindCallerID binds an identity field of a request body to the authenticated
+// caller. Without a caller (AuthOff, or an exempt route) it does nothing, so
+// the body is trusted as before. With one, an absent or zero id becomes the
+// caller's; the caller's own id is accepted; anything else is a 403 with the
+// given error code, audited. It reports whether the request may proceed. Call
+// it before validating the body, because validation rejects a zero id.
+func (s *Server) bindCallerID(w http.ResponseWriter, r *http.Request, id *int64, code, message string) bool {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		return true
 	}
-	switch *authorID {
+	switch *id {
 	case 0:
-		*authorID = caller.ID
+		*id = caller.ID
 	case caller.ID:
 	default:
-		s.denyForbidden(w, r, caller, "author_mismatch", "author_id does not match the authenticated principal")
+		s.denyForbidden(w, r, caller, code, message)
 		return false
 	}
 	return true
