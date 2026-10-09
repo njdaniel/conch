@@ -338,13 +338,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.approvals = msg.approvals
 			m.selApproval = 0
-			m.setStatus(modeInbox, "inbox loaded")
 			// A slower load can land after the user has already moved into
-			// modeDecision on a stale (now-refreshed) list; if the refresh
-			// came back empty there is nothing left to decide on.
-			if m.mode == modeDecision && len(m.approvals) == 0 {
+			// modeDecision on a stale (now-refreshed) list. If the refresh
+			// came back empty there is nothing left to decide on; otherwise
+			// the prompt they are answering stays on screen, since the
+			// decision prompt shares the inbox's status.
+			switch {
+			case m.mode == modeDecision && len(m.approvals) == 0:
 				m.mode = modeInbox
 				m.setStatus(modeInbox, "no open approvals")
+			case m.mode != modeDecision:
+				m.setStatus(modeInbox, "inbox loaded")
 			}
 		}
 	case decisionCast:

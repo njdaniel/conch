@@ -967,3 +967,35 @@ func TestInboxStatusSurvivesChannelResults(t *testing.T) {
 		t.Errorf("inbox status after channel results = %q, want inbox loaded", got)
 	}
 }
+
+// The decision prompt shares the inbox's status, so a slow approvals refresh
+// must not replace the prompt the user is answering. An empty refresh still
+// ends the decision, and a failed one is still shown.
+func TestApprovalsRefreshKeepsTheDecisionPrompt(t *testing.T) {
+	open := []schema.ApprovalV1{{ID: 1, Title: "deploy", Options: []schema.Option{{ID: "approve", Label: "Approve"}}}}
+	tests := []struct {
+		name     string
+		msg      approvalsLoaded
+		wantMode mode
+		want     string
+	}{
+		{"refresh with approvals", approvalsLoaded{approvals: open}, modeDecision, "type reason to decide"},
+		{"refresh came back empty", approvalsLoaded{}, modeInbox, "no open approvals"},
+		{"refresh failed", approvalsLoaded{err: errors.New("boom")}, modeDecision, "boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, _ := resubModel(t)
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyTab})
+			m, _ = update(m, approvalsLoaded{approvals: open})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+			if m.mode != modeDecision || m.status() != "type reason to decide" {
+				t.Fatalf("setup: mode %v status %q", m.mode, m.status())
+			}
+			m, _ = update(m, tt.msg)
+			if m.mode != tt.wantMode || m.status() != tt.want {
+				t.Errorf("mode %v status %q, want mode %v status %q", m.mode, m.status(), tt.wantMode, tt.want)
+			}
+		})
+	}
+}
