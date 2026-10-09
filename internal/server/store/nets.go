@@ -100,9 +100,14 @@ func scanNet(row interface{ Scan(dest ...any) error }) (Net, error) {
 // CreateNet creates an empty net named name in channelID and writes net_created.
 // createdBy is the acting principal, or 0 when unknown. It returns ErrNotFound
 // for an unknown channel and ErrDuplicate when the channel already has a live
-// net of that name; the name of an archived net is free again. Name syntax is
-// the caller's job (schema.ValidateNetName).
+// net of that name; the name of an archived net is free again. The name must
+// satisfy schema.ValidateNetName. Handlers check that first to give a clean
+// 400; it is checked again here because the name is written into the audit
+// detail, and no caller, present or future, may put arbitrary text there.
 func (s *Store) CreateNet(ctx context.Context, actor string, channelID int64, name string, createdBy int64) (Net, error) {
+	if err := schema.ValidateNetName(name); err != nil {
+		return Net{}, fmt.Errorf("store: create net: %w", err)
+	}
 	now := time.Now().Truncate(time.Millisecond)
 	var n Net
 	err := s.withImmediateTx(ctx, func(tx execer) error {

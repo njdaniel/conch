@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -32,8 +33,13 @@ func newNetFixture(t *testing.T) *netFixture {
 	if f.other, err = s.CreateChannel(ctx, "other"); err != nil {
 		t.Fatal(err)
 	}
-	for name, dst := range map[string]*Principal{"alice": &f.alice, "bob": &f.bob, "carol": &f.carol} {
-		if *dst, err = s.CreatePrincipal(ctx, PrincipalHuman, name); err != nil {
+	// A slice, not a map: ids must be assigned in a fixed order, because the
+	// roster tests assert an ordering by principal id.
+	for _, p := range []struct {
+		name string
+		dst  *Principal
+	}{{"alice", &f.alice}, {"bob", &f.bob}, {"carol", &f.carol}} {
+		if *p.dst, err = s.CreatePrincipal(ctx, PrincipalHuman, p.name); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -451,5 +457,30 @@ func TestNetsMigrationFromSchema10(t *testing.T) {
 	}
 	if ms, err := s.ListNetMembers(ctx, n.ID); err != nil || len(ms) != 1 {
 		t.Errorf("roster = %+v, %v", ms, err)
+	}
+}
+
+// The store refuses a net name the schema would not accept, whoever calls it:
+// the name goes into the audit detail, which is parsed as key=value text.
+func TestCreateNetRejectsInvalidNames(t *testing.T) {
+	f := newNetFixture(t)
+	ctx := context.Background()
+	for _, name := range []string{"", "Alpha", "two words", "new\nline", "a=b", "-lead", strings.Repeat("x", 33)} {
+		if _, err := f.s.CreateNet(ctx, "system", f.ch.ID, name, f.alice.ID); err == nil {
+			t.Errorf("CreateNet(%q) succeeded", name)
+		}
+	}
+	nets, err := f.s.ListNets(ctx, f.ch.ID)
+	if err != nil || len(nets) != 0 {
+		t.Errorf("nets after refused creates = %v, %v; want none", nets, err)
+	}
+	events, err := f.s.ListAuditEvents(ctx, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Action == AuditNetCreated {
+			t.Errorf("a refused create was audited: %+v", e)
+		}
 	}
 }
