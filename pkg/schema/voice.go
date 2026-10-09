@@ -3,6 +3,9 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 )
 
 // Voice control-plane wire shapes (issue #124, ADR-004; design note
@@ -112,7 +115,8 @@ type VoiceSessionResponseV1 struct {
 }
 
 // Validate reports whether the response is structurally well-formed: a
-// non-empty address and identity, and at least one well-formed grant. It does
+// non-empty address and identity, at least one well-formed grant, and no two
+// grants for the same audience. It does
 // not check that the address parses as a URL; the operator configured it and
 // conchd returns it as is.
 func (r VoiceSessionResponseV1) Validate() error {
@@ -125,12 +129,39 @@ func (r VoiceSessionResponseV1) Validate() error {
 	if len(r.Rooms) == 0 {
 		return errors.New("schema: voice session rooms must list at least one grant")
 	}
+	seen := make(map[string]struct{}, len(r.Rooms))
 	for _, g := range r.Rooms {
 		if err := g.Validate(); err != nil {
 			return err
 		}
+		key := audienceKey(g.Audience)
+		if _, dup := seen[key]; dup {
+			return errors.New("schema: voice session lists more than one grant for the same audience")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// audienceKey names an audience for the one-room-per-audience rule: there is
+// one voice room for the whole channel, one per net, and (if whispers are ever
+// mapped to rooms) one per set of principals. Two grants or two presence rooms
+// with the same audience would leave a reader unable to say which is the
+// channel's room. The key is for comparison only and never leaves the package.
+func audienceKey(a *Audience) string {
+	if a == nil {
+		return "channel"
+	}
+	if a.Kind == AudienceKindNet {
+		return "net:" + strconv.FormatInt(a.NetID, 10)
+	}
+	ids := slices.Clone(a.PrincipalIDs)
+	slices.Sort(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return string(a.Kind) + ":" + strings.Join(parts, ",")
 }
 
 // VoiceParticipant is one principal connected to a voice room, as conchd last
@@ -231,8 +262,14 @@ type VoicePresenceV1 struct {
 }
 
 // Validate reports whether the snapshot is structurally well-formed: the v1
-// schema name, a positive channel_id, every room well-formed, and the
-// configured/available/rooms states consistent with each other. Not
+// schema name, a positive channel_id, every room well-formed, no two rooms for
+// the same audience, and the configured/available/rooms states consistent
+// with each other.
+//
+// An unknown audience kind in any room fails the whole document, as it does
+// for a message (ADR-005: an audience a reader does not understand must never
+// widen what it shows). A new audience kind is therefore a new version of
+// these shapes, not an addition to this one. Not
 // configured implies not available, and not available implies no rooms.
 func (p VoicePresenceV1) Validate() error {
 	if p.Schema != VoicePresenceSchemaV1 {
@@ -247,10 +284,16 @@ func (p VoicePresenceV1) Validate() error {
 	if !p.Available && len(p.Rooms) != 0 {
 		return errors.New("schema: voice presence must list no rooms when not available")
 	}
+	seen := make(map[string]struct{}, len(p.Rooms))
 	for _, r := range p.Rooms {
 		if err := r.Validate(); err != nil {
 			return err
 		}
+		key := audienceKey(r.Audience)
+		if _, dup := seen[key]; dup {
+			return errors.New("schema: voice presence lists more than one room for the same audience")
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }

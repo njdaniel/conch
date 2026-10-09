@@ -482,3 +482,80 @@ func TestVoicePresenceUnknownFieldsTolerated(t *testing.T) {
 		t.Errorf("decoded presence lost known fields: %+v", p)
 	}
 }
+
+// One room per audience: a session with two grants for the same audience, or
+// a presence document with two rooms for it, would leave a reader unable to
+// say which is the channel's room. Audiences are compared by meaning, so the
+// same principals in another order are the same audience.
+func TestVoiceOneRoomPerAudience(t *testing.T) {
+	net3 := &Audience{Kind: AudienceKindNet, NetID: 3}
+	net4 := &Audience{Kind: AudienceKindNet, NetID: 4}
+	whisperA := &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 7}}
+	whisperB := &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{7, 3}}
+	whisperC := &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 9}}
+	tests := []struct {
+		name      string
+		audiences []*Audience
+		wantErr   bool
+	}{
+		{"channel only", []*Audience{nil}, false},
+		{"channel and two nets", []*Audience{nil, net3, net4}, false},
+		{"channel, net and whisper", []*Audience{nil, net3, whisperA}, false},
+		{"two different whispers", []*Audience{whisperA, whisperC}, false},
+		{"channel twice", []*Audience{nil, nil}, true},
+		{"same net twice", []*Audience{nil, net3, net3}, true},
+		{"same principals in another order", []*Audience{whisperA, whisperB}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := validVoiceSessionResponseV1()
+			session.Rooms = nil
+			presence := validVoicePresenceV1()
+			presence.Rooms = nil
+			for _, a := range tt.audiences {
+				g := validVoiceRoomGrant()
+				g.Audience = a
+				session.Rooms = append(session.Rooms, g)
+				r := validVoicePresenceRoom()
+				r.Audience = a
+				presence.Rooms = append(presence.Rooms, r)
+			}
+			for what, err := range map[string]error{"session": session.Validate(), "presence": presence.Validate()} {
+				if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "the same audience")) {
+					t.Errorf("%s: err = %v, want a same-audience error", what, err)
+				}
+				if !tt.wantErr && err != nil {
+					t.Errorf("%s: err = %v, want nil", what, err)
+				}
+			}
+		})
+	}
+}
+
+// The fields a presence document can carry are an exact list. Checking only
+// for fields named "token" or "room" would miss a credential added under
+// another name, so any new field has to be added here on purpose, by someone
+// who has asked whether a presence reader should see it.
+func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoicePresenceV1{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := []string{
+		"schema", "channel_id", "configured", "available", "rooms", // the document
+		"audience", "participants", // a room
+		"kind", "net_id", "principal_ids", // an audience
+		"principal_id", "can_publish", "transmitting", "joined_at", // a participant
+	}
+	for _, k := range want {
+		if !got[k] {
+			t.Errorf("presence no longer carries %q; update this list if that is intended", k)
+		}
+		delete(got, k)
+	}
+	for k := range got {
+		t.Errorf("presence can now carry %q, which is not on the reviewed list", k)
+	}
+}
