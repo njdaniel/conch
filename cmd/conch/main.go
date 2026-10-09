@@ -10,16 +10,18 @@ import (
 	"strings"
 
 	"github.com/njdaniel/conch/internal/cli"
+	"github.com/njdaniel/conch/internal/cli/termquiet"
 	"github.com/njdaniel/conch/internal/cli/tui"
 )
 
 var version = "v0.0.0-dev"
 
 func main() {
+	termquiet.Restore() // after every package init; see the package comment
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	var err error
-	if len(os.Args) == 1 {
+	if len(os.Args) <= 1 { // an empty argument list is possible, and is not a command
 		err = runTUI(ctx)
 	} else {
 		err = cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, version)
