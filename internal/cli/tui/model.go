@@ -164,6 +164,12 @@ type Model struct {
 	// It is never carried across channels, and nothing ever falls back from a
 	// scoped send to a channel-wide one.
 	target *netTarget
+	// pendingNet is the name a "/net <name>" lookup is waiting on, "" for
+	// none. Only the lookup the user last asked for may change the target: a
+	// later "/net", another "/net <name>" or a channel switch clears or
+	// replaces it, and a result that arrives after that is only a roster
+	// refresh.
+	pendingNet string
 	// sending is true while a post is in flight, so a second enter cannot
 	// send the same text twice.
 	sending bool
@@ -413,6 +419,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setStatus(modeChannels, m.notice)
 		m.channels = names
 		m.selected = 0
+		// The channel on screen may have changed under the user.
+		m.target = nil
+		m.pendingNet = ""
 		m.subscribed[names[0]] = true
 		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription())
 	case netsLoaded:
@@ -472,17 +481,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sending = false
 		if msg.err != nil {
 			// The typed text stays so it can be fixed or retried by hand;
-			// nothing else is sent in its place.
-			m.setStatus(modeChannels, msg.err.Error())
+			// nothing else is sent in its place. The error text comes from
+			// the server, so it is made safe for the terminal like a body.
+			m.setStatus(modeChannels, sanitize(msg.err.Error()))
 			return m, nil
 		}
 		if msg.message.ID > 0 {
 			// The same message also arrives on the subscription; ids dedupe.
 			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV2{msg.message})
 		}
-		if m.input == msg.raw {
-			m.input = ""
-		}
+		// What was sent leaves the input; anything typed after enter stays.
+		m.input = strings.TrimPrefix(m.input, msg.raw)
 		status := "sent"
 		if msg.whisper && !m.whisperNoted {
 			m.whisperNoted = true
@@ -541,6 +550,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.selected = next
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
+	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
 	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, "")}
 	// A pending retry timer will start the subscription itself.
@@ -990,6 +1000,7 @@ func (m Model) netCommand(rest string) (tea.Model, tea.Cmd) {
 	switch len(args) {
 	case 0:
 		m.target = nil
+		m.pendingNet = ""
 		m.input = ""
 		m.setStatus(modeChannels, "transmitting to the whole channel")
 		return m, nil
@@ -1004,10 +1015,12 @@ func (m Model) netCommand(rest string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if n, ok := findNet(m.nets[m.current()], name); ok {
+		m.pendingNet = ""
 		return m.useNet(n), nil
 	}
 	// Not in the roster we have: it may have been created since, so ask once
 	// before calling it unknown.
+	m.pendingNet = name
 	m.setStatus(modeChannels, "looking up net "+name+"…")
 	return m, m.loadNets(true, name)
 }
@@ -1057,11 +1070,13 @@ func (m Model) netsLoaded(msg netsLoaded) (tea.Model, tea.Cmd) {
 	if msg.err == nil {
 		m.nets[msg.channel] = msg.nets
 	}
-	if !msg.resolve || msg.channel != m.current() {
+	// A lookup the user has since overridden changes nothing but the roster.
+	if !msg.resolve || msg.channel != m.current() || msg.want != m.pendingNet {
 		return m, nil
 	}
+	m.pendingNet = ""
 	if msg.err != nil {
-		m.setStatus(modeChannels, "/net: "+msg.err.Error())
+		m.setStatus(modeChannels, "/net: "+sanitize(msg.err.Error()))
 		return m, nil
 	}
 	if n, ok := findNet(msg.nets, msg.want); ok {
@@ -1121,7 +1136,11 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 		}
 		return "whisper:" + strings.Join(others, ",")
 	default:
-		return sanitize(string(a.Kind))
+		// Never empty: an empty badge would show a scoped message as open.
+		if kind := sanitize(string(a.Kind)); strings.TrimSpace(kind) != "" {
+			return kind
+		}
+		return "scoped"
 	}
 }
 

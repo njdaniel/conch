@@ -1465,17 +1465,35 @@ func TestDoubleEnterSendsOnce(t *testing.T) {
 }
 
 func TestInputTypedDuringSendSurvives(t *testing.T) {
-	api := &scopeAPI{roster: scopeRoster()}
-	m := scopeModel(api, true)
-	m.input = "first"
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(Model)
-	m.input = "first and more" // typed while the post is in flight
-	for _, msg := range run(cmd) {
-		m, _ = update(m, msg)
+	tests := []struct {
+		name   string
+		during string // what the input holds when the post comes back
+		want   string
+	}{
+		{"nothing typed since", "first", ""},
+		// What was sent must not stay in the box to be sent a second time.
+		{"typed on after enter", "first and more", " and more"},
+		{"replaced with something else", "another thought", "another thought"},
+		{"edited so it no longer starts with what was sent", "firs", "firs"},
 	}
-	if m.input != "first and more" {
-		t.Errorf("input = %q, want the new typing kept", m.input)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, true)
+			m.input = "first"
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(Model)
+			m.input = tt.during // typed while the post is in flight
+			for _, msg := range run(cmd) {
+				m, _ = update(m, msg)
+			}
+			if m.input != tt.want {
+				t.Errorf("input = %q, want %q", m.input, tt.want)
+			}
+			if len(api.posts) != 1 || api.posts[0].body != "first" {
+				t.Errorf("posts = %+v, want the one message as entered", api.posts)
+			}
+		})
 	}
 }
 
@@ -1682,5 +1700,103 @@ func TestPromptKeepsTheNetWhenClipped(t *testing.T) {
 	m.width, m.height = 60, 24
 	if v := m.View(); !strings.Contains(v, "/alpha > ") {
 		t.Errorf("the view's prompt lost the net:\n%s", v)
+	}
+}
+
+// Only the lookup the user last asked for may change the target. "/net alpha"
+// that has to ask the server, then "/net" (or a switch, or another name)
+// before the answer arrives: the late answer must not move the target.
+func TestLateNetLookupDoesNotChangeTheTarget(t *testing.T) {
+	late := netsLoaded{channel: "ops", nets: scopeRoster(), resolve: true, want: "alpha"}
+	tests := []struct {
+		name       string
+		then       func(m Model) Model // what the user does before the answer arrives
+		wantPrompt string
+	}{
+		{"nothing: the lookup completes", func(m Model) Model { return m }, "ops/alpha >"},
+		{"/net back to the channel", func(m Model) Model { return enter(m, "/net") }, "ops >"},
+		{"switched channel and back", func(m Model) Model {
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyUp})
+			return m
+		}, "ops >"},
+		{"asked for another net that is known", func(m Model) Model {
+			m.nets["ops"] = []schema.NetV1{{ID: 9, Name: "zulu", Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMember}}}}
+			return enter(m, "/net zulu")
+		}, "ops/zulu >"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &scopeAPI{roster: scopeRoster()}
+			m := scopeModel(api, false) // roster not loaded: /net alpha must ask
+			m.input = "/net alpha"
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // the lookup is now in flight
+			m = next.(Model)
+			if m.prompt() != "ops >" {
+				t.Fatalf("prompt while looking up = %q", m.prompt())
+			}
+			m = tt.then(m)
+			m, _ = update(m, late)
+			if got := m.prompt(); got != tt.wantPrompt {
+				t.Errorf("prompt after the late answer = %q, want %q", got, tt.wantPrompt)
+			}
+			// The roster is refreshed either way.
+			if _, ok := findNet(m.nets["ops"], "alpha"); !ok {
+				t.Error("the late answer did not refresh the roster")
+			}
+		})
+	}
+}
+
+// A channel list that arrives while a target is set (the channel on screen can
+// change under the user) resets the target, like a channel switch.
+func TestChannelListResetsTheTarget(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	m = enter(m, "/net alpha")
+	if m.prompt() != "ops/alpha >" {
+		t.Fatalf("prompt = %q", m.prompt())
+	}
+	m.loadingChannels = true
+	m, _ = update(m, channelsLoaded{channels: []schema.ChannelV0{{ID: 2, Name: "general"}, {ID: 1, Name: "ops"}}})
+	if got := m.prompt(); strings.Contains(got, "alpha") || got != m.current()+" >" {
+		t.Errorf("prompt after the channel list changed = %q on channel %q", got, m.current())
+	}
+}
+
+// A scoped message always has a badge, even when its audience kind is empty or
+// blank: an empty badge would render it as a message to the whole channel.
+func TestScopedMessageWithoutAKindStillHasABadge(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster()}
+	m := scopeModel(api, true)
+	for _, tt := range []struct {
+		kind schema.AudienceKind
+		want string // the badge, "" for "any non-empty one"
+	}{{"", "[scoped]"}, {" ", "[scoped]"}, {"\t", "[scoped]"}, {"\x1b[2J", ""}, {"\n", ""}, {"future-kind", "[future-kind]"}} {
+		line := m.messageLine("ops", schema.MessageV2{ID: 1, AuthorID: 4, Body: "hi", Audience: &schema.Audience{Kind: tt.kind}}, 80)
+		if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[]") || !strings.Contains(line, "] 4  hi") {
+			t.Errorf("kind %q: line %q, want a badge before the author", tt.kind, line)
+		}
+		if tt.want != "" && !strings.HasPrefix(line, tt.want+" ") {
+			t.Errorf("kind %q: line %q, want badge %s", tt.kind, line, tt.want)
+		}
+		if strings.ContainsAny(line, "\x1b\n\r\t") {
+			t.Errorf("kind %q: line %q carries a control character", tt.kind, line)
+		}
+	}
+}
+
+// Error text from the server is shown in the status line without control
+// characters, like everything else that comes from outside.
+func TestServerErrorTextIsSanitized(t *testing.T) {
+	api := &scopeAPI{roster: scopeRoster(), postErr: errors.New("cli: server error forbidden: no\x1b[2J\nsecond line")}
+	m := scopeModel(api, true)
+	m = enter(m, "hello")
+	status := m.channelStatus
+	if strings.ContainsAny(status, "\x1b\n\r") || !strings.Contains(status, "forbidden") {
+		t.Errorf("status = %q", status)
+	}
+	if m.input != "hello" {
+		t.Errorf("input = %q, want it kept after the refusal", m.input)
 	}
 }
