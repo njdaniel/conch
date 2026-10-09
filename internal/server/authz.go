@@ -48,6 +48,7 @@ var (
 	errChannelNotFound = &schema.Error{Code: "channel_not_found", Message: "channel not found"}
 	errApprovalMissing = &schema.Error{Code: "approval_not_found", Message: "approval not found"}
 	errInternal        = &schema.Error{Code: "internal_error", Message: "internal server error"}
+	errUnauthenticated = &schema.Error{Code: "unauthenticated", Message: "the credential is no longer valid"}
 )
 
 // auditAgentDenial records one denied agent action. A failure to write the
@@ -57,7 +58,11 @@ func (s *Server) auditAgentDenial(ctx context.Context, principalID int64, subjec
 	if channelID > 0 {
 		target = fmt.Sprintf("channel:%d", channelID)
 	}
-	detail := fmt.Sprintf("capability=%s target=%s reason=%s", capability, target, reason)
+	named := string(capability)
+	if named == "" {
+		named = "n/a"
+	}
+	detail := fmt.Sprintf("capability=%s target=%s reason=%s", named, target, reason)
 	// The caller may already be gone; the denial must still be recorded.
 	actx := context.WithoutCancel(ctx)
 	if _, err := s.store.AppendAuditEvent(actx, fmt.Sprintf("principal:%d", principalID), "access_denied", subject, detail); err != nil {
@@ -83,9 +88,10 @@ func (s *Server) agentManifest(ctx context.Context, principalID int64) (schema.A
 }
 
 // agentManifestAllows is the manifest gate alone: does the agent's manifest
-// grant capability, and (when channelID is non-zero) permission in that
-// channel? Denials are audited under subject. A store failure is reported as
-// an error and is not an allow.
+// grant capability, and permission in channel channelID? Denials are audited
+// under subject. A store failure is reported as an error and is not an allow.
+// The channel is required: a caller with no channel to name is refused rather
+// than checked on capability alone.
 func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, subject string, capability schema.Capability, channelID int64, permission schema.ChannelPermission) (bool, error) {
 	m, reason, err := s.agentManifest(ctx, principalID)
 	if err != nil {
@@ -95,7 +101,7 @@ func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, sub
 	case reason != "":
 	case !m.Allows(capability):
 		reason = denyCapability
-	case channelID > 0 && !m.AllowsChannel(channelID, permission):
+	case channelID <= 0 || !m.AllowsChannel(channelID, permission):
 		reason = denyChannelPermission
 	}
 	if reason != "" {
@@ -107,92 +113,157 @@ func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, sub
 
 // agentScope authorizes one MCP tool call for one agent. It is created by the
 // tool wrapper after the tool's capability has been checked, and it is the
-// only way a tool reaches a channel or an approval.
+// only way a tool reaches a channel or an approval: the lookups below return
+// grantedChannel and grantedApproval values, and reading or writing content
+// is a method on those, so a tool body never touches the store.
 type agentScope struct {
-	s           *Server
-	principalID int64
-	subject     string // "mcp:<tool>", the audit subject
-	capability  schema.Capability
-	manifest    schema.AgentManifestV1
+	s          *Server
+	identity   mcpIdentity
+	subject    string // "mcp:<tool>", the audit subject
+	tool       string
+	capability schema.Capability
+	manifest   schema.AgentManifestV1
 }
 
 // newAgentScope checks the capability gate for tool: the tool must be mapped
 // to a capability and the agent's manifest must grant it. It returns a
 // *schema.Error to hand back to the caller when the call is refused.
-func (s *Server) newAgentScope(ctx context.Context, principalID int64, tool string) (*agentScope, *schema.Error) {
-	subject := "mcp:" + tool
+func (s *Server) newAgentScope(ctx context.Context, identity mcpIdentity, tool string) (*agentScope, *schema.Error) {
+	a := &agentScope{s: s, identity: identity, subject: "mcp:" + tool, tool: tool}
 	capability, ok := schema.MCPToolCapability(tool)
 	if !ok {
 		// A tool registered without a capability mapping has no access.
-		s.auditAgentDenial(ctx, principalID, subject, "", 0, denyUnmappedTool)
+		s.auditAgentDenial(ctx, identity.principalID, a.subject, "", 0, denyUnmappedTool)
 		return nil, errForbidden
 	}
-	m, reason, err := s.agentManifest(ctx, principalID)
-	if err != nil {
-		slog.ErrorContext(ctx, "authz: load manifest failed", "principal", principalID, "error", err)
-		return nil, errInternal
+	a.capability = capability
+	if serr := a.loadManifest(ctx); serr != nil {
+		return nil, serr
 	}
-	if reason == "" && !m.Allows(capability) {
+	return a, nil
+}
+
+// loadManifest reads the agent's manifest afresh and applies the capability
+// gate to it.
+func (a *agentScope) loadManifest(ctx context.Context) *schema.Error {
+	m, reason, err := a.s.agentManifest(ctx, a.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: load manifest failed", "principal", a.identity.principalID, "error", err)
+		return errInternal
+	}
+	if reason == "" && !m.Allows(a.capability) {
 		reason = denyCapability
 	}
 	if reason != "" {
-		s.auditAgentDenial(ctx, principalID, subject, capability, 0, reason)
-		return nil, errForbidden
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, 0, reason)
+		return errForbidden
 	}
-	return &agentScope{s: s, principalID: principalID, subject: subject, capability: capability, manifest: m}, nil
+	a.manifest = m
+	return nil
 }
 
-// channel applies both gates to one channel: membership first (a non-member
-// learns nothing), then the manifest's per-channel permission.
-func (a *agentScope) channel(ctx context.Context, channel store.Channel, permission schema.ChannelPermission, notFound *schema.Error) *schema.Error {
-	member, err := a.s.store.IsChannelMember(ctx, channel.ID, a.principalID)
+// refresh re-establishes everything a scope decided when it was created, for
+// a tool that runs long enough for it to change (await_decision calls it on
+// every poll): the credential or principal must still be usable, and the
+// manifest, read again, must still grant the capability. Channel membership
+// and the per-channel permission are re-checked by the next lookup.
+func (a *agentScope) refresh(ctx context.Context) *schema.Error {
+	live, err := a.s.mcpStillAuthenticated(ctx, a.identity)
 	if err != nil {
-		slog.ErrorContext(ctx, "authz: check membership failed", "principal", a.principalID, "error", err)
+		slog.ErrorContext(ctx, "authz: re-check credential failed", "principal", a.identity.principalID, "error", err)
+		return errInternal
+	}
+	if !live {
+		return errUnauthenticated
+	}
+	return a.loadManifest(ctx)
+}
+
+// channel applies both remaining gates to one channel: membership first (a
+// non-member learns nothing), then the manifest's per-channel permission.
+func (a *agentScope) channel(ctx context.Context, channel store.Channel, permission schema.ChannelPermission, notFound *schema.Error) *schema.Error {
+	member, err := a.s.store.IsChannelMember(ctx, channel.ID, a.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: check membership failed", "principal", a.identity.principalID, "error", err)
 		return errInternal
 	}
 	if !member {
-		a.s.auditAgentDenial(ctx, a.principalID, a.subject, a.capability, channel.ID, denyNotMember)
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyNotMember)
 		return notFound
 	}
 	if !a.manifest.AllowsChannel(channel.ID, permission) {
-		a.s.auditAgentDenial(ctx, a.principalID, a.subject, a.capability, channel.ID, denyChannelPermission)
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyChannelPermission)
 		return errForbidden
 	}
 	return nil
 }
 
+// grantedChannel is a channel the agent has been authorized to use with one
+// permission. It exists only as the result of a scope lookup.
+type grantedChannel struct {
+	scope   *agentScope
+	channel store.Channel
+}
+
+// id returns the channel's id.
+func (g *grantedChannel) id() int64 { return g.channel.ID }
+
+// insertMessage stores a message in the channel, authored by the agent.
+func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload *schema.Payload) (store.Message, error) {
+	return g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
+}
+
+// listMessages reads one page of the channel's messages.
+func (g *grantedChannel) listMessages(ctx context.Context, after int64, limit int) ([]store.Message, error) {
+	return g.scope.s.store.ListMessages(ctx, g.channel.ID, after, limit)
+}
+
+// grantedApproval is an approval the agent has been authorized to observe.
+type grantedApproval struct {
+	scope    *agentScope
+	approval store.Approval
+}
+
+// state returns the approval's state as of the lookup.
+func (g *grantedApproval) state() schema.ApprovalState { return g.approval.State }
+
+// resolution reads the approval's resolution event.
+func (g *grantedApproval) resolution(ctx context.Context) (schema.ApprovalResolutionV1, error) {
+	return g.scope.s.store.ResolutionByApprovalID(ctx, g.approval.ID)
+}
+
 // channelByName resolves a channel the agent may use with permission. An
 // unknown channel and a channel the agent is not a member of are the same
 // answer.
-func (a *agentScope) channelByName(ctx context.Context, name string, permission schema.ChannelPermission) (store.Channel, *schema.Error) {
+func (a *agentScope) channelByName(ctx context.Context, name string, permission schema.ChannelPermission) (*grantedChannel, *schema.Error) {
 	channel, err := a.s.store.ChannelByName(ctx, name)
 	if errors.Is(err, store.ErrNotFound) {
-		return store.Channel{}, errChannelNotFound
+		return nil, errChannelNotFound
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: find channel failed", "error", err)
-		return store.Channel{}, errInternal
+		return nil, errInternal
 	}
 	if serr := a.channel(ctx, channel, permission, errChannelNotFound); serr != nil {
-		return store.Channel{}, serr
+		return nil, serr
 	}
-	return channel, nil
+	return &grantedChannel{scope: a, channel: channel}, nil
 }
 
 // channelByID is channelByName for a channel id.
-func (a *agentScope) channelByID(ctx context.Context, id int64, permission schema.ChannelPermission) (store.Channel, *schema.Error) {
+func (a *agentScope) channelByID(ctx context.Context, id int64, permission schema.ChannelPermission) (*grantedChannel, *schema.Error) {
 	channel, err := a.s.store.ChannelByID(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		return store.Channel{}, errChannelNotFound
+		return nil, errChannelNotFound
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: find channel failed", "error", err)
-		return store.Channel{}, errInternal
+		return nil, errInternal
 	}
 	if serr := a.channel(ctx, channel, permission, errChannelNotFound); serr != nil {
-		return store.Channel{}, serr
+		return nil, serr
 	}
-	return channel, nil
+	return &grantedChannel{scope: a, channel: channel}, nil
 }
 
 // approval resolves an approval the agent may observe: it must be a member of
@@ -201,24 +272,40 @@ func (a *agentScope) channelByID(ctx context.Context, id int64, permission schem
 // answer. Being the requester grants nothing by itself: membership is the
 // boundary, so an agent removed from a channel can no longer watch the
 // approvals it raised there.
-func (a *agentScope) approval(ctx context.Context, id int64, permission schema.ChannelPermission) (store.Approval, *schema.Error) {
+func (a *agentScope) approval(ctx context.Context, id int64, permission schema.ChannelPermission) (*grantedApproval, *schema.Error) {
 	approval, err := a.s.store.ApprovalByID(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		return store.Approval{}, errApprovalMissing
+		return nil, errApprovalMissing
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: find approval failed", "error", err)
-		return store.Approval{}, errInternal
+		return nil, errInternal
 	}
 	channel, err := a.s.store.ChannelByID(ctx, approval.ChannelID)
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: find approval channel failed", "error", err)
-		return store.Approval{}, errInternal
+		return nil, errInternal
 	}
 	if serr := a.channel(ctx, channel, permission, errApprovalMissing); serr != nil {
-		return store.Approval{}, serr
+		return nil, serr
 	}
-	return approval, nil
+	return &grantedApproval{scope: a, approval: approval}, nil
+}
+
+// auditAgentNonMember records a membership refusal for a REST or WebSocket
+// request made with an agent's credential, so that an agent probing channels
+// it is not in leaves the same trace there as it does over MCP. It does
+// nothing for other callers.
+func (s *Server) auditAgentNonMember(r *http.Request, capability schema.Capability, channelID int64) {
+	caller, ok := callerFrom(r.Context())
+	if !ok || caller.Kind != store.PrincipalAgent {
+		return
+	}
+	subject := r.Pattern
+	if subject == "" {
+		subject = "<unmatched>"
+	}
+	s.auditAgentDenial(r.Context(), caller.ID, subject, capability, channelID, denyNotMember)
 }
 
 // agentCallerAllowed applies the manifest gate to a REST or WebSocket request
@@ -245,6 +332,45 @@ func (s *Server) agentCallerAllowed(w http.ResponseWriter, r *http.Request, capa
 		return false
 	}
 	return true
+}
+
+// agentReadAllowed reports whether manifest m lets an agent read channelID.
+func agentReadAllowed(m schema.AgentManifestV1, channelID int64) bool {
+	return m.Allows(schema.CapabilityMessagesRead) && m.AllowsChannel(channelID, schema.ChannelPermissionRead)
+}
+
+// dropAgentSubscriptionsRevokedBy closes the agent's live WebSocket
+// subscriptions on every channel that manifest m no longer lets it read. It is
+// called after a manifest is written. If the agent's channels cannot be
+// listed, every subscription it holds is closed instead (fail closed); a
+// client that reconnects is checked against the new manifest.
+func (s *Server) dropAgentSubscriptionsRevokedBy(ctx context.Context, agentID int64, m schema.AgentManifestV1) {
+	channels, err := s.store.ListChannelsForPrincipal(context.WithoutCancel(ctx), agentID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: list agent channels failed; closing all its subscriptions", "principal", agentID, "error", err)
+		s.hub.DropPrincipalAll(agentID)
+		return
+	}
+	for _, c := range channels {
+		if !agentReadAllowed(m, c.ID) {
+			s.hub.DropPrincipal(c.ID, agentID)
+		}
+	}
+}
+
+// agentMayNoLongerRead reports whether principalID is an agent whose manifest
+// does not (or no longer) let it read channelID. It only chooses a WebSocket
+// close reason, so any error answers false and nothing is audited.
+func (s *Server) agentMayNoLongerRead(ctx context.Context, principalID, channelID int64) bool {
+	p, err := s.store.PrincipalByID(ctx, principalID)
+	if err != nil || p.Kind != store.PrincipalAgent {
+		return false
+	}
+	m, reason, err := s.agentManifest(ctx, principalID)
+	if err != nil {
+		return false
+	}
+	return reason != "" || !agentReadAllowed(m, channelID)
 }
 
 // humansOnly refuses an agent caller on a route that is the human surface for

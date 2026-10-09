@@ -712,10 +712,11 @@ func assertAuditChain(proc *conchdProc, approvalID int64, want []string) error {
 }
 
 // isolationCheck runs a second agent with a deliberately narrow grant —
-// message capabilities only, in its own channel "lab" — and asserts what it
-// cannot do: see "ops" at all while not a member, post there once it is a
-// member but its manifest still says no, observe the first agent's approval,
-// or raise an approval even where it may post. Every refusal must be audited.
+// messages plus approvals.check, in its own channel "lab" — and asserts what
+// it cannot do: see "ops" or the approval raised there while not a member,
+// post there or observe that approval once it is a member but its manifest
+// still says no, or raise an approval even where it may post. Every refusal
+// must be audited.
 func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
 	labID, err := createChannel(proc.baseURL, "lab")
 	if err != nil {
@@ -728,8 +729,8 @@ func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
 	if err := addMember(proc.baseURL, "lab", observerID); err != nil {
 		return err
 	}
-	messagesOnly := []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost}
-	if err := putManifest(proc.baseURL, observerID, "dogfood-observer", messagesOnly, labID); err != nil {
+	narrow := []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost, schema.CapabilityApprovalsCheck}
+	if err := putManifest(proc.baseURL, observerID, "dogfood-observer", narrow, labID); err != nil {
 		return err
 	}
 	_, token, err := issueCredential(proc.baseURL, observerID, "dogfood-observer")
@@ -764,7 +765,9 @@ func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
 		{"read a channel it is not in", "read_channel", map[string]any{"channel": "ops"}, "channel_not_found"},
 		{"post to a channel it is not in", "post_message", map[string]any{"channel": "ops", "body": "intrusion"}, "channel_not_found"},
 		{"raise an approval without the capability", "request_approval", approvalArgs(labID), "forbidden"},
-		{"observe an approval without the capability", "check_decision", map[string]any{"approval_id": opsApprovalID}, "forbidden"},
+		// It holds approvals.check, so this is the membership rule alone: an
+		// approval in a channel it is not in looks like it does not exist.
+		{"observe an approval in a channel it is not in", "check_decision", map[string]any{"approval_id": opsApprovalID}, "approval_not_found"},
 	}
 	for _, r := range refusals {
 		if err := expectToolError(observer, r.tool, r.args, r.code); err != nil {
@@ -776,8 +779,18 @@ func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
 	if err := addMember(proc.baseURL, "ops", observerID); err != nil {
 		return err
 	}
-	if err := expectToolError(observer, "post_message", map[string]any{"channel": "ops", "body": "intrusion"}, "forbidden"); err != nil {
-		return fmt.Errorf("observer must not post where its manifest has no grant: %w", err)
+	memberRefusals := []struct {
+		what string
+		tool string
+		args map[string]any
+	}{
+		{"post", "post_message", map[string]any{"channel": "ops", "body": "intrusion"}},
+		{"observe an approval", "check_decision", map[string]any{"approval_id": opsApprovalID}},
+	}
+	for _, r := range memberRefusals {
+		if err := expectToolError(observer, r.tool, r.args, "forbidden"); err != nil {
+			return fmt.Errorf("observer must not %s where its manifest has no grant: %w", r.what, err)
+		}
 	}
 
 	list, err := restListMessages(proc.baseURL, "ops")
@@ -803,7 +816,7 @@ func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
 			denials++
 		}
 	}
-	if want := len(refusals) + 1; denials != want {
+	if want := len(refusals) + len(memberRefusals); denials != want {
 		return fmt.Errorf("access_denied audit events for the observer = %d, want %d", denials, want)
 	}
 	return nil
