@@ -394,7 +394,7 @@ func (f mcpAuthFixture) authors(t *testing.T) []int64 {
 }
 
 func TestMCPAuthenticatesIssuedCredential(t *testing.T) {
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	_, token := f.issue(t, f.agent.ID, nil)
 
 	rec := f.post(t, "Bearer "+token)
@@ -409,7 +409,7 @@ func TestMCPAuthenticatesIssuedCredential(t *testing.T) {
 func TestMCPRejectsInvalidCredentialsIdentically(t *testing.T) {
 	logs := captureLogs(t)
 	staticShaped := schema.CredentialTokenPrefix + strings.Repeat("B", 43)
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	f.srv.cfg.MCPBearerTokens = map[string]int64{staticShaped: f.agent.ID}
 
 	revokedCred, revokedToken := f.issue(t, f.agent.ID, nil)
@@ -479,7 +479,7 @@ func TestMCPRejectsInvalidCredentialsIdentically(t *testing.T) {
 }
 
 func TestMCPRotationTakesEffectWithoutRestart(t *testing.T) {
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	cred, oldToken := f.issue(t, f.agent.ID, nil)
 	if rec := f.post(t, "Bearer "+oldToken); rec.Code != http.StatusOK {
 		t.Fatalf("before rotation: status = %d", rec.Code)
@@ -530,7 +530,7 @@ func (f mcpAuthFixture) callTool(t *testing.T, token, name string, arguments map
 // credential's agent.
 func TestMCPToolInputCannotOverridePrincipal(t *testing.T) {
 	ctx := context.Background()
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	_, token := f.issue(t, f.agent.ID, nil)
 	channel, err := f.srv.store.ChannelByName(ctx, "general")
 	if err != nil {
@@ -582,7 +582,7 @@ func TestMCPToolInputCannotOverridePrincipal(t *testing.T) {
 
 func TestMCPStoreFailureFailsClosed(t *testing.T) {
 	logs := captureLogs(t)
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	_, token := f.issue(t, f.agent.ID, nil)
 	f.srv.cfg.MCPBearerTokens = map[string]int64{"static-token": f.agent.ID}
 	if err := f.srv.store.Close(); err != nil {
@@ -601,7 +601,7 @@ func TestMCPStoreFailureFailsClosed(t *testing.T) {
 func TestMCPStaticTokenStillWorksAndWarnsOnce(t *testing.T) {
 	logs := captureLogs(t)
 	// The agent created first in the fixture has id 1.
-	f := newMCPAuthFixture(t, Config{MCPBearerTokens: map[string]int64{"static-token": 1}})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff, MCPBearerTokens: map[string]int64{"static-token": 1}})
 	if f.agent.ID != 1 {
 		t.Fatalf("fixture agent id = %d, want 1", f.agent.ID)
 	}
@@ -621,7 +621,7 @@ func TestMCPStaticTokenStillWorksAndWarnsOnce(t *testing.T) {
 
 func TestMCPNoDeprecationWarningWithoutStaticTokens(t *testing.T) {
 	logs := captureLogs(t)
-	newMCPAuthFixture(t, Config{})
+	newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	if strings.Contains(logs.buf.String(), "deprecated") {
 		t.Errorf("unexpected deprecation warning:\n%s", logs.buf.String())
 	}
@@ -632,7 +632,7 @@ func TestMCPNoDeprecationWarningWithoutStaticTokens(t *testing.T) {
 // which is configuration and so is not revoked by the disable.
 func TestMCPRejectsDisabledAgent(t *testing.T) {
 	ctx := context.Background()
-	f := newMCPAuthFixture(t, Config{})
+	f := newMCPAuthFixture(t, Config{AuthMode: AuthOff})
 	f.srv.cfg.MCPBearerTokens = map[string]int64{"static-token": f.agent.ID}
 	_, issued := f.issue(t, f.agent.ID, nil)
 	for _, tok := range []string{issued, "static-token"} {

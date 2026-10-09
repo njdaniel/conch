@@ -136,7 +136,7 @@ func TestListChannelsStoreFailure(t *testing.T) {
 	if err := st.Close(); err != nil {
 		t.Fatalf("store.Close: %v", err)
 	}
-	srv := New(Config{Version: "v0", Listen: "127.0.0.1:0"}, st)
+	srv := New(Config{AuthMode: AuthOff, Version: "v0", Listen: "127.0.0.1:0"}, st)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/channels", nil))
 	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error")
