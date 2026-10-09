@@ -243,9 +243,18 @@ func (s *Store) RotateCredential(ctx context.Context, credentialID int64) (schem
 			}
 			exp = &e
 		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), credentialID); err != nil {
+		res, err := tx.ExecContext(ctx,
+			"UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), credentialID)
+		if err != nil {
 			return fmt.Errorf("store: rotate credential: revoke old: %w", err)
+		}
+		// BEGIN IMMEDIATE already serializes this against other writers, so
+		// exactly one row changes. Checking anyway means a second credential
+		// can never be issued for one revocation even if that ever changes.
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("store: rotate credential: revoke old: %w", err)
+		} else if n != 1 {
+			return ErrCredentialRevoked
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp)
 		if err != nil {
@@ -285,9 +294,16 @@ func (s *Store) RevokeCredential(ctx context.Context, credentialID int64) error 
 			return nil
 		}
 		now := credentialNow().Truncate(time.Millisecond)
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), credentialID); err != nil {
+		res, err := tx.ExecContext(ctx,
+			"UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), credentialID)
+		if err != nil {
 			return fmt.Errorf("store: revoke credential: %w", err)
+		}
+		// Same guard as rotation: no audit event unless this call revoked it.
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("store: revoke credential: %w", err)
+		} else if n != 1 {
+			return nil
 		}
 		return appendAuditEventTx(ctx, tx, "system", "credential_revoked",
 			principalActor(principalID), credentialDetail(credentialID, label), now)
