@@ -21,7 +21,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	var err error
-	if len(os.Args) == 1 {
+	if len(os.Args) <= 1 { // an empty argument list is possible, and is not a command
 		err = runTUI(ctx)
 	} else {
 		err = cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, version)

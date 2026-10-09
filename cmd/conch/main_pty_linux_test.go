@@ -19,6 +19,8 @@ import (
 	"unsafe"
 
 	"github.com/njdaniel/conch/pkg/schema"
+
+	"github.com/njdaniel/conch/internal/cli/termquiet"
 )
 
 // These tests run the built conch binary attached to a real pseudo-terminal.
@@ -50,6 +52,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// A test binary has arguments, so termquiet's init treated it as a plain
+	// command and set TERM=dumb. main never runs here, so put it back.
+	termquiet.Restore()
 	code := m.Run()
 	if buildDir != "" {
 		_ = os.RemoveAll(buildDir)

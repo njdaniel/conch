@@ -25,6 +25,12 @@
 //
 // The TUI (no arguments) is left alone, so it still learns the real
 // background through the same query, exactly as before.
+//
+// One lasting effect: termenv and Lip Gloss decide their default colour
+// profile during initialization, while TERM is dumb, so for a plain command
+// the default renderer has colour off even after Restore. No plain command
+// styles its output today. One that wants colour must build its own renderer
+// after Restore instead of using the default.
 package termquiet
 
 import "os"
