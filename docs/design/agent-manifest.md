@@ -62,7 +62,17 @@ The mapping is keyed by MCP tool name, but the capability is the unit of authori
 
 ## 4. Channel permissions
 
-Type `ChannelPermission`: `read` or `post`. A `ChannelGrant` is `{channel_id, permissions}` with a positive channel id and a non-empty, duplicate-free permission list. The permissions are independent: `post` does not imply `read`.
+Type `ChannelPermission`, a closed string enum; `ChannelPermissions()` returns the vocabulary. A `ChannelGrant` is `{channel_id, permissions}` with a positive channel id and a non-empty, duplicate-free permission list. The permissions are independent: none implies another. In particular `post` does not imply `read`, `post_net` does not imply `post`, and `whisper` does not imply `whisper_agent`.
+
+| Permission | Constant | Permits |
+|---|---|---|
+| `read` | `ChannelPermissionRead` | Reading the channel's contents, including scoped messages whose audience the agent is in. No further grant is needed to read a net or a whisper. |
+| `post` | `ChannelPermissionPost` | Posting channel-wide: a message with no `audience`. |
+| `post_net` | `ChannelPermissionPostNet` | Posting with `{"kind": "net"}` to a net in the channel that the agent is a member (not merely a monitor) of ([ADR-005](../adr/ADR-005-nets-and-whispers.md), #114). |
+| `whisper` | `ChannelPermissionWhisper` | Posting with `{"kind": "principals"}` to a list of human principals in the channel. |
+| `whisper_agent` | `ChannelPermissionWhisperAgent` | The whisper list may include other agents. Separate from `whisper` for the same reason the roadmap's `reply-to-agent` capability exists: agent-to-agent traffic no human reads is its own risk. |
+
+The three scoped-speaking permissions were added as a compatible change; existing fixtures are byte-identical and `agent-manifest-v1-nets.json` exercises them. Enforcement (which permission a given post needs, and net membership checks) belongs to the V2 server slice; the schema only names the grants. An agent with `post_net` or `whisper` but not `messages.post` still cannot post anywhere, because the capability and the channel permission are both required.
 
 A capability and a channel permission are **both** required; neither substitutes for the other. `messages.post` with no channel grant can post nowhere, and a `post` grant without `messages.post` is inert. Capabilities say *what kind of thing* an agent may do; channel grants say *where*.
 
@@ -80,7 +90,7 @@ Budgets are per capability, which gives #80 its required separation: reads have 
 
 ## 6. How the vocabulary grows
 
-Later decisions add permissions: transmitting on a net and whispering ([ADR-005](../adr/ADR-005-nets-and-whispers.md), which grants them per channel), and voice publishing.
+Later decisions add permissions. Transmitting on a net and whispering ([ADR-005](../adr/ADR-005-nets-and-whispers.md)) landed in #114 as the per-channel permissions `post_net`, `whisper` and `whisper_agent` (§4), following this procedure; voice publishing is still to come.
 
 - **Adding a value is compatible** and needs no version bump: add the constant, add it to `Valid()` (and to `Capabilities()` for a capability), add a row to the tables here, and add a *new* fixture that uses it. Existing fixtures stay byte-identical, which is what `scripts/schema-compat.sh` gates. Per-channel grants such as net transmit and whisper are new `ChannelPermission` constants; server-wide ones such as voice publishing are new `Capability` constants.
 - **A new MCP tool** adds a row to the tool mapping in the same PR that registers the tool. Until then it is unmapped and denied.
