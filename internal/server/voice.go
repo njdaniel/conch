@@ -74,9 +74,11 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 		writeChannelNotFound(w)
 		return
 	}
-	// Agents in voice are deferred (ADR-004). Checked after membership, so a
-	// non-member agent learns nothing about the channel from this answer.
-	if caller.Kind == store.PrincipalAgent {
+	// Humans only: agents in voice are deferred (ADR-004), and any kind of
+	// principal added later has no voice until someone decides it does.
+	// Checked after membership, so a non-member learns nothing about the
+	// channel from this answer.
+	if caller.Kind != store.PrincipalHuman {
 		s.auditAgentDenial(ctx, caller.ID, r.Pattern, "", channel.ID, denyAgentVoice)
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return
@@ -89,10 +91,19 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 
 	resp, grants, err := s.voiceSession(ctx, caller, channel)
 	switch {
+	case errors.Is(err, errVoiceNoLongerEntitled):
+		// Removed, disabled or signed out while LiveKit was being asked: the
+		// same answer as if it had happened before the request.
+		writeChannelNotFound(w)
+		return
 	case errors.Is(err, livekit.ErrUnavailable):
-		// The error text names the LiveKit method and the transport failure;
-		// it carries no token and no secret.
-		slog.WarnContext(ctx, "voice: livekit unavailable", "channel", channel.ID, "error", err)
+		// A caller who hung up cancels the LiveKit call; that is not an
+		// outage and must not look like one in the log. Otherwise the error
+		// text names the LiveKit method and the transport failure; it carries
+		// no token and no secret.
+		if ctx.Err() == nil {
+			slog.WarnContext(ctx, "voice: livekit unavailable", "channel", channel.ID, "error", err)
+		}
 		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceUnavailable, "voice is temporarily unavailable")
 		return
 	case err != nil:
@@ -111,7 +122,30 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.InfoContext(ctx, "voice: session issued", "principal", caller.ID, "channel", channel.ID)
-	writeJSON(w, http.StatusOK, resp)
+	// The body carries bearer tokens: never cached.
+	writeSecretJSON(w, http.StatusOK, resp)
+}
+
+// errVoiceNoLongerEntitled is voiceSession's refusal when the caller stopped
+// being entitled between the handler's checks and the signing of a token.
+var errVoiceNoLongerEntitled = errors.New("voice: caller is no longer entitled")
+
+// voiceStillEntitled re-checks, immediately before a token is signed, what the
+// handler checked on the way in: the caller is a member of the channel and the
+// credential it used is still live (which also covers a disabled principal).
+// Asking LiveKit to create the room can take seconds, and a removal that lands
+// in that time must not be answered with a fresh token. A window of
+// microseconds remains; closing it for good is the poller's job (issue #127),
+// which compares every participant against current membership.
+func (s *Server) voiceStillEntitled(ctx context.Context, p store.Principal, ch store.Channel) (bool, error) {
+	member, err := s.store.IsChannelMember(ctx, ch.ID, p.ID)
+	if err != nil || !member {
+		return false, err
+	}
+	if credID, ok := credentialIDFrom(ctx); ok {
+		return s.store.CredentialLive(ctx, credID)
+	}
+	return true, nil
 }
 
 // voiceAudience is one room a principal may join in a channel: which audience
@@ -134,7 +168,11 @@ func (s *Server) voiceAudiences(_ store.Principal, ch store.Channel) []voiceAudi
 		audience:   nil,
 		canPublish: true,
 		label:      "channel:publish",
-		room:       func(ctx context.Context) (store.VoiceRoom, error) { return s.store.ChannelVoiceRoom(ctx, ch.ID) },
+		// Not cancellable: once asked for, the room's row is written or
+		// found whether or not the caller is still there.
+		room: func(ctx context.Context) (store.VoiceRoom, error) {
+			return s.store.ChannelVoiceRoom(context.WithoutCancel(ctx), ch.ID)
+		},
 	}}
 }
 
@@ -159,6 +197,13 @@ func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.C
 		}
 		if err := s.lk.CreateRoom(ctx, room.RoomName); err != nil {
 			return schema.VoiceSessionResponseV1{}, nil, err
+		}
+		entitled, err := s.voiceStillEntitled(ctx, p, ch)
+		if err != nil {
+			return schema.VoiceSessionResponseV1{}, nil, fmt.Errorf("voice: re-check caller: %w", err)
+		}
+		if !entitled {
+			return schema.VoiceSessionResponseV1{}, nil, errVoiceNoLongerEntitled
 		}
 		// The reported expiry is taken before signing and cut to whole
 		// seconds, as the token's is, so it is never later than the token's.

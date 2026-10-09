@@ -17,7 +17,8 @@ import (
 
 // AuditVoiceSessionIssued is written by the server for every voice session it
 // issues, never for a refusal. Its subject is "channel:<id>". The detail names
-// the room row and what was granted; it never contains a token.
+// the channel, the identity and what was granted; it never contains a token or
+// a room name.
 const AuditVoiceSessionIssued = "voice_session_issued"
 
 // voiceRoomPrefix starts every room name. The rest is 128 random bits, never
@@ -45,11 +46,26 @@ func newVoiceRoomName() (string, error) {
 }
 
 // ChannelVoiceRoom returns the channel-wide voice room of channelID, creating
-// its row on first use. It is idempotent and safe under concurrency: the
-// insert and the read run in one immediate transaction, the partial unique
-// index admits one channel-wide row per channel, and every caller gets that
-// row. The channel must exist (a foreign key enforces it).
+// its row on first use. Every call after the first is one read: a room row is
+// never changed or deleted, so a row that is found is the answer, and a member
+// asking for sessions in a loop takes no write lock. Creation is idempotent
+// and safe under concurrency: the insert and the read run in one immediate
+// transaction, the partial unique index admits one channel-wide row per
+// channel, and every caller gets that row. The channel must exist (a foreign
+// key enforces it).
 func (s *Store) ChannelVoiceRoom(ctx context.Context, channelID int64) (VoiceRoom, error) {
+	existing := VoiceRoom{ChannelID: channelID}
+	var existingAt int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, room_name, created_at FROM voice_rooms WHERE channel_id = ? AND net_id IS NULL`,
+		channelID).Scan(&existing.ID, &existing.RoomName, &existingAt)
+	if err == nil {
+		existing.CreatedAt = time.UnixMilli(existingAt)
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return VoiceRoom{}, fmt.Errorf("store: read voice room for channel %d: %w", channelID, err)
+	}
 	name, err := newVoiceRoomName()
 	if err != nil {
 		return VoiceRoom{}, err

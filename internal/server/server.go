@@ -106,8 +106,9 @@ func New(cfg Config, st *store.Store) *Server {
 			// Unreachable: Configured() was just checked. Fail closed anyway:
 			// with no client every voice endpoint answers voice_not_configured.
 			slog.Error("voice: client not built", "error", err)
+		} else {
+			slog.Info("voice: configured", "livekit", cfg.LiveKit)
 		}
-		slog.Info("voice: configured", "livekit", cfg.LiveKit)
 	} else {
 		slog.Info("voice: not configured")
 	}

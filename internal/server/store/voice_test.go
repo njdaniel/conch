@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sync"
 	"testing"
+	"time"
 )
 
 // roomNamePattern is "conch-" plus 128 bits in unpadded lower-case base32:
@@ -158,8 +159,12 @@ func TestVoiceRoomsIndexes(t *testing.T) {
 		{"net room", ch.ID, net1.ID, "r4", false},
 		{"second room for the same net", ch.ID, net1.ID, "r5", true},
 		{"room for another net", ch.ID, net2.ID, "r6", false},
-		{"duplicate room name", other.ID, net1.ID, "r1", true},
+		{"duplicate room name", other.ID, nil, "r1", true},
 		{"unknown channel", 9999, nil, "r7", true},
+		// A net room belongs to its net's own channel, and a net has one room.
+		{"a net's room under another channel", other.ID, net2.ID, "r8", true},
+		{"a second room for a net under another channel", other.ID, net1.ID, "r9", true},
+		{"unknown net", ch.ID, int64(9999), "r10", true},
 	}
 	for _, st := range steps {
 		err := insert(st.channel, st.net, st.room)
@@ -217,5 +222,40 @@ func TestVoiceRoomsMigrationFromSchema12(t *testing.T) {
 	}
 	if _, err := s.ChannelVoiceRoom(ctx, 2); err == nil {
 		t.Error("room for a channel that does not exist was created")
+	}
+}
+
+// After the first call a room lookup is a read: it takes no write lock, so a
+// member asking for sessions in a loop cannot hold up writers, and it works
+// while another connection is in the middle of a write transaction.
+func TestChannelVoiceRoomReadsOnceTheRoomExists(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	ch, err := s.CreateChannel(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ChannelVoiceRoom(ctx, ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold SQLite's write lock on another connection.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "ROLLBACK") }()
+	quick, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	again, err := s.ChannelVoiceRoom(quick, ch.ID)
+	if err != nil {
+		t.Fatalf("lookup while a writer holds the lock: %v", err)
+	}
+	if again != first {
+		t.Errorf("room = %+v, want %+v", again, first)
 	}
 }

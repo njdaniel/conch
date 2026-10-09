@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,11 @@ type fakeLiveKitServer struct {
 	status int
 	rooms  []string // room name of each CreateRoom, in order
 	calls  int      // every request of any kind
+	// body, when set, is sent instead of the usual answer.
+	body string
+	// onCreateRoom, when set, runs while a CreateRoom request is being
+	// answered: the moment between the handler's checks and the token.
+	onCreateRoom func()
 }
 
 func newFakeLiveKit(t *testing.T, status int) *fakeLiveKitServer {
@@ -48,15 +54,24 @@ func newFakeLiveKit(t *testing.T, status int) *fakeLiveKitServer {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls++
+		answer := `{}`
 		if strings.HasSuffix(r.URL.Path, "/CreateRoom") {
 			var req struct {
 				Name string `json:"name"`
 			}
 			_ = json.Unmarshal(raw, &req)
 			f.rooms = append(f.rooms, req.Name)
+			// LiveKit answers CreateRoom with the room.
+			answer = fmt.Sprintf(`{"sid":"RM_test","name":%q}`, req.Name)
+		}
+		if f.onCreateRoom != nil && strings.HasSuffix(r.URL.Path, "/CreateRoom") {
+			f.onCreateRoom()
+		}
+		if f.body != "" {
+			answer = f.body
 		}
 		w.WriteHeader(f.status)
-		_, _ = io.WriteString(w, `{}`)
+		_, _ = io.WriteString(w, answer)
 	}))
 	t.Cleanup(f.Close)
 	return f
@@ -541,5 +556,105 @@ func TestVoiceSessionLiveKitFailureLogsNoSecret(t *testing.T) {
 				t.Errorf("failure logs contain %q", s)
 			}
 		}
+	}
+}
+
+// A caller who stops being entitled while LiveKit is being asked gets no
+// token. CreateRoom can take seconds; a removal, a disable or a sign-out that
+// lands in that time must be answered like one that came before the request.
+func TestVoiceSessionRechecksBeforeSigning(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		lose func(f *voiceFixture) error
+	}{
+		{"removed from the channel", func(f *voiceFixture) error {
+			_, err := f.srv.store.RemoveChannelMember(ctx, "system", f.ops.ID, f.ids["ann"])
+			return err
+		}},
+		{"principal disabled", func(f *voiceFixture) error {
+			_, err := f.srv.store.DisablePrincipal(ctx, "system", f.ids["ann"])
+			return err
+		}},
+		{"all credentials revoked", func(f *voiceFixture) error {
+			_, err := f.srv.store.RevokeAllCredentials(ctx, "system", f.ids["ann"])
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newVoiceFixture(t, voiceOpts{auth: AuthRequired, configured: true})
+			f.lk.onCreateRoom = func() {
+				if err := tt.lose(f); err != nil {
+					t.Errorf("lose entitlement: %v", err)
+				}
+			}
+			res := f.session(t, "ann", "ops")
+			if res.status != http.StatusNotFound || errCode(t, res.body) != "channel_not_found" {
+				t.Fatalf("answer = %d %s, want the unknown-channel 404", res.status, res.body)
+			}
+			if strings.Contains(res.body, "token") || strings.Contains(res.body, "eyJ") {
+				t.Errorf("the refusal carries a token: %s", res.body)
+			}
+			if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+				t.Errorf("voice_session_issued = %d, want 0", n)
+			}
+			// The answer is the same bytes a non-member gets.
+			if other := f.session(t, "bob", "ops"); other.body != res.body {
+				t.Errorf("differs from a non-member's answer:\n %s\n %s", res.body, other.body)
+			}
+		})
+	}
+}
+
+// The response carries bearer tokens, so it must not be cached; refusals carry
+// nothing and need no such header.
+func TestVoiceSessionResponseIsNotCacheable(t *testing.T) {
+	f := newVoiceFixture(t, voiceOpts{auth: AuthRequired, configured: true})
+	rec := f.do(t, http.MethodPost, "/v1/channels/ops/voice/session", f.tokens["ann"], "")
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("status %d, Cache-Control %q; want 200 and no-store", rec.Code, rec.Header().Get("Cache-Control"))
+	}
+}
+
+// A 200 from LiveKit's address that does not name the room is not LiveKit
+// agreeing the room exists: no token is issued.
+func TestVoiceSessionNeedsLiveKitToNameTheRoom(t *testing.T) {
+	for _, body := range []string{`<html>welcome</html>`, `{}`, `{"name":"conch-someone-elses-room"}`} {
+		f := newVoiceFixture(t, voiceOpts{auth: AuthRequired, configured: true})
+		f.lk.body = body
+		res := f.session(t, "ann", "ops")
+		if res.status != http.StatusServiceUnavailable || errCode(t, res.body) != schema.ErrorCodeVoiceUnavailable {
+			t.Errorf("answer to LiveKit body %q = %d %s, want 503 voice_unavailable", body, res.status, res.body)
+		}
+		if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+			t.Errorf("LiveKit body %q: voice_session_issued = %d, want 0", body, n)
+		}
+	}
+}
+
+// A caller who hangs up cancels the LiveKit call. That is not an outage, and
+// any member could otherwise fill the log with lines that look like one.
+func TestVoiceSessionCancelledCallerIsNotLoggedAsAnOutage(t *testing.T) {
+	f := newVoiceFixture(t, voiceOpts{auth: AuthRequired, configured: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	f.lk.onCreateRoom = cancel
+	req := httptest.NewRequest(http.MethodPost, "/v1/channels/ops/voice/session", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tokens["ann"])
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	cancel()
+	if strings.Contains(rec.Body.String(), "eyJ") {
+		t.Errorf("a cancelled request was answered with a token: %s", rec.Body)
+	}
+	if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+		t.Errorf("voice_session_issued = %d, want 0", n)
+	}
+	if logs := f.logs.buf.String(); strings.Contains(logs, "livekit unavailable") {
+		t.Errorf("a cancelled request is logged as an outage:\n%s", logs)
+	}
+	// And the store is intact: the next caller is served.
+	if res := f.session(t, "ann2", "ops"); res.status != http.StatusOK {
+		t.Errorf("the next session = %d %s", res.status, res.body)
 	}
 }
