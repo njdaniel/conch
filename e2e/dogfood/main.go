@@ -1091,8 +1091,8 @@ func restartPath(bin binaries) error {
 	for _, e := range events {
 		switch {
 		case e.Action == approvals.AuditApprovalsStarted:
-			if e.Detail != "notifications=on" {
-				return fmt.Errorf("approvals_started detail = %q, want notifications=on", e.Detail)
+			if !strings.HasPrefix(e.Detail, "notifications=on since=") {
+				return fmt.Errorf("approvals_started detail = %q, want notifications=on and where the next start reads from", e.Detail)
 			}
 			starts++
 		case starts == 2 && (e.Action == approvals.AuditNotifySent || e.Action == approvals.AuditNotifyFailed):

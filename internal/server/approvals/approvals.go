@@ -98,6 +98,7 @@ type backing interface {
 	AppendAuditEvent(ctx context.Context, actor, action, subject, detail string) (store.AuditEvent, error)
 	ListAuditEvents(ctx context.Context, afterID int64, limit int) ([]store.AuditEvent, error)
 	LastAuditEvent(ctx context.Context, action string) (store.AuditEvent, error)
+	LastAuditID(ctx context.Context) (int64, error)
 }
 
 // notice is one notification owed for a committed transition.
@@ -124,6 +125,10 @@ type Manager struct {
 	retries   map[uint64]*time.Timer
 	nextRetry uint64
 	closed    bool
+	// attempted holds the owed notifications catch-up has already attempted
+	// in this process, so that a catch-up that has to be repeated (a row
+	// could not be written) does not deliver them again.
+	attempted map[notice]bool
 
 	// inflight tracks running timer callbacks so Close can wait for them,
 	// keeping tests deterministic.
@@ -139,6 +144,7 @@ func New(st *store.Store, notifier Notifier) *Manager {
 		catchUpBudget: defaultCatchUpBudget,
 		timers:        make(map[int64]*time.Timer),
 		retries:       make(map[uint64]*time.Timer),
+		attempted:     make(map[notice]bool),
 	}
 }
 
@@ -249,7 +255,15 @@ func (m *Manager) Rehydrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.catchUp(ctx)
+	// Everything in the log up to this id was written before this process
+	// served a request or armed a timer: it is the past, which catch-up is
+	// about. What comes after belongs to this run and is announced as it
+	// happens.
+	past, err := m.store.LastAuditID(ctx)
+	if err != nil {
+		return err
+	}
+	m.catchUp(ctx, past)
 	for _, a := range open {
 		switch a.State {
 		case schema.ApprovalStatePending:
@@ -306,17 +320,37 @@ func (m *Manager) cancel(id int64) {
 // armed. If the approval was decided in the meantime the escalation is a
 // no-op and no timer is re-armed. A store failure re-arms this timer rather
 // than leaving the approval pending until the next restart.
-func (m *Manager) onDeadline(id int64) {
+func (m *Manager) onDeadline(id int64) { m.escalate(id, false) }
+
+// onDeadlineAgain is onDeadline after the store failed it once.
+func (m *Manager) onDeadlineAgain(id int64) { m.escalate(id, true) }
+
+func (m *Manager) escalate(id int64, again bool) {
 	ctx := context.Background()
 	m.forget(id)
 	escalated, err := m.store.EscalateApproval(ctx, id)
 	if err != nil {
 		slog.ErrorContext(ctx, "approvals: escalate failed; trying again", "approval", id, "retry_in", m.retryEvery, "error", err)
-		m.schedule(id, m.retryEvery, m.onDeadline)
+		m.schedule(id, m.retryEvery, m.onDeadlineAgain)
 		return
 	}
 	if !escalated {
-		return
+		if !again {
+			return
+		}
+		// The store reported a failure for this transition a moment ago. If
+		// the approval is escalated now, that attempt committed after all
+		// (nothing else escalates), and what follows the commit was never
+		// done: do it now.
+		a, err := m.store.ApprovalByID(ctx, id)
+		if err != nil {
+			slog.ErrorContext(ctx, "approvals: load approval after a failed escalation failed; trying again", "approval", id, "retry_in", m.retryEvery, "error", err)
+			m.schedule(id, m.retryEvery, m.onDeadlineAgain)
+			return
+		}
+		if a.State != schema.ApprovalStateEscalated {
+			return
+		}
 	}
 	m.announce(ctx, notice{id, eventEscalated}, 0)
 	m.armGrace(id)
@@ -344,17 +378,36 @@ func (m *Manager) armGrace(id int64) {
 // onGrace fires when the escalation grace period ends: escalated → expired
 // with an outcome=expired resolution (audit: approval_expired). A concurrent
 // resolution makes this a no-op. A store failure re-arms this timer.
-func (m *Manager) onGrace(id int64) {
+func (m *Manager) onGrace(id int64) { m.expire(id, false) }
+
+// onGraceAgain is onGrace after the store failed it once.
+func (m *Manager) onGraceAgain(id int64) { m.expire(id, true) }
+
+func (m *Manager) expire(id int64, again bool) {
 	ctx := context.Background()
 	m.forget(id)
 	r, err := m.store.ExpireApproval(ctx, id)
 	if err != nil {
 		slog.ErrorContext(ctx, "approvals: expire failed; trying again", "approval", id, "retry_in", m.retryEvery, "error", err)
-		m.schedule(id, m.retryEvery, m.onGrace)
+		m.schedule(id, m.retryEvery, m.onGraceAgain)
 		return
 	}
 	if r == nil {
-		return
+		if !again {
+			return
+		}
+		// As in escalate: if the approval is expired now, the attempt the
+		// store reported as failed committed (nothing else expires one; a
+		// decision resolves it and announces that itself).
+		a, err := m.store.ApprovalByID(ctx, id)
+		if err != nil {
+			slog.ErrorContext(ctx, "approvals: load approval after a failed expiry failed; trying again", "approval", id, "retry_in", m.retryEvery, "error", err)
+			m.schedule(id, m.retryEvery, m.onGraceAgain)
+			return
+		}
+		if a.State != schema.ApprovalStateExpired {
+			return
+		}
 	}
 	m.announce(ctx, notice{id, eventExpired}, 0)
 }
@@ -378,7 +431,7 @@ func (m *Manager) announce(ctx context.Context, n notice, attempt int) {
 	if m.notifier == nil {
 		return
 	}
-	action, detail, err := m.attempt(ctx, n)
+	action, detail, err := m.attempt(ctx, time.Time{}, n)
 	if err != nil {
 		if attempt < loadRetries {
 			slog.ErrorContext(ctx, "approvals: load approval for notification failed; trying again",
@@ -395,29 +448,56 @@ func (m *Manager) announce(ctx context.Context, n notice, attempt int) {
 
 // attempt reads what the notification needs and delivers it, returning the
 // audit row that records the outcome. An error means the approval or its
-// resolution could not be read and nothing was sent.
-func (m *Manager) attempt(ctx context.Context, n notice) (action, detail string, err error) {
+// resolution could not be read and nothing was sent. A non-zero deliverBy
+// bounds the delivery itself (not the reads).
+func (m *Manager) attempt(ctx context.Context, deliverBy time.Time, n notice) (action, detail string, err error) {
 	a, err := m.store.ApprovalByID(ctx, n.approval)
 	if err != nil {
 		return "", "", err
 	}
-	switch n.event {
-	case eventCreated:
-		err = m.notifier.ApprovalCreated(ctx, a)
-	case eventEscalated:
-		err = m.notifier.ApprovalEscalated(ctx, a)
-	default:
-		r, rerr := m.store.ResolutionByApprovalID(ctx, n.approval)
-		if rerr != nil {
-			return "", "", rerr
+	var r schema.ApprovalResolutionV1
+	if n.event == eventResolved || n.event == eventExpired {
+		if r, err = m.store.ResolutionByApprovalID(ctx, n.approval); err != nil {
+			return "", "", err
 		}
-		err = m.notifier.ApprovalResolved(ctx, a, r)
 	}
-	if err != nil {
+	dctx := ctx
+	if !deliverBy.IsZero() {
+		var cancel context.CancelFunc
+		dctx, cancel = context.WithDeadline(ctx, deliverBy)
+		defer cancel()
+	}
+	if err := m.deliver(dctx, n, a, r); err != nil {
 		slog.ErrorContext(ctx, "approvals: notification failed", "approval", n.approval, "event", n.event, "error", err)
 		return AuditNotifyFailed, fmt.Sprintf("event=%s error=%q", n.event, err), nil
 	}
 	return AuditNotifySent, "event=" + n.event, nil
+}
+
+// errNotifierPanicked is what a delivery is recorded as failing with when the
+// notifier panicked.
+var errNotifierPanicked = errors.New("the notifier panicked")
+
+// deliver hands one notification to the notifier. A notifier that panics has
+// failed this delivery and nothing more: an approval must not lose its
+// timers, nor conchd its start-up, to the optional side of the system.
+func (m *Manager) deliver(ctx context.Context, n notice, a store.Approval, r schema.ApprovalResolutionV1) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			// The value is not logged: it can hold whatever the notifier had
+			// in hand, the approval's text included.
+			slog.ErrorContext(ctx, "approvals: the notifier panicked", "approval", n.approval, "event", n.event, "panic_type", fmt.Sprintf("%T", p))
+			err = errNotifierPanicked
+		}
+	}()
+	switch n.event {
+	case eventCreated:
+		return m.notifier.ApprovalCreated(ctx, a)
+	case eventEscalated:
+		return m.notifier.ApprovalEscalated(ctx, a)
+	default:
+		return m.notifier.ApprovalResolved(ctx, a, r)
+	}
 }
 
 // notAttempted is the audit row for a notification conchd could not attempt.
@@ -426,13 +506,16 @@ func notAttempted(n notice, why string) (action, detail string) {
 }
 
 // record appends a notify row, and keeps trying if the store refuses it: the
-// attempt has been made, so only the row is retried, not the delivery.
-func (m *Manager) record(ctx context.Context, n notice, action, detail string) {
+// attempt has been made, so only the row is retried, not the delivery. It
+// reports whether the row was written now.
+func (m *Manager) record(ctx context.Context, n notice, action, detail string) bool {
 	if err := m.write(ctx, n, action, detail); err != nil {
 		slog.ErrorContext(ctx, "approvals: append notify audit failed; trying again",
 			"approval", n.approval, "event", n.event, "retry_in", m.retryEvery, "error", err)
 		m.later(func(ctx context.Context) { m.record(ctx, n, action, detail) })
+		return false
 	}
+	return true
 }
 
 func (m *Manager) write(ctx context.Context, n notice, action, detail string) error {
@@ -446,6 +529,7 @@ func (m *Manager) later(step func(ctx context.Context)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
+		slog.Warn("approvals: a notification step to retry was dropped at shutdown; the next start redoes it")
 		return
 	}
 	m.nextRetry++
@@ -460,13 +544,22 @@ func (m *Manager) later(step func(ctx context.Context)) {
 	})
 }
 
-// catchUp makes the notification attempts that a stopped conchd left undone,
-// then appends this start's approvals_started row (§5.1). The row is written
-// only once every such transition has its notify row, so a catch-up that
-// fails part-way is repeated from the same place by the next start. Nothing
-// here fails start-up: an approval must stay decidable with the audit log or
-// ntfy in trouble.
-func (m *Manager) catchUp(ctx context.Context) {
+// catchUp makes the notification attempts that a stopped conchd left undone
+// and then appends this start's approvals_started row (§5.1). past is the
+// last audit id from before this process: catch-up concerns transitions up to
+// it, never this run's own. If it cannot finish (the log cannot be read, a
+// row cannot be written) it is tried again every retryEvery until it has, and
+// the start row is written only then. Nothing here fails start-up: an
+// approval must stay decidable with the audit log or ntfy in trouble.
+func (m *Manager) catchUp(ctx context.Context, past int64) {
+	if !m.caughtUp(ctx, past) {
+		m.later(func(ctx context.Context) { m.catchUp(ctx, past) })
+	}
+}
+
+// caughtUp is one pass of catchUp. It reports whether the start row is
+// written.
+func (m *Manager) caughtUp(ctx context.Context, past int64) bool {
 	state := notificationsOff
 	if m.notifier != nil {
 		state = notificationsOn
@@ -476,26 +569,56 @@ func (m *Manager) catchUp(ctx context.Context) {
 	case errors.Is(err, store.ErrNotFound):
 		// First start with this log: there is nowhere to read from.
 	case err != nil:
-		slog.ErrorContext(ctx, "approvals: read the last start from the audit log failed; notifications owed from before this start are left for the next", "error", err)
-		return
-	case last.Detail == notificationsOn && m.notifier != nil:
-		owed, err := m.owed(ctx, last.ID)
+		slog.ErrorContext(ctx, "approvals: read the last start from the audit log failed; trying again", "retry_in", m.retryEvery, "error", err)
+		return false
+	default:
+		was, since := startedRow(last)
+		if was != notificationsOn || m.notifier == nil {
+			break
+		}
+		owed, err := m.owed(ctx, since, past)
 		if err != nil {
-			slog.ErrorContext(ctx, "approvals: read the audit log for owed notifications failed; they are left for the next start", "error", err)
-			return
+			slog.ErrorContext(ctx, "approvals: read the audit log for owed notifications failed; trying again", "retry_in", m.retryEvery, "error", err)
+			return false
 		}
 		if !m.settle(ctx, owed) {
-			return
+			return false
 		}
 	}
-	if _, err := m.store.AppendAuditEvent(ctx, "system", AuditApprovalsStarted, "approvals", state); err != nil {
-		slog.ErrorContext(ctx, "approvals: append approvals_started failed", "error", err)
+	// since says where the next start reads from. It is the end of the past
+	// as this process found it, not this row's own id: the row may be written
+	// late, after transitions of this run, and they must not fall before it.
+	detail := fmt.Sprintf("%s since=%d", state, past)
+	if _, err := m.store.AppendAuditEvent(ctx, "system", AuditApprovalsStarted, "approvals", detail); err != nil {
+		slog.ErrorContext(ctx, "approvals: append approvals_started failed; trying again", "retry_in", m.retryEvery, "error", err)
+		return false
 	}
+	return true
 }
 
-// owed returns, in log order, the transitions after audit row afterID that
-// have no notify row.
-func (m *Manager) owed(ctx context.Context, afterID int64) ([]notice, error) {
+// startedRow reads an approvals_started row: whether notifications were on
+// (notificationsOn or notificationsOff), and the audit id the next start
+// reads from. A row without since= is read from its own id.
+func startedRow(e store.AuditEvent) (state string, since int64) {
+	since = e.ID
+	for _, field := range strings.Fields(e.Detail) {
+		if v, ok := strings.CutPrefix(field, "since="); ok {
+			if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+				since = id
+			}
+			continue
+		}
+		if strings.HasPrefix(field, "notifications=") {
+			state = field
+		}
+	}
+	return state, since
+}
+
+// owed returns, in log order, the transitions in audit rows (afterID, upTo]
+// that have no notify row. Notify rows are read to the end of the log: one
+// written by this process for an older transition settles it.
+func (m *Manager) owed(ctx context.Context, afterID, upTo int64) ([]notice, error) {
 	events := map[string]string{
 		store.AuditApprovalCreated:   eventCreated,
 		store.AuditApprovalEscalated: eventEscalated,
@@ -523,7 +646,7 @@ func (m *Manager) owed(ctx context.Context, afterID int64) ([]notice, error) {
 				name, _, _ := strings.Cut(strings.TrimPrefix(e.Detail, "event="), " ")
 				delete(at, notice{id, name})
 			default:
-				if event, ok := events[e.Action]; ok {
+				if event, ok := events[e.Action]; ok && e.ID <= upTo {
 					at[notice{id, event}] = e.ID
 				}
 			}
@@ -541,28 +664,40 @@ func (m *Manager) owed(ctx context.Context, afterID int64) ([]notice, error) {
 }
 
 // settle makes each owed attempt and writes its row, and reports whether
-// every one of them now has a row. It does not retry: whatever is left
-// without a row is found again by the next start. Deliveries stop when the
-// start-up budget is spent; the rest are recorded as not attempted.
+// every one of them now has a row. Deliveries stop when the start-up budget
+// is spent, which also bounds the delivery in progress; the rest are recorded
+// as not attempted. A read that fails here is recorded as not attempted at
+// once: start-up does not wait on retries. An attempt made is not made again
+// by a later pass in this process; only its row is retried.
 func (m *Manager) settle(ctx context.Context, owed []notice) bool {
-	if len(owed) > 0 {
-		slog.WarnContext(ctx, "approvals: transitions from before this start have no notification record; attempting them now", "count", len(owed))
-	}
 	deadline := time.Now().Add(m.catchUpBudget)
 	all := true
+	announced := false
 	for _, n := range owed {
+		m.mu.Lock()
+		done := m.attempted[n]
+		m.attempted[n] = true
+		m.mu.Unlock()
+		if done {
+			// Its row is still being retried (record).
+			all = false
+			continue
+		}
+		if !announced {
+			slog.WarnContext(ctx, "approvals: transitions from before this start have no notification record; attempting them now", "count", len(owed))
+			announced = true
+		}
 		var action, detail string
 		if time.Now().After(deadline) {
 			action, detail = notAttempted(n, whyBudgetSpent)
 		} else {
 			var err error
-			if action, detail, err = m.attempt(ctx, n); err != nil {
+			if action, detail, err = m.attempt(ctx, deadline, n); err != nil {
 				slog.ErrorContext(ctx, "approvals: load approval for notification failed", "approval", n.approval, "event", n.event, "error", err)
 				action, detail = notAttempted(n, whyNotLoaded)
 			}
 		}
-		if err := m.write(ctx, n, action, detail); err != nil {
-			slog.ErrorContext(ctx, "approvals: append notify audit failed; left for the next start", "approval", n.approval, "event", n.event, "error", err)
+		if !m.record(ctx, n, action, detail) {
 			all = false
 		}
 	}

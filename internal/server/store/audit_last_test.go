@@ -42,3 +42,22 @@ func TestLastAuditEvent(t *testing.T) {
 		t.Errorf("for an action never written: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestLastAuditID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if id, err := s.LastAuditID(ctx); err != nil || id != 0 {
+		t.Fatalf("empty log: %d, %v; want 0", id, err)
+	}
+	var last AuditEvent
+	for i := 0; i < 3; i++ {
+		e, err := s.AppendAuditEvent(ctx, "system", "something", "none", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = e
+	}
+	if id, err := s.LastAuditID(ctx); err != nil || id != last.ID {
+		t.Errorf("LastAuditID = %d, %v; want %d", id, err, last.ID)
+	}
+}

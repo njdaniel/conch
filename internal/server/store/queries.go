@@ -341,6 +341,15 @@ func (s *Store) LastAuditEvent(ctx context.Context, action string) (AuditEvent, 
 	return e, nil
 }
 
+// LastAuditID returns the id of the newest audit event, or 0 for an empty log.
+func (s *Store) LastAuditID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM audit_events").Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: last audit id: %w", err)
+	}
+	return id, nil
+}
+
 // ListAuditEvents returns up to limit audit events with ID greater than
 // afterID, in ascending ID order.
 func (s *Store) ListAuditEvents(ctx context.Context, afterID int64, limit int) ([]AuditEvent, error) {

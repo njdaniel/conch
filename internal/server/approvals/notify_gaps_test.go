@@ -27,12 +27,27 @@ type faultyStore struct {
 	mu    sync.Mutex
 	fail  map[string]int // method -> failures left; negative means until cleared
 	calls map[string]int
+	// lie holds, per method, how many calls are still to be carried out in
+	// full and then reported as failed: a commit whose answer was lost.
+	lie map[string]int
 }
 
 var errInjected = errors.New("injected store failure")
 
 func newFaultyStore(s *store.Store) *faultyStore {
-	return &faultyStore{Store: s, fail: map[string]int{}, calls: map[string]int{}}
+	return &faultyStore{Store: s, fail: map[string]int{}, calls: map[string]int{}, lie: map[string]int{}}
+}
+
+// lying reports whether this call, having been carried out, is to be
+// reported as failed.
+func (f *faultyStore) lying(method string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lie[method] > 0 {
+		f.lie[method]--
+		return true
+	}
+	return false
 }
 
 func (f *faultyStore) set(method string, n int) {
@@ -80,14 +95,29 @@ func (f *faultyStore) EscalateApproval(ctx context.Context, id int64) (bool, err
 	if f.failing("EscalateApproval") {
 		return false, errInjected
 	}
-	return f.Store.EscalateApproval(ctx, id)
+	done, err := f.Store.EscalateApproval(ctx, id)
+	if err == nil && f.lying("EscalateApproval") {
+		return false, errInjected
+	}
+	return done, err
 }
 
 func (f *faultyStore) ExpireApproval(ctx context.Context, id int64) (*schema.ApprovalResolutionV1, error) {
 	if f.failing("ExpireApproval") {
 		return nil, errInjected
 	}
-	return f.Store.ExpireApproval(ctx, id)
+	r, err := f.Store.ExpireApproval(ctx, id)
+	if err == nil && f.lying("ExpireApproval") {
+		return nil, errInjected
+	}
+	return r, err
+}
+
+func (f *faultyStore) LastAuditID(ctx context.Context) (int64, error) {
+	if f.failing("LastAuditID") {
+		return 0, errInjected
+	}
+	return f.Store.LastAuditID(ctx)
 }
 
 // AppendAuditEvent fails for the notify rows only ("AppendNotify") or for the
@@ -449,7 +479,8 @@ func (r *restart) log() []string {
 	for _, e := range events {
 		switch e.Action {
 		case AuditApprovalsStarted:
-			out = append(out, "started "+e.Detail)
+			state, _ := startedRow(e)
+			out = append(out, "started "+state)
 		case AuditNotifySent, AuditNotifyFailed:
 			out = append(out, e.Action+" "+e.Subject+" "+e.Detail)
 		case store.AuditApprovalCreated, store.AuditApprovalEscalated, store.AuditApprovalResolved, store.AuditApprovalExpired:
@@ -464,6 +495,20 @@ func (r *restart) wantLog(want ...string) {
 	if got := r.log(); !slices.Equal(got, want) {
 		r.t.Fatalf("audit log:\n got  %s\n want %s", strings.Join(got, "\n      "), strings.Join(want, "\n      "))
 	}
+}
+
+// waitLog waits until the log is want: a catch-up that could not finish at
+// start keeps trying in the background.
+func (r *restart) waitLog(want ...string) {
+	r.t.Helper()
+	deadline := time.Now().Add(waitBudget)
+	for time.Now().Before(deadline) {
+		if slices.Equal(r.log(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.wantLog(want...)
 }
 
 // A conchd that stops between a commit and the notification leaves a
@@ -741,5 +786,396 @@ func TestCatchUpReadsPastOnePage(t *testing.T) {
 	defer m2.Close()
 	if got := n.recorded(); !slices.Equal(got, []string{"created"}) {
 		t.Errorf("deliveries = %v, want the creation", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review of #169
+
+// The start row could not be written at the start. It is written as soon as
+// the store takes it, and what it says holds for the next start whichever way
+// the notifier setting changed in between. Before, a start whose row was lost
+// left the older row standing: transitions of a run with notifications on
+// were never caught up (the older row said off), and those of a run with
+// notifications off were delivered later as if owed (the older row said on).
+func TestStartRowIsRetriedSoTheNextStartReadsTheRightRun(t *testing.T) {
+	on, off := "started notifications=on", "started notifications=off"
+	tests := []struct {
+		name       string
+		first      bool // the first start has a notifier
+		second     bool // so does the second, whose start row is refused at first
+		deliveries []string
+		log        func(a string) []string
+	}{
+		{"off, then on with the row refused: the on run is caught up", false, true, []string{"created"},
+			func(a string) []string {
+				return []string{off, on, "approval_created " + a, "notify_sent " + a + " event=created", on}
+			}},
+		{"on, then off with the row refused: the off run is not replayed", true, false, nil,
+			func(a string) []string { return []string{on, off, "approval_created " + a, on} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRestart(t)
+			channelID, agentID, _ := fixture(t, r.s)
+			deadline, grace := farFuture()
+			notifier := func(have bool) Notifier {
+				if have {
+					return &recordingNotifier{}
+				}
+				return nil
+			}
+			m1, _ := r.start(notifier(tt.first))
+			m1.Close()
+			r.again()
+
+			m2, f2 := quick(r.s, notifier(tt.second))
+			f2.set("AppendStarted", 3)
+			if err := m2.Rehydrate(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			states := map[bool]string{true: on, false: off}
+			r.waitLog(states[tt.first], states[tt.second])
+			// Committed during the second run, and conchd stops before
+			// telling anyone.
+			a, err := r.s.CreateApproval(context.Background(), params(channelID, agentID, deadline, grace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			m2.Close()
+			r.again()
+
+			n3 := &recordingNotifier{}
+			m3, _ := r.start(n3)
+			defer m3.Close()
+			if got := n3.recorded(); !slices.Equal(got, tt.deliveries) {
+				t.Errorf("deliveries at the third start = %v, want %v", got, tt.deliveries)
+			}
+			r.wantLog(tt.log(fmt.Sprintf("approval:%d", a.ID))...)
+		})
+	}
+}
+
+// A start row written late lands after transitions of its own run. The next
+// start must still read those: it reads from where the row says the past
+// ended, not from the row.
+func TestLateStartRowDoesNotHideItsOwnRun(t *testing.T) {
+	r := newRestart(t)
+	channelID, agentID, _ := fixture(t, r.s)
+	deadline, grace := farFuture()
+	m1, _ := r.start(&recordingNotifier{})
+	m1.Close()
+	r.again()
+
+	m2, f2 := quick(r.s, &recordingNotifier{})
+	f2.set("AppendStarted", -1)
+	if err := m2.Rehydrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.s.CreateApproval(context.Background(), params(channelID, agentID, deadline, grace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := fmt.Sprintf("approval:%d", a.ID)
+	f2.set("AppendStarted", 0)
+	r.waitLog("started notifications=on", "approval_created "+subject, "started notifications=on")
+	m2.Close()
+	r.again()
+
+	n3 := &recordingNotifier{}
+	m3, _ := r.start(n3)
+	defer m3.Close()
+	if got := n3.recorded(); !slices.Equal(got, []string{"created"}) {
+		t.Fatalf("deliveries = %v, want the creation that came before the late start row", got)
+	}
+	r.wantLog("started notifications=on", "approval_created "+subject, "started notifications=on",
+		"notify_sent "+subject+" event=created", "started notifications=on")
+}
+
+// Catch-up that cannot finish at start finishes in the same process once the
+// store lets it, without delivering anything a second time.
+func TestCatchUpFinishesInTheSameProcess(t *testing.T) {
+	for _, method := range []string{"AppendNotify", "ListAuditEvents", "LastAuditEvent"} {
+		t.Run(method+" fails at first", func(t *testing.T) {
+			r := newRestart(t)
+			channelID, agentID, _ := fixture(t, r.s)
+			deadline, grace := farFuture()
+			m1, _ := r.start(&recordingNotifier{})
+			m1.Close()
+			a, err := r.s.CreateApproval(context.Background(), params(channelID, agentID, deadline, grace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			subject := fmt.Sprintf("approval:%d", a.ID)
+			r.again()
+
+			n := &recordingNotifier{}
+			m2, f2 := quick(r.s, n)
+			defer m2.Close()
+			f2.set(method, 4)
+			if err := m2.Rehydrate(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			r.waitLog("started notifications=on", "approval_created "+subject, "notify_sent "+subject+" event=created", "started notifications=on")
+			if got := n.recorded(); !slices.Equal(got, []string{"created"}) {
+				t.Errorf("deliveries = %v, want exactly one", got)
+			}
+		})
+	}
+}
+
+// slowNotifier answers only when its context ends.
+type slowNotifier struct{ recordingNotifier }
+
+func (n *slowNotifier) ApprovalCreated(ctx context.Context, _ store.Approval) error {
+	<-ctx.Done()
+	return n.record("created", ctx.Err())
+}
+
+// The start-up budget bounds the delivery in progress, not only whether the
+// next one starts: a notifier that does not answer cannot hold up start-up.
+func TestCatchUpBudgetBoundsTheDeliveryItself(t *testing.T) {
+	r := newRestart(t)
+	channelID, agentID, _ := fixture(t, r.s)
+	deadline, grace := farFuture()
+	m1, _ := r.start(&recordingNotifier{})
+	m1.Close()
+	a, err := r.s.CreateApproval(context.Background(), params(channelID, agentID, deadline, grace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := fmt.Sprintf("approval:%d", a.ID)
+	r.again()
+
+	m2, _ := quick(r.s, &slowNotifier{})
+	m2.catchUpBudget = 50 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- m2.Rehydrate(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Rehydrate did not return: the budget does not bound a delivery in progress")
+	}
+	defer m2.Close()
+	r.wantLog("started notifications=on", "approval_created "+subject,
+		"notify_failed "+subject+fmt.Sprintf(" event=created error=%q", context.DeadlineExceeded.Error()), "started notifications=on")
+}
+
+// panickyNotifier panics on every delivery.
+type panickyNotifier struct{}
+
+func (panickyNotifier) ApprovalCreated(context.Context, store.Approval) error {
+	panic("notifier bug")
+}
+func (panickyNotifier) ApprovalEscalated(context.Context, store.Approval) error {
+	panic("notifier bug")
+}
+func (panickyNotifier) ApprovalResolved(context.Context, store.Approval, schema.ApprovalResolutionV1) error {
+	panic("notifier bug")
+}
+
+// A notifier that panics has failed a delivery. It must not cost an approval
+// its timers, nor conchd its start: before, a panic in Create left the
+// approval without a deadline timer, and one during catch-up panicked every
+// start on the same owed transition.
+func TestAPanickingNotifierFailsOnlyTheDelivery(t *testing.T) {
+	r := newRestart(t)
+	ctx := context.Background()
+	channelID, agentID, _ := fixture(t, r.s)
+	failed := func(event string) string {
+		return fmt.Sprintf("%s event=%s error=%q", AuditNotifyFailed, event, errNotifierPanicked.Error())
+	}
+
+	m1, _ := r.start(panickyNotifier{})
+	now := time.Now()
+	a, err := m1.Create(ctx, params(channelID, agentID, now.Add(20*time.Millisecond), now.Add(40*time.Millisecond)))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The timers were armed: the approval walks to expired, each
+	// notification recorded as failed.
+	waitRows(t, r.s, a.ID, []string{
+		store.AuditApprovalCreated, failed("created"),
+		store.AuditApprovalEscalated, failed("escalated"),
+		store.AuditApprovalExpired, failed("expired"),
+	})
+	// And at a start: an owed transition does not stop Rehydrate.
+	farDeadline, farGrace := farFuture()
+	untold, err := r.s.CreateApproval(ctx, params(channelID, agentID, farDeadline, farGrace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1.Close()
+	r.again()
+	m2, _ := r.start(panickyNotifier{})
+	defer m2.Close()
+	waitRows(t, r.s, untold.ID, []string{store.AuditApprovalCreated, failed("created")})
+}
+
+// The store carries out a timer's transition and then reports failure (the
+// answer to a commit can be lost). The retry finds the transition done; what
+// follows a commit, the notification and for an escalation the grace timer,
+// must still happen, once.
+func TestTimerTransitionThatCommittedButReportedFailure(t *testing.T) {
+	s := openTestStore(t)
+	n := &recordingNotifier{}
+	m, f := quick(s, n)
+	defer m.Close()
+	ctx := context.Background()
+	channelID, agentID, _ := fixture(t, s)
+
+	f.mu.Lock()
+	f.lie["EscalateApproval"], f.lie["ExpireApproval"] = 1, 1
+	f.mu.Unlock()
+	now := time.Now()
+	a, err := m.Create(ctx, params(channelID, agentID, now.Add(20*time.Millisecond), now.Add(40*time.Millisecond)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitRows(t, s, a.ID, []string{
+		store.AuditApprovalCreated, AuditNotifySent + " event=created",
+		store.AuditApprovalEscalated, AuditNotifySent + " event=escalated",
+		store.AuditApprovalExpired, AuditNotifySent + " event=expired",
+	})
+	time.Sleep(10 * m.retryEvery)
+	if got := n.recorded(); !slices.Equal(got, []string{"created", "escalated", "resolved"}) {
+		t.Errorf("deliveries = %v, want each once", got)
+	}
+}
+
+// A decision made between a failed escalation and its retry is not announced
+// as an escalation: the retry acts only if the approval is escalated.
+func TestRetriedEscalationOfADecidedApprovalAnnouncesNothing(t *testing.T) {
+	s := openTestStore(t)
+	n := &recordingNotifier{}
+	m, f := quick(s, n)
+	m.retryEvery = 50 * time.Millisecond
+	defer m.Close()
+	ctx := context.Background()
+	channelID, agentID, humanID := fixture(t, s)
+
+	f.set("EscalateApproval", 1)
+	now := time.Now()
+	a, err := m.Create(ctx, params(channelID, agentID, now.Add(10*time.Millisecond), now.Add(time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return f.called("EscalateApproval") == 1 })
+	// The decision goes straight to the store, as one does that commits
+	// while the retry's callback is already running: Decide would stop a
+	// timer that is still waiting, and then there is nothing to test.
+	if _, res, err := s.CastDecision(ctx, a.ID, humanID, "approve", "in time"); err != nil || res == nil {
+		t.Fatalf("CastDecision = %+v, %v", res, err)
+	}
+	waitFor(t, func() bool { return f.called("EscalateApproval") == 2 })
+	time.Sleep(2 * m.retryEvery)
+	waitRows(t, s, a.ID, []string{
+		store.AuditApprovalCreated, AuditNotifySent + " event=created",
+		store.AuditDecisionCast, store.AuditApprovalResolved,
+	})
+	if got := n.recorded(); !slices.Equal(got, []string{"created"}) {
+		t.Errorf("deliveries = %v, want no escalation", got)
+	}
+}
+
+// The start row says where the next start reads from, and a row without that
+// (or with more after it) is still understood.
+func TestStartedRow(t *testing.T) {
+	tests := []struct {
+		detail    string
+		wantState string
+		wantSince int64
+	}{
+		{"notifications=on since=41", notificationsOn, 41},
+		{"notifications=off since=0", notificationsOff, 0},
+		{"notifications=on", notificationsOn, 7},
+		{"notifications=on since=41 later=addition", notificationsOn, 41},
+		{"notifications=on since=nonsense", notificationsOn, 7},
+		{"", "", 7},
+	}
+	for _, tt := range tests {
+		state, since := startedRow(store.AuditEvent{ID: 7, Detail: tt.detail})
+		if state != tt.wantState || since != tt.wantSince {
+			t.Errorf("startedRow(%q) = %q, %d; want %q, %d", tt.detail, state, since, tt.wantState, tt.wantSince)
+		}
+	}
+}
+
+// Rehydrate cannot say what the past is without the end of the log, so it
+// fails as it does when the open approvals cannot be listed.
+func TestRehydrateFailsWhenTheLogCannotBeRead(t *testing.T) {
+	s := openTestStore(t)
+	m, f := quick(s, &recordingNotifier{})
+	defer m.Close()
+	f.set("LastAuditID", 1)
+	if err := m.Rehydrate(context.Background()); !errors.Is(err, errInjected) {
+		t.Fatalf("Rehydrate = %v, want the store's error", err)
+	}
+}
+
+// heldNotifier holds each delivery until released.
+type heldNotifier struct {
+	recordingNotifier
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (n *heldNotifier) ApprovalCreated(context.Context, store.Approval) error {
+	n.arrived <- struct{}{}
+	<-n.release
+	return n.record("created", nil)
+}
+
+// A catch-up still being retried while conchd serves concerns the past only.
+// A transition of this run that is between its commit and its notify row at
+// that moment is being announced by its own request; catch-up must not take
+// it for owed and deliver it a second time.
+func TestCatchUpRetryLeavesThisRunAlone(t *testing.T) {
+	r := newRestart(t)
+	channelID, agentID, _ := fixture(t, r.s)
+	deadline, grace := farFuture()
+	m1, _ := r.start(&recordingNotifier{})
+	m1.Close()
+	r.again()
+
+	n := &heldNotifier{arrived: make(chan struct{}, 8), release: make(chan struct{}, 8)}
+	m2, f2 := quick(r.s, n)
+	defer m2.Close()
+	// Runs before Close: a delivery still held would keep Close waiting.
+	defer close(n.release)
+	f2.set("LastAuditEvent", -1) // catch-up cannot finish yet
+	if err := m2.Rehydrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	created := make(chan store.Approval, 1)
+	go func() {
+		a, err := m2.Create(context.Background(), params(channelID, agentID, deadline, grace))
+		if err != nil {
+			t.Errorf("Create: %v", err)
+		}
+		created <- a
+	}()
+	<-n.arrived // committed; its notification is in flight and has no row
+	// Catch-up now runs to the end, with that transition in the log. Either
+	// it writes its start row, or (the defect) it delivers the transition.
+	f2.set("LastAuditEvent", 0)
+	finished := func() bool { log := r.log(); return log[len(log)-1] == "started notifications=on" }
+	for stop := time.Now().Add(waitBudget); !finished(); time.Sleep(5 * time.Millisecond) {
+		if len(n.arrived) > 0 {
+			t.Fatal("catch-up delivered a transition of this run that its own request was still announcing")
+		}
+		if time.Now().After(stop) {
+			t.Fatal("catch-up never finished")
+		}
+	}
+	n.release <- struct{}{}
+	a := <-created
+	subject := fmt.Sprintf("approval:%d", a.ID)
+	r.waitLog("started notifications=on", "approval_created "+subject, "started notifications=on", "notify_sent "+subject+" event=created")
+	if got := n.recorded(); !slices.Equal(got, []string{"created"}) {
+		t.Errorf("deliveries = %v, want exactly one", got)
 	}
 }
