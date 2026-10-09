@@ -283,7 +283,7 @@ func TestMCPToolAuthorizationMatrix(t *testing.T) {
 	// Refused calls wrote nothing: only the two agents allowed to post did,
 	// and only the one allowed to request raised an approval beside the seed.
 	ctx := context.Background()
-	messages, err := f.srv.store.ListMessages(ctx, f.alpha.ID, 0, 100)
+	messages, err := f.srv.store.ListVisibleMessages(ctx, f.alpha.ID, store.ChannelWideOnly, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestHookForAgentFollowsManifest(t *testing.T) {
 	if rec.Code != unknown.Code || rec.Body.String() != unknown.Body.String() {
 		t.Fatalf("hook after the manifest stopped allowing posts = %d %s, want the unknown-token response", rec.Code, rec.Body)
 	}
-	messages, err := f.srv.store.ListMessages(ctx, f.general.ID, 0, 100)
+	messages, err := f.srv.store.ListVisibleMessages(ctx, f.general.ID, store.ChannelWideOnly, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
