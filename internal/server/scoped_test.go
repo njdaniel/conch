@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -783,8 +786,12 @@ func TestScopedSnapshotThroughTheAPI(t *testing.T) {
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, _, err := sock.conn.Read(ctx2); err == nil {
-		t.Error("removed member's socket still delivers")
+	// The server must close the socket, with the membership reason. A read
+	// that merely times out would also be an error, so the close status is
+	// what is asserted.
+	_, _, err := sock.conn.Read(ctx2)
+	if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Errorf("removed member's socket: read error = %v, want a policy-violation close", err)
 	}
 	// A message posted after the removal is not delivered to anyone removed.
 	f.mustPost(t, "ann", `{"body":"post-removal",`+netAudience(f.net1.ID)+`}`)
@@ -949,5 +956,80 @@ func TestScopedMessagesAuthOff(t *testing.T) {
 		if ids, _ := listIDs(t, res.body); len(ids) != 2 {
 			t.Errorf("%s list = %v, want the 2 channel-wide messages", version, ids)
 		}
+	}
+}
+
+// The visibility reader comes from the authenticated caller in the request
+// context and from nothing the client sends. The structural guard accepts any
+// reader built by readerFor, so readerFor itself is pinned here: no query
+// parameter, header or body field can name the reader, and only v2 is Scoped.
+func TestReaderForUsesOnlyTheAuthenticatedCaller(t *testing.T) {
+	spoof := func() *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/v2/channels/ops/messages?as=7&principal_id=7&reader=7&author_id=7", strings.NewReader(`{"principal_id":7}`))
+		for _, h := range []string{"X-Principal-Id", "X-Conch-Principal", "X-Forwarded-User", "X-User-Id"} {
+			r.Header.Set(h, "7")
+		}
+		return r
+	}
+	for _, v := range []apiVersion{apiV0, apiV1, apiV2} {
+		got := readerFor(spoof(), v)
+		if got.PrincipalID != 0 {
+			t.Errorf("version %d, no caller: reader principal = %d, want 0", v, got.PrincipalID)
+		}
+		if got.Scoped != (v == apiV2) {
+			t.Errorf("version %d: Scoped = %v, want %v", v, got.Scoped, v == apiV2)
+		}
+	}
+	caller := store.Principal{ID: 3, Kind: store.PrincipalHuman, Name: "ann"}
+	authed := spoof()
+	authed = authed.WithContext(withCaller(authed.Context(), caller))
+	if got := readerFor(authed, apiV2); got.PrincipalID != 3 || !got.Scoped {
+		t.Errorf("with caller 3 on v2: reader = %+v, want principal 3, scoped", got)
+	}
+	if got := readerFor(authed, apiV1); got.PrincipalID != 3 || got.Scoped {
+		t.Errorf("with caller 3 on v1: reader = %+v, want principal 3, not scoped", got)
+	}
+}
+
+// An agent that may whisper to humans but not to agents must not be able to
+// use the difference in refusals to learn about principals outside the
+// channel. A target who is not a member gets the one invalid_audience answer
+// whether it is an agent, a human, or no principal at all, and writes no
+// denial; only a target who IS a member and an agent gets the grant refusal.
+func TestAgentWhisperDoesNotRevealOutsiders(t *testing.T) {
+	f := newScopedFixture(t)
+	f.add(t, "gwhisper", store.PrincipalAgent, true)
+	f.manifest(t, "gwhisper", nil, schema.ChannelPermissionWhisper)
+	f.add(t, "outside-agent", store.PrincipalAgent, false)
+	f.add(t, "outside-human", store.PrincipalHuman, false)
+
+	type answer struct {
+		status int
+		body   string
+	}
+	ask := func(target int64) (answer, int) {
+		t.Helper()
+		before := countAction(f.audit(t), "access_denied")
+		res := f.postV2(t, "gwhisper", `{"body":"x",`+whisperAudience(target)+`}`)
+		return answer{res.status, res.body}, countAction(f.audit(t), "access_denied") - before
+	}
+	outsideAgent, d1 := ask(f.p("outside-agent").ID)
+	outsideHuman, d2 := ask(f.p("outside-human").ID)
+	nobody, d3 := ask(99999)
+	if outsideAgent.status != http.StatusBadRequest || !strings.Contains(outsideAgent.body, "invalid_audience") {
+		t.Fatalf("whisper to an agent outside the channel = %d %s, want 400 invalid_audience", outsideAgent.status, outsideAgent.body)
+	}
+	if outsideAgent != outsideHuman || outsideAgent != nobody {
+		t.Errorf("answers differ by what the outsider is:\n agent  %+v\n human  %+v\n nobody %+v", outsideAgent, outsideHuman, nobody)
+	}
+	if d1+d2+d3 != 0 {
+		t.Errorf("refusing an outsider wrote %d access_denied events, want none", d1+d2+d3)
+	}
+	// The grant still bites where it should: a member who is an agent.
+	if inside, denials := ask(f.p("aria").ID); inside.status != http.StatusForbidden || denials != 1 {
+		t.Errorf("whisper to a member agent = %d with %d denials, want 403 and one", inside.status, denials)
+	}
+	if n := f.messageCount(t); n != 0 {
+		t.Errorf("%d messages were stored by refused whispers", n)
 	}
 }

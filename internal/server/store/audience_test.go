@@ -503,7 +503,11 @@ func TestOnlyAudienceGoReadsMessageRows(t *testing.T) {
 			t.Fatal(err)
 		}
 		src := string(data)
-		for _, forbidden := range []string{"FROM messages", "JOIN messages", "from messages", "join messages"} {
+		for _, forbidden := range []string{
+			"FROM messages", "JOIN messages", "from messages", "join messages",
+			// Who received a scoped message is as sensitive as the message.
+			"FROM message_recipients", "JOIN message_recipients", "from message_recipients", "join message_recipients",
+		} {
 			if strings.Contains(src, forbidden) {
 				t.Errorf("%s contains %q; messages are read only in audience.go (ListVisibleMessages)", name, forbidden)
 			}

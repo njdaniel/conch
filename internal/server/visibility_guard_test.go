@@ -87,6 +87,17 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				return true
 			}
 			name := sel.Sel.Name
+			// Any store method that mentions messages must be one of the
+			// known four. A heuristic on the method's prefix alone would miss
+			// a read named, say, MessagesSince or LastMessage.
+			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
+				switch name {
+				case "ListVisibleMessages", "InsertMessage", "InsertMessageV1", "InsertScopedMessage":
+				default:
+					t.Errorf("%s: %s calls the store's %s; server code may only use ListVisibleMessages and the three inserts", path, fset.Position(x.Pos()), name)
+					return true
+				}
+			}
 			listsMessages := strings.Contains(name, "Message") &&
 				(strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Read") || strings.HasPrefix(name, "Get") ||
 					strings.HasPrefix(name, "Fetch") || strings.HasPrefix(name, "Query") || strings.HasPrefix(name, "Search") ||

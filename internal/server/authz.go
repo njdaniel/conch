@@ -389,10 +389,22 @@ func (s *Server) authorizeScopedPost(ctx context.Context, caller store.Principal
 		if id == caller.ID {
 			continue
 		}
+		// Only a current member of the channel can be a whisper target, and
+		// the store refuses any other with one answer, invalid_audience. So a
+		// target who is not a member is left to the store, whatever kind of
+		// principal it is. Looking at its kind first would answer "forbidden"
+		// for an agent and "invalid audience" for a human or an unknown id,
+		// and so tell the caller which principal ids exist and which are
+		// agents, for principals it shares no channel with.
+		member, err := s.store.IsChannelMember(ctx, channelID, id)
+		if err != nil {
+			return false, err
+		}
+		if !member {
+			continue
+		}
 		target, err := s.store.PrincipalByID(ctx, id)
 		if errors.Is(err, store.ErrNotFound) {
-			// Not a principal at all, so not an agent; the store refuses the
-			// audience as invalid.
 			continue
 		}
 		if err != nil {
