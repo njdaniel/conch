@@ -125,7 +125,7 @@ func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label
 // label, never the token or hash.
 //
 // It returns ErrPrincipalNotFound or ErrCredentialExpiryPast without writing.
-func (s *Store) CreateCredential(ctx context.Context, principalID int64, label string, expiresAt *time.Time) (schema.CredentialV1, string, error) {
+func (s *Store) CreateCredential(ctx context.Context, actor string, principalID int64, label string, expiresAt *time.Time) (schema.CredentialV1, string, error) {
 	now := credentialNow().Truncate(time.Millisecond)
 	var exp *time.Time
 	if expiresAt != nil {
@@ -154,7 +154,7 @@ func (s *Store) CreateCredential(ctx context.Context, principalID int64, label s
 			return err
 		}
 		out = c
-		return appendAuditEventTx(ctx, tx, "system", "credential_created",
+		return appendAuditEventTx(ctx, tx, actor, "credential_created",
 			principalActor(principalID), credentialDetail(c.ID, c.Label), now)
 	})
 	if err != nil {
@@ -211,7 +211,7 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 //
 // It returns ErrCredentialNotFound, ErrCredentialRevoked, or ErrCredentialExpired
 // (the old credential's expiry has passed) without writing anything.
-func (s *Store) RotateCredential(ctx context.Context, credentialID int64) (schema.CredentialV1, string, error) {
+func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID int64) (schema.CredentialV1, string, error) {
 	token, err := newCredentialToken()
 	if err != nil {
 		return schema.CredentialV1{}, "", err
@@ -262,7 +262,7 @@ func (s *Store) RotateCredential(ctx context.Context, credentialID int64) (schem
 		}
 		out = c
 		detail := credentialDetail(c.ID, c.Label) + fmt.Sprintf(" replaces=%d", credentialID)
-		return appendAuditEventTx(ctx, tx, "system", "credential_rotated", principalActor(principalID), detail, now)
+		return appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID), detail, now)
 	})
 	if err != nil {
 		return schema.CredentialV1{}, "", err
@@ -275,7 +275,7 @@ func (s *Store) RotateCredential(ctx context.Context, credentialID int64) (schem
 // revoked_at stands and no second audit event is written). A credential_revoked
 // audit event is appended in the same transaction as the first revocation.
 // It returns ErrCredentialNotFound for an unknown id.
-func (s *Store) RevokeCredential(ctx context.Context, credentialID int64) error {
+func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
 	return s.withImmediateTx(ctx, func(tx execer) error {
 		var (
 			principalID int64
@@ -305,7 +305,7 @@ func (s *Store) RevokeCredential(ctx context.Context, credentialID int64) error 
 		} else if n != 1 {
 			return nil
 		}
-		return appendAuditEventTx(ctx, tx, "system", "credential_revoked",
+		return appendAuditEventTx(ctx, tx, actor, "credential_revoked",
 			principalActor(principalID), credentialDetail(credentialID, label), now)
 	})
 }
@@ -328,14 +328,14 @@ func (s *Store) ResolveCredential(ctx context.Context, token string) (Principal,
 		storedHash           string
 		expiresAt, revokedAt sql.NullInt64
 		p                    Principal
-		kind                 string
+		kind, role           string
 		createdAt            int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT c.token_hash, c.expires_at, c.revoked_at, p.id, p.kind, p.name, p.created_at
+		`SELECT c.token_hash, c.expires_at, c.revoked_at, p.id, p.kind, p.name, p.role, p.created_at
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
-	).Scan(&storedHash, &expiresAt, &revokedAt, &p.ID, &kind, &p.Name, &createdAt)
+	).Scan(&storedHash, &expiresAt, &revokedAt, &p.ID, &kind, &p.Name, &role, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, ErrCredentialInvalid
 	}
@@ -352,6 +352,7 @@ func (s *Store) ResolveCredential(ctx context.Context, token string) (Principal,
 		return Principal{}, ErrCredentialInvalid
 	}
 	p.Kind = PrincipalKind(kind)
+	p.Role = Role(role)
 	p.CreatedAt = time.UnixMilli(createdAt)
 	return p, nil
 }

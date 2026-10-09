@@ -40,7 +40,7 @@ func (e *ChannelNotFoundError) Error() string {
 //
 // It returns ErrPrincipalNotFound, ErrPrincipalNotAgent, *ChannelNotFoundError,
 // or the request's validation error without writing anything.
-func (s *Store) PutAgentManifest(ctx context.Context, principalID int64, req schema.PutAgentManifestRequestV1) (schema.AgentManifestV1, bool, error) {
+func (s *Store) PutAgentManifest(ctx context.Context, actor string, principalID int64, req schema.PutAgentManifestRequestV1) (schema.AgentManifestV1, bool, error) {
 	if principalID <= 0 {
 		return schema.AgentManifestV1{}, false, fmt.Errorf("store: put manifest: principal id must be positive, got %d", principalID)
 	}
@@ -116,7 +116,7 @@ func (s *Store) PutAgentManifest(ctx context.Context, principalID int64, req sch
 		if created {
 			action = "manifest_created"
 		}
-		if err := appendAuditEventTx(ctx, tx, "system", action, principalActor(principalID), "", now); err != nil {
+		if err := appendAuditEventTx(ctx, tx, actor, action, principalActor(principalID), "", now); err != nil {
 			return err
 		}
 

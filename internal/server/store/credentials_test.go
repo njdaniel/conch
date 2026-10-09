@@ -47,7 +47,7 @@ func TestCreateAndResolveCredential(t *testing.T) {
 
 	for _, p := range []Principal{agent, human} {
 		t.Run(string(p.Kind), func(t *testing.T) {
-			c, token, err := s.CreateCredential(ctx, p.ID, "laptop", nil)
+			c, token, err := s.CreateCredential(ctx, "system", p.ID, "laptop", nil)
 			if err != nil {
 				t.Fatalf("CreateCredential: %v", err)
 			}
@@ -73,10 +73,10 @@ func TestCreateCredentialErrors(t *testing.T) {
 	ctx := context.Background()
 	past := time.Now().Add(-time.Hour)
 
-	if _, _, err := s.CreateCredential(ctx, 9999, "x", nil); !errors.Is(err, ErrPrincipalNotFound) {
+	if _, _, err := s.CreateCredential(ctx, "system", 9999, "x", nil); !errors.Is(err, ErrPrincipalNotFound) {
 		t.Errorf("unknown principal error = %v, want ErrPrincipalNotFound", err)
 	}
-	if _, _, err := s.CreateCredential(ctx, agent.ID, "x", &past); !errors.Is(err, ErrCredentialExpiryPast) {
+	if _, _, err := s.CreateCredential(ctx, "system", agent.ID, "x", &past); !errors.Is(err, ErrCredentialExpiryPast) {
 		t.Errorf("past expiry error = %v, want ErrCredentialExpiryPast", err)
 	}
 	var n int
@@ -91,7 +91,7 @@ func TestCreateCredentialErrors(t *testing.T) {
 func TestResolveCredentialMalformedAndUnknown(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	_, good, err := s.CreateCredential(ctx, agent.ID, "ci", nil)
+	_, good, err := s.CreateCredential(ctx, "system", agent.ID, "ci", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestResolveCredentialExpiry(t *testing.T) {
 	setCredentialClock(t, &now)
 
 	exp := now.Add(time.Hour)
-	_, token, err := s.CreateCredential(ctx, agent.ID, "short", &exp)
+	_, token, err := s.CreateCredential(ctx, "system", agent.ID, "short", &exp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,11 +169,11 @@ func TestResolveCredentialExpiry(t *testing.T) {
 func TestResolveCredentialRevoked(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	c, token, err := s.CreateCredential(ctx, agent.ID, "x", nil)
+	c, token, err := s.CreateCredential(ctx, "system", agent.ID, "x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeCredential(ctx, c.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", c.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ResolveCredential(ctx, token); !errors.Is(err, ErrCredentialInvalid) {
@@ -184,7 +184,7 @@ func TestResolveCredentialRevoked(t *testing.T) {
 func TestResolveCredentialStoreErrorIsDistinct(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	_, token, err := s.CreateCredential(ctx, agent.ID, "x", nil)
+	_, token, err := s.CreateCredential(ctx, "system", agent.ID, "x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,12 +210,12 @@ func TestRotateCredential(t *testing.T) {
 	setCredentialClock(t, &now)
 
 	exp := now.Add(24 * time.Hour)
-	old, oldToken, err := s.CreateCredential(ctx, agent.ID, "prod", &exp)
+	old, oldToken, err := s.CreateCredential(ctx, "system", agent.ID, "prod", &exp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Minute)
-	fresh, newToken, err := s.RotateCredential(ctx, old.ID)
+	fresh, newToken, err := s.RotateCredential(ctx, "system", old.ID)
 	if err != nil {
 		t.Fatalf("RotateCredential: %v", err)
 	}
@@ -244,10 +244,10 @@ func TestRotateCredential(t *testing.T) {
 	}
 
 	// Rotating the revoked original fails and writes nothing.
-	if _, _, err := s.RotateCredential(ctx, old.ID); !errors.Is(err, ErrCredentialRevoked) {
+	if _, _, err := s.RotateCredential(ctx, "system", old.ID); !errors.Is(err, ErrCredentialRevoked) {
 		t.Errorf("rotate revoked error = %v, want ErrCredentialRevoked", err)
 	}
-	if _, _, err := s.RotateCredential(ctx, 9999); !errors.Is(err, ErrCredentialNotFound) {
+	if _, _, err := s.RotateCredential(ctx, "system", 9999); !errors.Is(err, ErrCredentialNotFound) {
 		t.Errorf("rotate unknown error = %v, want ErrCredentialNotFound", err)
 	}
 	if n := countRows(t, s, "credentials"); n != 2 {
@@ -262,12 +262,12 @@ func TestRotateExpiredCredentialFailsClosed(t *testing.T) {
 	setCredentialClock(t, &now)
 
 	exp := now.Add(time.Hour)
-	c, _, err := s.CreateCredential(ctx, agent.ID, "short", &exp)
+	c, _, err := s.CreateCredential(ctx, "system", agent.ID, "short", &exp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = exp.Add(time.Second)
-	if _, _, err := s.RotateCredential(ctx, c.ID); !errors.Is(err, ErrCredentialExpired) {
+	if _, _, err := s.RotateCredential(ctx, "system", c.ID); !errors.Is(err, ErrCredentialExpired) {
 		t.Fatalf("rotate expired error = %v, want ErrCredentialExpired", err)
 	}
 	if n := countRows(t, s, "credentials"); n != 1 {
@@ -281,7 +281,7 @@ func TestRotateExpiredCredentialFailsClosed(t *testing.T) {
 func TestRotateConcurrent(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	old, oldToken, err := s.CreateCredential(ctx, agent.ID, "prod", nil)
+	old, oldToken, err := s.CreateCredential(ctx, "system", agent.ID, "prod", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestRotateConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			c, tok, err := s.RotateCredential(ctx, old.ID)
+			c, tok, err := s.RotateCredential(ctx, "system", old.ID)
 			results[i] = result{c, tok, err}
 		}()
 	}
@@ -344,22 +344,22 @@ func TestRevokeCredential(t *testing.T) {
 	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
 	setCredentialClock(t, &now)
 
-	a, tokA, err := s.CreateCredential(ctx, agent.ID, "a", nil)
+	a, tokA, err := s.CreateCredential(ctx, "system", agent.ID, "a", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, tokB, err := s.CreateCredential(ctx, agent.ID, "b", nil)
+	b, tokB, err := s.CreateCredential(ctx, "system", agent.ID, "b", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	now = now.Add(time.Minute)
-	if err := s.RevokeCredential(ctx, a.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", a.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	firstRevokedAt := revokedAtMillis(t, s, a.ID)
 	now = now.Add(time.Hour)
-	if err := s.RevokeCredential(ctx, a.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", a.ID); err != nil {
 		t.Fatalf("second revoke: %v", err)
 	}
 	if got := revokedAtMillis(t, s, a.ID); got != firstRevokedAt {
@@ -368,7 +368,7 @@ func TestRevokeCredential(t *testing.T) {
 	if n := countAudit(t, s, "credential_revoked"); n != 1 {
 		t.Errorf("credential_revoked events = %d, want 1", n)
 	}
-	if err := s.RevokeCredential(ctx, 9999); !errors.Is(err, ErrCredentialNotFound) {
+	if err := s.RevokeCredential(ctx, "system", 9999); !errors.Is(err, ErrCredentialNotFound) {
 		t.Errorf("revoke unknown error = %v, want ErrCredentialNotFound", err)
 	}
 
@@ -385,7 +385,7 @@ func TestRevokeCredential(t *testing.T) {
 	if _, err := s.PrincipalByID(ctx, agent.ID); err != nil {
 		t.Errorf("principal: %v", err)
 	}
-	if err := s.RevokeCredential(ctx, b.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", b.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ResolveCredential(ctx, tokB); !errors.Is(err, ErrCredentialInvalid) {
@@ -408,14 +408,14 @@ func TestListCredentialsOrderAndShape(t *testing.T) {
 	}
 
 	// Two share a created_at (tie broken by id desc); one is older; one belongs to someone else.
-	c1, _, _ := s.CreateCredential(ctx, agent.ID, "oldest", nil)
+	c1, _, _ := s.CreateCredential(ctx, "system", agent.ID, "oldest", nil)
 	now = now.Add(time.Second)
-	c2, _, _ := s.CreateCredential(ctx, agent.ID, "tie-first", nil)
-	c3, _, _ := s.CreateCredential(ctx, agent.ID, "tie-second", nil)
-	if _, _, err := s.CreateCredential(ctx, human.ID, "other", nil); err != nil {
+	c2, _, _ := s.CreateCredential(ctx, "system", agent.ID, "tie-first", nil)
+	c3, _, _ := s.CreateCredential(ctx, "system", agent.ID, "tie-second", nil)
+	if _, _, err := s.CreateCredential(ctx, "system", human.ID, "other", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeCredential(ctx, c3.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", c3.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -450,7 +450,7 @@ func TestCredentialPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, token, err := s.CreateCredential(ctx, agent.ID, "x", nil)
+	_, token, err := s.CreateCredential(ctx, "system", agent.ID, "x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,19 +472,19 @@ func TestCredentialPersistsAcrossRestart(t *testing.T) {
 func TestCredentialAtRestAndAuditHoldNoPlaintext(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	c, token, err := s.CreateCredential(ctx, agent.ID, "ci", nil)
+	c, token, err := s.CreateCredential(ctx, "system", agent.ID, "ci", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, rotatedToken, err := s.RotateCredential(ctx, c.ID)
+	_, rotatedToken, err := s.RotateCredential(ctx, "system", c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, tok3, err := s.CreateCredential(ctx, agent.ID, "other", nil)
+	c2, tok3, err := s.CreateCredential(ctx, "system", agent.ID, "other", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeCredential(ctx, c2.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", c2.ID); err != nil {
 		t.Fatal(err)
 	}
 	tokens := []string{token, rotatedToken, tok3}
@@ -547,15 +547,15 @@ func TestCredentialAtRestAndAuditHoldNoPlaintext(t *testing.T) {
 func TestCredentialAuditEvents(t *testing.T) {
 	s, agent, _ := credentialFixture(t)
 	ctx := context.Background()
-	c, _, err := s.CreateCredential(ctx, agent.ID, "ci", nil)
+	c, _, err := s.CreateCredential(ctx, "system", agent.ID, "ci", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, _, err := s.RotateCredential(ctx, c.ID)
+	fresh, _, err := s.RotateCredential(ctx, "system", c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeCredential(ctx, fresh.ID); err != nil {
+	if err := s.RevokeCredential(ctx, "system", fresh.ID); err != nil {
 		t.Fatal(err)
 	}
 	events, err := s.ListAuditEvents(ctx, 0, 100)
@@ -635,7 +635,7 @@ func TestCredentialMigrationFromPreCredentialSchema(t *testing.T) {
 		t.Errorf("user_version = %d (%v), want %d", version, err, len(migrations))
 	}
 	// The migrated database is immediately usable.
-	if _, _, err := s.CreateCredential(ctx, 1, "post-migration", nil); err != nil {
+	if _, _, err := s.CreateCredential(ctx, "system", 1, "post-migration", nil); err != nil {
 		t.Errorf("create after migration: %v", err)
 	}
 }
@@ -662,11 +662,11 @@ func TestCredentialFilesHoldNoPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, token, err := s.CreateCredential(ctx, agent.ID, "x", nil)
+	c, token, err := s.CreateCredential(ctx, "system", agent.ID, "x", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, rotated, err := s.RotateCredential(ctx, c.ID)
+	_, rotated, err := s.RotateCredential(ctx, "system", c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestRotateRevokeConcurrent(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 20; i++ {
 		s, agent, _ := credentialFixture(t)
-		old, oldToken, err := s.CreateCredential(ctx, agent.ID, "prod", nil)
+		old, oldToken, err := s.CreateCredential(ctx, "system", agent.ID, "prod", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -716,12 +716,12 @@ func TestRotateRevokeConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			rotatedCred, rotatedTok, rotateErr = s.RotateCredential(ctx, old.ID)
+			rotatedCred, rotatedTok, rotateErr = s.RotateCredential(ctx, "system", old.ID)
 		}()
 		go func() {
 			defer wg.Done()
 			<-start
-			revokeErr = s.RevokeCredential(ctx, old.ID)
+			revokeErr = s.RevokeCredential(ctx, "system", old.ID)
 		}()
 		close(start)
 		wg.Wait()

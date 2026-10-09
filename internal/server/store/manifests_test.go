@@ -41,7 +41,7 @@ func TestAgentManifestCreateReadReplace(t *testing.T) {
 		t.Fatalf("read before create error = %v, want ErrNotFound", err)
 	}
 
-	created, wasCreated, err := s.PutAgentManifest(ctx, agent.ID, req)
+	created, wasCreated, err := s.PutAgentManifest(ctx, "system", agent.ID, req)
 	if err != nil || !wasCreated {
 		t.Fatalf("create = (%v, %v)", wasCreated, err)
 	}
@@ -63,7 +63,7 @@ func TestAgentManifestCreateReadReplace(t *testing.T) {
 	// Replacement is total: omitted lists become empty, created_at is kept,
 	// updated_at advances.
 	repl := schema.PutAgentManifestRequestV1{DisplayName: "Leviathan 2", Tier: schema.AgentTierC}
-	replaced, wasCreated, err := s.PutAgentManifest(ctx, agent.ID, repl)
+	replaced, wasCreated, err := s.PutAgentManifest(ctx, "system", agent.ID, repl)
 	if err != nil || wasCreated {
 		t.Fatalf("replace = (%v, %v)", wasCreated, err)
 	}
@@ -120,7 +120,7 @@ func TestPutAgentManifestRejects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := s.PutAgentManifest(ctx, tt.principal, tt.req); !tt.check(err) {
+			if _, _, err := s.PutAgentManifest(ctx, "system", tt.principal, tt.req); !tt.check(err) {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -145,7 +145,7 @@ func TestAgentManifestSurvivesRestart(t *testing.T) {
 	agent, _ := s.CreatePrincipal(ctx, PrincipalAgent, "bot")
 	req := manifestRequest()
 	req.Channels[0].ChannelID = ch.ID
-	want, _, err := s.PutAgentManifest(ctx, agent.ID, req)
+	want, _, err := s.PutAgentManifest(ctx, "system", agent.ID, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestAgentManifestInvalidStoredRowFailsClosed(t *testing.T) {
 			agent, _ := s.CreatePrincipal(ctx, PrincipalAgent, "bot")
 			req := manifestRequest()
 			req.Channels[0].ChannelID = ch.ID
-			if _, _, err := s.PutAgentManifest(ctx, agent.ID, req); err != nil {
+			if _, _, err := s.PutAgentManifest(ctx, "system", agent.ID, req); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.db.Exec(tt.sql); err != nil {

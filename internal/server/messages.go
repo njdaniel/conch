@@ -21,7 +21,7 @@ const (
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	var req schema.PostMessageRequest
-	if !s.decodePostRequest(w, r, &req) {
+	if !s.decodePostRequest(w, r, &req) || !s.bindAuthor(w, r, &req.AuthorID) {
 		return
 	}
 	s.postMessage(w, r, req.AuthorID, req.Body, nil, false)
@@ -30,6 +30,11 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePostMessageV1(w http.ResponseWriter, r *http.Request) {
 	var req schema.PostMessageRequestV1
 	if !s.decodePostRequest(w, r, &req) {
+		return
+	}
+	// Bind before validation: Validate rejects author_id <= 0, but an
+	// authenticated caller may omit it.
+	if !s.bindAuthor(w, r, &req.AuthorID) {
 		return
 	}
 	if err := req.Validate(); err != nil {
