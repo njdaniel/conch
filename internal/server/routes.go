@@ -36,6 +36,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/principals/{id}/credentials", accessOperator, hf(s.handleListCredentials)),
 		rt("POST /v1/credentials/{credential_id}/rotate", accessOperator, hf(s.handleRotateCredential)),
 		rt("DELETE /v1/credentials/{credential_id}", accessOperator, hf(s.handleRevokeCredential)),
+		// Disabling a principal and mass revocation (issue #101).
+		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
+		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
+		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperator, hf(s.handleRevokeAllCredentials)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),

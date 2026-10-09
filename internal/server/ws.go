@@ -23,6 +23,17 @@ const (
 	// wsWriteTimeout bounds a single frame write so one dead peer cannot pin
 	// its handler goroutine.
 	wsWriteTimeout = 5 * time.Second
+	// defaultCredentialRecheckInterval is how often an authenticated socket
+	// re-checks the credential it connected with (issue #101). It bounds how
+	// long a socket outlives the revocation or expiry of that one credential;
+	// disabling a principal or revoking all its credentials closes sockets
+	// immediately through the hub and does not wait for this.
+	defaultCredentialRecheckInterval = 30 * time.Second
+	// wsRecheckTimeout bounds one liveness read so a stuck store cannot pin
+	// the stream loop.
+	wsRecheckTimeout = 5 * time.Second
+
+	reasonCredentialInvalid = "credential no longer valid" //nolint:gosec // close-frame reason text, not a credential
 )
 
 // handleWS serves GET /v0/ws?channel=<name>: it upgrades to a WebSocket and
@@ -79,6 +90,23 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		sub0 = s.hub.Subscribe(channel.ID, principalID, wsSendBuffer)
 		defer sub0.Cancel()
 	}
+	// Same ordering argument for the credential: a disable that committed
+	// after the middleware resolved the token but before this subscription
+	// registered would have run DropPrincipalAll past it. Re-checking now,
+	// after subscribing, closes that window. The failure is the standard 401.
+	credID, hasCred := credentialIDFrom(ctx)
+	if hasCred {
+		live, err := s.store.CredentialLive(ctx, credID)
+		if err != nil {
+			slog.ErrorContext(ctx, "ws: check credential failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		if !live {
+			writeUnauthenticated(w)
+			return
+		}
+	}
 	member, err := s.callerIsMember(r, channel.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: check membership failed", "error", err)
@@ -101,8 +129,16 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		slog.DebugContext(ctx, "ws: accept failed", "error", err)
 		return
 	}
+	// Only an authenticated connection re-checks; a nil channel never fires,
+	// so AuthOff starts no timer.
+	var recheck <-chan time.Time
+	if hasCred {
+		ticker := time.NewTicker(s.credRecheckInterval)
+		defer ticker.Stop()
+		recheck = ticker.C
+	}
 	if v1 {
-		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID)
+		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID, credID, recheck)
 		return
 	}
 	sub := sub0
@@ -115,12 +151,16 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		case <-ctx.Done():
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return
+		case <-recheck:
+			if !s.credentialStillValid(ctx, conn, credID) {
+				return
+			}
 		case msg, ok := <-sub.Messages():
 			if !ok {
 				// The hub dropped us — tell the client whether to blame
 				// itself (too slow) or the server (shutdown), so a client
 				// like conch tail knows whether reconnecting makes sense.
-				s.closeDropped(ctx, conn, channel.ID, principalID)
+				s.closeDropped(ctx, conn, channel.ID, principalID, credID)
 				return
 			}
 			if err := writeWSMessage(ctx, conn, msg); err != nil {
@@ -135,16 +175,20 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 	}
 }
 
-func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, channelID, principalID int64) {
+func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, channelID, principalID, credID int64, recheck <-chan time.Time) {
 	ctx = conn.CloseRead(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return
+		case <-recheck:
+			if !s.credentialStillValid(ctx, conn, credID) {
+				return
+			}
 		case msg, ok := <-sub.Messages():
 			if !ok {
-				s.closeDropped(ctx, conn, channelID, principalID)
+				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
 			}
 			if err := writeWSMessageV1(ctx, conn, msg); err != nil {
@@ -168,17 +212,46 @@ func writeWSMessageV1(ctx context.Context, conn *websocket.Conn, msg schema.Mess
 	return wsjson.Write(wctx, conn, msg)
 }
 
+// credentialStillValid re-reads the credential the connection authenticated
+// with. It reports true when the stream may continue. Otherwise it has closed
+// conn: with a policy violation when the credential is revoked, expired, or
+// its principal disabled, and fail closed with a generic reason when the store
+// itself failed (the error is logged, never sent to the client).
+func (s *Server) credentialStillValid(ctx context.Context, conn *websocket.Conn, credID int64) bool {
+	cctx, cancel := context.WithTimeout(ctx, wsRecheckTimeout)
+	defer cancel()
+	live, err := s.store.CredentialLive(cctx, credID)
+	switch {
+	case err != nil:
+		slog.ErrorContext(ctx, "ws: recheck credential failed", "error", err)
+		_ = conn.Close(websocket.StatusInternalError, "credential check failed")
+		return false
+	case !live:
+		_ = conn.Close(websocket.StatusPolicyViolation, reasonCredentialInvalid)
+		return false
+	}
+	return true
+}
+
 // closeDropped closes conn after the hub dropped its subscription, telling the
-// client why: shutdown, removal from the channel, or falling too far behind.
-func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID int64) {
+// client why: shutdown, a revoked credential or disabled principal, removal
+// from the channel, or falling too far behind.
+func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
 	if s.hub.Closed() {
 		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
 		return
 	}
+	// The request context may already be done; the reason is advisory, so
+	// fall back to the slow-consumer wording on any error.
+	bg := context.WithoutCancel(ctx)
+	if credID != 0 {
+		if live, err := s.store.CredentialLive(bg, credID); err == nil && !live {
+			_ = conn.Close(websocket.StatusPolicyViolation, reasonCredentialInvalid)
+			return
+		}
+	}
 	if principalID != 0 {
-		// The request context may already be done; the reason is advisory, so
-		// fall back to the slow-consumer wording on any error.
-		if member, err := s.store.IsChannelMember(context.WithoutCancel(ctx), channelID, principalID); err == nil && !member {
+		if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
 			_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
 			return
 		}

@@ -69,6 +69,9 @@ type Server struct {
 	routes         []route
 	routeByPattern map[string]route
 	mux            *http.ServeMux
+	// credRecheckInterval is how often an authenticated WebSocket re-checks
+	// its own credential. Unexported so tests can shorten it before serving.
+	credRecheckInterval time.Duration
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -82,7 +85,7 @@ func New(cfg Config, st *store.Store) *Server {
 	if err != nil {
 		slog.Error("server: ntfy disabled by invalid configuration", "error", err)
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval}
 	s.routes = s.routeTable()
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()

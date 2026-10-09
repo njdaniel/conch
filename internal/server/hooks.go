@@ -44,12 +44,19 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	if _, err := s.store.PrincipalByID(ctx, req.Principal); errors.Is(err, store.ErrNotFound) {
+	principal, err := s.store.PrincipalByID(ctx, req.Principal)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "principal_not_found", "principal not found")
 		return
 	} else if err != nil {
 		slog.ErrorContext(ctx, "hooks: find principal failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// A hook is a posting credential for its principal, so a disabled
+	// principal cannot be given one (issue #101).
+	if principal.DisabledAt != nil {
+		writeError(w, http.StatusConflict, "principal_disabled", "principal is disabled")
 		return
 	}
 	tokenBytes := make([]byte, hookTokenBytes)
@@ -77,6 +84,20 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: resolve failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// A hook posts as its principal. Disabling the principal switches it off
+	// everywhere, in every auth mode, so its hooks stop too and answer exactly
+	// like an unknown token (issue #101). Enabling the principal brings them
+	// back.
+	hookPrincipal, err := s.store.PrincipalByID(ctx, hook.PrincipalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "hooks: find principal failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if hookPrincipal.DisabledAt != nil {
+		writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")
 		return
 	}
 	// A hook posts as its principal, so it inherits that principal's channel

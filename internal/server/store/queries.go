@@ -50,6 +50,9 @@ type Principal struct {
 	Name      string
 	Role      Role
 	CreatedAt time.Time
+	// DisabledAt is when the principal was disabled (issue #101); nil means
+	// enabled. A disabled principal cannot authenticate.
+	DisabledAt *time.Time
 }
 
 // Channel is a named message stream.
@@ -195,9 +198,10 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 	var p Principal
 	var kind, role string
 	var createdAt int64
+	var disabledAt sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, kind, name, role, created_at FROM principals WHERE id = ?", id,
-	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt)
+		"SELECT id, kind, name, role, created_at, disabled_at FROM principals WHERE id = ?", id,
+	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
 	}
@@ -207,6 +211,10 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 	p.Kind = PrincipalKind(kind)
 	p.Role = Role(role)
 	p.CreatedAt = time.UnixMilli(createdAt)
+	if disabledAt.Valid {
+		t := time.UnixMilli(disabledAt.Int64)
+		p.DisabledAt = &t
+	}
 	return p, nil
 }
 
