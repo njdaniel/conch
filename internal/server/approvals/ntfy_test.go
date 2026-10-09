@@ -200,8 +200,9 @@ func TestNtfyTitleHeaderSurvivesAnyTitle(t *testing.T) {
 					t.Errorf("delivery %d: Priority = %v", i, g.headers.Values("Priority"))
 				}
 			}
-			// The body is the place for the title as written.
-			if !strings.HasPrefix(got[0].body, tt.title+"\n") {
+			// The body is the place for the title as written (made valid
+			// UTF-8, which ntfy requires of a message body: issue #164).
+			if !strings.HasPrefix(got[0].body, strings.ToValidUTF8(tt.title, "\uFFFD")+"\n") {
 				t.Errorf("the created notification's body does not start with the title as written: %q", got[0].body[:min(len(got[0].body), 60)])
 			}
 		})
@@ -228,5 +229,153 @@ func TestHeaderValue(t *testing.T) {
 		if got := headerValue(strings.Repeat("a", n) + "発射"); !utf8.ValidString(got) || len(got) > maxTitleBytes {
 			t.Errorf("headerValue cut at %d bytes into invalid UTF-8 or past the cap: %d bytes", n, len(got))
 		}
+	}
+}
+
+// Issue #164. ntfy turns a body over 4,096 bytes into an attachment and, with
+// attachments not configured, refuses it: the push never happens. Whatever the
+// approval's body, what is sent fits one ntfy message, is valid UTF-8, and
+// says when it was cut and where the rest is. A body that fits is untouched.
+func TestNtfyBodyFitsOneMessage(t *testing.T) {
+	const ntfyLimit = 4096
+	var mu sync.Mutex
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		// As a self-hosted ntfy without attachments answers an oversized body.
+		if len(raw) > ntfyLimit || !utf8.Valid(raw) {
+			http.Error(w, `{"code":40014,"error":"attachments not allowed"}`, http.StatusBadRequest)
+			return
+		}
+	}))
+	defer ts.Close()
+	n, err := NewNtfyNotifier(NtfyConfig{Server: ts.URL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mark = "\n[cut here; the full text is in approval 42]"
+	tests := []struct {
+		name    string
+		body    string
+		wantCut bool
+	}{
+		{"short", "please review", false},
+		{"just under what fits", strings.Repeat("a", maxBodyBytes-200), false},
+		{"well over ntfy's limit", strings.Repeat("a", 5000), true},
+		{"a megabyte", strings.Repeat("deploy the thing. ", 60000), true},
+		{"multi-byte text across the cut", strings.Repeat("発射", 3000), true},
+		{"four-byte characters across the cut", strings.Repeat("🚀", 2000), true},
+		{"invalid UTF-8", "ok \xff\xfe then text", false},
+		// A run of bytes that are not UTF-8 becomes one replacement character.
+		{"a long run of invalid UTF-8", strings.Repeat("\xff", 6000), false},
+		{"invalid UTF-8 scattered through a long body", strings.Repeat("ab\xffcd ", 2000), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mu.Lock()
+			bodies = nil
+			mu.Unlock()
+			a := store.Approval{ID: 42, RequesterID: 7, ChannelID: 3, Title: "Ship it", Body: tt.body, Deadline: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+			if err := n.ApprovalCreated(context.Background(), a); err != nil {
+				t.Fatalf("created: %v", err)
+			}
+			if err := n.ApprovalEscalated(context.Background(), a); err != nil {
+				t.Fatalf("escalated: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 2 {
+				t.Fatalf("deliveries = %d, want 2", len(bodies))
+			}
+			for i, got := range bodies {
+				if len(got) > ntfyLimit || !utf8.ValidString(got) {
+					t.Errorf("delivery %d: body is %d bytes, valid UTF-8 %v", i, len(got), utf8.ValidString(got))
+				}
+				if strings.HasSuffix(got, mark) != tt.wantCut {
+					t.Errorf("delivery %d: cut mark present = %v, want %v (tail %q)", i, strings.HasSuffix(got, mark), tt.wantCut, got[max(0, len(got)-60):])
+				}
+				if !strings.Contains(got, "Requester: principal:7") {
+					t.Errorf("delivery %d: the lines Conch adds are missing", i)
+				}
+				if !tt.wantCut && utf8.ValidString(tt.body) && !strings.HasSuffix(got, tt.body) {
+					t.Errorf("delivery %d: a body that fits was changed", i)
+				}
+			}
+		})
+	}
+}
+
+func TestNotificationBodyCut(t *testing.T) {
+	// The cut never splits a character, wherever it falls.
+	for pad := 0; pad < 8; pad++ {
+		got := notificationBody(strings.Repeat("a", maxBodyBytes-4+pad)+strings.Repeat("🚀", 10), 9)
+		if !utf8.ValidString(got) || len(got) > 4096 {
+			t.Errorf("pad %d: %d bytes, valid %v", pad, len(got), utf8.ValidString(got))
+		}
+	}
+	if got := notificationBody(strings.Repeat("a", maxBodyBytes), 9); len(got) != maxBodyBytes {
+		t.Errorf("a body exactly at the cap was changed: %d bytes", len(got))
+	}
+	if got := notificationBody(strings.Repeat("a", maxBodyBytes+1), 9); !strings.HasSuffix(got, "approval 9]") {
+		t.Errorf("a body one byte over the cap was not cut: tail %q", got[len(got)-30:])
+	}
+}
+
+// Issue #164. The HTTP client's error quotes the request URL, and the URL's
+// path is the topic: on a public ntfy server, what lets someone read the
+// notifications. The notifier's errors are written to the audit log and the
+// server log, so they say what went wrong and not where.
+func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
+	const topic = "tpc-SECRET-grep-me"
+	refused, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedAddr := refused.Addr().String()
+	_ = refused.Close()
+	// A server that never answers. It is released at the end of the test: a
+	// handler that has not read the request body is not told when the client
+	// gives up, and Close would wait for it for ever.
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { <-release }))
+	defer hang.Close()
+	defer close(release)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://"+refusedAddr+"/elsewhere/"+topic, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	tests := []struct {
+		name   string
+		server string
+		want   string // part of the cause that must survive
+	}{
+		{"connection refused", "http://" + refusedAddr, "connection refused"},
+		{"connection refused, credentials in the URL", "http://alice:hunter2@" + refusedAddr, "connection refused"},
+		{"timeout", hang.URL, "deadline exceeded"},
+		{"redirect to a dead address", redirect.URL, "connection refused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, err := NewNtfyNotifier(NtfyConfig{Server: tt.server, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: 300 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = n.ApprovalCreated(context.Background(), store.Approval{ID: 1, Title: "x", Body: "b", Deadline: time.Now()})
+			if err == nil {
+				t.Fatal("no error")
+			}
+			text := err.Error()
+			for _, secret := range []string{topic, "hunter2", "alice", refusedAddr, "127.0.0.1", "http://"} {
+				if strings.Contains(text, secret) {
+					t.Errorf("the error names %q: %s", secret, text)
+				}
+			}
+			if !strings.Contains(text, tt.want) || !strings.HasPrefix(text, "ntfy: ") {
+				t.Errorf("error = %q, want it to keep the cause %q", text, tt.want)
+			}
+		})
 	}
 }

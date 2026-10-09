@@ -3,7 +3,9 @@ package approvals
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,7 +68,7 @@ func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) er
 	}
 	body := fmt.Sprintf("%s\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s",
 		a.Title, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Body)
-	return n.post(ctx, n.approvalsTopic, "Approval requested: "+a.Title, "default", body)
+	return n.post(ctx, n.approvalsTopic, "Approval requested: "+a.Title, "default", notificationBody(body, a.ID))
 }
 
 func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) error {
@@ -75,7 +77,7 @@ func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) 
 	}
 	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s",
 		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Body)
-	return n.post(ctx, n.urgentTopic, "URGENT approval escalated: "+a.Title, "max", body)
+	return n.post(ctx, n.urgentTopic, "URGENT approval escalated: "+a.Title, "max", notificationBody(body, a.ID))
 }
 
 func (n *NtfyNotifier) ApprovalResolved(ctx context.Context, a store.Approval, r schema.ApprovalResolutionV1) error {
@@ -83,20 +85,21 @@ func (n *NtfyNotifier) ApprovalResolved(ctx context.Context, a store.Approval, r
 		return nil
 	}
 	body := fmt.Sprintf("Approval %d resolved: %s\nOption: %s\nDecisions: %d", a.ID, r.Outcome, r.OptionID, len(r.Decisions))
-	return n.post(ctx, n.approvalsTopic, "Approval resolved: "+a.Title, "default", body)
+	return n.post(ctx, n.approvalsTopic, "Approval resolved: "+a.Title, "default", notificationBody(body, a.ID))
 }
 
 func (n *NtfyNotifier) post(ctx context.Context, topic, title, priority, body string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.server+"/"+url.PathEscape(topic), bytes.NewBufferString(body))
 	if err != nil {
-		return err
+		// The error would quote the URL, topic and all.
+		return errors.New("ntfy: build request")
 	}
 	req.Header.Set("Title", headerValue(title))
 	req.Header.Set("Priority", priority)
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("ntfy: %w", transportCause(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -143,4 +146,46 @@ func headerValue(s string) string {
 		b.WriteRune(r)
 	}
 	return strings.TrimRight(b.String(), " ")
+}
+
+// maxBodyBytes caps a notification's body. ntfy treats a body over 4,096
+// bytes as an attachment, and a server without attachments configured (the
+// self-hosted default) answers 400: the push never happens. An approval's
+// body is user text of up to a megabyte, so without a cap anyone who could
+// raise an approval could raise one nobody was pushed about (issue #164).
+// The cap leaves room below ntfy's limit for the mark that says it was cut.
+const maxBodyBytes = 3800
+
+// notificationBody is body made to fit one ntfy message: valid UTF-8 (ntfy
+// treats anything else as an attachment too), cut on a character boundary at
+// maxBodyBytes, with a last line saying so and where the rest is. A body that
+// fits is returned as it is.
+func notificationBody(body string, approvalID int64) string {
+	body = strings.ToValidUTF8(body, "\uFFFD")
+	if len(body) <= maxBodyBytes {
+		return body
+	}
+	cut := maxBodyBytes
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return body[:cut] + fmt.Sprintf("\n[cut here; the full text is in approval %d]", approvalID)
+}
+
+// transportCause reduces an error from the HTTP client to what went wrong,
+// without where. The client's own error quotes the request URL, whose path is
+// the topic: on a public ntfy server the topic is what lets someone read the
+// notifications, and this error is written to the audit log and to the server
+// log. A dial error likewise names the host. Neither helps an operator who
+// already knows their own configuration; the cause does.
+func transportCause(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		return fmt.Errorf("%s: %w", op.Op, op.Err)
+	}
+	return err
 }
