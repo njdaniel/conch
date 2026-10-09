@@ -71,6 +71,9 @@ func newAuthFixture(t *testing.T, mode AuthMode) *authFixture {
 			t.Fatalf("AddChannelMember %s: %v", p.Name, err)
 		}
 	}
+	// Since issue #79 an agent also needs a manifest; the fixture agent may do
+	// everything in "general".
+	setAgentManifest(t, srv, f.bot.ID, nil, general.ID)
 	return f
 }
 
@@ -252,6 +255,12 @@ func TestRoleMatrix(t *testing.T) {
 			if exp.class == classOp || exp.class == classSelf {
 				memberWant = http.StatusForbidden
 			}
+			// The approval REST routes are the human surface: an agent
+			// credential is refused there and uses MCP instead (issue #79).
+			agentWant := memberWant
+			if strings.Contains(rt.pattern, "/v1/approvals") {
+				agentWant = http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -259,7 +268,7 @@ func TestRoleMatrix(t *testing.T) {
 			}{
 				{"unauthenticated", "", http.StatusUnauthorized},
 				{"member human", f.aliceTok, memberWant},
-				{"member agent", f.botTok, memberWant},
+				{"member agent", f.botTok, agentWant},
 				{"operator", f.rootTok, exp.allowed},
 			}
 			for _, c := range cases {
@@ -297,10 +306,11 @@ func TestAuthOffUnchanged(t *testing.T) {
 			})
 		}
 		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
-		// and the fixture's three member_added events; no request may add to
-		// that (in particular no access_denied).
-		if n := len(f.audit(t)); n != 7 {
-			t.Errorf("mode %q: audit events = %d, want 7", mode, n)
+		// the fixture's three member_added events, and the fixture agent's
+		// manifest_created; no request may add to that (in particular no
+		// access_denied).
+		if n := len(f.audit(t)); n != 8 {
+			t.Errorf("mode %q: audit events = %d, want 8", mode, n)
 		}
 	}
 }

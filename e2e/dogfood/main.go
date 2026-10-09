@@ -11,6 +11,11 @@
 // the REST API (issues #78, #97) and ends by revoking it and asserting the
 // next MCP call is refused. The degraded path keeps using the deprecated
 // static --mcp-token mapping, so both mechanisms stay covered end to end.
+//
+// Agents are deny-by-default (issue #79): the happy path first shows the
+// agent can do nothing without a manifest, then gives it membership of the
+// channel and a manifest, and also runs a second, narrowly-permitted agent
+// to show it cannot reach the first agent's channel or raise approvals.
 package main
 
 import (
@@ -287,6 +292,77 @@ func revokeCredential(baseURL string, credentialID int64) error {
 	return nil
 }
 
+// putJSON sends a PUT with a JSON body (or none when body is nil) and expects
+// a 2xx.
+func putJSON(url string, body any) error {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequest(http.MethodPut, url, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT %s status %d: %s", url, resp.StatusCode, respBody)
+	}
+	return nil
+}
+
+// addMember makes a principal a member of a channel.
+func addMember(baseURL, channel string, principalID int64) error {
+	return putJSON(fmt.Sprintf("%s/v1/channels/%s/members/%d", baseURL, channel, principalID), nil)
+}
+
+// putManifest writes an agent's manifest: the given capabilities, with read
+// and post in each of the given channels.
+func putManifest(baseURL string, agentID int64, name string, caps []schema.Capability, channelIDs ...int64) error {
+	req := schema.PutAgentManifestRequestV1{DisplayName: name, Tier: schema.AgentTierA, Capabilities: caps}
+	for _, id := range channelIDs {
+		req.Channels = append(req.Channels, schema.ChannelGrant{
+			ChannelID:   id,
+			Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost},
+		})
+	}
+	return putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", baseURL, agentID), req)
+}
+
+// provisionAgent gives an agent everything it needs to work in one channel:
+// membership, and a manifest with every capability there.
+func provisionAgent(baseURL string, agentID int64, name, channel string, channelID int64) error {
+	if err := addMember(baseURL, channel, agentID); err != nil {
+		return fmt.Errorf("add agent to %s: %w", channel, err)
+	}
+	if err := putManifest(baseURL, agentID, name, schema.Capabilities(), channelID); err != nil {
+		return fmt.Errorf("write agent manifest: %w", err)
+	}
+	return nil
+}
+
+// expectToolError calls an MCP tool and requires it to fail with the given
+// error code.
+func expectToolError(client *mcpclient.Client, tool string, args map[string]any, code string) error {
+	_, err := client.CallTool(context.Background(), tool, args)
+	if err == nil {
+		return fmt.Errorf("%s succeeded, want %s", tool, code)
+	}
+	if !strings.Contains(err.Error(), code) {
+		return fmt.Errorf("%s failed with %w, want %s", tool, err, code)
+	}
+	return nil
+}
+
 func restListMessages(baseURL, channel string) (schema.ListMessagesResponseV1, error) {
 	var resp schema.ListMessagesResponseV1
 	r, err := http.Get(baseURL + "/v1/channels/" + channel + "/messages")
@@ -358,6 +434,15 @@ func happyPath(bin binaries) error {
 	client := mcpclient.New(proc.baseURL, agentToken)
 	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
 		return fmt.Errorf("mcp initialize with issued credential: %w", err)
+	}
+
+	// Deny by default: authenticated, but with no manifest the agent can do
+	// nothing. Membership and a manifest are what let it work in "ops".
+	if err := expectToolError(client, "post_message", map[string]any{"channel": "ops", "body": "too early"}, "forbidden"); err != nil {
+		return fmt.Errorf("agent without a manifest: %w", err)
+	}
+	if err := provisionAgent(proc.baseURL, agentID, "dogfood-agent", "ops", channelID); err != nil {
+		return err
 	}
 
 	// Step 2: post a typed message via MCP; verify via read_channel and REST
@@ -503,6 +588,12 @@ func happyPath(bin binaries) error {
 		return err
 	}
 
+	// Step 7b: a second agent, permitted only to exchange messages in another
+	// channel, cannot reach "ops" or raise approvals anywhere.
+	if err := isolationCheck(proc, created.ID); err != nil {
+		return fmt.Errorf("two-agent isolation: %w", err)
+	}
+
 	// Step 8: revoke the agent's credential; the very next MCP call is
 	// refused, with no restart.
 	if err := revokeCredential(proc.baseURL, credentialID); err != nil {
@@ -517,7 +608,7 @@ func happyPath(bin binaries) error {
 		return err
 	}
 
-	fmt.Println("happy path: OK (issued credential, message parity, request/await/check, CLI approve, ntfy fired, audit chain in order, revoked credential refused)")
+	fmt.Println("happy path: OK (issued credential, deny by default, message parity, request/await/check, CLI approve, ntfy fired, audit chain in order, two-agent isolation, revoked credential refused)")
 	return nil
 }
 
@@ -540,8 +631,12 @@ func degradedPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}
-	if _, err := createPrincipal(proc.baseURL, schema.PrincipalAgent, "dogfood-agent"); err != nil {
+	agentID, err := createPrincipal(proc.baseURL, schema.PrincipalAgent, "dogfood-agent")
+	if err != nil {
 		return fmt.Errorf("create agent principal: %w", err)
+	}
+	if err := provisionAgent(proc.baseURL, agentID, "dogfood-agent", "ops", channelID); err != nil {
+		return err
 	}
 	humanID, err := createPrincipal(proc.baseURL, schema.PrincipalHuman, "dogfood-human")
 	if err != nil {
@@ -612,6 +707,117 @@ func assertAuditChain(proc *conchdProc, approvalID int64, want []string) error {
 	}
 	if !reflect.DeepEqual(got, want) {
 		return fmt.Errorf("audit chain for %s = %v, want %v", subject, got, want)
+	}
+	return nil
+}
+
+// isolationCheck runs a second agent with a deliberately narrow grant —
+// messages plus approvals.check, in its own channel "lab" — and asserts what
+// it cannot do: see "ops" or the approval raised there while not a member,
+// post there or observe that approval once it is a member but its manifest
+// still says no, or raise an approval even where it may post. Every refusal
+// must be audited.
+func isolationCheck(proc *conchdProc, opsApprovalID int64) error {
+	labID, err := createChannel(proc.baseURL, "lab")
+	if err != nil {
+		return fmt.Errorf("create channel: %w", err)
+	}
+	observerID, err := createPrincipal(proc.baseURL, schema.PrincipalAgent, "dogfood-observer")
+	if err != nil {
+		return fmt.Errorf("create observer principal: %w", err)
+	}
+	if err := addMember(proc.baseURL, "lab", observerID); err != nil {
+		return err
+	}
+	narrow := []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost, schema.CapabilityApprovalsCheck}
+	if err := putManifest(proc.baseURL, observerID, "dogfood-observer", narrow, labID); err != nil {
+		return err
+	}
+	_, token, err := issueCredential(proc.baseURL, observerID, "dogfood-observer")
+	if err != nil {
+		return fmt.Errorf("issue observer credential: %w", err)
+	}
+	observer := mcpclient.New(proc.baseURL, token)
+	if err := observer.Initialize(context.Background(), "dogfood-observer"); err != nil {
+		return fmt.Errorf("observer initialize: %w", err)
+	}
+
+	// What it is allowed to do works.
+	if _, err := observer.CallTool(context.Background(), "post_message", map[string]any{"channel": "lab", "body": "observer online"}); err != nil {
+		return fmt.Errorf("observer post in its own channel: %w", err)
+	}
+	approvalArgs := func(channelID int64) map[string]any {
+		return map[string]any{
+			"channel_id": channelID, "title": "should never exist", "body": "raised by an agent without the capability",
+			"options": []map[string]any{
+				{"id": "approve", "kind": "approve", "label": "Approve"},
+				{"id": "reject", "kind": "reject", "label": "Reject"},
+			},
+			"deadline": time.Now().Add(time.Hour).Format(time.RFC3339),
+		}
+	}
+	refusals := []struct {
+		what string
+		tool string
+		args map[string]any
+		code string
+	}{
+		{"read a channel it is not in", "read_channel", map[string]any{"channel": "ops"}, "channel_not_found"},
+		{"post to a channel it is not in", "post_message", map[string]any{"channel": "ops", "body": "intrusion"}, "channel_not_found"},
+		{"raise an approval without the capability", "request_approval", approvalArgs(labID), "forbidden"},
+		// It holds approvals.check, so this is the membership rule alone: an
+		// approval in a channel it is not in looks like it does not exist.
+		{"observe an approval in a channel it is not in", "check_decision", map[string]any{"approval_id": opsApprovalID}, "approval_not_found"},
+	}
+	for _, r := range refusals {
+		if err := expectToolError(observer, r.tool, r.args, r.code); err != nil {
+			return fmt.Errorf("observer must not %s: %w", r.what, err)
+		}
+	}
+	// Membership alone is not enough: once in "ops", its manifest still has
+	// no grant there.
+	if err := addMember(proc.baseURL, "ops", observerID); err != nil {
+		return err
+	}
+	memberRefusals := []struct {
+		what string
+		tool string
+		args map[string]any
+	}{
+		{"post", "post_message", map[string]any{"channel": "ops", "body": "intrusion"}},
+		{"observe an approval", "check_decision", map[string]any{"approval_id": opsApprovalID}},
+	}
+	for _, r := range memberRefusals {
+		if err := expectToolError(observer, r.tool, r.args, "forbidden"); err != nil {
+			return fmt.Errorf("observer must not %s where its manifest has no grant: %w", r.what, err)
+		}
+	}
+
+	list, err := restListMessages(proc.baseURL, "ops")
+	if err != nil {
+		return err
+	}
+	for _, m := range list.Messages {
+		if m.AuthorID == observerID {
+			return fmt.Errorf("the observer posted message %d into ops", m.ID)
+		}
+	}
+	events, err := proc.auditEvents()
+	if err != nil {
+		return fmt.Errorf("read audit events: %w", err)
+	}
+	actor := fmt.Sprintf("principal:%d", observerID)
+	denials := 0
+	for _, e := range events {
+		if strings.Contains(e.Actor+e.Action+e.Subject+e.Detail, token) {
+			return fmt.Errorf("audit event %q contains the observer's token", e.Action)
+		}
+		if e.Actor == actor && e.Action == "access_denied" {
+			denials++
+		}
+	}
+	if want := len(refusals) + len(memberRefusals); denials != want {
+		return fmt.Errorf("access_denied audit events for the observer = %d, want %d", denials, want)
 	}
 	return nil
 }
