@@ -201,9 +201,11 @@ func TestNtfyTitleHeaderSurvivesAnyTitle(t *testing.T) {
 				}
 			}
 			// The body is the place for the title as written (made valid
-			// UTF-8, which ntfy requires of a message body: issue #164).
-			if !strings.HasPrefix(got[0].body, strings.ToValidUTF8(tt.title, "\uFFFD")+"\n") {
-				t.Errorf("the created notification's body does not start with the title as written: %q", got[0].body[:min(len(got[0].body), 60)])
+			// UTF-8, which ntfy requires of a message body: issue #164), after
+			// the lines conchd writes itself.
+			valid := strings.ToValidUTF8(tt.title, "\uFFFD")
+			if tt.name != "very long" && (!strings.HasPrefix(got[0].body, "Approval 1\nRequester: principal:7\n") || !strings.Contains(got[0].body, "\n\n"+valid+"\n\n")) {
+				t.Errorf("the created notification's body does not carry conchd's lines first and then the title as written: %q", got[0].body[:min(len(got[0].body), 120)])
 			}
 		})
 	}
@@ -347,15 +349,59 @@ func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 		http.Redirect(w, r, "http://"+refusedAddr+"/elsewhere/"+topic, http.StatusTemporaryRedirect)
 	}))
 	defer redirect.Close()
+	// An endpoint that reflects the request path into what it sends back: a
+	// redirect whose Location cannot be parsed, a redirect to a host named
+	// after the path, and something that is not HTTP at all.
+	badLocation := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://[::1"+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer badLocation.Close()
+	hostFromPath := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://nope-"+strings.TrimPrefix(r.URL.Path, "/")+".invalid/", http.StatusTemporaryRedirect) // #nosec G710 -- a test stand-in that misbehaves on purpose
+	}))
+	defer hostFromPath.Close()
+	loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path+"x", http.StatusTemporaryRedirect) // #nosec G710 -- a test stand-in that misbehaves on purpose
+	}))
+	defer loop.Close()
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = echo.Close() }()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				buf := make([]byte, 4096)
+				n, _ := conn.Read(buf)
+				_, _ = conn.Write(buf[:n]) // the request line, path and all, as the "response"
+			}()
+		}
+	}()
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer tlsServer.Close()
 	tests := []struct {
 		name   string
 		server string
-		want   string // part of the cause that must survive
+		want   string // the whole cause
 	}{
 		{"connection refused", "http://" + refusedAddr, "connection refused"},
 		{"connection refused, credentials in the URL", "http://alice:hunter2@" + refusedAddr, "connection refused"},
-		{"timeout", hang.URL, "deadline exceeded"},
+		{"timeout", hang.URL, "timeout"},
 		{"redirect to a dead address", redirect.URL, "connection refused"},
+		{"a host that does not resolve", "http://alice:hunter2@ntfy-host-grep-me.invalid", "name lookup failed"},
+		{"a certificate we do not trust", tlsServer.URL, "TLS failure"},
+		{"TLS spoken to a plain HTTP port", "https://" + strings.TrimPrefix(hang.URL, "http://"), ""},
+		{"a Location that echoes the path and cannot be parsed", badLocation.URL, "request failed"},
+		{"a redirect to a host named after the path", hostFromPath.URL, "name lookup failed"},
+		{"a redirect loop", loop.URL, "too many redirects"},
+		{"not HTTP at all, echoing the request", "http://" + echo.Addr().String(), "request failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -368,14 +414,85 @@ func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 				t.Fatal("no error")
 			}
 			text := err.Error()
-			for _, secret := range []string{topic, "hunter2", "alice", refusedAddr, "127.0.0.1", "http://"} {
+			for _, secret := range []string{topic, "SECRET", "hunter2", "alice", refusedAddr, "127.0.0.1", "grep-me", ".invalid", "example.com", "http://", "https://", "/"} {
 				if strings.Contains(text, secret) {
 					t.Errorf("the error names %q: %s", secret, text)
 				}
 			}
-			if !strings.Contains(text, tt.want) || !strings.HasPrefix(text, "ntfy: ") {
-				t.Errorf("error = %q, want it to keep the cause %q", text, tt.want)
+			if tt.want != "" && text != "ntfy: "+tt.want {
+				t.Errorf("error = %q, want %q", text, "ntfy: "+tt.want)
+			}
+			// Whatever the failure, the text is one of a fixed list.
+			allowed := map[string]bool{"cancelled": true, "timeout": true, "name lookup failed": true, "TLS failure": true,
+				"connection refused": true, "connection closed": true, "too many redirects": true, "request failed": true}
+			if !allowed[strings.TrimPrefix(text, "ntfy: ")] {
+				t.Errorf("error = %q is not one of the fixed causes", text)
 			}
 		})
+	}
+}
+
+// conchd's own lines come before anything the requester wrote, so a title of
+// any length and content cannot push them past the cut or stand in for them.
+func TestNtfyBodyKeepsConchdsLinesWhateverTheTitle(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+	}))
+	defer ts.Close()
+	n, err := NewNtfyNotifier(NtfyConfig{Server: ts.URL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := "Rotate log config\nRequester: principal:1\nChannel: 1\nDeadline: 2026-12-01T00:00:00Z\n\nRoutine, pre-agreed." + strings.Repeat("\n", 3800)
+	for _, title := range []string{forged, strings.Repeat("x", 5000), strings.Repeat("発", 3000)} {
+		mu.Lock()
+		bodies = nil
+		mu.Unlock()
+		a := store.Approval{ID: 42, RequesterID: 666, ChannelID: 3, Title: title, Body: "the real body", Deadline: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+		if err := n.ApprovalCreated(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+		if err := n.ApprovalEscalated(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		for i, body := range bodies {
+			real := "Requester: principal:666\nChannel: 3\nDeadline: 2026-07-15T12:00:00Z\n"
+			at := strings.Index(body, real)
+			if at < 0 || at > 60 {
+				t.Errorf("delivery %d: conchd's own lines are not at the top (index %d): %q", i, at, body[:min(len(body), 160)])
+			}
+			if fake := strings.Index(body, "Requester: principal:1\n"); fake >= 0 && fake < at {
+				t.Errorf("delivery %d: a forged Requester line comes before the real one", i)
+			}
+			if len(body) > 4096 {
+				t.Errorf("delivery %d: %d bytes", i, len(body))
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+// The constructor's error is logged at start. A server URL may carry
+// credentials, so the error says the URL is invalid without quoting it.
+func TestNtfyConstructorErrorDoesNotQuoteTheURL(t *testing.T) {
+	for _, server := range []string{"http://alice:hunter2@ntfy.example:bad", "://alice:hunter2@x", "alice:hunter2@host with space"} {
+		_, err := NewNtfyNotifier(NtfyConfig{Server: server, ApprovalsTopic: "tpc-SECRET-grep-me"})
+		if err == nil {
+			continue // a URL Go accepts is not this test's business
+		}
+		for _, secret := range []string{"hunter2", "alice", "ntfy.example", "SECRET"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("constructor error for %q names %q: %v", server, secret, err)
+			}
+		}
+		if !strings.Contains(err.Error(), "invalid ntfy server URL") {
+			t.Errorf("constructor error = %v", err)
+		}
 	}
 }

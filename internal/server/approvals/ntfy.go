@@ -3,12 +3,16 @@ package approvals
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -48,7 +52,12 @@ func NewNtfyNotifier(cfg NtfyConfig) (*NtfyNotifier, error) {
 		return nil, nil
 	}
 	if _, err := url.ParseRequestURI(server); err != nil {
-		return nil, fmt.Errorf("approvals: invalid ntfy server %q: %w", cfg.Server, err)
+		// Not the URL: it may carry credentials, and this is logged at start.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, fmt.Errorf("approvals: invalid ntfy server URL: %w", err)
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -66,8 +75,13 @@ func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) er
 	if n == nil || n.approvalsTopic == "" {
 		return nil
 	}
-	body := fmt.Sprintf("%s\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s",
-		a.Title, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Body)
+	// What conchd itself says comes first, before any text the requester
+	// wrote. The body is cut to fit one ntfy message (notificationBody), and
+	// the title and body are user text of any length: put first, a long title
+	// could push these lines past the cut and leave only lines of its own
+	// making, a forged "Requester:" among them.
+	body := fmt.Sprintf("Approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s\n\n%s",
+		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Title, a.Body)
 	return n.post(ctx, n.approvalsTopic, "Approval requested: "+a.Title, "default", notificationBody(body, a.ID))
 }
 
@@ -75,8 +89,8 @@ func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) 
 	if n == nil || n.urgentTopic == "" {
 		return nil
 	}
-	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s",
-		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Body)
+	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s\n\n%s",
+		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Title, a.Body)
 	return n.post(ctx, n.urgentTopic, "URGENT approval escalated: "+a.Title, "max", notificationBody(body, a.ID))
 }
 
@@ -172,20 +186,41 @@ func notificationBody(body string, approvalID int64) string {
 	return body[:cut] + fmt.Sprintf("\n[cut here; the full text is in approval %d]", approvalID)
 }
 
-// transportCause reduces an error from the HTTP client to what went wrong,
-// without where. The client's own error quotes the request URL, whose path is
-// the topic: on a public ntfy server the topic is what lets someone read the
+// transportCause reduces an error from the HTTP client to one of a fixed set
+// of causes. The client's own error quotes the request URL, whose path is the
+// topic: on a public ntfy server the topic is what lets someone read the
 // notifications, and this error is written to the audit log and to the server
-// log. A dial error likewise names the host. Neither helps an operator who
-// already knows their own configuration; the cause does.
+// log. Dial, DNS and TLS errors name the host; an endpoint that misbehaves can
+// reflect the path into errors of almost any shape. So nothing from the
+// original text is passed through: the cause is named from a list, and
+// anything not on it is "request failed". An operator knows their own
+// configuration; what they need is which kind of failure it was.
 func transportCause(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		err = ue.Err
+	var (
+		dns      *net.DNSError
+		netErr   net.Error
+		hostname x509.HostnameError
+		unknown  x509.UnknownAuthorityError
+		invalid  x509.CertificateInvalidError
+		verify   *tls.CertificateVerificationError
+		record   tls.RecordHeaderError
+	)
+	switch {
+	case errors.Is(err, context.Canceled):
+		return errors.New("cancelled")
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return errors.New("timeout")
+	case errors.As(err, &dns):
+		return errors.New("name lookup failed")
+	case errors.As(err, &hostname), errors.As(err, &unknown), errors.As(err, &invalid), errors.As(err, &verify), errors.As(err, &record):
+		return errors.New("TLS failure")
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return errors.New("connection refused")
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return errors.New("connection closed")
+	case strings.Contains(err.Error(), "stopped after") && strings.Contains(err.Error(), "redirects"):
+		return errors.New("too many redirects")
+	default:
+		return errors.New("request failed")
 	}
-	var op *net.OpError
-	if errors.As(err, &op) && op.Err != nil {
-		return fmt.Errorf("%s: %w", op.Op, op.Err)
-	}
-	return err
 }
