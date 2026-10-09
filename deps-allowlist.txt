@@ -10,3 +10,5 @@ github.com/charmbracelet/lipgloss
 github.com/coder/websocket
 # MCP SDK for issue #11: approved by Nick 2026-07-15.
 github.com/modelcontextprotocol/go-sdk
+# No-echo token prompt for conch login (issue #134): approved under Nick's delegation, 2026-10-09.
+golang.org/x/term
