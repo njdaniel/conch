@@ -28,16 +28,18 @@ type Hub struct {
 // Subscription is one subscriber's membership in a channel. Receive from
 // Messages; call Cancel when done.
 type Subscription struct {
-	hub       *Hub
-	channelID int64
-	msgs      chan schema.MessageV0
+	hub         *Hub
+	channelID   int64
+	principalID int64
+	msgs        chan schema.MessageV0
 }
 
 // SubscriptionV1 is a typed-envelope channel subscription.
 type SubscriptionV1 struct {
-	hub       *Hub
-	channelID int64
-	msgs      chan schema.MessageV1
+	hub         *Hub
+	channelID   int64
+	principalID int64
+	msgs        chan schema.MessageV1
 }
 
 // New returns an empty hub ready for subscriptions.
@@ -45,9 +47,10 @@ func New() *Hub {
 	return &Hub{subs: make(map[int64]map[*Subscription]struct{}), subsV1: make(map[int64]map[*SubscriptionV1]struct{})}
 }
 
-// SubscribeV1 registers a MessageV1 subscription.
-func (h *Hub) SubscribeV1(channelID int64, buffer int) *SubscriptionV1 {
-	sub := &SubscriptionV1{hub: h, channelID: channelID, msgs: make(chan schema.MessageV1, buffer)}
+// SubscribeV1 registers a MessageV1 subscription held by principalID (0 when
+// the connection has no authenticated caller).
+func (h *Hub) SubscribeV1(channelID, principalID int64, buffer int) *SubscriptionV1 {
+	sub := &SubscriptionV1{hub: h, channelID: channelID, principalID: principalID, msgs: make(chan schema.MessageV1, buffer)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -73,13 +76,14 @@ func (s *SubscriptionV1) Cancel() {
 	s.hub.dropV1Locked(s)
 }
 
-// Subscribe registers a subscription for messages broadcast to channelID from
-// now on. buffer bounds the subscription's queue (see the slow-consumer
+// Subscribe registers a subscription held by principalID (0 when the
+// connection has no authenticated caller) for messages broadcast to channelID
+// from now on. buffer bounds the subscription's queue (see the slow-consumer
 // policy on Hub). The hub closes the message channel when it drops the
 // subscription — on overflow or hub Close; a subscription taken from a closed
 // hub starts closed. Callers must Cancel the subscription when done.
-func (h *Hub) Subscribe(channelID int64, buffer int) *Subscription {
-	sub := &Subscription{hub: h, channelID: channelID, msgs: make(chan schema.MessageV0, buffer)}
+func (h *Hub) Subscribe(channelID, principalID int64, buffer int) *Subscription {
+	sub := &Subscription{hub: h, channelID: channelID, principalID: principalID, msgs: make(chan schema.MessageV0, buffer)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -135,6 +139,34 @@ func (h *Hub) BroadcastMessageV1(_ context.Context, msg schema.MessageV1) {
 			h.dropV1Locked(sub)
 		}
 	}
+}
+
+// DropPrincipal closes every subscription, v0 and v1, that principalID holds
+// on channelID, and reports how many it closed. Subscribers observe the close
+// exactly as for a slow-consumer drop. Because the drop and every broadcast
+// serialize on the hub lock, a message broadcast after DropPrincipal returns
+// is never delivered to a dropped subscription. A zero principalID (no
+// caller) matches nothing: unauthenticated subscriptions are never targeted.
+func (h *Hub) DropPrincipal(channelID, principalID int64) int {
+	if principalID == 0 {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for sub := range h.subs[channelID] {
+		if sub.principalID == principalID {
+			h.dropLocked(sub)
+			n++
+		}
+	}
+	for sub := range h.subsV1[channelID] {
+		if sub.principalID == principalID {
+			h.dropV1Locked(sub)
+			n++
+		}
+	}
+	return n
 }
 
 // Closed reports whether Close has been called, letting subscribers
