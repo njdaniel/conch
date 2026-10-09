@@ -144,12 +144,17 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/principals/{id}/credentials":                  {classOp, "/v1/principals/1/credentials", "", 200},
 	"POST /v1/credentials/{credential_id}/rotate":          {classOp, "/v1/credentials/9999/rotate", "", 404},
 	"DELETE /v1/credentials/{credential_id}":               {classOp, "/v1/credentials/9999", "", 404},
-	"POST /v1/hooks":                                       {classOp, "/v1/hooks", `{}`, 400},
-	"POST /v1/hooks/{token}":                               {classExempt, "/v1/hooks/nope", `{}`, 404},
-	"POST /v1/approvals":                                   {classAuth, "/v1/approvals", `{}`, 400},
-	"GET /v1/approvals":                                    {classAuth, "/v1/approvals", "", 200},
-	"POST /v1/approvals/{id}/decisions":                    {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                                 {classExempt, "/mcp", `{}`, 401},
+	// Unknown principal / already-enabled ghost: no-ops that write no audit
+	// event, so the AuthOff audit count below is unaffected.
+	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
+	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
+	"POST /v1/principals/{id}/credentials/revoke-all": {classOp, "/v1/principals/9999/credentials/revoke-all", "", 404},
+	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
+	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
+	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
+	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
+	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
 }
 
 func routeMethod(pattern string) string {

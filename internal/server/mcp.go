@@ -180,6 +180,12 @@ func (s *Server) authenticateMCP(r *http.Request) (int64, bool) {
 		}
 		return 0, false
 	}
+	// A static mapping is configuration, not a credential row, so disabling
+	// the principal (issue #101) revokes nothing here. Check it explicitly:
+	// a disabled agent must not keep MCP access through the deprecated flag.
+	if static.DisabledAt != nil {
+		return 0, false
+	}
 	return principalID, true
 }
 

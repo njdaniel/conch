@@ -88,6 +88,22 @@ func callerFrom(ctx context.Context) (store.Principal, bool) {
 	return p, ok
 }
 
+type credentialIDKey struct{}
+
+// withCredentialID returns ctx carrying the id of the credential the request
+// authenticated with, so later code can re-check that one credential without
+// a second token lookup. The token itself is never stored in the context.
+func withCredentialID(ctx context.Context, id int64) context.Context {
+	return context.WithValue(ctx, credentialIDKey{}, id)
+}
+
+// credentialIDFrom returns the authenticating credential's id. It reports
+// false under AuthOff and on exempt routes.
+func credentialIDFrom(ctx context.Context) (int64, bool) {
+	id, ok := ctx.Value(credentialIDKey{}).(int64)
+	return id, ok
+}
+
 // auditActor is the audit actor for an administrative write made in ctx: the
 // authenticated caller as "principal:<id>", or "system" when there is no
 // caller (AuthOff).
@@ -136,7 +152,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeUnauthenticated(w)
 			return
 		}
-		principal, err := s.store.ResolveCredential(r.Context(), token)
+		principal, credentialID, err := s.store.ResolveCredentialDetail(r.Context(), token)
 		switch {
 		case errors.Is(err, store.ErrCredentialInvalid):
 			writeUnauthenticated(w)
@@ -148,7 +164,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withCaller(r.Context(), principal)))
+		next.ServeHTTP(w, r.WithContext(withCredentialID(withCaller(r.Context(), principal), credentialID)))
 	})
 }
 
