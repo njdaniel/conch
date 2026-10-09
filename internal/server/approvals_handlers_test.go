@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -255,4 +256,86 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Issue #157, the whole chain. A title with control characters in it used to
+// stop both notifications from leaving conchd (Go's HTTP client refuses such a
+// header value). Request, notify, resolve, audit must all happen whatever the
+// title holds, and the title is stored and returned as written.
+func TestApprovalWithControlCharactersInTitleIsNotified(t *testing.T) {
+	titles := map[string]string{
+		"newline":          "Deploy\nprod",
+		"header injection": "Deploy\r\nX-Evil: 1",
+		"NUL and DEL":      "Deploy\x00prod\x7f",
+	}
+	for name, title := range titles {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var titles []string
+			evil := false
+			ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				titles = append(titles, r.Header.Get("Title"))
+				evil = evil || r.Header.Get("X-Evil") != ""
+				mu.Unlock()
+			}))
+			defer ntfy.Close()
+			srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Ntfy: approvals.NtfyConfig{Server: ntfy.URL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: time.Second}})
+			channel, agent, human := approvalTestFixture(t, srv)
+
+			var req schema.CreateApprovalRequestV1
+			if err := json.Unmarshal([]byte(createApprovalBody(channel.ID, agent.ID)), &req); err != nil {
+				t.Fatal(err)
+			}
+			req.Title = title
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := postJSON(t, srv, "/v1/approvals", string(body))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create = %d %s", rec.Code, rec.Body)
+			}
+			var created schema.CreateApprovalResponseV1
+			if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			if created.Approval.Title != title {
+				t.Errorf("stored title = %q, want it as written %q", created.Approval.Title, title)
+			}
+			decision := fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, human.ID)
+			if rec := postJSON(t, srv, fmt.Sprintf("/v1/approvals/%d/decisions", created.Approval.ID), decision); rec.Code != http.StatusOK {
+				t.Fatalf("decide = %d %s", rec.Code, rec.Body)
+			}
+
+			events, err := srv.store.ListAuditEvents(context.Background(), 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var chain []string
+			subject := fmt.Sprintf("approval:%d", created.Approval.ID)
+			for _, e := range events {
+				if e.Subject == subject {
+					chain = append(chain, e.Action)
+				}
+			}
+			want := []string{store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent}
+			if !equalStringSlices(chain, want) {
+				t.Errorf("audit chain = %v, want %v", chain, want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(titles) != 2 {
+				t.Fatalf("ntfy received %d notifications, want 2", len(titles))
+			}
+			for _, got := range titles {
+				if strings.ContainsAny(got, "\r\n\x00\x7f") || !strings.Contains(got, "Deploy") {
+					t.Errorf("Title header = %q", got)
+				}
+			}
+			if evil {
+				t.Error("the title injected a header into the ntfy request")
+			}
+		})
+	}
 }
