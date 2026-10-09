@@ -272,7 +272,21 @@ func (p *conchdProc) auditEvents() ([]store.AuditEvent, error) {
 		return nil, err
 	}
 	defer func() { _ = st.Close() }()
-	return st.ListAuditEvents(ctx, 0, 1000)
+	// The whole log, page by page: step 2b alone writes several hundred
+	// rows, and a fixed limit would silently cut the chain off the end.
+	var all []store.AuditEvent
+	after := int64(0)
+	for {
+		page, err := st.ListAuditEvents(ctx, after, 1000)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < 1000 {
+			return all, nil
+		}
+		after = page[len(page)-1].ID
+	}
 }
 
 // ------------------------------------------------------------------ REST
@@ -452,11 +466,22 @@ func abandonRequests(proc *conchdProc) error {
 	const body = `{"label":"abandoned"}`
 	request := fmt.Sprintf("POST /v1/principals/%d/credentials HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
 		bystander, addr, proc.operatorToken, len(body), body)
-	// One sweep of 61 requests reaches the window only now and then against
-	// a separate server process (the old code survived two runs in three), so
-	// the sweep is repeated: ten of them failed the old code five runs in five.
+	// How long a request takes depends on the machine, so the sweep covers
+	// twice a completed one, and never less than 1.5 ms.
+	span := 1500 * time.Microsecond
+	started := time.Now()
+	if _, _, err := issueCredential(proc.operator(), bystander, "timing"); err != nil {
+		return fmt.Errorf("abandoned requests: timing request: %w", err)
+	}
+	if took := 2 * time.Since(started); took > span {
+		span = took
+	}
+	// One sweep of about sixty requests reaches the window only now and then
+	// against a separate server process (the old code survived two runs in
+	// three), so the sweep is repeated: ten of them failed the old code five
+	// runs in five.
 	for round := 0; round < 10; round++ {
-		for wait := time.Duration(0); wait <= 1500*time.Microsecond; wait += 25 * time.Microsecond {
+		for wait := time.Duration(0); wait <= span; wait += span / 60 {
 			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 			if err != nil {
 				return fmt.Errorf("abandoned request: dial: %w", err)

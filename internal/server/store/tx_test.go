@@ -349,3 +349,87 @@ func TestWithImmediateTxRandomCancellation(t *testing.T) {
 		})
 	}
 }
+
+// A COMMIT that SQLite refuses leaves the transaction open; it must be rolled
+// back before the connection is reused. A deferred foreign-key violation is
+// the way to make a commit fail after every statement succeeded.
+func TestWithImmediateTxFailedCommitIsRolledBack(t *testing.T) {
+	for _, conns := range []int{1, 0} {
+		t.Run(fmt.Sprintf("max conns %d", conns), func(t *testing.T) {
+			s := openTxStore(t, conns)
+			ctx := context.Background()
+			err := s.withImmediateTx(ctx, func(tx execer) error {
+				if _, err := tx.ExecContext(ctx, "PRAGMA defer_foreign_keys = ON"); err != nil {
+					return err
+				}
+				if err := insertMarker(ctx, tx, "doomed"); err != nil {
+					return err
+				}
+				// No such channel or principal: checked only at COMMIT.
+				_, err := tx.ExecContext(ctx, "INSERT INTO channel_members (channel_id, principal_id, created_at) VALUES (424242, 424242, 1)")
+				return err
+			})
+			if err == nil || !strings.HasPrefix(err.Error(), "store: commit:") {
+				t.Fatalf("err = %v, want the commit to fail", err)
+			}
+			if n := s.durable(t, "doomed"); n != 0 {
+				t.Errorf("a row of the refused transaction is durable (%d)", n)
+			}
+			s.assertHealthy(t, "after")
+		})
+	}
+}
+
+// The message inserts use database/sql's own Tx (BeginTx), not
+// withImmediateTx. It already rolls back on cancellation; this holds it to
+// the same standard, since the two share the pool: after cancellations at
+// random moments the store is healthy, and each insert is whole or absent.
+func TestBeginTxSitesSurviveCancellation(t *testing.T) {
+	for _, conns := range []int{1, 0} {
+		t.Run(fmt.Sprintf("max conns %d", conns), func(t *testing.T) {
+			s := openTxStore(t, conns)
+			bg := context.Background()
+			channel, err := s.CreateChannel(bg, "ops")
+			if err != nil {
+				t.Fatal(err)
+			}
+			author, err := s.CreatePrincipal(bg, PrincipalHuman, "ann")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Deadlines are spread over twice the time one insert takes here,
+			// so that on any machine some land before, some during and some
+			// after it.
+			started := time.Now()
+			if _, err := s.InsertMessageV1(bg, channel.ID, author.ID, "timing", nil); err != nil {
+				t.Fatal(err)
+			}
+			span := 2 * time.Since(started)
+			rng := rand.New(rand.NewSource(11)) // #nosec G404 -- test timing only
+			stored, refused := 0, 0
+			for i := 0; i < 300; i++ {
+				ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
+				body := fmt.Sprintf("cancelled-insert-%d", i)
+				_, err := s.InsertMessageV1(ctx, channel.ID, author.ID, body, nil)
+				cancel()
+				var n int
+				if qerr := s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE body = ?", body).Scan(&n); qerr != nil {
+					t.Fatal(qerr)
+				}
+				if want := map[bool]int{true: 1, false: 0}[err == nil]; n != want {
+					t.Fatalf("insert %d: err = %v but %d rows stored", i, err, n)
+				}
+				if err == nil {
+					stored++
+				} else {
+					refused++
+				}
+			}
+			t.Logf("%d stored, %d refused", stored, refused)
+			if stored == 0 || refused == 0 {
+				t.Errorf("stored %d, refused %d: the timings exercised only one outcome", stored, refused)
+			}
+			s.assertHealthy(t, "after")
+		})
+	}
+}

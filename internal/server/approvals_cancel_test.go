@@ -94,12 +94,22 @@ func TestAbandonedRequestsDoNotBreakTheApprovalChain(t *testing.T) {
 	}
 	// The hang-up has to land while the handler is inside its transaction,
 	// a window of a few hundred microseconds. Sweeping the wait across the
-	// first 1.5 ms of each request, one request at a time, lands in it many
-	// times: against the old code the store was poisoned within the first
-	// twenty requests of this loop, every run.
+	// time a request takes, one request at a time, lands in it many times:
+	// against the old code the store was poisoned within the first twenty
+	// requests of this loop, every run. How long a request takes depends on
+	// the machine (and on -race), so the sweep is sized from a measurement:
+	// twice a completed request, and never less than 1.5 ms.
+	span := 1500 * time.Microsecond
+	started := time.Now()
+	if status, body := callWith(t, web.URL, "PUT", fmt.Sprintf("/v1/channels/ops/members/%d", bob.ID), rootTok, ""); status >= 300 {
+		t.Fatalf("timing request: %d %s", status, body)
+	}
+	if took := 2 * time.Since(started); took > span {
+		span = took
+	}
 	abandoned := 0
 	for round := 0; round < 4; round++ {
-		for wait := time.Duration(0); wait <= 1500*time.Microsecond; wait += 25 * time.Microsecond {
+		for wait := time.Duration(0); wait <= span; wait += span / 60 {
 			if round%2 == 0 {
 				// Raising an approval: a transaction on the approval path.
 				abandon("POST", "/v1/approvals", malloryTok, createApprovalBody(channel.ID, mallory.ID), wait)
@@ -114,19 +124,7 @@ func TestAbandonedRequestsDoNotBreakTheApprovalChain(t *testing.T) {
 	// The chain, by people who had nothing to do with the abandoned requests.
 	call := func(method, target, token, body string) (int, string) {
 		t.Helper()
-		req, err := http.NewRequest(method, web.URL+target, strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, target, err)
-		}
-		defer func() { _ = res.Body.Close() }()
-		raw, _ := io.ReadAll(res.Body)
-		return res.StatusCode, string(raw)
+		return callWith(t, web.URL, method, target, token, body)
 	}
 	before := notified.Load()
 	status, body := call("POST", "/v1/approvals", annTok, createApprovalBody(channel.ID, ann.ID))
@@ -194,4 +192,22 @@ func TestAbandonedRequestsDoNotBreakTheApprovalChain(t *testing.T) {
 		t.Errorf("approval_created events = %d, approvals stored = %d (open %d plus the resolved one)", got, wantCreated, len(open))
 	}
 	t.Logf("%d abandoned requests; %d of their approvals were committed whole, the rest rolled back", abandoned, len(open))
+}
+
+// callWith makes one ordinary request and returns its status and body.
+func callWith(t *testing.T, base, method, target, token, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, base+target, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, target, err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(raw)
 }
