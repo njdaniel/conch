@@ -292,7 +292,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 				t.Errorf("status after failed backfill = %q, want %q", s, wantFailed)
 			}
 			ended, _ := got.Update(subscriptionEnded{channel: tt.wantList[0], err: errors.New("gone")})
-			wantEnded := "live updates: gone"
+			wantEnded := "live updates: reconnecting…"
 			if tt.wantStatus != "" {
 				wantEnded = tt.wantStatus
 			}
@@ -563,5 +563,315 @@ func TestModelIdentityStatusStates(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// resubAPI counts backfills and subscriptions. Subscribe blocks until the
+// context ends, like a healthy live stream.
+type resubAPI struct {
+	stubAPI
+	mu         sync.Mutex
+	backfills  map[string]int
+	subscribes map[string]int
+	started    chan string
+}
+
+func newResubAPI() *resubAPI {
+	return &resubAPI{backfills: map[string]int{}, subscribes: map[string]int{}, started: make(chan string, 16)}
+}
+
+func (a *resubAPI) ListMessages(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV1, error) {
+	a.mu.Lock()
+	a.backfills[channel]++
+	a.mu.Unlock()
+	return schema.ListMessagesResponseV1{}, nil
+}
+
+func (a *resubAPI) Subscribe(ctx context.Context, channel string, _ func(schema.MessageV1) error) error {
+	a.mu.Lock()
+	a.subscribes[channel]++
+	a.mu.Unlock()
+	a.started <- channel
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// run executes cmd (flattening batches) and returns the messages it produced.
+// Only for commands that do not include waitEvent, which would block.
+func run(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		var out []tea.Msg
+		for _, c := range batch {
+			out = append(out, run(c)...)
+		}
+		return out
+	}
+	if msg == nil {
+		return nil
+	}
+	return []tea.Msg{msg}
+}
+
+type recordedTimer struct {
+	d   time.Duration
+	msg tea.Msg
+}
+
+func resubModel(t *testing.T) (Model, *resubAPI, *[]recordedTimer) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	api := newResubAPI()
+	m := NewModel(ctx, api, 7, []string{"general", "ops"})
+	timers := &[]recordedTimer{}
+	m.after = func(d time.Duration, msg tea.Msg) tea.Cmd {
+		*timers = append(*timers, recordedTimer{d, msg})
+		return func() tea.Msg { return nil }
+	}
+	return m, api, timers
+}
+
+func (a *resubAPI) counts(channel string) (backfills, subscribes int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.backfills[channel], a.subscribes[channel]
+}
+
+func awaitStart(t *testing.T, a *resubAPI, want string) {
+	t.Helper()
+	select {
+	case got := <-a.started:
+		if got != want {
+			t.Fatalf("subscribed to %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no subscription started for %q", want)
+	}
+}
+
+func update(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
+func TestSubscriptionEndedClearsFlag(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantFlag  bool
+		wantTimer bool
+		wantState string
+	}{
+		{"error", errors.New("eof"), false, true, "live updates: reconnecting…"},
+		{"clean close", nil, false, true, "live updates: reconnecting…"},
+		{"canceled", context.Canceled, true, false, ""},
+		{"unauthenticated", &cli.UnauthenticatedError{Server: "http://h:1"}, false, false, "not logged in to http://h:1: run 'conch login'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, timers := resubModel(t)
+			m, _ = update(m, subscriptionEnded{channel: "general", err: tt.err})
+			if m.subscribed["general"] != tt.wantFlag {
+				t.Errorf("subscribed = %v, want %v", m.subscribed["general"], tt.wantFlag)
+			}
+			if (len(*timers) == 1) != tt.wantTimer {
+				t.Errorf("timers = %d, want timer=%v", len(*timers), tt.wantTimer)
+			}
+			if m.status != tt.wantState {
+				t.Errorf("status = %q, want %q", m.status, tt.wantState)
+			}
+		})
+	}
+}
+
+func TestResubscribeBackoff(t *testing.T) {
+	m, _, timers := resubModel(t)
+	var got []time.Duration
+	// Each round: the subscription drops, the timer fires, and the
+	// resubscription immediately drops again.
+	for i := 0; i < 8; i++ {
+		m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+		got = append(got, (*timers)[len(*timers)-1].d)
+		m, _ = update(m, (*timers)[len(*timers)-1].msg)
+	}
+	want := []time.Duration{1, 2, 4, 8, 16, 30, 30, 30}
+	for i, w := range want {
+		if got[i] != w*time.Second {
+			t.Fatalf("delays = %v, want seconds %v", got, want)
+		}
+	}
+}
+
+func TestResubscribeStartsOneSubscriptionAndBackfills(t *testing.T) {
+	m, api, timers := resubModel(t)
+	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+	if n, _ := api.counts("general"); n != 0 {
+		t.Fatalf("backfilled before the delay elapsed: %d", n)
+	}
+	m, cmd := update(m, (*timers)[0].msg)
+	run(cmd)
+	awaitStart(t, api, "general")
+	if b, s := api.counts("general"); b != 1 || s != 1 {
+		t.Errorf("backfills=%d subscribes=%d, want 1 and 1", b, s)
+	}
+	if !m.subscribed["general"] || m.retryPending["general"] {
+		t.Errorf("subscribed=%v pending=%v", m.subscribed["general"], m.retryPending["general"])
+	}
+	// A duplicate timer for the same drop is stale and must do nothing.
+	_, cmd = update(m, (*timers)[0].msg)
+	if cmd != nil {
+		t.Error("stale resubscribeDue produced a command")
+	}
+}
+
+func TestBackoffResetsAfterSuccessfulSubscription(t *testing.T) {
+	tests := []struct {
+		name  string
+		heal  func(m Model) Model
+		wantD time.Duration
+	}{
+		{"no recovery keeps growing", func(m Model) Model { return m }, 4 * time.Second},
+		{"message received", func(m Model) Model {
+			m, _ = update(m, messageReceived{channel: "general", message: schema.MessageV1{ID: 1}})
+			return m
+		}, time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, timers := resubModel(t)
+			for i := 0; i < 2; i++ {
+				m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+				m, _ = update(m, (*timers)[len(*timers)-1].msg)
+			}
+			m = tt.heal(m)
+			update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+			if d := (*timers)[len(*timers)-1].d; d != tt.wantD {
+				t.Errorf("delay = %v, want %v", d, tt.wantD)
+			}
+		})
+	}
+	t.Run("long-lived subscription", func(t *testing.T) {
+		m, _, timers := resubModel(t)
+		for i := 0; i < 2; i++ {
+			m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+			m, _ = update(m, (*timers)[len(*timers)-1].msg)
+		}
+		update(m, subscriptionEnded{channel: "general", err: errors.New("eof"), lived: time.Minute})
+		if d := (*timers)[len(*timers)-1].d; d != time.Second {
+			t.Errorf("delay = %v, want 1s", d)
+		}
+	})
+}
+
+func TestNonSelectedChannelResubscribesOnSelect(t *testing.T) {
+	m, api, timers := resubModel(t)
+	m, cmd := update(m, subscriptionEnded{channel: "ops", err: errors.New("eof")})
+	_ = cmd
+	if len(*timers) != 0 {
+		t.Fatalf("timer scheduled for a channel nobody is viewing")
+	}
+	if m.subscribed["ops"] {
+		t.Fatal("flag not cleared")
+	}
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	run(cmd)
+	awaitStart(t, api, "ops")
+	if _, s := api.counts("ops"); s != 1 {
+		t.Errorf("subscribes = %d, want 1", s)
+	}
+	// Moving away and back must not start another one.
+	m, _ = update(m, tea.KeyMsg{Type: tea.KeyUp})
+	_, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	run(cmd)
+	if _, s := api.counts("ops"); s != 1 {
+		t.Errorf("subscribes after re-select = %d, want 1", s)
+	}
+}
+
+func TestNoSecondSubscriptionWhileRetryPending(t *testing.T) {
+	tests := []struct {
+		name        string
+		fireWhileOn bool
+	}{
+		{"timer fires after returning", true},
+		{"timer fires while away", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, api, timers := resubModel(t)
+			m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown})
+			if !tt.fireWhileOn {
+				m, _ = update(m, (*timers)[0].msg)
+			}
+			m, cmd := update(m, tea.KeyMsg{Type: tea.KeyUp})
+			run(cmd)
+			if tt.fireWhileOn {
+				if _, s := api.counts("general"); s != 0 {
+					t.Fatalf("selectChannel started a subscription under a pending timer")
+				}
+				_, cmd = update(m, (*timers)[0].msg)
+				run(cmd)
+			}
+			awaitStart(t, api, "general")
+			if _, s := api.counts("general"); s != 1 {
+				t.Errorf("subscribes = %d, want exactly 1", s)
+			}
+		})
+	}
+}
+
+// A backfill that completes while the selected channel's subscription is down
+// and a retry is pending must not report "connected": the history loaded, the
+// live feed did not. Once the retry has resubscribed, it may.
+func TestBackfillDoesNotClaimConnectedWhileReconnecting(t *testing.T) {
+	m, _, _ := resubModel(t)
+	// The subscription fails at once; the first backfill is still in flight.
+	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+	if m.status != statusReconnecting {
+		t.Fatalf("status after the drop = %q", m.status)
+	}
+	m, _ = update(m, messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}})
+	if m.status != statusReconnecting {
+		t.Errorf("status after a backfill during the outage = %q, want %q", m.status, statusReconnecting)
+	}
+	if len(m.messages["general"]) != 1 {
+		t.Errorf("the backfill was not merged: %+v", m.messages["general"])
+	}
+	// The retry fires and resubscribes; its backfill may now say connected.
+	m, _ = update(m, resubscribeDue{channel: "general"})
+	m, _ = update(m, messagesLoaded{channel: "general"})
+	if m.status != "connected" {
+		t.Errorf("status after the reconnect's backfill = %q, want connected", m.status)
+	}
+}
+
+func TestStaleBackfillKeepsStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  messagesLoaded
+		want string
+	}{
+		{"stale success", messagesLoaded{channel: "general", messages: []schema.MessageV1{{ID: 1, Body: "a"}}}, "loading…"},
+		{"stale error", messagesLoaded{channel: "general", err: errors.New("boom")}, "loading…"},
+		{"selected success", messagesLoaded{channel: "ops"}, "connected"},
+		{"selected error", messagesLoaded{channel: "ops", err: errors.New("boom")}, "boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, _ := resubModel(t)
+			m, _ = update(m, tea.KeyMsg{Type: tea.KeyDown}) // ops, status "loading…"
+			m, _ = update(m, tt.msg)
+			if m.status != tt.want {
+				t.Errorf("status = %q, want %q", m.status, tt.want)
+			}
+			if len(tt.msg.messages) > 0 && len(m.messages["general"]) != 1 {
+				t.Errorf("stale messages not merged: %+v", m.messages["general"])
+			}
+		})
 	}
 }
