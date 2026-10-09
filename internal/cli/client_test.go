@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -278,5 +279,190 @@ func TestClientCastDecision(t *testing.T) {
 	}
 	if got.Decision.PrincipalID != want.Decision.PrincipalID || got.State != want.State {
 		t.Errorf("response = %+v, want %+v", got, want)
+	}
+}
+
+func TestClientSendsBearerOnEveryCall(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"ListMessages":  func(c *Client) error { _, err := c.ListMessages(context.Background(), "g", 0, 10); return err },
+		"SendMessage":   func(c *Client) error { _, err := c.SendMessage(context.Background(), "g", 1, "x"); return err },
+		"ListChannels":  func(c *Client) error { _, err := c.ListChannels(context.Background()); return err },
+		"ListApprovals": func(c *Client) error { _, err := c.ListApprovals(context.Background()); return err },
+		"CastDecision": func(c *Client) error {
+			_, err := c.CastDecision(context.Background(), 1, schema.CastDecisionRequestV1{})
+			return err
+		},
+		"Send":   func(c *Client) error { _, err := c.Send(context.Background(), "g", 1, "x"); return err },
+		"WhoAmI": func(c *Client) error { _, err := c.WhoAmI(context.Background()); return err },
+	}
+	for name, call := range calls {
+		for _, token := range []string{"", "tok-abc"} {
+			t.Run(name+"/"+token, func(t *testing.T) {
+				var got string
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					got = r.Header.Get("Authorization")
+					w.WriteHeader(http.StatusUnauthorized)
+					_ = json.NewEncoder(w).Encode(schema.Error{Code: "unauthenticated", Message: "authentication required"})
+				}))
+				defer server.Close()
+				client, err := NewClient(server.URL, server.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = call(client.WithToken(token))
+				want := ""
+				if token != "" {
+					want = "Bearer " + token
+				}
+				if got != want {
+					t.Errorf("Authorization = %q, want %q", got, want)
+				}
+				var unauth *UnauthenticatedError
+				if !errors.As(err, &unauth) || !errors.Is(err, ErrUnauthenticated) || unauth.Server != server.URL {
+					t.Errorf("err = %v, want UnauthenticatedError for %s", err, server.URL)
+				}
+			})
+		}
+	}
+}
+
+func TestWebSocketDialCarriesBearer(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		run  func(c *Client) error
+	}{
+		{"tail", "/v0/ws", func(c *Client) error {
+			return c.Tail(context.Background(), "g", func(schema.MessageV0) error { return nil })
+		}},
+		{"subscribe", "/v1/ws", func(c *Client) error {
+			return c.Subscribe(context.Background(), "g", func(schema.MessageV1) error { return nil })
+		}},
+	}
+	for _, tt := range tests {
+		for _, token := range []string{"", "tok-abc"} {
+			t.Run(tt.name+"/"+token, func(t *testing.T) {
+				headers := make(chan string, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != tt.path {
+						t.Errorf("path = %s, want %s", r.URL.Path, tt.path)
+					}
+					headers <- r.Header.Get("Authorization")
+					conn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					_ = conn.Close(websocket.StatusGoingAway, "bye")
+				}))
+				defer server.Close()
+				client, err := NewClient(server.URL, server.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = tt.run(client.WithToken(token))
+				want := ""
+				if token != "" {
+					want = "Bearer " + token
+				}
+				if got := <-headers; got != want {
+					t.Errorf("upgrade Authorization = %q, want %q", got, want)
+				}
+			})
+		}
+	}
+
+	t.Run("401 on upgrade", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer server.Close()
+		client, _ := NewClient(server.URL, server.Client())
+		err := client.Tail(context.Background(), "g", func(schema.MessageV0) error { return nil })
+		if !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("err = %v, want ErrUnauthenticated", err)
+		}
+	})
+}
+
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	var sinkHits atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		sinkHits.Add(1)
+	}))
+	defer sink.Close()
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL+"/sink", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	// The caller's client deliberately follows redirects; NewClient must not trust it.
+	followClient := origin.Client()
+	followClient.CheckRedirect = nil
+
+	tests := []struct {
+		name string
+		run  func(c *Client) error
+	}{
+		{"rest", func(c *Client) error { _, err := c.ListChannels(context.Background()); return err }},
+		{"whoami", func(c *Client) error { _, err := c.WhoAmI(context.Background()); return err }},
+		{"tail", func(c *Client) error {
+			return c.Tail(context.Background(), "g", func(schema.MessageV0) error { return nil })
+		}},
+		{"subscribe", func(c *Client) error {
+			return c.Subscribe(context.Background(), "g", func(schema.MessageV1) error { return nil })
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(origin.URL, followClient)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = tt.run(client.WithToken("tok-secret"))
+			if err == nil {
+				t.Fatal("want an error for a redirect")
+			}
+			if !strings.Contains(err.Error(), "server redirected to "+sink.URL) || !strings.Contains(err.Error(), "HTTP 307") || !strings.Contains(err.Error(), "--server") {
+				t.Errorf("err = %q", err)
+			}
+			if strings.Contains(err.Error(), "tok-secret") {
+				t.Error("error leaks token")
+			}
+			if n := sinkHits.Load(); n != 0 {
+				t.Errorf("redirect target received %d requests, want 0", n)
+			}
+		})
+	}
+	if followClient.CheckRedirect != nil {
+		t.Error("NewClient mutated the caller's client")
+	}
+}
+
+func TestNewClientDefaultDoesNotTouchDefaultClient(t *testing.T) {
+	client, err := NewClient("http://127.0.0.1:1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.httpClient == http.DefaultClient || http.DefaultClient.CheckRedirect != nil {
+		t.Error("must use a private client and leave http.DefaultClient alone")
+	}
+	if client.httpClient.CheckRedirect == nil {
+		t.Error("private client must refuse redirects")
+	}
+}
+
+func TestUnauthenticatedHintKeepsServerPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Conch-A/v1/whoami" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	client, _ := NewClient(server.URL+"/Conch-A/", server.Client())
+	_, err := client.WhoAmI(context.Background())
+	want := "not logged in to " + server.URL + "/Conch-A: run 'conch login'"
+	if err == nil || err.Error() != want {
+		t.Errorf("err = %v, want %q", err, want)
 	}
 }

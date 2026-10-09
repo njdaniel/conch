@@ -61,14 +61,9 @@ func (s *Server) postMessage(
 	w http.ResponseWriter, r *http.Request, authorID int64, body string, payload *schema.Payload, v1 bool,
 ) {
 	ctx := r.Context()
-	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "channel_not_found", "channel not found")
-		return
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "messages: find channel failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+	// Membership is enforced here: a non-member gets the unknown-channel 404.
+	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"))
+	if !ok {
 		return
 	}
 
@@ -119,14 +114,9 @@ func (s *Server) handleListMessagesV1(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, v1 bool) {
 	ctx := r.Context()
-	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "channel_not_found", "channel not found")
-		return
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "messages: find channel failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+	// Membership is enforced here: a non-member gets the unknown-channel 404.
+	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"))
+	if !ok {
 		return
 	}
 

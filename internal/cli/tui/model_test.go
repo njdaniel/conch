@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -30,6 +32,10 @@ func (stubAPI) ListApprovals(context.Context) (schema.ListApprovalsResponseV1, e
 }
 func (stubAPI) CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error) {
 	return schema.CastDecisionResponseV1{}, nil
+}
+
+func (stubAPI) WhoAmI(context.Context) (schema.WhoAmIResponseV1, error) {
+	return schema.WhoAmIResponseV1{}, nil
 }
 
 func TestModelUpdate(t *testing.T) {
@@ -378,5 +384,184 @@ func TestModelViewSmoke(t *testing.T) {
 	}
 	if lines := strings.Count(view, "\n") + 1; lines > 24 {
 		t.Errorf("view has %d lines, want at most 24", lines)
+	}
+}
+
+// identityAPI answers whoami and records the principal used to act.
+type identityAPI struct {
+	stubAPI
+	who       schema.WhoAmIResponseV1
+	whoErr    error
+	mu        sync.Mutex
+	sentAs    int64
+	decidedAs int64
+}
+
+func (a *identityAPI) WhoAmI(context.Context) (schema.WhoAmIResponseV1, error) {
+	return a.who, a.whoErr
+}
+
+func (a *identityAPI) SendMessage(_ context.Context, _ string, author int64, _ string) (schema.MessageV1, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sentAs = author
+	return schema.MessageV1{}, nil
+}
+
+func (a *identityAPI) CastDecision(_ context.Context, _ int64, d schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.decidedAs = d.PrincipalID
+	return schema.CastDecisionResponseV1{}, nil
+}
+
+func TestModelWhoAmI(t *testing.T) {
+	api := &identityAPI{who: schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator}}
+	model := NewModel(context.Background(), api, 0, []string{"general"}).WithCredential()
+	whoMsg := model.loadWhoAmI()()
+	updated, _ := model.Update(whoMsg)
+	got := updated.(Model)
+	if got.authorID != 42 || got.userName != "nick" {
+		t.Fatalf("author = %d name = %q, want 42 nick", got.authorID, got.userName)
+	}
+	got.width, got.height = 80, 24
+	if view := got.View(); !strings.Contains(view, "nick") || !strings.Contains(view, "signed in as nick") {
+		t.Errorf("status line missing signed-in name:\n%s", view)
+	}
+
+	// Sending uses the whoami id.
+	got.input = "hello"
+	_, cmd := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	runCmd(cmd)
+	if api.sentAs != 42 {
+		t.Errorf("sent as %d, want 42", api.sentAs)
+	}
+
+	// Deciding uses it too.
+	got.mode = modeDecision
+	got.approvals = []schema.ApprovalV1{{ID: 3, Options: []schema.Option{{ID: "approve", Label: "Approve"}}}}
+	got.input = "because"
+	_, cmd = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	runCmd(cmd)
+	if api.decidedAs != 42 {
+		t.Errorf("decided as %d, want 42", api.decidedAs)
+	}
+}
+
+func TestModelInitCallsWhoAmIOnlyWithCredential(t *testing.T) {
+	for _, withCred := range []bool{true, false} {
+		api := &identityAPI{who: schema.WhoAmIResponseV1{ID: 1, Name: "n"}}
+		model := NewModel(context.Background(), api, 0, []string{"general"})
+		if withCred {
+			model = model.WithCredential()
+		}
+		var saw bool
+		for _, m := range runCmd(model.Init()) {
+			if _, ok := m.(whoAmILoaded); ok {
+				saw = true
+			}
+		}
+		if saw != withCred {
+			t.Errorf("credential=%v: whoami issued = %v", withCred, saw)
+		}
+	}
+}
+
+func TestModelUnauthenticated(t *testing.T) {
+	unauth := &cli.UnauthenticatedError{Server: "http://h:1"}
+	hint := "not logged in to http://h:1: run 'conch login'"
+	tests := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{"whoami", whoAmILoaded{err: unauth}},
+		{"messages", messagesLoaded{channel: "general", err: unauth}},
+		{"approvals", approvalsLoaded{err: unauth}},
+		{"send", messageSent{err: unauth}},
+		{"decision", decisionCast{err: unauth}},
+		{"subscription", subscriptionEnded{channel: "general", err: unauth}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewModel(context.Background(), stubAPI{}, 0, []string{"general"}).WithCredential()
+			updated, _ := model.Update(tt.msg)
+			got := updated.(Model)
+			if got.status != hint {
+				t.Fatalf("status = %q, want %q", got.status, hint)
+			}
+			// Still usable: keys are accepted and the view renders.
+			next, _ := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+			if next.(Model).input != "x" {
+				t.Error("model stopped accepting input after 401")
+			}
+			_ = next.View()
+		})
+	}
+
+	t.Run("channel list", func(t *testing.T) {
+		model := NewModel(context.Background(), stubAPI{}, 0, nil).WithCredential()
+		updated, _ := model.Update(channelsLoaded{err: unauth})
+		if got := updated.(Model).status; got != hint {
+			t.Errorf("status = %q, want %q", got, hint)
+		}
+	})
+
+	t.Run("send before identity is known", func(t *testing.T) {
+		model := NewModel(context.Background(), stubAPI{}, 0, []string{"general"}).WithCredential()
+		model.input = "hi"
+		updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd != nil || !strings.Contains(updated.(Model).status, "identity") {
+			t.Errorf("status = %q cmd = %v", updated.(Model).status, cmd)
+		}
+	})
+}
+
+func TestModelCredentialIgnoresSuppliedAuthor(t *testing.T) {
+	api := &identityAPI{}
+	model := NewModel(context.Background(), api, 7, []string{"general"}).WithCredential()
+	if model.authorID != 0 {
+		t.Fatalf("authorID = %d, want 0 after WithCredential", model.authorID)
+	}
+	model.input = "hello"
+	_, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Errorf("a command was issued before whoami returned")
+	}
+	if api.sentAs != 0 {
+		t.Errorf("sent as %d before whoami returned; want nothing sent", api.sentAs)
+	}
+}
+
+func TestModelIdentityStatusStates(t *testing.T) {
+	hint := "not logged in to http://h:1: run 'conch login'"
+	tests := []struct {
+		name string
+		who  *whoAmILoaded // nil = still pending
+		want string
+	}{
+		{"pending", nil, "waiting for your identity"},
+		{"401", &whoAmILoaded{err: &cli.UnauthenticatedError{Server: "http://h:1"}}, hint},
+		{"other error", &whoAmILoaded{err: errors.New("boom")}, "whoami: boom"},
+	}
+	for _, tt := range tests {
+		for _, md := range []mode{modeChannels, modeDecision} {
+			t.Run(fmt.Sprintf("%s/mode%d", tt.name, md), func(t *testing.T) {
+				var cur tea.Model = NewModel(context.Background(), stubAPI{}, 0, []string{"general"}).WithCredential()
+				if tt.who != nil {
+					cur, _ = cur.Update(*tt.who)
+				}
+				m := cur.(Model)
+				m.mode = md
+				m.input = "x"
+				m.approvals = []schema.ApprovalV1{{ID: 1, Options: []schema.Option{{ID: "approve", Label: "A"}}}}
+				updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				if cmd != nil {
+					t.Error("nothing should be sent")
+				}
+				if got := updated.(Model).status; !strings.Contains(got, tt.want) {
+					t.Errorf("status = %q, want containing %q", got, tt.want)
+				}
+			})
+		}
 	}
 }

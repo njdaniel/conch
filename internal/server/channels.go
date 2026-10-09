@@ -28,7 +28,13 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channel, err := s.store.CreateChannel(ctx, req.Name)
+	// The creator of a channel is its only member; with no caller (AuthOff)
+	// the channel starts with no members.
+	var creatorID int64
+	if caller, ok := callerFrom(ctx); ok {
+		creatorID = caller.ID
+	}
+	channel, err := s.store.CreateChannelAs(ctx, auditActor(ctx), req.Name, creatorID)
 	if errors.Is(err, store.ErrDuplicate) {
 		writeError(w, http.StatusConflict, "channel_exists", "a channel with this name already exists")
 		return
@@ -43,7 +49,15 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	channels, err := s.store.ListChannels(ctx)
+	// With a caller, only the caller's channels (operators included); with no
+	// caller (AuthOff), every channel as before.
+	var channels []store.Channel
+	var err error
+	if caller, ok := callerFrom(ctx); ok {
+		channels, err = s.store.ListChannelsForPrincipal(ctx, caller.ID)
+	} else {
+		channels, err = s.store.ListChannels(ctx)
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "channels: list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

@@ -216,8 +216,8 @@ func TestRoleMigrationFromSchema6(t *testing.T) {
 		t.Errorf("operators after migration = %d (%v), want 0", operators, err)
 	}
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version != 7 {
-		t.Errorf("user_version = %d (%v), want 7", version, err)
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
+		t.Errorf("user_version = %d (%v), want %d", version, err, len(migrations))
 	}
 	// The first operator can still be bootstrapped on the migrated database.
 	if _, _, _, err := s.BootstrapOperator(ctx, "root"); err != nil {

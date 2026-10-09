@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -20,6 +21,12 @@ const defaultServer = "http://127.0.0.1:8080"
 
 // Run dispatches a conch command using the supplied standard output streams.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version string) error {
+	return RunWithStdin(ctx, args, os.Stdin, stdout, stderr, version)
+}
+
+// RunWithStdin is Run with an explicit standard input, which `conch login`
+// reads the token from.
+func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) error {
 	if len(args) == 0 {
 		Usage(stderr)
 		return errors.New("cli: no command given")
@@ -35,6 +42,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version s
 		return runApprovalsDecision(ctx, args[1:], stdout, stderr, "approve")
 	case "reject":
 		return runApprovalsDecision(ctx, args[1:], stdout, stderr, "reject")
+	case "login":
+		return runLogin(ctx, args[1:], stdin, stdout, stderr)
+	case "logout":
+		return runLogout(args[1:], stderr)
+	case "whoami":
+		return runWhoAmI(ctx, args[1:], stdout, stderr)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -57,11 +70,15 @@ Usage:
   conch approvals list [--server <url>]
   conch approve [flags] <id>
   conch reject [flags] <id>
+  conch login [--server <url>]     (reads the token from stdin: conch login < tokenfile)
+  conch logout [--server <url>]
+  conch whoami [--server <url>]
   conch version
 
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)
-  CONCH_AUTHOR  author ID for send
+  CONCH_TOKEN   bearer token; overrides the stored login
+  CONCH_AUTHOR  author ID (deprecated; with a login the server decides who you are)
   CONCH_CHANNELS optional comma-separated TUI channel override (default: all channels from the server)
 `)
 }
@@ -76,14 +93,11 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	if fs.NArg() != 2 {
 		return errors.New("cli: send: expected <channel> <text>")
 	}
-	if *author == "" {
-		return errors.New("cli: send: --author (or CONCH_AUTHOR) is required")
+	client, hasCredential, err := NewAuthClient(*server)
+	if err != nil {
+		return err
 	}
-	authorID, err := strconv.ParseInt(*author, 10, 64)
-	if err != nil || authorID <= 0 {
-		return errors.New("cli: send: author must be a positive integer")
-	}
-	client, err := NewClient(*server, nil)
+	authorID, err := resolveAuthor(ctx, client, hasCredential, *author, "send", stderr)
 	if err != nil {
 		return err
 	}
@@ -100,7 +114,7 @@ func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if fs.NArg() != 1 {
 		return errors.New("cli: tail: expected <channel>")
 	}
-	client, err := NewClient(*server, nil)
+	client, _, err := NewAuthClient(*server)
 	if err != nil {
 		return err
 	}
@@ -155,7 +169,7 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 		return errors.New("cli: approvals list takes no positional arguments")
 	}
 
-	client, err := NewClient(*server, nil)
+	client, _, err := NewAuthClient(*server)
 	if err != nil {
 		return err
 	}
@@ -197,19 +211,15 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 		return fmt.Errorf("cli: %s: id must be a positive integer", defaultOption)
 	}
 
-	if *author == "" {
-		return fmt.Errorf("cli: %s: --author (or CONCH_AUTHOR) is required", defaultOption)
-	}
-	principalID, err := strconv.ParseInt(*author, 10, 64)
-	if err != nil || principalID <= 0 {
-		return fmt.Errorf("cli: %s: author must be a positive integer", defaultOption)
-	}
-
 	if *reason == "" {
 		return fmt.Errorf("cli: %s: --reason is required", defaultOption)
 	}
 
-	client, err := NewClient(*server, nil)
+	client, hasCredential, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	principalID, err := resolveAuthor(ctx, client, hasCredential, *author, defaultOption, stderr)
 	if err != nil {
 		return err
 	}
@@ -239,4 +249,136 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 	}
 
 	return nil
+}
+
+// NewAuthClient builds a client for server that carries the stored or
+// CONCH_TOKEN credential when there is one. The bool reports whether a
+// credential is in use.
+func NewAuthClient(server string) (*Client, bool, error) {
+	client, err := NewClient(server, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	token, err := LoadToken(server)
+	if err != nil {
+		return nil, false, err
+	}
+	client.WithToken(token)
+	return client, token != "", nil
+}
+
+// resolveAuthor decides which principal an action is performed as. With a
+// credential the server's whoami answer is authoritative and --author may only
+// repeat it; without one the legacy --author / CONCH_AUTHOR rules apply.
+func resolveAuthor(ctx context.Context, client *Client, hasCredential bool, flagValue, command string, stderr io.Writer) (int64, error) {
+	var asserted int64
+	if flagValue != "" {
+		id, err := strconv.ParseInt(flagValue, 10, 64)
+		if err != nil || id <= 0 {
+			return 0, fmt.Errorf("cli: %s: author must be a positive integer", command)
+		}
+		asserted = id
+	}
+	if !hasCredential {
+		if asserted == 0 {
+			return 0, fmt.Errorf("cli: %s: --author (or CONCH_AUTHOR) is required", command)
+		}
+		return asserted, nil
+	}
+	who, err := client.WhoAmI(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if asserted != 0 {
+		if asserted != who.ID {
+			return 0, fmt.Errorf("cli: %s: --author %d does not match your login (principal %d)", command, asserted, who.ID)
+		}
+		_, _ = fmt.Fprintln(stderr, "warning: --author is deprecated; identity comes from your login")
+	}
+	return who.ID, nil
+}
+
+func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := newFlagSet("login", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("cli: login: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return errors.New("cli: login takes no positional arguments; the token is read from stdin")
+	}
+	client, err := NewClient(*server, nil)
+	if err != nil {
+		return err
+	}
+	token, err := readToken(stdin, stderr)
+	if err != nil {
+		return err
+	}
+	who, err := client.WithToken(token).WhoAmI(ctx)
+	if errors.Is(err, ErrUnauthenticated) {
+		return errors.New("login failed: token rejected (or the server is not running with --auth required)")
+	}
+	if err != nil {
+		return err
+	}
+	if err := SaveToken(*server, token); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "logged in to %s as %s (%s)\n", client.Server(), who.Name, who.Role)
+	return err
+}
+
+// readToken reads one line from stdin. On a terminal it prompts on stderr.
+// Echo is not suppressed: golang.org/x/term is not a dependency of this module
+// and adding one needs sign-off, so the user is warned instead.
+func readToken(stdin io.Reader, stderr io.Writer) (string, error) {
+	if f, ok := stdin.(*os.File); ok {
+		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			_, _ = fmt.Fprintln(stderr, "warning: the token will be visible as you type; prefer 'conch login < tokenfile'")
+			_, _ = fmt.Fprint(stderr, "Token: ")
+		}
+	}
+	line, err := bufio.NewReader(io.LimitReader(stdin, 64<<10)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("cli: login: read token: %w", err)
+	}
+	token := strings.TrimSpace(line)
+	if token == "" {
+		return "", errors.New("cli: login: no token provided on stdin")
+	}
+	return token, nil
+}
+
+func runLogout(args []string, stderr io.Writer) error {
+	fs := newFlagSet("logout", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("cli: logout: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return errors.New("cli: logout takes no positional arguments")
+	}
+	return DeleteToken(*server)
+}
+
+func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("whoami", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("cli: whoami: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return errors.New("cli: whoami takes no positional arguments")
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	who, err := client.WhoAmI(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, who.Kind, who.Name, who.Role)
+	return err
 }

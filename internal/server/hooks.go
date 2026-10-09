@@ -79,6 +79,23 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// A hook posts as its principal, so it inherits that principal's channel
+	// membership (issue #90): once the principal is removed from the channel,
+	// or if it was never a member, the hook stops working and answers exactly
+	// like an unknown token. As with every membership check, this applies only
+	// when authentication is required.
+	if s.cfg.authRequired() {
+		member, err := s.store.IsChannelMember(ctx, hook.ChannelID, hook.PrincipalID)
+		if err != nil {
+			slog.ErrorContext(ctx, "hooks: check membership failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		if !member {
+			writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")
+			return
+		}
+	}
 	channel, err := s.store.ChannelByID(ctx, hook.ChannelID)
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: find channel failed", "error", err)
