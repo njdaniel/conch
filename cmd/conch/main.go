@@ -10,12 +10,14 @@ import (
 	"strings"
 
 	"github.com/njdaniel/conch/internal/cli"
+	"github.com/njdaniel/conch/internal/cli/termquiet"
 	"github.com/njdaniel/conch/internal/cli/tui"
 )
 
 var version = "v0.0.0-dev"
 
 func main() {
+	termquiet.Restore() // after every package init; see the package comment
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	var err error
