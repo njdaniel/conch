@@ -37,7 +37,7 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
 	case errors.Is(err, store.ErrLastOperator):
-		writeError(w, http.StatusConflict, "last_operator", "cannot disable the last enabled operator")
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "principals: disable failed", "principal", id, "error", err)
@@ -86,6 +86,9 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: revoke-all failed", "principal", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -94,3 +97,7 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 	s.hub.DropPrincipalAll(id)
 	writeJSON(w, http.StatusOK, schema.RevokeAllCredentialsResponseV1{Revoked: n})
 }
+
+// lastOperatorMessage explains a 409 last_operator: the action would leave no
+// enabled operator holding a live credential.
+const lastOperatorMessage = "this would leave no operator able to sign in; give another operator a credential first"

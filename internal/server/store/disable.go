@@ -8,13 +8,39 @@ import (
 	"time"
 )
 
-// ErrLastOperator is returned when disabling the only enabled operator.
-var ErrLastOperator = errors.New("store: cannot disable the last enabled operator")
+// ErrLastOperator is returned when an action would leave the instance with no
+// operator able to sign in: disabling, or revoking the credentials of, the
+// only enabled operator that still holds a live credential. Without this
+// guard the instance could only be recovered by restarting it with
+// authentication off or by editing the database.
+var ErrLastOperator = errors.New("store: this would leave no operator able to sign in")
 
-// revokePrincipalCredentialsTx revokes every live (unrevoked, unexpired)
-// credential of principalID, writing one credential_revoked event each with
-// the given reason, and returns how many it revoked. The caller must hold the
-// write lock (withImmediateTx) so the set it reads is the set it revokes.
+// liveOperatorCredentialsTx counts the live credentials held by enabled
+// operators, leaving out one principal and one credential (pass 0 to leave
+// nothing out). It is what the lock-out guards ask: "if this principal, or
+// this credential, went away, could an operator still sign in?"
+func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID int64, now time.Time) (int, error) {
+	var n int
+	err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
+		 WHERE p.role = 'operator' AND p.disabled_at IS NULL
+		   AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
+		   AND p.id <> ? AND c.id <> ?`,
+		now.UnixMilli(), exceptPrincipalID, exceptCredentialID,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count live operator credentials: %w", err)
+	}
+	return n, nil
+}
+
+// revokePrincipalCredentialsTx revokes every unrevoked credential of
+// principalID, writing one credential_revoked event each with the given
+// reason, and returns how many it revoked. Expired credentials are revoked
+// too: an expired-but-unrevoked row would resolve again if the clock were set
+// back, and "enable revives nothing" must hold regardless. The caller must
+// hold the write lock (withImmediateTx) so the set it reads is the set it
+// revokes.
 func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason string, now time.Time) (int, error) {
 	type live struct {
 		id    int64
@@ -22,8 +48,8 @@ func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, 
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, label FROM credentials
-		 WHERE principal_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) ORDER BY id`,
-		principalID, now.UnixMilli())
+		 WHERE principal_id = ? AND revoked_at IS NULL ORDER BY id`,
+		principalID)
 	if err != nil {
 		return 0, fmt.Errorf("store: list live credentials: %w", err)
 	}
@@ -97,18 +123,18 @@ func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID 
 		if disabled {
 			return nil
 		}
+		now := credentialNow().Truncate(time.Millisecond)
 		if role == RoleOperator {
-			var others int
-			if err := tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM principals WHERE role = 'operator' AND disabled_at IS NULL AND id <> ?", principalID,
-			).Scan(&others); err != nil {
-				return fmt.Errorf("store: disable principal: count operators: %w", err)
+			// Another enabled operator is not enough: it must also hold a live
+			// credential, or nobody could sign in to undo this.
+			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+			if err != nil {
+				return err
 			}
 			if others == 0 {
 				return ErrLastOperator
 			}
 		}
-		now := credentialNow().Truncate(time.Millisecond)
 		res, err := tx.ExecContext(ctx,
 			"UPDATE principals SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL", now.UnixMilli(), principalID)
 		if err != nil {
@@ -168,20 +194,35 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 	return changed, nil
 }
 
-// RevokeAllCredentials revokes every live credential of principalID in one
-// transaction, writing one credential_revoked event each (reason=revoke-all),
-// and returns how many it revoked. The principal stays enabled. Revoking when
-// none are live returns 0 and writes nothing. It returns ErrPrincipalNotFound
-// for an unknown id.
+// RevokeAllCredentials revokes every unrevoked credential of principalID in
+// one transaction and returns how many it revoked. The principal stays
+// enabled. It writes one credential_revoked event per credential
+// (reason=revoke-all) and always one credentials_revoked_all event recording
+// the operator's action and the count, even when the count is zero. It
+// returns ErrPrincipalNotFound for an unknown id, and ErrLastOperator, writing
+// nothing, when the target is an enabled operator and no other enabled
+// operator holds a live credential.
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
 	var n int
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		if _, _, err := principalState(ctx, tx, principalID); err != nil {
+		role, disabled, err := principalState(ctx, tx, principalID)
+		if err != nil {
 			return err
 		}
-		var err error
-		n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", credentialNow().Truncate(time.Millisecond))
-		return err
+		now := credentialNow().Truncate(time.Millisecond)
+		if role == RoleOperator && !disabled {
+			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+			if err != nil {
+				return err
+			}
+			if others == 0 {
+				return ErrLastOperator
+			}
+		}
+		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", now); err != nil {
+			return err
+		}
+		return appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now)
 	})
 	if err != nil {
 		return 0, err

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -419,5 +420,90 @@ func TestDisableNoTokenLeaks(t *testing.T) {
 				t.Errorf("token leaked into %q", text)
 			}
 		}
+	}
+}
+
+// A webhook hook posts as its principal, so disabling the principal must stop
+// its hooks too — in every auth mode — and they must answer exactly like an
+// unknown token. Enabling the principal brings them back.
+func TestDisabledPrincipalHooksStop(t *testing.T) {
+	for _, mode := range []AuthMode{AuthRequired, AuthOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			f := newAuthFixture(t, mode)
+			tok := ""
+			if mode == AuthRequired {
+				tok = f.rootTok
+			}
+			general, err := f.srv.store.ChannelByName(ctx, "general")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.srv.store.CreateHook(ctx, "bot-hook", general.ID, f.bot.ID); err != nil {
+				t.Fatal(err)
+			}
+			ingest := func() *httptest.ResponseRecorder {
+				return f.do(t, "POST", "/v1/hooks/bot-hook", "", `{"body":"from the hook"}`)
+			}
+			unknown := f.do(t, "POST", "/v1/hooks/no-such-token", "", `{"body":"x"}`)
+			if rec := ingest(); rec.Code != http.StatusCreated {
+				t.Fatalf("ingest before disable = %d %s", rec.Code, rec.Body)
+			}
+
+			if rec := f.do(t, "POST", f.disablePath(f.bot.ID), tok, ""); rec.Code != http.StatusNoContent {
+				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
+			}
+			if rec := ingest(); rec.Code != unknown.Code || rec.Body.String() != unknown.Body.String() {
+				t.Errorf("ingest for a disabled principal = %d %s, want the unknown-token response %d %s", rec.Code, rec.Body, unknown.Code, unknown.Body)
+			}
+			body := fmt.Sprintf(`{"channel":"general","principal":%d}`, f.bot.ID)
+			assertErrorBody(t, f.do(t, "POST", "/v1/hooks", tok, body), http.StatusConflict, "principal_disabled")
+
+			messages, err := f.srv.store.ListMessages(ctx, general.ID, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 {
+				t.Errorf("messages = %d, want only the one posted before the disable", len(messages))
+			}
+
+			if rec := f.do(t, "POST", f.enablePath(f.bot.ID), tok, ""); rec.Code != http.StatusNoContent {
+				t.Fatalf("enable = %d %s", rec.Code, rec.Body)
+			}
+			if rec := ingest(); rec.Code != http.StatusCreated {
+				t.Errorf("ingest after enable = %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// Revoking credentials must never leave the instance with no operator able to
+// sign in: the only recovery would be to restart with authentication off.
+func TestRevocationCannotLockOutOperators(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	list := decodeBody[schema.ListCredentialsResponseV1](t, f.do(t, "GET", fmt.Sprintf("/v1/principals/%d/credentials", f.root.ID), f.rootTok, ""))
+	if len(list.Credentials) != 1 {
+		t.Fatalf("operator credentials = %d, want 1", len(list.Credentials))
+	}
+	only := list.Credentials[0].ID
+
+	assertErrorBody(t, f.do(t, "DELETE", fmt.Sprintf("/v1/credentials/%d", only), f.rootTok, ""), http.StatusConflict, "last_operator")
+	assertErrorBody(t, f.do(t, "POST", f.revokeAllPath(f.root.ID), f.rootTok, ""), http.StatusConflict, "last_operator")
+	if rec := f.do(t, "GET", "/v1/whoami", f.rootTok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("the operator's token stopped working after a refused revocation: %d", rec.Code)
+	}
+
+	// With a second credential the first can be revoked; the operator can
+	// still sign in with the second.
+	_, second := f.newCred(t, f.root.ID)
+	if rec := f.do(t, "DELETE", fmt.Sprintf("/v1/credentials/%d", only), second, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke one of two operator credentials = %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, "GET", "/v1/whoami", second, ""); rec.Code != http.StatusOK {
+		t.Fatalf("second operator credential = %d", rec.Code)
+	}
+	// A member's credentials are not guarded.
+	if rec := f.do(t, "POST", f.revokeAllPath(f.alice.ID), second, ""); rec.Code != http.StatusOK {
+		t.Fatalf("revoke-all on a member = %d %s", rec.Code, rec.Body)
 	}
 }

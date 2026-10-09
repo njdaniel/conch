@@ -136,6 +136,9 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
 		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: revoke failed", "credential", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

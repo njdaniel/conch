@@ -307,38 +307,158 @@ func TestResolveCredentialDetailAndLive(t *testing.T) {
 func TestLastOperatorGuard(t *testing.T) {
 	ctx := context.Background()
 	f := newDisableFixture(t)
-	// Sole operator cannot be disabled.
-	if _, err := f.s.DisablePrincipal(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+	disable := func(id int64) (bool, error) { return f.s.DisablePrincipal(ctx, "system", id) }
+
+	// The sole operator cannot be disabled, and the refusal changes nothing.
+	if _, err := disable(f.op.ID); !errors.Is(err, ErrLastOperator) {
 		t.Fatalf("disable sole operator: %v", err)
 	}
 	if _, err := f.s.ResolveCredential(ctx, f.opTok); err != nil {
 		t.Errorf("failed disable changed state: %v", err)
 	}
-	// A member does not count as an operator; promote a second operator.
+
+	// A second operator who cannot sign in does not make it safe: the guard
+	// asks for another enabled operator holding a live credential.
 	if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, role, created_at) VALUES ('human', 'op2', 'operator', 1)`); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := f.s.DisablePrincipal(ctx, "system", f.op.ID); err != nil || !changed {
-		t.Fatalf("disable with two operators = %v, %v", changed, err)
+	op2, err := f.s.PrincipalByID(ctx, f.op.ID+countPrincipalsAfter(t, f.s, f.op.ID))
+	if err != nil || op2.Name != "op2" {
+		t.Fatalf("find op2: %+v, %v", op2, err)
 	}
-	// The disabled operator no longer counts: op2 is now the last.
-	var op2 int64
-	if err := f.s.db.QueryRow(`SELECT id FROM principals WHERE name = 'op2'`).Scan(&op2); err != nil {
+	if _, err := disable(f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("disable while the other operator has no credential: %v", err)
+	}
+	past := time.Now().Add(time.Hour)
+	expiring, _ := f.cred(t, op2, &past)
+	// An expired credential does not count either.
+	if _, err := f.s.db.Exec(`UPDATE credentials SET expires_at = 1 WHERE id = ?`, expiring); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.s.DisablePrincipal(ctx, "system", op2); !errors.Is(err, ErrLastOperator) {
+	if _, err := disable(f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("disable while the other operator's credential is expired: %v", err)
+	}
+
+	// With a live credential on op2, the first operator can be disabled.
+	f.cred(t, op2, nil)
+	if changed, err := disable(f.op.ID); err != nil || !changed {
+		t.Fatalf("disable with a second usable operator = %v, %v", changed, err)
+	}
+	// The disabled operator no longer counts: op2 is now the last.
+	if _, err := disable(op2.ID); !errors.Is(err, ErrLastOperator) {
 		t.Errorf("disable remaining operator: %v", err)
 	}
 	// Re-disabling the already-disabled operator is idempotent, not a guard hit.
-	if changed, err := f.s.DisablePrincipal(ctx, "system", f.op.ID); err != nil || changed {
+	if changed, err := disable(f.op.ID); err != nil || changed {
 		t.Errorf("repeat disable = %v, %v", changed, err)
 	}
-	// Enabling it again restores the headroom.
+	// Enabling it restores nothing by itself (its credentials stay revoked)...
 	if _, err := f.s.EnablePrincipal(ctx, "system", f.op.ID); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := f.s.DisablePrincipal(ctx, "system", op2); err != nil || !changed {
-		t.Errorf("disable op2 after re-enable = %v, %v", changed, err)
+	if _, err := disable(op2.ID); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("disable op2 while the re-enabled operator has no credential: %v", err)
+	}
+	// ...until it is issued a new credential.
+	f.cred(t, f.op, nil)
+	if changed, err := disable(op2.ID); err != nil || !changed {
+		t.Errorf("disable op2 once the first operator can sign in again = %v, %v", changed, err)
+	}
+}
+
+// countPrincipalsAfter returns how many principals have an id greater than id,
+// so a test can find the one it just inserted with raw SQL.
+func countPrincipalsAfter(t *testing.T, s *Store, id int64) int64 {
+	t.Helper()
+	var n int64
+	if err := s.db.QueryRow(`SELECT MAX(id) - ? FROM principals`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// Revoking credentials must not lock every operator out either.
+func TestLastOperatorCredentialGuard(t *testing.T) {
+	ctx := context.Background()
+	f := newDisableFixture(t)
+	opCred := credentialIDOf(t, f.s, f.opTok)
+
+	// The sole operator's only credential cannot be revoked, singly or in bulk.
+	if err := f.s.RevokeCredential(ctx, "system", opCred); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("revoke the last operator credential: %v", err)
+	}
+	if _, err := f.s.RevokeAllCredentials(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("revoke-all on the sole operator: %v", err)
+	}
+	if _, err := f.s.ResolveCredential(ctx, f.opTok); err != nil {
+		t.Fatalf("a refused revocation changed state: %v", err)
+	}
+	if n := count(f.actions(t), "credentials_revoked_all"); n != 0 {
+		t.Errorf("a refused revoke-all wrote %d credentials_revoked_all events", n)
+	}
+
+	// With a second credential, one of the two may go — but not both.
+	second, secondTok := f.cred(t, f.op, nil)
+	if err := f.s.RevokeCredential(ctx, "system", opCred); err != nil {
+		t.Fatalf("revoke one of two operator credentials: %v", err)
+	}
+	if err := f.s.RevokeCredential(ctx, "system", second); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("revoke the remaining operator credential: %v", err)
+	}
+	if _, err := f.s.RevokeAllCredentials(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Fatalf("revoke-all while it would lock everyone out: %v", err)
+	}
+	if _, err := f.s.ResolveCredential(ctx, secondTok); err != nil {
+		t.Fatalf("the remaining operator credential stopped working: %v", err)
+	}
+
+	// A member's credentials are never guarded.
+	if _, err := f.s.RevokeAllCredentials(ctx, "system", f.alice.ID); err != nil {
+		t.Fatalf("revoke-all on a member: %v", err)
+	}
+}
+
+// credentialIDOf looks a credential id up by its token.
+func credentialIDOf(t *testing.T, s *Store, token string) int64 {
+	t.Helper()
+	_, id, err := s.ResolveCredentialDetail(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// Disabling a principal revokes its expired credentials too, so that setting
+// the clock back cannot revive one after the principal is enabled again; and
+// revoke-all always records the operator's action.
+func TestDisableRevokesExpiredAndRevokeAllIsAudited(t *testing.T) {
+	ctx := context.Background()
+	f := newDisableFixture(t)
+	soon := time.Now().Add(time.Hour)
+	expired, _ := f.cred(t, f.alice, &soon)
+	if _, err := f.s.db.Exec(`UPDATE credentials SET expires_at = 1 WHERE id = ?`, expired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.DisablePrincipal(ctx, "system", f.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	var unrevoked int
+	if err := f.s.db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE principal_id = ? AND revoked_at IS NULL`, f.alice.ID).Scan(&unrevoked); err != nil {
+		t.Fatal(err)
+	}
+	if unrevoked != 0 {
+		t.Errorf("disable left %d unrevoked credentials (an expired one must be revoked too)", unrevoked)
+	}
+
+	if _, err := f.s.EnablePrincipal(ctx, "system", f.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := count(f.actions(t), "credentials_revoked_all")
+	if n, err := f.s.RevokeAllCredentials(ctx, "system", f.alice.ID); err != nil || n != 0 {
+		t.Fatalf("revoke-all with nothing to revoke = %d, %v", n, err)
+	}
+	if got := count(f.actions(t), "credentials_revoked_all") - before; got != 1 {
+		t.Errorf("revoke-all with nothing to revoke wrote %d credentials_revoked_all events, want 1", got)
 	}
 }
 
