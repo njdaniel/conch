@@ -2310,15 +2310,30 @@ func TestVoiceSweepPrunesRetiredRooms(t *testing.T) {
 		t.Error("DeleteRoom was called for a room LiveKit never listed")
 	}
 
-	// Once LiveKit lets it go, the next sweep prunes that one too. Live rooms
-	// are untouched throughout.
+	// LiveKit lets it go at last. The room had people in it, and LiveKit
+	// renewing their tokens, until a moment ago: its row is more than a day
+	// old but must not go at the first sweep that no longer finds the room.
+	// The day is counted from when LiveKit last had it. (Security review of
+	// #172: pruned at once, the row was gone while those tokens were valid.)
 	f.lk.setDeleteStatus(0)
 	f.clock.Advance(voiceSweepInterval)
-	f.sweep(t)
-	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t) // deletes the room in LiveKit; it was still listed
+	for i := 0; i < 3; i++ {
+		f.clock.Advance(voiceSweepInterval)
+		f.sweep(t)
+	}
+	if f.lk.has(listed.RoomName) {
+		t.Fatal("the room is still in LiveKit")
+	}
+	if got := retired(); !slices.Equal(got, []string{listed.RoomName}) {
+		t.Fatalf("retired rows just after LiveKit let the room go = %d, want its row kept for a day more", len(got))
+	}
+	// A day after LiveKit last listed it, the row goes. Live rooms are
+	// untouched throughout.
+	f.clock.Advance(voiceRetiredKeep)
 	f.sweep(t)
 	if got := retired(); len(got) != 0 {
-		t.Errorf("retired rows at the end = %d, want none", len(got))
+		t.Errorf("retired rows a day after LiveKit last listed the room = %d, want none", len(got))
 	}
 	live, err := f.srv.store.ListVoiceRooms(ctx)
 	if err != nil || len(live) != 2 {

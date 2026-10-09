@@ -56,8 +56,10 @@ const (
 const voiceRoomPrefix = "conch-"
 
 // VoiceRoom is a stored voice room. NetID is 0 for the channel-wide room.
-// RetiredAt is zero for a live room: a retired room is one the channel no
-// longer uses, kept so its name is never handed out again.
+// RetiredAt is zero for a live room. A retired room is one the channel no
+// longer uses; its row is kept so that the sweep can find the room in LiveKit
+// and delete it, until a day after LiveKit last listed it (RetiredAt is moved
+// forward each time a sweep still finds the room there).
 type VoiceRoom struct {
 	ID        int64
 	ChannelID int64
@@ -166,12 +168,31 @@ func (s *Store) ListRetiredVoiceRooms(ctx context.Context) ([]VoiceRoom, error) 
 		`SELECT `+voiceRoomColumns+` FROM voice_rooms r WHERE r.retired_at IS NOT NULL ORDER BY r.id ASC`)
 }
 
-// PruneRetiredVoiceRooms deletes the retired rooms that were retired before
-// cutoff, except those whose ids are in keep (the ones LiveKit still lists,
-// which the sweep is still deleting there), and returns how many it deleted.
-// A retired row exists so that the sweep can find a room LiveKit still has;
-// once LiveKit no longer lists it and the tokens for it have long expired
-// there is nothing left for the row to do. Room names are 128 random bits, so
+// SeenRetiredVoiceRooms records that LiveKit still listed these retired rooms
+// at the given time, by moving their retired_at forward to it. The time a
+// retired row is kept (PruneRetiredVoiceRooms) is therefore counted from when
+// LiveKit last had the room, not from the rotation: a room that could only be
+// deleted late (conchd stopped, LiveKit unreachable) had people in it and
+// LiveKit renewing their tokens until then. It never moves a time backward
+// and never touches a live row.
+func (s *Store) SeenRetiredVoiceRooms(ctx context.Context, ids []int64, at time.Time) error {
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE voice_rooms SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL AND retired_at < ?`,
+			at.UnixMilli(), id, at.UnixMilli()); err != nil {
+			return fmt.Errorf("store: mark retired voice room seen: %w", err)
+		}
+	}
+	return nil
+}
+
+// PruneRetiredVoiceRooms deletes the retired rooms whose retired_at (the
+// rotation, or the last time LiveKit still listed the room, whichever is
+// later) is before cutoff, except those whose ids are in keep (the ones
+// LiveKit lists now, which the sweep is deleting there), and returns how many
+// it deleted. A retired row exists so that the sweep can find a room LiveKit
+// still has; once LiveKit has not had it for long enough that no token for it
+// can be valid, there is nothing left for the row to do. Room names are 128 random bits, so
 // a pruned name being generated again is not a case. Live rows are never
 // touched, nor a row that still has a holder recorded against it.
 func (s *Store) PruneRetiredVoiceRooms(ctx context.Context, cutoff time.Time, keep []int64) (int64, error) {
@@ -427,9 +448,10 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 // live row under a fresh name and appends one voice_room_rotated event. It
 // reports rotated == false, having changed nothing, when roomID was already
 // retired, so concurrent callers rotate a room exactly once between them. The
-// retired name is never handed out again (room_name is unique over live and
-// retired rows). Deleting the room in LiveKit is the caller's job and is
-// retried by the sweep from the retired row.
+// retired name is never handed out again: names are 128 random bits, and
+// room_name is unique over live and retired rows while the retired row lasts.
+// Deleting the room in LiveKit is the caller's job and is retried by the sweep
+// from the retired row.
 func (s *Store) RotateVoiceRoom(ctx context.Context, roomID int64, reason string) (next VoiceRoom, rotated bool, err error) {
 	name, err := newVoiceRoomName()
 	if err != nil {

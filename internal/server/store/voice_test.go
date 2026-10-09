@@ -899,3 +899,53 @@ func TestPruneRetiredVoiceRooms(t *testing.T) {
 		t.Errorf("holder rows = %d, %v; want the one recorded, untouched", holders, err)
 	}
 }
+
+// SeenRetiredVoiceRooms moves a retired room's time forward to when LiveKit
+// was last seen to have it, never backward, and never touches a live room.
+func TestSeenRetiredVoiceRooms(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	insert := func(i int, retired any) int64 {
+		ch, err := s.CreateChannel(ctx, fmt.Sprintf("seen%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.db.ExecContext(ctx,
+			"INSERT INTO voice_rooms (channel_id, net_id, room_name, created_at, retired_at) VALUES (?, NULL, ?, 1, ?)",
+			ch.ID, fmt.Sprintf("conch-seen-%d", i), retired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	retiredAt := func(id int64) sql.NullInt64 {
+		var at sql.NullInt64
+		if err := s.db.QueryRowContext(ctx, "SELECT retired_at FROM voice_rooms WHERE id = ?", id).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	old, newer, live, other := insert(0, int64(1000)), insert(1, int64(9000)), insert(2, nil), insert(3, int64(1000))
+	if err := s.SeenRetiredVoiceRooms(ctx, []int64{old, newer, live}, time.UnixMilli(5000)); err != nil {
+		t.Fatal(err)
+	}
+	if got := retiredAt(old); got.Int64 != 5000 {
+		t.Errorf("a room seen later than its retirement: retired_at = %d, want 5000", got.Int64)
+	}
+	if got := retiredAt(newer); got.Int64 != 9000 {
+		t.Errorf("a room already stamped later: retired_at = %d, want it left at 9000", got.Int64)
+	}
+	if got := retiredAt(live); got.Valid {
+		t.Errorf("a live room was given retired_at = %d", got.Int64)
+	}
+	if got := retiredAt(other); got.Int64 != 1000 {
+		t.Errorf("a room not in the list: retired_at = %d, want 1000", got.Int64)
+	}
+	if err := s.SeenRetiredVoiceRooms(ctx, nil, time.UnixMilli(7000)); err != nil {
+		t.Errorf("with no rooms: %v", err)
+	}
+}
