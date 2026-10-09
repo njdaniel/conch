@@ -327,6 +327,14 @@ func TestPostMessageRequestV2Validate(t *testing.T) {
 			r.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 4, 7}}
 		}},
 
+		{name: "valid whisper to one id with the author omitted: only the server can tell whether it is the author", mutate: func(r *PostMessageRequestV2) {
+			r.AuthorID = 0
+			r.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3}}
+		}},
+
+		{name: "whisper to the named author alone", mutate: func(r *PostMessageRequestV2) {
+			r.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3}}
+		}, wantErr: "at least one principal other than the author"},
 		{name: "negative author", mutate: func(r *PostMessageRequestV2) { r.AuthorID = -1 }, wantErr: "author_id must not be negative, got -1"},
 		{name: "empty body", mutate: func(r *PostMessageRequestV2) { r.Body = "" }, wantErr: "body is required"},
 		{name: "payload bad name", mutate: func(r *PostMessageRequestV2) {

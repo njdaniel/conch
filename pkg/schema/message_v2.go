@@ -292,7 +292,8 @@ type PostMessageRequestV2 struct {
 // Validate reports whether the request is structurally well-formed. Its
 // payload rules mirror MessageV2's. A present audience must satisfy
 // Audience.Validate: a known kind, a positive net_id, or 1 to
-// MaxAudiencePrincipals positive, distinct principal_ids in any order.
+// MaxAudiencePrincipals positive, distinct principal_ids in any order. A
+// request that names its author must also list someone else.
 func (r PostMessageRequestV2) Validate() error {
 	if r.AuthorID < 0 {
 		return fmt.Errorf("schema: post message author_id must not be negative, got %d", r.AuthorID)
@@ -308,6 +309,13 @@ func (r PostMessageRequestV2) Validate() error {
 	if r.Audience != nil {
 		if err := r.Audience.Validate(); err != nil {
 			return err
+		}
+		// A whisper needs someone other than its author. When the request
+		// names its author this is checkable here; when it does not, the
+		// server finds out after binding the author, from MessageV2.Validate.
+		if r.AuthorID > 0 && r.Audience.Kind == AudienceKindPrincipals &&
+			len(r.Audience.PrincipalIDs) == 1 && r.Audience.PrincipalIDs[0] == r.AuthorID {
+			return errors.New("schema: audience principal_ids must include at least one principal other than the author")
 		}
 	}
 	return nil
