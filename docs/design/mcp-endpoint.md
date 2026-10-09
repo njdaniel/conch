@@ -117,7 +117,9 @@ else. There is no tool for managing nets: an agent learns a net's id from the
 
 The SDK validates arguments against the published input schema and rejects any
 it does not know, so a misspelt `audience` is an error, never a channel-wide
-post.
+post. The only spellings of "the whole channel" are leaving `audience` out and
+an explicit `"audience": null`, as on REST; either needs the channel-wide
+`post` permission.
 
 **Parity:** the posted message is durable, then broadcast to the WS hub and
 readable via the REST `GET` — the same `persist-then-broadcast` path

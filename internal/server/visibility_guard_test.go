@@ -71,11 +71,15 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 	// MCP scope's reader() (the authenticated agent). Each is pinned by its
 	// own test. Anything else that assembles a store.Reader could name any
 	// principal.
-	readerBuilders := map[string]string{"readerFor": "messages.go", "reader": "authz.go"}
+	// Keyed by the function as written: its receiver type, a dot, its name.
+	readerBuilders := map[string]string{"readerFor": "messages.go", "*agentScope.reader": "authz.go"}
 	for _, decl := range file.Decls {
 		within := ""
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			within = fn.Name.Name
+			if fn.Recv != nil && len(fn.Recv.List) == 1 {
+				within = types.ExprString(fn.Recv.List[0].Type) + "." + within
+			}
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)

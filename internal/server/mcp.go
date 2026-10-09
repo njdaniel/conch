@@ -240,26 +240,27 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 		}
 		schemaPayload = &schema.Payload{Schema: in.Payload.Schema, Data: json.RawMessage(dataBytes)}
 	}
+	// The same steps as the REST post (handlePostMessageV2), in the same
+	// order, so the two answer every input alike: the audience's shape as
+	// given, which says nothing about any channel or net; then the request as
+	// given; then the audience is normalized with the author, and the store
+	// judges the normalized form.
 	var audience *schema.Audience
 	if in.Audience != nil {
-		// The same rules as the REST post, in the same order: shape first,
-		// which says nothing about any channel or net.
 		audience = &schema.Audience{Kind: schema.AudienceKind(in.Audience.Kind), NetID: in.Audience.NetID, PrincipalIDs: in.Audience.PrincipalIDs}
 		if err := audience.Validate(); err != nil {
 			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_audience", Message: err.Error()}
 		}
-		normalized := audience.Normalize(authorID)
-		if normalized.Kind == schema.AudienceKindPrincipals && len(normalized.PrincipalIDs) < 2 {
+		if audience.Kind == schema.AudienceKindPrincipals && len(audience.Normalize(authorID).PrincipalIDs) < 2 {
 			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_audience", Message: "a whisper needs at least one recipient other than the author"}
 		}
-		audience = &normalized
 	}
 	req := schema.PostMessageRequestV2{AuthorID: authorID, Body: in.Body, Payload: schemaPayload, Audience: audience}
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
 	if audience != nil {
-		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, *audience)
+		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, audience.Normalize(authorID))
 	}
 	channel, serr := scope.channelByName(ctx, in.Channel, schema.ChannelPermissionPost)
 	if serr != nil {

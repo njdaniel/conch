@@ -196,6 +196,8 @@ func TestMCPAudienceAuthorizationMatrix(t *testing.T) {
 		{"whisper to an id that is no principal", "gwhisper", mcpWhisper(999999), "invalid_audience", ""},
 		{"whisper to itself only", "gboth", mcpWhisper(f.p("gboth").ID), "invalid_audience", ""},
 		{"whisper naming a recipient twice", "gboth", mcpWhisper(f.p("wes").ID, f.p("wes").ID), "invalid_audience", ""},
+		{"whisper at the size limit before the author is added", "gboth", mcpWhisper(manyIDs(schema.MaxAudiencePrincipals)...), "invalid_audience", ""},
+		{"whisper over the size limit", "gboth", mcpWhisper(manyIDs(schema.MaxAudiencePrincipals + 1)...), "invalid_audience", ""},
 
 		{"unknown audience kind", "gboth", map[string]any{"kind": "everyone"}, "invalid_audience", ""},
 		{"net audience with principal ids", "gnet", map[string]any{"kind": "net", "net_id": f.net1.ID, "principal_ids": []int64{f.p("wes").ID}}, "invalid_audience", ""},
@@ -281,6 +283,66 @@ func TestMCPAudienceAuthorizationMatrix(t *testing.T) {
 		if strings.Contains(e.Actor+e.Subject+e.Detail, "SECRET") {
 			t.Errorf("an audit event carries a message body: %+v", e)
 		}
+	}
+}
+
+// manyIDs returns n distinct principal ids that belong to nobody.
+func manyIDs(n int) []int64 {
+	ids := make([]int64, n)
+	for i := range ids {
+		ids[i] = int64(900000 + i)
+	}
+	return ids
+}
+
+// The MCP tool and the REST post refuse the same inputs with the same code.
+// Both end in the same functions, but each front end validates the request
+// first; this holds them to one answer for the audience shapes where the order
+// of those steps could matter.
+func TestMCPAndRESTRefuseAudiencesAlike(t *testing.T) {
+	f := newScopedFixture(t)
+	f.add(t, "gboth", store.PrincipalAgent, true)
+	f.manifest(t, "gboth", nil, schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper, schema.ChannelPermissionWhisperAgent)
+	self := f.p("gboth").ID
+	tests := []struct {
+		name     string
+		audience map[string]any
+	}{
+		{"unknown kind", map[string]any{"kind": "everyone"}},
+		{"net without an id", map[string]any{"kind": "net"}},
+		{"net with principal ids", map[string]any{"kind": "net", "net_id": f.net1.ID, "principal_ids": []int64{f.p("wes").ID}}},
+		{"net the agent is not on", mcpNet(f.net1.ID)},
+		{"net that does not exist", mcpNet(999999)},
+		{"whisper to nobody", map[string]any{"kind": "principals"}},
+		{"whisper to itself", mcpWhisper(self)},
+		{"whisper with a duplicate", mcpWhisper(f.p("wes").ID, f.p("wes").ID)},
+		{"whisper with a non-positive id", mcpWhisper(0)},
+		{"whisper to a non-member", mcpWhisper(f.p("nora").ID)},
+		{"whisper to an unknown id", mcpWhisper(999999)},
+		{"whisper one under the limit", mcpWhisper(manyIDs(schema.MaxAudiencePrincipals - 1)...)},
+		{"whisper at the limit, author not listed", mcpWhisper(manyIDs(schema.MaxAudiencePrincipals)...)},
+		{"whisper at the limit, author listed", mcpWhisper(append(manyIDs(schema.MaxAudiencePrincipals-1), self)...)},
+		{"whisper over the limit", mcpWhisper(manyIDs(schema.MaxAudiencePrincipals + 1)...)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := f.messageCount(t)
+			viaMCP, _ := f.mcpPost(t, "gboth", "x", tt.audience)
+			rest := f.postV2(t, "gboth", string(mustJSON(t, map[string]any{"body": "x", "audience": tt.audience})))
+			var restErr schema.Error
+			if err := json.Unmarshal([]byte(rest.body), &restErr); err != nil {
+				t.Fatalf("decode REST refusal %s: %v", rest.body, err)
+			}
+			if viaMCP.result() == "ok" || rest.status < 400 {
+				t.Fatalf("not refused: MCP %s, REST %d %s", viaMCP.result(), rest.status, rest.body)
+			}
+			if viaMCP.code != restErr.Code {
+				t.Errorf("MCP answers %q and REST %q (%s)", viaMCP.code, restErr.Code, rest.body)
+			}
+			if n := f.messageCount(t) - before; n != 0 {
+				t.Errorf("refused posts stored %d messages", n)
+			}
+		})
 	}
 }
 
@@ -702,6 +764,19 @@ func TestMCPToolDefinitionsCarryAudience(t *testing.T) {
 	}
 	if n := f.messageCount(t) - before; n != 0 {
 		t.Errorf("malformed audience arguments stored %d messages, want 0", n)
+	}
+
+	// An explicit null is the one spelling of "no audience" besides leaving
+	// the argument out, as on REST: a channel-wide post, which needs the
+	// channel-wide grant.
+	out := f.mcpCall(t, f.p("aria").token, "post_message", map[string]any{"channel": "ops", "body": "open", "audience": nil})
+	if out.result() != "ok" || strings.Contains(out.body, `"audience"`) {
+		t.Errorf("audience null = %s (%s), want a channel-wide post", out.result(), out.body)
+	}
+	f.manifest(t, "aria", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPostNet)
+	out = f.mcpCall(t, f.p("aria").token, "post_message", map[string]any{"channel": "ops", "body": "open", "audience": nil})
+	if out.result() != "forbidden" {
+		t.Errorf("audience null with only post_net = %s, want forbidden: it is a channel-wide post", out.result())
 	}
 }
 
