@@ -1039,3 +1039,89 @@ func TestAgentWhisperDoesNotRevealOutsiders(t *testing.T) {
 		t.Errorf("%d messages were stored by refused whispers", n)
 	}
 }
+
+// Issue #149. An agent's scoped post refused by the net's roster leaves an
+// access_denied row, over REST as over MCP (both end in storeScopedPost): it
+// only monitors the net, or it is not on it. A human's refusal leaves none,
+// like every other human refusal. Not-on, archived and unknown nets give the
+// same row, with no net id in it, as they give the same answer.
+func TestNetLevelRefusalsAreAuditedForAgents(t *testing.T) {
+	f := newScopedFixture(t)
+	ctx := context.Background()
+	grants := []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPostNet}
+	f.add(t, "watcher", store.PrincipalAgent, true) // monitors net1
+	f.manifest(t, "watcher", nil, grants...)
+	f.seat(t, "net1", "watcher", schema.NetRoleMonitor)
+	f.add(t, "stranger", store.PrincipalAgent, true) // on no net
+	f.manifest(t, "stranger", nil, grants...)
+	gone := f.net(t, "gone")
+	f.seat(t, "gone", "stranger", schema.NetRoleMember)
+	if _, err := f.srv.store.ArchiveNet(ctx, "system", f.ops.ID, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	denials := func() []store.AuditEvent {
+		var out []store.AuditEvent
+		for _, e := range f.audit(t) {
+			if e.Action == "access_denied" {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	const route = "POST /v2/channels/{channel}/messages"
+	tests := []struct {
+		name       string
+		who        string
+		netID      int64
+		wantStatus int
+		wantCode   string
+		wantReason string // "" for no audit row
+	}{
+		{"agent monitor", "watcher", f.net1.ID, http.StatusForbidden, "forbidden", denyNetMonitorOnly},
+		{"agent not on the net", "stranger", f.net1.ID, http.StatusNotFound, "net_not_found", denyNetNotOn},
+		{"agent, archived net it was on", "stranger", gone.ID, http.StatusNotFound, "net_not_found", denyNetNotOn},
+		{"agent, unknown net", "stranger", 424242, http.StatusNotFound, "net_not_found", denyNetNotOn},
+		{"human monitor", "mona", f.net1.ID, http.StatusForbidden, "forbidden", ""},
+		{"human not on the net", "olga", f.net1.ID, http.StatusNotFound, "net_not_found", ""},
+		{"human, unknown net", "olga", 424242, http.StatusNotFound, "net_not_found", ""},
+	}
+	var notOn []store.AuditEvent
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before, msgs := len(denials()), f.messageCount(t)
+			got := f.postV2(t, tt.who, `{"body":"x",`+netAudience(tt.netID)+`}`)
+			if got.status != tt.wantStatus || !strings.Contains(got.body, `"`+tt.wantCode+`"`) {
+				t.Fatalf("answer = %d %s, want %d %s", got.status, got.body, tt.wantStatus, tt.wantCode)
+			}
+			if n := f.messageCount(t) - msgs; n != 0 {
+				t.Errorf("a refused post stored %d messages", n)
+			}
+			rows := denials()[before:]
+			if tt.wantReason == "" {
+				if len(rows) != 0 {
+					t.Errorf("a human's refusal wrote %d access_denied rows: %+v", len(rows), rows)
+				}
+				return
+			}
+			if len(rows) != 1 {
+				t.Fatalf("access_denied rows = %d, want 1: %+v", len(rows), rows)
+			}
+			e := rows[0]
+			wantDetail := fmt.Sprintf("capability=%s target=channel:%d reason=%s", schema.CapabilityMessagesPost, f.ops.ID, tt.wantReason)
+			if e.Actor != fmt.Sprintf("principal:%d", f.p(tt.who).ID) || e.Subject != route || e.Detail != wantDetail {
+				t.Errorf("audit row = %+v, want actor principal:%d subject %q detail %q", e, f.p(tt.who).ID, route, wantDetail)
+			}
+			if tt.wantReason == denyNetNotOn {
+				notOn = append(notOn, e)
+			}
+		})
+	}
+	if len(notOn) != 3 {
+		t.Fatalf("net_not_on rows = %d, want 3", len(notOn))
+	}
+	for _, e := range notOn[1:] {
+		if e.Actor != notOn[0].Actor || e.Subject != notOn[0].Subject || e.Detail != notOn[0].Detail {
+			t.Errorf("not-on, archived and unknown nets left different audit rows:\n %+v\n %+v", notOn[0], e)
+		}
+	}
+}

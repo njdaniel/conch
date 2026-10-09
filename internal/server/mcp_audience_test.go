@@ -169,11 +169,11 @@ func TestMCPAudienceAuthorizationMatrix(t *testing.T) {
 		reason   string // the access_denied reason, "" when none is written
 	}{
 		{"post_net on its own net", "gnet", net1, ok, ""},
-		{"a monitor may not transmit", "gmonitor", net1, "forbidden", ""},
-		{"a net the agent is not on", "goffnet", net1, "net_not_found", ""},
-		{"a net that does not exist", "goffnet", mcpNet(999999), "net_not_found", ""},
-		{"an archived net the agent was on", "goffnet", mcpNet(archived.ID), "net_not_found", ""},
-		{"post_net does not reach a net the agent is not on", "gnet", net2, "net_not_found", ""},
+		{"a monitor may not transmit", "gmonitor", net1, "forbidden", denyNetMonitorOnly},
+		{"a net the agent is not on", "goffnet", net1, "net_not_found", denyNetNotOn},
+		{"a net that does not exist", "goffnet", mcpNet(999999), "net_not_found", denyNetNotOn},
+		{"an archived net the agent was on", "goffnet", mcpNet(archived.ID), "net_not_found", denyNetNotOn},
+		{"post_net does not reach a net the agent is not on", "gnet", net2, "net_not_found", denyNetNotOn},
 		{"whisper does not allow a net post", "gwhisper", net1, "forbidden", denyAudienceGrant},
 		{"channel-wide post does not allow a net post", "gpost", net1, "forbidden", denyAudienceGrant},
 		{"the capability is needed for a net post", "gnocap", net1, "forbidden", denyCapability},
@@ -275,6 +275,21 @@ func TestMCPAudienceAuthorizationMatrix(t *testing.T) {
 	archivedNet, _ := f.mcpPost(t, "goffnet", "x", mcpNet(archived.ID))
 	same("a net the agent is not on and an unknown net", notOn, unknownNet)
 	same("an archived net and an unknown net", archivedNet, unknownNet)
+	// The audit rows for those three are the same too, but for id and time:
+	// the log no more tells an unknown net from one the agent is not on than
+	// the answer does, and carries no net id.
+	rows := f.denials(t)
+	last3 := rows[len(rows)-3:]
+	for _, e := range last3 {
+		if e.Actor != last3[0].Actor || e.Subject != last3[0].Subject || e.Detail != last3[0].Detail || !strings.HasSuffix(e.Detail, "reason="+denyNetNotOn) {
+			t.Errorf("net_not_on audit rows differ: %+v vs %+v", e, last3[0])
+		}
+		// No net id at all: an agent walking net ids must not be able to
+		// write numbers of its choosing into the log.
+		if strings.Contains(e.Detail, "net=") || strings.Contains(e.Detail, "999999") || strings.Contains(e.Detail, fmt.Sprintf(":%d ", archived.ID)) {
+			t.Errorf("an audit row names a net: %+v", e)
+		}
+	}
 	notMember, _ := f.mcpPost(t, "goutside", "x", net1)
 	unknownChannel := f.mcpCall(t, f.p("goutside").token, "post_message", map[string]any{"channel": "nosuch", "body": "x", "audience": net1})
 	same("a channel the agent is not in and an unknown channel", notMember, unknownChannel)
