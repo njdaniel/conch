@@ -54,24 +54,30 @@ One LiveKit room per audience. In V3 the only audience is the whole channel.
 
 - The caller must be a human member of the channel. A non-member gets 404 `channel_not_found`, as everywhere else. An agent gets 403 `forbidden`, audited.
 - Voice needs a verified caller. With `--auth off` the endpoint answers 400 `voice_requires_auth`.
-- The response carries the client address, the caller's LiveKit identity, and one grant per room the caller may join:
+- The response is a `VoiceSessionResponseV1` (`pkg/schema/voice.go`): the client address, the caller's LiveKit identity, and one `VoiceRoomGrant` per room the caller may join. `rooms` always has at least one grant. A grant's `audience` is the ADR-005 type; absent means the whole channel, as on messages. This is the golden fixture `pkg/schema/testdata/voice-session-response-v1.json`:
 
-```jsonc
+```json
 {
   "livekit_url": "wss://voice.example",
   "identity": "p7",
   "rooms": [
-    // audience absent = the whole channel, as on messages (ADR-005)
-    {"room": "conch-…", "token": "<jwt>", "can_publish": true, "expires_at": "2026-10-09T12:00:45.000Z"}
+    {
+      "room": "conch-k3m7q2x9v4t1b8n6w5z0r2c4e6",
+      "token": "fixture-token-channel-7-not-a-real-credential",
+      "can_publish": true,
+      "expires_at": "2026-10-09T12:00:45.000Z"
+    }
   ]
 }
 ```
+
+- `room` and `token` are opaque strings: the schema requires them to be present and never inspects them. `can_publish` is always written out, so a reader never has to know that an omitted value means false.
 
 - **Identity** is `p<principal id>`. One principal holds one connection per room; LiveKit replaces an earlier connection with the same identity. That keeps presence unambiguous. A second device takes over from the first.
 - **Token grant:** join that one room; subscribe; publish a microphone track only if `can_publish`; no data publishing; no room administration.
 - **The token expires 15 seconds after it is issued, and can start a connection for about 75.** LiveKit checks a token when a client connects, not afterwards, and it allows 60 seconds of leeway on both the expiry and the not-before time (§10, finding 6). So the expiry `conchd` writes is deliberately short: the leeway cannot be turned off from `conchd`, and it is added on top. Clients ask for a session immediately before connecting and again before any reconnect.
 - **Clock skew.** The same leeway means the two clocks may differ by up to about a minute in either direction before a fresh token is refused, so the not-before time is not backdated. `conchd` and LiveKit normally share a host; on separate hosts their clocks must be synchronised, and the deployment docs say so.
-- With nets (V5), a member of a net gets a publishing grant for its room and a monitor gets a listen-only grant. The shape above does not change; each grant gains the `audience` that ADR-005 defines.
+- With nets (V5), a member of a net gets a publishing grant for its room and a monitor gets a listen-only grant. The shape above does not change; each net grant carries the `audience` that ADR-005 defines (`{"kind": "net", "net_id": 3}`), with `can_publish: false` for a monitor. The fixture `voice-session-response-v1-net.json` shows a channel grant beside a listen-only net grant.
 
 Each issued session writes one `voice_session_issued` audit event. The token is never logged or audited.
 
@@ -130,7 +136,27 @@ The actor is the principal. No audio and no token is ever recorded.
 
 ## 8. Wire shapes
 
-Canonical types land in `pkg/schema` through the `schema-change` skill: the session response and room grant, the presence document (`conch.voice_presence.v1`), and the error codes `voice_not_configured`, `voice_unavailable`, `voice_requires_auth`. They reuse `Audience` from the V2 schema (#114). All are new types; nothing published changes.
+Canonical types live in `pkg/schema/voice.go` (#124), added through the `schema-change` skill. All are new types; nothing published changed.
+
+| Type | Wire name | Where it travels |
+|---|---|---|
+| `VoiceSessionResponseV1` | REST body, versioned by suffix | `POST /v1/channels/{channel}/voice/session` (§4) |
+| `VoiceRoomGrant` | element of `rooms` above | one per room the caller may join |
+| `VoicePresenceV1` | `conch.voice_presence.v1` (`schema.VoicePresenceSchemaV1`) | `GET /v1/channels/{channel}/voice` and the presence socket (§6) |
+| `VoicePresenceRoom` | element of `rooms` in presence | one per room the caller may see: optional `audience`, `participants` |
+| `VoiceParticipant` | element of `participants` | `principal_id`, `can_publish`, `transmitting`, `joined_at` |
+
+Both `audience` fields reuse `Audience` from the V2 schema (#114); absent means the whole channel. The error codes `voice_not_configured`, `voice_unavailable` and `voice_requires_auth` are the constants `ErrorCodeVoiceNotConfigured`, `ErrorCodeVoiceUnavailable` and `ErrorCodeVoiceRequiresAuth`, carried in the existing `Error` body.
+
+What the schema enforces, so that handlers and clients do not restate it:
+
+- Session: non-empty `livekit_url` and `identity`; at least one grant; each grant has a non-empty `room` and `token`, an `expires_at`, and a well-formed `audience` if present.
+- Presence: the schema name; a positive `channel_id`; `available` only when `configured`; `rooms` empty unless `available` (participants last seen are not reported while LiveKit is unreachable); within a room, positive `principal_id`s with no principal listed twice, `joined_at` set, and no participant `transmitting` without `can_publish`.
+- One grant per audience in a session and one room per audience in presence, so a reader can always tell which is the channel's room. An unknown audience kind fails the whole document, as it does for a message; a new kind is a new version of these shapes.
+- Presence carries no token and no room name. `voice_test.go` asserts this on the marshalled JSON (no key `token` or `room` at any depth) and on the Go types by reflection (no field `Token`, `Room` or `RoomName` reachable from `VoicePresenceV1`), so a future field cannot smuggle one in.
+- Empty `rooms` and `participants` encode as `[]`, never `null`.
+
+Golden fixtures in `pkg/schema/testdata/`: `voice-session-response-v1.json`, `voice-session-response-v1-net.json`, `voice-presence-v1.json`, `voice-presence-v1-unavailable.json`, `voice-presence-v1-not-configured.json`.
 
 API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapshot. Joining is `conch-voice`'s job in V4, using the same session endpoint.
 

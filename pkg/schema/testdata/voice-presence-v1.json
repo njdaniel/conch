@@ -1,0 +1,24 @@
+{
+  "schema": "conch.voice_presence.v1",
+  "channel_id": 7,
+  "configured": true,
+  "available": true,
+  "rooms": [
+    {
+      "participants": [
+        {
+          "principal_id": 3,
+          "can_publish": true,
+          "transmitting": true,
+          "joined_at": "2026-10-09T11:58:02.250Z"
+        },
+        {
+          "principal_id": 7,
+          "can_publish": true,
+          "transmitting": false,
+          "joined_at": "2026-10-09T12:00:31.000Z"
+        }
+      ]
+    }
+  ]
+}

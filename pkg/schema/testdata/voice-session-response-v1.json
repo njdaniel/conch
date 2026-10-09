@@ -1,0 +1,12 @@
+{
+  "livekit_url": "wss://voice.example",
+  "identity": "p7",
+  "rooms": [
+    {
+      "room": "conch-k3m7q2x9v4t1b8n6w5z0r2c4e6",
+      "token": "fixture-token-channel-7-not-a-real-credential",
+      "can_publish": true,
+      "expires_at": "2026-10-09T12:00:45.000Z"
+    }
+  ]
+}

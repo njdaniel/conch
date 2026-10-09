@@ -1,0 +1,22 @@
+{
+  "livekit_url": "wss://voice.example",
+  "identity": "p9",
+  "rooms": [
+    {
+      "room": "conch-k3m7q2x9v4t1b8n6w5z0r2c4e6",
+      "token": "fixture-token-channel-7-not-a-real-credential",
+      "can_publish": true,
+      "expires_at": "2026-10-09T12:00:45.000Z"
+    },
+    {
+      "room": "conch-a1s2d3f4g5h6j7k8l9q0w1e2r3",
+      "token": "fixture-token-net-3-not-a-real-credential",
+      "can_publish": false,
+      "expires_at": "2026-10-09T12:00:45.000Z",
+      "audience": {
+        "kind": "net",
+        "net_id": 3
+      }
+    }
+  ]
+}
