@@ -129,6 +129,15 @@ API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapsho
 2. **Is the one-second rejoin window in §5 acceptable**, or should a membership change rotate the room?
 3. **One connection per principal per room** means a second device displaces the first. Acceptable for V3?
 
-## 10. Out of scope
+## 10. Assumptions not yet verified
+
+The spike verified token minting, `ListParticipants`, `RemoveParticipant` and `UpdateParticipant` against LiveKit 1.13.7. This note also relies on four behaviours it did **not** exercise. The first implementation issue (#125) must check each against a real server and record the result; if one is false, this note is corrected before work continues.
+
+1. `ListParticipants` shows whether a published microphone track is muted, and reflects a change within one poll interval.
+2. `CreateRoom` on a name that already exists succeeds without disturbing the room.
+3. With automatic room creation off, a valid token for a room that does not exist cannot be used to join.
+4. A second connection with the same identity replaces the first.
+
+## 11. Out of scope
 
 Recording; video and screen share (P9); agents as voice participants; whisper mapping; anything about audio quality, echo cancellation or push-to-talk keys, which belong to the client (V4 and V5).
