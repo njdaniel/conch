@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	_ "modernc.org/sqlite"
 )
@@ -264,35 +265,73 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // exist, and tightens it and its -wal/-shm siblings to 0600 if they are
 // accessible to group or others. A tightening is reported in exactly one log
 // line; a file that is already private logs nothing.
+//
+// path is a filesystem path, not a SQLite URI. Each file is inspected and
+// changed through one open handle, so what is checked is what is changed: a
+// name swapped for something else between the two steps cannot redirect the
+// chmod. Only a regular file is touched.
 func securePermissions(path string) error {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- operator-configured data directory
-	if err != nil {
-		return fmt.Errorf("store: open %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("store: open %s: %w", path, err)
+	// File modes do not protect a database in a directory every user can
+	// write to: anyone could replace the files outright. That is the
+	// operator's arrangement to fix, so it is reported rather than refused.
+	// Only world-writable is flagged. Group-writable is the normal result of
+	// a umask of 002 where each user has a private group, and warning about
+	// it on every start would teach operators to ignore the line.
+	if info, err := os.Stat(filepath.Dir(path)); err == nil && info.Mode().Perm()&0o002 != 0 {
+		slog.Warn("store: the data directory is writable by other users, who could replace the database; restrict it to its owner",
+			"dir", filepath.Dir(path), "mode", fmt.Sprintf("%04o", info.Mode().Perm()))
 	}
 	var tightened []string
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		info, err := os.Stat(p)
-		if os.IsNotExist(err) {
-			continue
+	for i, p := range []string{path, path + "-wal", path + "-shm"} {
+		flags := os.O_RDWR
+		if i == 0 {
+			flags |= os.O_CREATE // only the database itself is created here
 		}
+		was, changed, err := restrictToOwner(p, flags)
 		if err != nil {
-			return fmt.Errorf("store: stat %s: %w", p, err)
+			return err
 		}
-		if info.Mode().Perm()&0o077 == 0 {
-			continue
+		if changed {
+			tightened = append(tightened, fmt.Sprintf("%s (was %04o)", p, was))
 		}
-		if err := os.Chmod(p, 0o600); err != nil {
-			return fmt.Errorf("store: restrict permissions of %s: %w", p, err)
-		}
-		tightened = append(tightened, fmt.Sprintf("%s (was %04o)", p, info.Mode().Perm()))
 	}
 	if len(tightened) > 0 {
 		slog.Warn("store: database files were readable by other users; restricted to owner only (0600)", "files", tightened)
 	}
 	return nil
+}
+
+// restrictToOwner opens p, and if it is a regular file with any group or
+// other permission bit set, makes it 0600. It reports the previous mode and
+// whether it changed anything. A missing file is not an error.
+func restrictToOwner(p string, flags int) (was os.FileMode, changed bool, err error) {
+	f, err := os.OpenFile(p, flags, 0o600) // #nosec G304 -- operator-configured data directory
+	if os.IsNotExist(err) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store: open %s: %w", p, err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("store: close %s: %w", p, cerr)
+		}
+	}()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, false, fmt.Errorf("store: stat %s: %w", p, err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, false, fmt.Errorf("store: %s is not a regular file", p)
+	}
+	was = info.Mode().Perm()
+	if was&0o077 == 0 {
+		return was, false, nil
+	}
+	if err := f.Chmod(0o600); err != nil {
+		return was, false, fmt.Errorf("store: restrict permissions of %s: %w", p, err)
+	}
+	return was, true, nil
 }
 
 // Close closes the underlying database.
@@ -325,14 +364,27 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("store: apply migration %d: %w", i+1, err)
 		}
 	}
-	// Migration 10 handled plaintext tokens. Their old page images can still
-	// sit in WAL frames, so fold the WAL into the database (where
-	// secure_delete already zeroed them) and truncate it. Nothing else holds
-	// the database open during startup, so the checkpoint is not blocked.
-	if version < 10 {
-		if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-			return fmt.Errorf("store: checkpoint after hook migration: %w", err)
-		}
+	return s.truncateWAL(ctx)
+}
+
+// truncateWAL folds the write-ahead log into the database and truncates it.
+// It runs on every start, not only after a migration. Migration 10 replaced
+// plaintext hook tokens with hashes, and their old page images can sit in WAL
+// frames long after the table is gone: secure_delete zeroes pages in the
+// database file, not frames already written to the log. Tying the checkpoint
+// to "just migrated" would skip it for good if the process died between the
+// migration's commit and the checkpoint, so it is unconditional and cheap.
+//
+// The pragma reports a blocked checkpoint in its result row, not as an error.
+// Another process holding the database open is the only cause at startup; it
+// is logged rather than fatal, since the next start tries again.
+func (s *Store) truncateWAL(ctx context.Context) error {
+	var busy, logFrames, checkpointed int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("store: checkpoint at startup: %w", err)
+	}
+	if busy != 0 {
+		slog.Warn("store: could not truncate the write-ahead log at startup because another process has the database open; it will be retried on the next start")
 	}
 	return nil
 }

@@ -39,6 +39,10 @@ func TestCreateHookRequestValidate(t *testing.T) {
 		{"too long", strings.Repeat("a", MaxHookLabelLength+1), true},
 		{"multibyte counted in characters", strings.Repeat("é", MaxHookLabelLength), false},
 		{"invalid utf-8", "bad\xff", true},
+		{"newline", "ci\nbuilds", true},
+		{"escape sequence", "ci\x1b[31m", true},
+		{"tab", "ci\tbuilds", true},
+		{"punctuation and spaces are fine", "CI: nightly builds (eu-west)", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

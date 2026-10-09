@@ -337,6 +337,9 @@ func TestHookMigrationFromSchema9(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open (migrate): %v", err)
 			}
+			// While the database is still open: Close would checkpoint and
+			// delete the WAL itself, hiding a missing checkpoint in Open.
+			assertNoTokenBytes(t, dir, tokens)
 			for i, tok := range tokens {
 				hook, err := s.HookByToken(ctx, tok)
 				if err != nil {
@@ -383,14 +386,101 @@ func TestHookMigrationFromSchema9(t *testing.T) {
 			if _, err := s.CreateHook(ctx, "post-migration", 1, 2); err != nil {
 				t.Errorf("create after migration: %v", err)
 			}
-			if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-				t.Fatal(err)
-			}
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
 			}
 			assertNoTokenBytes(t, dir, tokens)
 		})
+	}
+}
+
+// The start-up checkpoint does not depend on a migration having just run. A
+// process that died after migration 10 committed but before the checkpoint
+// leaves a database already at the current version with the plaintext still
+// in its WAL; the next Open must clear it all the same.
+func TestOpenTruncatesTheWALOnEveryStart(t *testing.T) {
+	ctx := context.Background()
+	const marker = "leftover-wal-frame-marker-0123456789"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "conch.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateChannel(ctx, marker); err != nil {
+		t.Fatal(err)
+	}
+	// Copy the files as a crashed process would leave them: WAL not folded in.
+	crashed := t.TempDir()
+	for _, suffix := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + suffix) // #nosec G304 -- temp dir
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(crashed, "conch.db"+suffix), data, 0o600); err != nil { // #nosec G703 -- temp dir
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wal := filepath.Join(crashed, "conch.db-wal")
+	if data, err := os.ReadFile(wal); err != nil || !bytes.Contains(data, []byte(marker)) { // #nosec G304 -- temp dir
+		t.Fatalf("test setup: expected the marker in the leftover WAL (err %v)", err)
+	}
+
+	reopened, err := Open(ctx, filepath.Join(crashed, "conch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if info, err := os.Stat(wal); err != nil || info.Size() != 0 {
+		t.Errorf("WAL after Open: size %v (err %v), want it truncated to 0", info, err)
+	}
+	// Nothing was lost: the channel written before the crash is there.
+	if _, err := reopened.ChannelByName(ctx, marker); err != nil {
+		t.Errorf("data from the WAL was not recovered: %v", err)
+	}
+}
+
+// A checkpoint blocked by another process reports "busy" in its result row,
+// not as an error. That must be noticed and logged, and must not stop startup.
+func TestTruncateWALReportsABlockedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "conch.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.CreateChannel(ctx, "general"); err != nil {
+		t.Fatal(err)
+	}
+	// A second process holding a read transaction pins the WAL.
+	other, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(50)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+	reader, err := other.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	var n int
+	if err := reader.QueryRowContext(ctx, "SELECT count(*) FROM channels").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateChannel(ctx, "written-while-pinned"); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := newLogCapture(t)
+	if err := s.truncateWAL(ctx); err != nil {
+		t.Fatalf("a blocked checkpoint must not be an error: %v", err)
+	}
+	if !strings.Contains(logs.String(), "could not truncate the write-ahead log") {
+		t.Errorf("a blocked checkpoint was not logged: %q", logs.String())
 	}
 }
 
@@ -418,6 +508,61 @@ func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// The permission change goes through an open handle on a regular file. A
+// directory or other non-file where the database should be is refused, and a
+// data directory other users can write to is reported, since they could
+// replace the files whatever their modes.
+func TestDatabasePathHazards(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a directory where the WAL should be is refused", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "conch.db")
+		if err := os.Mkdir(path+"-wal", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if s, err := Open(ctx, path); err == nil {
+			_ = s.Close()
+			t.Fatal("Open succeeded with a directory in place of the WAL")
+		}
+	})
+	t.Run("a symlinked database tightens the file it points to", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "real.db")
+		if err := os.WriteFile(target, nil, 0o644); err != nil { // #nosec G306 -- the loose mode is the point
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, 0o644); err != nil { // #nosec G302 -- as above
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "conch.db")
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		s, err := Open(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = s.Close() }()
+		if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("target mode = %v (err %v), want 0600", info.Mode().Perm(), err)
+		}
+	})
+	t.Run("a data directory writable by others is reported once", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil { // #nosec G302 -- the loose mode is the point
+			t.Fatal(err)
+		}
+		logs := newLogCapture(t)
+		s, err := Open(ctx, filepath.Join(dir, "conch.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = s.Close() }()
+		if n := strings.Count(logs.String(), "data directory is writable by other users"); n != 1 {
+			t.Errorf("warnings = %d, want 1: %q", n, logs.String())
+		}
+	})
 }
 
 func TestDatabaseFileModes(t *testing.T) {
