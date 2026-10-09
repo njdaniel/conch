@@ -351,7 +351,10 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 	// the subject is empty and nothing is written.
 	agentSubject := ""
 	if caller.Kind == store.PrincipalAgent {
-		agentSubject = r.Pattern
+		// Never empty for an agent: empty means "not an agent" below.
+		if agentSubject = r.Pattern; agentSubject == "" {
+			agentSubject = "<unmatched>"
+		}
 	}
 	message, recipients, serr := s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: channel.ID, AuthorID: req.AuthorID, Body: req.Body, Payload: req.Payload, Audience: audience,

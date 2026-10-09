@@ -1059,6 +1059,22 @@ func TestNetLevelRefusalsAreAuditedForAgents(t *testing.T) {
 	if _, err := f.srv.store.ArchiveNet(ctx, "system", f.ops.ID, "gone"); err != nil {
 		t.Fatal(err)
 	}
+	// A live net of another channel, with the agent seated on it there: from
+	// ops it is one more net the agent is "not on".
+	other, err := f.srv.store.CreateChannel(ctx, "elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.AddChannelMember(ctx, "system", other.ID, f.p("stranger").ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := f.srv.store.CreateNet(ctx, "system", other.ID, "foreign", f.root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.PutNetMember(ctx, "system", other.ID, "foreign", f.p("stranger").ID, schema.NetRoleMember, 0); err != nil {
+		t.Fatal(err)
+	}
 	denials := func() []store.AuditEvent {
 		var out []store.AuditEvent
 		for _, e := range f.audit(t) {
@@ -1081,6 +1097,7 @@ func TestNetLevelRefusalsAreAuditedForAgents(t *testing.T) {
 		{"agent not on the net", "stranger", f.net1.ID, http.StatusNotFound, "net_not_found", denyNetNotOn},
 		{"agent, archived net it was on", "stranger", gone.ID, http.StatusNotFound, "net_not_found", denyNetNotOn},
 		{"agent, unknown net", "stranger", 424242, http.StatusNotFound, "net_not_found", denyNetNotOn},
+		{"agent, a net of another channel it is on there", "stranger", foreign.ID, http.StatusNotFound, "net_not_found", denyNetNotOn},
 		{"human monitor", "mona", f.net1.ID, http.StatusForbidden, "forbidden", ""},
 		{"human not on the net", "olga", f.net1.ID, http.StatusNotFound, "net_not_found", ""},
 		{"human, unknown net", "olga", 424242, http.StatusNotFound, "net_not_found", ""},
@@ -1116,12 +1133,51 @@ func TestNetLevelRefusalsAreAuditedForAgents(t *testing.T) {
 			}
 		})
 	}
-	if len(notOn) != 3 {
-		t.Fatalf("net_not_on rows = %d, want 3", len(notOn))
+	if len(notOn) != 4 {
+		t.Fatalf("net_not_on rows = %d, want 4", len(notOn))
 	}
 	for _, e := range notOn[1:] {
 		if e.Actor != notOn[0].Actor || e.Subject != notOn[0].Subject || e.Detail != notOn[0].Detail {
-			t.Errorf("not-on, archived and unknown nets left different audit rows:\n %+v\n %+v", notOn[0], e)
+			t.Errorf("not-on, archived, unknown and other-channel nets left different audit rows:\n %+v\n %+v", notOn[0], e)
+		}
+	}
+}
+
+// A scoped post by an agent that is refused before the net is looked at still
+// leaves exactly one access_denied row: the roster reasons of issue #149 are
+// never added on top of a membership or manifest refusal.
+func TestNetPostRefusedEarlierWritesOneRow(t *testing.T) {
+	f := newScopedFixture(t)
+	f.add(t, "nogrant", store.PrincipalAgent, true) // in the channel, no post_net
+	f.manifest(t, "nogrant", nil, schema.ChannelPermissionRead)
+	f.seat(t, "net1", "nogrant", schema.NetRoleMonitor)
+	count := func(reason string) (total, withReason int) {
+		for _, e := range f.audit(t) {
+			if e.Action == "access_denied" {
+				total++
+				if strings.HasSuffix(e.Detail, "reason="+reason) {
+					withReason++
+				}
+			}
+		}
+		return total, withReason
+	}
+	tests := []struct {
+		who, reason string
+		status      int
+	}{
+		{"nogrant", denyAudienceGrant, http.StatusForbidden}, // also a monitor: the manifest answers first
+		{"nomad", denyNotMember, http.StatusNotFound},        // not in the channel at all
+	}
+	for _, tt := range tests {
+		before, _ := count(tt.reason)
+		got := f.postV2(t, tt.who, `{"body":"x",`+netAudience(f.net1.ID)+`}`)
+		if got.status != tt.status {
+			t.Fatalf("%s: status = %d %s, want %d", tt.who, got.status, got.body, tt.status)
+		}
+		after, withReason := count(tt.reason)
+		if after-before != 1 || withReason < 1 {
+			t.Errorf("%s: %d access_denied rows written, want exactly one, with reason %s", tt.who, after-before, tt.reason)
 		}
 	}
 }
