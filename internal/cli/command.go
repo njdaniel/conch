@@ -345,9 +345,20 @@ var (
 // be swallowed and the prompt would hang. On cancel the saved state is put back
 // here and the blocked read is abandoned; the process is about to exit, so the
 // goroutine does not outlive anything that matters.
+//
+// The abandoned goroutine can still write the terminal state once: turning
+// echo off is ReadPassword's first act. If the cancel arrived before that
+// happened, restoring at once would be undone a moment later and the user's
+// shell would be left without echo. So the cancel branch waits until the
+// goroutine has reached ReadPassword, allows it a moment to apply the change,
+// and only then restores. A context that is already cancelled never starts
+// the read at all.
 func readSecretNoEcho(ctx context.Context, fd int) ([]byte, error) {
 	state, err := term.GetState(fd)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	type result struct {
@@ -355,7 +366,9 @@ func readSecretNoEcho(ctx context.Context, fd int) ([]byte, error) {
 		err    error
 	}
 	done := make(chan result, 1)
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		secret, err := term.ReadPassword(fd)
 		done <- result{secret, err}
 	}()
@@ -363,10 +376,20 @@ func readSecretNoEcho(ctx context.Context, fd int) ([]byte, error) {
 	case r := <-done:
 		return r.secret, r.err
 	case <-ctx.Done():
+		select {
+		case <-started:
+		case <-time.After(echoSettle * 10):
+		}
+		time.Sleep(echoSettle)
 		_ = term.Restore(fd, state)
 		return nil, ctx.Err()
 	}
 }
+
+// echoSettle is how long the cancel branch of readSecretNoEcho lets the reader
+// goroutine apply its echo-off before restoring the terminal over it. The
+// change is a single ioctl made immediately after the goroutine starts.
+const echoSettle = 20 * time.Millisecond
 
 // readToken reads one line from stdin. On a terminal it prompts on stderr and
 // reads without echo; it never falls back to reading with echo on, because the
