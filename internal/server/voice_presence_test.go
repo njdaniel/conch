@@ -2173,3 +2173,74 @@ func TestVoicePollerPassInFlightDuringARotationReportsNothing(t *testing.T) {
 		t.Errorf("voice events = %v, want %v: nothing from the pass that was in flight", events, want)
 	}
 }
+
+// A retired room that could not be deleted is not left for half a minute:
+// until it is gone, the person who lost their place is still connected to it
+// and nobody is shown in presence. The sweep is brought forward, and keeps
+// coming soon for as long as the delete fails. (Security review of #166, S1.)
+func TestVoiceFailedDeleteBringsTheSweepForward(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	ann, ann2 := f.identity("ann"), f.identity("ann2")
+	old := f.inUse(t, f.ops)
+	f.holder(t, "ann", f.ops)
+	f.holder(t, "ann2", f.ops)
+	f.sweep(t)
+	f.lk.setRoom(old, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: ann2, joinedMs: 2_000})
+	f.pass(t)
+	if d := f.srv.voice.nextDelay(); d > voicePollInterval {
+		t.Fatalf("next delay before = %v", d)
+	}
+
+	f.lk.setDeleteStatus(http.StatusInternalServerError)
+	if rec := f.do(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove = %d %s", rec.Code, rec.Body)
+	}
+	if !f.lk.in(old, ann) {
+		t.Fatal("the fake deleted the room although it answered 500")
+	}
+	f.srv.voice.mu.Lock()
+	due := f.srv.voice.nextSweep.Sub(f.clock.Now())
+	f.srv.voice.mu.Unlock()
+	if due > voiceSweepRetry {
+		t.Fatalf("next sweep in %v after a failed delete, want within %v", due, voiceSweepRetry)
+	}
+
+	// Still failing: the sweep tries, fails, and is due soon again.
+	deletes := f.lk.callsFor("DeleteRoom", old)
+	f.clock.Advance(voiceSweepRetry)
+	f.srv.voice.tick(ctx)
+	if got := f.lk.callsFor("DeleteRoom", old); got != deletes+1 {
+		t.Fatalf("DeleteRoom calls after the retry interval = %d, want %d", got, deletes+1)
+	}
+	f.srv.voice.mu.Lock()
+	due = f.srv.voice.nextSweep.Sub(f.clock.Now())
+	f.srv.voice.mu.Unlock()
+	if due > voiceSweepRetry {
+		t.Fatalf("next sweep in %v after a second failed delete, want within %v", due, voiceSweepRetry)
+	}
+
+	// LiveKit answers: the room goes one retry interval later.
+	f.lk.setDeleteStatus(0)
+	f.clock.Advance(voiceSweepRetry)
+	f.srv.voice.tick(ctx)
+	if f.lk.has(old) {
+		t.Error("the retired room is still in LiveKit one retry interval after it could be deleted")
+	}
+}
+
+// A sweep's read of the holders failing is logged: while it fails, a
+// credential expiring rotates nothing. (Security review of #166, S4.)
+func TestVoiceSweepLogsAFailedHolderCheck(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	f.srv.voice.invalid = func(context.Context, time.Time) ([]store.VoiceViolation, error) {
+		return nil, errors.New("store unavailable")
+	}
+	f.sweep(t)
+	if !strings.Contains(f.logs.buf.String(), "could not check the holders") {
+		t.Errorf("no log line for the failed check:\n%s", f.logs.buf.String())
+	}
+	if d := f.srv.voice.nextDelay(); d > voiceSweepRetry {
+		t.Errorf("next delay = %v, want at most %v", d, voiceSweepRetry)
+	}
+}

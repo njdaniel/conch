@@ -291,8 +291,15 @@ END`,
 	// records, durably, every credential a session was issued under for a room:
 	// the set of people who may hold a token LiveKit will renew. Its rows go
 	// when the room is retired.
+	//
+	// Rooms that exist before this migration have no holder rows, although
+	// tokens for them may be out and LiveKit may be renewing them, so nobody
+	// losing their place could ever rotate them. They are all retired here:
+	// the first sweep deletes any that LiveKit still has, and the next session
+	// for a channel creates its room afresh, with holders recorded.
 	{
 		`ALTER TABLE voice_rooms ADD COLUMN retired_at INTEGER`,
+		`UPDATE voice_rooms SET retired_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000`,
 		`DROP INDEX voice_rooms_channel_wide`,
 		`DROP INDEX voice_rooms_by_net`,
 		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL AND retired_at IS NULL`,

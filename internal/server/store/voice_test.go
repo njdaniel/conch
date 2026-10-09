@@ -728,8 +728,12 @@ func TestRotateVoiceRoomIsAtomic(t *testing.T) {
 	}
 }
 
-// A database at version 13 with rooms in it keeps them live, and the indexes
-// are the live-row ones afterwards.
+// A database at version 13 with rooms in it has them all retired by the
+// migration: tokens for them may be out, renewed by LiveKit, and nothing
+// records who holds them, so no loss of entitlement could ever rotate them.
+// Retired, the sweep deletes any LiveKit still has, and the channel's next
+// session gets a new room with its holders recorded. The indexes are the
+// live-row ones afterwards.
 func TestVoiceRoomsMigrationFromSchema13(t *testing.T) {
 	const pre = 13
 	ctx := context.Background()
@@ -767,19 +771,23 @@ func TestVoiceRoomsMigrationFromSchema13(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version < 14 {
 		t.Errorf("user_version = %d (%v), want %d (at least 14)", version, err, len(migrations))
 	}
-	live, err := s.ListVoiceRooms(ctx)
-	if err != nil || len(live) != 2 || live[0].RoomName != "conch-old1" || live[1].RoomName != "conch-old2" {
-		t.Fatalf("live rooms after migration = %+v, %v", live, err)
+	if live, err := s.ListVoiceRooms(ctx); err != nil || len(live) != 0 {
+		t.Fatalf("live rooms after migration = %+v, %v; want none", live, err)
 	}
-	for _, r := range live {
-		if !r.RetiredAt.IsZero() {
-			t.Errorf("room %d was retired by the migration", r.ID)
+	retired, err := s.ListRetiredVoiceRooms(ctx)
+	if err != nil || len(retired) != 2 || retired[0].RoomName != "conch-old1" || retired[1].RoomName != "conch-old2" {
+		t.Fatalf("retired rooms after migration = %+v, %v; want both old rooms", retired, err)
+	}
+	for _, r := range retired {
+		if r.RetiredAt.IsZero() || time.Since(r.RetiredAt) > time.Minute || time.Until(r.RetiredAt) > time.Minute {
+			t.Errorf("room %d retired at %v, want now", r.ID, r.RetiredAt)
 		}
 	}
 	got, err := s.ChannelVoiceRoom(ctx, 1)
-	if err != nil || got.RoomName != "conch-old1" {
-		t.Errorf("ChannelVoiceRoom = %+v, %v; want the existing room", got, err)
+	if err != nil || got.RoomName == "conch-old1" || got.RoomName == "" {
+		t.Fatalf("ChannelVoiceRoom = %+v, %v; want a new room, not the retired one", got, err)
 	}
+	live := []VoiceRoom{got}
 	// The indexes now cover live rows only: a second live row is refused, a
 	// retired one is fine, and a used name still cannot be reused.
 	insert := func(name string, retired any) error {

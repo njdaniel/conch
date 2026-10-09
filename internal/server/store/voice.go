@@ -313,13 +313,15 @@ type VoiceViolation struct {
 	Reason string
 }
 
-// InvalidVoiceRooms returns every live channel-wide room with a holder that
-// is not a live credential of a current, enabled, human member of the room's
-// channel, in one statement for the whole table. "Live credential" is the
+// InvalidVoiceRooms returns every live room with a holder that is not a live
+// credential of a current, enabled, human member of the room's channel, in
+// one statement for the whole table. "Live credential" is the
 // definition CredentialLive uses (not revoked, not expired at now, principal
 // not disabled) and now is passed in so the caller's clock decides expiry. A
-// room with no holders, and every retired room, is never returned. Net rooms
-// (V5) are not checked here: their entitlement is net membership.
+// room with no holders, and every retired room, is never returned. A net's
+// room (V5) is held to the same conditions, which a seat on a net also needs;
+// V5 adds net membership to them. Leaving net rooms out until then would let
+// their holders go unchecked the day a session is first issued for one.
 func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceViolation, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+voiceRoomColumns+`, MIN(CASE
@@ -334,7 +336,7 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 		 JOIN voice_room_holders h ON h.room_id = r.id
 		 LEFT JOIN credentials c ON c.id = h.credential_id
 		 LEFT JOIN principals p ON p.id = h.principal_id
-		 WHERE r.retired_at IS NULL AND r.net_id IS NULL
+		 WHERE r.retired_at IS NULL
 		 GROUP BY r.id
 		 HAVING why IS NOT NULL
 		 ORDER BY r.id ASC`, now.UnixMilli())

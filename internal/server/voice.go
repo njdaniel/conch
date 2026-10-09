@@ -303,63 +303,122 @@ func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.C
 // starts over against the channel's new room instead: the holder is recorded
 // against a live room (the store refuses a retired one), and liveness is
 // checked again after the slow LiveKit call and before the token exists.
+//
+// A request that asked LiveKit to create a room and then issues no token for
+// it must not leave a retired room behind: a rotation that landed between the
+// holder being recorded and CreateRoom deleted the room before this request
+// created it again, and a stale token would work there until the next sweep.
+// So every such exit deletes the room if it is retired (voiceDropIfRetired).
 func (s *Server) voiceGrant(ctx context.Context, p store.Principal, ch store.Channel, credID int64, identity string, a voiceAudience) (schema.VoiceRoomGrant, error) {
 	for range voiceRoomAttempts {
-		room, err := a.room(ctx)
+		grant, again, err := s.voiceGrantOnce(ctx, p, ch, credID, identity, a)
 		if err != nil {
-			return schema.VoiceRoomGrant{}, fmt.Errorf("voice: room for channel %d: %w", ch.ID, err)
-		}
-		// Recorded before anything else is done for the room, and so before
-		// a token exists: whoever may hold one is always in the store. Not
-		// cancellable, like the room row: a caller who hangs up now must not
-		// leave a half-issued session.
-		err = s.voice.recordHolder(context.WithoutCancel(ctx), room.ID, p.ID, credID)
-		if errors.Is(err, store.ErrVoiceRoomRetired) {
-			continue
-		}
-		if err != nil {
-			return schema.VoiceRoomGrant{}, fmt.Errorf("voice: record holder for channel %d: %w", ch.ID, err)
-		}
-		if err := s.lk.CreateRoom(ctx, room.RoomName); err != nil {
 			return schema.VoiceRoomGrant{}, err
 		}
-		// The poller must know the room is in use before any token for it
-		// exists (design note §6): a session issued in the last two minutes.
-		s.voice.noteSession(room)
-		entitled, err := s.voiceStillEntitled(ctx, p, ch)
-		if err != nil {
-			return schema.VoiceRoomGrant{}, fmt.Errorf("voice: re-check caller: %w", err)
+		if !again {
+			return grant, nil
 		}
-		if !entitled {
-			return schema.VoiceRoomGrant{}, errVoiceNoLongerEntitled
-		}
-		live, err := s.store.VoiceRoomLive(ctx, room.ID)
-		if err != nil {
-			return schema.VoiceRoomGrant{}, fmt.Errorf("voice: re-check room: %w", err)
-		}
-		if !live {
-			s.voice.forgetRoom(context.WithoutCancel(ctx), room.RoomName)
-			continue
-		}
-		// The reported expiry is taken before signing and cut to whole
-		// seconds, as the token's is, so it is never later than the token's.
-		issued := time.Now()
-		token, err := s.lk.JoinToken(livekit.JoinParams{
-			Identity:   identity,
-			Room:       room.RoomName,
-			CanPublish: a.canPublish,
-			Lifetime:   voiceTokenLifetime,
-		})
-		if err != nil {
-			return schema.VoiceRoomGrant{}, fmt.Errorf("voice: sign token: %w", err)
-		}
-		return schema.VoiceRoomGrant{
-			Room:       room.RoomName,
-			Token:      token,
-			CanPublish: a.canPublish,
-			ExpiresAt:  schema.NewTimestamp(issued.Add(voiceTokenLifetime).Truncate(time.Second)),
-			Audience:   a.audience,
-		}, nil
 	}
 	return schema.VoiceRoomGrant{}, errVoiceRoomChanging
+}
+
+// voiceGrantOnce is one attempt at voiceGrant. again reports that the room
+// was rotated under it and the caller should start over.
+func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store.Channel, credID int64, identity string, a voiceAudience) (grant schema.VoiceRoomGrant, again bool, err error) {
+	// A caller who has lost their place since the handler checked is turned
+	// away before a holder is recorded for them. Recorded first, the row
+	// would outlive the refused request and rotate the room at the next
+	// sweep, disconnecting everyone for a session that was never issued.
+	// (The check after CreateRoom is the one that keeps a token from them.)
+	entitled, err := s.voiceStillEntitled(ctx, p, ch)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: check caller: %w", err)
+	}
+	if !entitled {
+		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
+	}
+	room, err := a.room(ctx)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: room for channel %d: %w", ch.ID, err)
+	}
+	// Recorded before anything else is done for the room, and so before
+	// a token exists: whoever may hold one is always in the store. Not
+	// cancellable, like the room row: a caller who hangs up now must not
+	// leave a half-issued session.
+	err = s.voice.recordHolder(context.WithoutCancel(ctx), room.ID, p.ID, credID)
+	if errors.Is(err, store.ErrVoiceRoomRetired) {
+		return schema.VoiceRoomGrant{}, true, nil
+	}
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: record holder for channel %d: %w", ch.ID, err)
+	}
+	issued := false
+	defer func() {
+		if !issued {
+			s.voiceDropIfRetired(ctx, room)
+		}
+	}()
+	if err := s.lk.CreateRoom(ctx, room.RoomName); err != nil {
+		return schema.VoiceRoomGrant{}, false, err
+	}
+	// The poller must know the room is in use before any token for it
+	// exists (design note §6): a session issued in the last two minutes.
+	s.voice.noteSession(room)
+	entitled, err = s.voiceStillEntitled(ctx, p, ch)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: re-check caller: %w", err)
+	}
+	if !entitled {
+		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
+	}
+	live, err := s.store.VoiceRoomLive(ctx, room.ID)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: re-check room: %w", err)
+	}
+	if !live {
+		return schema.VoiceRoomGrant{}, true, nil
+	}
+	// The reported expiry is taken before signing and cut to whole
+	// seconds, as the token's is, so it is never later than the token's.
+	at := time.Now()
+	token, err := s.lk.JoinToken(livekit.JoinParams{
+		Identity:   identity,
+		Room:       room.RoomName,
+		CanPublish: a.canPublish,
+		Lifetime:   voiceTokenLifetime,
+	})
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: sign token: %w", err)
+	}
+	issued = true
+	return schema.VoiceRoomGrant{
+		Room:       room.RoomName,
+		Token:      token,
+		CanPublish: a.canPublish,
+		ExpiresAt:  schema.NewTimestamp(at.Add(voiceTokenLifetime).Truncate(time.Second)),
+		Audience:   a.audience,
+	}, false, nil
+}
+
+// voiceDropIfRetired is called when a request asked LiveKit to create room
+// and is not issuing a token for it. If the room has been retired, the poller
+// forgets it and LiveKit is told to delete it, because this request may have
+// created it again after the rotation deleted it. A rotation that commits
+// after this check deletes the room itself, after our CreateRoom. It runs on
+// a bounded context the caller cannot cancel; what it cannot do is left to
+// the sweep, which is brought forward.
+func (s *Server) voiceDropIfRetired(ctx context.Context, room store.VoiceRoom) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+	defer cancel()
+	live, err := s.store.VoiceRoomLive(ctx, room.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired; the sweep checks", "channel", room.ChannelID, "error", err)
+		s.voice.sweepSoon()
+		return
+	}
+	if live {
+		return
+	}
+	s.voice.forgetRoom(ctx, room.RoomName)
+	s.voice.deleteRooms(ctx, []store.VoiceRoom{room})
 }

@@ -397,6 +397,11 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 		return false
 	}
 	_, invErr := p.rotateInvalid(ctx)
+	if invErr != nil && ctx.Err() == nil {
+		// Until this read works again, a credential expiring and any change
+		// that did not go through a hook rotate nothing.
+		slog.ErrorContext(ctx, "voice: sweep could not check the holders of every room; trying again soon", "error", invErr)
+	}
 	now := p.now()
 	p.mu.Lock()
 	held := now.Before(p.retryAt)
@@ -1180,7 +1185,8 @@ func (p *voicePoller) rotateInvalid(ctx context.Context) ([]voiceRotation, error
 }
 
 // sweepSoon brings the next sweep forward to voiceSweepRetry from now and
-// wakes the loop, after a store failure that left the invariant unchecked.
+// wakes the loop, after a store failure that left the invariant unchecked or
+// a retired room that could not be deleted.
 func (p *voicePoller) sweepSoon() {
 	at := p.now().Add(voiceSweepRetry)
 	p.mu.Lock()
@@ -1230,8 +1236,10 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 // deleteRooms deletes retired rooms in LiveKit, which disconnects everyone in
 // them and makes every token for them, LiveKit's own refresh tokens included,
 // a token for a room that does not exist. A failure is logged and left to the
-// sweep, which deletes any retired room LiveKit still lists. Rooms are named
-// in logs by channel id.
+// sweep, which deletes any retired room LiveKit still lists and is brought
+// forward for it: until the room is gone the people in it, the one who lost
+// their place included, are connected and shown in no presence, and removing
+// them by name would not keep them out. Rooms are named in logs by channel id.
 func (p *voicePoller) deleteRooms(ctx context.Context, rooms []store.VoiceRoom) {
 	if p.s.lk == nil || len(rooms) == 0 {
 		return
@@ -1245,9 +1253,8 @@ func (p *voicePoller) deleteRooms(ctx context.Context, rooms []store.VoiceRoom) 
 			defer wg.Done()
 			defer func() { <-sem }()
 			if err := p.s.lk.DeleteRoom(ctx, room.RoomName); err != nil {
-				if ctx.Err() == nil {
-					slog.WarnContext(ctx, "voice: deleting a retired room failed; the sweep retries", "channel", room.ChannelID, "error", err)
-				}
+				slog.WarnContext(ctx, "voice: deleting a retired room failed; the sweep retries", "channel", room.ChannelID, "error", err)
+				p.sweepSoon()
 			}
 		}()
 	}
