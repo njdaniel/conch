@@ -118,7 +118,14 @@ const maxTitleBytes = 250
 // stay apart and nothing can start a second header line. Non-ASCII text is
 // sent as it is: ntfy reads UTF-8 in headers. The body of the notification
 // carries the title unchanged.
+//
+// ntfy also decodes RFC 2047 encoded-words ("=?UTF-8?Q?...?=") in header
+// values, after HTTP parsing. A title written that way is plain ASCII here and
+// would turn into whatever it encodes on ntfy's side, control characters
+// included. The "=?" that opens an encoded-word is split so the title is shown
+// as it was typed.
 func headerValue(s string) string {
+	s = strings.ReplaceAll(s, "=?", "= ?")
 	var b strings.Builder
 	space := false
 	for _, r := range s {

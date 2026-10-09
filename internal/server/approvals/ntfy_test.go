@@ -3,6 +3,7 @@ package approvals
 import (
 	"context"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -138,6 +139,14 @@ func TestNtfyTitleHeaderSurvivesAnyTitle(t *testing.T) {
 		{"header injection", "x\r\nX-Evil: 1\r\nPriority: max", "x X-Evil: 1 Priority: max"},
 		{"non-ASCII is kept", "Déployer — 発射 🚀", "Déployer — 発射 🚀"},
 		{"C1 control", "Ship\u0085it", "Ship it"},
+		// A title arrives as JSON, so it is valid UTF-8 by the time it is
+		// stored; if bytes that are not ever got here, each becomes U+FFFD
+		// and the notification is still delivered.
+		{"invalid UTF-8", "Ship\xff\xc3it", "Ship\ufffd\ufffdit"},
+		{"line and paragraph separators", "Ship\u2028it\u2029now", "Ship it now"},
+		// ntfy would decode this encoded-word into "Ship\r\nX-Evil: 1" plus
+		// an escape sequence; split, it is shown as typed.
+		{"RFC 2047 encoded-word", "=?UTF-8?Q?Ship=0D=0AX-Evil:_1=1B[2J?=", "= ?UTF-8?Q?Ship=0D=0AX-Evil:_1=1B[2J?="},
 		{"very long", long, ""},
 	}
 	resolution := schema.ApprovalResolutionV1{ApprovalID: 1, Outcome: schema.OutcomeApproved, OptionID: "approve", ResolvedAt: schema.NewTimestamp(time.Now())}
@@ -174,6 +183,10 @@ func TestNtfyTitleHeaderSurvivesAnyTitle(t *testing.T) {
 					}
 				} else if rest != tt.want {
 					t.Errorf("delivery %d: title part = %q, want %q", i, rest, tt.want)
+				}
+				// What ntfy will make of the value after its own decoding.
+				if decoded, err := new(mime.WordDecoder).DecodeHeader(g.title); err != nil || decoded != g.title {
+					t.Errorf("delivery %d: ntfy would decode the Title into %q (err %v)", i, decoded, err)
 				}
 				for _, r := range g.title {
 					if unicode.IsControl(r) {
