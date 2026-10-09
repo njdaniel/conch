@@ -1,0 +1,20 @@
+{
+  "id": 3,
+  "channel_id": 7,
+  "name": "alpha",
+  "members": [
+    {
+      "principal_id": 3,
+      "role": "member"
+    },
+    {
+      "principal_id": 4,
+      "role": "member"
+    },
+    {
+      "principal_id": 9,
+      "role": "monitor"
+    }
+  ],
+  "created_at": "2026-10-08T11:00:00.000Z"
+}

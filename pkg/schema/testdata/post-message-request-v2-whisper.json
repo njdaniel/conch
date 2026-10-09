@@ -1,0 +1,10 @@
+{
+  "body": "a word to the two of you",
+  "audience": {
+    "kind": "principals",
+    "principal_ids": [
+      7,
+      4
+    ]
+  }
+}
