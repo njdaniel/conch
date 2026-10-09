@@ -59,7 +59,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		expiresAt = &t
 	}
 
-	cred, token, err := s.store.CreateCredential(ctx, principalID, req.Label, expiresAt)
+	cred, token, err := s.store.CreateCredential(ctx, auditActor(ctx), principalID, req.Label, expiresAt)
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
@@ -100,7 +100,7 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	cred, token, err := s.store.RotateCredential(ctx, id)
+	cred, token, err := s.store.RotateCredential(ctx, auditActor(ctx), id)
 	switch {
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
@@ -125,7 +125,7 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	err := s.store.RevokeCredential(ctx, id)
+	err := s.store.RevokeCredential(ctx, auditActor(ctx), id)
 	switch {
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")

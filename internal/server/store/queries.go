@@ -34,11 +34,21 @@ const (
 	PrincipalAgent PrincipalKind = "agent"
 )
 
+// Role is a principal's administrative role (issue #89). Operators administer
+// the instance; members do not. It is not a wire field of PrincipalV0.
+type Role string
+
+const (
+	RoleOperator Role = "operator"
+	RoleMember   Role = "member"
+)
+
 // Principal is a human or agent identity.
 type Principal struct {
 	ID        int64
 	Kind      PrincipalKind
 	Name      string
+	Role      Role
 	CreatedAt time.Time
 }
 
@@ -94,7 +104,7 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	if err != nil {
 		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
 	}
-	return Principal{ID: id, Kind: kind, Name: name, CreatedAt: now}, nil
+	return Principal{ID: id, Kind: kind, Name: name, Role: RoleMember, CreatedAt: now}, nil
 }
 
 // CreateChannel creates a named channel. Names are unique.
@@ -183,11 +193,11 @@ func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {
 // such principal exists.
 func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) {
 	var p Principal
-	var kind string
+	var kind, role string
 	var createdAt int64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, kind, name, created_at FROM principals WHERE id = ?", id,
-	).Scan(&p.ID, &kind, &p.Name, &createdAt)
+		"SELECT id, kind, name, role, created_at FROM principals WHERE id = ?", id,
+	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
 	}
@@ -195,6 +205,7 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, err)
 	}
 	p.Kind = PrincipalKind(kind)
+	p.Role = Role(role)
 	p.CreatedAt = time.UnixMilli(createdAt)
 	return p, nil
 }

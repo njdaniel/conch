@@ -157,6 +157,12 @@ END`,
 		`CREATE UNIQUE INDEX credentials_by_token_hash ON credentials (token_hash)`,
 		`CREATE INDEX credentials_by_principal ON credentials (principal_id)`,
 	},
+	// 7: Principal roles (issue #89). Every existing principal becomes a
+	// member; nobody is silently promoted. Operators are created only by
+	// Store.BootstrapOperator.
+	{
+		`ALTER TABLE principals ADD COLUMN role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('operator','member'))`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
