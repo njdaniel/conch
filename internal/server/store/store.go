@@ -182,6 +182,11 @@ END`,
 	SELECT c.id, p.id, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000
 	FROM channels c CROSS JOIN principals p`,
 	},
+	// 9: Principal disabling (issue #101). disabled_at is unix milliseconds
+	// UTC; NULL means enabled. Existing principals stay enabled.
+	{
+		`ALTER TABLE principals ADD COLUMN disabled_at INTEGER`,
+	},
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

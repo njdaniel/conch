@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,6 +32,9 @@ var (
 	// ErrCredentialExpiryPast is returned when a new credential's expiry is
 	// not in the future.
 	ErrCredentialExpiryPast = errors.New("store: credential expiry must be in the future")
+	// ErrPrincipalDisabled is returned when issuing or rotating a credential
+	// for a disabled principal (issue #101).
+	ErrPrincipalDisabled = errors.New("store: principal disabled")
 )
 
 // credentialNow is the clock used for credential creation, expiry, and
@@ -142,12 +144,18 @@ func (s *Store) CreateCredential(ctx context.Context, actor string, principalID 
 
 	var out schema.CredentialV1
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		var one int
-		switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM principals WHERE id = ?", principalID).Scan(&one); {
+		// The disabled check and the insert share one IMMEDIATE transaction
+		// with DisablePrincipal's revoke, so a credential can never be
+		// issued after (or concurrently with) a disable and survive it.
+		var disabledAt sql.NullInt64
+		switch err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrPrincipalNotFound
 		case err != nil:
 			return fmt.Errorf("store: create credential: find principal: %w", err)
+		}
+		if disabledAt.Valid {
+			return ErrPrincipalDisabled
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp)
 		if err != nil {
@@ -231,6 +239,13 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		case err != nil:
 			return fmt.Errorf("store: rotate credential: read: %w", err)
 		}
+		var disabledAt sql.NullInt64
+		if err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); err != nil {
+			return fmt.Errorf("store: rotate credential: find principal: %w", err)
+		}
+		if disabledAt.Valid {
+			return ErrPrincipalDisabled
+		}
 		if revokedAt.Valid {
 			return ErrCredentialRevoked
 		}
@@ -308,51 +323,4 @@ func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID
 		return appendAuditEventTx(ctx, tx, actor, "credential_revoked",
 			principalActor(principalID), credentialDetail(credentialID, label), now)
 	})
-}
-
-// ResolveCredential returns the principal bound to a live bearer token.
-//
-// Every token problem -- wrong shape, unknown, expired (expires_at <= now), or
-// revoked -- yields the same ErrCredentialInvalid. A malformed token is
-// rejected before any database work. A genuine database failure is returned as
-// a different, wrapped error so callers can tell "bad token" from "store is
-// broken"; callers must fail closed on both. The token is never logged or
-// included in any error.
-func (s *Store) ResolveCredential(ctx context.Context, token string) (Principal, error) {
-	if !wellFormedCredentialToken(token) {
-		return Principal{}, ErrCredentialInvalid
-	}
-	want := hashCredentialToken(token)
-
-	var (
-		storedHash           string
-		expiresAt, revokedAt sql.NullInt64
-		p                    Principal
-		kind, role           string
-		createdAt            int64
-	)
-	err := s.db.QueryRowContext(ctx,
-		`SELECT c.token_hash, c.expires_at, c.revoked_at, p.id, p.kind, p.name, p.role, p.created_at
-		 FROM credentials c JOIN principals p ON p.id = c.principal_id
-		 WHERE c.token_hash = ?`, want,
-	).Scan(&storedHash, &expiresAt, &revokedAt, &p.ID, &kind, &p.Name, &role, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Principal{}, ErrCredentialInvalid
-	}
-	if err != nil {
-		return Principal{}, fmt.Errorf("store: resolve credential: %w", err)
-	}
-	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(want)) != 1 {
-		return Principal{}, ErrCredentialInvalid
-	}
-	if revokedAt.Valid {
-		return Principal{}, ErrCredentialInvalid
-	}
-	if expiresAt.Valid && expiresAt.Int64 <= credentialNow().UnixMilli() {
-		return Principal{}, ErrCredentialInvalid
-	}
-	p.Kind = PrincipalKind(kind)
-	p.Role = Role(role)
-	p.CreatedAt = time.UnixMilli(createdAt)
-	return p, nil
 }
