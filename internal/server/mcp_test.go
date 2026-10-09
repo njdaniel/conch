@@ -621,3 +621,44 @@ func TestMCPNoDeprecationWarningWithoutStaticTokens(t *testing.T) {
 		t.Errorf("unexpected deprecation warning:\n%s", logs.buf.String())
 	}
 }
+
+// Disabling an agent (issue #101) ends its MCP access on both authentication
+// paths: its stored credential, and a deprecated static --mcp-token mapping,
+// which is configuration and so is not revoked by the disable.
+func TestMCPRejectsDisabledAgent(t *testing.T) {
+	ctx := context.Background()
+	f := newMCPAuthFixture(t, Config{})
+	f.srv.cfg.MCPBearerTokens = map[string]int64{"static-token": f.agent.ID}
+	_, issued := f.issue(t, f.agent.ID, nil)
+	for _, tok := range []string{issued, "static-token"} {
+		if rec := f.post(t, "Bearer "+tok); rec.Code != http.StatusOK {
+			t.Fatalf("before disable: status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+	}
+	unknown := f.post(t, "Bearer no-such-token")
+
+	if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{issued, "static-token"} {
+		rec := f.post(t, "Bearer "+tok)
+		if rec.Code != http.StatusUnauthorized || rec.Body.String() != unknown.Body.String() {
+			t.Errorf("disabled agent: status = %d, body = %q; want the same 401 as an unknown token", rec.Code, rec.Body.String())
+		}
+	}
+	if got := f.authors(t); len(got) != 2 {
+		t.Errorf("messages = %d, want only the two posted before the disable", len(got))
+	}
+
+	// Enabling restores the static mapping (it is configuration) but revives
+	// no stored credential.
+	if _, err := f.srv.store.EnablePrincipal(ctx, "system", f.agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.post(t, "Bearer static-token"); rec.Code != http.StatusOK {
+		t.Errorf("static token after enable: status = %d", rec.Code)
+	}
+	if rec := f.post(t, "Bearer "+issued); rec.Code != http.StatusUnauthorized {
+		t.Errorf("stored credential after enable: status = %d, want 401", rec.Code)
+	}
+}
