@@ -78,3 +78,30 @@ jobs:
 
       - name: dogfood-check
         run: go run ./e2e/dogfood
+
+  voice-check:
+    # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
+    # CLI and a real LiveKit server in Docker, plus the proof that the core is
+    # unaffected with LiveKit down or not configured. It runs on every pull
+    # request and every push to main, like check. CI=true makes a skip a
+    # failure: if Docker, the LiveKit image or lk cannot be had, this job is
+    # red rather than quietly green.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: voice-check
+        run: go run ./e2e/voice
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only containers it labelled.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter label=conch-voice-check=1 | xargs -r docker rm -f
