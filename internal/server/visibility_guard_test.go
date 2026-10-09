@@ -22,8 +22,10 @@ import (
 //   - names the messages or message_recipients table in a string,
 //   - calls a message-listing or message-counting method on anything but
 //     ListVisibleMessages, or
-//   - calls ListVisibleMessages with a reader that is not either
-//     store.ChannelWideOnly or the one request-derived constructor readerFor.
+//   - calls ListVisibleMessages with a reader that is not one of
+//     store.ChannelWideOnly, the request-derived constructor readerFor, or the
+//     MCP scope's reader() (the authenticated agent; pinned by
+//     TestAgentScopeReaderIsTheAuthenticatedAgent).
 //
 // Tests are exempt: they read the log to assert on it.
 func TestMessageReadsStayInTheVisibilityFunction(t *testing.T) {
@@ -64,6 +66,28 @@ func TestMessageReadsStayInTheVisibilityFunction(t *testing.T) {
 
 func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast.File) {
 	t.Helper()
+	// A reader is who the visibility function answers for, so only the two
+	// constructors may build one: readerFor (the request's caller) and the
+	// MCP scope's reader() (the authenticated agent). Each is pinned by its
+	// own test. Anything else that assembles a store.Reader could name any
+	// principal.
+	readerBuilders := map[string]string{"readerFor": "messages.go", "reader": "authz.go"}
+	for _, decl := range file.Decls {
+		within := ""
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			within = fn.Name.Name
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || lit.Type == nil || types.ExprString(lit.Type) != "store.Reader" {
+				return true
+			}
+			if readerBuilders[within] != filepath.Base(path) || within == "" {
+				t.Errorf("%s: %s builds a store.Reader outside readerFor and the agent scope's reader()", path, fset.Position(lit.Pos()))
+			}
+			return true
+		})
+	}
 	for _, imp := range file.Imports {
 		p := strings.Trim(imp.Path.Value, `"`)
 		if p == "database/sql" || strings.HasPrefix(p, "modernc.org/sqlite") {
@@ -120,8 +144,9 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			}
 			switch reader := types.ExprString(x.Args[2]); {
 			case reader == "store.ChannelWideOnly", strings.HasPrefix(reader, "readerFor("):
+			case reader == "g.scope.reader()" && filepath.Base(path) == "authz.go":
 			default:
-				t.Errorf("%s: %s passes reader %q to ListVisibleMessages; use readerFor(r, version) or store.ChannelWideOnly", path, fset.Position(x.Pos()), reader)
+				t.Errorf("%s: %s passes reader %q to ListVisibleMessages; use readerFor(r, version), the agent scope's reader(), or store.ChannelWideOnly", path, fset.Position(x.Pos()), reader)
 			}
 		}
 		return true

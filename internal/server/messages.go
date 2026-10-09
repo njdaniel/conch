@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -346,32 +347,54 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
-	stored, recipients, err := s.store.InsertScopedMessage(ctx, store.ScopedPost{
+	message, recipients, serr := s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: channel.ID, AuthorID: req.AuthorID, Body: req.Body, Payload: req.Payload, Audience: audience,
 	})
-	switch {
-	case errors.Is(err, store.ErrNetNotFound):
-		writeNetNotFound(w)
-		return
-	case errors.Is(err, store.ErrNetMonitorOnly):
-		writeError(w, http.StatusForbidden, errForbidden.Code, "a monitor of a net may listen but not transmit")
-		return
-	case errors.Is(err, store.ErrInvalidAudience):
-		writeError(w, http.StatusBadRequest, "invalid_audience", "every recipient must be a member of the channel, and a whisper needs a recipient other than the author")
-		return
-	case errors.Is(err, store.ErrNotChannelMember):
-		// Removed from the channel after the membership check above.
-		writeChannelNotFound(w)
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "messages: insert scoped failed", "error", err)
-		writeInternalError(w)
+	if serr != nil {
+		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
 		return
 	}
-	message := messageV2FromStore(stored)
 	// Persist-then-broadcast, to the recipients' v2 sockets only.
 	s.hub.BroadcastMessageV2(ctx, message, recipients)
 	writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: message})
+}
+
+// storeScopedPost stores a message with an audience and turns each refusal of
+// the store into its wire error. The REST post and the MCP post_message tool
+// both end here, so the two cannot answer differently: an unknown net, an
+// archived net and a net the author is not on are all net_not_found; only a
+// monitor of the net learns it may not transmit.
+func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost) (schema.MessageV2, []int64, *schema.Error) {
+	stored, recipients, err := s.store.InsertScopedMessage(ctx, post)
+	switch {
+	case errors.Is(err, store.ErrNetNotFound):
+		return schema.MessageV2{}, nil, &schema.Error{Code: "net_not_found", Message: "net not found"}
+	case errors.Is(err, store.ErrNetMonitorOnly):
+		return schema.MessageV2{}, nil, &schema.Error{Code: errForbidden.Code, Message: "a monitor of a net may listen but not transmit"}
+	case errors.Is(err, store.ErrInvalidAudience):
+		return schema.MessageV2{}, nil, &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
+	case errors.Is(err, store.ErrNotChannelMember):
+		// Removed from the channel after the caller's membership check.
+		return schema.MessageV2{}, nil, errChannelNotFound
+	case err != nil:
+		slog.ErrorContext(ctx, "messages: insert scoped failed", "error", err)
+		return schema.MessageV2{}, nil, errInternal
+	}
+	return messageV2FromStore(stored), recipients, nil
+}
+
+// scopedPostStatus is the HTTP status for a storeScopedPost refusal.
+func scopedPostStatus(code string) int {
+	switch code {
+	case "net_not_found", errChannelNotFound.Code:
+		return http.StatusNotFound
+	case errForbidden.Code:
+		return http.StatusForbidden
+	case "invalid_audience":
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // channelForScopedPost is channelForCaller for a scoped post: the same

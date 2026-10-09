@@ -43,8 +43,9 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 	return c.call(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
 }
 
-// ReadChannel reads one page from the read_channel tool.
-func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
+// ReadChannel reads one page from the read_channel tool. The messages are v2
+// envelopes: one with an Audience was not sent to the whole channel.
+func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
 	arguments := map[string]any{"channel": channel}
 	if after != 0 {
 		arguments["after"] = after
@@ -54,18 +55,19 @@ func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, l
 	}
 	raw, err := c.CallTool(ctx, "read_channel", arguments)
 	if err != nil {
-		return schema.ListMessagesResponseV1{}, err
+		return schema.ListMessagesResponseV2{}, err
 	}
-	return Decode[schema.ListMessagesResponseV1](raw)
+	return Decode[schema.ListMessagesResponseV2](raw)
 }
 
-// PostMessage posts an untyped message through the post_message tool.
-func (c *Client) PostMessage(ctx context.Context, channel, body string) (schema.PostMessageResponseV1, error) {
+// PostMessage posts an untyped, channel-wide message through the
+// post_message tool.
+func (c *Client) PostMessage(ctx context.Context, channel, body string) (schema.PostMessageResponseV2, error) {
 	raw, err := c.CallTool(ctx, "post_message", map[string]any{"channel": channel, "body": body})
 	if err != nil {
-		return schema.PostMessageResponseV1{}, err
+		return schema.PostMessageResponseV2{}, err
 	}
-	return Decode[schema.PostMessageResponseV1](raw)
+	return Decode[schema.PostMessageResponseV2](raw)
 }
 
 // Decode unmarshals a tool's structured content into a schema type.

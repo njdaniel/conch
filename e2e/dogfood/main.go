@@ -524,9 +524,17 @@ func happyPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("post_message: %w", err)
 	}
-	posted, err := mcpclient.Decode[schema.PostMessageResponseV1](postRaw)
+	// The MCP tools speak the v2 envelope (issue #117); a message posted
+	// without an audience is channel-wide and carries none.
+	posted, err := mcpclient.Decode[schema.PostMessageResponseV2](postRaw)
 	if err != nil {
 		return err
+	}
+	if err := posted.Message.Validate(); err != nil {
+		return fmt.Errorf("post_message returned an invalid v2 message: %w", err)
+	}
+	if posted.Message.Audience != nil {
+		return fmt.Errorf("a channel-wide post_message returned audience %+v", posted.Message.Audience)
 	}
 	if posted.Message.AuthorID != agentID {
 		return fmt.Errorf("posted message author = %d, want authenticated agent %d", posted.Message.AuthorID, agentID)
@@ -536,7 +544,7 @@ func happyPath(bin binaries) error {
 	if err != nil {
 		return fmt.Errorf("read_channel: %w", err)
 	}
-	read, err := mcpclient.Decode[schema.ListMessagesResponseV1](readRaw)
+	read, err := mcpclient.Decode[schema.ListMessagesResponseV2](readRaw)
 	if err != nil {
 		return err
 	}

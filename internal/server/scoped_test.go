@@ -132,9 +132,10 @@ func (f *scopedFixture) labelsToIDs(t *testing.T, ids map[string]int64, labels [
 
 // TestScopedMessagesExactSets is the leak test. For every reader and every
 // path by which messages can be read, it asserts the EXACT set of message ids
-// received: not "contains", not "excludes the secret". v0, v1 and MCP readers
-// see channel-wide messages only; only v2 readers see scoped messages, and
-// only the ones they are a recipient of. Operators get no exemption.
+// received: not "contains", not "excludes the secret". v0 and v1 readers see
+// channel-wide messages only; v2 readers and agents reading over MCP (which
+// speaks the v2 envelope, issue #117) also see scoped messages, and only the
+// ones they are a recipient of. Operators get no exemption.
 //
 // EVERY NEW WAY TO READ MESSAGES MUST ADD A COLUMN HERE (and to
 // scopedReadPaths). Sockets are opened before the corpus is posted, since a
@@ -254,7 +255,7 @@ func TestScopedMessagesExactSets(t *testing.T) {
 			})
 		}
 		t.Run(r.name+"/mcp read_channel", func(t *testing.T) {
-			status, code, got := f.mcpReadChannel(t, tok, map[string]any{"channel": "ops", "limit": 100})
+			status, code, got, raw := f.mcpReadChannel(t, tok, map[string]any{"channel": "ops", "limit": 100})
 			// MCP is the agent front end: humans, the disabled and the
 			// unauthenticated are refused at the door.
 			wantStatus, wantCode := http.StatusOK, ""
@@ -267,10 +268,15 @@ func TestScopedMessagesExactSets(t *testing.T) {
 			case r.access == readNotFound:
 				wantCode = "channel_not_found"
 			default:
-				want = wantFor(ri, false) // the MCP read is a v1 reader
+				want = wantFor(ri, true) // the MCP read is a v2 reader
 			}
 			if status != wantStatus || code != wantCode {
 				t.Fatalf("status = %d code = %q, want %d %q", status, code, wantStatus, wantCode)
+			}
+			// Whatever the answer, it carries no body the reader may not see.
+			noSecrets(t, "mcp read_channel", raw, want)
+			if strings.Contains(raw, "recipient") {
+				t.Errorf("read_channel mentions recipients: %s", raw)
 			}
 			if wantStatus == http.StatusOK && wantCode == "" && !reflect.DeepEqual(got, want) {
 				t.Errorf("ids = %v, want %v", got, want)
@@ -309,7 +315,7 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 	// MCP tools: each is either a message reader (and in the table) or declared
 	// not to return message content.
 	notMessageContent := map[string]string{
-		"post_message":     "writes channel-wide; returns only the message it stored",
+		"post_message":     "returns only the message the caller just stored, of whose audience it is the author",
 		"request_approval": "approvals carry no channel messages",
 		"check_decision":   "approvals carry no channel messages",
 		"await_decision":   "approvals carry no channel messages",
