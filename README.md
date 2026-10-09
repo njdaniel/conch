@@ -197,8 +197,8 @@ This drives the full loop live against freshly built binaries, authenticated end
 ### Known limitations
 
 - Tokens travel in the `Authorization` header in the clear unless you put TLS in front of `conchd`; keep it on localhost or a VPN, or behind a TLS-terminating reverse proxy.
-- `conch login` echoes the token if you type it at the prompt; pipe it from a file instead, as shown.
-- Webhook hook URLs cannot yet be revoked individually, and the database file is created readable by other local users (#104).
+- `conch login` does not echo a token typed at its prompt. Piping it from a file, as shown, also keeps it out of your clipboard and scrollback.
+- A webhook hook URL is a posting credential. List hooks with `GET /v1/hooks` and revoke one with `DELETE /v1/hooks/{id}` (operator only); only a hash of each token is stored. The database file is created owner-only (0600) and an existing looser one is tightened at startup.
 
 ## License
 

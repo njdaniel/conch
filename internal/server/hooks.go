@@ -34,6 +34,10 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel must not be empty and principal must be positive")
 		return
 	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	channel, err := s.store.ChannelByName(ctx, req.Channel)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "channel_not_found", "channel not found")
@@ -66,12 +70,46 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	if _, err := s.store.CreateHook(ctx, token, channel.ID, req.Principal); err != nil {
+	hook, err := s.store.CreateHookWithLabel(ctx, token, req.Label, channel.ID, req.Principal)
+	if err != nil {
 		slog.ErrorContext(ctx, "hooks: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, schema.CreateHookResponse{Token: token})
+	// The one place the token is ever returned; it must not be cached.
+	writeSecretJSON(w, http.StatusCreated, schema.CreateHookResponse{ID: hook.ID, Token: token})
+}
+
+func (s *Server) handleListHooks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	hooks, err := s.store.ListHooks(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "hooks: list failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, schema.ListHooksResponseV1{Hooks: hooks})
+}
+
+// handleRevokeHook revokes a hook by its numeric id (never its token), the way
+// credentials are revoked. Revoking an already-revoked hook succeeds.
+func (s *Server) handleRevokeHook(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, ok := pathID(w, r, "id", "hook")
+	if !ok {
+		return
+	}
+	err := s.store.RevokeHook(ctx, auditActor(ctx), id)
+	switch {
+	case errors.Is(err, store.ErrHookNotFound):
+		writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "hooks: revoke failed", "hook", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {

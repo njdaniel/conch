@@ -1,0 +1,19 @@
+{
+  "hooks": [
+    {
+      "id": 4,
+      "channel": "general",
+      "principal": 7,
+      "label": "ci builds",
+      "created_at": "2026-09-01T08:30:00.000Z"
+    },
+    {
+      "id": 3,
+      "channel": "general",
+      "principal": 7,
+      "label": "old monitor",
+      "created_at": "2026-08-01T08:30:00.000Z",
+      "revoked_at": "2026-10-01T09:15:30.250Z"
+    }
+  ]
+}
