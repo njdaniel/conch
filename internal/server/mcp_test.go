@@ -349,14 +349,11 @@ func (f mcpAuthFixture) issue(t *testing.T, principalID int64, expiresAt *time.T
 	return cred, token
 }
 
-// post calls post_message with the given Authorization header value and
-// extra tool arguments, returning the HTTP response.
-func (f mcpAuthFixture) post(t *testing.T, authorization string, extra map[string]any) *httptest.ResponseRecorder {
+// post calls post_message with the given Authorization header value,
+// returning the HTTP response.
+func (f mcpAuthFixture) post(t *testing.T, authorization string) *httptest.ResponseRecorder {
 	t.Helper()
 	arguments := map[string]any{"channel": "general", "body": "hello"}
-	for k, v := range extra {
-		arguments[k] = v
-	}
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "post_message", "arguments": arguments}})
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +392,7 @@ func TestMCPAuthenticatesIssuedCredential(t *testing.T) {
 	f := newMCPAuthFixture(t, Config{})
 	_, token := f.issue(t, f.agent.ID, nil)
 
-	rec := f.post(t, "Bearer "+token, nil)
+	rec := f.post(t, "Bearer "+token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -452,7 +449,7 @@ func TestMCPRejectsInvalidCredentialsIdentically(t *testing.T) {
 	var wantBody string
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := f.post(t, tt.authorization, nil)
+			rec := f.post(t, tt.authorization)
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 			}
@@ -479,33 +476,102 @@ func TestMCPRejectsInvalidCredentialsIdentically(t *testing.T) {
 func TestMCPRotationTakesEffectWithoutRestart(t *testing.T) {
 	f := newMCPAuthFixture(t, Config{})
 	cred, oldToken := f.issue(t, f.agent.ID, nil)
-	if rec := f.post(t, "Bearer "+oldToken, nil); rec.Code != http.StatusOK {
+	if rec := f.post(t, "Bearer "+oldToken); rec.Code != http.StatusOK {
 		t.Fatalf("before rotation: status = %d", rec.Code)
 	}
 	_, newToken, err := f.srv.store.RotateCredential(context.Background(), cred.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec := f.post(t, "Bearer "+oldToken, nil); rec.Code != http.StatusUnauthorized {
+	if rec := f.post(t, "Bearer "+oldToken); rec.Code != http.StatusUnauthorized {
 		t.Errorf("old token after rotation: status = %d, want 401", rec.Code)
 	}
-	if rec := f.post(t, "Bearer "+newToken, nil); rec.Code != http.StatusOK {
+	if rec := f.post(t, "Bearer "+newToken); rec.Code != http.StatusOK {
 		t.Errorf("new token after rotation: status = %d, want 200", rec.Code)
 	}
 }
 
+// callTool calls an MCP tool with a bearer token and reports the HTTP status
+// and whether the tool result was an error.
+func (f mcpAuthFixture) callTool(t *testing.T, token, name string, arguments map[string]any) (int, bool) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": arguments}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	f.srv.Handler().ServeHTTP(rec, req)
+	var response struct {
+		Result struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *json.RawMessage `json:"error"`
+	}
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode %s response %s: %v", name, rec.Body.String(), err)
+		}
+	}
+	return rec.Code, response.Result.IsError || response.Error != nil
+}
+
 // A tool input cannot choose who the call acts as: the principal comes only
-// from the credential.
+// from the credential. Identity fields smuggled into the arguments are
+// rejected outright and nothing is written; well-formed calls act as the
+// credential's agent.
 func TestMCPToolInputCannotOverridePrincipal(t *testing.T) {
+	ctx := context.Background()
 	f := newMCPAuthFixture(t, Config{})
 	_, token := f.issue(t, f.agent.ID, nil)
-	for _, field := range []string{"author_id", "principal_id", "requester_id"} {
-		f.post(t, "Bearer "+token, map[string]any{field: f.other.ID})
+	channel, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, author := range f.authors(t) {
-		if author != f.agent.ID {
-			t.Fatalf("a message was authored by principal %d, want only %d", author, f.agent.ID)
+	withField := func(base map[string]any, field string) map[string]any {
+		out := map[string]any{field: f.other.ID}
+		for k, v := range base {
+			out[k] = v
 		}
+		return out
+	}
+	post := map[string]any{"channel": "general", "body": "hello"}
+	approval := approvalMCPArguments(channel.ID, time.Now().Add(time.Hour))
+
+	for _, field := range []string{"author_id", "principal_id", "requester_id"} {
+		for tool, base := range map[string]map[string]any{"post_message": post, "request_approval": approval} {
+			status, isError := f.callTool(t, token, tool, withField(base, field))
+			if status != http.StatusOK || !isError {
+				t.Errorf("%s with %s: status %d, isError %v; want a rejected tool call", tool, field, status, isError)
+			}
+		}
+	}
+	if got := f.authors(t); len(got) != 0 {
+		t.Fatalf("a call carrying an identity field posted a message: authors %v", got)
+	}
+	if open, err := f.srv.store.ListOpenApprovals(ctx); err != nil || len(open) != 0 {
+		t.Fatalf("a call carrying an identity field raised an approval: %d open (err %v)", len(open), err)
+	}
+
+	// The same calls without the smuggled field act as the credential's agent.
+	if status, isError := f.callTool(t, token, "post_message", post); status != http.StatusOK || isError {
+		t.Fatalf("post_message: status %d, isError %v", status, isError)
+	}
+	if got := f.authors(t); len(got) != 1 || got[0] != f.agent.ID {
+		t.Fatalf("message authors = %v, want [%d]", got, f.agent.ID)
+	}
+	if status, isError := f.callTool(t, token, "request_approval", approval); status != http.StatusOK || isError {
+		t.Fatalf("request_approval: status %d, isError %v", status, isError)
+	}
+	open, err := f.srv.store.ListOpenApprovals(ctx)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("open approvals = %d (err %v), want 1", len(open), err)
+	}
+	if open[0].RequesterID != f.agent.ID {
+		t.Fatalf("approval requester = %d, want the credential's agent %d", open[0].RequesterID, f.agent.ID)
 	}
 }
 
@@ -518,7 +584,7 @@ func TestMCPStoreFailureFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tok := range []string{token, "static-token"} {
-		if rec := f.post(t, "Bearer "+tok, nil); rec.Code != http.StatusUnauthorized {
+		if rec := f.post(t, "Bearer "+tok); rec.Code != http.StatusUnauthorized {
 			t.Errorf("status with the store down = %d, want 401", rec.Code)
 		}
 	}
@@ -534,7 +600,7 @@ func TestMCPStaticTokenStillWorksAndWarnsOnce(t *testing.T) {
 	if f.agent.ID != 1 {
 		t.Fatalf("fixture agent id = %d, want 1", f.agent.ID)
 	}
-	if rec := f.post(t, "Bearer static-token", nil); rec.Code != http.StatusOK {
+	if rec := f.post(t, "Bearer static-token"); rec.Code != http.StatusOK {
 		t.Fatalf("static token: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if got := f.authors(t); len(got) != 1 || got[0] != f.agent.ID {
