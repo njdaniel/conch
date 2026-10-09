@@ -90,6 +90,9 @@ jobs:
     timeout-minutes: 20
     env:
       CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +104,7 @@ jobs:
         run: go run ./e2e/voice
 
       # The program removes its own container on every path; this is for the
-      # case where the runner killed it. Only containers it labelled.
+      # case where the runner killed it. Only the container of this run.
       - name: remove any leftover LiveKit container
         if: always()
-        run: docker ps -aq --filter label=conch-voice-check=1 | xargs -r docker rm -f
+        run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f

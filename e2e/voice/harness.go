@@ -38,9 +38,14 @@ type harness struct {
 	mu      sync.Mutex
 	out     bytes.Buffer // everything this program printed
 	secrets map[string]string
-	rooms   map[string]bool // room names: not secret, but never logged or audited
-	logs    []namedFile     // files to scan for secrets before the run ends
-	cleanup []func()
+	rooms   map[string][]string // room names (and what to search for): not secret, but never logged or audited
+	jtis    map[string]bool     // jti of every join token seen
+	conchds []*conchdProc
+	logs    []namedFile // files to scan for secrets before the run ends
+	// headless are the lk participants started, whose LiveKit-issued tokens
+	// are registered as secrets before the final scan.
+	headless []*headless
+	cleanup  []func()
 }
 
 // namedFile is a captured log. rooms is true for files that must not mention
@@ -62,7 +67,7 @@ func newHarness() (*harness, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &harness{repo: repo, tmp: tmp, secrets: map[string]string{}, rooms: map[string]bool{}}, nil
+	return &harness{repo: repo, tmp: tmp, secrets: map[string]string{}, rooms: map[string][]string{}, jtis: map[string]bool{}}, nil
 }
 
 // say prints one line and remembers it, so the run can check at the end that
@@ -89,8 +94,9 @@ func (h *harness) secret(label, value string) {
 // room registers a room name. conchd never writes one to a log line, an audit
 // row, an error or a presence document (design note §3), so the run checks.
 func (h *harness) room(name string) {
+	needles := roomNeedles(name)
 	h.mu.Lock()
-	h.rooms[name] = true
+	h.rooms[name] = needles
 	h.mu.Unlock()
 }
 
@@ -98,9 +104,11 @@ func (h *harness) room(name string) {
 func (h *harness) hasRoom(text string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for r := range h.rooms {
-		if strings.Contains(text, r) {
-			return true
+	for _, needles := range h.rooms {
+		for _, n := range needles {
+			if strings.Contains(text, n) {
+				return true
+			}
 		}
 	}
 	return false
@@ -146,6 +154,20 @@ func (h *harness) scan(what, text string) error {
 // scanAll checks the program's own output and every captured log.
 func (h *harness) scanAll() error {
 	h.mu.Lock()
+	daemons := append([]*conchdProc(nil), h.conchds...)
+	h.mu.Unlock()
+	for _, d := range daemons {
+		if err := d.registerStoreRooms(); err != nil {
+			return fmt.Errorf("read the rooms conchd stored: %w", err)
+		}
+	}
+	h.mu.Lock()
+	participants := append([]*headless(nil), h.headless...)
+	h.mu.Unlock()
+	for _, hl := range participants {
+		hl.registerTokens(h)
+	}
+	h.mu.Lock()
 	printed := h.out.String()
 	logs := append([]namedFile(nil), h.logs...)
 	h.mu.Unlock()
@@ -183,7 +205,16 @@ func (h *harness) teardown() {
 	h.cleanup = nil
 	h.mu.Unlock()
 	for i := len(fs) - 1; i >= 0; i-- {
-		fs[i]()
+		func() {
+			// One cleanup that panics must not stop the ones after it: a
+			// container is removed by a cleanup that may be last in line.
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintln(os.Stderr, "voice-check: a clean-up step panicked:", h.redact(fmt.Sprint(r)))
+				}
+			}()
+			fs[i]()
+		}()
 	}
 	_ = os.RemoveAll(h.tmp)
 }
@@ -203,12 +234,25 @@ func randHex(n int) string {
 // waitFor polls fn until it reports true or the deadline passes. fn returns a
 // short description of what it saw, which the timeout message quotes. Nothing
 // here sleeps as a way of knowing something happened: every wait ends the
-// moment the thing it waits for is true.
+// moment the thing it waits for is true, or a signal arrives.
 func waitFor(what string, within time.Duration, fn func() (bool, string)) error {
+	return waitForOrFail(what, within, func() (bool, string, error) {
+		ok, saw := fn()
+		return ok, saw, nil
+	})
+}
+
+// waitForOrFail is waitFor for a check that can also know the wait is
+// hopeless (the process that was to do the thing has exited): a non-nil error
+// from fn ends the wait at once.
+func waitForOrFail(what string, within time.Duration, fn func() (bool, string, error)) error {
 	deadline := time.Now().Add(within)
 	last := "nothing observed"
 	for {
-		ok, saw := fn()
+		ok, saw, err := fn()
+		if err != nil {
+			return fmt.Errorf("waiting for %s: %w", what, err)
+		}
 		if ok {
 			return nil
 		}
@@ -218,7 +262,11 @@ func waitFor(what string, within time.Duration, fn func() (bool, string)) error 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out after %s waiting for %s (last saw: %s)", within, what, last)
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-stopCtx.Done():
+			return fmt.Errorf("waiting for %s: %w", what, errInterrupted)
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
@@ -237,7 +285,7 @@ func (h *harness) build() error {
 	}
 	h.bin = binaries{dir: dir, conchd: filepath.Join(dir, "conchd"), conch: filepath.Join(dir, "conch")}
 	for out, pkg := range map[string]string{h.bin.conchd: "./cmd/conchd", h.bin.conch: "./cmd/conch"} {
-		cmd := exec.Command("go", "build", "-o", out, pkg) // #nosec G204 -- out and pkg are this program's own temp paths and constants
+		cmd := groupCommand(stopCtx, "go", "build", "-o", out, pkg)
 		cmd.Dir = h.repo
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("go build %s: %w\n%s", pkg, err, output)
@@ -274,6 +322,7 @@ type conchdProc struct {
 	baseURL  string
 	dataDir  string
 	logPath  string
+	lk       *livekitSettings // nil when voice is not configured
 	operator api
 	done     chan struct{}
 	stopped  bool
@@ -297,7 +346,7 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 	}
 	env := append(cleanEnv(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_DATA_HOME="+filepath.Join(home, "data"))
 
-	bootstrap := exec.Command(h.bin.conchd, "bootstrap-operator", "--data", dataDir, "--name", "voice-operator") // #nosec G204 -- binary built by this program
+	bootstrap := groupCommand(stopCtx, h.bin.conchd, "bootstrap-operator", "--data", dataDir, "--name", "voice-operator")
 	bootstrap.Env = env
 	tokenOut, err := bootstrap.Output()
 	if err != nil {
@@ -323,7 +372,7 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(h.bin.conchd, args...) // #nosec G204 -- binary built by this program; args are its own
+	cmd := groupStart(h.bin.conchd, args...)
 	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
@@ -331,10 +380,12 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 		return nil, err
 	}
 	p := &conchdProc{h: h, cmd: cmd, baseURL: "http://" + addr, dataDir: dataDir, logPath: logPath, done: make(chan struct{})}
-	p.operator = api{baseURL: p.baseURL, token: opToken}
+	p.operator = api{h: h, baseURL: p.baseURL, token: opToken}
+	p.lk = lk
 	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(p.done) }()
 	h.onCleanup(p.stop)
 	h.mu.Lock()
+	h.conchds = append(h.conchds, p)
 	h.logs = append(h.logs, namedFile{"conchd log (" + name + ")", logPath, true})
 	h.mu.Unlock()
 	if err := waitFor("conchd to answer /healthz", 15*time.Second, func() (bool, string) {
@@ -350,16 +401,14 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 	return p, nil
 }
 
-func (p *conchdProc) as(token string) api { return api{baseURL: p.baseURL, token: token} }
+func (p *conchdProc) as(token string) api { return api{h: p.h, baseURL: p.baseURL, token: token} }
 
 func (p *conchdProc) stop() {
 	if p.stopped {
 		return
 	}
 	p.stopped = true
-	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
+	_ = killGroup(p.cmd)
 	<-p.done
 }
 
@@ -412,6 +461,9 @@ func (p *conchdProc) auditRows(action string) ([]store.AuditEvent, error) {
 
 // scanAudit checks every audit row for a secret or a room name.
 func (p *conchdProc) scanAudit(name string) error {
+	if err := p.registerStoreRooms(); err != nil {
+		return fmt.Errorf("read the rooms conchd stored: %w", err)
+	}
 	all, err := p.audit()
 	if err != nil {
 		return err
@@ -430,7 +482,13 @@ func (p *conchdProc) scanAudit(name string) error {
 
 // ---------------------------------------------------------------------- REST
 
-type api struct{ baseURL, token string }
+// api is a REST client acting as one principal. Every answer it receives is
+// scanned for a token, the API secret and a room name (see scanResponse), so
+// that what conchd sends to clients is checked, not only what it logs.
+type api struct {
+	h              *harness
+	baseURL, token string
+}
 
 func (a api) do(method, path string, body any) (int, []byte, error) {
 	var reader io.Reader
@@ -458,7 +516,16 @@ func (a api) do(method, path string, body any) (int, []byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, data, err
+	if err != nil {
+		return resp.StatusCode, data, err
+	}
+	if a.h != nil {
+		what := method + " " + strings.SplitN(path, "?", 2)[0]
+		if err := a.h.scanResponse(what, resp.Header, data, bodyCarriesCredentials(method, path, resp.StatusCode)); err != nil {
+			return resp.StatusCode, data, err
+		}
+	}
+	return resp.StatusCode, data, nil
 }
 
 func (a api) call(method, path string, body, out any) error {
@@ -489,28 +556,53 @@ func (a api) refusal(method, path string) (int, string, error) {
 
 // person is a human with a credential and their own `conch` configuration.
 type person struct {
-	name  string
-	id    int64
-	token string
-	api   api
-	cli   *conchUser
+	name   string
+	id     int64
+	token  string
+	credID int64 // the credential token belongs to
+	d      *conchdProc
+	api    api
+	cli    *conchUser
+}
+
+// personOpts varies how a principal is made.
+type personOpts struct {
+	kind    schema.PrincipalKind // default human
+	expires *time.Time           // the credential stops being live at this time
+	noCLI   bool                 // do not set up a conch configuration for them
 }
 
 func (h *harness) newPerson(d *conchdProc, name string, channels ...string) (*person, error) {
+	return h.newPersonWith(d, name, personOpts{}, channels...)
+}
+
+func (h *harness) newPersonWith(d *conchdProc, name string, o personOpts, channels ...string) (*person, error) {
+	kind := o.kind
+	if kind == "" {
+		kind = schema.PrincipalHuman
+	}
 	var created schema.CreatePrincipalResponse
-	if err := d.operator.call(http.MethodPost, "/v0/principals", schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: name}, &created); err != nil {
+	if err := d.operator.call(http.MethodPost, "/v0/principals", schema.CreatePrincipalRequest{Kind: kind, Name: name}, &created); err != nil {
 		return nil, fmt.Errorf("create %s: %w", name, err)
 	}
+	req := schema.CreateCredentialRequestV1{Label: name}
+	if o.expires != nil {
+		ts := schema.NewTimestamp(*o.expires)
+		req.ExpiresAt = &ts
+	}
 	var cred schema.CreateCredentialResponseV1
-	if err := d.operator.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", created.Principal.ID), schema.CreateCredentialRequestV1{Label: name}, &cred); err != nil {
+	if err := d.operator.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", created.Principal.ID), req, &cred); err != nil {
 		return nil, fmt.Errorf("issue credential for %s: %w", name, err)
 	}
 	h.secret(name+"'s conch credential", cred.Token)
-	p := &person{name: name, id: created.Principal.ID, token: cred.Token, api: d.as(cred.Token)}
+	p := &person{name: name, id: created.Principal.ID, token: cred.Token, credID: cred.Credential.ID, d: d, api: d.as(cred.Token)}
 	for _, ch := range channels {
 		if err := d.operator.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", ch, p.id), nil, nil); err != nil {
 			return nil, fmt.Errorf("add %s to %s: %w", name, ch, err)
 		}
+	}
+	if o.noCLI || kind != schema.PrincipalHuman {
+		return p, nil
 	}
 	cli, err := h.newConchUser(d.baseURL, cred.Token)
 	if err != nil {
@@ -518,6 +610,25 @@ func (h *harness) newPerson(d *conchdProc, name string, channels ...string) (*pe
 	}
 	p.cli = cli
 	return p, nil
+}
+
+// newAgent makes an agent that is a member of channel and holds a manifest
+// granting every capability there, so that anything it is refused is refused
+// for being an agent and not for lacking a grant.
+func (h *harness) newAgent(d *conchdProc, name, channel string, channelID int64) (*person, error) {
+	a, err := h.newPersonWith(d, name, personOpts{kind: schema.PrincipalAgent}, channel)
+	if err != nil {
+		return nil, err
+	}
+	req := schema.PutAgentManifestRequestV1{DisplayName: name, Tier: schema.AgentTierA, Capabilities: schema.Capabilities()}
+	req.Channels = append(req.Channels, schema.ChannelGrant{
+		ChannelID:   channelID,
+		Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost},
+	})
+	if err := d.operator.call(http.MethodPut, fmt.Sprintf("/v1/principals/%d/manifest", a.id), req, nil); err != nil {
+		return nil, fmt.Errorf("write %s's manifest: %w", name, err)
+	}
+	return a, nil
 }
 
 func (d *conchdProc) createChannel(name string) (int64, error) {
@@ -541,22 +652,51 @@ func (h *harness) session(p *person, channel string) (schema.VoiceSessionRespons
 		_ = json.Unmarshal(data, &e)
 		return resp, fmt.Errorf("%s asked for a voice session in %s: status %d, code %q", p.name, channel, status, e.Code)
 	}
-	if err := json.Unmarshal(data, &resp); err != nil {
+	if err := decodeStrict(data, &resp); err != nil {
 		return resp, fmt.Errorf("decode session response: %w", err)
 	}
 	for _, g := range resp.Rooms {
 		h.secret("a voice join token", g.Token)
+		h.room(g.Room)
 	}
 	if err := resp.Validate(); err != nil {
 		return resp, fmt.Errorf("session response for %s does not satisfy the schema: %w", p.name, err)
 	}
+	if resp.Identity != identity(p.id) {
+		return resp, fmt.Errorf("session for %s names identity %q, want %q", p.name, resp.Identity, identity(p.id))
+	}
+	if p.d.lk != nil {
+		for _, g := range resp.Rooms {
+			if err := h.checkJoinToken(g.Token, p.d.lk, identity(p.id), g.Room, g.CanPublish, g.ExpiresAt.Time()); err != nil {
+				return resp, fmt.Errorf("%s's join token for %s: %w", p.name, channel, err)
+			}
+		}
+	}
 	return resp, nil
+}
+
+// decodeStrict decodes JSON and fails on a field the type does not have, so a
+// field added to a document conchd sends is a failure here, not a silent
+// extra.
+func decodeStrict(data []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode(out)
 }
 
 func (p *person) presence(channel string) (schema.VoicePresenceV1, error) {
 	var doc schema.VoicePresenceV1
-	err := p.api.call(http.MethodGet, "/v1/channels/"+channel+"/voice", nil, &doc)
-	return doc, err
+	status, data, err := p.api.do(http.MethodGet, "/v1/channels/"+channel+"/voice", nil)
+	if err != nil {
+		return doc, err
+	}
+	if status != http.StatusOK {
+		return doc, fmt.Errorf("presence for %s: status %d", channel, status)
+	}
+	if err := decodeStrict(data, &doc); err != nil {
+		return doc, fmt.Errorf("presence document does not decode strictly: %w", err)
+	}
+	return doc, nil
 }
 
 // ----------------------------------------------------------------- conch CLI
@@ -581,9 +721,9 @@ func (h *harness) newConchUser(serverURL, token string) (*conchUser, error) {
 
 // run executes one conch subcommand and returns its combined output.
 func (u *conchUser) run(stdin string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(stopCtx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, u.bin, args...) // #nosec G204 -- binary built by this program; args are its own
+	cmd := groupCommand(ctx, u.bin, args...)
 	cmd.Env = u.env
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
@@ -609,14 +749,20 @@ func (h *harness) runDogfood(label string, extraEnv ...string) error {
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(stopCtx, 8*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "run", "./e2e/dogfood") // #nosec G204 -- constant command
+	// dogfood makes temp directories of its own; pointing TMPDIR into this
+	// run's tree means they go with it however the run ends.
+	dtmp, err := h.mkdir("dogfood-tmp-")
+	if err != nil {
+		return err
+	}
+	cmd := groupCommand(ctx, "go", "run", "./e2e/dogfood")
 	cmd.Dir = h.repo
 	// conch and conchd under dogfood get their own temp config directories;
 	// the only environment passed through is what Go itself needs, minus
 	// anything that selects an identity or a LiveKit.
-	cmd.Env = append(cleanEnvKeepingHome(), extraEnv...)
+	cmd.Env = append(append(cleanEnvKeepingHome(), "TMPDIR="+dtmp), extraEnv...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	start := time.Now()
 	if err := cmd.Run(); err != nil {
@@ -692,6 +838,7 @@ func docker(ctx context.Context, args ...string) (string, error) {
 type livekitServer struct {
 	h      *harness
 	name   string
+	id     string // container id, once docker run has printed it
 	apiURL string // http://127.0.0.1:port
 	wsURL  string // ws://127.0.0.1:port
 	key    string
@@ -725,6 +872,9 @@ func (h *harness) startLiveKit(ctx context.Context) (*livekitServer, error) {
 		secret: "voice-check-NOT-FOR-PRODUCTION-" + randHex(24),
 	}
 	h.secret("the LiveKit API secret", srv.secret)
+	// The settings go in a file and the key pair in the environment of the
+	// docker command, passed on by name: neither is on a command line, where
+	// any local user could read the secret while the container runs.
 	cfg := fmt.Sprintf(`port: %s
 bind_addresses: ["127.0.0.1"]
 rtc:
@@ -732,17 +882,41 @@ rtc:
   port_range_start: %d
   port_range_end: %d
   use_external_ip: false
-keys:
-  %s: %s
 room:
   auto_create: false
   empty_timeout: 5
   departure_timeout: 5
   enable_remote_unmute: true
-`, httpPort, tcpPort, base, base+99, srv.key, srv.secret)
+`, httpPort, tcpPort, base, base+99)
+	dir, err := h.mkdir("livekit-")
+	if err != nil {
+		return nil, err
+	}
+	// The directory and file are made readable beyond this user because the
+	// process in the container may not run as it; they hold no secret.
+	cfgPath := filepath.Join(dir, "livekit.yaml")
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- holds only the settings file below, no secret
+		return nil, err
+	}
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil { // #nosec G306 -- settings only; the key pair is passed in the environment
+		return nil, err
+	}
 	h.onCleanup(func() { srv.remove() })
-	out, err := docker(ctx, "run", "-d", "--name", srv.name, "--label", "conch-voice-check=1", "--network", "host",
-		livekitImage, "--config-body", cfg, "--node-ip", "127.0.0.1")
+	cmd := groupCommand(stopCtx, "docker", "run", "-d", "--name", srv.name, "--label", containerLabel(), "--network", "host",
+		"-e", "LIVEKIT_KEYS", "-v", cfgPath+":/etc/livekit.yaml:ro",
+		livekitImage, "--config", "/etc/livekit.yaml", "--node-ip", "127.0.0.1")
+	cmd.Env = append(os.Environ(), "LIVEKIT_KEYS="+srv.key+": "+srv.secret)
+	raw, err := cmd.CombinedOutput()
+	out := strings.TrimSpace(string(raw))
+	// docker prints the new container's id; remove() uses it. A signal that
+	// arrives while docker run is working can leave a container behind with
+	// no id for us: remove() then finds it by the name and label this run gave it.
+	if id := lastField(out); len(id) == 64 {
+		srv.id = id
+	}
+	if stopCtx.Err() != nil {
+		return nil, errInterrupted
+	}
 	if err != nil {
 		return nil, fmt.Errorf("docker run: %s", h.redact(out))
 	}
@@ -758,6 +932,18 @@ room:
 		return nil, fmt.Errorf("%w\ncontainer log:\n%s", err, h.redact(logs))
 	}
 	return srv, nil
+}
+
+// containerLabel is the label every container of this run carries. In CI the
+// job sets VOICE_CHECK_RUN to something unique to the run, and its clean-up
+// step removes by that label, so that it can never remove the container of
+// another job on the same host.
+func containerLabel() string {
+	run := os.Getenv("VOICE_CHECK_RUN")
+	if run == "" {
+		run = "local"
+	}
+	return "conch-voice-check=" + run
 }
 
 func randByte() byte {
@@ -780,14 +966,43 @@ func (s *livekitServer) stop(ctx context.Context) error {
 	return nil
 }
 
-// remove removes the container, running or not. It is safe to call twice.
+// remove removes the container, running or not, by its id. It is safe to call
+// twice. When docker run never reported an id (it was interrupted), the id is
+// looked up by the name and label this run gave the container.
 func (s *livekitServer) remove() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, _ = docker(ctx, "rm", "-f", s.name)
+	id := s.id
+	if id == "" {
+		out, _ := docker(ctx, "ps", "-aq", "--no-trunc", "--filter", "name=^/"+s.name+"$", "--filter", "label="+containerLabel())
+		id = lastField(out)
+	}
+	if id != "" {
+		_, _ = docker(ctx, "rm", "-f", id)
+	}
+}
+
+// lastField is the last whitespace-separated word of s.
+func lastField(s string) string {
+	f := strings.Fields(s)
+	if len(f) == 0 {
+		return ""
+	}
+	return f[len(f)-1]
 }
 
 // ---------------------------------------------------------------- lk download
+
+// errUnreachable marks a download that failed for want of a network: the one
+// failure of fetchLK that is a reason to skip.
+var errUnreachable = errors.New("the download could not be completed")
+
+// checksumError is a downloaded file that is not the one pinned in this
+// file. That is evidence of tampering or of a wrong pin, never of a missing
+// network, so the run fails on it everywhere and does not skip.
+type checksumError struct{ msg string }
+
+func (e *checksumError) Error() string { return e.msg }
 
 // fetchLK downloads the pinned lk release, checks its SHA-256 against the
 // sum written in this file, and extracts the lk binary into dir.
@@ -804,19 +1019,22 @@ func fetchLK(ctx context.Context, dir string) (string, error) {
 	}
 	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download lk: %w", unwrapURLError(err))
+		return "", fmt.Errorf("download lk: %w: %w", errUnreachable, unwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 500 {
+		return "", fmt.Errorf("download lk: %w: HTTP %d", errUnreachable, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download lk: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("download lk: the pinned release URL answered HTTP %d", resp.StatusCode)
 	}
 	archive, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 	if err != nil {
-		return "", fmt.Errorf("download lk: %w", err)
+		return "", fmt.Errorf("download lk: %w: %w", errUnreachable, err)
 	}
 	sum := sha256.Sum256(archive)
 	if got := hex.EncodeToString(sum[:]); got != want {
-		return "", fmt.Errorf("lk %s archive has SHA-256 %s, want %s: refusing to run it", lkVersion, got, want)
+		return "", &checksumError{fmt.Sprintf("lk %s archive has SHA-256 %s, want %s: refusing to run it", lkVersion, got, want)}
 	}
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -877,9 +1095,13 @@ func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*head
 	}
 	// A throwaway key pair LiveKit has never heard of: lk signs its own token
 	// with it, and the relay replaces that token before LiveKit sees it.
-	cmd := exec.Command(lkBin, "--url", rl.url(), "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000", // #nosec G204 -- the pinned lk binary this program downloaded
+	cmd := groupStart(lkBin, "--url", rl.url(), "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000",
 		"room", "join", "--identity", "relay-placeholder", "--publish", oggPath, "relay-placeholder-room")
-	cmd.Env = append(cleanEnv(), "HOME="+dir, "XDG_CONFIG_HOME="+filepath.Join(dir, "config"))
+	// lk reads livekit.toml from its working directory and LIVEKIT_* from its
+	// environment. It gets an empty directory of its own and PATH, HOME and
+	// TMPDIR, and nothing else of the caller's.
+	cmd.Dir = dir
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir}
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -891,16 +1113,23 @@ func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*head
 	h.onCleanup(hl.stop)
 	h.mu.Lock()
 	h.logs = append(h.logs, namedFile{"lk output", logPath, false})
+	h.headless = append(h.headless, hl)
 	h.mu.Unlock()
 	return hl, nil
 }
 
 func (hl *headless) stop() {
-	if hl.cmd.Process != nil {
-		_ = hl.cmd.Process.Kill()
-	}
+	_ = killGroup(hl.cmd)
 	<-hl.done
 	hl.relay.Close()
+}
+
+// registerTokens makes the tokens LiveKit sent this participant known to the
+// leak scan.
+func (hl *headless) registerTokens(h *harness) {
+	for _, t := range hl.relay.issuedTokens() {
+		h.secret("a LiveKit-issued token", t)
+	}
 }
 
 func (hl *headless) exited() bool {

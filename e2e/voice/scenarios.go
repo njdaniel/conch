@@ -2,16 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// refused joins LiveKit with token and requires LiveKit to turn it away
+// refusedRoomGone joins LiveKit with token and requires LiveKit to turn it away
 // because the room no longer exists. A join that is refused for another
 // reason (an expired token is 401) would pass the test for the wrong reason,
 // so the answer is checked, not only the refusal.
@@ -29,11 +32,39 @@ func (l *live) refusedRoomGone(ctx context.Context, what, token string) error {
 
 func (l *live) rotations() (int, error) { return l.auditCount(store.AuditVoiceRoomRotated, "", "") }
 
+// expectRotation requires exactly one more voice_room_rotated row than before,
+// for the channel, written by the system, with exactly this reason and no
+// room name.
+func (l *live) expectRotation(what string, before int, subject, reason string, within time.Duration) error {
+	if err := waitFor(what+": one more voice_room_rotated row", within, func() (bool, string) {
+		n, err := l.rotations()
+		if err != nil {
+			return false, err.Error()
+		}
+		return n == before+1, fmt.Sprintf("%d voice_room_rotated rows, want %d", n, before+1)
+	}); err != nil {
+		return err
+	}
+	rows, err := l.d.auditRows(store.AuditVoiceRoomRotated)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("%s: no voice_room_rotated row", what)
+	}
+	last := rows[len(rows)-1]
+	if last.Actor != "system" || last.Subject != subject || last.Detail != "reason="+reason {
+		return fmt.Errorf("%s: voice_room_rotated row has actor %q subject %q detail %q; want system, %s, \"reason=%s\"", what, last.Actor, last.Subject, last.Detail, subject, reason)
+	}
+	return nil
+}
+
 // ---- scenario 2: removing a member who was issued a session rotates the room
 
 func (l *live) removed(ctx context.Context) error {
 	h, d := l.h, l.d
 	alice, bob, oldRoom := l.alice, l.bob, l.bridgeRoom
+	bobID, aliceID := bob.id, alice.id
 
 	// Bob connects with a token conchd issues, and so is sent one by LiveKit.
 	sb, err := h.session(bob, "bridge")
@@ -67,7 +98,6 @@ func (l *live) removed(ctx context.Context) error {
 		return fmt.Errorf("control: bob rejoining with LiveKit's own token while still a member: HTTP %d %s", status, h.redact(body))
 	}
 	defer conn2.Close()
-	bobID, aliceID := bob.id, alice.id
 	if err := waitFor("LiveKit to list bob in bridge's room", 30*time.Second, func() (bool, string) {
 		ok, _, saw := l.lkHas(oldRoom, bobID)
 		return ok, saw
@@ -77,9 +107,44 @@ func (l *live) removed(ctx context.Context) error {
 	if ok, _, saw := l.lkHas(oldRoom, aliceID); !ok {
 		return fmt.Errorf("before the removal alice is not in bridge's room (%s)", saw)
 	}
+
+	// Everyone who is connected is shown, to everyone, on every surface: the
+	// REST snapshot of each, alice's socket, and bob's socket.
+	bobWS, status, err := h.openPresenceSocket(ctx, bob)
+	if err != nil {
+		return fmt.Errorf("bob opening the presence socket: HTTP %d", status)
+	}
+	for _, who := range []struct {
+		name string
+		p    *person
+	}{{"alice", alice}, {"bob", bob}} {
+		if err := waitFor("presence (REST) as "+who.name+" to list exactly alice and bob", 30*time.Second, func() (bool, string) {
+			doc, err := who.p.presence("bridge")
+			if err != nil {
+				return false, err.Error()
+			}
+			ids := presenceIDs(doc)
+			return sameIDs(ids, []int64{aliceID, bobID}), fmt.Sprintf("lists %v", ids)
+		}); err != nil {
+			return err
+		}
+	}
+	if err := l.aliceWS.waitIDs("alice's presence socket to list exactly alice and bob", 30*time.Second, aliceID, bobID); err != nil {
+		return err
+	}
+	if err := bobWS.waitIDs("bob's presence socket to list exactly alice and bob", 30*time.Second, aliceID, bobID); err != nil {
+		return err
+	}
+
 	before, err := l.rotations()
 	if err != nil {
 		return err
+	}
+	leftBefore := map[int64]int{}
+	for _, id := range []int64{aliceID, bobID} {
+		if leftBefore[id], err = l.auditCount(store.AuditVoiceLeft, l.bridgeSubject, fmt.Sprintf("principal:%d", id)); err != nil {
+			return err
+		}
 	}
 	// A token for the rejoin attempt, fresh so that it cannot be refused for
 	// having expired.
@@ -87,7 +152,7 @@ func (l *live) removed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	h.say("ok   removal set-up: alice (lk) and bob are in bridge's room; LiveKit sent bob its own token (control: it admits him while he is a member)")
+	h.say("ok   removal set-up: alice (lk) and bob are in bridge's room and shown, exactly, on every surface; LiveKit sent bob its own token (control: it admits him while he is a member)")
 
 	if err := d.operator.call(http.MethodDelete, fmt.Sprintf("/v1/channels/bridge/members/%d", bobID), nil, nil); err != nil {
 		return fmt.Errorf("remove bob from bridge: %w", err)
@@ -111,11 +176,22 @@ func (l *live) removed(ctx context.Context) error {
 		return err
 	}
 	if err := waitFor("everyone in the old room to be disconnected", 20*time.Second, func() (bool, string) {
-		inBob, _, _ := l.lkHas(oldRoom, bobID)
-		inAlice, _, _ := l.lkHas(oldRoom, aliceID)
-		return !inBob && !inAlice && conn2.closed(), fmt.Sprintf("bob in room=%v alice in room=%v bob's connection closed=%v", inBob, inAlice, conn2.closed())
+		bobGone, sawBob := l.lkGone(oldRoom, bobID)
+		aliceGone, sawAlice := l.lkGone(oldRoom, aliceID)
+		return bobGone && aliceGone && conn2.closed(), fmt.Sprintf("bob: %s; alice: %s; bob's connection closed=%v", sawBob, sawAlice, conn2.closed())
 	}); err != nil {
 		return err
+	}
+	// The removal ends bob's presence socket: he may no longer see the channel.
+	if err := waitFor("bob's presence socket to be closed by his removal", 20*time.Second, func() (bool, string) {
+		ended, _ := bobWS.closeStatus()
+		_, frames := bobWS.latest()
+		return ended, fmt.Sprintf("still open (%d frames received)", frames)
+	}); err != nil {
+		return err
+	}
+	if _, st := bobWS.closeStatus(); st != websocket.StatusPolicyViolation {
+		return fmt.Errorf("bob's presence socket was closed with status %d, want %d (policy violation: no longer a member)", st, websocket.StatusPolicyViolation)
 	}
 	// The headless client has done its part; its retries would only hit the
 	// same refusal.
@@ -138,25 +214,30 @@ func (l *live) removed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := waitFor("LiveKit to list alice in the new room", 60*time.Second, func() (bool, string) {
+	l.aliceHL, l.bridgeRoom = hl, newRoom
+	if err := waitForOrFail("LiveKit to list alice in the new room", 60*time.Second, func() (bool, string, error) {
 		ok, _, saw := l.lkHas(newRoom, aliceID)
 		if !ok && hl.exited() {
-			return false, "lk exited: " + hl.tail(h)
+			return false, "", errors.New("lk exited: " + hl.tail(h))
 		}
-		return ok, saw
+		return ok, saw, nil
 	}); err != nil {
 		return err
 	}
 	if rooms, err := l.lkRooms(); err != nil || contains(rooms, oldRoom) || !contains(rooms, newRoom) {
 		return fmt.Errorf("after rejoining: old room present=%v new room present=%v (%s)", contains(rooms, oldRoom), contains(rooms, newRoom), exitText(err))
 	}
-	if err := waitFor("alice's presence to show her in the new room", 30*time.Second, func() (bool, string) {
-		listed, _, saw, err := presenceOf(alice, aliceID)
+	if err := waitFor("alice's presence to show exactly her, in the new room", 30*time.Second, func() (bool, string) {
+		doc, err := alice.presence("bridge")
 		if err != nil {
 			return false, err.Error()
 		}
-		return listed, saw
+		ids := presenceIDs(doc)
+		return sameIDs(ids, []int64{aliceID}), fmt.Sprintf("lists %v", ids)
 	}); err != nil {
+		return err
+	}
+	if err := l.aliceWS.waitIDs("alice's presence socket to follow her to the new room", 30*time.Second, aliceID); err != nil {
 		return err
 	}
 	out, err := alice.cli.run("", "voice", "status", "bridge")
@@ -164,28 +245,225 @@ func (l *live) removed(ctx context.Context) error {
 		return fmt.Errorf("conch voice status as alice after the rotation: exit=%s output=%q, want her own line", exitText(err), strings.TrimSpace(out))
 	}
 
-	// Audit: one rotation, with the reason and no room name.
-	if err := l.waitAudit("one voice_room_rotated row for bridge", store.AuditVoiceRoomRotated, l.bridgeSubject, "system", 1); err != nil {
+	// Audit: one rotation, with the reason and no room name; and the people
+	// who were in the old room are recorded as having left it.
+	if err := l.expectRotation("bob's removal", before, l.bridgeSubject, store.VoiceRotateMemberRemoved, 30*time.Second); err != nil {
 		return err
 	}
-	rows, err := d.auditRows(store.AuditVoiceRoomRotated)
-	if err != nil {
-		return err
+	for _, id := range []int64{aliceID, bobID} {
+		actor := fmt.Sprintf("principal:%d", id)
+		if err := waitFor(fmt.Sprintf("a voice_left row for principal %d after the rotation", id), 30*time.Second, func() (bool, string) {
+			n, err := l.auditCount(store.AuditVoiceLeft, l.bridgeSubject, actor)
+			if err != nil {
+				return false, err.Error()
+			}
+			return n == leftBefore[id]+1, fmt.Sprintf("%d voice_left rows, was %d", n, leftBefore[id])
+		}); err != nil {
+			return err
+		}
 	}
-	if len(rows) != before+1 || rows[len(rows)-1].Detail != "reason=member_removed" {
-		return fmt.Errorf("voice_room_rotated rows: %d (was %d), last detail %q; want one new row with detail \"reason=member_removed\"", len(rows), before, rows[len(rows)-1].Detail)
-	}
-	h.say("ok   removed: bob's removal disconnected everyone and deleted the old room; both his tokens (conchd's, LiveKit's) are refused 404; alice got a new room and is shown there; one voice_room_rotated reason=member_removed")
+	h.say("ok   removed: bob's removal disconnected everyone and deleted the old room, closed his presence socket (policy violation); both his tokens (conchd's, LiveKit's) are refused 404; alice got a new room and is shown there; one voice_room_rotated reason=member_removed; voice_left for alice and bob")
 	return nil
 }
 
-// ---- scenario 3: removing a member who was never issued a session
+// ---- scenario 3: removing a member who holds a session but never connected
+
+func (l *live) removedNotConnected(ctx context.Context) error {
+	h, d := l.h, l.d
+	dan, err := h.newPerson(d, "dan", "bridge")
+	if err != nil {
+		return err
+	}
+	sd, err := h.session(dan, "bridge")
+	if err != nil {
+		return err
+	}
+	room := sd.Rooms[0].Room
+	// Control: the room exists, so the refusal below is the rotation's doing.
+	if rooms, err := l.lkRooms(); err != nil || !contains(rooms, room) {
+		return fmt.Errorf("control: bridge's room is not in LiveKit before the removal (%s)", exitText(err))
+	}
+	before, err := l.rotations()
+	if err != nil {
+		return err
+	}
+	if err := d.operator.call(http.MethodDelete, fmt.Sprintf("/v1/channels/bridge/members/%d", dan.id), nil, nil); err != nil {
+		return err
+	}
+	if err := l.refusedRoomGone(ctx, "the token of a removed holder who never connected", sd.Rooms[0].Token); err != nil {
+		return err
+	}
+	if err := l.expectRotation("dan's removal", before, l.bridgeSubject, store.VoiceRotateMemberRemoved, 30*time.Second); err != nil {
+		return err
+	}
+	l.aliceHL.stop()
+	h.say("ok   removed while not connected: a holder who never joined still rotates the room, and his token is refused")
+	return nil
+}
+
+// ---- scenario 4: every other way of losing the right to be in a room
+
+// rotationCase is one way a holder stops being entitled. Each runs in a
+// channel of its own: a member gets a session, connects, is sent LiveKit's own
+// token, and then the thing happens.
+type rotationCase struct {
+	name   string
+	reason string
+	// act makes it happen; nil for the credential that expires by itself.
+	act func(l *live, p *person) error
+	// expires, when set, gives the holder a credential that stops being live
+	// this long after it was made.
+	expires time.Duration
+	// extraCredential gives the holder a second credential, so that
+	// revoke-all has more than the one in use to revoke.
+	extraCredential bool
+}
+
+func (l *live) rotationCases() []rotationCase {
+	op := func(method, path string) error { return l.d.operator.call(method, path, nil, nil) }
+	return []rotationCase{
+		{name: "principal-disabled", reason: store.VoiceRotatePrincipalDisabled, act: func(l *live, p *person) error {
+			return op(http.MethodPost, fmt.Sprintf("/v1/principals/%d/disable", p.id))
+		}},
+		{name: "credential-revoked", reason: store.VoiceRotateRevoked, act: func(l *live, p *person) error {
+			return op(http.MethodDelete, fmt.Sprintf("/v1/credentials/%d", p.credID))
+		}},
+		{name: "all-credentials-revoked", reason: store.VoiceRotateRevoked, extraCredential: true, act: func(l *live, p *person) error {
+			return op(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", p.id))
+		}},
+	}
+}
+
+func (l *live) rotationScenario(ctx context.Context) error {
+	for _, c := range l.rotationCases() {
+		if err := l.rotationCase(ctx, c); err != nil {
+			return fmt.Errorf("%s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// rotationCase runs one case. For a case with act == nil it waits for the
+// sweep to notice, with no request at all (the credential simply expires).
+func (l *live) rotationCase(ctx context.Context, c rotationCase) error {
+	h, d := l.h, l.d
+	chName := "rot-" + c.name
+	chID, err := d.createChannel(chName)
+	if err != nil {
+		return err
+	}
+	subject := fmt.Sprintf("channel:%d", chID)
+	opts := personOpts{noCLI: true}
+	if c.expires > 0 {
+		t := time.Now().Add(c.expires)
+		opts.expires = &t
+	}
+	holder, err := h.newPersonWith(d, "holder-"+c.name, opts, chName)
+	if err != nil {
+		return err
+	}
+	if c.extraCredential {
+		var extra schema.CreateCredentialResponseV1
+		if err := d.operator.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", holder.id), schema.CreateCredentialRequestV1{Label: "second"}, &extra); err != nil {
+			return err
+		}
+		h.secret("a second conch credential", extra.Token)
+	}
+	sess, err := h.session(holder, chName)
+	if err != nil {
+		return err
+	}
+	room, conchdToken := sess.Rooms[0].Room, sess.Rooms[0].Token
+	conn1, status, body, err := dialSignal(ctx, l.srv.wsURL, conchdToken)
+	if err != nil {
+		return fmt.Errorf("the holder joining with conchd's token: HTTP %d %s", status, h.redact(body))
+	}
+	defer conn1.Close()
+	var lkToken string
+	if err := waitFor("LiveKit to send the holder a token of its own", 30*time.Second, func() (bool, string) {
+		for _, t := range conn1.issuedTokens() {
+			if t != conchdToken {
+				lkToken = t
+				return true, ""
+			}
+		}
+		return false, "no token of LiveKit's yet"
+	}); err != nil {
+		return err
+	}
+	h.secret("a LiveKit-issued token", lkToken)
+	// Control: LiveKit's token admits the holder while they are entitled.
+	conn2, status, body, err := dialSignal(ctx, l.srv.wsURL, lkToken)
+	if err != nil {
+		return fmt.Errorf("control: the holder rejoining with LiveKit's own token while entitled: HTTP %d %s", status, h.redact(body))
+	}
+	defer conn2.Close()
+	if err := waitFor("LiveKit to list the holder", 30*time.Second, func() (bool, string) {
+		ok, _, saw := l.lkHas(room, holder.id)
+		return ok, saw
+	}); err != nil {
+		return err
+	}
+	before, err := l.rotations()
+	if err != nil {
+		return err
+	}
+	within := 30 * time.Second
+	if c.act != nil {
+		if err := c.act(l, holder); err != nil {
+			return err
+		}
+	} else {
+		// Nothing is done: the credential expires, and the sweep (at most
+		// 30 s apart) is the only thing that can notice.
+		within = 75 * time.Second
+	}
+	if c.act != nil {
+		if err := l.refusedRoomGone(ctx, "LiveKit's own token for the holder", lkToken); err != nil {
+			return err
+		}
+	}
+	if err := l.expectRotation(c.name, before, subject, c.reason, within); err != nil {
+		return err
+	}
+	if err := l.refusedRoomGone(ctx, "LiveKit's own token for the holder", lkToken); err != nil {
+		return err
+	}
+	if err := l.refusedRoomGone(ctx, "the token conchd issued the holder", conchdToken); err != nil {
+		return err
+	}
+	if err := waitFor("the holder to be disconnected and the room gone", 20*time.Second, func() (bool, string) {
+		gone, saw := l.lkGone(room, holder.id)
+		return gone && conn2.closed(), fmt.Sprintf("%s; connection closed=%v", saw, conn2.closed())
+	}); err != nil {
+		return err
+	}
+	h.say("ok   rotation (%s): LiveKit's token and conchd's are refused 404, the holder is disconnected, one voice_room_rotated reason=%s", c.name, c.reason)
+	return nil
+}
+
+// credentialExpires: a credential that expires with no request at all is
+// noticed by the sweep alone. The wait it needs doubles as the sweep after
+// which the never-issued check is repeated.
+func (l *live) credentialExpires(ctx context.Context) error {
+	if err := l.rotationCase(ctx, rotationCase{name: "credential-expired", reason: store.VoiceRotateExpired, expires: 12 * time.Second}); err != nil {
+		return fmt.Errorf("credential-expired: %w", err)
+	}
+	if l.afterSweep != nil {
+		return l.afterSweep()
+	}
+	return nil
+}
+
+// ---- scenario 5: removing a member who was never issued a session
 
 func (l *live) neverIssued(ctx context.Context) error {
 	h, d := l.h, l.d
-	if _, err := d.createChannel("calm"); err != nil {
+	calmID, err := d.createChannel("calm")
+	if err != nil {
 		return err
 	}
+	calmSubject := fmt.Sprintf("channel:%d", calmID)
 	fay, err := h.newPerson(d, "fay", "calm")
 	if err != nil {
 		return err
@@ -226,20 +504,17 @@ func (l *live) neverIssued(ctx context.Context) error {
 			return err
 		}
 	}
-	before, err := l.rotations()
-	if err != nil {
-		return err
-	}
 	if err := d.operator.call(http.MethodDelete, fmt.Sprintf("/v1/channels/calm/members/%d", hal.id), nil, nil); err != nil {
 		return fmt.Errorf("remove hal from calm: %w", err)
 	}
 	check := func(when string) error {
-		after, err := l.rotations()
+		// Other channels rotate while this runs; calm must never.
+		after, err := l.auditCount(store.AuditVoiceRoomRotated, calmSubject, "")
 		if err != nil {
 			return err
 		}
-		if after != before {
-			return fmt.Errorf("%s: %d voice_room_rotated rows, were %d: removing a member who never had a session rotated a room", when, after, before)
+		if after != 0 {
+			return fmt.Errorf("%s: %d voice_room_rotated rows for calm: removing a member who never had a session rotated its room", when, after)
 		}
 		rooms, err := l.lkRooms()
 		if err != nil {
@@ -253,35 +528,38 @@ func (l *live) neverIssued(ctx context.Context) error {
 				return fmt.Errorf("%s: %s was disconnected (%s)", when, p.name, saw)
 			}
 		}
+		again, err := h.session(fay, "calm")
+		if err != nil {
+			return err
+		}
+		if again.Rooms[0].Room != calmRoom {
+			return fmt.Errorf("%s: fay was given a different room after the removal of someone who never had a session", when)
+		}
 		return nil
 	}
 	// The hook has run by the time the removal is answered.
 	if err := check("right after the removal"); err != nil {
 		return err
 	}
-	// Nothing is the thing being checked, so there is no event to wait for.
-	// A few poller passes (500 ms each) give a wrongly scheduled rotation or
-	// removal time to show up.
-	time.Sleep(3 * time.Second)
-	if err := check("after several poller passes"); err != nil {
-		return err
-	}
-	again, err := h.session(fay, "calm")
-	if err != nil {
-		return err
-	}
-	if again.Rooms[0].Room != calmRoom {
-		return fmt.Errorf("fay was given a different room after the removal of someone who never had a session")
-	}
-	h.say("ok   never issued: removing hal, who never had a session, rotated nothing and disconnected nobody")
+	// The same must hold after a sweep (the poller's 30-second pass over
+	// every stored room). The run waits for one anyway, in the expiry case
+	// below, which can only be noticed by a sweep that starts after this
+	// removal; l.afterSweep is called then, so this check adds no wait of
+	// its own.
+	l.afterSweep = func() error { return check("after a sweep") }
+	h.say("ok   never issued: removing hal, who never had a session, rotated nothing and disconnected nobody (checked again after a sweep below)")
 	return nil
 }
 
-// ---- scenario 4: LiveKit stopped
+// ---- scenario 6: LiveKit stopped
 
 func (l *live) liveKitDown(ctx context.Context) error {
 	h := l.h
 	fay := l.fay
+	outagesBefore, err := l.auditCount(store.AuditVoiceEnforcementUnavailable, "", "")
+	if err != nil {
+		return err
+	}
 	if err := l.srv.stop(ctx); err != nil {
 		return err
 	}
@@ -289,20 +567,14 @@ func (l *live) liveKitDown(ctx context.Context) error {
 	if err := expectDown(fay, "calm"); err != nil {
 		return err
 	}
-	if err := waitFor("a voice_enforcement_unavailable audit row", 30*time.Second, func() (bool, string) {
-		n, err := l.auditCount(store.AuditVoiceEnforcementUnavailable, "", "")
-		if err != nil {
-			return false, err.Error()
-		}
-		return n >= 1, fmt.Sprintf("%d rows", n)
-	}); err != nil {
+	if err := l.waitAudit("exactly one voice_enforcement_unavailable row for the outage", store.AuditVoiceEnforcementUnavailable, "", "", outagesBefore+1); err != nil {
 		return err
 	}
 	// Messaging does not notice.
 	if out, err := fay.cli.run("", "send", "calm", "still here"); err != nil {
 		return fmt.Errorf("posting a message with LiveKit down: %w (%s)", err, strings.TrimSpace(out))
 	}
-	h.say("ok   LiveKit down: session answers voice_unavailable, presence says unavailable, conch voice status exits nonzero, voice_enforcement_unavailable audited, messaging works")
+	h.say("ok   LiveKit down: session answers voice_unavailable, presence says unavailable, conch voice status exits nonzero, voice_enforcement_unavailable audited once, messaging works")
 	cfg := l.srv.settings()
 	return h.runDogfood("voice configured, LiveKit container stopped",
 		"CONCHD_LIVEKIT_URL="+cfg.url, "CONCHD_LIVEKIT_API_KEY="+cfg.key, "CONCHD_LIVEKIT_API_SECRET="+cfg.secret)

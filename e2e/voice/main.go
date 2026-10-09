@@ -18,9 +18,16 @@
 //     a member who was never issued a session rotates nothing, and LiveKit is
 //     stopped. LiveKit itself is asked for ground truth throughout.
 //
-// With no Docker, or no way to pull the image or lk, the live half is skipped
-// with one line and the program exits 0, unless CI is set: then a skip is a
-// failure. It prints one "voice-check: PASS" line when everything ran.
+// Also checked throughout: the join token's own claims (claims.go); that no
+// token, secret or room name appears in anything conchd sends to a client
+// (every response header and body, every presence frame), in its log, in its
+// audit log, in lk's output or in this program's (scan.go).
+//
+// With no Docker, or no network to pull the image or lk, the live half is
+// skipped with one line and the program exits 0, unless CI is set: then a skip
+// is a failure. An image or lk that is not the pinned one fails everywhere. It
+// prints one "voice-check: PASS" line when everything ran. A SIGINT or SIGTERM
+// stops the run and removes what it started.
 package main
 
 import (
@@ -36,7 +43,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -50,22 +56,35 @@ func realMain() int {
 		fmt.Fprintln(os.Stderr, "voice-check: FAIL:", err)
 		return 1
 	}
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	// A signal cancels stopCtx and nothing else. Every child runs under it and
+	// every wait watches it, so the run unwinds on its own path and teardown
+	// below runs once, after nothing is in flight. (Tearing down from the
+	// handler raced a container being started, and a build in progress.)
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sig
-		h.teardown()
-		os.Exit(130)
+		for n := 1; ; n++ {
+			<-sigs
+			switch n {
+			case 1:
+				fmt.Fprintln(os.Stderr, "voice-check: interrupted; cleaning up")
+				stopCancel()
+			case 2:
+				fmt.Fprintln(os.Stderr, "voice-check: still cleaning up; signal again to give up (a container may be left behind)")
+			default:
+				fmt.Fprintln(os.Stderr, "voice-check: giving up on clean-up")
+				os.Exit(130)
+			}
+		}
 	}()
 
-	ctx := context.Background()
 	start := time.Now()
-	skipped, err := run(ctx, h)
-	if err == nil {
-		err = h.scanAll()
-	}
+	skipped, err := guardedRun(h)
 	h.teardown()
 	switch {
+	case stopCtx.Err() != nil:
+		fmt.Fprintln(os.Stderr, "voice-check: interrupted")
+		return 130
 	case err != nil:
 		fmt.Fprintln(os.Stderr, "voice-check: FAIL:", h.redact(err.Error()))
 		return 1
@@ -75,6 +94,21 @@ func realMain() int {
 	}
 	fmt.Printf("voice-check: PASS in %s\n", time.Since(start).Round(time.Second))
 	return 0
+}
+
+// guardedRun is run and the final scan, turning a panic into a failure so
+// that realMain still tears everything down.
+func guardedRun(h *harness) (skipped string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	skipped, err = run(stopCtx, h)
+	if err == nil {
+		err = h.scanAll()
+	}
+	return skipped, err
 }
 
 // inCI is true when the job says so. In CI a skip is a failure.
@@ -93,7 +127,10 @@ func run(ctx context.Context, h *harness) (skipped string, err error) {
 	}
 
 	h.say("== live half (LiveKit in Docker, headless participant via lk) ==")
-	lv, reason := prepareLive(ctx, h)
+	lv, reason, err := prepareLive(ctx, h)
+	if err != nil {
+		return "", err
+	}
 	if reason != "" {
 		if inCI() {
 			return "", fmt.Errorf("live half cannot run in CI: %s", reason)
@@ -244,40 +281,72 @@ type live struct {
 	// Set by the first scenario, used by the later ones.
 	alice, bob, carol *person
 	fay               *person
+	bot               *person
+	aliceWS           *presenceSocket
+	afterSweep        func() error // checks to repeat once a sweep has run
 	bridgeRoom        string
 	bridgeSubject     string
 	aliceHL           *headless
 }
 
-// prepareLive checks what the live half needs and returns a reason to skip
-// when it cannot run.
-func prepareLive(ctx context.Context, h *harness) (*live, string) {
+// prepareLive checks what the live half needs. It returns a reason to skip
+// when the machine cannot run it (no Docker, no network), and an error when it
+// could but something is wrong: a pulled image or a downloaded lk that is not
+// the one pinned in this program is not a missing network, and fails
+// everywhere, CI or not.
+func prepareLive(ctx context.Context, h *harness) (*live, string, error) {
 	if goos := runtime.GOOS; goos != "linux" {
-		return nil, "the live half runs LiveKit on the Docker host network, which only Linux has (this is " + goos + ")"
+		return nil, "the live half runs LiveKit on the Docker host network, which only Linux has (this is " + goos + ")", nil
 	}
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if out, err := docker(pctx, "info", "--format", "{{.ServerVersion}}"); err != nil {
-		return nil, "Docker is not available: " + oneLine(out, err)
+		return nil, "Docker is not available: " + oneLine(out, err), nil
 	}
 	ictx, icancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer icancel()
 	if out, err := docker(ictx, "pull", "--quiet", livekitImage); err != nil {
-		return nil, "cannot pull the LiveKit image: " + oneLine(out, err)
+		if ctx.Err() != nil {
+			return nil, "", errInterrupted
+		}
+		if looksOffline(out) {
+			return nil, "cannot pull the LiveKit image (no network?): " + oneLine(out, err), nil
+		}
+		return nil, "", fmt.Errorf("cannot pull the pinned LiveKit image %s: %s", livekitImage, oneLine(out, err))
 	}
 	dir, err := h.mkdir("lkbin-")
 	if err != nil {
-		return nil, err.Error()
+		return nil, "", err
 	}
 	lkBin, err := fetchLK(ictx, dir)
 	if err != nil {
-		return nil, "cannot get lk " + lkVersion + ": " + err.Error()
+		if ctx.Err() != nil {
+			return nil, "", errInterrupted
+		}
+		if errors.Is(err, errUnreachable) {
+			return nil, "cannot download lk " + lkVersion + " (no network?): " + err.Error(), nil
+		}
+		return nil, "", fmt.Errorf("lk %s: %w", lkVersion, err)
 	}
 	ogg := filepath.Join(dir, "silence.ogg")
 	if err := writeSilentOpus(ogg, 900); err != nil {
-		return nil, err.Error()
+		return nil, "", err
 	}
-	return &live{h: h, lkBin: lkBin, ogg: ogg}, ""
+	return &live{h: h, lkBin: lkBin, ogg: ogg}, "", nil
+}
+
+// looksOffline reports whether a failed pull is about reaching the registry,
+// as opposed to what the registry answered.
+func looksOffline(out string) bool {
+	out = strings.ToLower(out)
+	for _, w := range []string{"no such host", "timeout", "timed out", "connection refused", "network is unreachable",
+		"temporary failure", "tls handshake", "dial tcp", "no route to host", "i/o timeout", "could not resolve",
+		"unexpected eof", "toomanyrequests", "rate limit", "deadline exceeded", "cannot connect to the docker daemon"} {
+		if strings.Contains(out, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func oneLine(out string, err error) string {
@@ -312,7 +381,10 @@ func (l *live) run(ctx context.Context) error {
 	}{
 		{"joined, transmitting, outsider", l.joinedTransmittingOutsider},
 		{"removed (room rotation)", l.removed},
+		{"removed while not connected", l.removedNotConnected},
+		{"other ways of losing the room", l.rotationScenario},
 		{"never issued", l.neverIssued},
+		{"credential expiring by itself", l.credentialExpires},
 		{"LiveKit down", l.liveKitDown},
 	}
 	for _, s := range steps {
@@ -346,7 +418,30 @@ func presenceOf(viewer *person, id int64) (listed, talking bool, saw string, err
 	return listed, talking, fmt.Sprintf("available=%v principals=%v", doc.Available, ids), nil
 }
 
-// lkHas asks LiveKit whether identity p<id> is in room.
+// lkGone reports that LiveKit itself says identity p<id> is not in room:
+// either it listed the room's participants and they are not among them, or
+// it answered that the room does not exist. A call that failed for any other
+// reason says nothing, and is not taken for absence.
+func (l *live) lkGone(room string, id int64) (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	parts, err := l.adm.listParticipants(ctx, room)
+	if roomNotFound(err) {
+		return true, "the room does not exist"
+	}
+	if err != nil {
+		return false, "LiveKit could not be asked: " + err.Error()
+	}
+	for _, p := range parts {
+		if p.Identity == identity(id) {
+			return false, "LiveKit lists them in the room"
+		}
+	}
+	return true, "LiveKit does not list them in the room"
+}
+
+// lkHas asks LiveKit whether identity p<id> is in room. False means only
+// "not seen": use lkGone to assert that someone is absent.
 func (l *live) lkHas(room string, id int64) (bool, lkParticipant, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -419,239 +514,4 @@ func (l *live) waitAudit(what, action, subject, actor string, want int) error {
 func (l *live) joinHeadless(grant schema.VoiceRoomGrant) (*headless, error) {
 	hostPort := strings.TrimPrefix(l.srv.wsURL, "ws://")
 	return l.h.startHeadless(l.lkBin, l.ogg, hostPort, grant.Token)
-}
-
-// ---- scenario 1: joined, transmitting, outsider
-
-func (l *live) joinedTransmittingOutsider(ctx context.Context) error {
-	h, d := l.h, l.d
-	bridgeID, err := d.createChannel("bridge")
-	if err != nil {
-		return err
-	}
-	if _, err := d.createChannel("side"); err != nil {
-		return err
-	}
-	bridgeSubject := fmt.Sprintf("channel:%d", bridgeID)
-	alice, err := h.newPerson(d, "alice", "bridge")
-	if err != nil {
-		return err
-	}
-	bob, err := h.newPerson(d, "bob", "bridge")
-	if err != nil {
-		return err
-	}
-	carol, err := h.newPerson(d, "carol", "side")
-	if err != nil {
-		return err
-	}
-
-	// Two humans get sessions.
-	sa, err := h.session(alice, "bridge")
-	if err != nil {
-		return err
-	}
-	if _, err := h.session(bob, "bridge"); err != nil {
-		return err
-	}
-	if g := sa.Rooms[0]; sa.Identity != identity(alice.id) || sa.LivekitURL != l.srv.wsURL || !g.CanPublish {
-		return fmt.Errorf("alice's session: identity %q (want %q), url %q (want %q), can_publish=%v (want true)", sa.Identity, identity(alice.id), sa.LivekitURL, l.srv.wsURL, g.CanPublish)
-	}
-	bridgeRoom := sa.Rooms[0].Room
-	h.room(bridgeRoom)
-	h.say("ok   alice and bob each got a session for bridge (schema-valid, identity p<id>, publish allowed)")
-
-	// While LiveKit is up the session endpoint must not say it is down:
-	// asked again, it answers again.
-	if _, err := h.session(bob, "bridge"); err != nil {
-		return fmt.Errorf("session endpoint while LiveKit is up: %w", err)
-	}
-
-	// A headless participant joins as alice on the token conchd issued.
-	hl, err := l.joinHeadless(sa.Rooms[0])
-	if err != nil {
-		return err
-	}
-	l.alice, l.bob, l.carol, l.bridgeRoom, l.bridgeSubject, l.aliceHL = alice, bob, carol, bridgeRoom, bridgeSubject, hl
-	aliceID := alice.id
-	if err := waitFor("LiveKit to list alice in bridge's room", 60*time.Second, func() (bool, string) {
-		ok, _, saw := l.lkHas(bridgeRoom, aliceID)
-		if !ok && hl.exited() {
-			return false, "lk exited: " + hl.tail(h)
-		}
-		return ok, saw
-	}); err != nil {
-		return err
-	}
-	if err := waitFor("bob's presence to show alice", 30*time.Second, func() (bool, string) {
-		listed, _, saw, err := presenceOf(bob, aliceID)
-		if err != nil {
-			return false, err.Error()
-		}
-		return listed, saw
-	}); err != nil {
-		return err
-	}
-	want := fmt.Sprintf("%d ", aliceID)
-	if err := waitFor("conch voice status (as bob) to list alice", 30*time.Second, func() (bool, string) {
-		out, err := bob.cli.run("", "voice", "status", "bridge")
-		if err != nil {
-			return false, oneLine(out, err)
-		}
-		for _, line := range strings.Split(out, "\n") {
-			if strings.HasPrefix(line, want) {
-				return true, ""
-			}
-		}
-		return false, strings.TrimSpace(out)
-	}); err != nil {
-		return err
-	}
-	// Presence shows exactly who is connected: alice, and nobody who holds
-	// a session without having joined (bob) or is not in the channel (carol).
-	doc, err := bob.presence("bridge")
-	if err != nil {
-		return err
-	}
-	var shown []int64
-	for _, room := range doc.Rooms {
-		for _, p := range room.Participants {
-			shown = append(shown, p.PrincipalID)
-		}
-	}
-	if len(shown) != 1 || shown[0] != aliceID {
-		return fmt.Errorf("presence for bridge lists principals %v, want alice (%d) alone", shown, aliceID)
-	}
-	if err := l.waitAudit("voice_session_issued rows for bridge", store.AuditVoiceSessionIssued, bridgeSubject, "", 3); err != nil {
-		return err
-	}
-	if err := l.waitAudit("alice's voice_joined row", store.AuditVoiceJoined, bridgeSubject, fmt.Sprintf("principal:%d", aliceID), 1); err != nil {
-		return err
-	}
-	h.say("ok   joined: lk joined as alice on conchd's token; LiveKit, presence and conch voice status agree; audit has voice_session_issued and voice_joined")
-
-	// Transmitting. lk publishes its audio track unmuted. Muting and
-	// unmuting is done at LiveKit's side, which is all conchd can see of a
-	// key press: the muted state of a published microphone track.
-	actor := fmt.Sprintf("principal:%d", aliceID)
-	var track lkTrack
-	if err := waitFor("alice's microphone track in LiveKit", 30*time.Second, func() (bool, string) {
-		ok, p, saw := l.lkHas(bridgeRoom, aliceID)
-		if !ok {
-			return false, saw
-		}
-		t, has := p.mic()
-		track = t
-		return has, "alice is in the room but has no microphone track"
-	}); err != nil {
-		return err
-	}
-	setMuted := func(muted bool) error {
-		mctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if err := l.adm.mute(mctx, bridgeRoom, identity(aliceID), track.SID, muted); err != nil {
-			return err
-		}
-		return waitFor(fmt.Sprintf("LiveKit to report alice's track muted=%v", muted), 15*time.Second, func() (bool, string) {
-			ok, p, saw := l.lkHas(bridgeRoom, aliceID)
-			if !ok {
-				return false, saw
-			}
-			t, _ := p.mic()
-			return t.Muted == muted, fmt.Sprintf("muted=%v", t.Muted)
-		})
-	}
-	seen := func(talking bool) error {
-		return waitFor(fmt.Sprintf("bob's presence to show alice talking=%v", talking), 30*time.Second, func() (bool, string) {
-			listed, tk, saw, err := presenceOf(bob, aliceID)
-			if err != nil {
-				return false, err.Error()
-			}
-			return listed && tk == talking, saw + fmt.Sprintf(" listed=%v talking=%v", listed, tk)
-		})
-	}
-	// Start from muted so that the unmute is the event under test.
-	if err := setMuted(true); err != nil {
-		return err
-	}
-	if err := seen(false); err != nil {
-		return err
-	}
-	started, _ := l.auditCount(store.AuditVoiceTransmitStarted, bridgeSubject, actor)
-	stopped, _ := l.auditCount(store.AuditVoiceTransmitStopped, bridgeSubject, actor)
-	if err := setMuted(false); err != nil {
-		return err
-	}
-	if err := seen(true); err != nil {
-		return err
-	}
-	if err := l.waitAudit("a voice_transmit_started row after the unmute", store.AuditVoiceTransmitStarted, bridgeSubject, actor, started+1); err != nil {
-		return err
-	}
-	if out, err := bob.cli.run("", "voice", "status", "bridge"); err != nil || !strings.Contains(out, fmt.Sprintf("%d - talking ", aliceID)) {
-		return fmt.Errorf("conch voice status while alice is unmuted: exit=%s output=%q, want her line to say talking", exitText(err), strings.TrimSpace(out))
-	}
-	if err := setMuted(true); err != nil {
-		return err
-	}
-	if err := seen(false); err != nil {
-		return err
-	}
-	if err := l.waitAudit("a voice_transmit_stopped row after the mute", store.AuditVoiceTransmitStopped, bridgeSubject, actor, stopped+1); err != nil {
-		return err
-	}
-	// Leave her transmitting for what follows.
-	if err := setMuted(false); err != nil {
-		return err
-	}
-	if err := seen(true); err != nil {
-		return err
-	}
-	h.say("ok   transmitting: unmute shows talking and writes voice_transmit_started; mute shows quiet and writes voice_transmit_stopped")
-
-	// Outsider: carol is not in bridge.
-	if err := expectRefusal("an outsider asking for a session in bridge", carol.api, http.MethodPost, "/v1/channels/bridge/voice/session", http.StatusNotFound, "channel_not_found"); err != nil {
-		return err
-	}
-	if err := expectRefusal("anyone asking for a session in a channel that does not exist", carol.api, http.MethodPost, "/v1/channels/no-such-channel/voice/session", http.StatusNotFound, "channel_not_found"); err != nil {
-		return err
-	}
-	if err := expectRefusal("an outsider reading bridge's presence", carol.api, http.MethodGet, "/v1/channels/bridge/voice", http.StatusNotFound, "channel_not_found"); err != nil {
-		return err
-	}
-	// A token for a different room puts the holder in that room, not this one.
-	cs, err := h.session(carol, "side")
-	if err != nil {
-		return err
-	}
-	sideRoom := cs.Rooms[0].Room
-	h.room(sideRoom)
-	if sideRoom == bridgeRoom {
-		return errors.New("bridge and side were given the same room")
-	}
-	hostURL := l.srv.wsURL
-	sc, status, body, err := dialSignal(ctx, hostURL, cs.Rooms[0].Token)
-	if err != nil {
-		return fmt.Errorf("carol joining side with her own token: HTTP %d %s", status, h.redact(body))
-	}
-	h.onCleanup(sc.Close)
-	if err := waitFor("LiveKit to list carol in side's room", 30*time.Second, func() (bool, string) {
-		ok, _, saw := l.lkHas(sideRoom, carol.id)
-		return ok, saw
-	}); err != nil {
-		return err
-	}
-	if in, _, _ := l.lkHas(bridgeRoom, carol.id); in {
-		return fmt.Errorf("LiveKit lists carol in bridge's room, though her token is for side")
-	}
-	listed, _, saw, err := presenceOf(bob, carol.id)
-	if err != nil {
-		return err
-	}
-	if listed {
-		return fmt.Errorf("bridge's presence lists carol, who holds a token for another room (presence: %s)", saw)
-	}
-	sc.Close()
-	h.say("ok   outsider: refused the unknown-channel answer; a token for side puts carol in side, not in bridge (LiveKit and presence)")
-	return nil
 }

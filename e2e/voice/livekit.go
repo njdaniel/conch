@@ -88,12 +88,31 @@ func (a *lkAdmin) call(ctx context.Context, method string, video map[string]any,
 		return fmt.Errorf("livekit %s: %w", method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("livekit %s: HTTP %d: %s", method, resp.StatusCode, truncate(string(data), 200))
+		return &lkStatusError{method: method, status: resp.StatusCode, body: truncate(string(data), 200)}
 	}
 	if out == nil {
 		return nil
 	}
 	return json.Unmarshal(data, out)
+}
+
+// lkStatusError is LiveKit answering an admin call with something other than
+// 200, kept apart from a call that got no answer: "the room does not exist"
+// is a fact about LiveKit, "the call failed" is not.
+type lkStatusError struct {
+	method string
+	status int
+	body   string
+}
+
+func (e *lkStatusError) Error() string {
+	return fmt.Sprintf("livekit %s: HTTP %d: %s", e.method, e.status, e.body)
+}
+
+// roomNotFound reports whether err is LiveKit saying the room does not exist.
+func roomNotFound(err error) bool {
+	var se *lkStatusError
+	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
 // unwrapURLError drops the URL from a transport error; the URL of an admin
@@ -166,6 +185,29 @@ func (a *lkAdmin) listRooms(ctx context.Context) ([]string, error) {
 		names = append(names, r.Name)
 	}
 	return names, nil
+}
+
+// mintJoin signs a join token for identity into room with the API secret this
+// run chose: a participant conchd never issued a token to, as someone holding a
+// leaked secret could make. The token lives a minute.
+func (a *lkAdmin) mintJoin(identity, room string) (string, error) {
+	now := time.Now()
+	body, err := json.Marshal(map[string]any{
+		"iss": a.key,
+		"sub": identity,
+		"nbf": now.Add(-5 * time.Second).Unix(),
+		"exp": now.Add(time.Minute).Unix(),
+		"video": map[string]any{
+			"roomJoin": true, "room": room, "canSubscribe": true, "canPublish": false, "canPublishData": false,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	signing := b64([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + b64(body)
+	mac := hmac.New(sha256.New, []byte(a.secret))
+	mac.Write([]byte(signing))
+	return signing + "." + b64(mac.Sum(nil)), nil
 }
 
 func (a *lkAdmin) mute(ctx context.Context, room, identity, sid string, muted bool) error {
@@ -281,6 +323,13 @@ type relay struct {
 	issued []string
 }
 
+// issuedTokens returns the JWTs LiveKit sent the participant behind the relay.
+func (r *relay) issuedTokens() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.issued...)
+}
+
 func startRelay(upstreamHostPort, conchdToken string) (*relay, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -347,7 +396,10 @@ func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, string(body), status)
 		return
 	}
-	down, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	// lk is not a browser and sends no Origin header; the default check then
+	// has nothing to refuse, and a request that does carry one must be from
+	// the loopback.
+	down, err := websocket.Accept(w, req, &websocket.AcceptOptions{OriginPatterns: []string{"127.0.0.1:*", "localhost:*", "[::1]:*"}})
 	if err != nil {
 		_ = up.CloseNow()
 		return
