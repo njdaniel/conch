@@ -141,7 +141,7 @@ func seedPreOperatorHooks(t *testing.T, s *Store) []string {
 	}
 	tokens := []string{"hook-token-one", "hook-token-two"}
 	for _, token := range tokens {
-		if _, err := s.CreateHook(ctx, token, channel.ID, agent.ID); err != nil {
+		if _, err := s.CreateHook(ctx, "system", token, channel.ID, agent.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
