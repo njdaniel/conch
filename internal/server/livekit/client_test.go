@@ -498,3 +498,23 @@ func TestCreateRoomRequiresTheRoomInTheAnswer(t *testing.T) {
 		})
 	}
 }
+
+// Evict tells a removal from "there was nobody to remove".
+func TestEvictReportsWhetherSomeoneWasRemoved(t *testing.T) {
+	ctx := context.Background()
+	present, _ := fakeLiveKit(t, 200, `{}`)
+	if removed, err := testClient(t, present.URL).Evict(ctx, "r", "p7"); err != nil || !removed {
+		t.Errorf("Evict of a connected participant = %v, %v; want true, nil", removed, err)
+	}
+	absent, _ := fakeLiveKit(t, 404, `{"code":"not_found","msg":"participant does not exist"}`)
+	if removed, err := testClient(t, absent.URL).Evict(ctx, "r", "p7"); err != nil || removed {
+		t.Errorf("Evict of an absent participant = %v, %v; want false, nil", removed, err)
+	}
+	down, _ := fakeLiveKit(t, 500, `{"code":"internal"}`)
+	if removed, err := testClient(t, down.URL).Evict(ctx, "r", "p7"); !errors.Is(err, ErrUnavailable) || removed {
+		t.Errorf("Evict when LiveKit fails = %v, %v; want false, ErrUnavailable", removed, err)
+	}
+	if removed, err := testClient(t, present.URL).Evict(ctx, "", "p7"); err == nil || removed {
+		t.Errorf("Evict without a room = %v, %v", removed, err)
+	}
+}

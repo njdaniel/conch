@@ -68,9 +68,13 @@ type Server struct {
 	broadcaster Broadcaster
 	// lk is the LiveKit client; nil when voice is not configured. It is built
 	// without contacting LiveKit (design note §2).
-	lk   *livekit.Client
-	http *http.Server
-	ln   net.Listener
+	lk *livekit.Client
+	// voice is voice presence and enforcement (issue #127). It exists on
+	// every server so presence can answer "not configured"; its goroutine
+	// runs only when lk is set, started by Serve.
+	voice *voicePoller
+	http  *http.Server
+	ln    net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -102,6 +106,7 @@ func New(cfg Config, st *store.Store) *Server {
 		notifier = ntfy
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval}
+	s.voice = newVoicePoller(s)
 	s.routes = s.routeTable()
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()
@@ -184,6 +189,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer s.hub.Close()
 	// Stop approval timers on shutdown; open approvals re-arm on next boot.
 	defer s.approvals.Close()
+	// Voice presence: the poller runs only when voice is configured, stops
+	// with ctx, and Serve waits for it (a pass in flight is cancelled, so
+	// this is prompt). Presence sockets are hijacked like message sockets, so
+	// they are closed explicitly.
+	defer s.voice.closeAll()
+	if s.lk != nil {
+		stop := s.voice.start(ctx)
+		defer stop()
+	}
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

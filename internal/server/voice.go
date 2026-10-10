@@ -126,6 +126,77 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	writeSecretJSON(w, http.StatusOK, resp)
 }
 
+// voicePresenceChannel resolves the channel for a presence request and applies
+// the checks every presence reader shares, in the order the session endpoint
+// uses: a verified caller, then the unknown-channel 404 for a non-member, then
+// the refusal of agents. It writes the response and returns false when the
+// request must stop. With authentication off there is no verified caller, and
+// voice is never anonymous, so presence is refused as the session endpoint is
+// (the design note is silent; one rule keeps one answer for all voice routes).
+//
+// For the socket, afterLookup runs between the channel lookup and the
+// membership check: the caller subscribes there, so a removal that lands
+// during the checks closes the subscription (see handleVoiceWS).
+func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, name string, afterLookup func(store.Channel, store.Principal) bool) (store.Channel, store.Principal, bool) {
+	ctx := r.Context()
+	caller, ok := callerFrom(ctx)
+	if !ok {
+		writeError(w, http.StatusBadRequest, schema.ErrorCodeVoiceRequiresAuth, "voice requires authentication")
+		return store.Channel{}, store.Principal{}, false
+	}
+	channel, err := s.store.ChannelByName(ctx, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeChannelNotFound(w)
+		return store.Channel{}, store.Principal{}, false
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "voice: find channel failed", "error", err)
+		writeInternalError(w)
+		return store.Channel{}, store.Principal{}, false
+	}
+	if afterLookup != nil && !afterLookup(channel, caller) {
+		return store.Channel{}, store.Principal{}, false
+	}
+	member, err := s.callerIsMember(r, channel.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "voice: check membership failed", "error", err)
+		writeInternalError(w)
+		return store.Channel{}, store.Principal{}, false
+	}
+	if !member {
+		s.auditAgentNonMember(r, "", channel.ID)
+		writeChannelNotFound(w)
+		return store.Channel{}, store.Principal{}, false
+	}
+	// Whether an agent may see who is talking is part of the deferred
+	// decision on agents in voice (ADR-004): refused whatever its manifest
+	// says, and audited.
+	if caller.Kind != store.PrincipalHuman {
+		s.auditAgentDenial(ctx, caller.ID, r.Pattern, "", channel.ID, denyAgentVoice)
+		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
+		return store.Channel{}, store.Principal{}, false
+	}
+	return channel, caller, true
+}
+
+// handleVoicePresence serves GET /v1/channels/{channel}/voice: the whole voice
+// state of the channel. When voice is not configured the snapshot says so
+// (configured and available false, no rooms) rather than failing; only a
+// caller who passed the membership check sees that.
+func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
+	channel, _, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
+	if !ok {
+		return
+	}
+	snap := s.voice.snapshot(channel.ID)
+	if err := snap.Validate(); err != nil {
+		slog.ErrorContext(r.Context(), "voice: built an invalid presence document", "channel", channel.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
 // errVoiceNoLongerEntitled is voiceSession's refusal when the caller stopped
 // being entitled between the handler's checks and the signing of a token.
 var errVoiceNoLongerEntitled = errors.New("voice: caller is no longer entitled")
@@ -198,6 +269,9 @@ func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.C
 		if err := s.lk.CreateRoom(ctx, room.RoomName); err != nil {
 			return schema.VoiceSessionResponseV1{}, nil, err
 		}
+		// The poller must know the room is in use before any token for it
+		// exists (design note §6): a session issued in the last two minutes.
+		s.voice.noteSession(room)
 		entitled, err := s.voiceStillEntitled(ctx, p, ch)
 		if err != nil {
 			return schema.VoiceSessionResponseV1{}, nil, fmt.Errorf("voice: re-check caller: %w", err)

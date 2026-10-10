@@ -182,6 +182,10 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	// Always drop, even for an idempotent no-op: it is cheap and guarantees no
 	// subscription outlives the principal's membership.
 	s.hub.DropPrincipal(channel.ID, principalID)
+	// Voice: close their presence sockets and remove them from the channel's
+	// rooms before the response is written. It cannot fail the request;
+	// the poller finds anyone it could not remove (issue #127).
+	s.voiceMemberRemoved(ctx, channel.ID, principalID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

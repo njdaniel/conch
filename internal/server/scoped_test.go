@@ -295,7 +295,11 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		covered[p] = true
 	}
 	for _, rt := range f.srv.routes {
-		isRead := strings.HasPrefix(rt.pattern, "GET ") && (strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws"))
+		// The voice presence socket (issue #127) ends in /ws but carries
+		// presence documents, never messages; it has its own leak-table row
+		// in TestChannelContentLeak.
+		isRead := strings.HasPrefix(rt.pattern, "GET ") && rt.pattern != "GET /v1/voice/ws" &&
+			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws"))
 		if isRead && !covered[rt.pattern] {
 			t.Errorf("route %q reads messages but is not in scopedReadPaths and TestScopedMessagesExactSets: add a column there", rt.pattern)
 		}

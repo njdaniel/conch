@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -257,5 +258,58 @@ func TestChannelVoiceRoomReadsOnceTheRoomExists(t *testing.T) {
 	}
 	if again != first {
 		t.Errorf("room = %+v, want %+v", again, first)
+	}
+}
+
+// TestVoiceRoomReaders covers the read helpers the presence poller uses: all
+// rooms, the rooms of one channel, and the rooms of the channels a principal
+// is a member of.
+func TestVoiceRoomReaders(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	a, _ := s.CreateChannel(ctx, "alpha")
+	b, _ := s.CreateChannel(ctx, "beta")
+	c, _ := s.CreateChannel(ctx, "gamma")
+	p, err := s.CreatePrincipal(ctx, PrincipalHuman, "pat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomA, _ := s.ChannelVoiceRoom(ctx, a.ID)
+	roomB, _ := s.ChannelVoiceRoom(ctx, b.ID)
+	roomC, _ := s.ChannelVoiceRoom(ctx, c.ID)
+	for _, ch := range []Channel{a, b} {
+		if _, err := s.AddChannelMember(ctx, "system", ch.ID, p.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names := func(rooms []VoiceRoom, err error) string {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, r := range rooms {
+			if r.NetID != 0 || r.CreatedAt.IsZero() {
+				t.Errorf("room %+v: net or created_at wrong", r)
+			}
+			out = append(out, r.RoomName)
+		}
+		return strings.Join(out, ",")
+	}
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"all rooms", names(s.ListVoiceRooms(ctx)), strings.Join([]string{roomA.RoomName, roomB.RoomName, roomC.RoomName}, ",")},
+		{"one channel", names(s.VoiceRoomsForChannel(ctx, b.ID)), roomB.RoomName},
+		{"channel with no room", names(s.VoiceRoomsForChannel(ctx, 9999)), ""},
+		{"rooms of a member's channels", names(s.VoiceRoomsForMember(ctx, p.ID)), roomA.RoomName + "," + roomB.RoomName},
+		{"principal in no channel", names(s.VoiceRoomsForMember(ctx, 9999)), ""},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, tt.got, tt.want)
+		}
 	}
 }

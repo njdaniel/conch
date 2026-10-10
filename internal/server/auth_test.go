@@ -151,7 +151,13 @@ var routeExpectations = map[string]routeExpectation{
 	// Voice (issue #126). The fixture does not configure voice, so a member
 	// gets 503 voice_not_configured; AuthOff gets 400 and an agent 403 (both
 	// special-cased below).
-	"POST /v1/channels/{channel}/voice/session":   {classAuth, "/v1/channels/general/voice/session", "", 503},
+	"POST /v1/channels/{channel}/voice/session": {classAuth, "/v1/channels/general/voice/session", "", 503},
+	// Voice presence (issue #127). Not configured is a valid snapshot, so a
+	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
+	// special-cased below). The socket needs a channel parameter, so every
+	// caller who passes authentication gets 400 before anything else.
+	"GET /v1/channels/{channel}/voice":            {classAuth, "/v1/channels/general/voice", "", 200},
+	"GET /v1/voice/ws":                            {classAuth, "/v1/voice/ws", "", 400},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
@@ -274,7 +280,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 				agentWant = http.StatusForbidden
 			}
 			cases := []struct {
@@ -310,7 +316,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if rt.pattern == "GET /v1/whoami" {
 					want = http.StatusUnauthorized // new route; no caller to report
 				}
-				if strings.Contains(rt.pattern, "/voice/session") {
+				if strings.Contains(rt.pattern, "/voice/session") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)

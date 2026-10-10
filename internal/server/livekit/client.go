@@ -207,16 +207,25 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 // unknown path), and treating it as done would record a removal that never
 // happened.
 func (c *Client) RemoveParticipant(ctx context.Context, room, identity string) error {
+	_, err := c.Evict(ctx, room, identity)
+	return err
+}
+
+// Evict is RemoveParticipant that also reports whether LiveKit had the
+// participant: true when it disconnected someone, false when there was nobody
+// by that identity to disconnect (the not_found answer described above). A
+// caller that records removals needs the difference.
+func (c *Client) Evict(ctx context.Context, room, identity string) (removed bool, err error) {
 	if room == "" || identity == "" {
-		return errors.New("livekit: RemoveParticipant needs a room name and an identity")
+		return false, errors.New("livekit: RemoveParticipant needs a room name and an identity")
 	}
 	grant := adminGrant{RoomAdmin: true, Room: room}
-	err := c.call(ctx, "RemoveParticipant", grant, map[string]any{"room": room, "identity": identity}, nil)
+	err = c.call(ctx, "RemoveParticipant", grant, map[string]any{"room": room, "identity": identity}, nil)
 	var status httpStatusError
 	if errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
-		return nil
+		return false, nil
 	}
-	return err
+	return err == nil, err
 }
 
 // httpStatusError is a non-2xx answer from LiveKit. It is always wrapped in
