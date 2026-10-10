@@ -52,4 +52,4 @@ hooks-install:
 	@echo "git hooks installed (.githooks)"
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ voice/target/

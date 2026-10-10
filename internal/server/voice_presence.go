@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -122,10 +123,27 @@ type voiceSeen struct {
 }
 
 // voiceRoomState is the poller's memory of one stored voice room. All fields
-// except the immutable name and channelID are guarded by voicePoller.mu.
+// except the immutable name and channelID, and the two locks of its own, are
+// guarded by voicePoller.mu.
 type voiceRoomState struct {
 	name      string
 	channelID int64
+	// order puts the room's transmit rows into the audit log in the order
+	// the transmit rule produced them. Whoever changes transmit (a pass, a
+	// report, a removal, the room being forgotten) holds order from before
+	// the change until the rows it produced are written; the change itself
+	// is made under voicePoller.mu, taken inside it. So a report's `started`
+	// can never be written after the row that closes it, and no row is
+	// derived from a report whose own row is not in the log yet. It is held
+	// across the audit write and across nothing else: no LiveKit call, no
+	// read.
+	order sync.Mutex
+	// reports is where transmit reports for the room wait their turn: a
+	// report holds its one slot from before it is applied until its row is
+	// written or it has been taken back (voicePoller.reportTransmit). It is
+	// taken before order, and only by reports, so that however many reports
+	// are waiting, only one of them at a time contends with a pass for order.
+	reports chan struct{}
 	// lastSession is when a session was last issued for the room.
 	lastSession time.Time
 	// marked means a sweep found the room in LiveKit: it is polled on the next
@@ -222,9 +240,6 @@ type voicePoller struct {
 	appendAudit func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error)
 	// reports bounds transmit reports per principal (voice_transmit.go).
 	reports voiceReportLimiter
-	// reportTurns are the locks behind reportTurn: one principal's transmit
-	// reports are applied and audited one at a time.
-	reportTurns [64]sync.Mutex
 
 	// pass is set while a pass runs, so one that has not finished is not
 	// started again.
@@ -410,20 +425,19 @@ func voicePassGap() time.Duration {
 // gap while any room is in use, otherwise until the next sweep, and never
 // sooner than the end of a backoff.
 func (p *voicePoller) nextDelay() time.Duration {
-	// Drawn before the lock is taken: gap is a function a test may replace,
-	// and nothing of the poller's may be held while it runs.
-	gap := p.gap()
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	now := p.now()
 	d := p.nextSweep.Sub(now)
-	if p.anyInUseLocked(now) {
-		d = min(d, gap)
+	inUse := p.anyInUseLocked(now)
+	backoff := p.retryAt.Sub(now)
+	p.mu.Unlock()
+	if inUse {
+		// Drawn only when there is a pass to wait for, and with the lock
+		// released: gap is a function a test may replace, and nothing of
+		// the poller's may be held while it runs.
+		d = min(d, p.gap())
 	}
-	if wait := p.retryAt.Sub(now); wait > d {
-		d = wait
-	}
-	return max(d, voiceMinDelay)
+	return max(d, backoff, voiceMinDelay)
 }
 
 // anyInUse reports whether a pass would poll a room (for tests).
@@ -470,18 +484,6 @@ func (p *voicePoller) wakeIfIdle(idle bool) {
 	}
 }
 
-// reportTurn is the lock a transmit report of principalID holds from before
-// it is applied until its audit row is written or it has been taken back
-// (reportTransmit). The locks are shared out by principal id; two principals
-// that share one only wait for each other.
-func (p *voicePoller) reportTurn(principalID int64) *sync.Mutex {
-	i := principalID % int64(len(p.reportTurns))
-	if i < 0 {
-		i = -i
-	}
-	return &p.reportTurns[i]
-}
-
 // noteSession records that a session was issued for room, so the next pass
 // polls it. It is called before the token is signed: by the time a token
 // exists, the room is already known to be in use.
@@ -510,7 +512,7 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 	r := p.rooms[room.RoomName]
 	if r == nil {
-		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}}
+		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}, reports: make(chan struct{}, 1)}
 		p.rooms[room.RoomName] = r
 	}
 	return r
@@ -816,6 +818,12 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string) voiceEve
 func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, keep map[int64]struct{}, again bool, since uint64) {
 	next := make(map[int64]voiceSeen, len(seen))
 
+	// From before the transmit rule is fed until its rows are written
+	// (voiceRoomState.order): a report in flight has its row in the log
+	// before this pass reads the state it left, and no report is applied
+	// between this pass and its rows.
+	r.order.Lock()
+	defer r.order.Unlock()
 	p.mu.Lock()
 	now := p.now()
 	if r.retired {
@@ -1059,7 +1067,11 @@ func (p *voicePoller) evict(ctx context.Context, rooms []store.VoiceRoom, princi
 }
 
 func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, principalID int64, identity, reason string) {
-	was, closing, ok := p.forget(room.RoomName, principalID)
+	// Whatever the transmit rule had open for them is closed, with
+	// reason=left, and written at the moment they leave presence (forget):
+	// before LiveKit is asked, and so before their removal and their leaving
+	// are written.
+	was, ok := p.forget(ctx, room.RoomName, principalID)
 	removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 	var events []voiceEvent
 	if err != nil {
@@ -1076,9 +1088,6 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 			events = append(events, p.removedEvent(room.ChannelID, principalID, reason))
 		}
 	}
-	// Whatever the transmit rule had open for them was closed, with
-	// reason=left, at the moment they left presence (forget).
-	events = append(events, transmitEvents(room.ChannelID, closing)...)
 	if ok {
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", room.ChannelID)
@@ -1088,16 +1097,39 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	p.writeEvents(ctx, events...)
 }
 
+// roomNamed returns the state of the room called name, or nil if the poller
+// has none. It does not make one.
+func (p *voicePoller) roomNamed(name string) *voiceRoomState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rooms[name]
+}
+
 // forgetEverywhere takes principalID out of presence in every room the
 // poller has them in, with the events of their leaving, without calling
 // LiveKit: used when the rooms to evict from could not be read.
 func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
-	var events []voiceEvent
-	var channels []int64
 	p.mu.Lock()
-	now := p.now()
+	var rooms []*voiceRoomState
 	for _, r := range p.rooms {
-		if _, ok := r.participants[principalID]; !ok {
+		if _, ok := r.participants[principalID]; ok {
+			rooms = append(rooms, r)
+		}
+	}
+	p.mu.Unlock()
+	// One room at a time, each under its own order (voiceRoomState.order);
+	// in order of channel, so that the rows come out the same way every time.
+	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
+		return cmp.Or(cmp.Compare(a.channelID, b.channelID), cmp.Compare(a.name, b.name))
+	})
+	for _, r := range rooms {
+		r.order.Lock()
+		p.mu.Lock()
+		now := p.now()
+		if _, ok := r.participants[principalID]; r.retired || !ok {
+			// Forgotten, or gone from it, while this waited its turn.
+			p.mu.Unlock()
+			r.order.Unlock()
 			continue
 		}
 		delete(r.participants, principalID)
@@ -1107,27 +1139,33 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 		r.marked = true
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", r.channelID)
-		events = append(events, transmitEvents(r.channelID, r.transmit.leave(now, principalID))...)
+		events := transmitEvents(r.channelID, r.transmit.leave(now, principalID))
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: r.channelID, detail: detail})
-		channels = append(channels, r.channelID)
-	}
-	p.mu.Unlock()
-	p.writeEvents(ctx, events...)
-	for _, id := range channels {
-		p.notify(id)
+		p.mu.Unlock()
+		p.writeEvents(ctx, events...)
+		r.order.Unlock()
+		p.notify(r.channelID)
 	}
 }
 
-// forget takes principalID out of the room's presence, reporting what it
-// held and the rows that close whatever the transmit rule had open for them
-// (reason=left, timed now: they are gone from presence at this instant). ok is
-// false when the poller did not believe the principal was there.
-func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, []transmitRow, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	r := p.rooms[room]
+// forget takes principalID out of the room's presence and reports what it
+// held. Whatever the transmit rule had open for them is closed (reason=left,
+// timed now: they are gone from presence at this instant) and those rows are
+// written here, under the room's order. ok is false when the poller did not
+// believe the principal was there.
+func (p *voicePoller) forget(ctx context.Context, room string, principalID int64) (voiceSeen, bool) {
+	r := p.roomNamed(room)
 	if r == nil {
-		return voiceSeen{}, nil, false
+		return voiceSeen{}, false
+	}
+	r.order.Lock()
+	defer r.order.Unlock()
+	p.mu.Lock()
+	if r.retired {
+		// Forgotten while this waited its turn: everyone in it has been
+		// recorded as having left already.
+		p.mu.Unlock()
+		return voiceSeen{}, false
 	}
 	s, ok := r.participants[principalID]
 	delete(r.participants, principalID)
@@ -1135,7 +1173,10 @@ func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, []trans
 	// be about to.
 	r.seq++
 	r.evicted[principalID] = r.seq
-	return s, r.transmit.leave(p.now(), principalID), ok
+	closing := r.transmit.leave(p.now(), principalID)
+	p.mu.Unlock()
+	p.writeEvents(ctx, transmitEvents(r.channelID, closing)...)
+	return s, ok
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,9 +1456,18 @@ func (p *voicePoller) sweepSoon() {
 // rejoin. Whoever the poller had in the room is recorded as having left. The
 // state is marked retired so a pass already reading the room reports nothing.
 func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
-	p.mu.Lock()
-	r := p.rooms[name]
+	r := p.roomNamed(name)
 	if r == nil {
+		return
+	}
+	// Under the room's order (voiceRoomState.order): a report whose row is
+	// being written gets it into the log before the rows that close what it
+	// opened, and a pass in flight finishes or finds the room retired.
+	r.order.Lock()
+	defer r.order.Unlock()
+	p.mu.Lock()
+	if r.retired {
+		// Forgotten by someone else while this waited its turn.
 		p.mu.Unlock()
 		return
 	}

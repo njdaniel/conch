@@ -130,6 +130,66 @@ async fn a_speaker_who_stops_is_counted_as_silence_and_one_who_leaves_is_dropped
     );
 }
 
+/// A participant who publishes many tracks, or a room that announces thousands, costs a
+/// bounded number of buffers: tracks beyond the bounds are not mixed, and a slot comes
+/// free when a track goes.
+#[tokio::test]
+async fn tracks_beyond_the_bounds_are_ignored_and_a_slot_comes_free_when_one_goes() {
+    use conch_voice::session::{MAX_TRACKS, MAX_TRACKS_PER_SPEAKER};
+    let rig = Rig::start().await;
+    rig.connected(1).await;
+    let subscribed = |rig: &Rig| {
+        rig.events_named("track")
+            .iter()
+            .filter(|event| event["state"] == "subscribed")
+            .count()
+    };
+
+    // One speaker, many tracks: only the first few count.
+    let mut held = Vec::new();
+    let mut first = None;
+    for _ in 0..MAX_TRACKS_PER_SPEAKER + 3 {
+        let (track, frames) = rig.sdk.speaker("p3");
+        first.get_or_insert(track);
+        held.push(frames);
+    }
+    // Many speakers: the room's bound.
+    for id in 0..MAX_TRACKS + 3 {
+        let (_, frames) = rig.sdk.speaker(&format!("p{}", 100 + id));
+        held.push(frames);
+    }
+    // One more event, handled after all of those, to know they all were.
+    let (probe, _frames) = rig.sdk.speaker("p3");
+    assert!(
+        rig.sdk
+            .emit(conch_voice::sdk::SdkEvent::TrackUnsubscribed { track: probe })
+    );
+    let unsubscribed = conch_voice::sdk::SdkEvent::TrackUnsubscribed {
+        track: first.unwrap(),
+    };
+    assert!(rig.sdk.emit(unsubscribed));
+    rig.until("the first track to go", |rig| {
+        rig.events_named("track")
+            .iter()
+            .any(|event| event["state"] == "unsubscribed")
+    })
+    .await;
+    assert_eq!(subscribed(&rig), MAX_TRACKS);
+    let of_p3 = rig
+        .events_named("track")
+        .iter()
+        .filter(|event| event["state"] == "subscribed" && event["speaker"] == "p3")
+        .count();
+    assert_eq!(of_p3, MAX_TRACKS_PER_SPEAKER);
+
+    // The slot that came free is taken by the next track.
+    let (_track, _frames) = rig.sdk.speaker("p200");
+    rig.until("the next track to be mixed", |rig| {
+        subscribed(rig) == MAX_TRACKS + 1
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn the_clients_own_audio_is_never_in_its_own_mix() {
     let rig = Rig::start().await;

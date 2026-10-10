@@ -132,13 +132,35 @@ func (s *Server) handleVoiceTransmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.voice.reportTransmit(ctx, room, caller.ID, report.State == schema.VoiceTransmitStateStarted); err != nil {
+	err = s.voice.reportTransmit(ctx, room, caller.ID, report.State == schema.VoiceTransmitStateStarted)
+	switch {
+	case errors.Is(err, errVoiceReportRoomGone):
+		// Rotated between the holder check and the report's turn: the same
+		// answer as if the rotation had come first.
+		writeVoiceNoSession(w)
+		return
+	case errors.Is(err, errVoiceReportAbandoned):
+		// The caller went away while the report waited for its turn, and it
+		// was not applied. Nobody is there to read this, and it is not a
+		// failure to log.
+		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceUnavailable, "voice is temporarily unavailable")
+		return
+	case err != nil:
 		slog.ErrorContext(ctx, "voice: a transmit report could not be audited and was not applied", "channel", channel.ID, "principal", caller.ID, "error", err)
 		writeInternalError(w)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// errVoiceReportRoomGone is reportTransmit's refusal when the room's state was
+// dropped (the room was rotated) while the report waited for its turn. It is
+// answered 409 voice_no_session.
+var errVoiceReportRoomGone = errors.New("voice: the room was rotated before the report was applied")
+
+// errVoiceReportAbandoned is reportTransmit's answer when the caller's context
+// ended while the report was still waiting for its turn: it was not applied.
+var errVoiceReportAbandoned = errors.New("voice: the caller went away before the report was applied")
 
 // writeVoiceNoSession is the one answer for a report from a caller who holds
 // no session it could be reporting in: never issued one, issued one under
@@ -176,28 +198,36 @@ func (s *Server) voiceHeldRoom(ctx context.Context, channelID, principalID, cred
 // audit row. A report that does not change the reported state writes nothing
 // and succeeds.
 //
-// The invariant, with applyRoom: a report is applied under p.mu, and its time
-// (the time its audit row carries) is read under that same lock, as a pass's
-// is. Reports and passes are therefore in one order, with times that rise in
-// that order: a pass reads the reported state as it is at the instant of that
-// pass, and no report is ever applied "between" a pass and its time. The row
-// is written after the lock is released, with the time taken inside it, so two
-// rows written in a race can be a few rows apart from their order in time;
-// their times are the order of record.
+// Two invariants, with applyRoom.
 //
-// An error means the row could not be written. The report is then taken back,
-// so that the reported state never says more than the audit log does. One
-// principal's reports are applied one at a time, each after the one before it
-// has its row or has been taken back (reportTurn): a second report applied on
-// top of a first whose write then fails would be recorded as a change from a
-// state the log never had, and leave a row with nothing to pair with.
+// Time. A report is applied under p.mu, and its time (the time its audit row
+// carries) is read under that same lock, as a pass's is. Reports and passes
+// are therefore in one order, with times that rise in that order: a pass reads
+// the reported state as it is at the instant of that pass, and no report is
+// ever applied "between" a pass and its time.
+//
+// The log. The report's row is written before anything else can change the
+// room's transmit state: the report holds the room's order
+// (voiceRoomState.order) from before it is applied until its row is written,
+// and so does every pass, removal and rotation for the rows it produces. The
+// room's transmit rows are thus in the log in the order the rule produced
+// them. Without that, a pass or a rotation landing between the report being
+// applied and its row being written put the row that closes the transmission
+// into the log before the row that opens it.
+//
+// An error means the row could not be written, or the report never had its
+// turn. If the row could not be written the report is taken back, so that the
+// reported state never says more than the audit log does; nothing else has
+// touched the state in between, because the order was held throughout.
+// Reports for a room are applied one at a time, each after the one before it
+// has its row or has been taken back (voiceRoomState.reports): a second report
+// applied on top of a first whose write then fails would be recorded as a
+// change from a state the log never had. A report still waiting for its turn
+// when its caller goes away is dropped unapplied (errVoiceReportAbandoned), and
+// one whose room was rotated while it waited is refused
+// (errVoiceReportRoomGone).
 func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, principalID int64, started bool) error {
-	turn := p.reportTurn(principalID)
-	turn.Lock()
-	defer turn.Unlock()
-
 	p.mu.Lock()
-	now := p.now()
 	r := p.rooms[room.RoomName]
 	if r == nil && !started {
 		// Nothing is known of the room, so the reported state is `stopped`
@@ -205,24 +235,54 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		p.mu.Unlock()
 		return nil
 	}
+	r = p.roomLocked(room)
+	p.mu.Unlock()
+
+	// The report's turn among the room's reports. Waiting for it can be
+	// given up, since nothing has been applied yet; once it is applied the
+	// report is seen through whatever becomes of the caller.
+	select {
+	case r.reports <- struct{}{}:
+	case <-ctx.Done():
+		return errVoiceReportAbandoned
+	}
+	defer func() { <-r.reports }()
+
+	r.order.Lock()
+	p.mu.Lock()
+	now := p.now()
+	if r.retired {
+		p.mu.Unlock()
+		r.order.Unlock()
+		return errVoiceReportRoomGone
+	}
 	// Before the report is applied: whether the loop had anything to watch.
 	idle := !p.anyInUseLocked(now)
-	r = p.roomLocked(room)
 	row, change, changed := r.transmit.report(now, principalID, started)
 	p.mu.Unlock()
 	if !changed {
+		r.order.Unlock()
 		return nil
 	}
 
 	// Not tied to the caller: a client that hangs up now must not leave a
-	// reported state with no row.
+	// reported state with no row. Bounded all the same, because the room's
+	// order is held while it runs and a pass over the room waits for it: a
+	// store that does not answer fails the report, it does not hold the
+	// poller. (SQLite's own busy timeout, five seconds, is the only bound
+	// the server's other audit writes have.)
 	ctx = context.WithoutCancel(ctx)
-	if err := p.writeEvent(ctx, transmitEvents(room.ChannelID, []transmitRow{row})[0]); err != nil {
+	wctx, cancel := context.WithTimeout(ctx, voiceEvictTimeout)
+	err := p.writeEvent(wctx, transmitEvents(room.ChannelID, []transmitRow{row})[0])
+	cancel()
+	if err != nil {
 		p.mu.Lock()
 		r.transmit.retract(principalID, change)
 		p.mu.Unlock()
+		r.order.Unlock()
 		return err
 	}
+	r.order.Unlock()
 
 	// A reported `started` is something the poller has to look at: a holder
 	// who is not in the room, or never connects, is closed after 2 s by a
@@ -233,12 +293,12 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 	p.wakeIfIdle(idle)
 
 	// A rotation can land between the holder check and here. If it also
-	// dropped the room's state before the report was applied, the report
+	// dropped the room's state before the report looked for it, the report
 	// made that state again, for a room nobody can be in. So after any
 	// change: if the room is retired, forget it, which closes what the
 	// report opened with reason=left. A rotation that commits after this
 	// read forgets the room itself.
-	ctx, cancel := context.WithTimeout(ctx, voiceEvictTimeout)
+	ctx, cancel = context.WithTimeout(ctx, voiceEvictTimeout)
 	defer cancel()
 	live, err := p.s.store.VoiceRoomLive(ctx, room.ID)
 	switch {

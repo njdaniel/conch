@@ -15,5 +15,5 @@ Ground rules (see CLAUDE.md for the full list):
 - No `unwrap` or `expect` outside tests and `main`; one `thiserror` enum per crate; no `unsafe` (every crate forbids it).
 - No new crate without Nick's sign-off and a line in `voice/deps-allowlist.txt`; `scripts/voice-depgate.sh` fails the build otherwise. Do not edit `scripts/voice-pins.sh`. If you think you need either, stop and say why.
 - Tests never need a microphone, PipeWire, a keyboard or LiveKit. A test that does is marked `#[ignore]` with what it needs, and you say in your report that you did not run it.
-- `make check` clean before you report (run `scripts/voice-toolchain.sh` once if it says the toolchain is missing). Build with `. scripts/voice-env.sh` first, so the pinned compiler and the shared build directory are used.
+- `make check` clean before you report (run `scripts/voice-toolchain.sh` once if it says the toolchain is missing). Build with `. scripts/voice-env.sh` first, so the pinned compiler is used. Never point `CARGO_TARGET_DIR` or `CARGO_BUILD_BUILD_DIR` at a directory another checkout builds into: cargo would run that checkout's code under your tests and report them passed.
 - Stay inside the issue's scope: one issue = one branch = one PR.

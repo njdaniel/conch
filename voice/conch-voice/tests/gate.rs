@@ -331,6 +331,37 @@ async fn in_plain_mode_a_refused_press_says_why_in_words() {
     .await;
 }
 
+/// The SDK republishes inside its own reconnect. If it ever did so while a press was in
+/// progress, the track would be disabled under a client that says it is talking: the press
+/// is ended and reported instead, and does not resume though the key is still down.
+#[tokio::test]
+async fn a_republish_during_a_press_ends_the_press() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    rig.line(Down);
+    rig.frames_beyond(3).await;
+
+    rig.sdk.republish();
+    rig.not_talking().await;
+    assert!(rig.sdk.is_muted() && !rig.sdk.is_enabled());
+    rig.reported(2).await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+    let sent = rig.sdk.frames();
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), sent, "the held key does not resume");
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+
+    // Released and pressed again, it transmits.
+    rig.line(Up);
+    rig.ready().await;
+    rig.line(Down);
+    rig.frames_beyond(sent).await;
+    assert!(!rig.sdk.is_muted() && rig.sdk.is_enabled());
+    rig.line(Up);
+    rig.not_talking().await;
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
 #[tokio::test]
 async fn a_republished_track_is_muted_and_disabled_before_the_client_is_connected_again() {
     let rig = Rig::start().await;
