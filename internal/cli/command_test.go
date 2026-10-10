@@ -1125,3 +1125,421 @@ func TestUsageMentionsNetsAndWhispers(t *testing.T) {
 		}
 	}
 }
+
+// voiceFake is a conchd stand-in for the voice presence routes and whoami. It
+// records every request line.
+type voiceFake struct {
+	*httptest.Server
+	mu       sync.Mutex
+	requests []string
+	// snapshot is answered for GET /v1/channels/general/voice with status.
+	status   int
+	snapshot any
+	// whoami is answered for GET /v1/whoami; a zero ID answers 404.
+	whoami schema.WhoAmIResponseV1
+	// socket drives GET /v1/voice/ws after the upgrade.
+	socket func(ctx context.Context, conn *websocket.Conn)
+}
+
+func newVoiceFake(t *testing.T) *voiceFake {
+	t.Helper()
+	f := &voiceFake{status: http.StatusOK}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		f.mu.Lock()
+		f.requests = append(f.requests, key)
+		f.mu.Unlock()
+		switch key {
+		case "GET /v1/whoami":
+			if f.whoami.ID == 0 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(f.whoami)
+		case "GET /v1/channels/general/voice":
+			w.WriteHeader(f.status)
+			_ = json.NewEncoder(w).Encode(f.snapshot)
+		case "GET /v1/voice/ws":
+			if f.status != http.StatusOK {
+				w.WriteHeader(f.status)
+				_ = json.NewEncoder(w).Encode(f.snapshot)
+				return
+			}
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.CloseNow() }()
+			f.socket(r.Context(), conn)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *voiceFake) seen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+func TestVoiceStatusSnapshot(t *testing.T) {
+	const joined = "2026-10-09T08:30:00Z"
+	people := []schema.VoiceParticipant{voicePerson(9, false), voicePerson(3, true), voicePerson(42, false)}
+	apiError := func(code string) schema.Error { return schema.Error{Code: code, Message: "refused by test"} }
+	tests := []struct {
+		name       string
+		status     int
+		snapshot   any
+		whoami     schema.WhoAmIResponseV1
+		wantOut    string
+		wantErr    string // substring of the error (nonzero exit); empty means exit 0
+		wantWhoami bool
+	}{
+		{
+			name: "participants sorted by id, self named, talking and quiet", snapshot: voiceDoc(true, true, people...),
+			whoami:  schema.WhoAmIResponseV1{ID: 42, Name: "nick"},
+			wantOut: "3 - talking " + joined + "\n9 - quiet " + joined + "\n42 nick quiet " + joined + "\n", wantWhoami: true,
+		},
+		{
+			name: "whoami unavailable leaves ids alone", snapshot: voiceDoc(true, true, people[1]),
+			wantOut: "3 - talking " + joined + "\n", wantWhoami: true,
+		},
+		{
+			name: "a name with spaces is quoted", snapshot: voiceDoc(true, true, people[1]),
+			whoami:  schema.WhoAmIResponseV1{ID: 3, Name: "Ann Lee"},
+			wantOut: "3 \"Ann Lee\" talking " + joined + "\n", wantWhoami: true,
+		},
+		{
+			name: "hostile name stays on one line", snapshot: voiceDoc(true, true, people[1], people[0]),
+			whoami:  schema.WhoAmIResponseV1{ID: 3, Name: "x\n9 root talking 2026-01-01T00:00:00Z\x1b[31m\u202e"},
+			wantOut: "3 \"x\\n9 root talking 2026-01-01T00:00:00Z\\x1b[31m\\u202e\" talking " + joined + "\n9 - quiet " + joined + "\n", wantWhoami: true,
+		},
+		{
+			name: "a name that is a dash is quoted", snapshot: voiceDoc(true, true, people[1]),
+			whoami:  schema.WhoAmIResponseV1{ID: 3, Name: "-"},
+			wantOut: "3 \"-\" talking " + joined + "\n", wantWhoami: true,
+		},
+		{name: "available and empty is not an error", snapshot: voiceDoc(true, true), wantOut: "nobody is connected to voice in general\n"},
+		{name: "not configured", snapshot: voiceDoc(false, false), wantErr: "voice is not configured on this server"},
+		{name: "unavailable", snapshot: voiceDoc(true, false), wantErr: "voice is unavailable"},
+		{name: "unknown channel or non-member", status: http.StatusNotFound, snapshot: apiError("channel_not_found"), wantErr: "channel_not_found"},
+		{name: "agent credential", status: http.StatusForbidden, snapshot: apiError("forbidden"), wantErr: "forbidden"},
+		{name: "auth off", status: http.StatusBadRequest, snapshot: apiError(schema.ErrorCodeVoiceRequiresAuth), wantErr: schema.ErrorCodeVoiceRequiresAuth},
+		{name: "not logged in", status: http.StatusUnauthorized, snapshot: apiError("unauthenticated"), wantErr: "not logged in"},
+		{
+			name: "server text cannot break the error line", status: http.StatusForbidden,
+			snapshot: schema.Error{Code: "forbidden", Message: "no\n\x1b[2Jfake line"}, wantErr: `no\n\x1b[2Jfake line`,
+		},
+		{name: "invalid document is not printed", snapshot: schema.VoicePresenceV1{Schema: "conch.voice_presence.v9", ChannelID: 2}, wantErr: "invalid voice presence"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newVoiceFake(t)
+			if tt.status != 0 {
+				fake.status = tt.status
+			}
+			fake.snapshot = tt.snapshot
+			fake.whoami = tt.whoami
+			stdout, stderr, err := runCLI(t, "", "voice", "status", "--server", fake.URL, "general")
+			if stdout != tt.wantOut {
+				t.Errorf("stdout = %q, want %q", stdout, tt.wantOut)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want none (the error line is returned for main to print)", stderr)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want exit 0", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if strings.ContainsAny(err.Error(), "\n\x1b") {
+					t.Errorf("error is not one clean line: %q", err.Error())
+				}
+			}
+			asked := false
+			for _, line := range fake.seen() {
+				asked = asked || line == "GET /v1/whoami"
+			}
+			if asked != tt.wantWhoami {
+				t.Errorf("whoami requested = %v, want %v (requests %v)", asked, tt.wantWhoami, fake.seen())
+			}
+			if n := len(fake.seen()); n > 2 {
+				t.Errorf("%d requests, want at most the snapshot and one name lookup: %v", n, fake.seen())
+			}
+			if strings.ContainsRune(stdout, 0x1b) {
+				t.Error("stdout contains an escape code")
+			}
+		})
+	}
+}
+
+func TestVoiceStatusFlagAfterChannel(t *testing.T) {
+	isolateConfig(t)
+	fake := newVoiceFake(t)
+	fake.socket = func(ctx context.Context, conn *websocket.Conn) {
+		_ = wsjson.Write(ctx, conn, voiceDoc(true, true))
+		_ = conn.Close(websocket.StatusGoingAway, "bye")
+	}
+	voiceNow = func() time.Time { return time.Date(2026, time.October, 9, 9, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { voiceNow = time.Now })
+	stdout, _, err := runCLI(t, "", "voice", "status", "general", "--watch", "--server", fake.URL)
+	if err != nil || !strings.HasPrefix(stdout, "--- 2026-10-09T09:00:00Z\n") {
+		t.Fatalf("stdout = %q, err = %v", stdout, err)
+	}
+}
+
+// cancelOnWrite is a writer that cancels a context once the output contains
+// marker, standing in for the user's interrupt arriving after the first block.
+type cancelOnWrite struct {
+	buf    bytes.Buffer
+	marker string
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnWrite) Write(p []byte) (int, error) {
+	n, err := c.buf.Write(p)
+	if strings.Contains(c.buf.String(), c.marker) {
+		c.cancel()
+	}
+	return n, err
+}
+
+func TestVoiceStatusWatch(t *testing.T) {
+	const joined = "2026-10-09T08:30:00Z"
+	const stamp = "--- 2026-10-09T09:00:00Z\n"
+	three := voicePerson(3, false)
+	threeTalking := voicePerson(3, true)
+	tests := []struct {
+		name       string
+		status     int
+		snapshot   any
+		socket     func(ctx context.Context, conn *websocket.Conn)
+		interrupt  string // cancel the context once stdout contains this
+		wantOut    string
+		wantStderr string
+		wantErr    string
+	}{
+		{
+			name: "first snapshot, then a block per change; shutdown close is success",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true))
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, threeTalking))
+				_ = conn.Close(websocket.StatusGoingAway, "bye")
+			},
+			wantOut: stamp + "nobody is connected to voice in general\n" +
+				stamp + "3 - quiet " + joined + "\n" +
+				stamp + "3 - talking " + joined + "\n",
+			wantStderr: "server shutting down",
+		},
+		{
+			name: "an orderly close by the server ends the watch without an error",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusNormalClosure, "")
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+		},
+		{
+			name: "unavailable and back is shown, not fatal",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, false))
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusGoingAway, "bye")
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n" +
+				stamp + "voice is unavailable: the voice server cannot be reached right now\n" +
+				stamp + "3 - quiet " + joined + "\n",
+			wantStderr: "server shutting down",
+		},
+		{
+			name: "starting unavailable keeps following",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, false))
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusGoingAway, "bye")
+			},
+			wantOut: stamp + "voice is unavailable: the voice server cannot be reached right now\n" +
+				stamp + "3 - quiet " + joined + "\n",
+			wantStderr: "server shutting down",
+		},
+		{
+			name: "interrupt ends with exit 0",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				<-ctx.Done()
+			},
+			interrupt: "quiet",
+			wantOut:   stamp + "3 - quiet " + joined + "\n",
+		},
+		{
+			name: "not configured at the start is an error, like the snapshot",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(false, false))
+				<-ctx.Done()
+			},
+			wantErr: "voice is not configured on this server",
+		},
+		{
+			name: "removed from the channel is one line and nonzero",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusPolicyViolation, "x\n\x1b[31mfake")
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+			wantErr: "no longer a member",
+		},
+		{
+			name: "an invalid frame ends it with an error",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = wsjson.Write(ctx, conn, schema.VoicePresenceV1{Schema: "nope"})
+				<-ctx.Done()
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+			wantErr: "invalid voice presence",
+		},
+		{name: "unknown channel", status: http.StatusNotFound, snapshot: schema.Error{Code: "channel_not_found", Message: "no"}, wantErr: "channel_not_found"},
+		{name: "agent credential", status: http.StatusForbidden, snapshot: schema.Error{Code: "forbidden", Message: "no"}, wantErr: "forbidden"},
+		{name: "auth off", status: http.StatusBadRequest, snapshot: schema.Error{Code: schema.ErrorCodeVoiceRequiresAuth, Message: "no"}, wantErr: schema.ErrorCodeVoiceRequiresAuth},
+		{name: "not logged in", status: http.StatusUnauthorized, snapshot: schema.Error{Code: "unauthenticated"}, wantErr: "not logged in"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			voiceNow = func() time.Time { return time.Date(2026, time.October, 9, 9, 0, 0, 0, time.UTC) }
+			t.Cleanup(func() { voiceNow = time.Now })
+			fake := newVoiceFake(t)
+			if tt.status != 0 {
+				fake.status = tt.status
+			}
+			fake.snapshot = tt.snapshot
+			fake.socket = tt.socket
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			out := &cancelOnWrite{marker: tt.interrupt, cancel: cancel}
+			if tt.interrupt == "" {
+				out.marker = "\x00never"
+			}
+			var stderr bytes.Buffer
+			err := RunWithStdin(ctx, []string{"voice", "status", "--watch", "--server", fake.URL, "general"}, strings.NewReader(""), out, &stderr, "vtest")
+			if got := out.buf.String(); got != tt.wantOut {
+				t.Errorf("stdout = %q, want %q", got, tt.wantOut)
+			}
+			if tt.wantStderr == "" && stderr.Len() != 0 || !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want exit 0", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tt.wantErr)
+			}
+			if strings.ContainsAny(err.Error(), "\n\x1b") {
+				t.Errorf("error is not one clean line: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestVoiceStatusUsageErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"no subcommand", []string{"voice"}, "voice requires a subcommand"},
+		{"unknown subcommand", []string{"voice", "join", "general"}, `unknown voice subcommand "join"`},
+		{"no channel", []string{"voice", "status"}, "expected <channel>"},
+		{"no channel with watch", []string{"voice", "status", "--watch"}, "expected <channel>"},
+		{"two channels", []string{"voice", "status", "general", "ops"}, "expected <channel>"},
+		{"unknown flag", []string{"voice", "status", "--loud", "general"}, "flag provided but not defined"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newVoiceFake(t)
+			args := append([]string(nil), tt.args...)
+			if len(args) > 1 { // a bare "voice" has no flag position for --server
+				args = append(args, "--server", fake.URL)
+			}
+			stdout, _, err := runCLI(t, "", args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tt.wantErr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q", stdout)
+			}
+			if seen := fake.seen(); len(seen) != 0 {
+				t.Errorf("a usage error sent requests: %v", seen)
+			}
+		})
+	}
+}
+
+func TestUsageMentionsVoiceStatus(t *testing.T) {
+	var out bytes.Buffer
+	Usage(&out)
+	for _, want := range []string{"conch voice status", "--watch", "talking|quiet", "nobody is connected"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage lacks %q", want)
+		}
+	}
+}
+
+func TestVoiceNameFields(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"", "-"}, {"-", `"-"`}, {"nick", "nick"}, {"Ann Lee", `"Ann Lee"`}, {`a"b`, `"a\"b"`},
+		{`a\b`, `"a\\b"`}, {"tab\t", `"tab\t"`}, {"bell\a", `"bell\a"`}, {"\x1b[0m", `"\x1b[0m"`},
+		{"nul\x00", `"nul\x00"`}, {"c1\u009b", `"c1\u009b"`}, {"línea", "línea"},
+	}
+	for _, tt := range tests {
+		if got := voiceName(tt.in); got != tt.want {
+			t.Errorf("voiceName(%q) = %s, want %s", tt.in, got, tt.want)
+		}
+	}
+}
+
+// A room narrower than the channel (none before V5) adds a fifth field naming
+// its audience. The first four fields of every line stay what they are, and a
+// channel-wide line stays four fields, so a scoped room's people cannot read
+// as being in the channel's room.
+func TestVoicePresenceScopedRoomAddsAField(t *testing.T) {
+	at := schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC))
+	person := func(id int64, talking bool) schema.VoiceParticipant {
+		return schema.VoiceParticipant{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: at}
+	}
+	doc := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{
+		{Participants: []schema.VoiceParticipant{person(9, false), person(3, true)}},
+		{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipant{person(7, true), person(5, false)}},
+		{Audience: &schema.Audience{Kind: "future kind"}, Participants: []schema.VoiceParticipant{person(8, false)}},
+	}}
+	var out strings.Builder
+	if err := writeVoicePresence(&out, "general", doc, map[int64]string{3: "nick"}); err != nil {
+		t.Fatal(err)
+	}
+	want := "3 nick talking 2026-10-09T08:30:00Z\n" +
+		"9 - quiet 2026-10-09T08:30:00Z\n" +
+		"5 - quiet 2026-10-09T08:30:00Z net:4\n" +
+		"7 - talking 2026-10-09T08:30:00Z net:4\n" +
+		"8 - quiet 2026-10-09T08:30:00Z future_kind\n"
+	if out.String() != want {
+		t.Errorf("output =\n%s\nwant\n%s", out.String(), want)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		if n := len(strings.Fields(line)); n != 4 && n != 5 {
+			t.Errorf("line %q has %d fields", line, n)
+		}
+	}
+}

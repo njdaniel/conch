@@ -492,3 +492,57 @@ func (c *Client) RemoveNetMember(ctx context.Context, channel, name string, prin
 	endpoint := c.resolve("v1", "channels", channel, "nets", name, "members", strconv.FormatInt(principalID, 10))
 	return c.roundTrip(ctx, "remove net member", http.MethodDelete, endpoint, nil, nil)
 }
+
+// VoicePresence returns one snapshot of who is connected to channel's voice
+// and who is transmitting. A document that fails its own Validate is an error:
+// presence is read to be believed, so a malformed one is never shown.
+func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.VoicePresenceV1, error) {
+	endpoint := c.resolve("v1", "channels", channel, "voice")
+	var result schema.VoicePresenceV1
+	if err := c.roundTrip(ctx, "voice presence", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.VoicePresenceV1{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return schema.VoicePresenceV1{}, fmt.Errorf("cli: invalid voice presence: %w", err)
+	}
+	return result, nil
+}
+
+// SubscribeVoicePresence follows channel's voice presence socket and calls
+// receive with the whole-state document the server sends on connect and on
+// every change. A document that fails Validate ends the subscription with an
+// error. A server shutdown is reported through websocket.StatusGoingAway, and
+// removal from the channel (or a disabled or signed-out credential) through
+// websocket.StatusPolicyViolation.
+func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV1) error) error {
+	endpoint := c.resolve("v1", "voice", "ws")
+	if endpoint.Scheme == "http" {
+		endpoint.Scheme = "ws"
+	} else {
+		endpoint.Scheme = "wss"
+	}
+	query := endpoint.Query()
+	query.Set("channel", channel)
+	endpoint.RawQuery = query.Encode()
+	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	if err != nil {
+		if resp != nil {
+			defer func() { _ = resp.Body.Close() }()
+			return c.decodeError(resp)
+		}
+		return fmt.Errorf("cli: connect voice presence: %w", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	for {
+		var doc schema.VoicePresenceV1
+		if err := wsjson.Read(ctx, conn, &doc); err != nil {
+			return fmt.Errorf("cli: read voice presence: %w", err)
+		}
+		if err := doc.Validate(); err != nil {
+			return fmt.Errorf("cli: invalid voice presence: %w", err)
+		}
+		if err := receive(doc); err != nil {
+			return fmt.Errorf("cli: receive voice presence: %w", err)
+		}
+	}
+}
