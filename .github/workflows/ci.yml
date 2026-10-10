@@ -80,7 +80,7 @@ jobs:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            ~/.cache/conch/voice-target
+            ~/.cache/conch/voice-build
           key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
           # After a dependency change, start from the last build instead of
           # from nothing; cargo rebuilds only what changed.

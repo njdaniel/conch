@@ -39,7 +39,7 @@ rust-check:
 # Builds bin/conch-voice. Not part of `build`: conchd and conch need no Rust.
 rust-build:
 	@mkdir -p bin
-	. ./scripts/voice-env.sh && cd voice && cargo build --locked --release && cp "$$CARGO_TARGET_DIR/release/conch-voice" ../bin/conch-voice
+	bash -c '. ./scripts/voice-env.sh && cd voice && cargo build --locked --release && cp target/release/conch-voice ../bin/conch-voice'
 
 schema-compat:
 	./scripts/schema-compat.sh
