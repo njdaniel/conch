@@ -4,8 +4,8 @@
 /bin/
 /dist/
 
-# Rust (voice/). The shared target directory is in ~/.cache/conch; this is
-# for a cargo run without scripts/voice-env.sh.
+# Rust (voice/). What a build produces for this checkout. Cargo's intermediate
+# files are shared between checkouts, in ~/.cache/conch (scripts/voice-env.sh).
 /voice/target/
 
 # Go
