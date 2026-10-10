@@ -3,10 +3,11 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,13 +39,25 @@ import (
 // logs by channel id.
 
 const (
-	// voicePassGapMin and voicePassGapMax bound the pause between passes while
-	// any room is in use. Each pause is drawn at random between them, both
-	// included (voicePassGap), so that a client cannot place a transmit
-	// report around a pass that has not happened yet
-	// (docs/design/conch-voice.md §6: "Passes are not evenly spaced").
-	voicePassGapMin = 350 * time.Millisecond
-	voicePassGapMax = 650 * time.Millisecond
+	// The pause between passes while any room is in use is drawn at random
+	// for every pass (voicePassGap): voicePassGapMin, plus an exponentially
+	// distributed time with mean voicePassGapMean, and never more than
+	// voicePassGapMax. So the mean is about half a second, and:
+	//
+	//   - a pass a client has learnt of (presence changes the instant a pass
+	//     changes anything) tells it only that the next is at least
+	//     voicePassGapMin away, which is short;
+	//   - beyond that, how long ago the last pass was says almost nothing
+	//     about when the next will be: an exponential wait has no memory;
+	//   - no microphone goes unlooked at for longer than voicePassGapMax.
+	//
+	// The rule the passes feed depends on a client not knowing when the next
+	// one is (docs/design/conch-voice.md §6: "Passes are not evenly spaced").
+	// With the evenly bounded gap this replaced (350 to 650 ms), 350 ms after
+	// every known pass were certain to be unobserved.
+	voicePassGapMin  = 100 * time.Millisecond
+	voicePassGapMean = 400 * time.Millisecond
+	voicePassGapMax  = 1500 * time.Millisecond
 	// voiceSweepInterval is how often the room list is re-read to rebuild "in
 	// use" (design note §6). With no room in use it is the only call made.
 	voiceSweepInterval = 30 * time.Second
@@ -209,6 +222,9 @@ type voicePoller struct {
 	appendAudit func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error)
 	// reports bounds transmit reports per principal (voice_transmit.go).
 	reports voiceReportLimiter
+	// reportTurns are the locks behind reportTurn: one principal's transmit
+	// reports are applied and audited one at a time.
+	reportTurns [64]sync.Mutex
 
 	// pass is set while a pass runs, so one that has not finished is not
 	// started again.
@@ -216,7 +232,8 @@ type voicePoller struct {
 	// wakeLoop interrupts the loop's wait. With no room in use the loop
 	// sleeps until the next sweep, up to voiceSweepInterval away; a session
 	// issued meanwhile must start the polling now, not then. It holds one
-	// queued wake-up and is only ever sent to without blocking.
+	// queued wake-up and is only ever sent to without blocking. A request
+	// sends to it only through wakeIfIdle, which says why.
 	wakeLoop chan struct{}
 
 	mu    sync.Mutex
@@ -365,38 +382,43 @@ func (p *voicePoller) tick(ctx context.Context) {
 	}
 }
 
-// voicePassGap draws one pause between passes: uniform between voicePassGapMin
-// and voicePassGapMax, both included, from the operating system's random
-// source. It is drawn afresh for every pause and depends on nothing earlier,
-// so the passes seen so far say nothing about the next one beyond its range.
-// A generator seeded from the clock would not do: its output can be
-// reconstructed by whoever can guess the seed.
+// voicePassGap draws one pause between passes: voicePassGapMin plus an
+// exponentially distributed time with mean voicePassGapMean, capped at
+// voicePassGapMax, from the operating system's random source. It is drawn
+// afresh for every pause and depends on nothing earlier. A generator seeded
+// from the clock would not do: its output can be reconstructed by whoever can
+// guess the seed.
+//
+// The exponential is drawn by inversion: 53 random bits make a uniform u in
+// (0, 1], and -mean*ln(u) is exponential with that mean. u is never 0, so the
+// logarithm is finite; u = 1 gives the shortest gap.
 func voicePassGap() time.Duration {
-	span := big.NewInt(int64(voicePassGapMax-voicePassGapMin) + 1)
-	n, err := rand.Int(rand.Reader, span)
-	if err != nil {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand does not fail on a supported platform (since Go 1.24
 		// it aborts the program rather than return an error). If it ever
 		// did, there is no unpredictable gap to be had; the shortest one
 		// polls most often, which is the direction that records more.
 		return voicePassGapMin
 	}
-	return voicePassGapMin + time.Duration(n.Int64())
+	u := (float64(binary.BigEndian.Uint64(b[:])>>11) + 1) / (1 << 53)
+	gap := voicePassGapMin + time.Duration(-float64(voicePassGapMean)*math.Log(u))
+	return min(gap, voicePassGapMax)
 }
 
 // nextDelay is how long the loop waits before its next tick: a freshly drawn
 // gap while any room is in use, otherwise until the next sweep, and never
 // sooner than the end of a backoff.
 func (p *voicePoller) nextDelay() time.Duration {
+	// Drawn before the lock is taken: gap is a function a test may replace,
+	// and nothing of the poller's may be held while it runs.
+	gap := p.gap()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	d := p.nextSweep.Sub(now)
-	for _, r := range p.rooms {
-		if r.inUse(now) {
-			d = min(d, p.gap())
-			break
-		}
+	if p.anyInUseLocked(now) {
+		d = min(d, gap)
 	}
 	if wait := p.retryAt.Sub(now); wait > d {
 		d = wait
@@ -408,13 +430,56 @@ func (p *voicePoller) nextDelay() time.Duration {
 func (p *voicePoller) anyInUse() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := p.now()
+	return p.anyInUseLocked(p.now())
+}
+
+// anyInUseLocked reports whether any room is in use at now: whether the loop
+// is waiting out a gap between passes rather than sleeping until a sweep.
+func (p *voicePoller) anyInUseLocked(now time.Time) bool {
 	for _, r := range p.rooms {
 		if r.inUse(now) {
 			return true
 		}
 	}
 	return false
+}
+
+// wakeIfIdle wakes the loop if idle is true: if no room at all was in use
+// before whatever the caller just did (a session issued, a transmit report
+// applied) put one in use. Then the loop may be asleep until the next sweep,
+// up to voiceSweepInterval away, and the first people into an idle server
+// must be seen now, not then.
+//
+// It is the only way a request wakes the loop, and it must stay conditional on
+// the whole poller having been idle, not on the one room. A wake-up runs a
+// pass over every room in use and starts a new gap. If a session or a report
+// for a room that was idle could wake the loop while another room was in use,
+// a member of two channels could run a pass over the first whenever they
+// liked by reporting in the second: they would know when a pass had just
+// happened and so when none could, and could transmit in between unseen. With
+// anything in use the loop is already waiting out a gap of at most
+// voicePassGapMax, and the room that has just come into use is polled at the
+// end of it. No request brings a pass forward, and none puts one off.
+func (p *voicePoller) wakeIfIdle(idle bool) {
+	if !idle {
+		return
+	}
+	select {
+	case p.wakeLoop <- struct{}{}:
+	default: // a wake-up is already queued
+	}
+}
+
+// reportTurn is the lock a transmit report of principalID holds from before
+// it is applied until its audit row is written or it has been taken back
+// (reportTransmit). The locks are shared out by principal id; two principals
+// that share one only wait for each other.
+func (p *voicePoller) reportTurn(principalID int64) *sync.Mutex {
+	i := principalID % int64(len(p.reportTurns))
+	if i < 0 {
+		i = -i
+	}
+	return &p.reportTurns[i]
 }
 
 // noteSession records that a session was issued for room, so the next pass
@@ -426,20 +491,15 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 	}
 	now := p.now()
 	p.mu.Lock()
+	// Before the session is noted: whether the loop had anything to watch.
+	idle := !p.anyInUseLocked(now)
 	r := p.roomLocked(room)
-	wasInUse := r.inUse(now)
 	r.lastSession = now
 	p.mu.Unlock()
-	// A room already in use is being polled, a gap apart; only a room the
-	// loop was not watching needs it woken. So a member asking for sessions
-	// in a loop cannot make the poller run sooner than its next gap.
-	if wasInUse {
-		return
-	}
-	select {
-	case p.wakeLoop <- struct{}{}:
-	default: // a wake-up is already queued
-	}
+	// With any room in use the loop is waiting out a gap, and this room is
+	// polled when it ends. So asking for sessions, in this channel or another,
+	// cannot make a pass happen sooner.
+	p.wakeIfIdle(idle)
 }
 
 // roomLocked returns the state of room, creating it. Only channel-wide rooms
