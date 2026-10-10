@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -89,7 +91,7 @@ func (n *NtfyNotifier) post(ctx context.Context, topic, title, priority, body st
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Title", title)
+	req.Header.Set("Title", headerValue(title))
 	req.Header.Set("Priority", priority)
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp, err := n.client.Do(req)
@@ -101,4 +103,44 @@ func (n *NtfyNotifier) post(ctx context.Context, topic, title, priority, body st
 		return fmt.Errorf("ntfy: status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// maxTitleBytes caps the Title header. A title is user text of any length,
+// and a header has to fit in the server's header limit with room to spare.
+const maxTitleBytes = 250
+
+// headerValue makes user text safe to send as an HTTP header value (issue
+// #157). An approval's title goes into ntfy's Title header, and Go's HTTP
+// client refuses to send a value containing a control character: with a
+// newline in the title the request never left conchd, so anyone who could
+// raise an approval could raise one nobody was pushed about. Each run of
+// control characters and spaces becomes one space, so the words on either side
+// stay apart and nothing can start a second header line. Non-ASCII text is
+// sent as it is: ntfy reads UTF-8 in headers. The body of the notification
+// carries the title unchanged.
+//
+// ntfy also decodes RFC 2047 encoded-words ("=?UTF-8?Q?...?=") in header
+// values, after HTTP parsing. A title written that way is plain ASCII here and
+// would turn into whatever it encodes on ntfy's side, control characters
+// included. The "=?" that opens an encoded-word is split so the title is shown
+// as it was typed.
+func headerValue(s string) string {
+	s = strings.ReplaceAll(s, "=?", "= ?")
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		if b.Len()+utf8.RuneLen(r) > maxTitleBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimRight(b.String(), " ")
 }
