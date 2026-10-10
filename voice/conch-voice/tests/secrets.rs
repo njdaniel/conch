@@ -131,11 +131,11 @@ async fn whole_session(scrubber: Arc<Scrubber>, json: bool, also_stdout: bool) -
     // The first join failed and the second, with a session of its own, worked.
     until("ready", || rig.out.text(), || shown(ready, 1)).await;
     assert_eq!(rig.sdk.tokens(), [join_token(1), join_token(2)]);
-    // While the connection lives the scrubber knows its token and its room, and it has
-    // forgotten those of the attempt that failed.
+    // The scrubber knows this connection's token and room, and still knows those of the
+    // attempt that failed: what the SDK started for that one may not have finished.
     assert_eq!(rig.scrubber.scrub(&join_token(2)), REDACTED);
     assert_eq!(rig.scrubber.scrub(&room_name(2)), REDACTED);
-    assert_eq!(rig.scrubber.scrub(&room_name(1)), room_name(1));
+    assert_eq!(rig.scrubber.scrub(&room_name(1)), REDACTED);
 
     rig.line(Down);
     rig.frames_beyond(2).await;
@@ -176,21 +176,25 @@ async fn whole_session(scrubber: Arc<Scrubber>, json: bool, also_stdout: bool) -
     )
     .await;
     assert_eq!(rig.scrubber.scrub(&room_name(3)), REDACTED);
-    assert_eq!(
-        rig.scrubber.scrub(&room_name(2)),
+    // The room that was left is not forgotten: the SDK's tasks for it are still winding
+    // down, and this is what one of them would log.
+    assert_eq!(rig.scrubber.scrub(&room_name(2)), REDACTED);
+    log::error!(
+        target: "livekit::room",
+        "sdk-left-marker engine_event is taking too much time: RoomUpdate {{ room: {} }} after {}",
         room_name(2),
-        "the room that was left is forgotten"
+        room_name(1)
     );
 
     rig.line(Quit);
     let scrubber = Arc::clone(&rig.scrubber);
     let (result, ended) = rig.ended().await;
     assert!(result.is_ok(), "{result:?}");
-    assert_eq!(
-        scrubber.scrub(&room_name(3)),
-        room_name(3),
-        "and nothing of a connection is kept once the client has left"
-    );
+    // Nor when the client has left: the process is still there, and so is the SDK.
+    for n in 1..=3 {
+        assert_eq!(scrubber.scrub(&room_name(n)), REDACTED);
+        assert_eq!(scrubber.scrub(&join_token(n)), REDACTED);
+    }
     assert_eq!(scrubber.scrub(FAKE_LOGIN), REDACTED);
     ended
 }
@@ -224,9 +228,11 @@ async fn child_process_runs_a_whole_session_with_the_real_logger() {
     };
     let scrubber = Scrubber::new();
     // As `main` does, first, and at the most talkative level a user can ask for.
-    Logger::install(LevelFilter::Trace, Arc::clone(&scrubber)).expect("no logger yet");
+    let logger = Logger::install(LevelFilter::Trace, Arc::clone(&scrubber)).expect("no logger yet");
     log::info!(target: "conch_voice::session", "own-info-marker");
     whole_session(scrubber, mode == "json", true).await;
+    // As `main` does last: what was logged is written before the process ends.
+    assert!(logger.flush_within(std::time::Duration::from_secs(10)));
 }
 
 /// Runs this test binary again as the child above, and returns what it wrote.
@@ -289,6 +295,14 @@ fn nothing_a_whole_process_writes_to_standard_output_or_standard_error_holds_a_s
             stderr.contains(&format!(
                 "conch-voice: warn: livekit::rtc_engine: sdk-late-marker resume failed for \
                  {REDACTED} with {REDACTED} then {REDACTED}"
+            )),
+            "{mode}: {stderr}"
+        );
+        // ...and so did what the SDK logged about a room after that room was left...
+        assert!(
+            stderr.contains(&format!(
+                "conch-voice: error: livekit::room: sdk-left-marker engine_event is taking \
+                 too much time: RoomUpdate {{ room: {REDACTED} }} after {REDACTED}"
             )),
             "{mode}: {stderr}"
         );

@@ -15,6 +15,15 @@
 //! in every process, outside any logging, and nothing here can prevent that. Fields may be
 //! added; a reader should ignore those it does not know.
 //!
+//! **A reader that stops reading loses lines; it does not stop the client.** Lines are
+//! handed to a thread that writes them (`lines.rs`), and at most 1024 wait for it. Beyond
+//! that a line is dropped, and when there is room again an `output_dropped` object (in plain
+//! mode a line in words) says how many were. Nothing the client does waits for a line to be
+//! read: not the release of the key, not `quit`, and not the exit. On a terminal, where the
+//! status is redrawn instead, a frame is written where it is drawn: the terminal is its
+//! user's own reader, and a transmission held over one stopped with flow control is still
+//! bounded by the transmit limit, which the gate keeps by counting frames itself.
+//!
 //! | `event` | Written | Fields |
 //! |---|---|---|
 //! | `connection` | on every change of the voice connection | `state`: `connecting` (asking `conchd` for a session and joining), `connected`, `reconnecting` (the SDK is restoring the connection; not connected until it has), `waiting` (will ask `conchd` again), `stopped` (final; the exit code is not 0) or `closed` (left after `quit`). `reason`, when the state has one: `room_deleted`, `participant_removed`, `duplicate_identity`, `server_shutdown`, `connection_lost`, `reconnect_timed_out`, `connect_failed`, `server_unreachable`, `voice_unavailable`, or for `stopped` the policy's sentence. `detail`: the error's text, if there was one. `retry_in_ms`, with `waiting`: how long until `conchd` is asked; 0 means at once. |
@@ -26,6 +35,7 @@
 //! | `report` | a transmit report was not delivered at once | `state`: `started` or `stopped`. `problem`: `retrying` (with `attempt` and `of`), `gave_up`, `no_session` (409, not retried) or `rate_limited` (429, not retried). `detail`: the error's text. |
 //! | `microphone` | the microphone could not be opened | `detail`: the error's text. |
 //! | `key_device` | the key device was opened, or is not being read; written when that changes, not on every attempt to open it | `device`: the path that was configured. `state`: `open` or `missing`. With `missing`: `reason`: `cannot_open`, `refused` (it is not a character device under `/dev/input`), `read_failed`, `ended` or `partial_record`; `detail`: the reason in words; `retrying`: whether the client goes on trying to open it. Nothing here is derived from a key. |
+//! | `output_dropped` | lines were dropped because standard output was not being read, and it is being read again | `lines`: how many objects were not written since the last one that was. |
 //! | `stats` | once a second while connected | `frames_sent`: frames of this client's own audio handed to its track since the last `stats`; `frames_sent_total`: since it started. `reports_delivered`, `reports_dropped`: transmit reports since it started. `speakers`: for each remote speaker, `speaker`, and for the audio received from them since the last `stats`: `frames` (10 ms each, silent ones included), `audible_frames` (at or above -60 dB of full scale), `rms` (full scale is 1) and `dominant_hz` (the strongest of the tones `--sink` names, or `null` if none stood out or there was silence); and `frames_total` and `audible_frames_total` since the speaker was first heard. `mix`: `frames`, `audible_frames`, `rms` and `dominant_hz` of what was handed to the sink since the last `stats`; this client's own audio is never in it. |
 
 use std::fmt;
@@ -37,6 +47,7 @@ use conch_voice_control::{PttStatus, ShutReason};
 use serde_json::{Value, json};
 
 use crate::keydev::DeviceState;
+use crate::lines::{LineQueue, QUEUE_LINES};
 use crate::presence::Roster;
 use crate::receive::{Measured, MixStats};
 use crate::reports::ReportProblem;
@@ -410,11 +421,30 @@ impl Event<'_> {
     }
 }
 
+/// Where an output's lines go.
+enum Sink {
+    /// Written where they are shown: for tests, whose writer never stalls, and for the
+    /// status redrawn on a terminal, whose frames are not lines.
+    Direct(Box<dyn Write + Send>),
+    /// Handed to a writer thread without waiting.
+    Queued(LineQueue),
+}
+
+/// The line that stands in for lines that were dropped, with `--json`.
+fn dropped_object(lines: u64) -> String {
+    json!({"event": "output_dropped", "lines": lines}).to_string()
+}
+
+/// The line that stands in for lines that were dropped, in plain mode.
+fn dropped_plain(lines: u64) -> String {
+    format!("{lines} lines were not written: standard output was not being read")
+}
+
 /// Where the events go: standard output, one line each, or on a terminal a status that is
 /// redrawn.
 pub struct Output {
     json: bool,
-    out: Box<dyn Write + Send>,
+    out: Sink,
     /// The status that is redrawn in place, when the output is a terminal.
     screen: Option<Screen>,
 }
@@ -428,35 +458,51 @@ impl fmt::Debug for Output {
 }
 
 impl Output {
-    /// An output that writes to `out`: JSON objects if `json`, plain lines otherwise.
+    /// An output that writes each line to `out` where it is shown: JSON objects if `json`,
+    /// plain lines otherwise. For tests: whoever shows an event waits for `out`.
     #[must_use]
     pub fn new(json: bool, out: Box<dyn Write + Send>) -> Self {
         Self {
             json,
-            out,
+            out: Sink::Direct(out),
             screen: None,
         }
     }
 
     /// An output that draws the status on `screen` and writes it to `out`, which is a
-    /// terminal.
+    /// terminal. A terminal's frame is not a line, so it is written where it is shown: a
+    /// terminal stopped with flow control stalls the drawing, and the transmit gate's own
+    /// frame limit still bounds a transmission held over it.
     #[must_use]
     pub fn redrawn(screen: Screen, out: Box<dyn Write + Send>) -> Self {
         Self {
             json: false,
-            out,
+            out: Sink::Direct(out),
             screen: Some(screen),
         }
     }
 
-    /// An output on standard output: the redrawn status if it is a terminal and `json` is
-    /// not asked for, and otherwise line by line.
+    /// An output whose lines are written to `out` by a thread of their own. Showing an
+    /// event never waits for `out`: when [`QUEUE_LINES`] lines are waiting, further ones
+    /// are dropped, and a line says how many when there is room again.
     #[must_use]
-    pub fn stdout(json: bool) -> Self {
+    pub fn queued(json: bool, out: Box<dyn Write + Send>) -> Self {
+        let marker: fn(u64) -> String = if json { dropped_object } else { dropped_plain };
         Self {
             json,
-            out: Box::new(std::io::stdout()),
-            screen: Screen::for_stdout(json),
+            out: Sink::Queued(LineQueue::spawn(out, QUEUE_LINES, Box::new(marker))),
+            screen: None,
+        }
+    }
+
+    /// An output on standard output: the redrawn status if it is a terminal and `json` is
+    /// not asked for, and otherwise line by line, queued, so a reader who stops reading
+    /// cannot stop whoever shows an event.
+    #[must_use]
+    pub fn stdout(json: bool) -> Self {
+        match Screen::for_stdout(json) {
+            Some(screen) => Self::redrawn(screen, Box::new(std::io::stdout())),
+            None => Self::queued(json, Box::new(std::io::stdout())),
         }
     }
 
@@ -468,20 +514,34 @@ impl Output {
         }
     }
 
+    /// Waits until every line shown so far has been written, or `limit` has passed. True
+    /// if they were written. A flush that times out is not an error: the reader was not
+    /// reading, and the client goes on to exit.
+    pub async fn flush(&mut self, limit: Duration) -> bool {
+        match &mut self.out {
+            Sink::Direct(out) => out.flush().is_ok(),
+            Sink::Queued(queue) => queue.flush(limit).await,
+        }
+    }
+
     /// Whether events are written as JSON.
     #[must_use]
     pub fn is_json(&self) -> bool {
         self.json
     }
 
-    /// Writes one event as one line, and flushes it, so a reader sees it when it happens.
+    /// Shows one event: on a terminal, drawn into the status; otherwise one line, flushed,
+    /// so a reader sees it when it happens. With a queued output this hands the line over
+    /// and returns at once, whatever the reader is doing.
     pub fn show(&mut self, event: &Event<'_>) {
         if let Some(screen) = &mut self.screen {
             // What the screen gives back has had every line through the same filter as a
             // plain line below.
-            if let Some(drawn) = screen.show(event) {
-                let _ = self.out.write_all(drawn.as_bytes());
-                let _ = self.out.flush();
+            if let Some(drawn) = screen.show(event)
+                && let Sink::Direct(out) = &mut self.out
+            {
+                let _ = out.write_all(drawn.as_bytes());
+                let _ = out.flush();
             }
             return;
         }
@@ -497,10 +557,15 @@ impl Output {
                 None => return,
             }
         };
-        // If the reader has gone away there is nobody to tell; the client carries on, and
-        // ends when its standard input does.
-        let _ = writeln!(self.out, "{line}");
-        let _ = self.out.flush();
+        match &mut self.out {
+            Sink::Direct(out) => {
+                // If the reader has gone away there is nobody to tell; the client carries
+                // on, and ends when its standard input does.
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+            Sink::Queued(queue) => queue.push(line),
+        }
     }
 }
 
@@ -813,5 +878,72 @@ mod tests {
         assert_eq!(speaker_label("p7\u{1b}[31m red"), "p7??31m?red");
         assert_eq!(speaker_label(""), "?");
         assert_eq!(speaker_label(&"x".repeat(100)).len(), 32);
+    }
+
+    /// Shows events to a queued output whose reader is not reading, far more than the
+    /// queue holds, then lets the reader read and shows one more. Returns what was written.
+    async fn stalled_then_read(json: bool) -> Vec<String> {
+        use crate::lines::tests::Stallable;
+        let writer = Stallable::stalled();
+        let mut output = Output::queued(json, Box::new(writer.clone()));
+        output.show(&Event::Connection(&Connection::Connecting));
+        writer.until_waiting();
+
+        let began = std::time::Instant::now();
+        for _ in 0..QUEUE_LINES + 500 {
+            output.show(&Event::UnknownCommand);
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "showing an event waited for the reader"
+        );
+        assert!(!output.flush(Duration::from_millis(50)).await);
+        assert_eq!(writer.text(), "");
+
+        writer.stall(false);
+        writer.until_lines(1 + QUEUE_LINES);
+        output.show(&Event::Connection(&Connection::Connected));
+        assert!(output.flush(Duration::from_secs(10)).await);
+        writer.text().lines().map(str::to_owned).collect()
+    }
+
+    #[tokio::test]
+    async fn a_queued_output_drops_lines_a_stalled_reader_does_not_take_and_then_says_so() {
+        let lines = stalled_then_read(true).await;
+        assert_eq!(lines.len(), 1 + QUEUE_LINES + 2);
+        assert_eq!(lines[0], r#"{"event":"connection","state":"connecting"}"#);
+        assert_eq!(lines[QUEUE_LINES], r#"{"event":"unknown_command"}"#);
+        // The first thing written after the gap says how wide it was.
+        assert_eq!(
+            lines[QUEUE_LINES + 1],
+            r#"{"event":"output_dropped","lines":500}"#
+        );
+        assert_eq!(
+            lines[QUEUE_LINES + 2],
+            r#"{"event":"connection","state":"connected"}"#
+        );
+        for line in &lines {
+            assert!(line.starts_with('{'), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn in_plain_mode_the_dropped_lines_are_said_in_words() {
+        let lines = stalled_then_read(false).await;
+        assert_eq!(lines.len(), 1 + QUEUE_LINES + 2);
+        assert_eq!(
+            lines[QUEUE_LINES + 1],
+            "500 lines were not written: standard output was not being read"
+        );
+        assert_eq!(lines[QUEUE_LINES + 2], "connected");
+    }
+
+    #[tokio::test]
+    async fn a_direct_output_has_nothing_to_wait_for_when_flushed() {
+        let written = Buffer::default();
+        let mut output = Output::new(true, Box::new(written.clone()));
+        output.show(&Event::UnknownCommand);
+        assert!(output.flush(Duration::ZERO).await);
+        assert_eq!(written.text(), "{\"event\":\"unknown_command\"}\n");
     }
 }

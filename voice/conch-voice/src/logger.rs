@@ -11,18 +11,30 @@
 //!   not know) is written only at `Warn` and `Error`, whatever level the user asked for,
 //!   with its target in front.
 //!
-//! Every record that is written, of either kind, first has the join token and room name in
-//! use, the login token and anything shaped like a signed token replaced by the
-//! [`Scrubber`], and its control characters replaced by spaces, so that it is one line.
+//! Every record that is written, of either kind, first has the join tokens and room names
+//! of recent connections, the login token and anything shaped like a signed token replaced
+//! by the [`Scrubber`], its control characters replaced by spaces, so that it is one line,
+//! and is then cut to [`RECORD_CHARS`]: what answers where a session says LiveKit is decides
+//! what the SDK logs about it, and how much.
+//!
+//! The installed logger does not write to standard error itself. A record is handed to a
+//! [`LineQueue`], so a standard error nobody reads cannot stop whoever logged: the record
+//! is dropped and counted instead.
 
 use std::fmt;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
+use crate::lines::{LineQueue, QUEUE_LINES};
 use crate::secrets::Scrubber;
+
+/// The most characters of one record that are written. An SDK record about a refused join
+/// quotes the answer it got, which may be megabytes.
+pub const RECORD_CHARS: usize = 2_000;
 
 /// The targets whose records are this workspace's own: each crate's module path. A target
 /// is one of these, or one of these followed by `::`.
@@ -45,11 +57,19 @@ fn is_own(target: &str) -> bool {
     })
 }
 
+/// Where a logger's records go.
+enum Sink {
+    /// Written where they are logged, under a lock: for tests, whose writer never stalls.
+    Direct(Mutex<Box<dyn Write + Send>>),
+    /// Handed to a writer thread without waiting.
+    Queued(LineQueue),
+}
+
 /// The logger. See the module documentation for what it writes.
 pub struct Logger {
     /// The level the user asked for, as `LevelFilter as usize`.
     level: AtomicUsize,
-    out: Mutex<Box<dyn Write + Send>>,
+    out: Sink,
     scrubber: Arc<Scrubber>,
 }
 
@@ -63,23 +83,40 @@ impl fmt::Debug for Logger {
 }
 
 impl Logger {
-    /// A logger that writes to `out` at `level`, scrubbing with `scrubber`.
+    /// A logger that writes each record to `out` where it is logged, at `level`, scrubbing
+    /// with `scrubber`. For tests: whoever logs waits for `out`.
     pub fn new(level: LevelFilter, out: Box<dyn Write + Send>, scrubber: Arc<Scrubber>) -> Self {
         Self {
             level: AtomicUsize::new(level as usize),
-            out: Mutex::new(out),
+            out: Sink::Direct(Mutex::new(out)),
             scrubber,
         }
     }
 
-    /// Makes a logger that writes to standard error the process's logger. Call it first in
-    /// `main`: until it is installed a record goes nowhere, and once it is nothing can
-    /// install another.
+    /// A logger whose records are written to `out` by a thread of their own. Whoever logs
+    /// never waits for `out`: when [`QUEUE_LINES`] records are waiting, further ones are
+    /// dropped, and one warning says how many when there is room again.
+    pub fn queued(level: LevelFilter, out: Box<dyn Write + Send>, scrubber: Arc<Scrubber>) -> Self {
+        let dropped = |records| {
+            format!(
+                "conch-voice: warn: {records} log records were dropped: standard error was not being read"
+            )
+        };
+        Self {
+            level: AtomicUsize::new(level as usize),
+            out: Sink::Queued(LineQueue::spawn(out, QUEUE_LINES, Box::new(dropped))),
+            scrubber,
+        }
+    }
+
+    /// Makes a logger that writes to standard error, through a queue, the process's logger.
+    /// Call it first in `main`: until it is installed a record goes nowhere, and once it is
+    /// nothing can install another.
     ///
     /// Returns `None` if some other logger was installed already; then this one is not in
     /// use and nothing may be assumed about what is written.
     pub fn install(level: LevelFilter, scrubber: Arc<Scrubber>) -> Option<&'static Self> {
-        let logger: &'static Self = Box::leak(Box::new(Self::new(
+        let logger: &'static Self = Box::leak(Box::new(Self::queued(
             level,
             Box::new(std::io::stderr()),
             scrubber,
@@ -87,6 +124,19 @@ impl Logger {
         log::set_logger(logger).ok()?;
         log::set_max_level(level);
         Some(logger)
+    }
+
+    /// Waits until every record logged so far has been written, or `limit` has passed.
+    /// True if they were written. It blocks the calling thread: it is for `main`, before
+    /// the process exits, and a flush that times out is not an error.
+    pub fn flush_within(&self, limit: Duration) -> bool {
+        match &self.out {
+            Sink::Direct(out) => {
+                let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
+                out.flush().is_ok()
+            }
+            Sink::Queued(queue) => queue.flush_blocking(limit),
+        }
     }
 
     /// Changes the level the user asked for, for the installed logger. It never widens what
@@ -130,18 +180,31 @@ impl Log for Logger {
             // Not this program's text: its target is shown, and scrubbed with it.
             format!("{}: {}", record.target(), record.args())
         };
-        let line = format!("conch-voice: {level}: {}", self.scrubber.scrub_line(&text));
-        let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
-        // A logger has nowhere to report that it could not write.
-        let _ = writeln!(out, "{line}");
-        let _ = out.flush();
+        // Scrubbed first and cut second: a secret across the place of the cut is replaced
+        // whole, not left as a half that nothing would recognise.
+        let text = self.scrubber.scrub_line_within(&text, RECORD_CHARS);
+        let line = format!("conch-voice: {level}: {text}");
+        match &self.out {
+            Sink::Direct(out) => {
+                let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
+                // A logger has nowhere to report that it could not write.
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+            // Never waited for: this runs in the session loop and in the SDK's threads.
+            Sink::Queued(queue) => queue.push(line),
+        }
         // On a terminal the record went under the status, which is then drawn anew.
         crate::status::disturbed();
     }
 
+    /// The `log` facade's flush. A queued logger does nothing here, because this must not
+    /// wait for standard error either; [`Logger::flush_within`] is the flush with a limit.
     fn flush(&self) {
-        let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = out.flush();
+        if let Sink::Direct(out) = &self.out {
+            let mut out = out.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = out.flush();
+        }
     }
 }
 
@@ -150,6 +213,7 @@ mod tests {
     use conch_voice_api::Secret;
 
     use super::*;
+    use crate::lines::tests::Stallable;
 
     const FAKE_JOIN: &str = "FAKE-join-token-do-not-print-0123456789";
     const FAKE_ROOM: &str = "FAKE-room-name-do-not-print";
@@ -231,7 +295,7 @@ mod tests {
     #[test]
     fn a_warning_from_an_sdk_target_is_written_with_the_secrets_replaced() {
         let (logger, written, scrubber) = logger(LevelFilter::Trace);
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         for target in FOREIGN_TARGETS {
             for level in [Level::Warn, Level::Error] {
                 write(
@@ -258,7 +322,7 @@ mod tests {
     #[test]
     fn a_secret_in_an_sdk_records_target_is_replaced_too() {
         let (logger, written, scrubber) = logger(LevelFilter::Warn);
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         write(&logger, Level::Error, FAKE_ROOM, "gone");
         assert_eq!(written.text(), "conch-voice: error: [redacted]: gone\n");
     }
@@ -290,7 +354,7 @@ mod tests {
     #[test]
     fn this_workspaces_own_records_are_scrubbed_and_kept_to_one_line_too() {
         let (logger, written, scrubber) = logger(LevelFilter::Trace);
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         write(
             &logger,
             Level::Debug,
@@ -351,11 +415,112 @@ mod tests {
     #[test]
     fn debug_shows_nothing_the_scrubber_knows() {
         let (logger, _written, scrubber) = logger(LevelFilter::Warn);
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         let shown = format!("{logger:?}");
         assert!(
             !shown.contains(FAKE_JOIN) && !shown.contains(FAKE_ROOM),
             "{shown}"
         );
+    }
+
+    /// What the SDK logs about a refused join quotes the answer, and whatever answered
+    /// chose its length.
+    #[test]
+    fn a_record_is_cut_to_a_length_after_it_is_scrubbed() {
+        let (logger, written, scrubber) = logger(LevelFilter::Warn);
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        let megabytes = "A".repeat(2 * 1024 * 1024);
+        write(&logger, Level::Warn, "livekit_signaling", &megabytes);
+        write(&logger, Level::Error, "conch_voice", &megabytes);
+        let text = written.text();
+        for line in text.lines() {
+            let length = line.chars().count();
+            assert!(
+                length > RECORD_CHARS && length < RECORD_CHARS + 40,
+                "a record of {length} characters"
+            );
+            assert!(line.ends_with("A [cut]"), "it says that it was cut");
+        }
+        assert_eq!(text.lines().count(), 2);
+
+        // A secret that lies across the place of the cut is not written in part.
+        let lead = "x".repeat(RECORD_CHARS - "livekit: ".len() - 15);
+        let record = format!("{lead}{FAKE_JOIN} and the rest of it");
+        write(&logger, Level::Warn, "livekit", &record);
+        let text = written.text();
+        let last = text.lines().last().unwrap();
+        let end = &last[last.len() - 40..];
+        assert!(!last.contains("FAKE"), "{end}");
+        assert!(end.ends_with("x[redacted] and  [cut]"), "{end}");
+
+        // A record that fits is not touched.
+        write(&logger, Level::Warn, "livekit", "short");
+        assert!(
+            written
+                .text()
+                .ends_with("conch-voice: warn: livekit: short\n")
+        );
+    }
+
+    #[test]
+    fn a_queued_logger_writes_its_records_in_order() {
+        let writer = Stallable::default();
+        let logger = Logger::queued(LevelFilter::Warn, Box::new(writer.clone()), Scrubber::new());
+        for n in 0..50 {
+            write(&logger, Level::Warn, "livekit", &format!("record {n}"));
+        }
+        assert!(logger.flush_within(Duration::from_secs(10)));
+        let expected: String = (0..50)
+            .map(|n| format!("conch-voice: warn: livekit: record {n}\n"))
+            .collect();
+        assert_eq!(writer.text(), expected);
+    }
+
+    /// The logger is called from the session loop and from the SDK's threads. With a
+    /// standard error nobody reads, a record is dropped: nobody waits for it.
+    #[test]
+    fn with_a_stalled_standard_error_a_record_is_dropped_and_not_waited_for() {
+        let writer = Stallable::stalled();
+        let logger = Logger::queued(LevelFilter::Warn, Box::new(writer.clone()), Scrubber::new());
+        write(&logger, Level::Warn, "livekit", "in the writer's hands");
+        writer.until_waiting();
+
+        let began = std::time::Instant::now();
+        for n in 0..QUEUE_LINES + 300 {
+            write(&logger, Level::Error, "livekit", &format!("record {n}"));
+        }
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_secs(2),
+            "logging waited for standard error: {took:?}"
+        );
+        // Neither does the flush wait beyond its limit, nor the facade's flush at all.
+        let began = std::time::Instant::now();
+        assert!(!logger.flush_within(Duration::from_millis(100)));
+        Log::flush(&logger);
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert_eq!(writer.text(), "");
+
+        // When standard error is read again, one warning says how many were dropped.
+        writer.stall(false);
+        writer.until_lines(1 + QUEUE_LINES);
+        write(&logger, Level::Warn, "livekit", "after");
+        assert!(logger.flush_within(Duration::from_secs(10)));
+        let text = writer.text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1 + QUEUE_LINES + 2, "{}", lines.len());
+        assert_eq!(
+            lines[0],
+            "conch-voice: warn: livekit: in the writer's hands"
+        );
+        assert_eq!(
+            lines[QUEUE_LINES],
+            format!("conch-voice: error: livekit: record {}", QUEUE_LINES - 1)
+        );
+        assert_eq!(
+            lines[QUEUE_LINES + 1],
+            "conch-voice: warn: 300 log records were dropped: standard error was not being read"
+        );
+        assert_eq!(lines[QUEUE_LINES + 2], "conch-voice: warn: livekit: after");
     }
 }

@@ -8,15 +8,21 @@
 //! (a log record, an error's message) goes through [`Scrubber::scrub`] before it is written,
 //! which replaces:
 //!
-//! - the join token and the room name of the connection in progress, which the session loop
-//!   registers with [`Scrubber::connection`] and which are forgotten when the returned guard
-//!   is dropped;
+//! - the join token and the room name of each of the last [`CONNECTIONS_KEPT`] connection
+//!   attempts, which the session loop registers with [`Scrubber::connection`]. They are
+//!   kept after the connection has ended, because the SDK's own tasks go on running, and
+//!   logging, after a room was left; they are kept for this and for nothing else;
 //! - the login token, registered once with [`Scrubber::always`];
 //! - anything shaped like a signed token, whoever issued it: three runs of base64url
 //!   characters joined by dots, the first beginning `eyJ`. That covers the tokens LiveKit
 //!   sends the SDK later, which this program never sees.
+//!
+//! Text from outside is also made fit for one line of a terminal ([`one_line`]) and cut to
+//! a length ([`cut`]), in that order after the scrub, so that a secret is never cut in half
+//! and missed.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -25,16 +31,24 @@ use conch_voice_api::Secret;
 /// What a secret is replaced by.
 pub const REDACTED: &str = "[redacted]";
 
+/// How many connection attempts' join token and room name are remembered. A client makes
+/// one attempt at a time; sixteen is every attempt of the last minutes, and a bound on
+/// what a client that reconnects for days keeps.
+pub const CONNECTIONS_KEPT: usize = 16;
+
+/// What ends a text that [`cut`] shortened.
+pub const CUT_MARK: &str = " [cut]";
+
 #[derive(Default)]
 struct Known {
     /// For as long as the process runs.
     always: Vec<String>,
-    /// For one connection: the guard's number, and the value.
-    connection: Vec<(u64, String)>,
-    next_guard: u64,
+    /// The values of the last connection attempts, oldest first: for each, its join token
+    /// and its room name, less any that was empty.
+    connections: VecDeque<Vec<String>>,
 }
 
-/// Replaces secrets in text. Shared by the logger and the SDK layer.
+/// Replaces secrets in text. Shared by the logger, the session loop and the SDK layer.
 #[derive(Default)]
 pub struct Scrubber {
     known: RwLock<Known>,
@@ -46,7 +60,7 @@ impl fmt::Debug for Scrubber {
         let known = self.known.read().unwrap_or_else(PoisonError::into_inner);
         f.debug_struct("Scrubber")
             .field("always", &known.always.len())
-            .field("connection", &known.connection.len())
+            .field("connections", &known.connections.len())
             .finish()
     }
 }
@@ -67,23 +81,22 @@ impl Scrubber {
         known.always.push(secret.expose().to_owned());
     }
 
-    /// Registers the join token and the room name of one connection. They are forgotten when
-    /// the guard is dropped, which is when the connection has ended or the attempt failed.
-    #[must_use = "the values are forgotten when the guard is dropped"]
-    pub fn connection(self: &Arc<Self>, token: &Secret, room: &Secret) -> ConnectionSecrets {
-        let mut known = self.known.write().unwrap_or_else(PoisonError::into_inner);
-        let guard = known.next_guard;
-        known.next_guard = known.next_guard.wrapping_add(1);
-        for secret in [token, room] {
+    /// Registers the join token and the room name of one connection attempt. They stay
+    /// registered when the connection ends: the SDK may still log about a room after it
+    /// was left. Only the last [`CONNECTIONS_KEPT`] attempts are remembered; the oldest
+    /// goes when one more arrives.
+    pub fn connection(&self, token: &Secret, room: &Secret) {
+        let values: Vec<String> = [token, room]
+            .into_iter()
             // An empty value is in every text, so it is not searched for.
-            if !secret.is_empty() {
-                known.connection.push((guard, secret.expose().to_owned()));
-            }
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| secret.expose().to_owned())
+            .collect();
+        let mut known = self.known.write().unwrap_or_else(PoisonError::into_inner);
+        while known.connections.len() >= CONNECTIONS_KEPT {
+            known.connections.pop_front();
         }
-        ConnectionSecrets {
-            scrubber: Arc::clone(self),
-            guard,
-        }
+        known.connections.push_back(values);
     }
 
     /// `text` with every registered value, and anything shaped like a signed token, replaced
@@ -96,8 +109,8 @@ impl Scrubber {
             let mut values: Vec<&str> = known
                 .always
                 .iter()
+                .chain(known.connections.iter().flatten())
                 .map(String::as_str)
-                .chain(known.connection.iter().map(|(_, value)| value.as_str()))
                 .collect();
             // Longest first, so a whole token goes before a value that is part of it.
             values.sort_by_key(|value| std::cmp::Reverse(value.len()));
@@ -122,45 +135,64 @@ impl Scrubber {
         Cow::Owned(cleaned)
     }
 
-    /// [`Scrubber::scrub`], and then every control character replaced by a space: text fit
-    /// to be one line on a terminal. A line break in it cannot pass for a line of this
-    /// program's, and an escape sequence cannot drive the terminal.
+    /// [`Scrubber::scrub`], and then [`one_line`]: text fit to be one line on a terminal. A
+    /// line break in it cannot pass for a line of this program's, and neither an escape
+    /// sequence nor a change of writing direction can alter what the terminal shows.
     #[must_use]
     pub fn scrub_line(&self, text: &str) -> String {
         one_line(&self.scrub(text))
     }
-}
 
-/// `text` with every control character replaced by a space.
-#[must_use]
-pub fn one_line(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
-
-/// The join token and room name of one connection, registered with the scrubber. Dropping
-/// it makes the scrubber forget them.
-pub struct ConnectionSecrets {
-    scrubber: Arc<Scrubber>,
-    guard: u64,
-}
-
-impl Drop for ConnectionSecrets {
-    fn drop(&mut self) {
-        let mut known = self
-            .scrubber
-            .known
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        known.connection.retain(|(guard, _)| *guard != self.guard);
+    /// [`Scrubber::scrub_line`], and then [`cut`] to `most` characters: for text whose
+    /// length somebody else chose. The scrub comes first, so a secret that lies across the
+    /// place of the cut is replaced whole and not left as a half nothing would recognise.
+    #[must_use]
+    pub fn scrub_line_within(&self, text: &str, most: usize) -> String {
+        cut(self.scrub_line(text), most)
     }
 }
 
-/// Shows nothing of what it guards.
-impl fmt::Debug for ConnectionSecrets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionSecrets").finish_non_exhaustive()
+/// Whether `c` changes the direction text is shown in, or separates lines or paragraphs,
+/// without being a control character: U+061C, U+200E, U+200F, U+2028, U+2029, U+202A to
+/// U+202E and U+2066 to U+2069. With them a line can show something other than it holds.
+fn redirects(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// `text` with every control character, every bidirectional control and the line and
+/// paragraph separators each replaced by a space.
+#[must_use]
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || redirects(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `text` if it has at most `most` characters; otherwise its first `most` characters and
+/// [`CUT_MARK`]. The cut falls between characters, never inside one.
+#[must_use]
+pub fn cut(text: String, most: usize) -> String {
+    match text.char_indices().nth(most) {
+        None => text,
+        Some((at, _)) => {
+            let mut kept = text;
+            kept.truncate(at);
+            kept.push_str(CUT_MARK);
+            kept
+        }
     }
 }
 
@@ -215,36 +247,86 @@ mod tests {
     const FAKE_JWT: &str = "eyJGQUtFIjoiaGVhZGVyIn0.eyJGQUtFIjoiY2xhaW1zIn0.RkFLRS1zaWduYXR1cmU";
 
     #[test]
-    fn a_registered_token_and_room_are_replaced_and_forgotten_with_the_guard() {
+    fn a_registered_token_and_room_are_replaced_wherever_they_appear() {
         let scrubber = Scrubber::new();
         let text = format!("joining {FAKE_ROOM} with {FAKE_JOIN}, twice: {FAKE_JOIN}");
         assert_eq!(scrubber.scrub(&text), text, "nothing is registered yet");
 
-        let guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
-        let scrubbed = scrubber.scrub(&text);
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         assert_eq!(
-            scrubbed,
+            scrubber.scrub(&text),
             "joining [redacted] with [redacted], twice: [redacted]"
         );
+    }
 
-        drop(guard);
-        assert_eq!(scrubber.scrub(&text), text, "forgotten with the guard");
+    /// The SDK's tasks for a room go on running, and logging, after the room was left and
+    /// while the next connection is made: nothing about an earlier connection is forgotten
+    /// because a later one began.
+    #[test]
+    fn a_connections_values_are_still_replaced_after_later_connections_began() {
+        let scrubber = Scrubber::new();
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        for n in 1..CONNECTIONS_KEPT {
+            scrubber.connection(
+                &Secret::new(format!("later-FAKE-token-{n}")),
+                &Secret::new(format!("later-FAKE-room-{n}")),
+            );
+        }
+        assert_eq!(
+            scrubber.scrub(&format!("closing {FAKE_ROOM} ({FAKE_JOIN})")),
+            "closing [redacted] ([redacted])"
+        );
     }
 
     #[test]
-    fn one_guard_does_not_forget_another_connections_values() {
+    fn only_the_last_sixteen_connections_are_remembered() {
         let scrubber = Scrubber::new();
-        let first = scrubber.connection(&Secret::new("first-FAKE-token"), &Secret::new("room"));
-        let _second = scrubber.connection(&Secret::new("second-FAKE-token"), &Secret::new("room"));
-        drop(first);
-        assert_eq!(scrubber.scrub("second-FAKE-token"), REDACTED);
-        assert_eq!(scrubber.scrub("first-FAKE-token"), "first-FAKE-token");
+        let token = |n: usize| format!("FAKE-token-number-{n:03}");
+        let room = |n: usize| format!("FAKE-room-number-{n:03}");
+        for n in 0..CONNECTIONS_KEPT + 1 {
+            scrubber.connection(&Secret::new(token(n)), &Secret::new(room(n)));
+        }
+        // The oldest pair went when the seventeenth arrived, and only that pair.
+        assert_eq!(scrubber.scrub(&token(0)), token(0));
+        assert_eq!(scrubber.scrub(&room(0)), room(0));
+        for n in 1..CONNECTIONS_KEPT + 1 {
+            assert_eq!(scrubber.scrub(&token(n)), REDACTED, "token {n}");
+            assert_eq!(scrubber.scrub(&room(n)), REDACTED, "room {n}");
+        }
+        // However many more there are, what is kept does not grow.
+        for n in 100..400 {
+            scrubber.connection(&Secret::new(token(n)), &Secret::new(room(n)));
+        }
+        let known = scrubber.known.read().unwrap();
+        assert_eq!(known.connections.len(), CONNECTIONS_KEPT);
+        assert_eq!(known.connections.iter().flatten().count(), 32);
+    }
+
+    /// A value that is part of another is replaced after it, not before: otherwise the
+    /// longer one would no longer be found, and what is left of it would be written.
+    #[test]
+    fn a_value_that_holds_another_is_replaced_whole() {
+        let scrubber = Scrubber::new();
+        let room = "FAKE-room";
+        let token = format!("FAKE-head.{room}.FAKE-tail");
+        scrubber.connection(&Secret::new(token.clone()), &Secret::new(room));
+        assert_eq!(
+            scrubber.scrub(&format!("token={token}")),
+            "token=[redacted]"
+        );
+        assert_eq!(scrubber.scrub(&format!("room={room}")), "room=[redacted]");
     }
 
     #[test]
     fn the_login_token_is_replaced_for_as_long_as_the_process_runs() {
         let scrubber = Scrubber::new();
         scrubber.always(&Secret::new("conch_FAKE_login_token"));
+        for n in 0..CONNECTIONS_KEPT * 2 {
+            scrubber.connection(
+                &Secret::new(format!("FAKE-token-{n}")),
+                &Secret::new("room"),
+            );
+        }
         assert_eq!(
             scrubber.scrub("Authorization: Bearer conch_FAKE_login_token"),
             "Authorization: Bearer [redacted]"
@@ -290,14 +372,14 @@ mod tests {
     fn an_empty_value_is_not_searched_for_and_a_short_one_is() {
         let scrubber = Scrubber::new();
         scrubber.always(&Secret::new(""));
-        let _guard = scrubber.connection(&Secret::new(""), &Secret::new("r7"));
+        scrubber.connection(&Secret::new(""), &Secret::new("r7"));
         assert_eq!(scrubber.scrub("room r7 is full"), "room [redacted] is full");
     }
 
     #[test]
     fn a_scrubbed_line_has_no_control_character_and_no_secret() {
         let scrubber = Scrubber::new();
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         let text = format!("refused\r\n\x1b[2Jconnected\x07 {FAKE_JOIN}\t{FAKE_ROOM}\u{85}end");
         assert_eq!(
             scrubber.scrub_line(&text),
@@ -306,12 +388,68 @@ mod tests {
         assert_eq!(one_line("plain text, ünïcödé"), "plain text, ünïcödé");
     }
 
+    /// A right-to-left override makes a terminal show `dlrow olleh` as `hello world`; a
+    /// line separator starts a new line though it is no control character. None of them
+    /// gets through, and nothing else is touched.
+    #[test]
+    fn one_line_has_no_bidirectional_control_and_no_separator() {
+        let redirecting = [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}', '\u{202A}', '\u{202B}',
+            '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        for c in redirecting {
+            assert_eq!(one_line(&format!("a{c}b")), "a b", "U+{:04X}", c as u32);
+        }
+        assert_eq!(
+            one_line("denied \u{202E}dlrow olleh\u{202C} by\u{2028}conch-voice: connected"),
+            "denied  dlrow olleh  by conch-voice: connected"
+        );
+        // Their neighbours in the table, and text in a right-to-left script, pass.
+        let kept = "\u{061B}\u{061D}\u{200D}\u{2010}\u{2027}\u{202F}\u{2065}\u{206A} שלום مرحبا";
+        assert_eq!(one_line(kept), kept);
+    }
+
+    #[test]
+    fn a_text_is_cut_between_characters_and_says_that_it_was() {
+        assert_eq!(cut("short".into(), 5), "short");
+        assert_eq!(cut("shorter".into(), 5), "short [cut]");
+        assert_eq!(cut(String::new(), 0), "");
+        // Counted in characters, and never cut inside one.
+        assert_eq!(cut("ünïcödé".into(), 7), "ünïcödé");
+        assert_eq!(cut("ünïcödé".into(), 3), "ünï [cut]");
+        let long = "é".repeat(5_000);
+        let kept = cut(long, 512);
+        assert_eq!(kept.chars().count(), 512 + CUT_MARK.chars().count());
+    }
+
+    /// The scrub comes before the cut. Done the other way, a secret lying across the place
+    /// of the cut would be cut in half first, and its first half would be written.
+    #[test]
+    fn a_secret_that_lies_across_the_cut_is_replaced_and_not_cut_in_half() {
+        let scrubber = Scrubber::new();
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        for (secret, lead) in [(FAKE_JOIN, 500), (FAKE_ROOM, 505), (FAKE_JWT, 490)] {
+            let text = format!("{}{secret} and more", "x".repeat(lead));
+            let line = scrubber.scrub_line_within(&text, 512);
+            assert!(
+                !line.contains(&secret[..8]),
+                "the start of a secret was written: {}",
+                &line[lead.saturating_sub(4)..]
+            );
+            assert!(
+                line.ends_with(CUT_MARK) || line.ends_with("and more"),
+                "{line}"
+            );
+            assert!(line.chars().count() <= 512 + CUT_MARK.len());
+        }
+    }
+
     #[test]
     fn debug_shows_no_registered_value() {
         let scrubber = Scrubber::new();
         scrubber.always(&Secret::new("conch_FAKE_login_token"));
-        let guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
-        let shown = format!("{scrubber:?} {guard:?}");
+        scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        let shown = format!("{scrubber:?}");
         for secret in ["conch_FAKE_login_token", FAKE_JOIN, FAKE_ROOM] {
             assert!(!shown.contains(secret), "{shown}");
         }

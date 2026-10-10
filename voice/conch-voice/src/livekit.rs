@@ -11,9 +11,16 @@
 //!   SDK**, and it takes a [`GatedFrame`]. The SDK is never asked to open a microphone
 //!   itself: the track is built on a [`NativeAudioSource`], which sends what it is given and
 //!   captures nothing.
-//! - **Every text the SDK produces is scrubbed before it leaves this file**
-//!   (`secrets.rs`): an error's message may hold an address or a header on a path nobody
-//!   measured.
+//! - **Every text the SDK produces is scrubbed, put on one line and cut to a length before
+//!   it leaves this file** (`secrets.rs`): an error's message may hold an address or a
+//!   header on a path nobody measured, and when a join is refused it quotes the answer,
+//!   whose words and length whatever answered chose.
+//!
+//! What of this file a test can reach without a room is tested here: how a disconnect's
+//! reason is translated, and that `disable` disables the track. `mute`, `unmute` and the
+//! publication the SDK hands over when it republishes need a joined room; nothing here
+//! pretends to test them, and they stay with the end-to-end scenario (#188) and the real
+//! runs behind `docs/design/conch-voice.md` §13.
 
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -64,10 +71,42 @@ impl LiveKit {
     }
 }
 
-/// An error of the SDK's as one of ours: its text, scrubbed and on one line.
+/// The most characters of an SDK error's text that are kept. It becomes the `detail` of a
+/// status line, on every attempt.
+pub const ERROR_CHARS: usize = 512;
+
+/// An error of the SDK's as one of ours: its text scrubbed, on one line, and then cut.
 fn scrubbed(scrubber: &Scrubber, what: &str, error: &dyn std::fmt::Display) -> SdkError {
     let text = format!("{what}: {error}");
-    SdkError::scrubbed(scrubber.scrub_line(&text))
+    SdkError::scrubbed(scrubber.scrub_line_within(&text, ERROR_CHARS))
+}
+
+/// What a reason the SDK gives for a disconnect is to this client (the second table of the
+/// design note's §5). Every reason the SDK has is named, with no catch-all, so that one it
+/// gains is decided here and not by default: the match stops compiling until it is.
+fn reason(reason: LkReason) -> DisconnectReason {
+    match reason {
+        LkReason::RoomDeleted => DisconnectReason::RoomDeleted,
+        LkReason::ParticipantRemoved => DisconnectReason::ParticipantRemoved,
+        LkReason::DuplicateIdentity => DisconnectReason::DuplicateIdentity,
+        LkReason::ServerShutdown => DisconnectReason::ServerShutdown,
+        // No reason at all is what follows a `Reconnecting` the SDK gave up on. None of the
+        // rest is treated differently from a connection that was lost: `conchd` is asked
+        // again after a wait, and says what is still allowed.
+        LkReason::UnknownReason
+        | LkReason::ClientInitiated
+        | LkReason::StateMismatch
+        | LkReason::JoinFailure
+        | LkReason::Migration
+        | LkReason::SignalClose
+        | LkReason::RoomClosed
+        | LkReason::UserUnavailable
+        | LkReason::UserRejected
+        | LkReason::SipTrunkFailure
+        | LkReason::ConnectionTimeout
+        | LkReason::MediaFailure
+        | LkReason::AgentError => DisconnectReason::Lost,
+    }
 }
 
 /// The publication the SDK currently has for the microphone track. The SDK replaces it when
@@ -132,13 +171,7 @@ async fn pump(
                 *publication.lock().unwrap_or_else(PoisonError::into_inner) = Some(republished);
                 SdkEvent::Republished
             }
-            RoomEvent::Disconnected { reason } => SdkEvent::Disconnected(match reason {
-                LkReason::RoomDeleted => DisconnectReason::RoomDeleted,
-                LkReason::ParticipantRemoved => DisconnectReason::ParticipantRemoved,
-                LkReason::DuplicateIdentity => DisconnectReason::DuplicateIdentity,
-                LkReason::ServerShutdown => DisconnectReason::ServerShutdown,
-                _ => DisconnectReason::Lost,
-            }),
+            RoomEvent::Disconnected { reason: why } => SdkEvent::Disconnected(reason(why)),
             // Nothing else changes what this client does. A refreshed token in particular
             // is the SDK's own business: it is not kept, used or shown here.
             _ => continue,
@@ -332,7 +365,7 @@ mod tests {
     #[test]
     fn an_sdk_error_is_scrubbed_before_it_becomes_one_of_ours() {
         let scrubber = Scrubber::new();
-        let _connection = scrubber.connection(
+        scrubber.connection(
             &Secret::new("FAKE-join-token-do-not-print"),
             &Secret::new("FAKE-room-name-do-not-print"),
         );
@@ -345,5 +378,104 @@ mod tests {
             error.to_string(),
             "could not join the voice room: ws://h/rtc?access_token=[redacted] ([redacted])"
         );
+    }
+
+    /// When a join is refused the SDK's error quotes the answer it got, and whatever
+    /// answered where the session said LiveKit was chose how long that is.
+    #[test]
+    fn an_sdk_error_is_cut_to_a_length_after_it_is_scrubbed() {
+        let scrubber = Scrubber::new();
+        scrubber.connection(
+            &Secret::new("FAKE-join-token-do-not-print"),
+            &Secret::new("FAKE-room-name-do-not-print"),
+        );
+        let megabytes = "A".repeat(2 * 1024 * 1024);
+        let error = scrubbed(&scrubber, "could not join", &megabytes).to_string();
+        assert_eq!(error.chars().count(), ERROR_CHARS + " [cut]".len());
+        assert!(error.ends_with("A [cut]"), "it says that it was cut");
+
+        // A token that lies across the place of the cut is replaced, not cut in half.
+        let lead = "x".repeat(ERROR_CHARS - "could not join: ".len() - 12);
+        let text = format!("{lead}FAKE-join-token-do-not-print and the rest");
+        let error = scrubbed(&scrubber, "could not join", &text).to_string();
+        assert!(!error.contains("FAKE"), "{error}");
+        assert!(error.ends_with("x[redacted] a [cut]"), "{error}");
+
+        let short = scrubbed(&scrubber, "could not join", &"401").to_string();
+        assert_eq!(short, "could not join: 401");
+    }
+
+    /// The same table as the design note's §5, over every reason the SDK has. The numbers
+    /// are the protocol's: a reason that is added shows up here as one more that is valid.
+    #[test]
+    fn each_reason_the_sdk_gives_for_a_disconnect_is_translated_as_the_design_says() {
+        let table = [
+            (LkReason::UnknownReason, DisconnectReason::Lost),
+            (LkReason::ClientInitiated, DisconnectReason::Lost),
+            (
+                LkReason::DuplicateIdentity,
+                DisconnectReason::DuplicateIdentity,
+            ),
+            (LkReason::ServerShutdown, DisconnectReason::ServerShutdown),
+            (
+                LkReason::ParticipantRemoved,
+                DisconnectReason::ParticipantRemoved,
+            ),
+            (LkReason::RoomDeleted, DisconnectReason::RoomDeleted),
+            (LkReason::StateMismatch, DisconnectReason::Lost),
+            (LkReason::JoinFailure, DisconnectReason::Lost),
+            (LkReason::Migration, DisconnectReason::Lost),
+            (LkReason::SignalClose, DisconnectReason::Lost),
+            (LkReason::RoomClosed, DisconnectReason::Lost),
+            (LkReason::UserUnavailable, DisconnectReason::Lost),
+            (LkReason::UserRejected, DisconnectReason::Lost),
+            (LkReason::SipTrunkFailure, DisconnectReason::Lost),
+            (LkReason::ConnectionTimeout, DisconnectReason::Lost),
+            (LkReason::MediaFailure, DisconnectReason::Lost),
+            (LkReason::AgentError, DisconnectReason::Lost),
+        ];
+        for (theirs, ours) in table {
+            assert_eq!(reason(theirs), ours, "{}", theirs.as_str_name());
+        }
+        // Every reason the SDK can decode is in the table above.
+        let known: Vec<LkReason> = (0..1024)
+            .filter_map(|number| LkReason::try_from(number).ok())
+            .collect();
+        assert_eq!(
+            known.len(),
+            table.len(),
+            "the SDK has a reason this table lacks"
+        );
+        for theirs in known {
+            assert!(table.iter().any(|(listed, _)| *listed == theirs));
+        }
+    }
+
+    /// `disable` is what stops a republished track, which is muted already and enabled all
+    /// the same. A track can be made, and read back, without a room.
+    #[test]
+    fn disabling_the_track_disables_it() {
+        let source = NativeAudioSource::new(
+            AudioSourceOptions::default(),
+            SAMPLE_RATE,
+            1,
+            SOURCE_QUEUE_MS,
+        );
+        let track =
+            LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(source));
+        let ours = LiveKitTrack {
+            track: track.clone(),
+            // Not published: there is no room. Muting therefore does nothing here, and is
+            // not what this test is about.
+            publication: Publication::default(),
+        };
+        assert!(track.is_enabled(), "a new track is enabled");
+        ours.mute();
+        assert!(
+            track.is_enabled(),
+            "with no publication a mute reaches nothing"
+        );
+        ours.disable();
+        assert!(!track.is_enabled());
     }
 }
