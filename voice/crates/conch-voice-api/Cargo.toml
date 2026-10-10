@@ -8,7 +8,31 @@ repository.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# Every feature below is chosen so that Cargo.lock gains no crate: each one is
+# already in the tree through livekit. TLS is rustls with ring and the system's
+# roots, and reqwest is the only crate here that speaks it.
 [dependencies]
+# HTTP/1.1 only: no HTTP/2, no cookies, no decompression, no native-tls.
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots"] }
+# Framing only. The socket's opening handshake is made by reqwest (src/presence.rs
+# says why), so this needs neither `connect` nor a TLS feature of its own;
+# `handshake` gives the accept-key functions.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+# StreamExt, to read the socket.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# The bound on the time an upgrade may take.
+tokio = { version = "1.53", default-features = false, features = ["time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+# The stub conchd the tests talk to is written by hand on tokio's listener.
+tokio = { version = "1.53", default-features = false, features = ["macros", "rt", "net", "io-util", "time"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
+# Without its default feature, as the rest of the tree has it, so that Cargo.lock gains
+# no edge: temporary names are still random.
+tempfile = { version = "3.27", default-features = false }
 
 [lints]
 workspace = true
