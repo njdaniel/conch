@@ -1287,6 +1287,38 @@ func TestVoicePassGap(t *testing.T) {
 	}
 }
 
+// TestVoiceGapIsDrawnOnlyForAPass: the loop draws a gap when there is a pass
+// to wait for, once for each wait, and not while it is idle until the next
+// sweep. The gap function is what its comment says it is, the pause before the
+// next pass while a room is in use; one that hands out a fixed sequence is not
+// used up by an idle server.
+func TestVoiceGapIsDrawnOnlyForAPass(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	draws := 0
+	f.srv.voice.gap = func() time.Duration {
+		draws++
+		return testPassGap
+	}
+	f.sweep(t)
+	for range 5 {
+		if d := f.srv.voice.nextDelay(); d != voiceSweepInterval {
+			t.Fatalf("idle delay = %v, want the wait for the sweep", d)
+		}
+	}
+	if draws != 0 {
+		t.Errorf("an idle loop drew %d gaps in 5 waits, want none", draws)
+	}
+	f.inUse(t, f.ops)
+	for range 5 {
+		if d := f.srv.voice.nextDelay(); d != testPassGap {
+			t.Fatalf("delay with a room in use = %v, want the gap drawn", d)
+		}
+	}
+	if draws != 5 {
+		t.Errorf("5 waits with a room in use drew %d gaps, want one each", draws)
+	}
+}
+
 // TestVoiceTransmitAuditFailure: a report whose audit row cannot be written
 // is not applied. The caller is told it failed, and the reported state does
 // not say more than the audit log does: retried once the store works, the
@@ -1752,6 +1784,11 @@ func TestVoiceTransmitRowSurvivesTheCallerHangingUp(t *testing.T) {
 	write := f.srv.voice.appendAudit
 	f.srv.voice.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
 		hangUp() // the state has changed; the caller goes away before the write
+		// The write outlives the caller, but not for ever: the room's order
+		// is held while it runs, and a pass over the room waits for it.
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > voiceEvictTimeout {
+			t.Errorf("the report's audit write has no deadline within %v (deadline %v, set %v)", voiceEvictTimeout, deadline, ok)
+		}
 		return write(ctx, actor, action, subject, detail, at)
 	}
 	f.at(100)
@@ -1781,7 +1818,7 @@ func TestVoiceTransmitRowSurvivesTheCallerHangingUp(t *testing.T) {
 	assertTransmitPairs(t, f.audit(t))
 }
 
-// TestVoiceTransmitOneReportAtATime: a principal's reports are applied one at
+// TestVoiceTransmitOneReportAtATime: the reports for a room are applied one at
 // a time, each after the one before has its row or has been taken back.
 //
 // The review's sequence: reported `started`; A, a `stopped`, is applied and
@@ -1813,10 +1850,10 @@ func TestVoiceTransmitOneReportAtATime(t *testing.T) {
 	a := make(chan int, 1)
 	go func() { a <- f.report(t, "ann", "ops", "stopped").status }() // A: applied, its write hangs
 	<-entered
-	// A holds ann's turn for as long as its row is unwritten.
-	if turn := p.reportTurn(f.ids["ann"]); turn.TryLock() {
-		turn.Unlock()
-		t.Fatal("a report's turn is free while its audit row is being written: a second report could be applied on top of it")
+	// A holds the room's one turn for reports for as long as its row is
+	// unwritten.
+	if r := p.roomNamed(room); len(r.reports) != 1 {
+		t.Fatal("the room's turn for reports is free while a report's audit row is being written: a second report could be applied on top of it")
 	}
 	f.at(300)
 	b := make(chan int, 1)
@@ -1861,9 +1898,26 @@ func TestVoiceTransmitOneReportAtATime(t *testing.T) {
 // The test's clock looks at who is reading it and, for those functions, at
 // whether the lock is held. Nothing else is running, so the lock is held
 // exactly when the reader holds it.
+//
+// It checks the second invariant the same way: the one that puts the room's
+// transmit rows into the audit log in the order the rule produced them. Each
+// of those functions must hold the room's order (voiceRoomState.order) when it
+// changes the rule's state, which is when it reads the clock, and must still
+// hold it when the rows are written. If a report released it before its row
+// was written, a pass or a rotation could write the row that closes the
+// transmission first; if a pass did not take it, it could read a reported
+// state whose row is not in the log yet.
 func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	p := f.srv.voice
+	var state *voiceRoomState // the ops room's, once it exists
+	orderHeld := func() bool {
+		if state.order.TryLock() {
+			state.order.Unlock()
+			return false
+		}
+		return true
+	}
 	mustHold := map[string]int{"applyRoom": 0, "reportTransmit": 0, "forget": 0, "forgetEverywhere": 0, "forgetRoom": 0}
 	p.now = func() time.Time {
 		var pcs [1]uintptr
@@ -1876,12 +1930,25 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 					p.mu.Unlock()
 					t.Errorf("%s read the clock without holding the poller's lock", reader)
 				}
+				if !orderHeld() {
+					t.Errorf("%s changed the room's transmit state without holding the room's order", reader)
+				}
 			}
 		}
 		return f.clock.Now()
 	}
+	write := p.appendAudit
+	rowsUnderOrder := 0
+	p.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
+		if !orderHeld() {
+			t.Errorf("%s (%s) was written without the room's order held", action, detail)
+		}
+		rowsUnderOrder++
+		return write(ctx, actor, action, subject, detail, at)
+	}
 
 	room := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	state = p.roomNamed(room)
 	ann, ann2, bob := f.identity("ann"), f.identity("ann2"), f.identity("bob")
 	p.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
 		id, _ := parseVoiceIdentity(identity)
@@ -1927,6 +1994,244 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	}
 	if got := f.transmitRows(t); !slices.Equal(got, want) {
 		t.Errorf("rows:\n got  %q\n want %q", got, want)
+	}
+	if rowsUnderOrder != len(want) {
+		t.Errorf("%d transmit rows were checked for the room's order as they were written, want all %d", rowsUnderOrder, len(want))
+	}
+	assertTransmitPairs(t, f.audit(t))
+}
+
+// TestVoiceTransmitRowIsWrittenBeforeWhatClosesIt: a report's row is in the
+// audit log before any row derived from the state the report left. The review
+// of #135 found that it need not be: the report was applied under the poller's
+// lock and its row written after the lock was released, so a pass, a removal
+// or a rotation landing in between wrote `voice_transmit_stopped reason=left`
+// first, and the `voice_transmit_started` it closed came after it. Read in the
+// order written, the log had a close with nothing open and a start never
+// closed.
+//
+// Here the report's write is held, the thing that closes the transmission is
+// started, and the write is let go. Whatever the closer is, it has to wait for
+// the report's row.
+func TestVoiceTransmitRowIsWrittenBeforeWhatClosesIt(t *testing.T) {
+	closers := []struct {
+		name  string
+		close func(t *testing.T, f *presenceFixture, room store.VoiceRoom)
+	}{
+		{"the room is rotated", func(t *testing.T, f *presenceFixture, room store.VoiceRoom) {
+			f.srv.voice.forgetRoom(context.Background(), room.RoomName)
+		}},
+		{"a pass finds her gone", func(t *testing.T, f *presenceFixture, room store.VoiceRoom) {
+			f.srv.voice.runPass(context.Background())
+		}},
+		{"she is removed by name", func(t *testing.T, f *presenceFixture, room store.VoiceRoom) {
+			f.srv.voice.evict(context.Background(), []store.VoiceRoom{room}, f.ids["ann"], voiceReasonMemberRemoved)
+		}},
+	}
+	for _, tt := range closers {
+		for _, fails := range []bool{false, true} {
+			name := tt.name
+			if fails {
+				name += ", and the report's row cannot be written"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+				ctx := context.Background()
+				roomName := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+				room, err := f.srv.store.ChannelVoiceRoom(ctx, f.ops.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.runLive(t, roomName, []liveStep{{0, "join"}, {0, "pass"}})
+				p := f.srv.voice
+				state := p.roomNamed(roomName)
+
+				write := p.appendAudit
+				hold, entered := make(chan struct{}), make(chan struct{})
+				first := true
+				p.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
+					if first {
+						first = false
+						close(entered)
+						<-hold
+						if fails {
+							return store.AuditEvent{}, errors.New("database is locked")
+						}
+					}
+					return write(ctx, actor, action, subject, detail, at)
+				}
+				f.at(100)
+				reported := make(chan int, 1)
+				go func() { reported <- f.report(t, "ann", "ops", "started").status }()
+				<-entered // applied; its row is being written
+
+				// The report holds the room's order for as long as that takes.
+				if state.order.TryLock() {
+					state.order.Unlock()
+					t.Fatal("the room's order is free while a report's row is being written: whatever closes the transmission can be written first")
+				}
+				// What closes the transmission happens now, as far as the
+				// clock goes; it cannot be applied until the report is done.
+				f.at(200)
+				if tt.name == "the room is rotated" {
+					if _, _, err := f.srv.store.RotateVoiceRoom(ctx, room.ID, store.VoiceRotateRevoked); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.lk.setRoom(roomName) // she is gone from LiveKit, for the pass
+				closed := make(chan struct{})
+				go func() { tt.close(t, f, room); close(closed) }()
+				close(hold)
+				status := <-reported
+				<-closed
+
+				want := []string{"ann started@100 reported", "ann stopped@200 observed left"}
+				wantStatus := http.StatusNoContent
+				if fails {
+					// Taken back whole: nothing was derived from it, so the
+					// log has neither the start nor a close for it.
+					want, wantStatus = nil, http.StatusInternalServerError
+				}
+				if status != wantStatus {
+					t.Errorf("the report was answered %d, want %d", status, wantStatus)
+				}
+				if got := f.transmitRows(t); !slices.Equal(got, want) {
+					t.Errorf("transmit rows, in the order written:\n got  %q\n want %q", got, want)
+				}
+				assertTransmitPairs(t, f.audit(t))
+			})
+		}
+	}
+}
+
+// TestVoiceTransmitReportThatNeverGetsItsTurn: a report waits its turn behind
+// the one whose row is being written. If its caller goes away while it waits,
+// it is dropped, not applied; if the room is rotated while it waits, it is
+// refused as having no session. Neither writes a row or changes the state.
+func TestVoiceTransmitReportThatNeverGetsItsTurn(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	roomName := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	decodeSession(t, f.session(t, "ann2", "ops"))
+	room, err := f.srv.store.ChannelVoiceRoom(ctx, f.ops.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := f.srv.voice
+	write := p.appendAudit
+	hold, entered := make(chan struct{}), make(chan struct{})
+	first := true
+	p.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
+		if first {
+			first = false
+			close(entered)
+			<-hold
+		}
+		return write(ctx, actor, action, subject, detail, at)
+	}
+	f.at(100)
+	a := make(chan int, 1)
+	go func() { a <- f.report(t, "ann", "ops", "started").status }() // holds the turn; its write hangs
+	<-entered
+
+	// A caller who has already gone: the turn is taken, so the only thing
+	// its report can do is notice.
+	gone, hangUp := context.WithCancel(ctx)
+	hangUp()
+	abandoned := make(chan error, 1)
+	go func() { abandoned <- p.reportTransmit(gone, room, f.ids["ann2"], true) }()
+	select {
+	case err := <-abandoned:
+		if !errors.Is(err, errVoiceReportAbandoned) {
+			t.Errorf("a report whose caller went away while it waited: %v, want errVoiceReportAbandoned", err)
+		}
+	case <-time.After(10 * time.Second):
+		// Only on failure: it is still waiting for a turn it cannot have.
+		close(hold)
+		t.Fatal("a report whose caller had gone away went on waiting for its turn")
+	}
+
+	state := p.roomNamed(roomName)
+	close(hold)
+	if st := <-a; st != http.StatusNoContent {
+		t.Fatalf("ann's report: %d", st)
+	}
+
+	// The room is rotated, and its state dropped, while a report that had
+	// already found that state waits for its turn. The waiting is played by
+	// hand: the report is given the state it would have been holding.
+	f.at(200)
+	if _, _, err := f.srv.store.RotateVoiceRoom(ctx, room.ID, store.VoiceRotateRevoked); err != nil {
+		t.Fatal(err)
+	}
+	p.forgetRoom(ctx, roomName)
+	p.mu.Lock()
+	p.rooms[roomName] = state
+	p.mu.Unlock()
+	if err := p.reportTransmit(ctx, room, f.ids["ann2"], true); !errors.Is(err, errVoiceReportRoomGone) {
+		t.Errorf("a report whose room was rotated while it waited: %v, want errVoiceReportRoomGone", err)
+	}
+	p.mu.Lock()
+	delete(p.rooms, roomName)
+	p.mu.Unlock()
+	want := []string{"ann started@100 reported", "ann stopped@200 observed left"}
+	if got := f.transmitRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows:\n got  %q\n want %q (nothing of ann2's)", got, want)
+	}
+	if p.anyInUse() {
+		t.Error("a retired room is in use")
+	}
+	assertTransmitPairs(t, f.audit(t))
+
+	// Through the endpoint such a report is answered as having no session,
+	// as if the rotation had come first. (The state is marked by hand: in
+	// the race the endpoint's holder check, made before the rotation, has
+	// already passed.)
+	f2 := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	name2 := decodeSession(t, f2.session(t, "ann", "ops")).Rooms[0].Room
+	f2.srv.voice.mu.Lock()
+	f2.srv.voice.rooms[name2].retired = true
+	f2.srv.voice.mu.Unlock()
+	if res := f2.report(t, "ann", "ops", "started"); res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceNoSession {
+		t.Errorf("a report for a room rotated before its turn: %d %s, want 409 voice_no_session", res.status, res.body)
+	}
+	if got := f2.transmitRows(t); len(got) != 0 {
+		t.Errorf("it wrote %q", got)
+	}
+}
+
+// TestVoiceRoomForgottenWhileItsOrderWasAwaited: whoever waits for a room's
+// order may find, when its turn comes, that the room was forgotten meanwhile
+// (a rotation). Everyone in it has then been recorded as having left, once,
+// and nothing more is to be written for it: not by a second forgetting, not by
+// a removal by name. The waiting is played by hand, by handing each of them
+// the state it would have been holding.
+func TestVoiceRoomForgottenWhileItsOrderWasAwaited(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	name := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	f.runLive(t, name, []liveStep{{0, "join"}, {0, "pass"}, {100, "started"}, {100, "unmute"}, {500, "pass"}})
+	p := f.srv.voice
+	state := p.roomNamed(name)
+
+	f.at(600)
+	p.forgetRoom(ctx, name)
+	want := []string{"voice_joined " + f.actor("ann"), "voice_transmit_started " + f.actor("ann"), "voice_transmit_stopped " + f.actor("ann"), "voice_left " + f.actor("ann")}
+	if got := f.voiceAudit(t); !slices.Equal(got, want) {
+		t.Fatalf("after the room was forgotten: %q, want %q", got, want)
+	}
+
+	p.mu.Lock()
+	p.rooms[name] = state // what each of the three below was waiting with
+	p.mu.Unlock()
+	f.at(700)
+	p.forgetRoom(ctx, name)
+	if _, ok := p.forget(ctx, name, f.ids["ann"]); ok {
+		t.Error("forget found ann in a room that had been forgotten")
+	}
+	p.forgetEverywhere(ctx, f.ids["ann"])
+	if got := f.voiceAudit(t); !slices.Equal(got, want) {
+		t.Errorf("after three more arrived at the forgotten room: %q, want nothing more than %q", got, want)
 	}
 	assertTransmitPairs(t, f.audit(t))
 }
@@ -2004,17 +2309,35 @@ func TestVoiceTransmitConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rows are written after the lock is released, so two written in a race
-	// can be out of order by id. Their times are the order of record.
-	slices.SortStableFunc(events, func(a, b store.AuditEvent) int {
-		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
-	})
+	// The rows pair up read in the order they were written: a room's transmit
+	// rows go into the log in the order the rule produced them
+	// (voiceRoomState.order), whoever wrote them.
 	rows := logRowsFromAudit(events)
 	if len(rows) < 20 {
 		t.Fatalf("only %d transmit rows: the run exercised nothing", len(rows))
 	}
 	problems, open := checkTransmitPairs(rows)
 	for _, p := range append(problems, open...) {
-		t.Errorf("pairing: %s", p)
+		t.Errorf("pairing, in the order written: %s", p)
+	}
+	// And in that order their times do not go back, but for the row that
+	// opens an unreported transmission, which is timed at an earlier pass.
+	var last time.Time
+	for _, r := range rows {
+		if r.action == transmitActionUnreported {
+			continue
+		}
+		if r.at.Before(last) {
+			t.Errorf("%s %s (%s) at %v was written after a row timed %v", r.who, r.action, r.source, r.at.Sub(ruleT0), last.Sub(ruleT0))
+		}
+		last = r.at
+	}
+	// Read in order of time instead, they pair up too.
+	slices.SortStableFunc(events, func(a, b store.AuditEvent) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	problems, open = checkTransmitPairs(logRowsFromAudit(events))
+	for _, p := range append(problems, open...) {
+		t.Errorf("pairing, in order of time: %s", p)
 	}
 }
