@@ -1,9 +1,11 @@
-//! Where presses come from in this issue: lines on standard input, and signals.
+//! Where presses come from besides the key device (`keydev.rs`): lines on standard input,
+//! and signals.
 //!
 //! Standard input carries one command per line (`down`, `up`, `mute`, `deafen`, `quit`;
 //! `docs/design/conch-voice.md` §4). It is how the tests drive the client and the fallback
-//! when there is no key device; reading a real key is issue #185. A line that is not a
-//! command is reported as such and is not kept: nothing typed into the client is echoed.
+//! when there is no key device; it is read whether or not a key device is watched. A line
+//! that is not a command is reported as such and is not kept: nothing typed into the
+//! client is echoed.
 //!
 //! A line is read up to [`MAX_LINE_BYTES`] and no further. Whatever writes to standard
 //! input decides how long a line is, and a line with no end must not be collected for
@@ -17,6 +19,17 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::session::Input;
+
+/// What the end of standard input means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtEnd {
+    /// A release and then `quit`: standard input is the talk key, and a client must not
+    /// outlive a wrapper that was driving it.
+    Quit,
+    /// A release and no more: a key device is watched, so a client started with no
+    /// standard input runs on until `quit`, Ctrl-C or SIGTERM.
+    Release,
+}
 
 /// The most of one line that is kept. The longest command is six letters.
 pub const MAX_LINE_BYTES: usize = 256;
@@ -98,12 +111,24 @@ impl Line {
     }
 }
 
+/// What the end of standard input is sent as under `end`; anything else is sent as it is.
+fn at_the_end(input: Input, end: AtEnd) -> Input {
+    match input {
+        // With a key device watched, the end of standard input is a release and no more:
+        // the client runs on, driven by the device.
+        Input::Eof if end == AtEnd::Release => Input::Line(LineCommand::Up),
+        input => input,
+    }
+}
+
 /// Reads standard input on a thread of its own, for as long as it lasts. Its end is
-/// [`Input::Eof`], so a client never outlives a wrapper that was driving it with the gate
-/// left open.
-pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>) {
+/// [`Input::Eof`], or with [`AtEnd::Release`] an `up`; either way a wrapper that dies after
+/// `down` cannot leave the gate open.
+pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>, at_end: AtEnd) {
     std::thread::spawn(move || {
-        read_lines(std::io::stdin(), |input| inputs.send(input).is_ok());
+        read_lines(std::io::stdin(), |input| {
+            inputs.send(at_the_end(input, at_end)).is_ok()
+        });
     });
 }
 
@@ -267,5 +292,25 @@ mod tests {
             taken.len() < 2
         });
         assert_eq!(taken, [Input::Line(Down), Input::Line(Up)]);
+    }
+
+    #[test]
+    fn the_end_of_input_is_a_release_and_no_more_when_a_key_device_is_watched() {
+        // What the session loop gets when standard input ends: with a key device watched,
+        // an `up` and nothing more (the client runs on, driven by the device); without
+        // one, the end, which is a release and then `quit`.
+        assert_eq!(
+            at_the_end(Input::Eof, AtEnd::Release),
+            Input::Line(LineCommand::Up)
+        );
+        assert_eq!(at_the_end(Input::Eof, AtEnd::Quit), Input::Eof);
+        assert_eq!(
+            at_the_end(Input::Line(Down), AtEnd::Release),
+            Input::Line(Down)
+        );
+        assert_eq!(
+            at_the_end(Input::UnknownLine, AtEnd::Quit),
+            Input::UnknownLine
+        );
     }
 }

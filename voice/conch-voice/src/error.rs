@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use conch_voice_control::EXIT_STOPPED;
 
+use crate::keydev::Problem;
+
 /// Everything that ends `conch-voice` other than `quit`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -60,6 +62,26 @@ pub enum Error {
     /// The async runtime or the signal handlers could not be set up.
     #[error("cannot start: {0}")]
     Runtime(#[source] std::io::Error),
+
+    /// `keys` was run with standard output going somewhere other than a terminal.
+    #[error(
+        "keys shows every key pressed and writes only to a terminal: standard output is not one"
+    )]
+    NotATerminal,
+
+    /// `keys` could not open or read the device it was given. The problem says why in
+    /// words that hold nothing that was read.
+    #[error("key device {device}: {problem}")]
+    KeyDevice {
+        /// The device, as it was named on the command line, made fit for one line.
+        device: String,
+        /// Why not.
+        problem: Problem,
+    },
+
+    /// `devices` or `keys` could not write to standard output.
+    #[error("cannot write to standard output: {0}")]
+    Output(#[source] std::io::Error),
 }
 
 impl Error {
@@ -68,7 +90,7 @@ impl Error {
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Usage(_) | Error::NoChannel => 2,
+            Error::Usage(_) | Error::NoChannel | Error::NotATerminal => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
         }

@@ -194,6 +194,8 @@ impl Log for Logger {
             // Never waited for: this runs in the session loop and in the SDK's threads.
             Sink::Queued(queue) => queue.push(line),
         }
+        // On a terminal the record went under the status, which is then drawn anew.
+        crate::status::disturbed();
     }
 
     /// The `log` facade's flush. A queued logger does nothing here, because this must not

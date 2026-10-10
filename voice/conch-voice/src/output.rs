@@ -1,5 +1,7 @@
 //! What `conch-voice join` writes to standard output: plain lines for a person, or with
-//! `--json` one JSON object per line for a program.
+//! `--json` one JSON object per line for a program. When standard output is a terminal and
+//! `--json` was not given, the same events are shown as a status redrawn in place
+//! (`status.rs`) instead of as lines.
 //!
 //! Nothing written here holds a join token, a room name or the login token: none of the
 //! values an [`Event`] carries can be one. Participants are named by principal id (`p7`),
@@ -17,7 +19,10 @@
 //! handed to a thread that writes them (`lines.rs`), and at most 1024 wait for it. Beyond
 //! that a line is dropped, and when there is room again an `output_dropped` object (in plain
 //! mode a line in words) says how many were. Nothing the client does waits for a line to be
-//! read: not the release of the key, not `quit`, and not the exit.
+//! read: not the release of the key, not `quit`, and not the exit. On a terminal, where the
+//! status is redrawn instead, a frame is written where it is drawn: the terminal is its
+//! user's own reader, and a transmission held over one stopped with flow control is still
+//! bounded by the transmit limit, which the gate keeps by counting frames itself.
 //!
 //! | `event` | Written | Fields |
 //! |---|---|---|
@@ -29,6 +34,7 @@
 //! | `track` | a remote speaker's audio track came or went | `speaker` (`p<principal id>`), `state`: `subscribed` or `unsubscribed`. |
 //! | `report` | a transmit report was not delivered at once | `state`: `started` or `stopped`. `problem`: `retrying` (with `attempt` and `of`), `gave_up`, `no_session` (409, not retried) or `rate_limited` (429, not retried). `detail`: the error's text. |
 //! | `microphone` | the microphone could not be opened | `detail`: the error's text. |
+//! | `key_device` | the key device was opened, or is not being read; written when that changes, and when the client gives up trying, not on every attempt to open it | `device`: the path that was configured. `state`: `open` or `missing`. With `missing`: `reason`: `cannot_open`, `refused` (it is not an event device under `/dev/input`), `read_failed`, `ended` or `partial_record`; `detail`: the reason in words; `retrying`: whether the client goes on trying to open it; `presses_refused`: true if the device had been open, in which case a press is refused, from standard input too, until it is open again. Nothing here is derived from a key. |
 //! | `output_dropped` | lines were dropped because standard output was not being read, and it is being read again | `lines`: how many objects were not written since the last one that was. |
 //! | `stats` | once a second while connected | `frames_sent`: frames of this client's own audio handed to its track since the last `stats`; `frames_sent_total`: since it started. `reports_delivered`, `reports_dropped`: transmit reports since it started. `speakers`: for each remote speaker, `speaker`, and for the audio received from them since the last `stats`: `frames` (10 ms each, silent ones included), `audible_frames` (at or above -60 dB of full scale), `rms` (full scale is 1) and `dominant_hz` (the strongest of the tones `--sink` names, or `null` if none stood out or there was silence); and `frames_total` and `audible_frames_total` since the speaker was first heard. `mix`: `frames`, `audible_frames`, `rms` and `dominant_hz` of what was handed to the sink since the last `stats`; this client's own audio is never in it. |
 
@@ -40,11 +46,13 @@ use conch_voice_api::VoiceTransmitState;
 use conch_voice_control::{PttStatus, ShutReason};
 use serde_json::{Value, json};
 
+use crate::keydev::DeviceState;
 use crate::lines::{LineQueue, QUEUE_LINES};
 use crate::presence::Roster;
 use crate::receive::{Measured, MixStats};
 use crate::reports::ReportProblem;
 use crate::secrets::one_line;
+use crate::status::Screen;
 
 /// The state of the voice connection, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +114,13 @@ pub enum Event<'a> {
     Microphone {
         /// The error's text.
         detail: String,
+    },
+    /// The key device is being read, or is not.
+    KeyDevice {
+        /// The device, as it was configured.
+        device: &'a str,
+        /// Whether it is being read, and if not, why.
+        state: DeviceState,
     },
     /// The once-a-second counts. Written only with `--json`.
     Stats(&'a Stats),
@@ -255,6 +270,18 @@ impl Event<'_> {
                 object
             }
             Event::Microphone { detail } => json!({"event": "microphone", "detail": detail}),
+            Event::KeyDevice { device, state } => match state.problem() {
+                None => json!({"event": "key_device", "device": device, "state": "open"}),
+                Some(problem) => json!({
+                    "event": "key_device",
+                    "device": device,
+                    "state": "missing",
+                    "reason": problem.code(),
+                    "detail": problem.to_string(),
+                    "retrying": problem.retried(),
+                    "presses_refused": state.presses_refused(),
+                }),
+            },
             Event::Stats(stats) => json!({
                 "event": "stats",
                 "frames_sent": stats.frames_sent,
@@ -373,6 +400,10 @@ impl Event<'_> {
                 }
             }
             Event::Microphone { detail } => format!("no microphone: {detail}"),
+            // Which device and why, and what the client does about it, in one line.
+            Event::KeyDevice { device, state } => {
+                format!("key device {device}: {}", state.describe())
+            }
             Event::Track { .. } | Event::Stats(_) => return None,
         })
     }
@@ -380,7 +411,8 @@ impl Event<'_> {
 
 /// Where an output's lines go.
 enum Sink {
-    /// Written where they are shown: for tests, whose writer never stalls.
+    /// Written where they are shown: for tests, whose writer never stalls, and for the
+    /// status redrawn on a terminal, whose frames are not lines.
     Direct(Box<dyn Write + Send>),
     /// Handed to a writer thread without waiting.
     Queued(LineQueue),
@@ -396,10 +428,13 @@ fn dropped_plain(lines: u64) -> String {
     format!("{lines} lines were not written: standard output was not being read")
 }
 
-/// Where the events go: standard output, one line each.
+/// Where the events go: standard output, one line each, or on a terminal a status that is
+/// redrawn.
 pub struct Output {
     json: bool,
     out: Sink,
+    /// The status that is redrawn in place, when the output is a terminal.
+    screen: Option<Screen>,
 }
 
 impl fmt::Debug for Output {
@@ -418,6 +453,20 @@ impl Output {
         Self {
             json,
             out: Sink::Direct(out),
+            screen: None,
+        }
+    }
+
+    /// An output that draws the status on `screen` and writes it to `out`, which is a
+    /// terminal. A terminal's frame is not a line, so it is written where it is shown: a
+    /// terminal stopped with flow control stalls the drawing, and the transmit gate's own
+    /// frame limit still bounds a transmission held over it.
+    #[must_use]
+    pub fn redrawn(screen: Screen, out: Box<dyn Write + Send>) -> Self {
+        Self {
+            json: false,
+            out: Sink::Direct(out),
+            screen: Some(screen),
         }
     }
 
@@ -430,14 +479,27 @@ impl Output {
         Self {
             json,
             out: Sink::Queued(LineQueue::spawn(out, QUEUE_LINES, Box::new(marker))),
+            screen: None,
         }
     }
 
-    /// An output on standard output, queued: a reader that stops reading cannot stop
-    /// whoever shows an event.
+    /// An output on standard output: the redrawn status if it is a terminal and `json` is
+    /// not asked for, and otherwise line by line, queued, so a reader who stops reading
+    /// cannot stop whoever shows an event.
     #[must_use]
     pub fn stdout(json: bool) -> Self {
-        Self::queued(json, Box::new(std::io::stdout()))
+        match Screen::for_stdout(json) {
+            Some(screen) => Self::redrawn(screen, Box::new(std::io::stdout())),
+            None => Self::queued(json, Box::new(std::io::stdout())),
+        }
+    }
+
+    /// The user typed a line on standard input. On a terminal it was echoed under the
+    /// status, so the next status is drawn below it.
+    pub fn typed_line(&mut self) {
+        if let Some(screen) = &mut self.screen {
+            screen.typed_line();
+        }
     }
 
     /// Waits until every line shown so far has been written, or `limit` has passed. True
@@ -456,10 +518,21 @@ impl Output {
         self.json
     }
 
-    /// Writes one event as one line, flushed, so a reader sees it when it happens. With a
-    /// queued output this hands the line over and returns at once, whatever the reader is
-    /// doing.
+    /// Shows one event: on a terminal, drawn into the status; otherwise one line, flushed,
+    /// so a reader sees it when it happens. With a queued output this hands the line over
+    /// and returns at once, whatever the reader is doing.
     pub fn show(&mut self, event: &Event<'_>) {
+        if let Some(screen) = &mut self.screen {
+            // What the screen gives back has had every line through the same filter as a
+            // plain line below.
+            if let Some(drawn) = screen.show(event)
+                && let Sink::Direct(out) = &mut self.out
+            {
+                let _ = out.write_all(drawn.as_bytes());
+                let _ = out.flush();
+            }
+            return;
+        }
         let line = if self.json {
             // An object, so the line begins with `{`.
             event.json().to_string()

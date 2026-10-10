@@ -4,8 +4,10 @@
 //! Input: the command line; the configuration file `$XDG_CONFIG_HOME/conch/voice.toml`;
 //! `CONCH_SERVER` and `CONCH_TOKEN`, or the login `conch login` stored; `conchd`'s answers
 //! (voice sessions, the presence socket); the audio and events of the channel's LiveKit
-//! room; and, in this issue, standard input as the talk key: one command per line, `down`,
-//! `up`, `mute`, `deafen`, `quit`, where the end of input counts as `up` and then `quit`.
+//! room; the configured keyboard's event device, for the talk, mute and deafen keys and
+//! nothing else ([`keydev`]); and standard input, one command per line, `down`, `up`,
+//! `mute`, `deafen`, `quit`, where the end of input counts as `up`, and then as `quit`
+//! unless a key device is watched.
 //!
 //! Output: on standard output, plain lines or, with `--json`, one JSON object per line
 //! ([`output`] documents the fields; a reader must skip any line that does not begin with
@@ -24,9 +26,8 @@
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
 //!
-//! No hardware yet: the microphone is a tone or a WAV file, the speakers are a sink that
-//! counts, and the talk key is standard input. Real devices are issue #184 and real keys
-//! #185.
+//! No audio hardware yet: the microphone is a tone or a WAV file and the speakers are a
+//! sink that counts. Real audio devices are issue #184.
 //!
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
@@ -34,6 +35,8 @@
 //! - [`lines`]: the queue every line passes on its way to standard output or standard
 //!   error, so that a reader who stops reading stops nothing.
 //! - [`cli`]: the command line and the layers of configuration.
+//! - [`keydev`]: the key device's watcher. [`keys`] and [`devices`]: the two commands that
+//!   help set it up. [`status`]: the status redrawn in place on a terminal.
 //!
 //! Design: `docs/design/conch-voice.md` §3, §5 to §8.
 
@@ -41,8 +44,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
+pub mod devices;
 pub mod error;
 pub mod input;
+pub mod keydev;
+pub mod keys;
 pub mod lines;
 pub mod livekit;
 pub mod logger;
@@ -53,8 +59,11 @@ pub mod reports;
 pub mod sdk;
 pub mod secrets;
 pub mod session;
+pub mod status;
 pub mod transmit;
 
+use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,6 +72,8 @@ use tokio::sync::mpsc;
 
 use crate::cli::{Environment, JoinArgs, MicChoice, Resolved, TONE_AMPLITUDE};
 pub use crate::error::Error;
+use crate::input::AtEnd;
+use crate::keydev::{DeviceRule, KeyTimings};
 pub use crate::lines::LAST_WORDS_LIMIT;
 use crate::livekit::LiveKit;
 use crate::logger::RECORD_CHARS;
@@ -143,12 +154,18 @@ pub fn join(
     scrubber: Arc<Scrubber>,
 ) -> Result<(), Error> {
     let (resolved, conchd) = sign_in(args, environment, &scrubber)?;
+    // The keyboard to read, if any. The rule for what may be opened as one is written
+    // out below and is not a setting: only an event device under /dev/input.
+    let key_device = cli::key_device(&resolved.config, args.stdin_keys)?;
     let settings = Settings {
         channel: resolved.channel,
         open_mic: mic_opener(args.mic.clone()),
         sink_tones: args.sink_tones.clone(),
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
+        key_device: key_device
+            .as_ref()
+            .map(|(device, _)| device.display().to_string()),
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
@@ -160,7 +177,21 @@ pub fn join(
     let result = runtime.block_on(async {
         let (inputs, received) = mpsc::unbounded_channel();
         input::signals(inputs.clone()).map_err(Error::Runtime)?;
-        input::stdin_lines(inputs);
+        match key_device {
+            Some((device, bindings)) => {
+                // With a key device, a client started with no standard input runs on.
+                input::stdin_lines(inputs.clone(), AtEnd::Release);
+                keydev::spawn(
+                    device,
+                    bindings,
+                    DeviceRule::EventDevice,
+                    KeyTimings::default(),
+                    inputs,
+                )
+                .map_err(Error::Runtime)?;
+            }
+            None => input::stdin_lines(inputs, AtEnd::Quit),
+        }
         let transport = LiveKit::new(Arc::clone(&scrubber));
         session::join(settings, conchd, transport, scrubber, received, out).await
     });
@@ -171,6 +202,37 @@ pub fn join(
     // finishing: the panic would have replaced the reason the client stopped for.
     std::mem::forget(runtime);
     result
+}
+
+/// `conch-voice devices`: the keyboards under `/dev/input/by-id`, whether this user can
+/// read each, and the udev rule that would grant one. Nothing is read from any of them.
+///
+/// # Errors
+///
+/// [`Error::Output`] if standard output cannot be written to.
+pub fn devices() -> Result<(), Error> {
+    devices::report(
+        Path::new(devices::BY_ID),
+        DeviceRule::EventDevice,
+        devices::current_uid(),
+        &mut std::io::stdout().lock(),
+    )
+    .map_err(Error::Output)
+}
+
+/// `conch-voice keys <device>`: says that it will show every key pressed on the device,
+/// and then does, on the terminal, until Ctrl-C.
+///
+/// # Errors
+///
+/// [`Error::NotATerminal`] if standard output is not a terminal; [`Error::KeyDevice`] if
+/// the device cannot be opened, is not an event device, or stops being readable.
+pub fn keys(device: &Path) -> Result<(), Error> {
+    keys::until_interrupted(
+        device,
+        DeviceRule::EventDevice,
+        std::io::stdout().is_terminal(),
+    )
 }
 
 #[cfg(test)]
@@ -204,7 +266,10 @@ mod tests {
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
         };
-        let args = cli::parse(["conch-voice", "join", "ops"]).unwrap();
+        let args = match cli::parse(["conch-voice", "join", "ops"]).unwrap() {
+            cli::Invocation::Join(args) => args,
+            _ => unreachable!("join parses as a join"),
+        };
         let scrubber = Scrubber::new();
         let said = format!("401 from a proxy that repeats: Authorization: Bearer {FAKE_LOGIN}");
         assert_eq!(scrubber.scrub(&said), said, "not known before signing in");
