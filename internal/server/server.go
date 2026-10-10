@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/approvals"
@@ -106,6 +107,13 @@ func New(cfg Config, st *store.Store) *Server {
 	}
 	if ntfy != nil {
 		notifier = ntfy
+		// Said once, here: with a topic left empty the notifications that
+		// use it are never sent, and each is audited as not attempted (issue
+		// #170). conchd starts all the same.
+		if missing := ntfy.MissingTopics(); len(missing) > 0 {
+			slog.Warn("server: an ntfy server is set but a topic is not; the notifications that use it will not be sent",
+				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
+		}
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval}
 	s.voice = newVoicePoller(s)
@@ -248,4 +256,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(h)
+}
+
+// ntfyNotSent says in words which approval notifications are lost to the
+// missing ntfy settings.
+func ntfyNotSent(missing []string) string {
+	var lost []string
+	for _, flag := range missing {
+		switch flag {
+		case "--ntfy-topic":
+			lost = append(lost, "approval created, approval resolved or expired")
+		case "--ntfy-urgent-topic":
+			lost = append(lost, "approval escalated")
+		}
+	}
+	return strings.Join(lost, "; ")
 }
