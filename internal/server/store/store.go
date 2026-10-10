@@ -237,6 +237,25 @@ END`,
 )`,
 		`CREATE INDEX net_members_by_principal ON net_members (principal_id)`,
 	},
+	// 12: Scoped messages (issue #116, ADR-005). audience_kind is NULL for a
+	// channel-wide message, which is what every existing row is and stays, and
+	// 'net' or 'principals' for a scoped one; net_id is set only for a net
+	// message. The people a scoped message reached are resolved once, at post
+	// time, and stored in message_recipients: joining a net later reveals no
+	// history and leaving it hides nothing already received. Recipient rows
+	// are written in the same transaction as the message and are never
+	// updated or deleted. A channel-wide message has none. The unique pair is
+	// the primary key; the principal index serves "what was I sent".
+	{
+		`ALTER TABLE messages ADD COLUMN audience_kind TEXT CHECK (audience_kind IN ('net','principals'))`,
+		`ALTER TABLE messages ADD COLUMN net_id INTEGER REFERENCES nets (id)`,
+		`CREATE TABLE message_recipients (
+	message_id   INTEGER NOT NULL REFERENCES messages (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	PRIMARY KEY (message_id, principal_id)
+)`,
+		`CREATE INDEX message_recipients_by_principal ON message_recipients (principal_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -249,6 +268,10 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 // Store is the embedded SQLite database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
+	// rollbackSQL replaces "ROLLBACK" in withImmediateTx when set. Tests set
+	// it to a statement that fails, to exercise the path where a transaction
+	// cannot be ended and the connection must be discarded.
+	rollbackSQL string
 }
 
 // Open opens (creating if necessary) the database at path, enables WAL mode

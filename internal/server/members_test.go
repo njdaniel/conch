@@ -106,7 +106,13 @@ func callWS(t *testing.T, base, path, token string) wireResult {
 // operator, and requires that every non-member response is byte-identical to
 // the response for a channel that does not exist.
 //
-// EVERY NEW READ OR WRITE PATH OVER CHANNEL CONTENT MUST ADD A ROW HERE.
+// EVERY NEW READ OR WRITE PATH OVER CHANNEL CONTENT MUST ADD A ROW HERE. A new
+// way to READ MESSAGES must also extend the exact-set leak test,
+// TestScopedMessagesExactSets, which asserts which messages each kind of reader
+// receives once messages can carry an audience (issue #116); the completeness
+// guard below fails for a route with no row here, and
+// TestEveryMessageReadPathIsInTheLeakTest fails for a message-reading route
+// that is not in that test.
 func TestChannelContentLeak(t *testing.T) {
 	f := newMemberFixture(t)
 	base := wsTestServer(t, f.srv)
@@ -134,10 +140,13 @@ func TestChannelContentLeak(t *testing.T) {
 	}{
 		{"v0 message list", "GET", "/v0/channels/%s/messages", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"v1 message list", "GET", "/v1/channels/%s/messages", "", false, [4]int{ok, notFound, notFound, notFound}},
+		{"v2 message list", "GET", "/v2/channels/%s/messages", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"v0 message post", "POST", "/v0/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
 		{"v1 message post", "POST", "/v1/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
+		{"v2 message post", "POST", "/v2/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
 		{"v0 websocket", "GET", "/v0/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		{"v1 websocket", "GET", "/v1/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
+		{"v2 websocket", "GET", "/v2/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// Listing members is allowed to members and to operators only.
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
 		// Listing nets: members see their own nets, operators all of them.
@@ -196,19 +205,25 @@ func TestChannelContentLeak(t *testing.T) {
 		}
 	}
 
-	// Denied posts wrote nothing: only the member's two posts exist, and the
-	// audit log holds exactly their two message.post events.
-	msgs, err := f.srv.store.ListMessages(context.Background(), f.alpha.ID, 0, 100)
-	if err != nil || len(msgs) != 2 {
-		t.Errorf("alpha messages = %d (%v), want only the member's 2", len(msgs), err)
+	// Denied posts wrote nothing: only the member's three channel-wide posts
+	// exist, and the audit log holds exactly their three message.post events.
+	msgs, err := f.srv.store.ListVisibleMessages(context.Background(), f.alpha.ID, store.ChannelWideOnly, 0, 100)
+	if err != nil || len(msgs) != 3 {
+		t.Errorf("alpha messages = %d (%v), want only the member's 3", len(msgs), err)
+	}
+	if n, err := f.srv.store.CountMessages(context.Background(), f.alpha.ID); err != nil || n != 3 {
+		t.Errorf("alpha holds %d messages in all (%v), want 3", n, err)
 	}
 	for _, m := range msgs {
 		if m.AuthorID != f.alice.ID {
 			t.Errorf("message %d author = %d, want alice", m.ID, m.AuthorID)
 		}
 	}
-	if n := countAction(f.audit(t), "message.post"); n != 2 {
-		t.Errorf("message.post audit events = %d, want 2", n)
+	if n := countAction(f.audit(t), "message.post"); n != 3 {
+		t.Errorf("message.post audit events = %d, want 3", n)
+	}
+	if n := countAction(f.audit(t), store.AuditMessageScoped); n != 0 {
+		t.Errorf("message_scoped audit events = %d, want 0", n)
 	}
 
 	// The channel list shows each caller only their own channels, operators
@@ -697,7 +712,7 @@ func TestHookIngestRequiresMembership(t *testing.T) {
 	}
 	countMessages := func() int {
 		t.Helper()
-		messages, err := f.srv.store.ListMessages(ctx, f.alpha.ID, 0, 100)
+		messages, err := f.srv.store.ListVisibleMessages(ctx, f.alpha.ID, store.ChannelWideOnly, 0, 100)
 		if err != nil {
 			t.Fatal(err)
 		}

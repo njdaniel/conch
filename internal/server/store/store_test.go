@@ -49,7 +49,7 @@ func TestMessagePayloadMigrationRoundTripAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertMessageV1: %v", err)
 	}
-	listed, err := s.ListMessages(ctx, ch.ID, 0, 10)
+	listed, err := s.ListVisibleMessages(ctx, ch.ID, ChannelWideOnly, 0, 10)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestListMessagesOrderingAndPagination(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := s.ListMessages(ctx, tt.channelID, tt.afterID, tt.limit)
+			got, err := s.ListVisibleMessages(ctx, tt.channelID, ChannelWideOnly, tt.afterID, tt.limit)
 			if err != nil {
 				t.Fatalf("ListMessages: %v", err)
 			}
@@ -339,7 +339,7 @@ func TestListMessagesOrderingAndPagination(t *testing.T) {
 		})
 	}
 
-	if _, err := s.ListMessages(ctx, ch.ID, 0, 0); err == nil {
+	if _, err := s.ListVisibleMessages(ctx, ch.ID, ChannelWideOnly, 0, 0); err == nil {
 		t.Error("ListMessages with limit 0 succeeded, want error")
 	}
 }
