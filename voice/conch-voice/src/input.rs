@@ -1,9 +1,11 @@
-//! Where presses come from in this issue: lines on standard input, and signals.
+//! Where presses come from besides the key device (`keydev.rs`): lines on standard input,
+//! and signals.
 //!
 //! Standard input carries one command per line (`down`, `up`, `mute`, `deafen`, `quit`;
 //! `docs/design/conch-voice.md` §4). It is how the tests drive the client and the fallback
-//! when there is no key device; reading a real key is issue #185. A line that is not a
-//! command is reported as such and is not kept: nothing typed into the client is echoed.
+//! when there is no key device; it is read whether or not a key device is watched. A line
+//! that is not a command is reported as such and is not kept: nothing typed into the
+//! client is echoed.
 
 use conch_voice_control::LineCommand;
 use tokio::signal::unix::{SignalKind, signal};
@@ -11,10 +13,21 @@ use tokio::sync::mpsc;
 
 use crate::session::Input;
 
+/// What the end of standard input means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtEnd {
+    /// A release and then `quit`: standard input is the talk key, and a client must not
+    /// outlive a wrapper that was driving it.
+    Quit,
+    /// A release and no more: a key device is watched, so a client started with no
+    /// standard input runs on until `quit`, Ctrl-C or SIGTERM.
+    Release,
+}
+
 /// Reads standard input on a thread of its own, for as long as it lasts. Its end is
-/// [`Input::Eof`], so a client never outlives a wrapper that was driving it with the gate
-/// left open.
-pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>) {
+/// [`Input::Eof`], or with [`AtEnd::Release`] an `up`; either way a wrapper that dies after
+/// `down` cannot leave the gate open.
+pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>, at_end: AtEnd) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lines() {
             let Ok(line) = line else { break };
@@ -26,7 +39,10 @@ pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>) {
                 return;
             }
         }
-        let _ = inputs.send(Input::Eof);
+        let _ = inputs.send(match at_end {
+            AtEnd::Quit => Input::Eof,
+            AtEnd::Release => Input::Line(LineCommand::Up),
+        });
     });
 }
 

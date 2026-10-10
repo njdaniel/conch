@@ -135,6 +135,8 @@ impl Log for Logger {
         // A logger has nowhere to report that it could not write.
         let _ = writeln!(out, "{line}");
         let _ = out.flush();
+        // On a terminal the record went under the status, which is then drawn anew.
+        crate::status::disturbed();
     }
 
     fn flush(&self) {

@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod fake;
+pub mod keyboard;
 pub mod stub;
 
 use std::io::Write;
@@ -147,6 +148,9 @@ pub struct Setup {
     pub server: Option<String>,
     /// Write to the process's standard output as well.
     pub also_stdout: bool,
+    /// The key device the session is told it has, for the status. The test starts the
+    /// watcher itself, on [`Rig::inputs`].
+    pub key_device: Option<String>,
 }
 
 impl Default for Setup {
@@ -160,6 +164,7 @@ impl Default for Setup {
             sink_tones: vec![440.0, 880.0],
             server: None,
             also_stdout: false,
+            key_device: None,
         }
     }
 }
@@ -221,6 +226,7 @@ impl Rig {
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
+            key_device: setup.key_device,
             timings: setup.timings,
         };
         let out = Written::default();
@@ -256,6 +262,11 @@ impl Rig {
 
     pub fn input(&self, input: Input) {
         self.inputs.send(input).unwrap();
+    }
+
+    /// Where the session takes its inputs from: for a key device's watcher to write to.
+    pub fn inputs(&self) -> mpsc::UnboundedSender<Input> {
+        self.inputs.clone()
     }
 
     /// How many times the microphone source was opened.

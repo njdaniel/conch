@@ -1,5 +1,7 @@
 //! What `conch-voice join` writes to standard output: plain lines for a person, or with
-//! `--json` one JSON object per line for a program.
+//! `--json` one JSON object per line for a program. When standard output is a terminal and
+//! `--json` was not given, the same events are shown as a status redrawn in place
+//! (`status.rs`) instead of as lines.
 //!
 //! Nothing written here holds a join token, a room name or the login token: none of the
 //! values an [`Event`] carries can be one. Participants are named by principal id (`p7`),
@@ -23,6 +25,7 @@
 //! | `track` | a remote speaker's audio track came or went | `speaker` (`p<principal id>`), `state`: `subscribed` or `unsubscribed`. |
 //! | `report` | a transmit report was not delivered at once | `state`: `started` or `stopped`. `problem`: `retrying` (with `attempt` and `of`), `gave_up`, `no_session` (409, not retried) or `rate_limited` (429, not retried). `detail`: the error's text. |
 //! | `microphone` | the microphone could not be opened | `detail`: the error's text. |
+//! | `key_device` | the key device was opened, or is not being read; written when that changes, not on every attempt to open it | `device`: the path that was configured. `state`: `open` or `missing`. With `missing`: `reason`: `cannot_open`, `refused` (it is not a character device under `/dev/input`), `read_failed`, `ended` or `partial_record`; `detail`: the reason in words; `retrying`: whether the client goes on trying to open it. Nothing here is derived from a key. |
 //! | `stats` | once a second while connected | `frames_sent`: frames of this client's own audio handed to its track since the last `stats`; `frames_sent_total`: since it started. `reports_delivered`, `reports_dropped`: transmit reports since it started. `speakers`: for each remote speaker, `speaker`, and for the audio received from them since the last `stats`: `frames` (10 ms each, silent ones included), `audible_frames` (at or above -60 dB of full scale), `rms` (full scale is 1) and `dominant_hz` (the strongest of the tones `--sink` names, or `null` if none stood out or there was silence); and `frames_total` and `audible_frames_total` since the speaker was first heard. `mix`: `frames`, `audible_frames`, `rms` and `dominant_hz` of what was handed to the sink since the last `stats`; this client's own audio is never in it. |
 
 use std::fmt;
@@ -33,10 +36,12 @@ use conch_voice_api::VoiceTransmitState;
 use conch_voice_control::{PttStatus, ShutReason};
 use serde_json::{Value, json};
 
+use crate::keydev::DeviceState;
 use crate::presence::Roster;
 use crate::receive::{Measured, MixStats};
 use crate::reports::ReportProblem;
 use crate::secrets::one_line;
+use crate::status::Screen;
 
 /// The state of the voice connection, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,13 @@ pub enum Event<'a> {
     Microphone {
         /// The error's text.
         detail: String,
+    },
+    /// The key device is being read, or is not.
+    KeyDevice {
+        /// The device, as it was configured.
+        device: &'a str,
+        /// Whether it is being read, and if not, why.
+        state: DeviceState,
     },
     /// The once-a-second counts. Written only with `--json`.
     Stats(&'a Stats),
@@ -247,6 +259,19 @@ impl Event<'_> {
                 object
             }
             Event::Microphone { detail } => json!({"event": "microphone", "detail": detail}),
+            Event::KeyDevice { device, state } => match state {
+                DeviceState::Ready => {
+                    json!({"event": "key_device", "device": device, "state": "open"})
+                }
+                DeviceState::Missing(problem) => json!({
+                    "event": "key_device",
+                    "device": device,
+                    "state": "missing",
+                    "reason": problem.code(),
+                    "detail": problem.to_string(),
+                    "retrying": problem.retried(),
+                }),
+            },
             Event::Stats(stats) => json!({
                 "event": "stats",
                 "frames_sent": stats.frames_sent,
@@ -365,15 +390,33 @@ impl Event<'_> {
                 }
             }
             Event::Microphone { detail } => format!("no microphone: {detail}"),
+            Event::KeyDevice { device, state } => match state {
+                DeviceState::Ready => format!("key device {device}: open"),
+                DeviceState::Missing(problem) => {
+                    // Which device and why, and what the client does about it, in one line.
+                    let then = if problem.retried() {
+                        ", and trying again"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "key device {device}: {problem}; taking down, up, mute, deafen and \
+                         quit from standard input{then}"
+                    )
+                }
+            },
             Event::Track { .. } | Event::Stats(_) => return None,
         })
     }
 }
 
-/// Where the events go: standard output, one line each.
+/// Where the events go: standard output, one line each, or on a terminal a status that is
+/// redrawn.
 pub struct Output {
     json: bool,
     out: Box<dyn Write + Send>,
+    /// The status that is redrawn in place, when the output is a terminal.
+    screen: Option<Screen>,
 }
 
 impl fmt::Debug for Output {
@@ -388,13 +431,41 @@ impl Output {
     /// An output that writes to `out`: JSON objects if `json`, plain lines otherwise.
     #[must_use]
     pub fn new(json: bool, out: Box<dyn Write + Send>) -> Self {
-        Self { json, out }
+        Self {
+            json,
+            out,
+            screen: None,
+        }
     }
 
-    /// An output on standard output.
+    /// An output that draws the status on `screen` and writes it to `out`, which is a
+    /// terminal.
+    #[must_use]
+    pub fn redrawn(screen: Screen, out: Box<dyn Write + Send>) -> Self {
+        Self {
+            json: false,
+            out,
+            screen: Some(screen),
+        }
+    }
+
+    /// An output on standard output: the redrawn status if it is a terminal and `json` is
+    /// not asked for, and otherwise line by line.
     #[must_use]
     pub fn stdout(json: bool) -> Self {
-        Self::new(json, Box::new(std::io::stdout()))
+        Self {
+            json,
+            out: Box::new(std::io::stdout()),
+            screen: Screen::for_stdout(json),
+        }
+    }
+
+    /// The user typed a line on standard input. On a terminal it was echoed under the
+    /// status, so the next status is drawn below it.
+    pub fn typed_line(&mut self) {
+        if let Some(screen) = &mut self.screen {
+            screen.typed_line();
+        }
     }
 
     /// Whether events are written as JSON.
@@ -405,6 +476,15 @@ impl Output {
 
     /// Writes one event as one line, and flushes it, so a reader sees it when it happens.
     pub fn show(&mut self, event: &Event<'_>) {
+        if let Some(screen) = &mut self.screen {
+            // What the screen gives back has had every line through the same filter as a
+            // plain line below.
+            if let Some(drawn) = screen.show(event) {
+                let _ = self.out.write_all(drawn.as_bytes());
+                let _ = self.out.flush();
+            }
+            return;
+        }
         let line = if self.json {
             // An object, so the line begins with `{`.
             event.json().to_string()

@@ -67,7 +67,10 @@ fn a_mistake_on_the_command_line_exits_2() {
     for args in [
         &["join", "--mic", "pipewire"][..],
         &["join", "--sink", "count:440,450"],
-        &["devices"],
+        // Mistakes that are caught before anything is listed or opened.
+        &["devices", "extra"],
+        &["keys"],
+        &["listen"],
         &[],
         // No channel on the command line, and no configuration file to name one.
         &["join"],
@@ -375,5 +378,302 @@ async fn with_the_real_sdk_at_trace_level_nothing_written_holds_a_token_or_a_roo
             );
             assert!(stdout.contains(r#"{"event":"connection","state":"closed"}"#));
         }
+    }
+}
+
+/// A keyboard that is not there, where the configuration is allowed to name one. The name
+/// is made up and nothing is at it, so the client finds nothing to open: no test here
+/// opens, reads or lists a device under `/dev/input`.
+const NO_SUCH_KEYBOARD: &str = "/dev/input/by-id/conch-voice-test-no-such-keyboard-event-kbd";
+
+/// A configuration file that names a key device and a talk key.
+fn configure_keys(private: &Path, device: &Path) {
+    let directory = private.join("config").join("conch");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("voice.toml"),
+        format!(
+            "[keys]\ndevice = \"{}\"\ntalk = \"KEY_F13\"\n",
+            device.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// The lines that are about the key device, in either mode.
+fn key_device_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with("key device ") || line.contains(r#""event":"key_device""#))
+        .collect()
+}
+
+/// A `join` that stays up: `conchd` issues sessions, and what it calls LiveKit refuses the
+/// SDK, so the client waits and tries again for as long as it is left to.
+async fn joining(private: &Path, extra: &[&str]) -> (Command, Stub, NotLiveKit) {
+    let conchd = Stub::start().await;
+    let not_livekit = NotLiveKit::start().await;
+    conchd.livekit_url(&not_livekit.url);
+    let mut command = conch_voice(private);
+    command
+        .args(["join", "ops", "--server", &conchd.url()])
+        .args(extra)
+        .env("CONCH_TOKEN", FAKE_LOGIN);
+    (command, conchd, not_livekit)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_device_that_cannot_be_opened_is_said_once_and_the_client_runs_on_with_no_input() {
+    for json in [false, true] {
+        let private = tempfile::tempdir().unwrap();
+        let absent = Path::new(NO_SUCH_KEYBOARD);
+        assert!(!absent.exists(), "the made-up keyboard must not exist");
+        configure_keys(private.path(), absent);
+        let extra: &[&str] = if json { &["--json"] } else { &[] };
+        let (mut command, _conchd, _not_livekit) = joining(private.path(), extra).await;
+        // No standard input at all: with a key device to watch, its end is not a `quit`.
+        command.stdin(Stdio::null());
+
+        let (code, stdout, stderr) = tokio::task::spawn_blocking(move || {
+            let mut running = Running::start(&mut command);
+            // Two failed joins later (more than a second, and several attempts to open
+            // the device) the client is still running: `until` fails if it has exited.
+            running.until("two failed joins", Duration::from_secs(60), |stdout| {
+                failed_joins(stdout) >= 2
+            });
+            // SIGTERM, as a service manager would send it.
+            let ended = Command::new("kill")
+                .args(["-TERM", &running.child.id().to_string()])
+                .status()
+                .unwrap();
+            assert!(ended.success());
+            running.exit()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            code,
+            Some(0),
+            "json {json}: a signal is a clean exit: {stderr}"
+        );
+        let said = key_device_lines(&stdout);
+        assert_eq!(
+            said.len(),
+            1,
+            "json {json}: said once, not once an attempt: {stdout}"
+        );
+        let why = format!("cannot open it: {}", std::io::Error::from_raw_os_error(2));
+        if json {
+            let object: serde_json::Value = serde_json::from_str(said[0]).unwrap();
+            assert_eq!(
+                object,
+                serde_json::json!({
+                    "event": "key_device",
+                    "device": absent.display().to_string(),
+                    "state": "missing",
+                    "reason": "cannot_open",
+                    "detail": why,
+                    "retrying": true,
+                })
+            );
+        } else {
+            assert_eq!(
+                said[0],
+                format!(
+                    "key device {}: {why}; taking down, up, mute, deafen and quit from \
+                     standard input, and trying again",
+                    absent.display()
+                )
+            );
+            // Line by line, as before: standard output is not a terminal.
+            assert!(stdout.contains("you: not connected; "), "{stdout}");
+            assert!(stdout.contains("\nconnecting\n"), "{stdout}");
+            assert!(!stdout.contains("voice: "), "{stdout}");
+        }
+        assert!(!stdout.contains('\u{1b}'), "json {json}: {stdout:?}");
+    }
+}
+
+#[test]
+fn the_configuration_cannot_name_a_key_device_that_is_not_under_dev_input() {
+    let private = tempfile::tempdir().unwrap();
+    // A file that holds a press of the talk key, where the configuration says the keyboard
+    // is; and a path that only starts under /dev/input.
+    let file = private.path().join("usb-Example-event-kbd");
+    let mut press = [0u8; 24];
+    press[16] = 1;
+    press[18] = 183;
+    press[20] = 1;
+    std::fs::write(&file, press).unwrap();
+    let climbing = Path::new("/dev/input/..").join(file.strip_prefix("/").unwrap());
+    for device in [&file, &climbing] {
+        configure_keys(private.path(), device);
+        let mut command = conch_voice(private.path());
+        let (code, stdout, stderr) =
+            run(command.args(["join", "ops"]).env("CONCH_TOKEN", FAKE_LOGIN));
+        assert_eq!(code, Some(1), "{}", device.display());
+        assert_eq!(stdout, "");
+        assert!(
+            stderr.ends_with(
+                "`keys.device`: must be a path under /dev/input/, such as \
+                 /dev/input/by-id/...-event-kbd\n"
+            ),
+            "{stderr}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_stdin_keys_no_key_device_is_opened_and_the_end_of_input_still_quits() {
+    let private = tempfile::tempdir().unwrap();
+    configure_keys(private.path(), Path::new(NO_SUCH_KEYBOARD));
+    let (mut command, _conchd, _not_livekit) = joining(private.path(), &["--stdin-keys"]).await;
+
+    let (code, stdout, stderr) = tokio::task::spawn_blocking(move || {
+        let mut running = Running::start(&mut command);
+        running.until("a failed join", Duration::from_secs(60), |stdout| {
+            failed_joins(stdout) >= 1
+        });
+        running.end_input()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, Some(0), "the end of input is a clean exit: {stderr}");
+    assert!(key_device_lines(&stdout).is_empty(), "{stdout}");
+    assert!(stdout.ends_with("left voice\n"), "{stdout}");
+}
+
+#[test]
+fn keys_refuses_when_standard_output_is_not_a_terminal() {
+    let private = tempfile::tempdir().unwrap();
+    // Not a keyboard, and not there: nothing could be read even if the refusal failed.
+    let absent = private.path().join("absent-event-kbd");
+    let mut command = conch_voice(private.path());
+    let (code, stdout, stderr) = run(command.arg("keys").arg(&absent));
+    assert_eq!(code, Some(2));
+    assert_eq!(stdout, "", "not even the warning goes into a pipe");
+    assert_eq!(
+        stderr,
+        "conch-voice: keys shows every key pressed and writes only to a terminal: standard \
+         output is not one\n"
+    );
+}
+
+/// Runs the binary under script(1) from util-linux, which gives it a terminal for standard
+/// input, output and error, and returns its exit code and everything it wrote there, with
+/// the terminal's carriage returns taken out.
+fn on_a_terminal(private: &Path, args: &[&str], token: bool) -> (Option<i32>, String) {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let line = std::iter::once(BIN)
+        .chain(args.iter().copied())
+        .map(quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut command = Command::new("script");
+    command
+        .args(["--quiet", "--return", "--command", &line, "/dev/null"])
+        .env_clear()
+        .env("HOME", private.join("home"))
+        .env("XDG_CONFIG_HOME", private.join("config"))
+        .env("SHELL", "/bin/sh")
+        // Held open and never written to: the end of input would be a `quit`.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if token {
+        command.env("CONCH_TOKEN", FAKE_LOGIN);
+    }
+    let mut child = command
+        .spawn()
+        .expect("script(1) from util-linux is needed to give the binary a terminal");
+    let stdin = child.stdin.take();
+    let mut written = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut written)
+        .unwrap();
+    let status = child.wait().unwrap();
+    drop(stdin);
+    let written = String::from_utf8_lossy(&written).replace('\r', "");
+    (status.code(), written)
+}
+
+#[test]
+fn on_a_terminal_keys_says_what_it_will_show_and_only_then_tries_the_device() {
+    let private = tempfile::tempdir().unwrap();
+    let absent = private.path().join("absent-event-kbd");
+    let device = absent.display().to_string();
+    let (code, written) = on_a_terminal(private.path(), &["keys", &device], false);
+
+    let failure = format!(
+        "conch-voice: key device {device}: cannot open it: {}\n",
+        std::io::Error::from_raw_os_error(2)
+    );
+    // The whole warning, and after it the failure to open the device, which is not there.
+    assert_eq!(
+        written,
+        format!("{}{failure}", conch_voice::keys::warning(&device))
+    );
+    assert!(written.contains("EVERY key pressed"), "{written}");
+    assert_eq!(code, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_a_terminal_the_status_is_redrawn_in_place_and_with_json_it_is_not() {
+    let reason = "not a member of this channel, or there is no such channel";
+    for json in [false, true] {
+        let private = tempfile::tempdir().unwrap();
+        let conchd = Stub::start().await;
+        conchd.next_session(Reply::error(404, "channel_not_found"));
+        let url = conchd.url();
+        let directory = private.path().to_owned();
+        let (code, written) = tokio::task::spawn_blocking(move || {
+            let mut args = vec!["join", "ops", "--server", &url];
+            if json {
+                args.push("--json");
+            }
+            on_a_terminal(&directory, &args, true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, Some(1), "{written:?}");
+        assert!(
+            written.ends_with(&format!("conch-voice: {reason}\n")),
+            "{written:?}"
+        );
+
+        if json {
+            assert!(!written.contains('\u{1b}'), "{written:?}");
+            assert!(
+                written.contains(r#"{"event":"connection","state":"connecting"}"#),
+                "{written:?}"
+            );
+            continue;
+        }
+        // Drawn once where the cursor was, and then over itself, four lines up each time.
+        assert!(
+            written.contains("\u{1b}[?7l\u{1b}[2Kvoice: starting\n"),
+            "{written:?}"
+        );
+        assert!(
+            written.contains("\u{1b}7\u{1b}[4A\u{1b}[?7l\u{1b}[2Kvoice: connecting\n"),
+            "{written:?}"
+        );
+        let last = format!(
+            "\u{1b}7\u{1b}[4A\u{1b}[?7l\u{1b}[2Kvoice: stopped: {reason}\n\
+             \u{1b}[2Kyou: not connected; listening only: this session may not transmit; \
+             no microphone\n"
+        );
+        assert!(written.contains(&last), "{written:?}");
+        // No line of the line-by-line output is there.
+        assert!(!written.contains("\nconnecting\n"), "{written:?}");
+        assert!(
+            !written.contains(&format!("\nstopped: {reason}\n")),
+            "{written:?}"
+        );
     }
 }

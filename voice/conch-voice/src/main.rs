@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use conch_voice::cli::{self, Environment};
+use conch_voice::cli::{self, Environment, Invocation};
 use conch_voice::logger::Logger;
 use conch_voice::secrets::Scrubber;
 use log::LevelFilter;
@@ -45,9 +45,15 @@ fn main() {
         // Help, the version, or a mistake: clap prints it and knows the exit code.
         Err(error) => error.exit(),
     };
-    logger.set_level(args.log_level);
-
-    let code = match conch_voice::join(&args, &Environment::from_process(), scrubber) {
+    let result = match &args {
+        Invocation::Join(args) => {
+            logger.set_level(args.log_level);
+            conch_voice::join(args, &Environment::from_process(), scrubber)
+        }
+        Invocation::Devices => conch_voice::devices(),
+        Invocation::Keys { device } => conch_voice::keys(device),
+    };
+    let code = match result {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("conch-voice: {error}");

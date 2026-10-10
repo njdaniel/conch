@@ -43,13 +43,14 @@ use std::time::Duration;
 use conch_voice_api::{Client, Error as ApiError, Secret, ServerAddress, VoiceTransmitState};
 use conch_voice_audio::AudioError;
 use conch_voice_control::{
-    ConnectionPolicy, GateCommand, LineCommand, NextStep, Outcome, Ptt, PttInput, PttOutput,
-    TransmitReport,
+    ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
+    PttOutput, TransmitReport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::Error;
+use crate::keydev::DeviceState;
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
 use crate::presence::{self, PresenceTimings, Roster};
 use crate::receive::{self, MixCommand, MixStats};
@@ -63,11 +64,17 @@ use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
 /// there is none to open.
 pub type OpenMic = Box<dyn FnMut() -> Result<Option<BoxedMic>, AudioError> + Send>;
 
-/// Something from outside the loop: a line on standard input, its end, or a signal.
+/// Something from outside the loop: a line on standard input, its end, a signal, or what
+/// the key device's watcher (`keydev.rs`) saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
     /// One of the five commands.
     Line(LineCommand),
+    /// The talk, mute or deafen key went down or came up on the key device.
+    Key(KeyEvent),
+    /// The key device is being read, or is not, and why. A device that is not there ends
+    /// whatever was held on it.
+    KeyDevice(DeviceState),
     /// A line that is not a command.
     UnknownLine,
     /// Standard input ended. It counts as `up` and then `quit`: a wrapper that dies after
@@ -142,6 +149,9 @@ pub struct Settings {
     pub release_tail_ms: u32,
     /// `audio.max_transmit_secs`.
     pub max_transmit: Duration,
+    /// The key device being watched, as it is named when its state is shown. `None` when
+    /// presses come from standard input only.
+    pub key_device: Option<String>,
     /// Waits and limits.
     pub timings: Timings,
 }
@@ -381,6 +391,7 @@ struct Session<T: Transport> {
     transport: Arc<T>,
     scrubber: Arc<Scrubber>,
     out: Output,
+    key_device: Option<String>,
     inputs: mpsc::UnboundedReceiver<Input>,
     inputs_open: bool,
     /// The origin of the times the machine and the policy are given.
@@ -420,6 +431,7 @@ pub async fn join<T: Transport>(
         sink_tones,
         release_tail_ms,
         max_transmit,
+        key_device,
         timings,
     } = settings;
     let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
@@ -440,6 +452,7 @@ pub async fn join<T: Transport>(
         transport: Arc::new(transport),
         scrubber,
         out,
+        key_device,
         inputs,
         inputs_open: true,
         start: Instant::now(),
@@ -816,6 +829,10 @@ impl<T: Transport> Session<T> {
     }
 
     fn on_input(&mut self, input: Option<Input>) {
+        if matches!(input, Some(Input::Line(_) | Input::UnknownLine)) {
+            // On a terminal the line was echoed under the status, which is drawn anew.
+            self.out.typed_line();
+        }
         match input {
             Some(Input::Line(command)) => {
                 self.tell(PttInput::Line(command));
@@ -824,6 +841,15 @@ impl<T: Transport> Session<T> {
                 }
             }
             Some(Input::UnknownLine) => self.out.show(&Event::UnknownCommand),
+            // The key device is one more source of presses for the same machine.
+            Some(Input::Key(event)) => self.tell(PttInput::Key(event)),
+            Some(Input::KeyDevice(state)) => {
+                // The machine first: a device that went away is a release, and the gate
+                // does not wait for a line to be written.
+                self.tell(PttInput::KeyDevice(state.is_ready()));
+                let device = self.key_device.as_deref().unwrap_or_default();
+                self.out.show(&Event::KeyDevice { device, state });
+            }
             Some(Input::Signal) => {
                 self.exit.get_or_insert(Ok(()));
             }

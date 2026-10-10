@@ -1,10 +1,14 @@
 //! The command line, and how it is laid over the configuration file and the environment
 //! (`docs/design/conch-voice.md` §8).
 //!
-//! `conch-voice join [channel]` is the one command of this issue; `devices` and `keys`
-//! arrive with #184 and #185. Its test options replace hardware: a tone or a WAV file as
-//! the microphone, a sink that counts instead of playing, and standard input instead of a
-//! key device.
+//! `conch-voice join [channel]` joins a channel's voice. Its test options replace
+//! hardware: a tone or a WAV file as the microphone, a sink that counts instead of playing,
+//! and standard input instead of a key device. `conch-voice devices` and `conch-voice keys
+//! <device>` help set the key device up; the audio half of `devices` arrives with #184.
+//!
+//! Which keyboard is read, and for which keys, comes from `[keys]` in the configuration
+//! file and from nowhere else. How a device is checked before it is read is not a setting
+//! at all (`keydev::DeviceRule`).
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
 //! (`CONCH_SERVER`), the configuration file (`$XDG_CONFIG_HOME/conch/voice.toml`), the
@@ -18,7 +22,7 @@ use std::str::FromStr;
 use clap::{Arg, ArgAction, Command};
 use conch_voice_api::{Secret, ServerAddress, TOKEN_ENV, default_config_dir, resolve_token};
 use conch_voice_audio::{FRAME_MS, SAMPLE_RATE, SignalMeter};
-use conch_voice_control::{Config, ConfigOverrides};
+use conch_voice_control::{Config, ConfigOverrides, KeyBindings};
 use log::LevelFilter;
 
 use crate::error::Error;
@@ -105,6 +109,22 @@ pub struct JoinArgs {
     pub sink_tones: Vec<f32>,
     /// `--log-level`.
     pub log_level: LevelFilter,
+    /// `--stdin-keys`: take commands from standard input only, and open no key device.
+    pub stdin_keys: bool,
+}
+
+/// What the command line asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Invocation {
+    /// `conch-voice join`.
+    Join(JoinArgs),
+    /// `conch-voice devices`.
+    Devices,
+    /// `conch-voice keys <device>`.
+    Keys {
+        /// The keyboard's event device.
+        device: PathBuf,
+    },
 }
 
 /// One line: this binary's version and the audio frame it is built for.
@@ -162,7 +182,7 @@ pub fn command() -> Command {
             Arg::new("stdin-keys")
                 .long("stdin-keys")
                 .action(ArgAction::SetTrue)
-                .help("Take down, up, mute, deafen and quit from standard input, one per line (always on until key devices arrive)"),
+                .help("Take down, up, mute, deafen and quit from standard input only, one per line: do not open the key device the configuration file names"),
         )
         .arg(
             Arg::new("log-level")
@@ -172,12 +192,37 @@ pub fn command() -> Command {
                 .default_value("warn")
                 .help("off, error, warn, info, debug or trace; the SDK's own records are written at warn and error only, whatever is asked"),
         );
+    let devices = Command::new("devices")
+        .about("List keyboards, whether you can read each, and the udev rule that would grant one")
+        .long_about(
+            "Lists the keyboards under /dev/input/by-id, says for each whether you can read \
+             it, and prints a udev rule that would grant you read access to that one device. \
+             It opens each keyboard to see whether it can, and reads nothing from any of them.",
+        );
+    let keys = Command::new("keys")
+        .about("Show the code of EVERY key pressed on a keyboard until Ctrl-C, to find the key to talk with")
+        .long_about(
+            "Shows the code of EVERY key pressed on the device, in every application, until \
+             Ctrl-C. It is for finding the code of the key you want to talk with. It says so \
+             before it opens the device, and it writes only to a terminal: if standard output \
+             is redirected it refuses, so that keystrokes are not put in a file by accident. \
+             Nothing is logged or kept.",
+        )
+        .arg(
+            Arg::new("device")
+                .required(true)
+                .value_name("DEVICE")
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("The keyboard's event device, by its path under /dev/input/by-id"),
+        );
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
         .version(version)
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(join)
+        .subcommand(devices)
+        .subcommand(keys)
 }
 
 /// Parses a command line. `--help` and `--version` come back as errors of clap's, which
@@ -186,19 +231,34 @@ pub fn command() -> Command {
 /// # Errors
 ///
 /// clap's error, to be shown with its own `exit`.
-pub fn parse<I, S>(args: I) -> Result<JoinArgs, clap::Error>
+pub fn parse<I, S>(args: I) -> Result<Invocation, clap::Error>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString> + Clone,
 {
     let matches = command().try_get_matches_from(args)?;
-    let Some(("join", join)) = matches.subcommand() else {
-        return Err(command().error(
-            clap::error::ErrorKind::MissingSubcommand,
-            "a command is required: join",
-        ));
+    let join = match matches.subcommand() {
+        Some(("join", join)) => join,
+        Some(("devices", _)) => return Ok(Invocation::Devices),
+        Some(("keys", keys)) => {
+            if let Some(device) = keys.get_one::<PathBuf>("device") {
+                return Ok(Invocation::Keys {
+                    device: device.clone(),
+                });
+            }
+            return Err(command().error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "keys needs the device to read",
+            ));
+        }
+        _ => {
+            return Err(command().error(
+                clap::error::ErrorKind::MissingSubcommand,
+                "a command is required: join, devices or keys",
+            ));
+        }
     };
-    Ok(JoinArgs {
+    Ok(Invocation::Join(JoinArgs {
         channel: join.get_one::<String>("channel").cloned(),
         server: join.get_one::<String>("server").cloned(),
         json: join.get_flag("json"),
@@ -214,7 +274,8 @@ where
             .get_one::<LevelFilter>("log-level")
             .copied()
             .unwrap_or(LevelFilter::Warn),
-    })
+        stdin_keys: join.get_flag("stdin-keys"),
+    }))
 }
 
 /// The parts of the process's environment this program reads. Collected once, in `main`,
@@ -316,6 +377,39 @@ pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, E
     })
 }
 
+/// The device to watch and the keys to look for on it, if `join` is to watch one at all:
+/// not with `--stdin-keys`, not without a device, and not without a key to look for, since
+/// a keyboard is not opened for nothing.
+///
+/// # Errors
+///
+/// [`Error::Config`] if two of talk, mute and deafen are bound to one key.
+pub fn key_device(
+    config: &Config,
+    stdin_only: bool,
+) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
+    let bindings = config.key_bindings()?;
+    if stdin_only {
+        return Ok(None);
+    }
+    match (&config.keys.device, bindings.is_empty()) {
+        (Some(device), false) => Ok(Some((PathBuf::from(device), bindings))),
+        (Some(_), true) => {
+            log::warn!(
+                "keys.device is set but no key is bound to talk, mute or deafen: the device is not opened"
+            );
+            Ok(None)
+        }
+        (None, false) => {
+            log::warn!(
+                "keys are bound but keys.device is not set: commands are taken from standard input only"
+            );
+            Ok(None)
+        }
+        (None, true) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -327,7 +421,10 @@ mod tests {
     fn join(args: &[&str]) -> JoinArgs {
         let mut line = vec!["conch-voice", "join"];
         line.extend(args);
-        parse(line).unwrap()
+        match parse(line).unwrap() {
+            Invocation::Join(args) => args,
+            other => panic!("not a join: {other:?}"),
+        }
     }
 
     fn environment(dir: &std::path::Path) -> Environment {
@@ -367,6 +464,7 @@ mod tests {
                 mic: MicChoice::None,
                 sink_tones: Vec::new(),
                 log_level: LevelFilter::Warn,
+                stdin_keys: false,
             }
         );
     }
@@ -392,6 +490,7 @@ mod tests {
         assert_eq!(args.mic, MicChoice::Tone(440.0));
         assert_eq!(args.sink_tones, vec![440.0, 880.0]);
         assert_eq!(args.log_level, LevelFilter::Trace);
+        assert!(args.stdin_keys);
         assert_eq!(
             join(&["--mic", "wav:/tmp/a file.wav"]).mic,
             MicChoice::Wav(PathBuf::from("/tmp/a file.wav"))
@@ -419,7 +518,70 @@ mod tests {
             assert_eq!(error.exit_code(), 2, "{bad:?}");
         }
         assert!(parse(["conch-voice"]).is_err());
-        assert!(parse(["conch-voice", "devices"]).is_err());
+        assert!(parse(["conch-voice", "listen"]).is_err());
+    }
+
+    #[test]
+    fn devices_and_keys_are_commands_and_keys_needs_its_device() {
+        assert_eq!(
+            parse(["conch-voice", "devices"]).unwrap(),
+            Invocation::Devices
+        );
+        assert_eq!(
+            parse([
+                "conch-voice",
+                "keys",
+                "/dev/input/by-id/usb-Example-event-kbd"
+            ])
+            .unwrap(),
+            Invocation::Keys {
+                device: PathBuf::from("/dev/input/by-id/usb-Example-event-kbd")
+            }
+        );
+        for bad in [
+            &["keys"][..],
+            &["keys", "one", "two"],
+            &["devices", "extra"],
+            // How a device is checked is not an option of any command.
+            &["keys", "--any-file", "x"],
+            &["join", "--key-device", "x"],
+        ] {
+            let mut line = vec!["conch-voice"];
+            line.extend(bad);
+            assert_eq!(parse(line).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_help_of_keys_says_what_it_shows_and_that_it_wants_a_terminal() {
+        let help = command()
+            .find_subcommand_mut("keys")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("EVERY key pressed"), "{help}");
+        assert!(help.contains("writes only to a terminal"), "{help}");
+        assert!(help.contains("it refuses"), "{help}");
+    }
+
+    fn config(text: &str) -> Config {
+        Config::parse(text, "voice.toml").unwrap()
+    }
+
+    #[test]
+    fn a_key_device_is_watched_only_with_a_device_a_key_and_no_stdin_keys() {
+        let both =
+            config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\ntalk = \"KEY_F13\"\n");
+        let (device, keys) = key_device(&both, false).unwrap().unwrap();
+        assert_eq!(device, PathBuf::from("/dev/input/by-id/x-event-kbd"));
+        assert_eq!(keys.talk().map(|key| key.code()), Some(183));
+        assert!(key_device(&both, true).unwrap().is_none(), "--stdin-keys");
+
+        let no_key = config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\n");
+        assert!(key_device(&no_key, false).unwrap().is_none());
+        let no_device = config("[keys]\ntalk = \"KEY_F13\"\n");
+        assert!(key_device(&no_device, false).unwrap().is_none());
+        assert!(key_device(&Config::default(), false).unwrap().is_none());
     }
 
     #[test]
