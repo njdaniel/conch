@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,6 +17,10 @@ import (
 )
 
 var version = "v0.0.0-dev"
+
+// tuiBackgroundError is the whole of what the TUI says when it refuses a
+// background start (issue #214); main adds the "conch: " prefix.
+const tuiBackgroundError = "the full-screen client was started in the background and cannot take over the terminal; run it in the foreground (with timeout, use --foreground), or use a plain command such as conch tail"
 
 func main() {
 	termquiet.Restore() // after every package init; see the package comment
@@ -34,6 +39,14 @@ func main() {
 }
 
 func runTUI(ctx context.Context) error {
+	// Started as a background job, the TUI is stopped by the kernel the
+	// moment it sets the terminal's modes, and it sits stopped having said
+	// nothing (issue #214). Refuse instead, before anything is touched. Both
+	// standard streams are asked: with one redirected elsewhere the other can
+	// still be the terminal the kernel stops it for.
+	if !inTerminalForeground(os.Stdin) || !inTerminalForeground(os.Stdout) {
+		return errors.New(tuiBackgroundError)
+	}
 	// The TUI holds the terminal in raw mode on the alternate screen, so it
 	// has to leave by its own steps on SIGTERM as well as on the SIGINT that
 	// main already turns into the end of ctx. These contexts are the only
