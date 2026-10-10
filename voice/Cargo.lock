@@ -273,6 +273,16 @@ dependencies = [
 [[package]]
 name = "conch-voice-api"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+]
 
 [[package]]
 name = "conch-voice-audio"
