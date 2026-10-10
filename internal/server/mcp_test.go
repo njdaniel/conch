@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,7 +116,19 @@ func TestMCPRejectsMissingBearer(t *testing.T) {
 }
 
 func TestMCPApprovalFullChainAwaitAndCheck(t *testing.T) {
-	srv := newTestServer(t)
+	// A real ntfy stand-in: the chain asserted below includes the two
+	// notifications, and they are only recorded when there is somewhere to
+	// send them. (This test used to run with ntfy unconfigured and still saw
+	// notify_sent rows, which is the defect issue #158 fixed.)
+	var delivered atomic.Int64
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ntfy.Close)
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff,
+		Ntfy: approvals.NtfyConfig{Server: ntfy.URL, ApprovalsTopic: "approvals", UrgentTopic: "approvals-urgent"}})
 	channel, agent, human := approvalTestFixture(t, srv)
 	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID}
 
@@ -152,6 +165,9 @@ func TestMCPApprovalFullChainAwaitAndCheck(t *testing.T) {
 	want := []string{store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("audit chain = %v, want %v", actions, want)
+	}
+	if got := delivered.Load(); got != 2 {
+		t.Errorf("notifications that reached ntfy = %d, want 2 (created, resolved): a notify_sent row must mean one was sent", got)
 	}
 }
 

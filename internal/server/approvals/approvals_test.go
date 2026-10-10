@@ -33,6 +33,8 @@ type recordingNotifier struct {
 	mu     sync.Mutex
 	events []string
 	fail   bool
+	// resolutions are what ApprovalResolved was handed, in order.
+	resolutions []schema.ApprovalResolutionV1
 }
 
 func (n *recordingNotifier) record(event string, err error) error {
@@ -53,8 +55,18 @@ func (n *recordingNotifier) ApprovalEscalated(_ context.Context, _ store.Approva
 	return n.record("escalated", nil)
 }
 
-func (n *recordingNotifier) ApprovalResolved(_ context.Context, _ store.Approval, _ schema.ApprovalResolutionV1) error {
+func (n *recordingNotifier) ApprovalResolved(_ context.Context, _ store.Approval, r schema.ApprovalResolutionV1) error {
+	n.mu.Lock()
+	n.resolutions = append(n.resolutions, r)
+	n.mu.Unlock()
 	return n.record("resolved", nil)
+}
+
+// resolved returns the resolutions delivered so far.
+func (n *recordingNotifier) resolved() []schema.ApprovalResolutionV1 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]schema.ApprovalResolutionV1(nil), n.resolutions...)
 }
 
 func (n *recordingNotifier) recorded() []string {
