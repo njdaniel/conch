@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -43,8 +44,9 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments map[string
 	return c.call(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
 }
 
-// ReadChannel reads one page from the read_channel tool.
-func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
+// ReadChannel reads one page from the read_channel tool. The messages are v2
+// envelopes: one with an Audience was not sent to the whole channel.
+func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
 	arguments := map[string]any{"channel": channel}
 	if after != 0 {
 		arguments["after"] = after
@@ -54,18 +56,53 @@ func (c *Client) ReadChannel(ctx context.Context, channel string, after int64, l
 	}
 	raw, err := c.CallTool(ctx, "read_channel", arguments)
 	if err != nil {
-		return schema.ListMessagesResponseV1{}, err
+		return schema.ListMessagesResponseV2{}, err
 	}
-	return Decode[schema.ListMessagesResponseV1](raw)
+	return Decode[schema.ListMessagesResponseV2](raw)
 }
 
-// PostMessage posts an untyped message through the post_message tool.
-func (c *Client) PostMessage(ctx context.Context, channel, body string) (schema.PostMessageResponseV1, error) {
-	raw, err := c.CallTool(ctx, "post_message", map[string]any{"channel": channel, "body": body})
-	if err != nil {
-		return schema.PostMessageResponseV1{}, err
+// PostMessage posts an untyped, channel-wide message through the
+// post_message tool.
+func (c *Client) PostMessage(ctx context.Context, channel, body string) (schema.PostMessageResponseV2, error) {
+	return c.PostMessageTo(ctx, channel, body, nil)
+}
+
+// PostMessageTo posts an untyped message through the post_message tool to the
+// given audience, which is sent as is; nil posts channel-wide. A refusal by
+// the server comes back as a *ToolError.
+func (c *Client) PostMessageTo(ctx context.Context, channel, body string, audience *schema.Audience) (schema.PostMessageResponseV2, error) {
+	arguments := map[string]any{"channel": channel, "body": body}
+	if audience != nil {
+		arguments["audience"] = audience
 	}
-	return Decode[schema.PostMessageResponseV1](raw)
+	raw, err := c.CallTool(ctx, "post_message", arguments)
+	if err != nil {
+		return schema.PostMessageResponseV2{}, err
+	}
+	return Decode[schema.PostMessageResponseV2](raw)
+}
+
+// ToolError is a tool call the server answered with isError. Code is the
+// schema.Error code when the text carries one (for example forbidden or
+// net_not_found), so a caller can tell a refusal from a transport failure.
+type ToolError struct {
+	Method  string
+	Code    string
+	Message string
+	text    string
+}
+
+func (e *ToolError) Error() string {
+	return fmt.Sprintf("mcp %s tool error: %s", e.Method, e.text)
+}
+
+func newToolError(method, text string) *ToolError {
+	e := &ToolError{Method: method, text: text, Message: text}
+	var parsed schema.Error
+	if json.Unmarshal([]byte(text), &parsed) == nil && parsed.Code != "" {
+		e.Code, e.Message = parsed.Code, parsed.Message
+	}
+	return e
 }
 
 // Decode unmarshals a tool's structured content into a schema type.
@@ -110,8 +147,11 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 	if err != nil {
 		return nil, err
 	}
+	// A response body can hold message bodies, scoped ones included, and
+	// callers log these errors: an error never quotes a tool result, and
+	// quotes only the start of a refusal from the HTTP layer.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, respBody)
+		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, excerpt(respBody))
 	}
 	var envelope struct {
 		Result struct {
@@ -126,7 +166,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, fmt.Errorf("decode mcp %s response: %w (body=%s)", method, err, respBody)
+		return nil, fmt.Errorf("decode mcp %s response (%d bytes): %w", method, len(respBody), err)
 	}
 	if envelope.Error != nil {
 		return nil, fmt.Errorf("mcp %s rpc error: %s", method, envelope.Error.Message)
@@ -136,7 +176,17 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		if len(envelope.Result.Content) > 0 {
 			text = envelope.Result.Content[0].Text
 		}
-		return nil, fmt.Errorf("mcp %s tool error: %s", method, text)
+		return nil, newToolError(method, text)
 	}
 	return envelope.Result.StructuredContent, nil
+}
+
+// excerpt is the first line of an HTTP error body, cut to 120 bytes.
+func excerpt(body []byte) string {
+	const limit = 120
+	line, _, _ := strings.Cut(strings.TrimSpace(string(body)), "\n")
+	if len(line) > limit {
+		return line[:limit] + "…"
+	}
+	return line
 }

@@ -291,6 +291,10 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 // Store is the embedded SQLite database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
+	// rollbackSQL replaces "ROLLBACK" in withImmediateTx when set. Tests set
+	// it to a statement that fails, to exercise the path where a transaction
+	// cannot be ended and the connection must be discarded.
+	rollbackSQL string
 }
 
 // Open opens (creating if necessary) the database at path, enables WAL mode
