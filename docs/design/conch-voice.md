@@ -200,7 +200,7 @@ Who is connected and who is talking comes from `conchd`'s presence socket (voice
 
 ## 8. Configuration, login and commands
 
-**Configuration** is TOML at `$XDG_CONFIG_HOME/conch/voice.toml`, all optional: `server` (default `CONCH_SERVER`, then `http://127.0.0.1:8080`, as `conch`), a default `channel`, `[keys]` (`device`, `talk`, `mute`, `deafen`), and `[audio]` (`input`, `output`, `echo_cancellation`, `release_tail_ms`, `max_transmit_secs`). Unknown keys are an error, so a typo is not silently ignored.
+**Configuration** is TOML at `$XDG_CONFIG_HOME/conch/voice.toml`, all optional: `server`, a default `channel`, `[keys]` (`device`, `talk`, `mute`, `deafen`), and `[audio]` (`input`, `output`, `echo_cancellation`, `release_tail_ms`, `max_transmit_secs`). Unknown keys are an error, so a typo is not silently ignored. The server address is taken from `--server`, then `CONCH_SERVER`, then the file, then `http://127.0.0.1:8080`: the nearer to the invocation, the stronger, which is the order `conch` uses for its flag and the same variable.
 
 **Login** stays in `conch`. `conch-voice` reads the token `conch login` stored (`credentials.json` beside its own configuration), or `CONCH_TOKEN`, and never writes that file. It applies the same rule as the Go client: a credentials file readable by other users is refused. The file's format and the way a server address is normalised into its key become a contract between two programs, so both are tested against one shared set of vectors.
 
@@ -208,11 +208,15 @@ Who is connected and who is talking comes from `conchd`'s presence socket (voice
 
 | Command | Does |
 |---|---|
-| `conch-voice join [channel]` | Joins the channel's voice and runs until `quit` or Ctrl-C. |
+| `conch-voice join [channel]` | Joins the channel's voice and runs until `quit`, the end of standard input, or Ctrl-C. |
 | `conch-voice devices` | Lists PipeWire inputs and outputs, and keyboards with whether they can be read, and prints the udev rule that would grant one. |
 | `conch-voice keys <device>` | Prints the code of each key pressed on that device until Ctrl-C, to find the talk key. Says first that it will show every key pressed. |
 
 `join` takes test options that replace hardware: a WAV file as the microphone, a sink that counts instead of playing, and standard input instead of a key device (§4).
+
+**Exit codes.** 0 after `quit`, the end of standard input, or a signal; 2 for a mistake on the command line; 1 when the client stopped for a reason it printed (a stop of the connection policy, §5, or a refused setting); 101 for an internal error, which ends the whole process at once so that half a client is never left running with a microphone. The end of standard input counts as a release and then `quit`, so a wrapper that dies while holding the key down cannot leave the gate open. Until key devices exist (#185) that also means a client started with no standard input leaves at once.
+
+**Logging.** `--log-level` (default `warn`) sets what this program's own code writes to standard error. The SDK and what it links are written at `warn` and `error` only, whatever is asked (§5). Every record, the SDK's or this program's own, and every error text shown in the status, has the login token, the join token and room name in use and anything shaped like a signed token replaced, and its control characters removed, before it is written.
 
 ## 9. What `dmn-audio` must gain
 
