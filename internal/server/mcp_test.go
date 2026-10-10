@@ -46,13 +46,21 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	payload := map[string]any{"schema": "leviathan.trade_signal.v1", "data": map[string]any{"symbol": "BTC", "side": "buy"}}
 	var post struct {
 		Result struct {
-			StructuredContent schema.PostMessageResponseV1 `json:"structuredContent"`
+			StructuredContent schema.PostMessageResponseV2 `json:"structuredContent"`
 		} `json:"result"`
 	}
 	mcpPost(t, httpSrv.URL, sessionID, 2, "tools/call", map[string]any{
 		"name":      "post_message",
 		"arguments": map[string]any{"channel": "general", "body": "buy BTC", "payload": payload},
 	}, &post)
+	// The MCP tools speak the v2 envelope (issue #117); a channel-wide message
+	// is a valid v2 message with no audience.
+	if err := post.Result.StructuredContent.Message.Validate(); err != nil {
+		t.Fatalf("MCP post output is not a valid v2 message: %v", err)
+	}
+	if post.Result.StructuredContent.Message.Audience != nil {
+		t.Fatalf("a channel-wide MCP post has audience %+v", post.Result.StructuredContent.Message.Audience)
+	}
 	if post.Result.StructuredContent.Message.AuthorID != agent.ID {
 		t.Fatalf("MCP author ID = %d, want authenticated agent %d", post.Result.StructuredContent.Message.AuthorID, agent.ID)
 	}
@@ -68,7 +76,7 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 
 	var read struct {
 		Result struct {
-			StructuredContent schema.ListMessagesResponseV1 `json:"structuredContent"`
+			StructuredContent schema.ListMessagesResponseV2 `json:"structuredContent"`
 		} `json:"result"`
 	}
 	mcpPost(t, httpSrv.URL, sessionID, 3, "tools/call", map[string]any{
@@ -77,6 +85,9 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	}, &read)
 	if len(read.Result.StructuredContent.Messages) != 1 {
 		t.Fatalf("MCP read returned %d messages, want 1", len(read.Result.StructuredContent.Messages))
+	}
+	if err := read.Result.StructuredContent.Messages[0].Validate(); err != nil {
+		t.Fatalf("MCP read output is not a valid v2 message: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
