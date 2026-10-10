@@ -176,7 +176,7 @@ The actor is the principal. No audio and no token is ever recorded.
 
 ## 8. Wire shapes
 
-Canonical types live in `pkg/schema/voice.go` (#124), added through the `schema-change` skill. All are new types; nothing published changed.
+Canonical types live in `pkg/schema/voice.go` (#124; the transmit report was added in V4 by #179), added through the `schema-change` skill. All are new types; nothing published changed.
 
 | Type | Wire name | Where it travels |
 |---|---|---|
@@ -185,8 +185,11 @@ Canonical types live in `pkg/schema/voice.go` (#124), added through the `schema-
 | `VoicePresenceV1` | `conch.voice_presence.v1` (`schema.VoicePresenceSchemaV1`) | `GET /v1/channels/{channel}/voice` and the presence socket (§6) |
 | `VoicePresenceRoom` | element of `rooms` in presence | one per room the caller may see: optional `audience`, `participants` |
 | `VoiceParticipant` | element of `participants` | `principal_id`, `can_publish`, `transmitting`, `joined_at` |
+| `VoiceTransmitReportV1` | REST request body, versioned by suffix | `POST /v1/channels/{channel}/voice/transmit` (V4; [conch-voice.md](conch-voice.md) §6): a `state` of `started` or `stopped`, optional `audience` |
 
-Both `audience` fields reuse `Audience` from the V2 schema (#114); absent means the whole channel. The error codes `voice_not_configured`, `voice_unavailable` and `voice_requires_auth` are the constants `ErrorCodeVoiceNotConfigured`, `ErrorCodeVoiceUnavailable` and `ErrorCodeVoiceRequiresAuth`, carried in the existing `Error` body.
+Every `audience` field reuses `Audience` from the V2 schema (#114); absent means the whole channel. The error codes `voice_not_configured`, `voice_unavailable` and `voice_requires_auth` are the constants `ErrorCodeVoiceNotConfigured`, `ErrorCodeVoiceUnavailable` and `ErrorCodeVoiceRequiresAuth`, carried in the existing `Error` body.
+
+The transmit endpoint answers a successful report with 204 and no body. There is no response type: the report changes nothing a client needs told back, and a type that carries nothing was not added. The two error codes it adds travel in the existing `Error` body: 409 `voice_no_session` (`ErrorCodeVoiceNoSession`) when the caller holds no session for the channel's current room, and 429 `voice_report_rate_limited` (`ErrorCodeVoiceReportRateLimited`) past the per-principal report bound. No rate-limit code existed in `conchd` or the schema before #179, so the code is named for this endpoint and is not a general one. The handler is #135.
 
 What the schema enforces, so that handlers and clients do not restate it:
 
@@ -195,8 +198,10 @@ What the schema enforces, so that handlers and clients do not restate it:
 - One grant per audience in a session and one room per audience in presence, so a reader can always tell which is the channel's room. An unknown audience kind fails the whole document, as it does for a message; a new kind is a new version of these shapes.
 - Presence carries no token and no room name. `voice_test.go` asserts this on the marshalled JSON (no key `token` or `room` at any depth) and on the Go types by reflection (no field `Token`, `Room` or `RoomName` reachable from `VoicePresenceV1`), so a future field cannot smuggle one in.
 - Empty `rooms` and `participants` encode as `[]`, never `null`.
+- Transmit report: a `state` of exactly `started` or `stopped` (case-sensitive), and a well-formed `audience` if present; an unknown audience kind fails the report. The report carries no time, no sequence number, and no principal, room or token: `conchd` stamps the time of receipt, takes reports in arrival order, and knows the caller and the room itself.
+- A transmit report is decoded strictly, unlike presence. `schema.DecodeVoiceTransmitReportV1` is the one way a request body becomes a report: it rejects any field the type does not declare, at any depth (`at`, `time`, `seq`, `principal_id`, `room`, `token`, or an extra field inside `audience`), anything after the one JSON object, and a report that does not validate. A dropped field would otherwise sit in a captured request looking as though `conchd` had honoured it. `voice_test.go` also pins the fields a report can carry to an exact list, so adding one is a deliberate act and a new version of the shape. The decoder does not bound the body; the handler does.
 
-Golden fixtures in `pkg/schema/testdata/`: `voice-session-response-v1.json`, `voice-session-response-v1-net.json`, `voice-presence-v1.json`, `voice-presence-v1-unavailable.json`, `voice-presence-v1-not-configured.json`.
+Golden fixtures in `pkg/schema/testdata/`: `voice-session-response-v1.json`, `voice-session-response-v1-net.json`, `voice-presence-v1.json`, `voice-presence-v1-unavailable.json`, `voice-presence-v1-not-configured.json`, `voice-transmit-report-v1-started.json`, `voice-transmit-report-v1-stopped.json`, `voice-transmit-report-v1-net.json`.
 
 API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapshot. Joining is `conch-voice`'s job in V4, using the same session endpoint.
 

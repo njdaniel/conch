@@ -46,6 +46,30 @@ grep -q 'serde is not in' <<<"$out" && fail "the dependency gate refused a liste
 printf 'serde\nnot-on-the-list\nalso-not-on-the-list\n' >"$tmp/allow.txt"
 ./scripts/voice-depgate.sh "$tmp/ws" "$tmp/allow.txt" >/dev/null || fail "the dependency gate refused a manifest whose crates are all listed"
 
+# ... and refuses the three ways cargo can swap a listed crate for another copy.
+cat >>"$tmp/ws/Cargo.toml" <<'TOML'
+
+[patch.crates-io]
+serde = { path = "member" }
+TOML
+if out=$(./scripts/voice-depgate.sh "$tmp/ws" "$tmp/allow.txt" 2>&1); then
+    fail "the dependency gate passed a workspace with a [patch] section"
+fi
+grep -q 'has a \[patch\] or \[replace\] section' <<<"$out" || fail "the dependency gate failed a [patch] for another reason: $out"
+sed -i 's/^\[patch.crates-io\]$/[replace]/' "$tmp/ws/Cargo.toml"
+if ./scripts/voice-depgate.sh "$tmp/ws" "$tmp/allow.txt" >/dev/null 2>&1; then
+    fail "the dependency gate passed a workspace with a [replace] section"
+fi
+sed -i '/^\[replace\]$/,$d' "$tmp/ws/Cargo.toml"
+mkdir "$tmp/ws/.cargo"
+printf '[source.crates-io]\nreplace-with = "elsewhere"\n' >"$tmp/ws/.cargo/config.toml"
+if out=$(./scripts/voice-depgate.sh "$tmp/ws" "$tmp/allow.txt" 2>&1); then
+    fail "the dependency gate passed a workspace whose cargo configuration replaces a source"
+fi
+grep -q 'replaces a crate or a crate source' <<<"$out" || fail "the dependency gate failed a source replacement for another reason: $out"
+rm -r "$tmp/ws/.cargo"
+./scripts/voice-depgate.sh "$tmp/ws" "$tmp/allow.txt" >/dev/null || fail "the dependency gate still refuses the workspace after the swaps were removed"
+
 # 2. The toolchain script refuses a download whose SHA-256 is not the pinned
 #    one, and leaves nothing behind.
 head -c 4096 /dev/urandom >"$tmp/not-llvm.tar.xz"
@@ -54,7 +78,8 @@ if out=$(CONCH_CACHE="$tmp/cache" CONCH_VOICE_LLVM_URL="file://$tmp/not-llvm.tar
     fail "the toolchain script accepted an archive with the wrong hash"
 fi
 grep -q 'nothing was unpacked' <<<"$out" || fail "the toolchain script failed for another reason: $out"
-if [ -n "$(find "$tmp/cache" -mindepth 1 -print -quit)" ]; then
+# Its lock file is all that may remain.
+if [ -n "$(find "$tmp/cache" -mindepth 1 -not -name .toolchain.lock -print -quit)" ]; then
     fail "the toolchain script left files in the cache after refusing a download: $(ls -A "$tmp/cache")"
 fi
 

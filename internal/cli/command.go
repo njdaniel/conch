@@ -782,6 +782,10 @@ func safeLine(s string) string {
 	return b.String()
 }
 
+// VoiceName is voiceName for other packages: a principal's name as `conch
+// voice status` shows it, "-" when unknown.
+func VoiceName(name string) string { return voiceName(name) }
+
 // voiceName is a principal's name as a single field of a presence line:
 // "-" when unknown, bare when it is plain printable text without spaces, and
 // double-quoted and escaped otherwise, so a line always splits into exactly
