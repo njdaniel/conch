@@ -264,12 +264,14 @@ func (m Model) roster(width int) string {
 	used := 0
 	shown := 0
 	for i, p := range people {
+		// The mark comes before the id, where no name can put one: after the
+		// name, a name ending in the mark would read as someone talking.
 		entry := strconv.FormatInt(p.PrincipalID, 10)
+		if p.Transmitting {
+			entry = "●" + entry
+		}
 		if name, ok := names[p.PrincipalID]; ok {
 			entry += " " + cli.VoiceName(name)
-		}
-		if p.Transmitting {
-			entry += "●"
 		}
 		cost := utf8.RuneCountInString(entry)
 		if i > 0 {

@@ -95,7 +95,7 @@ func TestVoiceLineStates(t *testing.T) {
 	}{
 		{"before the first document", nil, ""},
 		{"nobody connected", presence(true, true), "voice: nobody"},
-		{"several, one transmitting", presence(true, true, person(9, false), person(5, true), person(3, false)), "voice: 3  5 alice●  9"},
+		{"several, one transmitting", presence(true, true, person(9, false), person(5, true), person(3, false)), "voice: 3  ●5 alice  9"},
 		{"not configured shows nothing", presence(false, false), ""},
 		{"unavailable is one quiet word", presence(true, false), "voice: unavailable"},
 	}
@@ -312,6 +312,35 @@ func TestVoiceLayoutDoesNotJump(t *testing.T) {
 	if heights[0] != 24 {
 		t.Errorf("screen is %d lines tall, want 24", heights[0])
 	}
+
+	// The moment the line first appears: before any presence document there
+	// is no voice line, and the screen is exactly as tall as with one. The
+	// line takes a row from the panes; it does not add one.
+	m, _, _ := voiceModelFor(t)
+	m.width, m.height = 80, 24
+	m.messages["general"] = []schema.MessageV2{{ID: 1, AuthorID: 3, Body: "hello"}}
+	before := m.View()
+	if strings.Contains(before, "voice: ") {
+		t.Fatalf("a voice line is drawn before any presence document:\n%s", before)
+	}
+	if got := len(strings.Split(before, "\n")); got != heights[0] {
+		t.Errorf("screen is %d lines tall without the voice line and %d with it", got, heights[0])
+	}
+}
+
+// A name cannot imitate the talking mark: the mark is before the id, and a
+// quiet participant whose name ends in it is not shown as talking.
+func TestVoiceMarkCannotBeImitatedByAName(t *testing.T) {
+	m, _, _ := voiceModelFor(t)
+	m.userName = "alice●"
+	m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: presence(true, true, person(5, false), person(9, true))})
+	got := m.voiceLine(80)
+	if want := "voice: 5 alice●  ●9"; got != want {
+		t.Fatalf("voice line = %q, want %q", got, want)
+	}
+	if strings.HasPrefix(strings.TrimPrefix(got, "voice: "), "●") {
+		t.Fatalf("the quiet participant is marked as talking: %q", got)
+	}
 }
 
 func TestVoiceLineTruncatesWithCount(t *testing.T) {
@@ -346,7 +375,7 @@ func TestVoiceNameIsSafeForOneLine(t *testing.T) {
 	m.width, m.height = 200, 24
 	m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: presence(true, true, person(5, true))})
 
-	want := "voice: 5 " + cli.VoiceName(hostile) + "●"
+	want := "voice: ●5 " + cli.VoiceName(hostile)
 	if got := m.voiceLine(200); got != want {
 		t.Errorf("voice line = %q, want %q", got, want)
 	}
@@ -384,7 +413,7 @@ func TestVoiceRosterListsOnlyTheChannelWideRoom(t *testing.T) {
 	})
 	m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: doc})
 	got := m.voiceLine(80)
-	if want := "voice: 5 alice  9●"; got != want {
+	if want := "voice: 5 alice  ●9"; got != want {
 		t.Fatalf("voice line = %q, want %q", got, want)
 	}
 }
