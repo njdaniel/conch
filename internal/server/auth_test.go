@@ -125,6 +125,7 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /healthz":      {classExempt, "/healthz", "", 200},
 	"GET /v0/ws":        {classAuth, "/v0/ws", "", 400},
 	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
+	"GET /v2/ws":        {classAuth, "/v2/ws", "", 400},
 	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
 	"POST /v0/channels": {classOp, "/v0/channels", `{}`, 400},
 	"GET /v1/channels":  {classAuth, "/v1/channels", "", 200},
@@ -145,6 +146,8 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v0/channels/{channel}/messages":                             {classAuth, "/v0/channels/general/messages", "", 200},
 	"POST /v1/channels/{channel}/messages":                            {classAuth, "/v1/channels/general/messages", `{}`, 400},
 	"GET /v1/channels/{channel}/messages":                             {classAuth, "/v1/channels/general/messages", "", 200},
+	"POST /v2/channels/{channel}/messages":                            {classAuth, "/v2/channels/general/messages", `{}`, 400},
+	"GET /v2/channels/{channel}/messages":                             {classAuth, "/v2/channels/general/messages", "", 200},
 	"PUT /v1/principals/{id}/manifest":                                {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":                                {classSelf, "/v1/principals/1/manifest", "", 404},
 	"POST /v1/principals/{id}/credentials":                            {classOp, "/v1/principals/1/credentials", `{}`, 400},
@@ -514,7 +517,7 @@ func TestAuthorBinding(t *testing.T) {
 				rec := f.do(t, "POST", "/"+version+"/channels/general/messages", f.aliceTok, tt.body(f))
 				if tt.code != "" {
 					assertErrorBody(t, rec, tt.status, tt.code)
-					msgs, err := f.srv.store.ListMessages(context.Background(), 1, 0, 10)
+					msgs, err := f.srv.store.ListVisibleMessages(context.Background(), 1, store.ChannelWideOnly, 0, 10)
 					if err != nil || len(msgs) != 0 {
 						t.Errorf("mismatched post stored %d messages (%v)", len(msgs), err)
 					}

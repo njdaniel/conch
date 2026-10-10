@@ -16,6 +16,7 @@ func (s *Server) routeTable() []route {
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
 		rt("GET /v1/ws", accessAuthenticated, hf(s.handleWSV1)),
+		rt("GET /v2/ws", accessAuthenticated, hf(s.handleWSV2)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
@@ -24,6 +25,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessages)),
 		rt("POST /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV1)),
 		rt("GET /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessagesV1)),
+		// Scoped messages (issue #116). The v2 list and socket are the only
+		// readers that can be given a message with an audience.
+		rt("POST /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV2)),
+		rt("GET /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessagesV2)),
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),

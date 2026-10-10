@@ -398,7 +398,7 @@ func (f mcpAuthFixture) authors(t *testing.T) []int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages, err := f.srv.store.ListMessages(ctx, channel.ID, 0, 100)
+	messages, err := f.srv.store.ListVisibleMessages(ctx, channel.ID, store.ChannelWideOnly, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
