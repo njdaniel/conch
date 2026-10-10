@@ -96,9 +96,40 @@ Guarantees:
 - On **resolution**: push a confirmation to the approvals topic (so the phone thread closes the loop).
 - ntfy is optional (single-binary invariant, ADR-002): delivery failure is recorded as an audit event (`notify_failed`) and never blocks the approval lifecycle. Decisions happen only via `conch` — ntfy is reachability, not an action channel.
 
+### 5.1 What is guaranteed (issue #158)
+
+With a notifier configured, each of the four transitions that has a notification (created, escalated, resolved, expired) gets **at least one delivery attempt, and an audit row for each attempt**: `notify_sent`, or `notify_failed` with the reason. When `conchd` cannot make the attempt at all, it writes `notify_failed` with `error="not attempted: …"`. A transition is never left with only a log line. A notification can arrive twice (after a crash, below); it is never retried merely because ntfy refused it — that is a `notify_failed` row, and the deadline escalation is the backstop.
+
+The row is the durable record that an attempt was made. Nothing else is stored: no table and no queue, so the guarantee is kept by the following rules.
+
+| What goes wrong after the transition has committed | What `conchd` does |
+|---|---|
+| The approval (or its resolution) cannot be read back | Retries the read every 5 s, five times; then writes `notify_failed` with `error="not attempted: the approval could not be loaded"`. |
+| The audit row cannot be written | Keeps the row in memory and retries every 5 s until it is written. The notification is not sent again. |
+| The notifier panics | That delivery is recorded as `notify_failed` with `error="the notifier panicked"`. The approval keeps its timers and `conchd` keeps running. |
+| `conchd` stops between the commit and the row (crash, kill, or a retry above still pending at shutdown) | The next start finds the transition without a row and makes the attempt then. |
+| The store fails at the deadline or the grace timer itself (escalate, expire, or reading the grace deadline) | The timer is re-armed for 5 s later instead of being dropped until the next restart. If the store had in fact carried the transition out and only reported failure, the retry finds it done and does what follows a commit: the notification and, for an escalation, the grace timer. |
+
+**Finding what a stopped `conchd` left undone.** Each start appends one `approvals_started` audit row (subject `approvals`), whose detail is `notifications=on since=<id>` or `notifications=off since=<id>`. `<id>` is the last audit id that existed when the process began: everything after it belongs to that run. Before writing its row, a start reads the previous one. If that says `on` and a notifier is configured now, it reads the audit log from the previous row's `since` up to its own, and collects every `approval_created`, `approval_escalated`, `approval_resolved` and `approval_expired` in that range with no notify row for the same approval and event. Each is attempted, in log order, and gets its row. Only when every one of them has a row is the new `approvals_started` row written.
+
+This runs before timers are armed and before the listener accepts. If it cannot finish then (the log cannot be read, a row or the start row cannot be written), `conchd` starts anyway and repeats it every 5 s until it has finished. A repeat concerns the same range, never the current run's own transitions, and does not deliver again what an earlier pass in the same process delivered; only the missing rows are retried. Because the start row carries `since`, it means the same thing written late as written at once.
+
+Limits, stated so nobody has to discover them:
+
+- Catch-up at start has a 10 s budget for deliveries, which also cuts short the delivery in progress, so an unreachable ntfy cannot hold up start-up for longer than that (connections made meanwhile wait; they are not refused). What is left when it is spent gets `notify_failed` with `error="not attempted: start-up time budget spent"`.
+- At start, an approval that cannot be read is recorded as not attempted at once; the five retries above apply to a running `conchd`, not to catch-up.
+- If notifications were on, `conchd` stopped, and it is next started with notifications **off**, what was owed is abandoned: that start writes `notifications=off`, and the log shows the transition, no notify row, and the reason.
+- If a start cannot write its `approvals_started` row and `conchd` stops again before the retry succeeds, the next start reads from the older row. Should the notifier setting have differed between the two, that one run is misjudged: its transitions are not caught up (older row `off`) or are delivered late although notifications were off (older row `on`). The window is from the start until 5 s after the audit log accepts writes again, and no transition can commit while it does not.
+- A database upgraded from a version without `approvals_started` rows has no starting point, so its first start catches up on nothing.
+- With no notifier configured nothing is sent and no notify rows are written. "Configured" means an ntfy server is set and valid; `conchd` then has a notifier. (An ntfy server with a topic left empty still has one, and notifications for that topic are not sent; see the follow-up issue.)
+- A late "created" notification can arrive for an approval that has since been decided. The resolution notification follows it.
+- A notify row can appear more than once for one attempt: a write the store carried out but reported as failed is repeated.
+
 ## 6. Audit chain
 
 Minimum audit events per approval: `approval_created` → (`notify_sent` | `notify_failed`) → [`decision_cast` ...] → (`approval_resolved` | `approval_escalated` → ... → `approval_expired`).
+
+Notify rows follow their transition but are not written in its transaction, so other rows can come between (§5.1), and after a crash a transition's notify row appears after the next `approvals_started` row.
 
 The P1 success criterion (ROADMAP) asserts this exact chain end-to-end, and every approval-path PR ships a test that walks it (CLAUDE.md rule 3).
 

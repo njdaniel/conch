@@ -42,17 +42,28 @@ const (
 // body-only frames, no envelope or payload fields. Pre-upgrade failures are
 // plain HTTP responses with the structured error body.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	s.handleWSVersion(w, r, false)
+	s.handleWSVersion(w, r, apiV0)
 }
 
 // handleWSV1 serves GET /v1/ws?channel=<name>: the same subscription contract
 // as handleWS, but each frame is a full schema.MessageV1 envelope including
 // any typed payload.
 func (s *Server) handleWSV1(w http.ResponseWriter, r *http.Request) {
-	s.handleWSVersion(w, r, true)
+	s.handleWSVersion(w, r, apiV1)
 }
 
-func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool) {
+// handleWSV2 serves GET /v2/ws?channel=<name>: each frame is a
+// schema.MessageV2. It is the only socket that can be delivered a scoped
+// message, and only one the connection's principal is a recipient of; a
+// connection with no verified principal (authentication off) receives
+// channel-wide messages only. A message the subscriber is not an audience of
+// is not sent at all, not even as a placeholder. The recipient list is never
+// in a frame.
+func (s *Server) handleWSV2(w http.ResponseWriter, r *http.Request) {
+	s.handleWSVersion(w, r, apiV2)
+}
+
+func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version apiVersion) {
 	ctx := r.Context()
 	name := r.URL.Query().Get("channel")
 	if name == "" {
@@ -83,10 +94,15 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 	}
 	var sub0 *hub.Subscription
 	var sub1 *hub.SubscriptionV1
-	if v1 {
+	var sub2 *hub.SubscriptionV2
+	switch version {
+	case apiV2:
+		sub2 = s.hub.SubscribeV2(channel.ID, principalID, wsSendBuffer)
+		defer sub2.Cancel()
+	case apiV1:
 		sub1 = s.hub.SubscribeV1(channel.ID, principalID, wsSendBuffer)
 		defer sub1.Cancel()
-	} else {
+	default:
 		sub0 = s.hub.Subscribe(channel.ID, principalID, wsSendBuffer)
 		defer sub0.Cancel()
 	}
@@ -138,7 +154,11 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, v1 bool
 		defer ticker.Stop()
 		recheck = ticker.C
 	}
-	if v1 {
+	switch version {
+	case apiV2:
+		s.streamWSV2(ctx, conn, sub2, channel.ID, principalID, credID, recheck)
+		return
+	case apiV1:
 		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID, credID, recheck)
 		return
 	}
@@ -193,6 +213,34 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 				return
 			}
 			if err := writeWSMessageV1(ctx, conn, msg); err != nil {
+				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				_ = conn.CloseNow()
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, channelID, principalID, credID int64, recheck <-chan time.Time) {
+	ctx = conn.CloseRead(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			return
+		case <-recheck:
+			if !s.credentialStillValid(ctx, conn, credID) {
+				return
+			}
+		case msg, ok := <-sub.Messages():
+			if !ok {
+				s.closeDropped(ctx, conn, channelID, principalID, credID)
+				return
+			}
+			wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+			err := wsjson.Write(wctx, conn, msg)
+			cancel()
+			if err != nil {
 				_ = conn.Close(websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return

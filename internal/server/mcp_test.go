@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,13 +46,21 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	payload := map[string]any{"schema": "leviathan.trade_signal.v1", "data": map[string]any{"symbol": "BTC", "side": "buy"}}
 	var post struct {
 		Result struct {
-			StructuredContent schema.PostMessageResponseV1 `json:"structuredContent"`
+			StructuredContent schema.PostMessageResponseV2 `json:"structuredContent"`
 		} `json:"result"`
 	}
 	mcpPost(t, httpSrv.URL, sessionID, 2, "tools/call", map[string]any{
 		"name":      "post_message",
 		"arguments": map[string]any{"channel": "general", "body": "buy BTC", "payload": payload},
 	}, &post)
+	// The MCP tools speak the v2 envelope (issue #117); a channel-wide message
+	// is a valid v2 message with no audience.
+	if err := post.Result.StructuredContent.Message.Validate(); err != nil {
+		t.Fatalf("MCP post output is not a valid v2 message: %v", err)
+	}
+	if post.Result.StructuredContent.Message.Audience != nil {
+		t.Fatalf("a channel-wide MCP post has audience %+v", post.Result.StructuredContent.Message.Audience)
+	}
 	if post.Result.StructuredContent.Message.AuthorID != agent.ID {
 		t.Fatalf("MCP author ID = %d, want authenticated agent %d", post.Result.StructuredContent.Message.AuthorID, agent.ID)
 	}
@@ -67,7 +76,7 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 
 	var read struct {
 		Result struct {
-			StructuredContent schema.ListMessagesResponseV1 `json:"structuredContent"`
+			StructuredContent schema.ListMessagesResponseV2 `json:"structuredContent"`
 		} `json:"result"`
 	}
 	mcpPost(t, httpSrv.URL, sessionID, 3, "tools/call", map[string]any{
@@ -76,6 +85,9 @@ func TestMCPEndpointPostMessageAndReadChannelParity(t *testing.T) {
 	}, &read)
 	if len(read.Result.StructuredContent.Messages) != 1 {
 		t.Fatalf("MCP read returned %d messages, want 1", len(read.Result.StructuredContent.Messages))
+	}
+	if err := read.Result.StructuredContent.Messages[0].Validate(); err != nil {
+		t.Fatalf("MCP read output is not a valid v2 message: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
@@ -104,7 +116,19 @@ func TestMCPRejectsMissingBearer(t *testing.T) {
 }
 
 func TestMCPApprovalFullChainAwaitAndCheck(t *testing.T) {
-	srv := newTestServer(t)
+	// A real ntfy stand-in: the chain asserted below includes the two
+	// notifications, and they are only recorded when there is somewhere to
+	// send them. (This test used to run with ntfy unconfigured and still saw
+	// notify_sent rows, which is the defect issue #158 fixed.)
+	var delivered atomic.Int64
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ntfy.Close)
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff,
+		Ntfy: approvals.NtfyConfig{Server: ntfy.URL, ApprovalsTopic: "approvals", UrgentTopic: "approvals-urgent"}})
 	channel, agent, human := approvalTestFixture(t, srv)
 	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID}
 
@@ -141,6 +165,9 @@ func TestMCPApprovalFullChainAwaitAndCheck(t *testing.T) {
 	want := []string{store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("audit chain = %v, want %v", actions, want)
+	}
+	if got := delivered.Load(); got != 2 {
+		t.Errorf("notifications that reached ntfy = %d, want 2 (created, resolved): a notify_sent row must mean one was sent", got)
 	}
 }
 
@@ -382,7 +409,7 @@ func (f mcpAuthFixture) authors(t *testing.T) []int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages, err := f.srv.store.ListMessages(ctx, channel.ID, 0, 100)
+	messages, err := f.srv.store.ListVisibleMessages(ctx, channel.ID, store.ChannelWideOnly, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

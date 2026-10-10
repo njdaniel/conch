@@ -63,7 +63,7 @@ func run() error {
 
 type mcpAdapter struct{ client *mcpclient.Client }
 
-func (m mcpAdapter) readChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
+func (m mcpAdapter) readChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
 	return m.client.ReadChannel(ctx, channel, after, limit)
 }
 

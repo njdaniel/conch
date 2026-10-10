@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -459,7 +460,7 @@ func TestDisabledPrincipalHooksStop(t *testing.T) {
 			body := fmt.Sprintf(`{"channel":"general","principal":%d}`, f.bot.ID)
 			assertErrorBody(t, f.do(t, "POST", "/v1/hooks", tok, body), http.StatusConflict, "principal_disabled")
 
-			messages, err := f.srv.store.ListMessages(ctx, general.ID, 0, 100)
+			messages, err := f.srv.store.ListVisibleMessages(ctx, general.ID, store.ChannelWideOnly, 0, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
