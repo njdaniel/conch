@@ -82,6 +82,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cache/conch/voice-target
           key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          # After a dependency change, start from the last build instead of
+          # from nothing; cargo rebuilds only what changed.
+          restore-keys: |
+            voice-build-${{ runner.os }}-
 
       # The SDK's build needs GLib's headers (found through pkg-config) and
       # nothing else from the system. scripts/voice-env.sh says so if they
