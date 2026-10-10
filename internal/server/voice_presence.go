@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,13 +28,23 @@ import (
 // room's channel, derives who is connected and who is transmitting, writes the
 // audit events, and tells presence subscribers when the picture changes.
 //
+// From issue #135 the poller no longer writes a row for every transmission it
+// sees. Clients report their presses (voice_transmit.go); each pass hands what
+// it saw to the transmit rule (voice_transmit_rule.go), which says what, if
+// anything, the audit log needs (docs/design/conch-voice.md §6).
+//
 // Nothing here puts a token, the API secret or a room name in a log line, an
 // audit row, a client-facing error or a presence document. Rooms are named in
 // logs by channel id.
 
 const (
-	// voicePollInterval is the pause between passes while any room is in use.
-	voicePollInterval = 500 * time.Millisecond
+	// voicePassGapMin and voicePassGapMax bound the pause between passes while
+	// any room is in use. Each pause is drawn at random between them, both
+	// included (voicePassGap), so that a client cannot place a transmit
+	// report around a pass that has not happened yet
+	// (docs/design/conch-voice.md §6: "Passes are not evenly spaced").
+	voicePassGapMin = 350 * time.Millisecond
+	voicePassGapMax = 650 * time.Millisecond
 	// voiceSweepInterval is how often the room list is re-read to rebuild "in
 	// use" (design note §6). With no room in use it is the only call made.
 	voiceSweepInterval = 30 * time.Second
@@ -121,10 +133,21 @@ type voiceRoomState struct {
 	// join that never happened.
 	seq     uint64
 	evicted map[int64]uint64
+	// transmit is the transmit rule's memory of the room: what each
+	// principal last reported and what the passes saw (voice_transmit_rule.go).
+	// Like everything here it is in memory only and goes with the room,
+	// after forgetRoom has closed what is open.
+	transmit transmitLedger
 }
 
+// inUse reports whether a pass polls the room. A room with something the
+// transmit rule has yet to settle (a reported `started`, an open unreported
+// transmission, a pass not yet judged) is in use until a pass settles it:
+// that is what makes a report from a holder who is not in the room be looked
+// at, and what guarantees every opening row its closing row
+// (docs/design/conch-voice.md §6).
 func (r *voiceRoomState) inUse(now time.Time) bool {
-	return r.marked || len(r.participants) > 0 ||
+	return r.marked || len(r.participants) > 0 || r.transmit.unsettled() ||
 		(!r.lastSession.IsZero() && now.Sub(r.lastSession) < voiceSessionRecent)
 }
 
@@ -134,6 +157,24 @@ type voiceEvent struct {
 	action    string
 	channelID int64
 	detail    string
+	// at is the time the row carries. Zero means the moment it is written,
+	// which is what every row but the transmit rule's uses.
+	at time.Time
+}
+
+// transmitEvents turns the transmit rule's rows for a room of channelID into
+// audit rows: actor the principal, the subject and detail conventions of the
+// poller's other rows, and the time the rule gave.
+func transmitEvents(channelID int64, rows []transmitRow) []voiceEvent {
+	events := make([]voiceEvent, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, voiceEvent{
+			actor: fmt.Sprintf("principal:%d", row.principalID), action: row.action, channelID: channelID,
+			detail: fmt.Sprintf("channel=%d audience=channel %s", channelID, row.detail()),
+			at:     row.at,
+		})
+	}
+	return events
 }
 
 // voicePoller owns presence state, the poller that fills it, and the
@@ -159,6 +200,15 @@ type voicePoller struct {
 	// before a token is signed. A test seam like the others.
 	recordHolder func(ctx context.Context, roomID, principalID, credentialID int64) error
 	retiredRooms func(ctx context.Context) ([]store.VoiceRoom, error)
+	// gap draws the pause before the next pass while a room is in use:
+	// voicePassGap. Tests replace it to drive passes exactly; nothing else
+	// may, because its unpredictability is part of the transmit rule.
+	gap func() time.Duration
+	// appendAudit is Store.AppendAuditEventAt, the write behind a row that
+	// carries its own time. A test seam like the reads above.
+	appendAudit func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error)
+	// reports bounds transmit reports per principal (voice_transmit.go).
+	reports voiceReportLimiter
 
 	// pass is set while a pass runs, so one that has not finished is not
 	// started again.
@@ -196,6 +246,8 @@ func newVoicePoller(s *Server) *voicePoller {
 		invalid:      s.store.InvalidVoiceRooms,
 		retiredRooms: s.store.ListRetiredVoiceRooms,
 		recordHolder: s.store.RecordVoiceHolder,
+		gap:          voicePassGap,
+		appendAudit:  s.store.AppendAuditEventAt,
 		wakeLoop:     make(chan struct{}, 1),
 		rooms:        make(map[string]*voiceRoomState),
 		removed:      make(map[string]time.Time),
@@ -313,9 +365,28 @@ func (p *voicePoller) tick(ctx context.Context) {
 	}
 }
 
-// nextDelay is how long the loop waits before its next tick: the polling
-// interval while any room is in use, otherwise until the next sweep, and
-// never sooner than the end of a backoff.
+// voicePassGap draws one pause between passes: uniform between voicePassGapMin
+// and voicePassGapMax, both included, from the operating system's random
+// source. It is drawn afresh for every pause and depends on nothing earlier,
+// so the passes seen so far say nothing about the next one beyond its range.
+// A generator seeded from the clock would not do: its output can be
+// reconstructed by whoever can guess the seed.
+func voicePassGap() time.Duration {
+	span := big.NewInt(int64(voicePassGapMax-voicePassGapMin) + 1)
+	n, err := rand.Int(rand.Reader, span)
+	if err != nil {
+		// crypto/rand does not fail on a supported platform (since Go 1.24
+		// it aborts the program rather than return an error). If it ever
+		// did, there is no unpredictable gap to be had; the shortest one
+		// polls most often, which is the direction that records more.
+		return voicePassGapMin
+	}
+	return voicePassGapMin + time.Duration(n.Int64())
+}
+
+// nextDelay is how long the loop waits before its next tick: a freshly drawn
+// gap while any room is in use, otherwise until the next sweep, and never
+// sooner than the end of a backoff.
 func (p *voicePoller) nextDelay() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -323,7 +394,7 @@ func (p *voicePoller) nextDelay() time.Duration {
 	d := p.nextSweep.Sub(now)
 	for _, r := range p.rooms {
 		if r.inUse(now) {
-			d = min(d, voicePollInterval)
+			d = min(d, p.gap())
 			break
 		}
 	}
@@ -359,9 +430,9 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 	wasInUse := r.inUse(now)
 	r.lastSession = now
 	p.mu.Unlock()
-	// A room already in use is being polled every interval; only a room the
+	// A room already in use is being polled, a gap apart; only a room the
 	// loop was not watching needs it woken. So a member asking for sessions
-	// in a loop cannot make the poller run faster than its interval.
+	// in a loop cannot make the poller run sooner than its next gap.
 	if wasInUse {
 		return
 	}
@@ -661,21 +732,32 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string) voiceEve
 // applyRoom replaces r's participants with seen and writes the events that
 // follow from the difference between the two passes.
 //
-// Every event time is the time of the pass that noticed the change, so it is
-// accurate to one polling interval: a join or a transmission shorter than the
-// interval can be missed entirely (design note §7). After an outage the
-// difference spans the whole outage.
+// Every join and leave is timed when the pass that noticed it is written, so
+// it is accurate to one gap between passes: a join shorter than the gap can be
+// missed entirely (design note §7). After an outage the difference spans the
+// whole outage.
+//
+// Transmissions are not derived from the difference any more (issue #135).
+// What the pass saw of each microphone goes to the transmit rule, together
+// with the reported state as it is at this instant, and the rule's rows are
+// written with the times it gives them. The instant of a pass is the moment
+// it is applied here, under p.mu, after LiveKit has answered: the pass's time
+// is read under the lock, and reportTransmit applies a report and reads its
+// time under the same lock. So passes and reports are in one order, their
+// times rise in that order, and the reported state a pass reads is the state
+// at the instant of that pass.
 //
 // keep names principals whose entitlement could not be read on this pass: one
 // who was in the room's state stays in it unchanged, and one who was not is
-// not added. again keeps the room marked for the next pass. since is the
-// room's eviction count when the pass asked LiveKit: anyone evicted after that
-// is left out, because what the pass saw of them is older than their removal.
+// not added. The transmit rule is told nothing about them on this pass.
+// again keeps the room marked for the next pass. since is the room's eviction
+// count when the pass asked LiveKit: anyone evicted after that is left out,
+// because what the pass saw of them is older than their removal.
 func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, keep map[int64]struct{}, again bool, since uint64) {
-	now := p.now()
 	next := make(map[int64]voiceSeen, len(seen))
 
 	p.mu.Lock()
+	now := p.now()
 	if r.retired {
 		// Rotated away while this pass was reading it: whatever it saw is
 		// in a room that no longer exists, and nobody is shown for it.
@@ -718,6 +800,30 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	}
 	slices.Sort(pids)
 
+	reconnected := func(pid int64) bool {
+		o, wasThere := old[pid]
+		n, isThere := next[pid]
+		return wasThere && isThere && o.joinedKnown && n.joinedKnown && !o.joinedAt.Equal(n.joinedAt)
+	}
+	// The transmit rule. A connection replaced by another between two passes
+	// left: whatever it had open is closed before the new connection is
+	// looked at, and the new one starts from a reported state of `stopped`.
+	left := make(map[int64][]transmitRow)
+	mics := make(map[int64]micObservation, len(next))
+	for pid, n := range next {
+		if _, kept := keep[pid]; kept {
+			continue
+		}
+		if reconnected(pid) {
+			left[pid] = r.transmit.leave(now, pid)
+		}
+		mics[pid] = micQuiet
+		if n.transmitting {
+			mics[pid] = micTransmitting
+		}
+	}
+	judged := r.transmit.pass(now, mics, keep)
+
 	var events []voiceEvent
 	changed := false
 	ev := func(action string, pid int64) {
@@ -729,36 +835,43 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	for _, pid := range pids {
 		o, wasThere := old[pid]
 		n, isThere := next[pid]
-		reconnected := wasThere && isThere && o.joinedKnown && n.joinedKnown && !o.joinedAt.Equal(n.joinedAt)
+		replaced := reconnected(pid)
+		// A transmission closed because its principal left is written
+		// before the leaving, as it always was.
+		events = append(events, transmitEvents(r.channelID, left[pid])...)
+		if wasThere && !isThere {
+			events = append(events, transmitEvents(r.channelID, judged[pid])...)
+			delete(judged, pid)
+		}
 		switch {
-		case wasThere && (!isThere || reconnected):
+		case wasThere && (!isThere || replaced):
 			// Gone, or displaced by a new connection between two passes
 			// (the same identity joining again replaces the first).
-			if o.transmitting {
-				ev(store.AuditVoiceTransmitStopped, pid)
-			}
 			ev(store.AuditVoiceLeft, pid)
 			changed = true
-			if reconnected {
+			if replaced {
 				ev(store.AuditVoiceJoined, pid)
-				if n.transmitting {
-					ev(store.AuditVoiceTransmitStarted, pid)
-				}
 			}
 		case !wasThere && isThere:
 			ev(store.AuditVoiceJoined, pid)
-			if n.transmitting {
-				ev(store.AuditVoiceTransmitStarted, pid)
-			}
 			changed = true
 		case wasThere && isThere && o.transmitting != n.transmitting:
-			if n.transmitting {
-				ev(store.AuditVoiceTransmitStarted, pid)
-			} else {
-				ev(store.AuditVoiceTransmitStopped, pid)
-			}
+			// Presence shows who is talking as the poller sees it, whatever
+			// was reported.
 			changed = true
 		}
+		events = append(events, transmitEvents(r.channelID, judged[pid])...)
+		delete(judged, pid)
+	}
+	// What is left belongs to principals who are in neither state: holders
+	// who reported and are not in the room.
+	rest := make([]int64, 0, len(judged))
+	for pid := range judged {
+		rest = append(rest, pid)
+	}
+	slices.Sort(rest)
+	for _, pid := range rest {
+		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 	}
 	r.participants = next
 	r.stale = false
@@ -886,7 +999,7 @@ func (p *voicePoller) evict(ctx context.Context, rooms []store.VoiceRoom, princi
 }
 
 func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, principalID int64, identity, reason string) {
-	was, ok := p.forget(room.RoomName, principalID)
+	was, closing, ok := p.forget(room.RoomName, principalID)
 	removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 	var events []voiceEvent
 	if err != nil {
@@ -903,12 +1016,12 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 			events = append(events, p.removedEvent(room.ChannelID, principalID, reason))
 		}
 	}
+	// Whatever the transmit rule had open for them was closed, with
+	// reason=left, at the moment they left presence (forget).
+	events = append(events, transmitEvents(room.ChannelID, closing)...)
 	if ok {
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", room.ChannelID)
-		if was.transmitting {
-			events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceTransmitStopped, channelID: room.ChannelID, detail: detail})
-		}
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: room.ChannelID, detail: detail})
 		p.notify(room.ChannelID)
 	}
@@ -922,9 +1035,9 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 	var events []voiceEvent
 	var channels []int64
 	p.mu.Lock()
+	now := p.now()
 	for _, r := range p.rooms {
-		was, ok := r.participants[principalID]
-		if !ok {
+		if _, ok := r.participants[principalID]; !ok {
 			continue
 		}
 		delete(r.participants, principalID)
@@ -934,9 +1047,7 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 		r.marked = true
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", r.channelID)
-		if was.transmitting {
-			events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceTransmitStopped, channelID: r.channelID, detail: detail})
-		}
+		events = append(events, transmitEvents(r.channelID, r.transmit.leave(now, principalID))...)
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: r.channelID, detail: detail})
 		channels = append(channels, r.channelID)
 	}
@@ -948,13 +1059,15 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 }
 
 // forget takes principalID out of the room's presence, reporting what it
-// held. ok is false when the poller did not believe the principal was there.
-func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, bool) {
+// held and the rows that close whatever the transmit rule had open for them
+// (reason=left, timed now: they are gone from presence at this instant). ok is
+// false when the poller did not believe the principal was there.
+func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, []transmitRow, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.rooms[room]
 	if r == nil {
-		return voiceSeen{}, false
+		return voiceSeen{}, nil, false
 	}
 	s, ok := r.participants[principalID]
 	delete(r.participants, principalID)
@@ -962,7 +1075,7 @@ func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, bool) {
 	// be about to.
 	r.seq++
 	r.evicted[principalID] = r.seq
-	return s, ok
+	return s, r.transmit.leave(p.now(), principalID), ok
 }
 
 // ---------------------------------------------------------------------------
@@ -975,14 +1088,25 @@ func (p *voicePoller) forget(room string, principalID int64) (voiceSeen, bool) {
 func (p *voicePoller) writeEvents(ctx context.Context, events ...voiceEvent) {
 	ctx = context.WithoutCancel(ctx)
 	for _, e := range events {
-		subject := "voice"
-		if e.channelID > 0 {
-			subject = fmt.Sprintf("channel:%d", e.channelID)
-		}
-		if _, err := p.s.store.AppendAuditEvent(ctx, e.actor, e.action, subject, e.detail); err != nil {
+		if err := p.writeEvent(ctx, e); err != nil {
 			slog.ErrorContext(ctx, "voice: audit write failed", "action", e.action, "channel", e.channelID, "error", err)
 		}
 	}
+}
+
+// writeEvent appends one row: at the time it carries, or now if it carries
+// none.
+func (p *voicePoller) writeEvent(ctx context.Context, e voiceEvent) error {
+	subject := "voice"
+	if e.channelID > 0 {
+		subject = fmt.Sprintf("channel:%d", e.channelID)
+	}
+	if e.at.IsZero() {
+		_, err := p.s.store.AppendAuditEvent(ctx, e.actor, e.action, subject, e.detail)
+		return err
+	}
+	_, err := p.appendAudit(ctx, e.actor, e.action, subject, e.detail, e.at)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,18 +1363,32 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	}
 	delete(p.rooms, name)
 	r.retired = true
-	pids := make([]int64, 0, len(r.participants))
+	// Every transmission still open in the room, reported or unreported, is
+	// closed now with reason=left, before the state is dropped
+	// (docs/design/conch-voice.md §6). That includes a reported `started`
+	// from a holder the poller never saw in the room.
+	closing := make(map[int64][]transmitRow)
+	for _, row := range r.transmit.drop(p.now()) {
+		closing[row.principalID] = append(closing[row.principalID], row)
+	}
+	pids := make([]int64, 0, len(r.participants)+len(closing))
 	for pid := range r.participants {
 		pids = append(pids, pid)
+	}
+	for pid := range closing {
+		if _, ok := r.participants[pid]; !ok {
+			pids = append(pids, pid)
+		}
 	}
 	slices.Sort(pids)
 	var events []voiceEvent
 	for _, pid := range pids {
+		events = append(events, transmitEvents(r.channelID, closing[pid])...)
+		if _, ok := r.participants[pid]; !ok {
+			continue
+		}
 		actor := fmt.Sprintf("principal:%d", pid)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", r.channelID)
-		if r.participants[pid].transmitting {
-			events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceTransmitStopped, channelID: r.channelID, detail: detail})
-		}
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: r.channelID, detail: detail})
 	}
 	channelID := r.channelID
