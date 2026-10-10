@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -242,7 +243,10 @@ func (s *Server) handleCastDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	after, err := s.store.ApprovalByID(ctx, approvalID)
+	// The decision is committed. Reading the state back for the response
+	// does not depend on the caller still being there: on the request
+	// context a hang-up here was logged as a store failure (issue #158).
+	after, err := s.store.ApprovalByID(context.WithoutCancel(ctx), approvalID)
 	if err != nil {
 		slog.ErrorContext(ctx, "approvals: read state after decision failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
