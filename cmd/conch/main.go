@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/internal/cli/termquiet"
@@ -33,6 +34,14 @@ func main() {
 }
 
 func runTUI(ctx context.Context) error {
+	// The TUI holds the terminal in raw mode on the alternate screen, so it
+	// has to leave by its own steps on SIGTERM as well as on the SIGINT that
+	// main already turns into the end of ctx. These contexts are the only
+	// signal handling the TUI has (tui.Run says why), and they stay in place
+	// until it has returned: a second signal during the shutdown is absorbed
+	// and cannot stop it half-way with the terminal still raw.
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
+	defer stop()
 	server := os.Getenv("CONCH_SERVER")
 	if server == "" {
 		server = "http://127.0.0.1:8080"
