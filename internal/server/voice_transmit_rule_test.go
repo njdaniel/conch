@@ -353,7 +353,7 @@ func runRuleOn(t *testing.T, ledger *transmitLedger, steps []ruleStep) []transmi
 		case stepUnread:
 			rows = ledger.pass(at, map[int64]micObservation{}, map[int64]struct{}{rulePID: {}})[rulePID]
 		case stepReport:
-			if row, changed := ledger.report(at, rulePID, st.started); changed {
+			if row, _, changed := ledger.report(at, rulePID, st.started); changed {
 				rows = []transmitRow{row}
 			}
 		case stepRemoved:
@@ -634,6 +634,66 @@ func TestTransmitRuleExcuseNeedsAnEdgeOrTheRation(t *testing.T) {
 			"started@2200 reported", "stopped@2990 reported", "started@3010 reported",
 			"unreported@3000 observed", "stopped@3500 observed reported",
 			"stopped@3600 reported",
+		}},
+		// Nor does being removed by name, or being replaced by a second
+		// connection (which the poller feeds to the rule as a removal and, at
+		// the same instant, a pass that sees the new connection).
+		{"the ration outlasts a removal by name", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), talking(1500), // excused at 1000
+			stopped(1600), removed(1700), quiet(2000),
+			started(2200), talking(2500),
+			stopped(2990), talking(3000), started(3010), talking(3500), // 2 s after 1000: recorded
+			stopped(3600), quiet(4000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@1600 reported",
+			"started@2200 reported", "stopped@2990 reported", "started@3010 reported",
+			"unreported@3000 observed", "stopped@3500 observed reported",
+			"stopped@3600 reported",
+		}},
+		{"the ration outlasts a replaced connection", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), talking(1500), // excused at 1000
+			removed(2000), quiet(2000), // replaced while reported started: closed as left
+			started(2200), talking(2500),
+			stopped(2990), talking(3000), started(3010), talking(3500), // 2 s after 1000: recorded
+			stopped(3600), quiet(4000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@2000 observed left",
+			"started@2200 reported", "stopped@2990 reported", "started@3010 reported",
+			"unreported@3000 observed", "stopped@3500 observed reported",
+			"stopped@3600 reported",
+		}},
+		// The first pass that sees a new connection is at the edge of a
+		// transmission, whatever the old connection was doing when it went:
+		// its late `started` is excused the first way, with the ration
+		// already spent. (Were the old connection's last pass remembered as
+		// the pass before, this would be the second way, and recorded.)
+		{"after a removal while transmitting, the new connection's first pass is an edge", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
+			removed(1700),
+			talking(2000), started(2010), talking(2500), stopped(2600), quiet(3000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@1700 observed left",
+			"started@2010 reported", "stopped@2600 reported",
+		}},
+		{"after a replaced connection that was transmitting, the new one's first pass is an edge", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
+			removed(2000), talking(2000), started(2010), talking(2500), stopped(2600), quiet(3000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@2000 observed left",
+			"started@2010 reported", "stopped@2600 reported",
+		}},
+		{"after leaving while transmitting, the first pass back is an edge", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
+			absent(2000),
+			talking(2500), started(2510), talking(3000), stopped(3100), quiet(3500),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@2000 observed left",
+			"started@2510 reported", "stopped@3100 reported",
 		}},
 		// The ration is spent only by the second way: edges of presses do
 		// not use it up, however many there are.
@@ -1041,7 +1101,7 @@ func TestTransmitLedgerPrincipalsAreSeparate(t *testing.T) {
 		}
 	}
 	report := func(ms int, pid int64, started bool) {
-		if row, changed := ledger.report(at(ms), pid, started); changed {
+		if row, _, changed := ledger.report(at(ms), pid, started); changed {
 			all = append(all, row)
 		}
 	}
@@ -1091,47 +1151,207 @@ func TestTransmitLedgerPrincipalsAreSeparate(t *testing.T) {
 	}
 }
 
+// TestTransmitLedgerUnsettled: the ledger says it holds something a later pass
+// must settle exactly when it does. Each of the three things counts by itself:
+// a reported `started`, an open unreported transmission, and an unaccounted
+// pass not yet judged. (In the poller the last is never alone in keeping a
+// room in use, since whoever was seen transmitting is in the room; the ledger
+// does not lean on that.)
+func TestTransmitLedgerUnsettled(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []ruleStep
+		want  bool
+	}{
+		{"nothing has happened", nil, false},
+		{"seen, quiet", []ruleStep{quiet(0)}, false},
+		{"a reported started", []ruleStep{started(0)}, true},
+		{"a reported started, then stopped", []ruleStep{started(0), stopped(100)}, false},
+		{"a reported started closed for want of a stop", []ruleStep{started(0), quiet(2000)}, false},
+		{"an unaccounted pass not yet judged, and nothing else", []ruleStep{quiet(0), talking(500)}, true},
+		{"that pass judged and recorded", []ruleStep{quiet(0), talking(500), quiet(1000)}, false},
+		{"that pass judged and excused", []ruleStep{quiet(0), talking(500), started(510), stopped(520), quiet(1000)}, false},
+		{"that pass settled by a removal", []ruleStep{quiet(0), talking(500), removed(600)}, false},
+		{"an unreported transmission open", []ruleStep{talking(0), talking(500)}, true},
+		{"an unreported transmission closed", []ruleStep{talking(0), talking(500), quiet(1000)}, false},
+		{"everything open, then the principal gone", []ruleStep{talking(0), talking(500), started(600), absent(1000)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ledger transmitLedger
+			runRuleOn(t, &ledger, tt.steps)
+			if got := ledger.unsettled(); got != tt.want {
+				t.Errorf("unsettled = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestTransmitLedgerRetract: a report whose row could not be written is taken
-// back, unless something has changed the reported state since.
+// back, but only that report. retract is told which change of the reported
+// state to undo and does nothing if anything has changed the state since: a
+// later report, a close by the poller, or an earlier retraction.
 func TestTransmitLedgerRetract(t *testing.T) {
-	at := func(ms int) time.Time { return ruleT0.Add(time.Duration(ms) * time.Millisecond) }
-	t.Run("a started is taken back: the transmission is then unreported", func(t *testing.T) {
-		var ledger transmitLedger
-		if _, changed := ledger.report(at(0), rulePID, true); !changed {
-			t.Fatal("the report changed nothing")
-		}
-		ledger.retract(rulePID, true)
-		rows := runRuleOn(t, &ledger, []ruleStep{talking(500), talking(1000), quiet(1500)})
-		if len(rows) != 2 || rows[0].action != transmitActionUnreported || rows[1].reason != transmitReasonMuted {
-			t.Errorf("rows = %+v, want an unreported transmission", rows)
-		}
-		assertRulePairs(t, rows)
-	})
-	t.Run("a stopped is taken back: the reported transmission is still open", func(t *testing.T) {
-		var ledger transmitLedger
-		first, _ := ledger.report(at(0), rulePID, true)
-		ledger.report(at(100), rulePID, false)
-		ledger.retract(rulePID, false)
-		row, changed := ledger.report(at(200), rulePID, false)
-		if !changed {
-			t.Fatal("the retried stopped changed nothing: the retraction did not restore the reported state")
-		}
-		assertRulePairs(t, []transmitRow{first, row})
-	})
-	t.Run("not if the state has changed since", func(t *testing.T) {
-		var ledger transmitLedger
-		ledger.report(at(0), rulePID, true)
-		ledger.report(at(100), rulePID, false)
-		ledger.retract(rulePID, true) // the started's write failed late
-		if _, changed := ledger.report(at(200), rulePID, false); changed {
-			t.Error("retracting a started after a stopped made the state started again")
-		}
-	})
+	// A step is a report (remembered under its name, so that it can fail
+	// later), the failure of a named report's audit write, or a pass. The
+	// rows are those the log would hold: a failed report's row is not there.
+	type step struct {
+		ms   int
+		do   string // started, stopped, fails, talking, quiet, absent, dropped
+		name string // of the report made, or of the one that fails
+		pid  int64  // rulePID when zero
+	}
+	tests := []struct {
+		name         string
+		steps        []step
+		wantRows     []string
+		wantReported bool // rulePID's reported state at the end: started?
+		// unpaired marks the sequences in which a second report was applied
+		// on top of one whose write then failed: the log is left with a row
+		// that has no partner, which is why the poller applies one
+		// principal's reports one at a time (reportTransmit). The ledger
+		// still has to end in the right state.
+		unpaired bool
+	}{
+		{"a started is taken back: the transmission is then unreported", []step{
+			{0, "started", "A", 0}, {10, "fails", "A", 0}, {500, "talking", "", 0}, {1000, "talking", "", 0}, {1500, "quiet", "", 0},
+		}, []string{"unreported@500 observed", "stopped@1500 observed muted"}, false, false},
+		{"a stopped is taken back: the reported transmission is still open, and the retry is a change", []step{
+			{0, "started", "A", 0}, {100, "stopped", "B", 0}, {110, "fails", "B", 0}, {200, "stopped", "C", 0},
+		}, []string{"started@0 reported", "stopped@200 reported"}, false, false},
+		// The review's sequence. Comparing values instead of changes,
+		// retract found the state `stopped`, as A had left it, and flipped
+		// it: reported `started`, with the last recorded report a `stopped`.
+		{"a stopped that fails after a later started and stopped were recorded undoes nothing", []step{
+			{0, "started", "S", 0}, {200, "stopped", "A", 0}, {300, "started", "B", 0}, {400, "stopped", "C", 0}, {450, "fails", "A", 0},
+			{500, "talking", "", 0}, {1000, "talking", "", 0}, {1500, "quiet", "", 0},
+		}, []string{"started@0 reported", "started@300 reported", "stopped@400 reported", "unreported@500 observed", "stopped@1500 observed muted"}, false, true},
+		{"a started that fails after a later stopped and started were recorded undoes nothing", []step{
+			{0, "started", "A", 0}, {100, "stopped", "B", 0}, {200, "started", "C", 0}, {250, "fails", "A", 0}, {300, "stopped", "D", 0},
+		}, []string{"stopped@100 reported", "started@200 reported", "stopped@300 reported"}, false, true},
+		{"a started that fails after the poller closed it for leaving undoes nothing", []step{
+			{0, "quiet", "", 0}, {100, "started", "A", 0}, {500, "talking", "", 0}, {1000, "absent", "", 0}, {1100, "fails", "A", 0},
+		}, []string{"stopped@1000 observed left"}, false, true},
+		{"a started that fails after the poller closed it for want of a stop undoes nothing", []step{
+			{0, "started", "A", 0}, {2000, "quiet", "", 0}, {2100, "fails", "A", 0},
+		}, []string{"stopped@2000 observed no_stop_report"}, false, true},
+		{"a report fails once: a second failure of the same report undoes nothing", []step{
+			{0, "started", "S", 0}, {100, "stopped", "A", 0}, {110, "fails", "A", 0}, {120, "fails", "A", 0},
+		}, []string{"started@0 reported"}, true, false},
+		// Changes are numbered by the ledger, not by the principal's track,
+		// so a report made before the room's state was dropped can never be
+		// mistaken for one made after.
+		{"a report from before a drop cannot undo one from after it", []step{
+			{0, "started", "A", 0}, {100, "dropped", "", 0}, {200, "started", "B", 0}, {300, "fails", "A", 0},
+		}, []string{"stopped@100 observed left", "started@200 reported"}, true, true},
+		{"one principal's failed report undoes nothing of another's", []step{
+			{0, "started", "A", 0}, {10, "started", "B", 8}, {20, "fails", "B", 0}, // B's change, named for the wrong principal
+		}, []string{"started@0 reported"}, true, true},
+		// A report that was not recorded excuses nothing: taken back, it is
+		// no longer "a report near" the pass that follows.
+		{"a report that was taken back does not excuse a lone unaccounted pass", []step{
+			{0, "quiet", "", 0}, {100, "started", "A", 0}, {110, "fails", "A", 0}, {500, "talking", "", 0}, {1000, "quiet", "", 0},
+		}, []string{"unreported@500 observed", "stopped@1000 observed muted"}, false, false},
+		{"the same lone pass with the report recorded is excused", []step{
+			{0, "quiet", "", 0}, {100, "started", "A", 0}, {110, "stopped", "B", 0}, {500, "talking", "", 0}, {1000, "quiet", "", 0},
+		}, []string{"started@100 reported", "stopped@110 reported"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ledger transmitLedger
+			type made struct {
+				row    transmitRow
+				change uint64
+				pid    int64
+			}
+			reports := map[string]made{}
+			var order []string // report names and "" for a poller row, in the order written
+			var poller []transmitRow
+			failed := map[string]bool{}
+			for _, st := range tt.steps {
+				at := ruleT0.Add(time.Duration(st.ms) * time.Millisecond)
+				pid := st.pid
+				if pid == 0 {
+					pid = rulePID
+				}
+				var rows []transmitRow
+				switch st.do {
+				case "started", "stopped":
+					row, change, changed := ledger.report(at, pid, st.do == "started")
+					if !changed {
+						t.Fatalf("report %s (%s at %d ms) changed nothing", st.name, st.do, st.ms)
+					}
+					reports[st.name] = made{row, change, pid}
+					order = append(order, st.name)
+				case "fails":
+					r, ok := reports[st.name]
+					if !ok {
+						t.Fatalf("no report named %s", st.name)
+					}
+					ledger.retract(pid, r.change)
+					failed[st.name] = true
+				case "talking":
+					rows = ledger.pass(at, map[int64]micObservation{pid: micTransmitting}, nil)[pid]
+				case "quiet":
+					rows = ledger.pass(at, map[int64]micObservation{pid: micQuiet}, nil)[pid]
+				case "absent":
+					rows = ledger.pass(at, map[int64]micObservation{}, nil)[pid]
+				case "dropped":
+					rows = ledger.drop(at)
+				default:
+					t.Fatalf("unknown step %q", st.do)
+				}
+				for _, r := range rows {
+					poller = append(poller, r)
+					order = append(order, "")
+				}
+			}
+			var log []transmitRow
+			next := 0
+			for _, name := range order {
+				switch {
+				case name == "":
+					log = append(log, poller[next])
+					next++
+				case !failed[name]:
+					log = append(log, reports[name].row)
+				}
+			}
+			got := make([]string, 0, len(log))
+			for _, r := range log {
+				got = append(got, rowText(r))
+			}
+			if !slices.Equal(got, tt.wantRows) {
+				t.Errorf("rows in the log:\n got  %q\n want %q", got, tt.wantRows)
+			}
+			reported := false
+			if k := ledger.tracks[rulePID]; k != nil {
+				reported = k.reported
+			}
+			if reported != tt.wantReported {
+				t.Errorf("reported state at the end: started=%v, want %v", reported, tt.wantReported)
+			}
+			if !tt.unpaired {
+				log = append(log, ledger.drop(ruleT0.Add(time.Hour))...)
+				assertRulePairs(t, log)
+			}
+		})
+	}
+
 	t.Run("an unknown principal is nothing to retract", func(t *testing.T) {
 		var ledger transmitLedger
-		ledger.retract(99, true)
+		ledger.retract(99, 0)
+		ledger.retract(99, 1)
 		if len(ledger.tracks) != 0 {
 			t.Error("retract made a track")
+		}
+	})
+	t.Run("a track that never changed has nothing to retract", func(t *testing.T) {
+		var ledger transmitLedger
+		ledger.pass(ruleT0, map[int64]micObservation{rulePID: micQuiet}, nil)
+		ledger.retract(rulePID, 0) // the zero change is no report's
+		if ledger.tracks[rulePID].reported {
+			t.Error("retracting change 0 made the state started")
 		}
 	})
 }

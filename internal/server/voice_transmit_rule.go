@@ -111,6 +111,11 @@ type transmitTrack struct {
 	// reported is the reported state: true is `started`. It is `stopped`
 	// until told otherwise.
 	reported bool
+	// change names the last change of the reported state, whatever made it: a
+	// report, a close by the poller, a retraction. The ledger numbers every
+	// change, so two never share one (transmitLedger.changes). It is how
+	// retract tells the report it is undoing from any that came after.
+	change uint64
 	// quietFrom is the later of the `started` report and the last pass that
 	// saw the microphone transmitting: the start of the time the 2 s rule
 	// measures. Meaningful only while reported.
@@ -165,23 +170,23 @@ func (k *transmitTrack) report(pid int64, at time.Time, started bool) (transmitR
 	return transmitRow{principalID: pid, action: action, at: at, source: transmitSourceReported}, true
 }
 
-// retract undoes a report whose audit row could not be written, if nothing has
-// changed the reported state since: a reported state with no row behind it
-// would let the poller treat a transmission as accounted for when the log does
-// not have it. A report that was not recorded excuses nothing either, so the
-// note that a report changed the state since the last pass goes too. That can
-// also forget an earlier report in the same gap, one that was recorded; it
-// errs toward recording, and only when the store is failing.
-func (k *transmitTrack) retract(started bool) {
-	if k.reported == started {
-		k.reported = !started
-		k.changedSincePass = false
-	}
+// undo puts the reported state back to what it was before the last report,
+// for a report whose audit row could not be written: a reported state with no
+// row behind it would let the poller treat a transmission as accounted for
+// when the log does not have it. A report that was not recorded excuses
+// nothing either, so the note that a report changed the state since the last
+// pass goes too. That can also forget an earlier report in the same gap, one
+// that was recorded; it errs toward recording, and only when the store is
+// failing. Whether the last change is the report to undo is the ledger's to
+// decide (transmitLedger.retract).
+func (k *transmitTrack) undo() {
+	k.reported = !k.reported
+	k.changedSincePass = false
 }
 
 // observe applies one pass at `at`. left forces the leaving of a principal
 // whatever the previous pass saw: the room is being dropped, or the principal
-// was removed by name.
+// was removed by name. The microphone is micAbsent whenever left is true.
 func (k *transmitTrack) observe(pid int64, at time.Time, mic micObservation, left bool) []transmitRow {
 	transmitting := mic == micTransmitting
 	// Gone: someone the poller had seen is no longer there.
@@ -254,8 +259,11 @@ func (k *transmitTrack) observe(pid int64, at time.Time, mic micObservation, lef
 		}
 	}
 
-	k.present = mic != micAbsent && !left
-	k.prevTransmitting = transmitting && !left
+	// Someone who has left is absent and was not transmitting, as far as the
+	// next pass is concerned: the first pass of a new connection is at the
+	// edge of a transmission whatever the old connection was doing.
+	k.present = mic != micAbsent
+	k.prevTransmitting = transmitting
 	k.changedSincePass = false
 	return rows
 }
@@ -283,6 +291,11 @@ func (k *transmitTrack) excused(nextTransmitting bool) bool {
 // unsettled reports whether the track holds something a later pass must
 // settle: a reported `started`, an open unreported transmission, or an
 // unaccounted pass not yet judged.
+//
+// In the poller the last of these never decides anything by itself: a pass is
+// pending only for someone the previous pass saw transmitting, and a room with
+// anyone in it is polled anyway. It is here so that the ledger's answer is
+// right without leaning on that.
 func (k *transmitTrack) unsettled() bool { return k.reported || k.open || k.pending }
 
 // transmitLedger is the rule for one room: a track per principal who has been
@@ -297,6 +310,22 @@ func (k *transmitTrack) unsettled() bool { return k.reported || k.open || k.pend
 // The zero value is ready to use.
 type transmitLedger struct {
 	tracks map[int64]*transmitTrack
+	// changes counts the changes of anyone's reported state. Each change
+	// takes the next number (transmitTrack.change), and the count outlives a
+	// drop, so no two changes in the life of a ledger share a number.
+	changes uint64
+}
+
+// observe is transmitTrack.observe, numbering the change if the pass changed
+// the reported state (a close for no_stop_report or for leaving).
+func (l *transmitLedger) observe(k *transmitTrack, pid int64, at time.Time, mic micObservation, left bool) []transmitRow {
+	was := k.reported
+	rows := k.observe(pid, at, mic, left)
+	if k.reported != was {
+		l.changes++
+		k.change = l.changes
+	}
+	return rows
 }
 
 func (l *transmitLedger) track(pid int64) *transmitTrack {
@@ -312,16 +341,34 @@ func (l *transmitLedger) track(pid int64) *transmitTrack {
 }
 
 // report applies a report from pid received at `at`. It returns the row to
-// write and true when the report changed the reported state.
-func (l *transmitLedger) report(at time.Time, pid int64, started bool) (transmitRow, bool) {
-	return l.track(pid).report(pid, at, started)
+// write, the number of the change it made, and true when it changed the
+// reported state. The number is what retract takes.
+func (l *transmitLedger) report(at time.Time, pid int64, started bool) (row transmitRow, change uint64, changed bool) {
+	k := l.track(pid)
+	row, changed = k.report(pid, at, started)
+	if changed {
+		l.changes++
+		k.change = l.changes
+	}
+	return row, k.change, changed
 }
 
-// retract undoes a report from pid whose row could not be written.
-func (l *transmitLedger) retract(pid int64, started bool) {
-	if k := l.tracks[pid]; k != nil {
-		k.retract(started)
+// retract undoes the report from pid that made the given change, whose row
+// could not be written, provided that change is still the last one to pid's
+// reported state. If anything has changed the state since (a later report,
+// which has its own row; a close by the poller), there is nothing of this
+// report left to undo, and undoing would take back the later change instead:
+// with `started` reported, a `stopped` whose write hangs, then a `started` and
+// a `stopped` that are both recorded, the first one failing late must not
+// leave the state `started`.
+func (l *transmitLedger) retract(pid int64, change uint64) {
+	k := l.tracks[pid]
+	if k == nil || change == 0 || k.change != change {
+		return
 	}
+	k.undo()
+	l.changes++
+	k.change = l.changes
 }
 
 // pass applies one pass over the room at `at`. seen holds what the pass saw of
@@ -349,7 +396,7 @@ func (l *transmitLedger) pass(at time.Time, seen map[int64]micObservation, skip 
 		if !ok {
 			mic = micAbsent
 		}
-		if rows := l.track(pid).observe(pid, at, mic, false); len(rows) > 0 {
+		if rows := l.observe(l.track(pid), pid, at, mic, false); len(rows) > 0 {
 			if out == nil {
 				out = make(map[int64][]transmitRow)
 			}
@@ -366,7 +413,7 @@ func (l *transmitLedger) leave(at time.Time, pid int64) []transmitRow {
 	if k == nil {
 		return nil
 	}
-	return k.observe(pid, at, micAbsent, true)
+	return l.observe(k, pid, at, micAbsent, true)
 }
 
 // drop closes at `at` whatever is open for anyone, with reason=left, and
@@ -381,7 +428,7 @@ func (l *transmitLedger) drop(at time.Time) []transmitRow {
 	slices.Sort(pids)
 	var rows []transmitRow
 	for _, pid := range pids {
-		rows = append(rows, l.tracks[pid].observe(pid, at, micAbsent, true)...)
+		rows = append(rows, l.observe(l.tracks[pid], pid, at, micAbsent, true)...)
 	}
 	l.tracks = nil
 	return rows
