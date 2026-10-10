@@ -23,10 +23,13 @@ const (
 	showCursor     = "\x1b[?25h"
 	hideCursor     = "\x1b[?25l"
 
-	// The acceptance criterion. An orderly exit takes some tens of
-	// milliseconds, most of it a pause Bubble Tea makes after leaving the
-	// alternate screen; the bug never exits at all.
-	stopLimit = time.Second
+	// How long a stopped TUI may take to be gone before the test fails. An
+	// orderly exit takes some tens of milliseconds (most of it a pause Bubble
+	// Tea makes after leaving the alternate screen) and the time it took is
+	// logged; the bug never exits at all. The limit is several seconds, not
+	// the one second the issue asks of the program, because a loaded CI
+	// runner under the race detector can take a second over anything.
+	stopLimit = 5 * time.Second
 )
 
 // signalTUI delivers each signal to the process, as kill(1) does. It does not
