@@ -267,7 +267,11 @@ dependencies = [
  "conch-voice-api",
  "conch-voice-audio",
  "conch-voice-control",
+ "futures-util",
  "livekit",
+ "log",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
