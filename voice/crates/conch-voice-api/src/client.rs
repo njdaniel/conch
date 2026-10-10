@@ -19,7 +19,7 @@ use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, LOCATION};
 use serde::de::DeserializeOwned;
 
-use crate::error::{Error, MAX_TEXT_CHARS, Refusal, bounded, causes};
+use crate::error::{Error, MAX_TEXT_CHARS, Scrubber, causes};
 use crate::server::{ServerAddress, query_escape};
 use crate::types::{
     Audience, ErrorBody, Secret, VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitReportV1,
@@ -40,16 +40,6 @@ const KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_PROBES: u32 = 3;
 
-/// Whether decoding errors of a document may say what they found. For a document that
-/// carries secrets they may not: serde's message can quote a value.
-#[derive(Clone, Copy)]
-pub(crate) enum Detail {
-    /// The decoder's own message.
-    Full,
-    /// Only the kind of problem and its position.
-    PositionOnly,
-}
-
 /// A client of one `conchd`, signed in as one principal.
 ///
 /// Cheap to clone; clones share connections. Its `Debug` shows the server and the timeout
@@ -60,6 +50,8 @@ pub struct Client {
     server: ServerAddress,
     /// `Bearer <token>`, marked sensitive so that nothing underneath prints it.
     authorization: HeaderValue,
+    /// Takes that token out of whatever an answer says before an error keeps it.
+    scrubber: Scrubber,
     timeout: Duration,
 }
 
@@ -71,6 +63,14 @@ impl Client {
     /// the environment are not used: the presence socket could not follow them, and a
     /// client that reached `conchd` two different ways would be harder to reason about
     /// than one that reaches it directly.
+    ///
+    /// The address is also refused when the host it would reach is not the host its login
+    /// is stored under. The key ([`ServerAddress::key`]) lower-cases the host as Go does,
+    /// one letter at a time; the request goes where the WHATWG URL rules send it; and for
+    /// a few letters the two disagree: `https://İstanbul.example` has the key of
+    /// `https://istanbul.example` and so finds that server's token, but would be reached
+    /// at another name. Sending one server's token to another host is the thing a login
+    /// must never do, so such an address gets no client.
     pub fn new(server: &ServerAddress, token: &Secret, timeout: Duration) -> Result<Self, Error> {
         if server.has_query_or_fragment() {
             return Err(Error::InvalidServer {
@@ -101,14 +101,25 @@ impl Client {
             http,
             server: server.clone(),
             authorization,
+            scrubber: Scrubber::new(token),
             timeout,
         };
         // An address reqwest cannot use is refused now, not at the first call.
-        client
+        let reached = client
             .url(&["v1"], None)
             .map_err(|_| Error::InvalidServer {
                 reason: "its host or path cannot be used in a request",
             })?;
+        // The token was looked up under the key. It may only go to the host the key names.
+        // (An origin is scheme, host and port; the three are compared as one thing.)
+        let same_host = reqwest::Url::parse(server.key())
+            .is_ok_and(|stored_under| stored_under.origin() == reached.origin());
+        if !same_host {
+            return Err(Error::InvalidServer {
+                reason: "its host cannot be used safely: the name its login is stored under \
+                         and the name it would be reached at are different hosts",
+            });
+        }
         Ok(client)
     }
 
@@ -134,10 +145,7 @@ impl Client {
         Self::check_channel(channel)?;
         let url = self.url(&["v1", "channels", channel, "voice", "session"], None)?;
         let response = self.send(self.http.post(url)).await?;
-        // The body holds join tokens and room names: an error about it says where, not what.
-        let session: VoiceSessionResponseV1 = self
-            .document(response, "voice session", Detail::PositionOnly)
-            .await?;
+        let session: VoiceSessionResponseV1 = self.document(response, "voice session").await?;
         session.validate()?;
         Ok(session)
     }
@@ -195,9 +203,7 @@ impl Client {
         Self::check_channel(channel)?;
         let url = self.url(&["v1", "channels", channel, "voice"], None)?;
         let response = self.send(self.http.get(url)).await?;
-        let presence: VoicePresenceV1 = self
-            .document(response, "voice presence", Detail::Full)
-            .await?;
+        let presence: VoicePresenceV1 = self.document(response, "voice presence").await?;
         presence.validate()?;
         Ok(presence)
     }
@@ -255,16 +261,25 @@ impl Client {
         self.http.get(url)
     }
 
+    /// What makes text from this client's peer safe to keep.
+    pub(crate) fn scrubber(&self) -> &Scrubber {
+        &self.scrubber
+    }
+
+    /// The request with the login on it: in the `Authorization` header and nowhere else.
+    fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request.header(AUTHORIZATION, self.authorization.clone())
+    }
+
     /// Sends one request with the login, once.
     pub(crate) async fn send(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, Error> {
-        request
-            .header(AUTHORIZATION, self.authorization.clone())
+        self.authorized(request)
             .send()
             .await
-            .map_err(transport)
+            .map_err(|e| transport(&self.scrubber, e))
     }
 
     /// The document a successful response carries, or the refusal an unsuccessful one is.
@@ -272,22 +287,22 @@ impl Client {
         &self,
         response: reqwest::Response,
         what: &'static str,
-        detail: Detail,
     ) -> Result<T, Error> {
         if !response.status().is_success() {
             return Err(self.refusal(response).await);
         }
-        let Some(body) = read_body(response).await? else {
+        let Some(body) = read_body(&self.scrubber, response).await? else {
             return Err(Error::Undecodable {
                 what,
                 detail: "it is larger than 1 MiB".into(),
             });
         };
-        decode(&body, what, detail)
+        decode(&body, what)
     }
 
     /// What an unsuccessful response means. Reads the body, which is an error document
-    /// when `conchd` itself answered.
+    /// when `conchd` itself answered. Every string kept from the answer is scrubbed of
+    /// this client's own token: whatever answered may be quoting the request.
     pub(crate) async fn refusal(&self, response: reqwest::Response) -> Error {
         let status = response.status().as_u16();
         if response.status().is_redirection() {
@@ -298,10 +313,10 @@ impl Client {
                 .unwrap_or_default();
             return Error::Redirected {
                 status,
-                location: bounded(&location, MAX_TEXT_CHARS),
+                location: self.scrubber.text(&location, MAX_TEXT_CHARS),
             };
         }
-        let body = match read_body(response).await {
+        let body = match read_body(&self.scrubber, response).await {
             Ok(body) => body,
             // The status arrived and the body did not: the failure is the more useful
             // thing to report, except for a 401, which means the same with no body.
@@ -312,11 +327,13 @@ impl Client {
             .and_then(|body| serde_json::from_slice::<ErrorBody>(&body).ok())
             .filter(|document| !document.code.is_empty());
         match document {
-            Some(document) => {
-                Error::from_refusal(Refusal::new(status, &document.code, &document.message))
-            }
+            Some(document) => Error::from_refusal(self.scrubber.refusal(
+                status,
+                &document.code,
+                &document.message,
+            )),
             // As in the Go client, a 401 is "not signed in" whatever its body.
-            None if status == 401 => Error::Unauthenticated(Refusal::new(status, "", "")),
+            None if status == 401 => Error::Unauthenticated(self.scrubber.refusal(status, "", "")),
             None => Error::UnexpectedResponse { status },
         }
     }
@@ -331,32 +348,31 @@ impl fmt::Debug for Client {
     }
 }
 
-/// Decodes one JSON document, keeping out of the error whatever `detail` says to.
-pub(crate) fn decode<T: DeserializeOwned>(
-    body: &[u8],
-    what: &'static str,
-    detail: Detail,
-) -> Result<T, Error> {
-    serde_json::from_slice(body).map_err(|e| Error::Undecodable {
-        what,
-        detail: match detail {
-            Detail::Full => e.to_string(),
-            Detail::PositionOnly => {
-                let kind = match e.classify() {
-                    serde_json::error::Category::Data => "it is JSON of another shape",
-                    serde_json::error::Category::Eof => "it ends early",
-                    _ => "it is not JSON",
-                };
-                format!("{kind}, at line {} column {}", e.line(), e.column())
-            }
-        },
+/// Decodes one JSON document. A failure says what kind of failure it is and where, and
+/// never what was found there: the decoder's own message quotes the value it stopped at,
+/// and that value may be a join token, or this client's login token sent back by a peer
+/// that reflects requests, or a megabyte of anything.
+pub(crate) fn decode<T: DeserializeOwned>(body: &[u8], what: &'static str) -> Result<T, Error> {
+    serde_json::from_slice(body).map_err(|e| {
+        let kind = match e.classify() {
+            serde_json::error::Category::Data => "it is JSON of another shape",
+            serde_json::error::Category::Eof => "it ends early",
+            _ => "it is not JSON",
+        };
+        Error::Undecodable {
+            what,
+            detail: format!("{kind}, at line {} column {}", e.line(), e.column()),
+        }
     })
 }
 
 /// Reads a body up to the bound. `None` means it is larger.
-async fn read_body(mut response: reqwest::Response) -> Result<Option<Vec<u8>>, Error> {
+async fn read_body(
+    scrubber: &Scrubber,
+    mut response: reqwest::Response,
+) -> Result<Option<Vec<u8>>, Error> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(transport)? {
+    while let Some(chunk) = response.chunk().await.map_err(|e| transport(scrubber, e))? {
         if body.len() + chunk.len() > MAX_BODY_BYTES {
             return Ok(None);
         }
@@ -367,17 +383,105 @@ async fn read_body(mut response: reqwest::Response) -> Result<Option<Vec<u8>>, E
 
 /// A failure to exchange a request and its response, sorted the way the connection policy
 /// needs it. The request's address is taken out first; no header is ever part of it.
-pub(crate) fn transport(error: reqwest::Error) -> Error {
+pub(crate) fn transport(scrubber: &Scrubber, error: reqwest::Error) -> Error {
     let error = error.without_url();
     if error.is_timeout() {
         Error::Timeout
     } else if error.is_connect() {
         Error::Connect {
-            detail: causes(&error),
+            detail: scrubber.detail(&error),
         }
     } else {
         Error::Transport {
-            detail: causes(&error),
+            detail: scrubber.detail(&error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FAKE_TOKEN: &str = "conch_FAKE_login_token_do_not_print";
+
+    fn client(server: &str) -> Client {
+        let server = ServerAddress::parse(server).unwrap();
+        Client::new(&server, &Secret::new(FAKE_TOKEN), Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn an_https_address_is_requested_over_https() {
+        // No network: the address a request would be sent to is built and looked at.
+        let secure = client("https://conch.example:8443/pre");
+        let rest = secure
+            .url(&["v1", "channels", "general", "voice", "session"], None)
+            .unwrap();
+        assert_eq!(rest.scheme(), "https");
+        assert_eq!(
+            rest.as_str(),
+            "https://conch.example:8443/pre/v1/channels/general/voice/session"
+        );
+        let socket = secure
+            .url(&["v1", "voice", "ws"], Some(("channel", "general")))
+            .unwrap();
+        assert_eq!(socket.scheme(), "https");
+        assert_eq!(
+            socket.as_str(),
+            "https://conch.example:8443/pre/v1/voice/ws?channel=general"
+        );
+        assert_eq!(socket.port_or_known_default(), Some(8443));
+        assert_eq!(
+            client("HTTPS://Conch.Example")
+                .url(&["v1"], None)
+                .unwrap()
+                .as_str(),
+            "https://conch.example/v1"
+        );
+
+        // And a plain address stays plain: nothing is upgraded behind the user's back.
+        let plain = client("http://127.0.0.1:8080").url(&["v1"], None).unwrap();
+        assert_eq!(plain.as_str(), "http://127.0.0.1:8080/v1");
+    }
+
+    #[test]
+    fn the_authorization_header_is_marked_sensitive_on_every_request() {
+        let client = client("http://127.0.0.1:8080");
+        assert!(client.authorization.is_sensitive());
+        assert!(!format!("{:?}", client.authorization).contains("FAKE"));
+
+        let url = client.url(&["v1", "voice", "ws"], None).unwrap();
+        for request in [
+            client.authorized(client.http.get(url.clone())),
+            client.authorized(client.http.post(url.clone())),
+            client.authorized(client.http_get(url)),
+        ] {
+            let request = request.build().unwrap();
+            let header = request.headers().get(AUTHORIZATION).unwrap();
+            assert!(header.is_sensitive());
+            assert_eq!(header.as_bytes(), format!("Bearer {FAKE_TOKEN}").as_bytes());
+            // What reqwest, hyper or a logger underneath would print of the request.
+            let printed = format!("{request:?} {:?}", request.headers());
+            assert!(!printed.contains("FAKE"), "{printed}");
+            assert!(printed.contains("Sensitive"), "{printed}");
+        }
+    }
+
+    #[test]
+    fn a_decoding_error_says_where_and_never_what() {
+        let cases: [&[u8]; 6] = [
+            br#"{"schema": "Bearer conch_FAKE_login_token_do_not_print"}"#,
+            br#""Bearer conch_FAKE_login_token_do_not_print""#,
+            br#"{"channel_id": "conch_FAKE_login_token_do_not_print"}"#,
+            b"conch_FAKE_login_token_do_not_print",
+            br#"{"schema": "conch.voice_presence.v1", "channel_id": 7, "configured": tru"#,
+            b"",
+        ];
+        for body in cases {
+            let error = decode::<VoicePresenceV1>(body, "voice presence").unwrap_err();
+            let shown = format!("{error} {error:?}");
+            assert!(!shown.contains("FAKE"), "{shown}");
+            assert!(shown.contains("line 1 column"), "{shown}");
+            assert!(shown.len() < 200, "{shown}");
         }
     }
 }

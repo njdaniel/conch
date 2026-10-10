@@ -68,7 +68,7 @@ pub enum Reply {
     /// A status and no body.
     Empty(u16),
     /// A redirect to this location.
-    Redirect(u16, &'static str),
+    Redirect(u16, String),
     /// Say nothing for this long (the slow server), then answer 200.
     Stall(Duration),
     /// Read the request and close the connection without a word.
@@ -94,6 +94,11 @@ impl Reply {
 pub enum Step {
     /// Send a text frame.
     Text(String),
+    /// Send a text frame made from the upgrade request: a peer that reflects what it
+    /// was sent.
+    TextFrom(fn(&Request) -> String),
+    /// Send a close frame with this code and a reason made from the upgrade request.
+    CloseFrom(u16, fn(&Request) -> String),
     /// Send a binary frame.
     Binary(Vec<u8>),
     /// Send a ping.
@@ -342,9 +347,20 @@ async fn play(
         Ok(response)
     };
     let mut socket = tokio_tungstenite::accept_hdr_async(stream, record).await?;
+    let request = seen.lock().unwrap().last().cloned().unwrap();
     for step in script {
         match step {
             Step::Text(text) => socket.send(Message::text(text)).await?,
+            Step::TextFrom(make) => socket.send(Message::text(make(&request))).await?,
+            Step::CloseFrom(code, make) => {
+                socket
+                    .close(Some(CloseFrame {
+                        code: code.into(),
+                        reason: make(&request).into(),
+                    }))
+                    .await?;
+                break;
+            }
             Step::Binary(bytes) => socket.send(Message::binary(bytes)).await?,
             Step::Ping => socket.send(Message::Ping(Vec::new().into())).await?,
             Step::Wait(wait) => tokio::time::sleep(wait).await,

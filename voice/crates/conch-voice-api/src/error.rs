@@ -5,9 +5,17 @@
 //! its place) chose, and that text is marked as such below: it is safe to keep and to match
 //! on, and it must be escaped before it is written to a terminal. The `Display` renderings
 //! here already escape it.
+//!
+//! Whatever answered may also have sent this client's own request back: a debugging proxy,
+//! an echo endpoint, an error page that quotes the headers. So text from outside is kept
+//! only after the client's own login token has been taken out of it ([`Scrubber`]), it is
+//! always cut to a bounded length, and a document that fails to decode is described by a
+//! position and never by what was found there.
 
 use std::fmt;
 use std::path::PathBuf;
+
+use crate::types::Secret;
 
 /// The error codes the voice endpoints carry in an error document's `code`
 /// (`pkg/schema/voice.go`, `ErrorCodeVoice*`), and the two general ones they share with the
@@ -37,6 +45,72 @@ pub(crate) fn bounded(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
+/// What stands where this client's own login token was found in text from outside.
+pub(crate) const REDACTED: &str = "<redacted>";
+
+/// Makes text that came from outside safe to keep in an error or an end-of-stream reason:
+/// takes this client's own login token out of it, and cuts it to a bounded length.
+///
+/// The token is the one secret the peer certainly has, because every request carries it,
+/// and a peer that reflects requests would otherwise put it in an error. Exact occurrences
+/// are replaced, with or without the `Bearer ` in front; a peer that sends the token back
+/// in some other encoding is not covered. A [`Client`](crate::Client) owns one of these and
+/// every error it makes out of an answer goes through it.
+#[derive(Clone)]
+pub(crate) struct Scrubber {
+    token: Secret,
+}
+
+impl Scrubber {
+    pub(crate) fn new(token: &Secret) -> Self {
+        Self {
+            token: token.clone(),
+        }
+    }
+
+    /// `text` with the token replaced by a placeholder, then cut to `max` characters. In
+    /// that order, so that a cut cannot leave half a token behind.
+    pub(crate) fn text(&self, text: &str, max: usize) -> String {
+        let token = self.token.expose();
+        if token.is_empty() || !text.contains(token) {
+            return bounded(text, max);
+        }
+        let cleaned = text
+            .replace(&format!("Bearer {token}"), REDACTED)
+            .replace(token, REDACTED);
+        bounded(&cleaned, max)
+    }
+
+    /// A refusal as it is kept: the server's code and message, scrubbed and bounded.
+    pub(crate) fn refusal(&self, status: u16, code: &str, message: &str) -> Refusal {
+        Refusal {
+            status,
+            code: self.text(code, MAX_CODE_CHARS),
+            message: self.text(message, MAX_TEXT_CHARS),
+        }
+    }
+
+    /// An error and its causes on one line, outermost first, scrubbed, bounded, and with
+    /// nothing in it that could move a terminal's cursor.
+    pub(crate) fn detail(&self, error: &dyn std::error::Error) -> String {
+        printable(&self.text(&chain(error), MAX_TEXT_CHARS))
+    }
+}
+
+/// Text with its control characters written as escapes, so that it can be part of a
+/// one-line message.
+fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A refusal `conchd` explained with an error document (`schema.Error`).
 ///
 /// `code` and `message` are the server's own words, cut to a bounded length. They are not
@@ -50,16 +124,6 @@ pub struct Refusal {
     pub code: String,
     /// The error document's `message`. Server-supplied text.
     pub message: String,
-}
-
-impl Refusal {
-    pub(crate) fn new(status: u16, code: &str, message: &str) -> Self {
-        Self {
-            status,
-            code: bounded(code, MAX_CODE_CHARS),
-            message: bounded(message, MAX_TEXT_CHARS),
-        }
-    }
 }
 
 impl fmt::Display for Refusal {
@@ -237,14 +301,13 @@ pub enum Error {
         detail: String,
     },
 
-    /// A body or frame that should have been a document is not JSON of that shape. For a
-    /// document that carries secrets `detail` is only a position.
+    /// A body or frame that should have been a document is not JSON of that shape.
     #[error("conchd's {what} could not be decoded: {detail}")]
     Undecodable {
         /// Which document.
         what: &'static str,
-        /// Where and, for a document with no secrets in it, why. May quote the document:
-        /// server-supplied text.
+        /// The kind of problem and the line and column it is at, and nothing of what was
+        /// found there: that may be a secret, the peer's or this client's own.
         detail: String,
     },
 
@@ -327,7 +390,7 @@ impl Error {
 }
 
 /// An error and its causes on one line, outermost first.
-pub(crate) fn causes(error: &dyn std::error::Error) -> String {
+fn chain(error: &dyn std::error::Error) -> String {
     let mut line = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -338,9 +401,104 @@ pub(crate) fn causes(error: &dyn std::error::Error) -> String {
     line
 }
 
+/// The causes of an error that no answer was part of (setting the HTTP client up), bounded
+/// and printable. An error made out of an answer goes through [`Scrubber::detail`].
+pub(crate) fn causes(error: &dyn std::error::Error) -> String {
+    printable(&bounded(&chain(error), MAX_TEXT_CHARS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FAKE_TOKEN: &str = "conch_FAKE_login_token_do_not_print";
+
+    fn scrubber() -> Scrubber {
+        Scrubber::new(&Secret::new(FAKE_TOKEN))
+    }
+
+    #[test]
+    fn the_clients_own_token_is_taken_out_of_text_from_outside() {
+        let scrub = scrubber();
+        // (what the peer sent, what is kept)
+        let table = [
+            (
+                "voice is temporarily unavailable",
+                "voice is temporarily unavailable",
+            ),
+            ("", ""),
+            (
+                "you sent: Authorization: Bearer conch_FAKE_login_token_do_not_print",
+                "you sent: Authorization: <redacted>",
+            ),
+            (
+                "token=conch_FAKE_login_token_do_not_print&again=conch_FAKE_login_token_do_not_print",
+                "token=<redacted>&again=<redacted>",
+            ),
+            (
+                "bearer conch_FAKE_login_token_do_not_print",
+                "bearer <redacted>",
+            ),
+            ("conch_FAKE_login_token_do_not_print", "<redacted>"),
+            (
+                "Bearerconch_FAKE_login_token_do_not_printx",
+                "Bearer<redacted>x",
+            ),
+            // Another token is not this client's to recognise.
+            (
+                "Bearer conch_FAKE_someone_elses",
+                "Bearer conch_FAKE_someone_elses",
+            ),
+        ];
+        for (sent, kept) in table {
+            assert_eq!(scrub.text(sent, MAX_TEXT_CHARS), kept);
+        }
+    }
+
+    #[test]
+    fn the_token_is_taken_out_before_the_text_is_cut() {
+        // The token straddles the cut: cutting first would keep its first half.
+        let sent = format!("{}{FAKE_TOKEN}", "x".repeat(MAX_TEXT_CHARS - 10));
+        let kept = scrubber().text(&sent, MAX_TEXT_CHARS);
+        assert_eq!(kept.chars().count(), MAX_TEXT_CHARS);
+        assert!(!kept.contains("conch_FAKE"), "{kept}");
+        assert!(kept.ends_with("<redacted>"), "{kept}");
+    }
+
+    #[test]
+    fn a_refusal_is_scrubbed_in_both_its_strings() {
+        let authorization = format!("Bearer {FAKE_TOKEN}");
+        let refusal = scrubber().refusal(500, &authorization, &format!("got {authorization}"));
+        assert_eq!(refusal.code, "<redacted>");
+        assert_eq!(refusal.message, "got <redacted>");
+        let error = Error::from_refusal(refusal);
+        assert!(!format!("{error} {error:?}").contains("FAKE"));
+    }
+
+    #[test]
+    fn details_are_one_printable_bounded_line() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("{0}")]
+        struct Outer(String, #[source] Inner);
+        #[derive(Debug, thiserror::Error)]
+        #[error("{0}")]
+        struct Inner(String);
+
+        let error = Outer(
+            "outer\u{1b}[2J".into(),
+            Inner(format!("inner\r\n{FAKE_TOKEN}\0{}", "y".repeat(5000))),
+        );
+        for detail in [scrubber().detail(&error), causes(&error)] {
+            assert!(
+                detail.starts_with("outer\\u{1b}[2J: inner\\r\\n"),
+                "{detail}"
+            );
+            assert!(!detail.chars().any(char::is_control), "{detail:?}");
+            // Escapes can lengthen a cut line, but only by a bounded factor.
+            assert!(detail.chars().count() <= MAX_TEXT_CHARS * 6);
+        }
+        assert!(!scrubber().detail(&error).contains("FAKE"));
+    }
 
     #[test]
     fn each_documented_refusal_has_its_own_variant() {
@@ -359,7 +517,7 @@ mod tests {
         ];
         let mut seen = std::collections::BTreeSet::new();
         for (status, code, variant) in table {
-            let error = Error::from_refusal(Refusal::new(status, code, "why"));
+            let error = Error::from_refusal(scrubber().refusal(status, code, "why"));
             let name = format!("{error:?}");
             assert!(
                 name.starts_with(&format!("{variant}(")),
@@ -380,7 +538,7 @@ mod tests {
             (400, code::CHANNEL_NOT_FOUND),
             (503, code::VOICE_REPORT_RATE_LIMITED),
         ] {
-            let error = Error::from_refusal(Refusal::new(status, code, ""));
+            let error = Error::from_refusal(scrubber().refusal(status, code, ""));
             assert!(matches!(error, Error::Refused(_)), "{status} {code}");
             assert_eq!(error.status(), Some(status));
             assert_eq!(error.code(), Some(code));
@@ -390,7 +548,7 @@ mod tests {
     #[test]
     fn display_escapes_what_the_server_supplied() {
         let hostile = "\u{1b}[2J\u{1b}[31mowned\r\n";
-        let error = Error::from_refusal(Refusal::new(503, "voice_unavailable", hostile));
+        let error = Error::from_refusal(scrubber().refusal(503, "voice_unavailable", hostile));
         let shown = error.to_string();
         assert!(!shown.contains('\u{1b}'), "{shown:?}");
         assert!(!shown.contains('\n') && !shown.contains('\r'), "{shown:?}");
@@ -405,7 +563,7 @@ mod tests {
 
     #[test]
     fn server_text_is_kept_to_a_bounded_length() {
-        let refusal = Refusal::new(500, &"c".repeat(10_000), &"m".repeat(10_000));
+        let refusal = scrubber().refusal(500, &"c".repeat(10_000), &"m".repeat(10_000));
         assert_eq!(refusal.code.len(), MAX_CODE_CHARS);
         assert_eq!(refusal.message.len(), MAX_TEXT_CHARS);
         // Cut on a character boundary, not in the middle of one.

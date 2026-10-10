@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"slices"
 	"strings"
@@ -1158,37 +1160,87 @@ func TestVoiceReportBoundIsWhatIsDocumented(t *testing.T) {
 	}
 }
 
-// TestVoicePassGap: the gap between passes is drawn at random between 350 and
-// 650 ms, from the operating system's random source, afresh for every gap.
+// TestVoicePassGap: the gap between passes is 100 ms plus an exponentially
+// distributed time with mean 400 ms, capped at 1.5 s, drawn from the operating
+// system's random source afresh for every gap.
+//
+// The bounds on the statistics are six or more standard errors wide at this
+// number of draws: a correct generator fails them about once in a billion
+// runs, and a wrong distribution (uniform, a different mean, no floor, no cap)
+// is far outside them.
 func TestVoicePassGap(t *testing.T) {
-	if voicePassGapMin != 350*time.Millisecond || voicePassGapMax != 650*time.Millisecond {
-		t.Fatalf("the gap is %v to %v, want 350 ms to 650 ms (docs/design/conch-voice.md §6)", voicePassGapMin, voicePassGapMax)
+	if voicePassGapMin != 100*time.Millisecond || voicePassGapMean != 400*time.Millisecond || voicePassGapMax != 1500*time.Millisecond {
+		t.Fatalf("the gap is %v plus an exponential with mean %v, capped at %v; want 100 ms, 400 ms and 1.5 s", voicePassGapMin, voicePassGapMean, voicePassGapMax)
 	}
-	const draws = 4000
-	seen := make(map[time.Duration]int, draws)
+	const draws = 40000
+	gaps := make([]time.Duration, draws)
+	seen := make(map[time.Duration]bool, draws)
 	lo, hi := voicePassGapMax, voicePassGapMin
-	var third [3]int
-	for range draws {
+	var sum time.Duration
+	for i := range gaps {
 		d := voicePassGap()
 		if d < voicePassGapMin || d > voicePassGapMax {
 			t.Fatalf("a gap of %v is outside %v to %v", d, voicePassGapMin, voicePassGapMax)
 		}
-		seen[d]++
+		gaps[i] = d
+		seen[d] = true
 		lo, hi = min(lo, d), max(hi, d)
-		third[min(2, int((d-voicePassGapMin)*3/(voicePassGapMax-voicePassGapMin)))]++
+		sum += d
 	}
-	if len(seen) < draws*9/10 {
-		t.Errorf("%d draws gave %d different gaps: they are not drawn afresh at nanosecond resolution", draws, len(seen))
-	}
-	// The whole range is used, not a corner of it. Each bound is missed by
-	// 4000 uniform draws with a probability far below any flake rate.
-	if lo > voicePassGapMin+10*time.Millisecond || hi < voicePassGapMax-10*time.Millisecond {
-		t.Errorf("gaps ran from %v to %v, want the whole of %v to %v", lo, hi, voicePassGapMin, voicePassGapMax)
-	}
-	for i, n := range third {
-		if n < draws/4 || n > draws*5/12 {
-			t.Errorf("third %d of the range got %d of %d draws: not uniform", i, n, draws)
+	// share is the fraction of the gaps that pass a test.
+	share := func(of []time.Duration, pass func(time.Duration) bool) float64 {
+		n := 0
+		for _, d := range of {
+			if pass(d) {
+				n++
+			}
 		}
+		return float64(n) / float64(len(of))
+	}
+	// tail is what an exponential with the mean gives for exceeding d.
+	tail := func(d time.Duration) float64 { return math.Exp(-float64(d) / float64(voicePassGapMean)) }
+	near := func(what string, got, want, tolerance float64) {
+		t.Helper()
+		if math.Abs(got-want) > tolerance {
+			t.Errorf("%s = %.4f, want %.4f within %.4f", what, got, want, tolerance)
+		}
+	}
+
+	// Not constant, and not a handful of values: drawn at nanosecond
+	// resolution, so all but the capped ones differ.
+	if len(seen) < draws*9/10 {
+		t.Errorf("%d draws gave %d different gaps", draws, len(seen))
+	}
+	// The floor is reached and so is the cap: a known pass promises 100 ms
+	// of quiet and no more, and nothing waits longer than 1.5 s.
+	if lo > voicePassGapMin+2*time.Millisecond || hi != voicePassGapMax {
+		t.Errorf("gaps ran from %v to %v, want from within 2 ms of %v to exactly %v", lo, hi, voicePassGapMin, voicePassGapMax)
+	}
+	// The mean: the floor, plus the exponential's mean less what the cap
+	// cuts off. About 488 ms.
+	wantMean := float64(voicePassGapMin) + float64(voicePassGapMean)*(1-tail(voicePassGapMax-voicePassGapMin))
+	near("the mean gap in ms", float64(sum)/draws/1e6, wantMean/1e6, 12)
+	// What an exponential gives, at several points: 12% of gaps are under
+	// 150 ms, 46% under 350 ms (the old least gap), 63% under 500 ms, 89%
+	// under 1 s, and 3% are cut to the cap.
+	for _, under := range []time.Duration{150 * time.Millisecond, 350 * time.Millisecond, 500 * time.Millisecond, time.Second} {
+		got := share(gaps, func(d time.Duration) bool { return d < under })
+		near(fmt.Sprintf("the share of gaps under %v", under), got, 1-tail(under-voicePassGapMin), 0.015)
+	}
+	near("the share of gaps at the cap", share(gaps, func(d time.Duration) bool { return d == voicePassGapMax }), tail(voicePassGapMax-voicePassGapMin), 0.006)
+	// No memory: however long it has been since the last pass (past the
+	// floor), the chance that the next 200 ms go by without one is the same,
+	// 61%. With the evenly bounded gap this replaced, it fell to nothing as
+	// the wait went on, which is what let a client time itself.
+	for _, waited := range []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, 600 * time.Millisecond} {
+		var still []time.Duration
+		for _, d := range gaps {
+			if d > waited {
+				still = append(still, d)
+			}
+		}
+		got := share(still, func(d time.Duration) bool { return d > waited+200*time.Millisecond })
+		near(fmt.Sprintf("the share of gaps over %v that go on another 200 ms", waited), got, tail(200*time.Millisecond), 0.03)
 	}
 
 	// The poller draws from it, once for every wait, while a room is in use.
@@ -1395,6 +1447,407 @@ func TestVoiceTransmitKeepsSecrets(t *testing.T) {
 			t.Errorf("the run did not exercise %q", exercised)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Nobody chooses when a pass happens
+//
+// The rule rests on a client not knowing when the next pass is. A wake-up of
+// the loop runs a pass over every room in use, at once, and starts a new gap;
+// so whoever can cause a wake-up knows when a pass has just happened, and so
+// when none can. The security review of #135 did it with a second channel:
+// a report (or a session request) for an idle room woke the loop, and a member
+// of two channels transmitted in the first for 95% of the time unrecorded.
+// The loop is now woken only when no room at all was in use.
+
+// idleSecondChannel sets up that member: ann holds a session in ops2 from long
+// ago, so its room is idle, and one in ops from just now, so its room is in
+// use; she is in the ops room, muted. It returns the two room names, with the
+// wake-up her sessions queued taken off.
+func idleSecondChannel(t *testing.T, f *presenceFixture) (ops, ops2 string) {
+	t.Helper()
+	ops2 = decodeSession(t, f.session(t, "ann", "ops2")).Rooms[0].Room
+	f.clock.Advance(voiceSessionRecent + time.Minute)
+	ops = decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true, muted: true})
+	select {
+	case <-f.srv.voice.wakeLoop:
+	default:
+	}
+	return ops, ops2
+}
+
+// TestVoiceLoopIsWokenOnlyWhenNothingWasInUse: a session or a report for a
+// room that was idle wakes the loop if no room at all was in use (the first
+// people into an idle server are seen at once), and wakes nothing if any other
+// room was: that room's passes are not the caller's to schedule. The room that
+// has just come into use is polled by the next pass.
+func TestVoiceLoopIsWokenOnlyWhenNothingWasInUse(t *testing.T) {
+	tests := []struct {
+		name string
+		// otherInUse: ops is in use when the request for ops2 is made.
+		otherInUse bool
+		request    func(t *testing.T, f *presenceFixture)
+		wantWake   bool
+	}{
+		{"a report for an idle room, another room in use", true,
+			func(t *testing.T, f *presenceFixture) { f.reportInOps2(t, "started") }, false},
+		{"a session for an idle room, another room in use", true,
+			func(t *testing.T, f *presenceFixture) { decodeSession(t, f.session(t, "ann", "ops2")) }, false},
+		{"a report for an idle room, nothing in use", false,
+			func(t *testing.T, f *presenceFixture) { f.reportInOps2(t, "started") }, true},
+		{"a session for an idle room, nothing in use", false,
+			func(t *testing.T, f *presenceFixture) { decodeSession(t, f.session(t, "ann", "ops2")) }, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ops, ops2 := idleSecondChannel(t, f)
+			if !tt.otherInUse {
+				// Long after both sessions, and nobody in either room.
+				f.lk.setRoom(ops)
+				f.pass(t)
+				f.clock.Advance(voiceSessionRecent + time.Minute)
+			}
+			if got := f.srv.voice.anyInUse(); got != tt.otherInUse {
+				t.Fatalf("before the request: a room in use = %v, want %v", got, tt.otherInUse)
+			}
+			polls := f.lk.count("ListParticipants")
+
+			tt.request(t, f)
+
+			if got := len(f.srv.voice.wakeLoop); (got == 1) != tt.wantWake {
+				t.Errorf("wake-ups queued by the request = %d; want one = %v", got, tt.wantWake)
+			}
+			if got := f.lk.count("ListParticipants"); got != polls {
+				t.Errorf("the request itself polled LiveKit %d times", got-polls)
+			}
+			// Either way the room is in use now, and the next pass polls it.
+			before := f.lk.callsFor("ListParticipants", ops2)
+			f.pass(t)
+			if got := f.lk.callsFor("ListParticipants", ops2) - before; got != 1 {
+				t.Errorf("the next pass polled the room that came into use %d times, want 1", got)
+			}
+		})
+	}
+}
+
+// reportInOps2 sends a report from ann in ops2, her second channel, that must
+// succeed.
+func (f *presenceFixture) reportInOps2(t *testing.T, state string) {
+	t.Helper()
+	if res := f.report(t, "ann", "ops2", state); res.status != http.StatusNoContent {
+		t.Fatalf("ann reports %s in ops2: %d %s", state, res.status, res.body)
+	}
+}
+
+// TestVoiceRunningLoopIsNotWokenForASecondRoom is the review's probe against
+// the real loop, made exact. The loop's gap function is the test's: it says
+// when a turn of the loop has finished, and holds the loop there until the
+// test lets it go on, with a wait so long that no pass happens by itself.
+//
+// With the loop asleep and ops in use, ann makes her request for idle ops2.
+// The test then queues one wake-up of its own and waits for one turn of the
+// loop. If the request woke the loop, that turn is the request's, and the
+// test's wake-up is still in the queue when it ends. If it did not, the turn
+// is the test's and the queue is empty: nothing the request did ran a pass.
+func TestVoiceRunningLoopIsNotWokenForASecondRoom(t *testing.T) {
+	requests := map[string]func(t *testing.T, f *presenceFixture){
+		"a report":  func(t *testing.T, f *presenceFixture) { f.reportInOps2(t, "started") },
+		"a session": func(t *testing.T, f *presenceFixture) { decodeSession(t, f.session(t, "ann", "ops2")) },
+	}
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ops, _ := idleSecondChannel(t, f)
+			p := f.srv.voice
+			turned := make(chan struct{}, 64)
+			goOn := make(chan struct{})
+			p.gap = func() time.Duration {
+				turned <- struct{}{}
+				<-goOn
+				return time.Hour
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- f.srv.Serve(ctx) }()
+			defer func() {
+				close(goOn) // whatever turn the loop is in, let it finish
+				cancel()
+				if err := <-done; err != nil {
+					t.Error(err)
+				}
+			}()
+			// The first turn: the startup sweep and a pass. Then the loop
+			// sleeps (the manual clock stands still, so until the next
+			// sweep, half a minute of real time away).
+			<-turned
+			if got := f.who(t, f.ops); got != "ann" {
+				t.Fatalf("after the first pass: %q, want ann", got)
+			}
+			goOn <- struct{}{}
+			polls := f.lk.callsFor("ListParticipants", ops)
+
+			request(t, f)
+
+			p.wakeLoop <- struct{}{} // the test's own wake-up; waits if one is queued
+			<-turned
+			if n := len(p.wakeLoop); n != 0 {
+				t.Errorf("the request for an idle room woke the loop: it ran a turn of its own, and the test's wake-up is still queued (%d)", n)
+			}
+			if got := f.lk.callsFor("ListParticipants", ops) - polls; got != 1 {
+				t.Errorf("the room in use was polled %d times since the request, want once, by the test's wake-up", got)
+			}
+		})
+	}
+}
+
+// fakeLoop plays voicePoller.loop against the manual clock, with the poller's
+// own tick and nextDelay: a turn when the wait is over, a turn at once when a
+// wake-up is queued, and after either a new wait.
+type fakeLoop struct {
+	t       *testing.T
+	f       *presenceFixture
+	next    time.Time
+	forced  int // turns run because a wake-up was queued
+	natural int // turns run because the wait was over
+}
+
+func newFakeLoop(t *testing.T, f *presenceFixture) *fakeLoop {
+	return &fakeLoop{t: t, f: f, next: f.clock.Now().Add(f.srv.voice.nextDelay())}
+}
+
+func (l *fakeLoop) turn() {
+	l.f.srv.voice.tick(context.Background())
+	l.next = l.f.clock.Now().Add(l.f.srv.voice.nextDelay())
+}
+
+// woken runs a turn if a wake-up is queued, as the loop would at once.
+func (l *fakeLoop) woken() {
+	select {
+	case <-l.f.srv.voice.wakeLoop:
+		l.forced++
+		l.turn()
+	default:
+	}
+}
+
+// advance moves the clock on by d, a millisecond at a time, running a turn
+// whenever the wait is over.
+func (l *fakeLoop) advance(d time.Duration) {
+	for range d / time.Millisecond {
+		l.f.clock.Advance(time.Millisecond)
+		if !l.f.clock.Now().Before(l.next) {
+			l.natural++
+			l.turn()
+		}
+	}
+}
+
+// TestVoiceSecondChannelCannotHideATransmission is the attack the review ran,
+// played against the manual clock: ann, in ops with a session in idle ops2,
+// tries to run a pass over ops whenever she likes by reporting in ops2, and
+// transmits in ops only just after each one.
+//
+// Before the fix every `started` in ops2 ran a pass and started a new gap, so
+// no pass ever fell while she was unmuted: nothing was written in ops. Now her
+// reports wake nothing, the passes come when the gaps say, and they find her.
+func TestVoiceSecondChannelCannotHideATransmission(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ops, _ := idleSecondChannel(t, f)
+	ann := f.identity("ann")
+	loop := newFakeLoop(t, f)
+	loop.advance(time.Second)
+	if got := f.who(t, f.ops); got != "ann" {
+		t.Fatalf("before the attack: %q, want ann, muted", got)
+	}
+	start := f.clock.Now()
+	var unmuted time.Duration
+	for f.clock.Now().Sub(start) < 6*time.Second {
+		// Muted: ask for a pass, by a `started` for the idle room.
+		f.reportInOps2(t, "started")
+		loop.woken()
+		loop.advance(5 * time.Millisecond)
+		f.reportInOps2(t, "stopped")
+		// A pass has just happened, she believes: 300 ms are safe.
+		f.lk.update(ops, ann, func(p *fakeParticipant) { p.muted = false })
+		loop.advance(300 * time.Millisecond)
+		f.lk.update(ops, ann, func(p *fakeParticipant) { p.muted = true })
+		unmuted += 300 * time.Millisecond
+		loop.advance(5 * time.Millisecond)
+	}
+	total := f.clock.Now().Sub(start)
+	loop.advance(3 * time.Second)
+
+	if loop.forced != 0 {
+		t.Errorf("her reports for the idle room ran %d passes", loop.forced)
+	}
+	var inOps []string
+	for _, e := range f.audit(t) {
+		if e.Subject == fmt.Sprintf("channel:%d", f.ops.ID) && strings.HasPrefix(e.Action, "voice_transmit_") {
+			inOps = append(inOps, e.Action)
+		}
+	}
+	unreported := 0
+	for _, a := range inOps {
+		if a == store.AuditVoiceTransmitUnreported {
+			unreported++
+		}
+	}
+	t.Logf("unmuted in ops for %v of %v; %d passes by the clock, %d forced; rows in ops: %d, of them unreported: %d", unmuted, total, loop.natural, loop.forced, len(inOps), unreported)
+	// She was unmuted for 300 ms of every 310 and the fixture's passes are
+	// 500 ms apart: every pass during the attack sees her.
+	if unreported == 0 {
+		t.Errorf("unmuted in ops for %v of %v and no unreported transmission was recorded there", unmuted, total)
+	}
+	for _, a := range inOps {
+		if a == store.AuditVoiceTransmitStarted {
+			t.Errorf("a voice_transmit_started row in ops: she reported nothing there")
+		}
+	}
+	// What she reported in the idle room is on the record too, and pairs up.
+	problems, open := checkTransmitPairs(logRowsFromAudit(f.audit(t)))
+	for _, p := range append(problems, open...) {
+		t.Errorf("pairing: %s", p)
+	}
+}
+
+// TestVoiceTransmitBoundIsPerPrincipalAcrossChannels: the bound is on the
+// principal, not on the principal in a channel. Reports in two channels draw
+// on one bucket; otherwise a member of ten channels would have ten times the
+// allowance, and ten times the rows.
+func TestVoiceTransmitBoundIsPerPrincipalAcrossChannels(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	decodeSession(t, f.session(t, "ann", "ops"))
+	decodeSession(t, f.session(t, "ann", "ops2"))
+	f.at(0)
+	states := []string{"started", "stopped"}
+	for i := range voiceReportBurst {
+		channel := []string{"ops", "ops2"}[i%2]
+		if res := f.report(t, "ann", channel, states[(i/2)%2]); res.status != http.StatusNoContent {
+			t.Fatalf("report %d of the burst, in %s: %d %s", i+1, channel, res.status, res.body)
+		}
+	}
+	for _, channel := range []string{"ops", "ops2", "ops"} {
+		if res := f.report(t, "ann", channel, "started"); res.status != http.StatusTooManyRequests {
+			t.Errorf("after a burst spent across both channels, a report in %s: %d %s, want 429", channel, res.status, res.body)
+		}
+	}
+	if got := len(f.audits(t, store.AuditVoiceReportRateLimited)); got != 1 {
+		t.Errorf("rate-limit rows = %d, want 1: the window is the principal's too", got)
+	}
+}
+
+// TestVoiceTransmitRowSurvivesTheCallerHangingUp: once a report has changed
+// the reported state its row is written whether or not the caller is still
+// there. A client that hangs up in that instant must not leave a reported
+// state with no row, or be able to take a report back by hanging up.
+func TestVoiceTransmitRowSurvivesTheCallerHangingUp(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	f.runLive(t, room, []liveStep{{0, "join"}, {0, "pass"}})
+
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	write := f.srv.voice.appendAudit
+	f.srv.voice.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
+		hangUp() // the state has changed; the caller goes away before the write
+		return write(ctx, actor, action, subject, detail, at)
+	}
+	f.at(100)
+	req := httptest.NewRequest(http.MethodPost, "/v1/channels/ops/voice/transmit", strings.NewReader(`{"state":"started"}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+f.tokens["ann"])
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	if ctx.Err() == nil {
+		t.Fatal("the caller's context was not cancelled: the test did not hang up")
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status %d %s, want 204", rec.Code, rec.Body)
+	}
+	if got, want := f.transmitRows(t), []string{"ann started@100 reported"}; !slices.Equal(got, want) {
+		t.Errorf("rows %q, want %q", got, want)
+	}
+	// Nor is what follows the write tied to the caller: the check that the
+	// room was not rotated meanwhile ran, and did not fail for a hang-up.
+	if logged := f.logs.buf.String(); strings.Contains(logged, "could not tell whether a room was retired") || strings.Contains(logged, "could not be audited") {
+		t.Errorf("the hang-up was logged as a failure:\n%s", logged)
+	}
+	f.srv.voice.appendAudit = write
+	f.runLive(t, room, []liveStep{{200, "unmute"}, {500, "pass"}, {1000, "pass"}, {1100, "stopped"}, {1100, "mute"}, {1500, "pass"}})
+	if got, want := f.transmitRows(t), []string{"ann started@100 reported", "ann stopped@1100 reported"}; !slices.Equal(got, want) {
+		t.Errorf("the press that followed: rows %q, want %q (the report had been applied)", got, want)
+	}
+	assertTransmitPairs(t, f.audit(t))
+}
+
+// TestVoiceTransmitOneReportAtATime: a principal's reports are applied one at
+// a time, each after the one before has its row or has been taken back.
+//
+// The review's sequence: reported `started`; A, a `stopped`, is applied and
+// its audit write hangs; B, a `started`, and C, a `stopped`, follow; A's write
+// then fails. Were B applied while A hung, it would be recorded as a change
+// from a state the log never had: two `started` rows running, one without a
+// close. And taking A back by comparing values, as the first version did,
+// found the state as C had left it and flipped that. Now B waits for A, finds
+// the state `started` again, and changes nothing; C is the one `stopped`.
+func TestVoiceTransmitOneReportAtATime(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	f.runLive(t, room, []liveStep{{0, "join"}, {0, "pass"}, {100, "started"}})
+
+	p := f.srv.voice
+	write := p.appendAudit
+	hold, entered := make(chan struct{}), make(chan struct{})
+	first := true
+	p.appendAudit = func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error) {
+		if first {
+			first = false
+			close(entered)
+			<-hold
+			return store.AuditEvent{}, errors.New("database is locked")
+		}
+		return write(ctx, actor, action, subject, detail, at)
+	}
+	f.at(200)
+	a := make(chan int, 1)
+	go func() { a <- f.report(t, "ann", "ops", "stopped").status }() // A: applied, its write hangs
+	<-entered
+	// A holds ann's turn for as long as its row is unwritten.
+	if turn := p.reportTurn(f.ids["ann"]); turn.TryLock() {
+		turn.Unlock()
+		t.Fatal("a report's turn is free while its audit row is being written: a second report could be applied on top of it")
+	}
+	f.at(300)
+	b := make(chan int, 1)
+	go func() { b <- f.report(t, "ann", "ops", "started").status }() // B: must wait for A
+	close(hold)                                                      // A's write fails now
+	if st := <-a; st != http.StatusInternalServerError {
+		t.Fatalf("A, whose row could not be written: %d, want 500", st)
+	}
+	if st := <-b; st != http.StatusNoContent {
+		t.Fatalf("B: %d, want 204", st)
+	}
+	f.at(400)
+	f.mustReport(t, "ann", "stopped") // C
+
+	want := []string{"ann started@100 reported", "ann stopped@400 reported"}
+	if got := f.transmitRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows:\n got  %q\n want %q", got, want)
+	}
+	p.mu.Lock()
+	reported := p.rooms[room].transmit.tracks[f.ids["ann"]].reported
+	p.mu.Unlock()
+	if reported {
+		t.Error("the reported state is started after the last answered report, a stopped")
+	}
+	// So a transmission that follows, unreported, is recorded as that.
+	f.runLive(t, room, []liveStep{{500, "unmute"}, {600, "pass"}, {1100, "pass"}, {1200, "mute"}, {1600, "pass"}})
+	want = append(want, "ann unreported@600 observed", "ann stopped@1600 observed muted")
+	if got := f.transmitRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows after an unreported transmission:\n got  %q\n want %q", got, want)
+	}
+	assertTransmitPairs(t, f.audit(t))
 }
 
 // TestVoiceTransmitTimesAreReadUnderTheLock: the invariant that puts reports

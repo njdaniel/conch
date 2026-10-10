@@ -16,6 +16,11 @@
 //!   faithful.
 //! - A field the schema always writes must be present. `conchd` never leaves one out, and
 //!   reading a missing `can_publish` as false would be guessing.
+//! - Nothing is read more leniently than Go's `encoding/json` reads it. A document is a
+//!   JSON object and a word such as an audience kind is a JSON string: serde's derived
+//!   decoders would also take an array holding a struct's fields in order, or an object
+//!   in place of an enum's name, and Go refuses both. So decoding is written out
+//!   (`wire_object!`, `wire_words!`) and only encoding is derived.
 //!
 //! The `validate` methods make the checks the Go `Validate` methods make, in the same
 //! order.
@@ -25,6 +30,93 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::Error;
+
+/// Implements `Deserialize` for a struct so that it decodes from a JSON object and from
+/// nothing else, least of all from an array of its fields in order.
+///
+/// Each field is named with its rule: `required` (absent is an error), `optional` (absent
+/// is the type's default), or `strict_audience` (an optional audience that refuses fields
+/// it does not declare). A key that is no field is `ignored` or `refused`, as the caller
+/// says. A field given twice is an error. None of the errors repeats anything from the
+/// document.
+macro_rules! wire_object {
+    (
+        $type:ident, $expecting:literal, unknown = $unknown:ident,
+        { $($field:ident: $rule:ident),+ $(,)? }
+    ) => {
+        impl<'de> serde::Deserialize<'de> for $type {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct Object;
+                impl<'de> serde::de::Visitor<'de> for Object {
+                    type Value = $type;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str($expecting)
+                    }
+
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<$type, A::Error> {
+                        $(let mut $field = None;)+
+                        while let Some(key) = map.next_key::<String>()? {
+                            match key.as_str() {
+                                $(stringify!($field) => {
+                                    if $field.is_some() {
+                                        return Err(<A::Error as serde::de::Error>::duplicate_field(
+                                            stringify!($field),
+                                        ));
+                                    }
+                                    $field = Some(map.next_value()?);
+                                })+
+                                _ => $crate::types::wire_object!(@unknown $unknown map A),
+                            }
+                        }
+                        Ok($type {
+                            $($field: $crate::types::wire_object!(@$rule $field A),)+
+                        })
+                    }
+                }
+                deserializer.deserialize_map(Object)
+            }
+        }
+    };
+    (@unknown ignored $map:ident $access:ident) => {{
+        $map.next_value::<serde::de::IgnoredAny>()?;
+    }};
+    (@unknown refused $map:ident $access:ident) => {
+        return Err(<$access::Error as serde::de::Error>::custom(
+            "a field this shape does not declare",
+        ))
+    };
+    (@required $field:ident $access:ident) => {
+        $field.ok_or_else(|| {
+            <$access::Error as serde::de::Error>::missing_field(stringify!($field))
+        })?
+    };
+    (@optional $field:ident $access:ident) => {
+        $field.unwrap_or_default()
+    };
+    (@strict_audience $field:ident $access:ident) => {
+        $crate::types::from_strict_audience($field)
+    };
+}
+pub(crate) use wire_object;
+
+/// Implements `Deserialize` for an enum of words so that it decodes from a JSON string
+/// that is exactly one of them, and from nothing else.
+macro_rules! wire_words {
+    ($type:ident, $problem:literal, { $($word:literal => $variant:ident),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                match String::deserialize(deserializer)?.as_str() {
+                    $($word => Ok(Self::$variant),)+
+                    _ => Err(serde::de::Error::custom($problem)),
+                }
+            }
+        }
+    };
+}
 
 /// The value of `schema` in a v1 voice presence document.
 pub const VOICE_PRESENCE_SCHEMA_V1: &str = "conch.voice_presence.v1";
@@ -38,6 +130,37 @@ pub const MAX_AUDIENCE_PRINCIPALS: usize = 64;
 /// output through formatting. The only way to its text is [`Secret::expose`], which is
 /// easy to find in review. It can be decoded from JSON; it can be encoded only in this
 /// crate's own tests, so nothing built on this crate can serialise a session by accident.
+///
+/// A program built on this crate cannot serialise one, nor a grant or a session that
+/// holds one:
+///
+/// ```compile_fail
+/// let secret = conch_voice_api::Secret::new("conch_FAKE_not_a_token");
+/// let _ = serde_json::to_string(&secret);
+/// ```
+///
+/// ```compile_fail
+/// fn encode(grant: &conch_voice_api::VoiceRoomGrant) -> String {
+///     serde_json::to_string(grant).unwrap_or_default()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn encode(session: &conch_voice_api::VoiceSessionResponseV1) -> String {
+///     serde_json::to_string(session).unwrap_or_default()
+/// }
+/// ```
+///
+/// The same code does build for a type that holds no secret, so what stops the three
+/// above is the missing `Serialize` and nothing else:
+///
+/// ```
+/// let audience = conch_voice_api::Audience::net(3);
+/// let _ = serde_json::to_string(&audience);
+/// fn encode(presence: &conch_voice_api::VoicePresenceV1) -> String {
+///     serde_json::to_string(presence).unwrap_or_default()
+/// }
+/// ```
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(transparent)]
@@ -257,7 +380,7 @@ impl<'de> Deserialize<'de> for Timestamp {
 /// Which of the two scoped audiences an [`Audience`] is (`schema.AudienceKind`). A kind
 /// outside these two fails the whole document, as it does in Go: an audience a reader does
 /// not understand must never widen what it shows (ADR-005).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudienceKind {
     /// The members and monitors of one net.
@@ -266,22 +389,33 @@ pub enum AudienceKind {
     Principals,
 }
 
+wire_words!(AudienceKind, "an audience kind that is not net or principals", {
+    "net" => Net,
+    "principals" => Principals,
+});
+
 /// The audience a room, a grant or a report is for (`schema.Audience`). Where one of these
 /// is optional, absent means the whole channel.
 ///
 /// The fields are the wire's, flat: exactly one of `net_id` and `principal_ids` is set,
 /// chosen by `kind`. [`Audience::validate`] checks that.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Audience {
     /// Which shape this is.
     pub kind: AudienceKind,
     /// The net, for kind `net`; otherwise 0 and not written.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(skip_serializing_if = "is_zero")]
     pub net_id: i64,
     /// The principals, for kind `principals`; otherwise empty and not written.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub principal_ids: Vec<i64>,
 }
+
+wire_object!(Audience, "an audience object", unknown = ignored, {
+    kind: required,
+    net_id: optional,
+    principal_ids: optional,
+});
 
 // serde's skip_serializing_if hands the field by reference.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -385,7 +519,7 @@ fn invalid(what: &'static str) -> impl Fn(String) -> Error {
 /// One room a voice session may join (`schema.VoiceRoomGrant`).
 ///
 /// `room` and `token` are opaque and secret: this type's `Debug` shows neither.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(test, derive(Serialize))]
 pub struct VoiceRoomGrant {
     /// The LiveKit room name `conchd` created.
@@ -398,9 +532,17 @@ pub struct VoiceRoomGrant {
     /// now", not a deadline to schedule against.
     pub expires_at: Timestamp,
     /// The audience the room carries; `None` is the whole channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, serde(skip_serializing_if = "Option::is_none"))]
     pub audience: Option<Audience>,
 }
+
+wire_object!(VoiceRoomGrant, "a voice room grant object", unknown = ignored, {
+    room: required,
+    token: required,
+    can_publish: required,
+    expires_at: required,
+    audience: optional,
+});
 
 impl VoiceRoomGrant {
     fn check(&self) -> Result<(), String> {
@@ -422,7 +564,7 @@ impl VoiceRoomGrant {
 
 /// The body of `POST /v1/channels/{channel}/voice/session`: everything needed to connect
 /// (`schema.VoiceSessionResponseV1`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(test, derive(Serialize))]
 pub struct VoiceSessionResponseV1 {
     /// The `ws://` or `wss://` address of LiveKit, exactly as the operator configured it.
@@ -432,6 +574,12 @@ pub struct VoiceSessionResponseV1 {
     /// One grant per room the caller may join; never empty.
     pub rooms: Vec<VoiceRoomGrant>,
 }
+
+wire_object!(VoiceSessionResponseV1, "a voice session object", unknown = ignored, {
+    livekit_url: required,
+    identity: required,
+    rooms: required,
+});
 
 impl VoiceSessionResponseV1 {
     /// Checks what `schema.VoiceSessionResponseV1.Validate` checks: an address and an
@@ -469,7 +617,7 @@ impl VoiceSessionResponseV1 {
 }
 
 /// One principal connected to a voice room (`schema.VoiceParticipant`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoiceParticipant {
     /// The connected principal.
     pub principal_id: i64,
@@ -480,6 +628,13 @@ pub struct VoiceParticipant {
     /// When the participant connected.
     pub joined_at: Timestamp,
 }
+
+wire_object!(VoiceParticipant, "a voice participant object", unknown = ignored, {
+    principal_id: required,
+    can_publish: required,
+    transmitting: required,
+    joined_at: required,
+});
 
 impl VoiceParticipant {
     fn check(&self) -> Result<(), String> {
@@ -504,14 +659,19 @@ impl VoiceParticipant {
 
 /// One voice room as presence shows it: its audience and who is in it
 /// (`schema.VoicePresenceRoom`). It has no room name and no token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoicePresenceRoom {
     /// The audience the room carries; `None` is the whole channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<Audience>,
     /// Every principal connected to the room, ordered by id.
     pub participants: Vec<VoiceParticipant>,
 }
+
+wire_object!(VoicePresenceRoom, "a voice presence room object", unknown = ignored, {
+    audience: optional,
+    participants: required,
+});
 
 impl VoicePresenceRoom {
     fn check(&self) -> Result<(), String> {
@@ -535,7 +695,7 @@ impl VoicePresenceRoom {
 /// The whole voice state of one channel (`schema.VoicePresenceV1`): the body of
 /// `GET /v1/channels/{channel}/voice` and every frame of the presence socket. A snapshot
 /// is the whole state, not a change to it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoicePresenceV1 {
     /// Always [`VOICE_PRESENCE_SCHEMA_V1`].
     pub schema: String,
@@ -548,6 +708,14 @@ pub struct VoicePresenceV1 {
     /// The rooms the caller may see. Empty unless `available`.
     pub rooms: Vec<VoicePresenceRoom>,
 }
+
+wire_object!(VoicePresenceV1, "a voice presence object", unknown = ignored, {
+    schema: required,
+    channel_id: required,
+    configured: required,
+    available: required,
+    rooms: required,
+});
 
 impl VoicePresenceV1 {
     /// Checks what `schema.VoicePresenceV1.Validate` checks: the schema name, a positive
@@ -594,7 +762,7 @@ impl VoicePresenceV1 {
 
 /// What a transmit report says: that the caller's transmission began or ended
 /// (`schema.VoiceTransmitState`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceTransmitState {
     /// The push-to-talk gate opened.
@@ -603,22 +771,27 @@ pub enum VoiceTransmitState {
     Stopped,
 }
 
+wire_words!(VoiceTransmitState, "a transmit state that is not started or stopped", {
+    "started" => Started,
+    "stopped" => Stopped,
+});
+
 /// The body of `POST /v1/channels/{channel}/voice/transmit`
 /// (`schema.VoiceTransmitReportV1`). It carries no time, no sequence number, and no
 /// principal, room or token: `conchd` knows all of those itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoiceTransmitReportV1 {
     /// Started or stopped.
     pub state: VoiceTransmitState,
     /// The audience transmitted to; `None` is the whole channel.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "strict_audience"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<Audience>,
 }
+
+wire_object!(VoiceTransmitReportV1, "a voice transmit report object", unknown = refused, {
+    state: required,
+    audience: strict_audience,
+});
 
 impl VoiceTransmitReportV1 {
     /// Checks what `schema.VoiceTransmitReportV1.Validate` checks beyond the state, which
@@ -633,35 +806,40 @@ impl VoiceTransmitReportV1 {
 
 /// [`Audience`] as a transmit report must decode it: a field it does not declare is an
 /// error, where everywhere else it is ignored.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictAudience {
+pub(crate) struct StrictAudience {
     kind: AudienceKind,
-    #[serde(default)]
     net_id: i64,
-    #[serde(default)]
     principal_ids: Vec<i64>,
 }
 
-fn strict_audience<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Audience>, D::Error> {
-    let strict = Option::<StrictAudience>::deserialize(deserializer)?;
-    Ok(strict.map(|a| Audience {
+wire_object!(StrictAudience, "an audience object", unknown = refused, {
+    kind: required,
+    net_id: optional,
+    principal_ids: optional,
+});
+
+/// What a report's `audience` key held, absent or null or an object, as the audience.
+pub(crate) fn from_strict_audience(found: Option<Option<StrictAudience>>) -> Option<Audience> {
+    found.flatten().map(|a| Audience {
         kind: a.kind,
         net_id: a.net_id,
         principal_ids: a.principal_ids,
-    }))
+    })
 }
 
 /// The error document every REST endpoint answers a refusal with (`schema.Error`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorBody {
     /// A short machine-readable code, such as `voice_unavailable`.
     pub code: String,
     /// A sentence for a person. Server-supplied text: escape it before printing.
     pub message: String,
 }
+
+wire_object!(ErrorBody, "an error document object", unknown = ignored, {
+    code: required,
+    message: required,
+});
 
 #[cfg(test)]
 mod tests {
@@ -1364,6 +1542,136 @@ mod tests {
             audience: Some(Audience::net(0)),
         };
         assert!(problem(report.validate()).contains("net_id must be positive"));
+    }
+
+    #[test]
+    fn a_document_is_a_json_object_and_never_an_array_of_its_fields() {
+        // Each of these is what serde's derived decoder would accept: the fields, in
+        // order, with no names. Go's decoder refuses every one.
+        fn refused<T: DeserializeOwned + fmt::Debug>(what: &str, body: Value) {
+            let result = serde_json::from_value::<T>(body.clone());
+            assert!(result.is_err(), "{what} decoded from {body}: {result:?}");
+            let result = serde_json::from_str::<T>(&body.to_string());
+            assert!(
+                result.is_err(),
+                "{what} decoded from text {body}: {result:?}"
+            );
+        }
+        let stamp = "2026-10-09T12:00:45.000Z";
+        refused::<VoicePresenceV1>(
+            "presence",
+            json!(["conch.voice_presence.v1", 7, true, true, []]),
+        );
+        refused::<VoiceSessionResponseV1>(
+            "a session",
+            json!(["wss://voice.example", "p7", [["r", "t", true, stamp]]]),
+        );
+        refused::<VoiceSessionResponseV1>(
+            "a session, with its grant an object",
+            json!(["wss://voice.example", "p7",
+                   [{"room": "r", "token": "t", "can_publish": true, "expires_at": stamp}]]),
+        );
+        refused::<VoiceSessionResponseV1>(
+            "a session whose grant is an array",
+            json!({"livekit_url": "wss://voice.example", "identity": "p7",
+                   "rooms": [["conch-FAKE-room", "FAKE-join-token", true, stamp]]}),
+        );
+        refused::<VoiceRoomGrant>("a grant", json!(["r", "t", true, stamp]));
+        refused::<VoiceRoomGrant>(
+            "a grant with an audience",
+            json!(["r", "t", true, stamp, null]),
+        );
+        refused::<VoicePresenceV1>(
+            "presence whose room is an array",
+            json!({"schema": "conch.voice_presence.v1", "channel_id": 7, "configured": true,
+                   "available": true, "rooms": [[null, []]]}),
+        );
+        refused::<VoicePresenceRoom>("a room", json!([null, []]));
+        refused::<VoicePresenceV1>(
+            "presence whose participant is an array",
+            json!({"schema": "conch.voice_presence.v1", "channel_id": 7, "configured": true,
+                   "available": true, "rooms": [{"participants": [[3, true, false, stamp]]}]}),
+        );
+        refused::<VoiceParticipant>("a participant", json!([3, true, false, stamp]));
+        refused::<Audience>("an audience", json!(["net", 3, []]));
+        refused::<Audience>("an audience", json!(["net", 3]));
+        refused::<VoiceRoomGrant>(
+            "a grant whose audience is an array",
+            json!({"room": "r", "token": "t", "can_publish": true, "expires_at": stamp,
+                   "audience": ["net", 3]}),
+        );
+        refused::<VoiceTransmitReportV1>("a report", json!(["started"]));
+        refused::<VoiceTransmitReportV1>("a report", json!(["started", null]));
+        refused::<VoiceTransmitReportV1>(
+            "a report whose audience is an array",
+            json!({"state": "started", "audience": ["net", 3]}),
+        );
+        refused::<ErrorBody>("an error document", json!(["forbidden", "no"]));
+        // Nor from anything else that is not an object.
+        for body in [json!(null), json!("x"), json!(7), json!(true), json!([])] {
+            refused::<VoicePresenceV1>("presence", body.clone());
+            refused::<VoiceSessionResponseV1>("a session", body.clone());
+            refused::<ErrorBody>("an error document", body);
+        }
+    }
+
+    #[test]
+    fn a_word_is_a_json_string_and_nothing_else() {
+        // serde's derived decoder for an enum also takes {"net": null}; Go's takes a string.
+        for body in [
+            json!({"net": null}),
+            json!({"net": []}),
+            json!(["net"]),
+            json!(0),
+            json!(null),
+            json!("Net"),
+            json!("NET"),
+            json!(" net"),
+            json!(""),
+        ] {
+            assert!(
+                serde_json::from_value::<AudienceKind>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+        for body in [
+            json!({"started": null}),
+            json!(["started"]),
+            json!(1),
+            json!("Started"),
+        ] {
+            assert!(
+                serde_json::from_value::<VoiceTransmitState>(body.clone()).is_err(),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<AudienceKind>(json!("net")).unwrap(),
+            AudienceKind::Net
+        );
+        assert_eq!(
+            serde_json::from_value::<AudienceKind>(json!("principals")).unwrap(),
+            AudienceKind::Principals
+        );
+        assert_eq!(
+            serde_json::from_value::<VoiceTransmitState>(json!("stopped")).unwrap(),
+            VoiceTransmitState::Stopped
+        );
+        assert!(
+            serde_json::from_value::<Audience>(json!({"kind": {"net": null}, "net_id": 3}))
+                .is_err()
+        );
+        // A secret is a string, not a one-element array of one.
+        assert!(serde_json::from_value::<Secret>(json!(["FAKE-join-token"])).is_err());
+    }
+
+    #[test]
+    fn a_field_given_twice_is_refused() {
+        // Through text: a serde_json::Value cannot hold the same key twice.
+        let twice = r#"{"code": "forbidden", "message": "a", "code": "voice_unavailable"}"#;
+        assert!(serde_json::from_str::<ErrorBody>(twice).is_err());
+        let twice = r#"{"state": "started", "state": "stopped"}"#;
+        assert!(serde_json::from_str::<VoiceTransmitReportV1>(twice).is_err());
     }
 
     #[test]

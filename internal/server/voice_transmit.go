@@ -186,8 +186,16 @@ func (s *Server) voiceHeldRoom(ctx context.Context, channelID, principalID, cred
 // their times are the order of record.
 //
 // An error means the row could not be written. The report is then taken back,
-// so that the reported state never says more than the audit log does.
+// so that the reported state never says more than the audit log does. One
+// principal's reports are applied one at a time, each after the one before it
+// has its row or has been taken back (reportTurn): a second report applied on
+// top of a first whose write then fails would be recorded as a change from a
+// state the log never had, and leave a row with nothing to pair with.
 func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, principalID int64, started bool) error {
+	turn := p.reportTurn(principalID)
+	turn.Lock()
+	defer turn.Unlock()
+
 	p.mu.Lock()
 	now := p.now()
 	r := p.rooms[room.RoomName]
@@ -197,9 +205,10 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		p.mu.Unlock()
 		return nil
 	}
+	// Before the report is applied: whether the loop had anything to watch.
+	idle := !p.anyInUseLocked(now)
 	r = p.roomLocked(room)
-	wasInUse := r.inUse(now)
-	row, changed := r.transmit.report(now, principalID, started)
+	row, change, changed := r.transmit.report(now, principalID, started)
 	p.mu.Unlock()
 	if !changed {
 		return nil
@@ -210,23 +219,18 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 	ctx = context.WithoutCancel(ctx)
 	if err := p.writeEvent(ctx, transmitEvents(room.ChannelID, []transmitRow{row})[0]); err != nil {
 		p.mu.Lock()
-		r.transmit.retract(principalID, started)
+		r.transmit.retract(principalID, change)
 		p.mu.Unlock()
 		return err
 	}
 
 	// A reported `started` is something the poller has to look at: a holder
 	// who is not in the room, or never connects, is closed after 2 s by a
-	// pass (§6). The room is in use from the report on (inUse), and if the
-	// loop was not watching it, it is woken, as a session wakes it. A room
-	// already being polled is not polled sooner: a report cannot be used to
-	// choose when a pass happens.
-	if !wasInUse {
-		select {
-		case p.wakeLoop <- struct{}{}:
-		default: // a wake-up is already queued
-		}
-	}
+	// pass (§6). The room is in use from the report on (inUse). The loop is
+	// woken only if it had nothing at all to watch, when it may be asleep
+	// until the next sweep; otherwise the next pass, at most a gap away,
+	// picks the room up. A report never brings a pass forward: see wakeIfIdle.
+	p.wakeIfIdle(idle)
 
 	// A rotation can land between the holder check and here. If it also
 	// dropped the room's state before the report was applied, the report

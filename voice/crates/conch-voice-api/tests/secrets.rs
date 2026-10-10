@@ -19,7 +19,7 @@ use conch_voice_api::{
     VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1, VoiceTransmitState,
 };
 use serde_json::json;
-use support::{FAKE_TOKEN, Reply, Step, Stub, client_for, closed_port};
+use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
 
 const FAKE_ROOM: &str = "conch-FAKEROOM-zq81-do-not-print";
 const FAKE_NET_ROOM: &str = "conch-FAKENETROOM-7h2k-do-not-print";
@@ -467,4 +467,436 @@ async fn the_login_token_is_sent_in_the_authorization_header_and_nowhere_else() 
         );
         assert!(request.header("cookie").is_none());
     }
+}
+
+// ---- A peer that sends the request back -------------------------------------------------
+//
+// Every request carries the login token, so the token is the one secret whatever answers
+// certainly has. A debugging proxy, an echo endpoint or an error page that quotes headers
+// sends it back, and then it is in the answer this client makes an error out of.
+
+/// The value of the request's `Authorization` header: `Bearer <token>`.
+fn authorization(request: &Request) -> String {
+    request.header("authorization").unwrap().to_owned()
+}
+
+fn presence_json() -> serde_json::Value {
+    json!({
+        "schema": "conch.voice_presence.v1",
+        "channel_id": 7,
+        "configured": true,
+        "available": true,
+        "rooms": []
+    })
+}
+
+/// One way of sending the request back as an HTTP answer.
+type Reflect = fn(&Request) -> Reply;
+/// One way of sending the request back as the text of a socket frame.
+type ReflectedFrame = fn(&Request) -> String;
+
+fn reflections() -> Vec<(&'static str, Reflect)> {
+    vec![
+        ("200, a JSON string holding the request", |r| {
+            Reply::Json(200, serde_json::to_string(&r.everything()).unwrap())
+        }),
+        (
+            "200, presence with the Authorization value where channel_id belongs",
+            |r| {
+                let mut doc = presence_json();
+                doc["channel_id"] = json!(authorization(r));
+                Reply::Json(200, doc.to_string())
+            },
+        ),
+        ("200, presence with the token as the schema name", |r| {
+            let mut doc = presence_json();
+            doc["schema"] = json!(authorization(r));
+            Reply::Json(200, doc.to_string())
+        }),
+        ("200, presence with the token as an audience kind", |r| {
+            let mut doc = presence_json();
+            doc["rooms"] = json!([{"audience": {"kind": authorization(r)}, "participants": []}]);
+            Reply::Json(200, doc.to_string())
+        }),
+        (
+            "200, a session with the Authorization value where can_publish belongs",
+            |r| {
+                let mut doc = session_json();
+                doc["rooms"][0]["can_publish"] = json!(authorization(r));
+                Reply::Json(200, doc.to_string())
+            },
+        ),
+        (
+            "200, a session with the token where expires_at belongs",
+            |r| {
+                let mut doc = session_json();
+                doc["rooms"][0]["expires_at"] = json!(authorization(r));
+                Reply::Json(200, doc.to_string())
+            },
+        ),
+        ("200, an echo of the headers as JSON", |r| {
+            let echo = json!({"headers": {"Authorization": authorization(r)}, "url": r.target});
+            Reply::Json(200, echo.to_string())
+        }),
+        ("200, the request as plain text", |r| {
+            Reply::Body(200, "text/plain", r.everything().into_bytes())
+        }),
+        ("500, an error document whose message is the request", |r| {
+            Reply::error(500, "proxy_error", &r.everything())
+        }),
+        (
+            "500, an error document whose code is the Authorization value",
+            |r| Reply::error(500, &authorization(r), ""),
+        ),
+        ("500, an error document whose code is the bare token", |r| {
+            let bare = authorization(r).replace("Bearer ", "");
+            Reply::error(500, &bare, &format!("token {bare} was refused"))
+        }),
+        ("401, an error document that quotes the header", |r| {
+            Reply::error(
+                401,
+                "unauthenticated",
+                &format!("bad header: Authorization: {}", authorization(r)),
+            )
+        }),
+        ("403, a named refusal that quotes the header", |r| {
+            Reply::error(
+                403,
+                "forbidden",
+                &format!("denied for {}", authorization(r)),
+            )
+        }),
+        ("404, a named refusal that quotes the header", |r| {
+            Reply::error(
+                404,
+                "channel_not_found",
+                &format!("no channel for {}", authorization(r)),
+            )
+        }),
+        ("409, a named refusal that quotes the header", |r| {
+            Reply::error(
+                409,
+                "voice_no_session",
+                &format!("no session for {}", authorization(r)),
+            )
+        }),
+        ("503, a named refusal that quotes the header", |r| {
+            Reply::error(
+                503,
+                "voice_unavailable",
+                &format!("upstream saw {}", authorization(r)),
+            )
+        }),
+        ("500, the request as plain text", |r| {
+            Reply::Body(500, "text/plain", r.everything().into_bytes())
+        }),
+        ("302, a Location that carries the token", |r| {
+            let bare = authorization(r).replace("Bearer ", "");
+            Reply::Redirect(
+                302,
+                format!("/login?token={bare}&header={}", authorization(r)),
+            )
+        }),
+    ]
+}
+
+/// What must hold of every error, whatever the peer sent: no secret, nothing that could
+/// drive a terminal, and a bounded length.
+fn assert_safe_to_print(context: &str, error: &Error) {
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    let pretty = format!("{error:#?}");
+    for text in [&display, &debug, &pretty] {
+        for secret in SECRETS {
+            assert!(!text.contains(secret), "{context}: shows a secret: {text}");
+        }
+        assert!(
+            !text.contains("FAKE"),
+            "{context}: shows part of a secret: {text}"
+        );
+        assert!(
+            text.len() < 8192,
+            "{context}: {} bytes of error",
+            text.len()
+        );
+    }
+    for text in [&display, &debug] {
+        assert!(
+            !text.chars().any(char::is_control),
+            "{context}: a control character in {text:?}"
+        );
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = format!("{cause} {cause:?}");
+        assert!(
+            !text.contains("FAKE"),
+            "{context}: a cause shows a secret: {text}"
+        );
+        source = cause.source();
+    }
+}
+
+#[tokio::test]
+async fn a_peer_that_reflects_the_request_cannot_put_the_token_in_an_error() {
+    let mut placeholders = 0;
+    for (name, reflect) in reflections() {
+        let stub = Stub::http(reflect).await;
+        let client = stub.client();
+        let errors = [
+            (
+                "session",
+                client.session("general").await.map(|_| ()).unwrap_err(),
+            ),
+            (
+                "transmit",
+                client
+                    .transmit("general", VoiceTransmitState::Started, None)
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "presence",
+                client.presence("general").await.map(|_| ()).unwrap_err(),
+            ),
+            (
+                "presence stream",
+                client
+                    .presence_stream("general")
+                    .await
+                    .map(|_| ())
+                    .unwrap_err(),
+            ),
+        ];
+        // The stub did receive the token each time: the peer had it to send back.
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 4, "{name}");
+        assert!(
+            requests.iter().all(|r| r.everything().contains(FAKE_TOKEN)),
+            "{name}"
+        );
+        for (call, error) in &errors {
+            assert_safe_to_print(&format!("{call}: {name}"), error);
+            if format!("{error:?}").contains("<redacted>") {
+                placeholders += 1;
+            }
+        }
+    }
+    // The server's words were kept where they are kept, with the token taken out of
+    // them: the errors are not clean merely because everything was thrown away.
+    assert!(
+        placeholders >= 20,
+        "only {placeholders} errors kept scrubbed text"
+    );
+}
+
+#[tokio::test]
+async fn what_a_reflecting_peer_says_is_kept_with_the_token_replaced() {
+    let stub = Stub::http(|r| {
+        Reply::error(
+            503,
+            "voice_unavailable",
+            &format!(
+                "upstream saw Authorization: {} twice: {}",
+                authorization(r),
+                authorization(r)
+            ),
+        )
+    })
+    .await;
+    let error = stub.client().session("general").await.unwrap_err();
+    match &error {
+        Error::Unavailable(refusal) => {
+            assert_eq!(refusal.code, "voice_unavailable");
+            assert_eq!(
+                refusal.message,
+                "upstream saw Authorization: <redacted> twice: <redacted>"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A code that is the token is no longer any code this client knows.
+    let stub =
+        Stub::http(|r| Reply::error(503, &authorization(r).replace("Bearer ", ""), "")).await;
+    let error = stub.client().session("general").await.unwrap_err();
+    match &error {
+        Error::Refused(refusal) => assert_eq!(refusal.code, "<redacted>"),
+        other => panic!("{other:?}"),
+    }
+
+    let stub =
+        Stub::http(|r| Reply::Redirect(307, format!("/next?auth={}", authorization(r)))).await;
+    let error = stub.client().presence("general").await.unwrap_err();
+    match &error {
+        Error::Redirected {
+            status: 307,
+            location,
+        } => assert_eq!(location, "/next?auth=<redacted>"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_socket_that_reflects_the_request_cannot_put_the_token_in_an_error_or_a_reason() {
+    let frames: [(&str, ReflectedFrame); 5] = [
+        ("a JSON string holding the request", |r| {
+            serde_json::to_string(&r.everything()).unwrap()
+        }),
+        (
+            "presence with the Authorization value where channel_id belongs",
+            |r| {
+                let mut doc = presence_json();
+                doc["channel_id"] = json!(authorization(r));
+                doc.to_string()
+            },
+        ),
+        ("presence with the token as an audience kind", |r| {
+            let mut doc = presence_json();
+            doc["rooms"] = json!([{"audience": {"kind": authorization(r)}, "participants": []}]);
+            doc.to_string()
+        }),
+        ("presence with the token as the schema name", |r| {
+            let mut doc = presence_json();
+            doc["schema"] = json!(authorization(r));
+            doc.to_string()
+        }),
+        ("the request as text", |r| r.everything()),
+    ];
+    for (name, frame) in frames {
+        let socket = Stub::websocket(vec![Step::TextFrom(frame)]).await;
+        let mut stream = socket.client().presence_stream("general").await.unwrap();
+        let error = match stream.next().await {
+            Err(error) => error,
+            Ok(event) => panic!("{name}: expected an error, got {event:?}"),
+        };
+        assert_safe_to_print(&format!("socket frame: {name}"), &error);
+        assert!(!format!("{stream:?}").contains("FAKE"), "{name}");
+    }
+
+    // A close frame is short, but long enough for a token.
+    for code in [1000, 1001, 1008, 1011] {
+        let socket = Stub::websocket(vec![Step::CloseFrom(code, |r| {
+            format!("saw {}", authorization(r))
+        })])
+        .await;
+        let mut stream = socket.client().presence_stream("general").await.unwrap();
+        let event = stream.next().await.unwrap();
+        let shown = format!("{event:?} {stream:?} {:?}", stream.ended());
+        assert!(!shown.contains("FAKE"), "close {code}: {shown}");
+        let reason = match event {
+            PresenceEvent::Ended(
+                StreamEnd::ServerGoingAway { reason }
+                | StreamEnd::PolicyViolation { reason }
+                | StreamEnd::Closed { reason, .. },
+            ) => reason,
+            other => panic!("close {code}: {other:?}"),
+        };
+        assert_eq!(reason, "saw <redacted>", "close {code}");
+    }
+}
+
+#[tokio::test]
+async fn whatever_the_server_sends_an_error_is_one_bounded_printable_line() {
+    let hostile = "\u{1b}[2J\u{1b}[31mowned\r\nsecond line\0\u{7}\u{9b}";
+    let huge = "x".repeat(900_000);
+
+    let with_kind = |kind: &str| {
+        let mut doc = presence_json();
+        doc["rooms"] = json!([{"audience": {"kind": kind, "net_id": 1}, "participants": []}]);
+        doc.to_string()
+    };
+    let with_channel = |channel: &str| {
+        let mut doc = presence_json();
+        doc["channel_id"] = json!(channel);
+        doc.to_string()
+    };
+    let with_schema = |schema: &str| {
+        let mut doc = presence_json();
+        doc["schema"] = json!(schema);
+        doc.to_string()
+    };
+    let documents = [
+        (
+            "an audience kind made of control characters",
+            with_kind(hostile),
+        ),
+        (
+            "control characters where a number belongs",
+            with_channel(hostile),
+        ),
+        ("900 kB where a number belongs", with_channel(&huge)),
+        (
+            "a schema name made of control characters",
+            with_schema(hostile),
+        ),
+        ("900 kB as the schema name", with_schema(&huge)),
+        ("900 kB as an audience kind", with_kind(&huge)),
+        (
+            "a JSON string of control characters",
+            serde_json::to_string(hostile).unwrap(),
+        ),
+        ("control characters, not JSON", hostile.to_owned()),
+    ];
+    for (name, document) in &documents {
+        // As a REST body ...
+        let stub = Stub::always(Reply::Json(200, document.clone())).await;
+        let client = stub.client();
+        assert_safe_to_print(
+            &format!("presence: {name}"),
+            &client.presence("general").await.unwrap_err(),
+        );
+        assert_safe_to_print(
+            &format!("session: {name}"),
+            &client.session("general").await.unwrap_err(),
+        );
+        // ... and as a socket frame.
+        let socket = Stub::websocket(vec![Step::Text(document.clone())]).await;
+        let mut stream = socket.client().presence_stream("general").await.unwrap();
+        assert_safe_to_print(
+            &format!("socket frame: {name}"),
+            &stream.next().await.unwrap_err(),
+        );
+    }
+
+    // Refusals: the server's code and message are kept, cut and escaped.
+    let refusals = [
+        Reply::error(503, "voice_unavailable", hostile),
+        Reply::error(500, hostile, hostile),
+        Reply::error(500, &huge[..400_000], &huge[..400_000]),
+        Reply::error(401, hostile, &huge[..400_000]),
+        Reply::Redirect(302, format!("/{}", "\u{e9}".repeat(4000))),
+        Reply::Body(502, "text/html", hostile.as_bytes().to_vec()),
+    ];
+    for reply in refusals {
+        let stub = Stub::always(reply.clone()).await;
+        let client = stub.client();
+        let label = format!("{reply:?}");
+        let context: String = label.chars().take(60).collect();
+        assert_safe_to_print(&context, &client.session("general").await.unwrap_err());
+        assert_safe_to_print(
+            &context,
+            &client
+                .transmit("general", VoiceTransmitState::Stopped, None)
+                .await
+                .unwrap_err(),
+        );
+        assert_safe_to_print(&context, &client.presence("general").await.unwrap_err());
+        assert_safe_to_print(
+            &context,
+            &client
+                .presence_stream("general")
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+        );
+    }
+
+    // A close reason is the server's text too; it is kept bounded, and its Debug is
+    // one printable line.
+    let socket = Stub::websocket(vec![Step::Close(1008, "\u{1b}[31mred\r\n")]).await;
+    let mut stream = socket.client().presence_stream("general").await.unwrap();
+    let end = format!("{:?}", stream.next().await.unwrap());
+    assert!(!end.chars().any(char::is_control), "{end:?}");
+    assert!(end.len() < 2048);
 }

@@ -487,7 +487,7 @@ async fn refusals_before_the_socket_opens_each_have_their_error() {
         ),
         (
             "a redirect, which is never followed",
-            Reply::Redirect(301, "https://elsewhere.example/v1/voice/ws"),
+            Reply::Redirect(301, "/v1/voice/moved".into()),
             |e| matches!(e, Error::Redirected { status: 301, .. }),
             Some(301),
             None,

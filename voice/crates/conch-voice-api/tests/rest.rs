@@ -205,9 +205,11 @@ fn common_cases() -> Vec<Case> {
             None,
         ),
         case(
+            // To the stub itself, so that following it would show as a second request.
+            // `no_redirect_is_followed_anywhere` covers the rest.
             "a redirect, which is never followed",
-            Reply::Redirect(307, "http://elsewhere.example/v1/"),
-            |e| matches!(e, Error::Redirected { status: 307, location } if location == "http://elsewhere.example/v1/"),
+            Reply::Redirect(307, "/v1/moved".into()),
+            |e| matches!(e, Error::Redirected { status: 307, location } if location == "/v1/moved"),
             Some(307),
             None,
         ),
@@ -753,6 +755,11 @@ async fn nothing_listening_is_a_connection_failure() {
         assert!(matches!(error, Error::Connect { .. }), "{name}: {error:?}");
         assert_eq!((error.status(), error.code()), (None, None));
         assert_no_secret(&error, name);
+        // The request's address is not part of the error: it says why, not where to.
+        let shown = format!("{error} {error:?}");
+        for part in ["/v1/", "general", "channels", "http://"] {
+            assert!(!shown.contains(part), "{name}: {part} in {shown}");
+        }
     }
 }
 
@@ -885,6 +892,220 @@ async fn a_client_is_only_built_for_an_address_and_token_it_can_use() {
     let client = Client::new(&server, &token, timeout).unwrap();
     assert_eq!(client.server(), "http://127.0.0.1:8080");
     assert!(!format!("{client:?}").contains("FAKE"));
+}
+
+#[tokio::test]
+async fn no_redirect_is_followed_anywhere() {
+    // The login token goes where the user pointed the server address and nowhere else.
+    // `target` is another origin, a real listener that would answer: it must hear nothing.
+    for status in [301u16, 302, 303, 307, 308] {
+        let target = Stub::http(|request| {
+            if request.target.ends_with("/voice/transmit") {
+                Reply::Empty(204)
+            } else if request.target.ends_with("/voice/session") {
+                Reply::Json(200, session_body().to_string())
+            } else {
+                Reply::Json(200, presence_body().to_string())
+            }
+        })
+        .await;
+        let elsewhere = [
+            format!("{}/v1/channels/general/voice", target.url("")),
+            format!("{}/v1/channels/general/voice/session", target.url("")),
+            format!("{}/v1/voice/ws?channel=general", target.url("")),
+            target.url("/"),
+        ];
+        for location in elsewhere {
+            let stub = Stub::always(Reply::Redirect(status, location.clone())).await;
+            let client = stub.client();
+            let results = [
+                client.session("general").await.map(|_| ()),
+                client
+                    .transmit("general", VoiceTransmitState::Started, None)
+                    .await,
+                client.presence("general").await.map(|_| ()),
+                client.presence_stream("general").await.map(|_| ()),
+            ];
+            for result in results {
+                match result {
+                    Err(Error::Redirected {
+                        status: s,
+                        location: l,
+                    }) => {
+                        assert_eq!((s, &l), (status, &location));
+                    }
+                    other => panic!("{status} to {location}: {other:?}"),
+                }
+            }
+            // One request per call to the server the user named; none to the other.
+            assert_eq!(stub.requests().len(), 4, "{status} to {location}");
+            assert!(
+                target.requests().is_empty(),
+                "{status} to {location}: the redirect was followed: {:#?}",
+                target.requests()
+            );
+        }
+
+        // To the same origin, absolute and relative: following it would be a second
+        // request to the same stub.
+        let stub_url = std::sync::Arc::new(std::sync::OnceLock::<String>::new());
+        let known = stub_url.clone();
+        let stub = Stub::http(move |request| {
+            let location = if request.target.contains("absolute") {
+                format!("{}/v1/moved", known.get().unwrap())
+            } else {
+                "/v1/moved".to_owned()
+            };
+            Reply::Redirect(status, location)
+        })
+        .await;
+        stub_url.set(stub.url("")).unwrap();
+        let client = stub.client();
+        for channel in ["relative", "absolute"] {
+            let results = [
+                client.session(channel).await.map(|_| ()),
+                client
+                    .transmit(channel, VoiceTransmitState::Stopped, None)
+                    .await,
+                client.presence(channel).await.map(|_| ()),
+                client.presence_stream(channel).await.map(|_| ()),
+            ];
+            for result in results {
+                assert!(
+                    matches!(result, Err(Error::Redirected { status: s, .. }) if s == status),
+                    "{status} {channel}: {result:?}"
+                );
+            }
+        }
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 8, "{status}: {requests:#?}");
+        assert!(
+            requests.iter().all(|r| !r.target.contains("moved")),
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_https_address_is_never_spoken_to_in_plain_http() {
+    // A plain-HTTP listener at an https address: the client must fail to connect, and
+    // the listener must never see a request, least of all the token.
+    let stub = Stub::always(Reply::Json(200, presence_body().to_string())).await;
+    let secure = stub.url("").replace("http://", "https://");
+    // The listener never answers a TLS hello, so each call ends at the timeout.
+    let client = client_for(&secure, Duration::from_millis(300));
+    assert!(client.server().starts_with("https://"));
+    let results = [
+        client.session("general").await.map(|_| ()),
+        client
+            .transmit("general", VoiceTransmitState::Started, None)
+            .await,
+        client.presence("general").await.map(|_| ()),
+        client.presence_stream("general").await.map(|_| ()),
+    ];
+    for result in results {
+        assert!(
+            matches!(
+                result,
+                Err(Error::Timeout | Error::Connect { .. } | Error::Transport { .. })
+            ),
+            "{result:?}"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(stub.requests().is_empty(), "{:#?}", stub.requests());
+}
+
+#[tokio::test]
+async fn an_address_that_would_reach_another_host_than_its_key_names_gets_no_client() {
+    let token = Secret::new(FAKE_TOKEN);
+    let timeout = Duration::from_secs(1);
+    // A capital dotted I lowers to a plain i in the key, as in Go, so these find the
+    // login stored for istanbul.example; the request would go to xn--istanbul-o0e.example.
+    for raw in [
+        "https://\u{130}stanbul.example",
+        "https://\u{130}STANBUL.example:8443/conch",
+        "http://conch.\u{130}stanbul.example",
+        "https://%C4%B0stanbul.example",
+    ] {
+        let server = ServerAddress::parse(raw).unwrap();
+        assert!(
+            server.key().contains("istanbul.example"),
+            "{raw}: the key is {}",
+            server.key()
+        );
+        let error = Client::new(&server, &token, timeout).unwrap_err();
+        match &error {
+            Error::InvalidServer { reason } => {
+                assert!(reason.contains("cannot be used safely"), "{raw}: {reason}");
+            }
+            other => panic!("{raw}: {other:?}"),
+        }
+        // The address is not repeated, as for every other address error.
+        let shown = format!("{error} {error:?}");
+        assert!(
+            !shown.contains("stanbul") && !shown.contains("FAKE"),
+            "{shown}"
+        );
+    }
+    // What the guard must not refuse: the plain spelling, and every ordinary address.
+    for (raw, key) in [
+        ("https://istanbul.example", "https://istanbul.example"),
+        ("https://ISTANBUL.example", "https://istanbul.example"),
+        ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+        ("http://localhost:8080/", "http://localhost:8080"),
+        ("http://Host:80", "http://host:80"),
+        (
+            "https://Conch.Example.COM:443",
+            "https://conch.example.com:443",
+        ),
+        (
+            "https://conch.example/Conch/V1/",
+            "https://conch.example/Conch/V1",
+        ),
+        ("http://[::1]:8080", "http://[::1]:8080"),
+        (
+            "http://[2001:DB8::1]:8080/pre",
+            "http://[2001:db8::1]:8080/pre",
+        ),
+        ("https://[::1]", "https://[::1]"),
+        ("http://B\u{dc}CHER.example", "http://b\u{fc}cher.example"),
+        (
+            "http://xn--bcher-kva.example",
+            "http://xn--bcher-kva.example",
+        ),
+        ("http://user:FAKE-password@Host:8080", "http://host:8080"),
+    ] {
+        let server = ServerAddress::parse(raw).unwrap();
+        let client = Client::new(&server, &token, timeout)
+            .unwrap_or_else(|e| panic!("{raw} was refused: {e}"));
+        assert_eq!(client.server(), key, "{raw}");
+    }
+}
+
+#[tokio::test]
+async fn a_bracketed_host_that_is_not_an_ipv6_address_gets_no_client() {
+    // Go 1.25.0 gives these a key (the shared vectors pin that); later Go refuses them
+    // outright. Whatever the key, no request is ever made to one.
+    let token = Secret::new(FAKE_TOKEN);
+    for raw in [
+        "http://[evil.com]",
+        "http://[evil.com]:8080/",
+        "http://a.b[",
+        "http://host[::1",
+        "http://[::1]]",
+        "http://[[::1]]:80",
+        "http://[1.2.3.4]",
+        "http://127.0.0.1[evil.com]",
+    ] {
+        if let Ok(server) = ServerAddress::parse(raw) {
+            let result = Client::new(&server, &token, Duration::from_secs(1));
+            assert!(
+                matches!(result, Err(Error::InvalidServer { .. })),
+                "{raw}: {result:?}"
+            );
+        }
+    }
 }
 
 /// The binary runs these on a multi-threaded runtime and hands them between tasks. This
