@@ -347,9 +347,18 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
+	// Only an agent's refusals are audited as access_denied; for a human
+	// the subject is empty and nothing is written.
+	agentSubject := ""
+	if caller.Kind == store.PrincipalAgent {
+		// Never empty for an agent: empty means "not an agent" below.
+		if agentSubject = r.Pattern; agentSubject == "" {
+			agentSubject = "<unmatched>"
+		}
+	}
 	message, recipients, serr := s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: channel.ID, AuthorID: req.AuthorID, Body: req.Body, Payload: req.Payload, Audience: audience,
-	})
+	}, agentSubject)
 	if serr != nil {
 		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
 		return
@@ -364,12 +373,24 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 // both end here, so the two cannot answer differently: an unknown net, an
 // archived net and a net the author is not on are all net_not_found; only a
 // monitor of the net learns it may not transmit.
-func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost) (schema.MessageV2, []int64, *schema.Error) {
+//
+// agentSubject is the audit subject ("mcp:<tool>" or the route pattern) when
+// the author is an agent, and empty otherwise. An agent's refusal by the net's
+// roster is then recorded as access_denied, once, here, so the two front ends
+// record it alike (issue #149). The answer to the caller does not change.
+func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, agentSubject string) (schema.MessageV2, []int64, *schema.Error) {
 	stored, recipients, err := s.store.InsertScopedMessage(ctx, post)
+	denied := func(reason string) {
+		if agentSubject != "" {
+			s.auditAgentDenial(ctx, post.AuthorID, agentSubject, schema.CapabilityMessagesPost, post.ChannelID, reason)
+		}
+	}
 	switch {
 	case errors.Is(err, store.ErrNetNotFound):
+		denied(denyNetNotOn)
 		return schema.MessageV2{}, nil, &schema.Error{Code: "net_not_found", Message: "net not found"}
 	case errors.Is(err, store.ErrNetMonitorOnly):
+		denied(denyNetMonitorOnly)
 		return schema.MessageV2{}, nil, &schema.Error{Code: errForbidden.Code, Message: "a monitor of a net may listen but not transmit"}
 	case errors.Is(err, store.ErrInvalidAudience):
 		return schema.MessageV2{}, nil, &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}

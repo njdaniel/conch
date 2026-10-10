@@ -45,7 +45,16 @@ const (
 	// audience: post_net, whisper or whisper_agent (issue #117). It is its own
 	// reason so the audit log tells "may not post here" from "may post here,
 	// but not to that audience".
-	denyAudienceGrant     = "audience_not_granted"
+	denyAudienceGrant = "audience_not_granted"
+	// denyNetMonitorOnly and denyNetNotOn are an agent's scoped post refused
+	// by the net's roster rather than by its manifest (issue #149): it only
+	// monitors the net, or it is not on it. "Not on it" also covers a net
+	// that is archived or does not exist: the store does not tell these
+	// apart, on purpose, and neither does the audit row, which carries no
+	// net id (an agent walking net ids must not fill the log with numbers of
+	// its choosing).
+	denyNetMonitorOnly    = "net_monitor_only"
+	denyNetNotOn          = "net_not_on"
 	denyAgentOnHumanRoute = "agents_use_mcp"
 )
 
@@ -254,7 +263,7 @@ func (g *grantedChannel) insertScopedMessage(ctx context.Context, body string, p
 	}
 	return g.scope.s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, Body: body, Payload: payload, Audience: *g.audience,
-	})
+	}, g.scope.subject)
 }
 
 // createApproval raises an approval in the channel on the agent's behalf. The
