@@ -70,7 +70,7 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	hook, err := s.store.CreateHookWithLabel(ctx, token, req.Label, channel.ID, req.Principal)
+	hook, err := s.store.CreateHookWithLabel(ctx, auditActor(ctx), token, req.Label, channel.ID, req.Principal)
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

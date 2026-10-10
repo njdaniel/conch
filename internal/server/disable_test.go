@@ -440,7 +440,7 @@ func TestDisabledPrincipalHooksStop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := f.srv.store.CreateHook(ctx, "bot-hook", general.ID, f.bot.ID); err != nil {
+			if _, err := f.srv.store.CreateHook(ctx, "system", "bot-hook", general.ID, f.bot.ID); err != nil {
 				t.Fatal(err)
 			}
 			ingest := func() *httptest.ResponseRecorder {
