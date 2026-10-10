@@ -38,9 +38,9 @@ echo "pre-commit: dependency gate"
 # absolute path shared by every worktree), so it can be newer than the branch
 # being committed. A branch from before voice/ existed has no Rust leg to run.
 # Where the script exists it always runs, and fails if its toolchain is missing.
-if [ -x ./scripts/rust-check.sh ]; then
+if [ -f ./scripts/rust-check.sh ]; then
     echo "pre-commit: rust (voice/)"
-    ./scripts/rust-check.sh
+    bash ./scripts/rust-check.sh
 fi
 
 echo "pre-commit: OK"
