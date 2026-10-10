@@ -123,6 +123,26 @@ bin/conch reject  --reason "not yet" 1
 bin/conch logout
 ```
 
+`conch voice status <channel>` shows who is connected to the channel's voice and who is transmitting, then exits; `--watch` keeps following and prints a `--- <time>` line and the new state on every change until you interrupt it. It only reads presence; it never joins voice. Each participant is one line, in principal id order: `<id> <name|-> <talking|quiet> <joined-at>` (an RFC 3339 UTC time), for example `3 nick talking 2026-10-09T08:30:00Z`. The API gives a member only their own name, so other participants show as `-`; a name with spaces or unusual characters is double-quoted and escaped. An empty room prints `nobody is connected to voice in <channel>` and exits 0. Voice not configured, or configured but unreachable, prints one line and exits nonzero (under `--watch`, an unreachable voice server is printed and the watch carries on).
+
+#### Nets and whispers
+
+A message goes to the whole channel, to a net (a named subset of the channel's members), or to a list of principals (a whisper). With no flag `send` posts channel-wide, so name the scope you mean:
+
+```sh
+bin/conch send --net alpha ops "alpha team: hold the deploy"   # to the net named alpha
+bin/conch send --to 3,5 ops "quick question"                   # whisper to principals 3 and 5
+bin/conch nets list ops                                        # name  id:role id:role ...
+bin/conch nets create ops alpha
+bin/conch nets add ops alpha 5            # add --monitor to listen only
+bin/conch nets remove ops alpha 5
+bin/conch nets archive ops alpha
+```
+
+`--net` and `--to` cannot be combined. `tail` marks scoped messages: `[net:alpha]` for a net, `[whisper:3,5,7]` for a whisper (the ids listed are everyone who can see it); channel-wide messages have no marker, and a message body that itself starts with `[` is printed as `\[` so that it cannot be mistaken for one. Whispers are discretion, not secrecy: they are recorded in the audit log, and `send --to` says so on stderr. Net management is an operator action; anyone else gets the server's refusal.
+
+In the TUI the prompt always says where your next message goes: `ops >` for the whole channel, `ops/alpha >` for a net. `/net alpha` sets that target, `/net` alone returns to the channel, and switching channels resets it. `/w 3,5 quick question` whispers once and leaves the target as it was. A message that really starts with `/` is sent as `//text`; any other `/word` is an error, not a message. Scoped messages start with a `[net:alpha]` or `[whisper:3,5]` badge (a whisper lists the other participants); a body that starts with `[` is shown with a leading `\`. The first whisper of a session reminds you that whispers are recorded in the audit log. If the server refuses a send, your text stays in the input and nothing else is sent: the TUI never falls back to the channel.
+
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
 - `CONCH_CHANNELS` — optional comma-separated override for which channels the TUI opens.
@@ -141,6 +161,13 @@ bin/conch-bot
 ```
 
 It skips messages already present when it starts and ignores its own replies.
+It replies in kind: an answer to a net message goes to that net, an answer to
+a whisper goes to the same principals, and an answer to a channel-wide message
+is channel-wide. To reply on a net or to a whisper its manifest needs
+`post_net` or `whisper` (plus `whisper_agent` for a whisper that includes
+another agent). If the server refuses a scoped reply, the bot logs one line and
+posts nothing; it never falls back to a wider audience. It does not start
+scoped conversations.
 Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
 `CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
 `CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`. Like any
@@ -151,8 +178,8 @@ agent it needs channel membership and a manifest (next section) allowing
 
 Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the agent's token from step 3. Five tools are registered:
 
-- `post_message` — post a message to a channel as the authenticated agent.
-- `read_channel` — read one paginated page of messages from a channel.
+- `post_message` — post a message to a channel as the authenticated agent. With an `audience` (`{"kind":"net","net_id":N}` or `{"kind":"principals","principal_ids":[…]}`) it goes only to that net or those principals; the agent's manifest must grant `post_net`, or `whisper` (plus `whisper_agent` to reach another agent).
+- `read_channel` — read one paginated page of messages from a channel: channel-wide ones, and scoped ones the agent is a recipient of. A message with an `audience` was not sent to everyone; reply in kind by sending the same `audience` back.
 - `request_approval` — raise an approval as the authenticated agent.
 - `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
 - `check_decision` — read an approval's current state/resolution immediately, without blocking.

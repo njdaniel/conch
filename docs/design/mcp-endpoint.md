@@ -22,7 +22,7 @@ gaps this mapping exposes, flagged rather than papered over.
   POST/GET/session-id mechanics of the transport). The versioned `/v0`, `/v1`
   REST paths stay as they are; MCP carries its own protocol version in the
   initialize handshake, and tool payload shapes are versioned by their
-  `pkg/schema` envelope (`conch.message.v1`), not by the URL.
+  `pkg/schema` envelope (`conch.message.v2` since #117; `conch.message.v1` before), not by the URL.
 - **Registration:** the endpoint advertises exactly the tools registered on it.
   P1 registers `post_message` and `read_channel`. The remaining D4 tools
   (`request_approval`, `await_decision`, `check_decision`) register later on the
@@ -56,10 +56,11 @@ change is needed for it.
 
 ## 3. Tool: `post_message`
 
-Post a message (rendered body + optional typed payload) to a channel. Projection
-of `POST /channels/{channel}/messages` (the v1 form; see gap G1).
+Post a message (rendered body + optional typed payload) to a channel, either to
+the whole channel or to an audience ([ADR-005](../adr/ADR-005-nets-and-whispers.md)).
+Projection of `POST /v2/channels/{channel}/messages`.
 
-**Input** — a projection of `schema.PostMessageRequestV1` minus `author_id`
+**Input** — a projection of `schema.PostMessageRequestV2` minus `author_id`
 (supplied by auth, §2):
 
 | Field | JSON | Type | Notes |
@@ -67,25 +68,58 @@ of `POST /channels/{channel}/messages` (the v1 form; see gap G1).
 | channel | `channel` | string | Channel **name** (matches REST, which resolves by name via `store.ChannelByName`). |
 | body | `body` | string | Rendered, human-readable form. Required, non-empty. Maps to `PostMessageRequestV1.Body`. |
 | payload | `payload` | object, optional | Typed machine payload. Exactly `schema.Payload`: `{ "schema": "<name>.v<N>", "data": <json> }`. Omitted when absent. Maps to `PostMessageRequestV1.Payload`. |
+| audience | `audience` | object, optional | Exactly `schema.Audience`: `{"kind":"net","net_id":N}` or `{"kind":"principals","principal_ids":[…]}`. **Omitted means the whole channel.** See "Audience" below. |
 
 `payload.schema` must be a well-formed versioned name (`schema.ValidPayloadName`,
 e.g. `leviathan.trade_signal.v1`); `payload.data` is preserved verbatim
 (`json.RawMessage`) so an unregistered schema round-trips unchanged — forward
 compatibility is a property of the schema layer, inherited for free.
 
-**Output** — exactly `schema.PostMessageResponseV1`:
+**Output** — exactly `schema.PostMessageResponseV2`:
 
 ```jsonc
-{ "message": {            // schema.MessageV1
-    "schema": "conch.message.v1",
+{ "message": {            // schema.MessageV2
+    "schema": "conch.message.v2",
     "id": 42,
     "channel_id": 7,
     "author_id": 3,        // the authenticated agent principal
     "created_at": "2026-07-14T12:34:56.789Z",  // RFC 3339 UTC, ms (schema.Timestamp)
     "body": "...",
-    "payload": { "schema": "leviathan.trade_signal.v1", "data": { } }
+    "payload": { "schema": "leviathan.trade_signal.v1", "data": { } },
+    "audience": { "kind": "net", "net_id": 5 }   // absent for a channel-wide message
 } }
 ```
+
+**Audience (#117).** The rules, the order they are checked in, and the answers
+are those of the REST post; both end in the same functions
+(`authorizeScopedPost`, `storeScopedPost`), so they cannot drift.
+
+1. The audience must be well-formed (`Audience.Validate`), and a whisper must
+   name at least one principal other than the agent: otherwise `invalid_audience`.
+   The server adds the author to a whisper and returns the list sorted.
+2. An unknown channel and a channel the agent is not a member of are the same
+   `channel_not_found`.
+3. The manifest must grant that kind of audience in that channel
+   ([agent-manifest.md §4](agent-manifest.md#4-channel-permissions)): `post_net`
+   for a net; `whisper` for a whisper, plus `whisper_agent` when a recipient is
+   an agent. Otherwise `forbidden`, audited with reason `audience_not_granted`.
+   The channel-wide `post` permission grants none of these, and none of these
+   grants a channel-wide post.
+4. A net the agent is not on, an archived net and a net that does not exist are
+   the same `net_not_found`. An agent that only monitors the net gets
+   `forbidden`. A whisper recipient who is not a member of the channel is
+   `invalid_audience`, whatever kind of principal it is.
+
+A scoped message is delivered to its recipients' v2 sockets and to nothing
+else. There is no tool for managing nets: an agent learns a net's id from the
+`audience` of a message it receives, and **replies in kind by sending that
+`audience` object back unchanged**.
+
+The SDK validates arguments against the published input schema and rejects any
+it does not know, so a misspelt `audience` is an error, never a channel-wide
+post. The only spellings of "the whole channel" are leaving `audience` out and
+an explicit `"audience": null`, as on REST; either needs the channel-wide
+`post` permission.
 
 **Parity:** the posted message is durable, then broadcast to the WS hub and
 readable via the REST `GET` — the same `persist-then-broadcast` path
@@ -94,8 +128,9 @@ write path of its own; it calls the same core operation.
 
 ## 4. Tool: `read_channel`
 
-Read/paginate a channel's messages. Projection of
-`GET /channels/{channel}/messages`.
+Read/paginate a channel's messages: those sent to the whole channel, and those
+with an audience the agent is a recipient of. Projection of
+`GET /v2/channels/{channel}/messages`.
 
 **Input:**
 
@@ -105,26 +140,35 @@ Read/paginate a channel's messages. Projection of
 | after | `after` | integer, optional | Cursor: return messages with id > `after`. Default 0 (from the start). Maps to the REST `after` query param. |
 | limit | `limit` | integer, optional | Page size. Default 50, max 100 — **identical bounds to REST** (`defaultMessageLimit`/`maxMessageLimit`). Out-of-range is an input error. |
 
-**Output** — exactly `schema.ListMessagesResponseV1`:
+**Output** — exactly `schema.ListMessagesResponseV2`:
 
 ```jsonc
 {
-  "messages": [ /* schema.MessageV1, ... */ ],
+  "messages": [ /* schema.MessageV2, ... */ ],
   "next_after": 91          // omitted/0 when no further page (same convention as REST)
 }
 ```
 
 **Parity:** identical pagination semantics, identical caps, identical cursor.
-A reader must see the same messages via `read_channel` and via the REST `GET`
-(the dogfood-check parity assertion). Because both return `MessageV1`, a payload
-posted through either front-end reads back byte-identical through both.
+A reader must see the same messages via `read_channel` and via the REST v2
+`GET` (the dogfood-check parity assertion). Because both return `MessageV2`, a
+payload posted through either front-end reads back byte-identical through both.
+
+**Visibility (#117).** The tool takes no audience argument: what an agent may
+read is decided by the server from its authenticated identity, through the one
+visibility function (`store.ListVisibleMessages`). Reading needs no grant
+beyond `messages.read` and the channel `read` permission; being a recipient is
+what makes a scoped message visible. A message with an `audience` field was not
+sent to everyone, and an agent that answers it without one discloses it.
+Paging is unaffected by messages the agent cannot see: `next_after` is always
+the id of the last message returned.
 
 ## 5. Parity mapping (ADR-001 D6)
 
 | MCP tool | REST/WS equivalent | Core operation | Canonical types |
 |---|---|---|---|
-| `post_message` | `POST /channels/{channel}/messages` + WS broadcast | `store.InsertMessage` → hub/broadcaster | in: `PostMessageRequestV1` (author from auth); out: `PostMessageResponseV1` |
-| `read_channel` | `GET /channels/{channel}/messages` | `store.ListMessages` | out: `ListMessagesResponseV1` |
+| `post_message` | `POST /v2/channels/{channel}/messages` + WS broadcast | `store.InsertMessage` → hub/broadcaster; with an audience, `store.InsertScopedMessage` → the recipients' v2 sockets | in: `PostMessageRequestV2` (author from auth); out: `PostMessageResponseV2` |
+| `read_channel` | `GET /v2/channels/{channel}/messages` | `store.ListVisibleMessages` | out: `ListMessagesResponseV2` |
 
 No MCP-only capability: every tool is a call into an operation the REST/WS API
 already fronts. The one shape difference (`author_id` sourced from auth, not the
@@ -147,6 +191,9 @@ MCP separates two failure classes; Conch maps its existing REST error taxonomy
 | Condition | REST today | MCP result |
 |---|---|---|
 | Channel does not exist | 404 `channel_not_found` | tool error, `schema.Error{code:"channel_not_found"}` |
+| Malformed audience, or a whisper recipient who is not a channel member | 400 `invalid_audience` | tool error, `schema.Error{code:"invalid_audience"}` |
+| Net unknown, archived, or one the caller is not on | 404 `net_not_found` | tool error, `schema.Error{code:"net_not_found"}` |
+| Manifest lacks the audience grant, or the caller only monitors the net | 403 `forbidden` | tool error, `schema.Error{code:"forbidden"}` |
 | Empty/invalid body, bad `after`/`limit` | 400 `invalid_request` | tool error, `schema.Error{code:"invalid_request"}` |
 | Payload schema name malformed / data not JSON | (v1) validation error | tool error, `schema.Error{code:"invalid_request"}` (from `Payload.Validate`) |
 | Body over size cap | 413 `request_too_large` | tool error, `schema.Error{code:"request_too_large"}` |
@@ -154,7 +201,7 @@ MCP separates two failure classes; Conch maps its existing REST error taxonomy
 | Store failure | 500 `internal_error` | tool error, `schema.Error{code:"internal_error"}`, detail withheld |
 
 **Structured output embedding:** successful results are returned as the SDK's
-structured tool output — the `PostMessageResponseV1` / `ListMessagesResponseV1`
+structured tool output — the `PostMessageResponseV2` / `ListMessagesResponseV2`
 JSON above — with a short human-readable text block alongside (SDK convention).
 The structured half is authoritative and is literally the `pkg/schema` type
 marshalled; agents parse that, not the prose.
@@ -163,7 +210,7 @@ marshalled; agents parse that, not the prose.
 `google/jsonschema-go` rather than hand-authored, so the advertised
 `inputSchema`/`outputSchema` track `pkg/schema` and cannot drift into a second
 source of truth (D8). The one exception is `post_message`'s input, which is the
-`PostMessageRequestV1` shape **with `author_id` removed** (§2) — see gap G2.
+`PostMessageRequestV2` shape **with `author_id` removed** (§2) — see gap G2.
 
 ## 7. `pkg/schema` gaps flagged (not invented)
 

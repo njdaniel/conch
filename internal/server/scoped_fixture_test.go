@@ -305,12 +305,13 @@ func listIDs(t *testing.T, body string) (ids []int64, next int64) {
 }
 
 // mcpReadChannel calls the read_channel tool with a bearer token and reports
-// the HTTP status, the tool error code if any, and the ids it returned.
-func (f *scopedFixture) mcpReadChannel(t *testing.T, token string, args map[string]any) (status int, code string, ids []int64) {
+// the HTTP status, the tool error code if any, the ids it returned, and the
+// raw response.
+func (f *scopedFixture) mcpReadChannel(t *testing.T, token string, args map[string]any) (status int, code string, ids []int64, raw string) {
 	t.Helper()
 	out := f.mcpCall(t, token, "read_channel", args)
 	if out.status != http.StatusOK || out.isError {
-		return out.status, out.code, nil
+		return out.status, out.code, nil, out.body
 	}
 	var resp struct {
 		Result struct {
@@ -328,7 +329,7 @@ func (f *scopedFixture) mcpReadChannel(t *testing.T, token string, args map[stri
 	for _, m := range resp.Result.Structured.Messages {
 		ids = append(ids, m.ID)
 	}
-	return out.status, "", ids
+	return out.status, "", ids, out.body
 }
 
 func (f *scopedFixture) mcpCall(t *testing.T, token, tool string, args map[string]any) mcpOutcome {
