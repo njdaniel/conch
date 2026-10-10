@@ -43,49 +43,8 @@ func voiceIdentity(principalID int64) string { return "p" + strconv.FormatInt(pr
 // it records the denial, not a session).
 func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	// Voice needs a verified caller; with authentication off the identity is
-	// whatever the request says. Refused before the channel is looked at.
-	caller, ok := callerFrom(ctx)
+	channel, caller, ok := s.voiceSessionCaller(w, r)
 	if !ok {
-		writeError(w, http.StatusBadRequest, schema.ErrorCodeVoiceRequiresAuth, "voice requires authentication")
-		return
-	}
-
-	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeChannelNotFound(w)
-		return
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "voice: find channel failed", "error", err)
-		writeInternalError(w)
-		return
-	}
-	member, err := s.callerIsMember(r, channel.ID)
-	if err != nil {
-		slog.ErrorContext(ctx, "voice: check membership failed", "error", err)
-		writeInternalError(w)
-		return
-	}
-	if !member {
-		// Operators get no exemption. A non-member agent is audited as such.
-		s.auditAgentNonMember(r, "", channel.ID)
-		writeChannelNotFound(w)
-		return
-	}
-	// Humans only: agents in voice are deferred (ADR-004), and any kind of
-	// principal added later has no voice until someone decides it does.
-	// Checked after membership, so a non-member learns nothing about the
-	// channel from this answer.
-	if caller.Kind != store.PrincipalHuman {
-		s.auditAgentDenial(ctx, caller.ID, r.Pattern, "", channel.ID, denyAgentVoice)
-		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
-		return
-	}
-
-	if s.lk == nil {
-		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceNotConfigured, "voice is not configured on this server")
 		return
 	}
 
@@ -131,13 +90,37 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	writeSecretJSON(w, http.StatusOK, resp)
 }
 
-// voicePresenceChannel resolves the channel for a presence request and applies
-// the checks every presence reader shares, in the order the session endpoint
-// uses: a verified caller, then the unknown-channel 404 for a non-member, then
-// the refusal of agents. It writes the response and returns false when the
-// request must stop. With authentication off there is no verified caller, and
-// voice is never anonymous, so presence is refused as the session endpoint is
-// (the design note is silent; one rule keeps one answer for all voice routes).
+// voiceSessionCaller is the check of who is asking that the session endpoint
+// and the transmit-report endpoint share, so that the two cannot drift apart:
+// the checks every voice route makes of the caller (voicePresenceChannel), and
+// then that voice is configured. It resolves the channel from the request
+// path, writes the response and returns false when the request must stop.
+//
+// The order is part of the contract. Everything that depends on who is asking
+// comes first, so a caller who is not a member of the channel gets the
+// unknown-channel 404 whether or not voice is configured, and learns nothing
+// about voice. Only a member is told that voice is not set up.
+func (s *Server) voiceSessionCaller(w http.ResponseWriter, r *http.Request) (store.Channel, store.Principal, bool) {
+	channel, caller, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
+	if !ok {
+		return store.Channel{}, store.Principal{}, false
+	}
+	if s.lk == nil {
+		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceNotConfigured, "voice is not configured on this server")
+		return store.Channel{}, store.Principal{}, false
+	}
+	return channel, caller, true
+}
+
+// voicePresenceChannel resolves the channel for a voice request and applies
+// the checks of the caller that every voice route shares, in one order: a
+// verified caller, then the unknown-channel 404 for a non-member, then the
+// refusal of agents. The session and transmit-report endpoints go through it
+// (voiceSessionCaller), as do the presence snapshot and its socket. It writes
+// the response and returns false when the request must stop. With
+// authentication off there is no verified caller, the identity would be
+// whatever the request says, and voice is never anonymous: refused, before the
+// channel is looked at.
 //
 // For the socket, afterLookup runs between the channel lookup and the
 // membership check: the caller subscribes there, so a removal that lands
@@ -169,13 +152,17 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 		return store.Channel{}, store.Principal{}, false
 	}
 	if !member {
+		// Operators get no exemption. A non-member agent is audited as such.
 		s.auditAgentNonMember(r, "", channel.ID)
 		writeChannelNotFound(w)
 		return store.Channel{}, store.Principal{}, false
 	}
-	// Whether an agent may see who is talking is part of the deferred
-	// decision on agents in voice (ADR-004): refused whatever its manifest
-	// says, and audited.
+	// Humans only: agents in voice are deferred (ADR-004), whether an agent
+	// may see who is talking is part of that decision, and any kind of
+	// principal added later has no voice until someone decides it does.
+	// Refused whatever its manifest says, and audited. Checked after
+	// membership, so a non-member learns nothing about the channel from this
+	// answer.
 	if caller.Kind != store.PrincipalHuman {
 		s.auditAgentDenial(ctx, caller.ID, r.Pattern, "", channel.ID, denyAgentVoice)
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
