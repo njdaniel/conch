@@ -23,8 +23,18 @@
 //! 55 capital letters that 15.0 does not. Every code point was run through both; those 55
 //! are the whole difference, and [`lower`] leaves them alone as Go does. The vectors hold
 //! one from each block, so that a Go whose tables have caught up fails its half of the
-//! test and this list is shortened. A letter added to Unicode after both is not covered
-//! by any of this until someone adds it.
+//! test and this list is shortened. Both tests also assert the Unicode version their side
+//! was built with (`char::UNICODE_VERSION` here, `unicode.Version` in Go), so a change of
+//! tables on either side fails at once and says to run the comparison again; until it is
+//! run, a letter that only the new tables know is not covered.
+//!
+//! One more difference is known and deliberately left in the key: Go 1.25.0 gives a key to
+//! a bracketed host that is not an IPv6 address (`http://[evil.com]`, `http://a.b[`), and
+//! later Go refuses such an address. This module does what Go 1.25.0 does, because that is
+//! the Go that `go.mod` names and the key is its contract; the vectors hold ten such
+//! addresses, so the Go half fails when `go.mod` moves. No request can go to one in the
+//! meantime: `Client::new` refuses every address whose host reqwest cannot parse, and it
+//! cannot parse these.
 
 use std::fmt;
 
@@ -437,6 +447,22 @@ mod tests {
         note: String,
     }
 
+    /// The Unicode version of the tables `go_to_lower` was compared with Go's under.
+    const COMPARED_UNDER_UNICODE: (u8, u8, u8) = (17, 0, 0);
+
+    #[test]
+    fn the_unicode_tables_are_the_ones_the_comparison_with_go_was_run_under() {
+        assert_eq!(
+            char::UNICODE_VERSION,
+            COMPARED_UNDER_UNICODE,
+            "this compiler lower-cases with other Unicode tables than the ones \
+             `newer_than_gos_tables` in src/server.rs was worked out from. Run the comparison \
+             again: every code point as a host (`http://<c>.x`) through Go's NormalizeServer \
+             and through ServerAddress::parse. Then bring that list and \
+             internal/cli/testdata/credentials-vectors.json up to date, and this constant last."
+        );
+    }
+
     fn vectors() -> Vec<Vector> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../internal/cli/testdata/credentials-vectors.json");
@@ -448,7 +474,7 @@ mod tests {
     #[test]
     fn the_key_matches_go_for_every_shared_vector() {
         let vectors = vectors();
-        assert!(vectors.len() >= 40, "only {} vectors", vectors.len());
+        assert!(vectors.len() >= 160, "only {} vectors", vectors.len());
         let (mut keys, mut errors) = (0, 0);
         for v in &vectors {
             assert!(
@@ -507,6 +533,31 @@ mod tests {
             format!("{address:?}"),
             r#"ServerAddress("http://host:8080/Pre")"#
         );
+    }
+
+    #[test]
+    fn the_origin_keeps_the_scheme_the_user_gave() {
+        // (address, origin). An https address must never be requested over http.
+        let table = [
+            ("https://conch.example", "https://conch.example"),
+            (
+                "HTTPS://Conch.Example:8443/pre/",
+                "https://Conch.Example:8443",
+            ),
+            ("hTtPs://[::1]:443", "https://[::1]:443"),
+            ("https://user:FAKE-password@host/", "https://host"),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("HTTP://host", "http://host"),
+        ];
+        for (raw, origin) in table {
+            let address = ServerAddress::parse(raw).unwrap();
+            assert_eq!(address.origin(), origin, "{raw}");
+            assert_eq!(
+                address.key().starts_with("https://"),
+                origin.starts_with("https://"),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

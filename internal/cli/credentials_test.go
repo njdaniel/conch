@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // TestMain keeps every test away from the real user configuration and from a
@@ -77,7 +78,22 @@ func TestNormalizeServer(t *testing.T) {
 // underneath it (net/url, or the Unicode tables strings.ToLower uses): logins
 // stored under the old key are no longer found, and the Rust side has to
 // change in the same pull request.
+//
+// Two changes underneath are expected, and the file is built to notice both.
+// The vectors cannot hold every letter, so the Unicode version is asserted
+// outright. And Go releases after 1.25.0 refuse a bracketed host that is not
+// an IPv6 address (http://[evil.com]); ten vectors have such a host, so this
+// test fails when go.mod moves to one of those releases.
 func TestNormalizeServerSharedVectors(t *testing.T) {
+	// The Unicode version the Go and Rust lower-casing were compared under.
+	const comparedUnderUnicode = "15.0.0"
+	if unicode.Version != comparedUnderUnicode {
+		t.Fatalf("this Go lower-cases with Unicode %s, and the shared vectors were made under %s. "+
+			"Run the comparison again: every code point as a host (http://<c>.x) through NormalizeServer "+
+			"and through the Rust ServerAddress::parse. Then bring newer_than_gos_tables in "+
+			"voice/crates/conch-voice-api/src/server.rs and testdata/credentials-vectors.json up to date, "+
+			"and this constant last.", unicode.Version, comparedUnderUnicode)
+	}
 	data, err := os.ReadFile(filepath.Join("testdata", "credentials-vectors.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +109,7 @@ func TestNormalizeServerSharedVectors(t *testing.T) {
 	if err := dec.Decode(&vectors); err != nil {
 		t.Fatalf("credentials-vectors.json: %v", err)
 	}
-	if len(vectors) < 40 {
+	if len(vectors) < 160 {
 		t.Fatalf("credentials-vectors.json has %d vectors; the file was cut short", len(vectors))
 	}
 	keys, refusals := 0, 0
