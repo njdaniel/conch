@@ -47,10 +47,12 @@ fn main() {
     };
     logger.set_level(args.log_level);
 
-    let code = match conch_voice::join(&args, &Environment::from_process(), scrubber) {
+    let code = match conch_voice::join(&args, &Environment::from_process(), Arc::clone(&scrubber)) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("conch-voice: {error}");
+            // No error holds a secret or a control character by construction; this is the
+            // last line the program writes, and it is made sure of all the same.
+            eprintln!("conch-voice: {}", scrubber.scrub_line(&error.to_string()));
             i32::from(error.exit_code())
         }
     };

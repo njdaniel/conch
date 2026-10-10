@@ -19,6 +19,7 @@
 //! - **A republish is muted and disabled before anything else.** After its own full
 //!   reconnect the SDK publishes the track again. The event is handled before any other,
 //!   and the SDK reports that it reconnected only after it.
+//!   Should a republish ever come outside a reconnect, a press in progress is ended.
 //! - **`Reconnecting` is not connected.** The gate is forced shut from that moment until
 //!   `Reconnected`. If that has not come within the grace period (20 s) the loop closes the
 //!   connection itself and goes back to `conchd`.
@@ -145,6 +146,14 @@ pub struct Settings {
     /// Waits and limits.
     pub timings: Timings,
 }
+
+/// The most remote tracks that are mixed at once. A room of people each has one; the bound
+/// is what stops a room that announces thousands from costing a buffer and a task each.
+pub const MAX_TRACKS: usize = 64;
+/// The most tracks of one speaker that are mixed at once: the one they talk on, and one
+/// more for the moment in which a track is replaced. Without it one participant who
+/// publishes many tracks would use up [`MAX_TRACKS`] and nobody else would be heard.
+pub const MAX_TRACKS_PER_SPEAKER: usize = 2;
 
 /// How long a session request or the opening of the presence socket may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -306,6 +315,9 @@ struct Live<T: Transport> {
     tracks: BTreeMap<String, String>,
     /// When the SDK said `Reconnecting`, until it says `Reconnected`.
     reconnecting_since: Option<Instant>,
+    /// Whether a track beyond the bounds was ignored on this connection, which is said
+    /// once.
+    ignored_a_track: bool,
     /// Forgotten by the scrubber when the connection has been closed.
     secrets: ConnectionSecrets,
 }
@@ -621,6 +633,7 @@ impl<T: Transport> Session<T> {
             identity,
             tracks: BTreeMap::new(),
             reconnecting_since: None,
+            ignored_a_track: false,
             secrets,
         });
         self.phase = Phase::Settled;
@@ -687,6 +700,19 @@ impl<T: Transport> Session<T> {
                     track.mute();
                     track.disable();
                 });
+                // The SDK republishes inside its own reconnect, when the gate is already
+                // forced shut. Should it ever do so at another time, a press in progress
+                // would go on against a track that sends nothing while the status says
+                // "talking". The press is ended instead, as for a lost connection: it is
+                // reported as stopped and the key must be pressed again.
+                let reconnecting = self
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.reconnecting_since.is_some());
+                if !reconnecting && self.ptt.status().transmitting {
+                    self.tell(PttInput::Connected(false));
+                    self.tell(PttInput::Connected(true));
+                }
             }
             Some(SdkEvent::Reconnecting) => {
                 let began = match self.live.as_mut() {
@@ -724,6 +750,19 @@ impl<T: Transport> Session<T> {
                     return;
                 }
                 let speaker = speaker_label(&speaker);
+                let of_speaker = live.tracks.values().filter(|s| **s == speaker).count();
+                if live.tracks.len() >= MAX_TRACKS || of_speaker >= MAX_TRACKS_PER_SPEAKER {
+                    // `frames` is dropped here, which ends the task that was reading the
+                    // track.
+                    if !live.ignored_a_track {
+                        live.ignored_a_track = true;
+                        log::warn!(
+                            "ignoring further audio tracks: at most {MAX_TRACKS} are mixed, \
+                             and {MAX_TRACKS_PER_SPEAKER} of one speaker"
+                        );
+                    }
+                    return;
+                }
                 live.tracks.insert(track.clone(), speaker.clone());
                 self.out.show(&Event::Track {
                     speaker: &speaker,
