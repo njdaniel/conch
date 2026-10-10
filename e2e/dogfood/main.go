@@ -272,7 +272,21 @@ func (p *conchdProc) auditEvents() ([]store.AuditEvent, error) {
 		return nil, err
 	}
 	defer func() { _ = st.Close() }()
-	return st.ListAuditEvents(ctx, 0, 1000)
+	// The whole log, page by page: step 2b alone writes several hundred
+	// rows, and a fixed limit would silently cut the chain off the end.
+	var all []store.AuditEvent
+	after := int64(0)
+	for {
+		page, err := st.ListAuditEvents(ctx, after, 1000)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < 1000 {
+			return all, nil
+		}
+		after = page[len(page)-1].ID
+	}
 }
 
 // ------------------------------------------------------------------ REST
@@ -437,6 +451,52 @@ func newHuman(a api, name, channel string) (int64, string, error) {
 
 // expectToolError calls an MCP tool and requires it to fail with the given
 // error code.
+// abandonRequests sends transactional requests and closes each connection
+// without reading the answer, at delays swept across the first 1.5 ms so that
+// some hang-ups land while the server is inside the transaction. Each request
+// issues a credential to a principal made for the purpose, who is in no
+// channel, so whichever way each one ends, nothing the rest of the run
+// asserts on changes.
+func abandonRequests(proc *conchdProc) error {
+	bystander, err := createPrincipal(proc.operator(), schema.PrincipalHuman, "dogfood-hangup")
+	if err != nil {
+		return fmt.Errorf("abandoned requests: create principal: %w", err)
+	}
+	addr := strings.TrimPrefix(proc.baseURL, "http://")
+	const body = `{"label":"abandoned"}`
+	request := fmt.Sprintf("POST /v1/principals/%d/credentials HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		bystander, addr, proc.operatorToken, len(body), body)
+	// How long a request takes depends on the machine, so the sweep covers
+	// twice a completed one, and never less than 1.5 ms.
+	span := 1500 * time.Microsecond
+	started := time.Now()
+	if _, _, err := issueCredential(proc.operator(), bystander, "timing"); err != nil {
+		return fmt.Errorf("abandoned requests: timing request: %w", err)
+	}
+	if took := 2 * time.Since(started); took > span {
+		span = took
+	}
+	// One sweep of about sixty requests reaches the window only now and then
+	// against a separate server process (the old code survived two runs in
+	// three), so the sweep is repeated: ten of them failed the old code five
+	// runs in five.
+	for round := 0; round < 10; round++ {
+		for wait := time.Duration(0); wait <= span; wait += span / 60 {
+			conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+			if err != nil {
+				return fmt.Errorf("abandoned request: dial: %w", err)
+			}
+			_, _ = conn.Write([]byte(request))
+			time.Sleep(wait)
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0) // an abortive close, as a vanished client produces
+			}
+			_ = conn.Close()
+		}
+	}
+	return nil
+}
+
 func expectToolError(client *mcpclient.Client, tool string, args map[string]any, code string) error {
 	_, err := client.CallTool(context.Background(), tool, args)
 	if err == nil {
@@ -549,6 +609,14 @@ func happyPath(bin binaries) error {
 	}
 	if len(rest.Messages) != 1 || rest.Messages[0].ID != posted.Message.ID {
 		return fmt.Errorf("REST/MCP parity mismatch: REST=%+v MCP=%+v", rest.Messages, read.Messages)
+	}
+
+	// Step 2b: clients that send a request and hang up (issue #153). A
+	// request abandoned inside a store transaction used to leave it open, and
+	// then no approval could be created or decided. Everything after this
+	// point is the proof that it no longer does.
+	if err := abandonRequests(proc); err != nil {
+		return err
 	}
 
 	// Step 3: request_approval, then await_decision (blocking) and

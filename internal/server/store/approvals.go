@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -100,25 +102,70 @@ type execer interface {
 // approval-path transactions serialize at begin instead of failing with a
 // busy-snapshot error at their first write — this is what makes the in-tx
 // quorum check safe under concurrency (approval-object.md §2).
+//
+// A transaction that was begun is always ended, whatever happens to ctx
+// (issue #153). ctx is usually a request's context, and database/sql will not
+// run a statement on a cancelled one; a ROLLBACK or COMMIT issued with it
+// after the client has gone is silently not executed, and the connection would
+// go back to the pool holding an open transaction and SQLite's write lock.
+// Every later transaction on it would fail, and plain writes on it would join
+// the abandoned transaction: reported as done, never committed. So the
+// transaction is ended on a context that cannot be cancelled, and a connection
+// that cannot be shown to be clean is discarded instead of reused.
 func (s *Store) withImmediateTx(ctx context.Context, fn func(tx execer) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("store: acquire connection: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	// clean is set once the connection is known to hold no transaction.
+	clean := false
+	defer func() {
+		if !clean {
+			// Closing the underlying connection ends whatever it holds.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	// SQLite's busy timeout still bounds these statements.
+	end := context.WithoutCancel(ctx)
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		// A cancellation that lands while BEGIN runs can report an error for
+		// a transaction that did open.
+		clean = s.rollback(end, conn)
 		return fmt.Errorf("store: begin immediate: %w", err)
 	}
 	if err := fn(conn); err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		clean = s.rollback(end, conn)
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+	// Nobody is waiting for the result of a caller whose context is done:
+	// its work is rolled back rather than committed behind its back.
+	if err := ctx.Err(); err != nil {
+		clean = s.rollback(end, conn)
+		return fmt.Errorf("store: transaction abandoned: %w", err)
+	}
+	// From here the commit runs to completion even if ctx is cancelled, so
+	// the outcome is never left unknown.
+	if _, err := conn.ExecContext(end, "COMMIT"); err != nil {
+		clean = s.rollback(end, conn)
 		return fmt.Errorf("store: commit: %w", err)
 	}
+	clean = true
 	return nil
+}
+
+// rollback ends the transaction on conn and reports whether the connection is
+// now known to hold none. SQLite rolls a transaction back by itself when a
+// write in it is interrupted, and then answers a ROLLBACK with "no transaction
+// is active": that is a clean connection too. Any other failure is not.
+func (s *Store) rollback(ctx context.Context, conn *sql.Conn) bool {
+	stmt := "ROLLBACK"
+	if s.rollbackSQL != "" {
+		stmt = s.rollbackSQL
+	}
+	_, err := conn.ExecContext(ctx, stmt)
+	return err == nil || strings.Contains(err.Error(), "no transaction is active")
 }
 
 // appendAuditEventTx appends an audit event inside an open transaction, so a
