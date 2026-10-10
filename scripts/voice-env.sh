@@ -26,6 +26,12 @@ if ! command -v cargo >/dev/null 2>&1; then
     return 1 2>/dev/null || exit 1
 fi
 
+# The livekit crate's build reads GLib's headers and finds them with pkg-config.
+if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists glib-2.0 gobject-2.0 gio-2.0; then
+    echo "voice: FAIL: GLib's development headers are not installed (Ubuntu: sudo apt install libglib2.0-dev pkg-config)" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # clang uses GCC's C++ standard library. Left to itself it picks the newest
 # GCC directory it finds, whose C++ headers may not be installed, so name the
 # newest one that has them.

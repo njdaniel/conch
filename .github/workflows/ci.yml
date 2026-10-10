@@ -83,6 +83,12 @@ jobs:
             ~/.cache/conch/voice-target
           key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
 
+      # The SDK's build needs GLib's headers (found through pkg-config) and
+      # nothing else from the system. scripts/voice-env.sh says so if they
+      # are missing.
+      - name: rust system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
 
