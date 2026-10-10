@@ -8,11 +8,13 @@
 //! - It says what it is about to do, and why, **before it opens anything**.
 //! - It writes only to a terminal. If standard output is anything else it refuses, so that
 //!   a redirection cannot put someone's keystrokes in a file by accident.
-//! - A code is written to that terminal and nowhere else: nothing here logs, and nothing is
-//!   kept. The read buffer is the same size as the watcher's, is reused for every read and
-//!   is overwritten with zeros after each one.
-//! - It opens the device through the watcher's own check (`keydev::open`): a character
-//!   device under `/dev/input`, or nothing.
+//! - A code is written to that terminal and nowhere else: nothing here logs, and this
+//!   program keeps nothing. What the terminal does with what it is shown is not this
+//!   program's to promise, and the warning says so: a terminal that is being recorded, and
+//!   its scrollback, keep it. The read buffer is the same size as the watcher's, is reused
+//!   for every read and is overwritten with zeros after each one.
+//! - It opens the device through the watcher's own check (`keydev::open`): an event
+//!   device directly in `/dev/input`, or nothing.
 //!
 //! Input: the device's path. Output: the warning, then one line per key press, to the
 //! terminal. Owns: the open device, until Ctrl-C.
@@ -133,7 +135,8 @@ pub fn warning(device: &str) -> String {
          It is for finding the code of the key you want to talk with, to put in the\n\
          configuration file as `talk` under `[keys]`.\n\
          Do not type a password or anything private while it runs.\n\
-         Codes are written to this terminal and nowhere else: nothing is logged or kept.\n"
+         conch-voice writes the codes to this terminal only and keeps nothing itself. A\n\
+         terminal that is being recorded, and its scrollback, keep what is shown.\n"
     )
 }
 
@@ -338,6 +341,15 @@ mod tests {
             warning.contains("the key you want to talk with"),
             "{warning}"
         );
-        assert!(warning.contains("nothing is logged or kept"), "{warning}");
+        assert!(
+            warning.contains("to this terminal only and keeps nothing itself"),
+            "{warning}"
+        );
+        // What it cannot promise: what the terminal does with what it is shown.
+        assert!(
+            warning.contains("terminal that is being recorded, and its scrollback, keep"),
+            "{warning}"
+        );
+        assert!(!warning.contains("nothing is logged or kept"), "{warning}");
     }
 }

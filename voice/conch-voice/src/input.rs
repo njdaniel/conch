@@ -111,19 +111,23 @@ impl Line {
     }
 }
 
+/// What the end of standard input is sent as under `end`; anything else is sent as it is.
+fn at_the_end(input: Input, end: AtEnd) -> Input {
+    match input {
+        // With a key device watched, the end of standard input is a release and no more:
+        // the client runs on, driven by the device.
+        Input::Eof if end == AtEnd::Release => Input::Line(LineCommand::Up),
+        input => input,
+    }
+}
+
 /// Reads standard input on a thread of its own, for as long as it lasts. Its end is
 /// [`Input::Eof`], or with [`AtEnd::Release`] an `up`; either way a wrapper that dies after
 /// `down` cannot leave the gate open.
 pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>, at_end: AtEnd) {
     std::thread::spawn(move || {
         read_lines(std::io::stdin(), |input| {
-            let input = match input {
-                // With a key device watched, the end of standard input is a release and no
-                // more: the client runs on, driven by the device.
-                Input::Eof if at_end == AtEnd::Release => Input::Line(LineCommand::Up),
-                input => input,
-            };
-            inputs.send(input).is_ok()
+            inputs.send(at_the_end(input, at_end)).is_ok()
         });
     });
 }
@@ -288,5 +292,25 @@ mod tests {
             taken.len() < 2
         });
         assert_eq!(taken, [Input::Line(Down), Input::Line(Up)]);
+    }
+
+    #[test]
+    fn the_end_of_input_is_a_release_and_no_more_when_a_key_device_is_watched() {
+        // What the session loop gets when standard input ends: with a key device watched,
+        // an `up` and nothing more (the client runs on, driven by the device); without
+        // one, the end, which is a release and then `quit`.
+        assert_eq!(
+            at_the_end(Input::Eof, AtEnd::Release),
+            Input::Line(LineCommand::Up)
+        );
+        assert_eq!(at_the_end(Input::Eof, AtEnd::Quit), Input::Eof);
+        assert_eq!(
+            at_the_end(Input::Line(Down), AtEnd::Release),
+            Input::Line(Down)
+        );
+        assert_eq!(
+            at_the_end(Input::UnknownLine, AtEnd::Quit),
+            Input::UnknownLine
+        );
     }
 }

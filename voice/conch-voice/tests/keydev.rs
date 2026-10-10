@@ -37,8 +37,14 @@ fn key(key: Key, action: KeyAction) -> Input {
 
 const READY: Input = Input::KeyDevice(DeviceState::Ready);
 
+/// A device that has not been read since the watcher started.
 fn missing(problem: Problem) -> Input {
     Input::KeyDevice(DeviceState::Missing(problem))
+}
+
+/// A device that was being read and is not any more.
+fn lost(problem: Problem) -> Input {
+    Input::KeyDevice(DeviceState::Lost(problem))
 }
 
 /// A watcher on `path`, under the rule only tests may use, with what it sends.
@@ -111,7 +117,7 @@ fn part_of_a_record_is_the_device_going_away_and_the_decoder_starts_again() {
     let mut faulty = press(TALK);
     faulty.extend_from_slice(&record(EV_KEY, 30, 1)[..10]);
     keyboard.write_all(&faulty).unwrap();
-    assert_eq!(next(&mut inputs), missing(Problem::PartialRecord));
+    assert_eq!(next(&mut inputs), lost(Problem::PartialRecord));
 
     // The device is opened again. Had the ten bytes been kept, every record after them
     // would be read out of step and this press would never be seen.
@@ -121,7 +127,7 @@ fn part_of_a_record_is_the_device_going_away_and_the_decoder_starts_again() {
 
     // Again, this time with nothing whole in the read.
     keyboard.write_all(&record(EV_KEY, TALK, 0)[..23]).unwrap();
-    assert_eq!(next(&mut inputs), missing(Problem::PartialRecord));
+    assert_eq!(next(&mut inputs), lost(Problem::PartialRecord));
     write_when_open(&mut keyboard, &release(TALK));
     assert_eq!(next(&mut inputs), READY);
     assert_eq!(next(&mut inputs), key(Key::Talk, KeyAction::Release));
@@ -139,7 +145,7 @@ fn a_read_of_nothing_is_the_device_going_away_and_it_is_opened_again_when_it_is_
 
     // The keyboard goes away with the key held: the read returns nothing.
     drop(keyboard);
-    assert_eq!(next(&mut inputs), missing(Problem::Ended));
+    assert_eq!(next(&mut inputs), lost(Problem::Ended));
     // Said once, however many times the watcher tries to open it.
     nothing_for(&mut inputs, Duration::from_millis(60));
 
@@ -156,8 +162,7 @@ fn a_read_error_is_the_device_going_away_and_is_said_once_however_often_it_recur
     let dir = tempfile::tempdir().unwrap();
     let mut inputs = watch(dir.path());
     assert_eq!(next(&mut inputs), READY);
-    let Input::KeyDevice(DeviceState::Missing(Problem::ReadFailed(error))) = next(&mut inputs)
-    else {
+    let Input::KeyDevice(DeviceState::Lost(Problem::ReadFailed(error))) = next(&mut inputs) else {
         panic!("not a read error");
     };
     assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
@@ -255,6 +260,15 @@ fn sources() -> Vec<(String, String)> {
         .collect()
 }
 
+/// A tripwire, and no more than that. It catches the rule for tests being named somewhere
+/// it should not be. It does not prove the binary cannot reach a plain open: it looks for
+/// one name, and it stops reading a file at its first `#[cfg(test)]`, so code after a test
+/// module, or a second way past the check under another name (a match arm that opens
+/// plainly when some environment variable is set, say), would pass it. What the binary
+/// really does with a file and with a pipe is tested where the binary is run, in
+/// `tests/binary.rs` (`on_a_terminal_keys_refuses_a_file_and_a_pipe_itself_...`), and for
+/// `join` the configuration refuses any path not written under `/dev/input/` before the
+/// watcher is started.
 #[test]
 fn the_rule_for_tests_is_named_nowhere_but_where_it_is_defined() {
     let sources = sources();
@@ -444,7 +458,7 @@ async fn every_reason_the_watcher_gives_for_a_lost_device_shuts_the_gate() {
         rig.input(key(Key::Talk, KeyAction::Press));
         rig.frames_beyond(3).await;
 
-        rig.input(missing(problem));
+        rig.input(lost(problem));
         rig.until("the gate to shut", |rig| {
             rig.own()["blocked"] == json!(["key_device_lost"]) && rig.own()["transmitting"] == false
         })
@@ -459,6 +473,7 @@ async fn every_reason_the_watcher_gives_for_a_lost_device_shuts_the_gate() {
         assert_eq!(said["reason"], problem.code());
         assert_eq!(said["detail"], problem.to_string());
         assert_eq!(said["retrying"], true);
+        assert_eq!(said["presses_refused"], true);
 
         // A press while the device is gone is refused, and says why.
         rig.input(key(Key::Talk, KeyAction::Press));
@@ -601,4 +616,178 @@ fn under_the_real_rule_the_path_is_checked_before_it_is_opened_and_the_file_befo
     }
     assert_eq!(real.matches("File::open(").count(), 1);
     assert!(!real.contains(".read("), "nothing is read before the check");
+}
+
+#[test]
+fn withdrawing_permission_does_not_stop_a_watcher_that_has_the_device_open() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // Permission is checked when a device is opened. Taking it away afterwards (which is
+    // what removing the udev rule or the ACL entry does) changes nothing for a reader
+    // that already has the device open: the setup text says so, and this is why.
+    let pipe = Pipe::new();
+    let mut inputs = watch(&pipe.path);
+    let mut keyboard = pipe.writer();
+    assert_eq!(next(&mut inputs), READY);
+
+    std::fs::set_permissions(&pipe.path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let root = std::fs::metadata("/proc/self").is_ok_and(|own| own.uid() == 0);
+    assert!(
+        root || std::fs::File::open(&pipe.path).is_err(),
+        "a new open is refused"
+    );
+
+    // The watcher goes on reading, and is never told anything changed.
+    keyboard.write_all(&press(TALK)).unwrap();
+    assert_eq!(next(&mut inputs), key(Key::Talk, KeyAction::Press));
+    keyboard.write_all(&release(TALK)).unwrap();
+    assert_eq!(next(&mut inputs), key(Key::Talk, KeyAction::Release));
+    nothing_for(&mut inputs, Duration::from_millis(60));
+
+    // Only when the device itself goes (the keyboard unplugged) does the next open meet
+    // the withdrawn permission.
+    drop(keyboard);
+    assert_eq!(next(&mut inputs), lost(Problem::Ended));
+    if !root {
+        // Tried again and refused by the system each time, and said only that once.
+        nothing_for(&mut inputs, Duration::from_millis(60));
+    }
+}
+
+#[test]
+fn a_device_that_turns_out_to_be_refused_is_said_and_the_watcher_stops() {
+    // Under the real rule: first there is nothing at the path, which is tried again; then
+    // there is something that is refused for good. That change is said, so that nothing
+    // goes on saying the client is trying when it has stopped.
+    let pipe = Pipe::unmade();
+    let (inputs, mut received) = mpsc::unbounded_channel();
+    keydev::spawn(
+        pipe.path.clone(),
+        bindings(),
+        DeviceRule::EventDevice,
+        quick_keys(),
+        inputs,
+    )
+    .unwrap();
+    let Input::KeyDevice(DeviceState::Missing(absent)) = next(&mut received) else {
+        panic!("not missing");
+    };
+    assert!(matches!(absent, Problem::CannotOpen(_)) && absent.retried());
+    nothing_for(&mut received, Duration::from_millis(40));
+
+    std::fs::write(&pipe.path, press(TALK)).unwrap();
+    let outside = Problem::Refused(Refusal::OutsideDevInput);
+    assert_eq!(next(&mut received), missing(outside));
+    assert!(!outside.retried());
+    // And that was the last of it: the watcher has stopped.
+    nothing_for(&mut received, Duration::from_millis(40));
+    assert!(matches!(
+        received.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[tokio::test]
+async fn once_a_device_that_was_read_is_lost_a_press_from_standard_input_is_refused_too() {
+    use conch_voice::output::Event;
+    let setup = Setup {
+        key_device: Some(KEYBOARD.to_owned()),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.ready().await;
+    rig.input(READY);
+    rig.input(lost(Problem::Ended));
+    rig.until("the loss", |rig| {
+        rig.own()["blocked"] == json!(["key_device_lost"])
+    })
+    .await;
+
+    // The machine's rule: something may have been held on the device, so no press opens
+    // the gate until the device is read again, whichever source the press comes from.
+    rig.line(Down);
+    rig.until("the refusal", |rig| {
+        rig.events_named("press_ignored").len() == 1
+    })
+    .await;
+    assert_eq!(
+        rig.events_named("press_ignored")[0]["reason"],
+        "key_device_lost"
+    );
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), 0);
+    rig.line(Up);
+
+    // And the client says exactly that, not that standard input has taken over.
+    let said = rig.events_named("key_device").pop().unwrap();
+    assert_eq!(
+        said,
+        json!({
+            "event": "key_device",
+            "device": KEYBOARD,
+            "state": "missing",
+            "reason": "ended",
+            "detail": "it ended: a read returned nothing",
+            "retrying": true,
+            "presses_refused": true,
+        })
+    );
+    let state = DeviceState::Lost(Problem::Ended);
+    assert_eq!(
+        Event::KeyDevice {
+            device: KEYBOARD,
+            state
+        }
+        .plain()
+        .unwrap(),
+        format!(
+            "key device {KEYBOARD}: it ended: a read returned nothing; a press is refused, from \
+             standard input too, until it is open again or conch-voice is started again with \
+             --stdin-keys; trying again"
+        )
+    );
+
+    // The rest of standard input works as before.
+    rig.line(Mute);
+    rig.until("muted", |rig| rig.own()["muted"] == true).await;
+    rig.line(Mute);
+    rig.until("unmuted", |rig| rig.own()["muted"] == false)
+        .await;
+
+    // If the watcher then gives up, that is said too, and a press stays refused.
+    let gave_up = Problem::Refused(Refusal::NotAnEventDevice);
+    rig.input(lost(gave_up));
+    rig.until("giving up", |rig| rig.events_named("key_device").len() == 3)
+        .await;
+    let said = rig.events_named("key_device").pop().unwrap();
+    assert_eq!(said["retrying"], false);
+    assert_eq!(said["presses_refused"], true);
+    assert_eq!(
+        Event::KeyDevice {
+            device: KEYBOARD,
+            state: DeviceState::Lost(gave_up)
+        }
+        .plain()
+        .unwrap(),
+        format!(
+            "key device {KEYBOARD}: refused: it is not an event device (/dev/input/event and a \
+             number); a press is refused, from standard input too, until conch-voice is \
+             started again with --stdin-keys; not trying again"
+        )
+    );
+    rig.line(Down);
+    rig.until("the second refusal", |rig| {
+        rig.events_named("press_ignored").len() == 2
+    })
+    .await;
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), 0);
+
+    // When the device is read again, a press works: from the key and from standard input.
+    rig.line(Up);
+    rig.input(READY);
+    rig.ready().await;
+    rig.line(Down);
+    rig.frames_beyond(2).await;
+    rig.line(Up);
+    rig.not_talking().await;
 }

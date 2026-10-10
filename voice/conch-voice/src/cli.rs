@@ -206,7 +206,7 @@ pub fn command() -> Command {
              Ctrl-C. It is for finding the code of the key you want to talk with. It says so \
              before it opens the device, and it writes only to a terminal: if standard output \
              is redirected it refuses, so that keystrokes are not put in a file by accident. \
-             Nothing is logged or kept.",
+             It keeps nothing itself; a terminal that is being recorded keeps what it is shown.",
         )
         .arg(
             Arg::new("device")

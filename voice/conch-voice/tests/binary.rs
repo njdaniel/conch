@@ -475,6 +475,7 @@ async fn a_key_device_that_cannot_be_opened_is_said_once_and_the_client_runs_on_
                     "reason": "cannot_open",
                     "detail": why,
                     "retrying": true,
+                    "presses_refused": false,
                 })
             );
         } else {
@@ -545,6 +546,68 @@ async fn with_stdin_keys_no_key_device_is_opened_and_the_end_of_input_still_quit
     assert!(stdout.ends_with("left voice\n"), "{stdout}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_a_key_device_the_end_of_standard_input_is_a_release_and_the_client_runs_on() {
+    let private = tempfile::tempdir().unwrap();
+    configure_keys(private.path(), Path::new(NO_SUCH_KEYBOARD));
+    let (mut command, _conchd, _not_livekit) = joining(private.path(), &[]).await;
+
+    let (code, stdout, stderr) = tokio::task::spawn_blocking(move || {
+        let mut running = Running::start(&mut command);
+        running.until("a failed join", Duration::from_secs(60), |stdout| {
+            failed_joins(stdout) >= 1
+        });
+        {
+            let stdin = running.child.stdin.as_mut().unwrap();
+            stdin.write_all(b"down\n").unwrap();
+            stdin.flush().unwrap();
+        }
+        // The end of standard input: with a key device watched it is a release and no
+        // more, so a wrapper that dies after `down` cannot leave the gate open, and the
+        // client runs on, driven by the device.
+        drop(running.child.stdin.take());
+        assert!(
+            exit_within(&mut running.child, Duration::from_secs(2)).is_none(),
+            "the end of standard input was taken as a quit"
+        );
+        // A signal is still a clean exit.
+        signal(&running.child, "TERM");
+        running.exit()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, Some(0), "a signal is a clean exit: {stderr}");
+    assert!(stdout.ends_with("left voice\n"), "{stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_that_is_not_text_is_not_a_command_and_the_reading_goes_on() {
+    let private = tempfile::tempdir().unwrap();
+    let (mut command, _conchd, _not_livekit) = joining(private.path(), &[]).await;
+
+    let (code, stdout, stderr) = tokio::task::spawn_blocking(move || {
+        let mut running = Running::start(&mut command);
+        running.until("a failed join", Duration::from_secs(60), |stdout| {
+            failed_joins(stdout) >= 1
+        });
+        {
+            let stdin = running.child.stdin.as_mut().unwrap();
+            // No UTF-8 here: the line is not a command, and it is not repeated. The
+            // reading does not end for it: the `quit` after it is still heard.
+            stdin.write_all(b"\xff\xfe\x00\nquit\n").unwrap();
+            stdin.flush().unwrap();
+        }
+        running.exit()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, Some(0), "quit was heard after it: {stderr}");
+    assert!(stdout.contains("unknown command"), "{stdout}");
+    assert!(stdout.ends_with("left voice\n"), "{stdout}");
+}
+
 #[test]
 fn keys_refuses_when_standard_output_is_not_a_terminal() {
     let private = tempfile::tempdir().unwrap();
@@ -561,19 +624,27 @@ fn keys_refuses_when_standard_output_is_not_a_terminal() {
     );
 }
 
-/// Runs the binary under script(1) from util-linux, which gives it a terminal for standard
-/// input, output and error, and returns its exit code and everything it wrote there, with
-/// the terminal's carriage returns taken out.
-fn on_a_terminal(private: &Path, args: &[&str], token: bool) -> (Option<i32>, String) {
-    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
-    let line = std::iter::once(BIN)
-        .chain(args.iter().copied())
-        .map(quote)
-        .collect::<Vec<_>>()
-        .join(" ");
+/// One word of a shell command line.
+fn quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// How long a run on a terminal may take before it is killed and the test fails.
+const TERMINAL_BOUND: Duration = Duration::from_secs(60);
+
+/// Runs a shell command line under script(1) from util-linux, which gives it a terminal
+/// for standard input, output and error (the line may then redirect any of them), and
+/// returns its exit code and everything written to that terminal, with the terminal's
+/// carriage returns taken out.
+///
+/// # Panics
+///
+/// If the command has not ended within [`TERMINAL_BOUND`]: a binary that blocks, on a pipe
+/// it should never have opened for one, fails the test and does not hang it.
+fn on_a_terminal_line(private: &Path, line: &str, token: bool) -> (Option<i32>, String) {
     let mut command = Command::new("script");
     command
-        .args(["--quiet", "--return", "--command", &line, "/dev/null"])
+        .args(["--quiet", "--return", "--command", line, "/dev/null"])
         .env_clear()
         .env("HOME", private.join("home"))
         .env("XDG_CONFIG_HOME", private.join("config"))
@@ -589,17 +660,41 @@ fn on_a_terminal(private: &Path, args: &[&str], token: bool) -> (Option<i32>, St
         .spawn()
         .expect("script(1) from util-linux is needed to give the binary a terminal");
     let stdin = child.stdin.take();
-    let mut written = Vec::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut written)
-        .unwrap();
-    let status = child.wait().unwrap();
+    let mut terminal = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut written = Vec::new();
+        let _ = terminal.read_to_end(&mut written);
+        written
+    });
+    let deadline = Instant::now() + TERMINAL_BOUND;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            // With script gone its terminal is gone, and the command under it is hung up.
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     drop(stdin);
-    let written = String::from_utf8_lossy(&written).replace('\r', "");
+    let written = String::from_utf8_lossy(&reader.join().unwrap()).replace('\r', "");
+    let Some(status) = status else {
+        panic!("`{line}` did not end within {TERMINAL_BOUND:?}; it wrote:\n{written}");
+    };
     (status.code(), written)
+}
+
+/// Runs the binary with these arguments on a terminal, as [`on_a_terminal_line`] does.
+fn on_a_terminal(private: &Path, args: &[&str], token: bool) -> (Option<i32>, String) {
+    let line = std::iter::once(BIN)
+        .chain(args.iter().copied())
+        .map(quoted)
+        .collect::<Vec<_>>()
+        .join(" ");
+    on_a_terminal_line(private, &line, token)
 }
 
 #[test]
@@ -770,5 +865,117 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         let unread = String::from_utf8_lossy(&unread);
         assert!(unread.contains(r#"{"event":"unknown_command"}"#), "{way}");
         assert!(!unread.contains(FAKE_LOGIN), "{way}");
+    }
+}
+
+/// What `keys` says when it refuses for want of a terminal.
+const NOT_A_TERMINAL: &str = "conch-voice: keys shows every key pressed and writes only to a \
+                              terminal: standard output is not one\n";
+
+#[test]
+fn keys_looks_at_standard_output_and_at_nothing_else_to_decide_whether_to_write() {
+    let private = tempfile::tempdir().unwrap();
+    // Not a keyboard, and not there: nothing could be read whatever `keys` decided.
+    let absent = private.path().join("absent-event-kbd");
+    let device = absent.display().to_string();
+    let keys = format!("{} keys {}", quoted(BIN), quoted(&device));
+    let failure = format!(
+        "conch-voice: key device {device}: cannot open it: {}\n",
+        std::io::Error::from_raw_os_error(2)
+    );
+    let warning = conch_voice::keys::warning(&device);
+
+    // Standard input and standard error are a terminal, and standard output is a file:
+    // it refuses, and nothing at all is put in the file.
+    let file = private.path().join("redirected.txt");
+    let (code, written) = on_a_terminal_line(
+        private.path(),
+        &format!("{keys} > {}", quoted(file.to_str().unwrap())),
+        false,
+    );
+    assert_eq!(code, Some(2), "{written}");
+    assert_eq!(written, NOT_A_TERMINAL);
+    assert_eq!(std::fs::read(&file).unwrap(), b"", "not a byte in the file");
+
+    // The same through a pipe to a program that writes to the terminal.
+    let (code, written) = on_a_terminal_line(private.path(), &format!("{keys} | /bin/cat"), false);
+    assert_eq!(written, NOT_A_TERMINAL);
+    // The shell reports the last command of the pipe, which is `cat`.
+    assert_eq!(code, Some(0));
+
+    // Standard output is a terminal and standard error is a file: it runs. What it looks
+    // at is where the keys would be written, and nothing else.
+    let errors = private.path().join("errors.txt");
+    let (code, written) = on_a_terminal_line(
+        private.path(),
+        &format!("{keys} 2> {}", quoted(errors.to_str().unwrap())),
+        false,
+    );
+    assert_eq!(code, Some(1), "{written}");
+    assert_eq!(written, warning);
+    assert_eq!(std::fs::read_to_string(&errors).unwrap(), failure);
+
+    // Standard output is a terminal and standard input is not: it runs.
+    let (code, written) = on_a_terminal_line(private.path(), &format!("{keys} < /dev/null"), false);
+    assert_eq!(code, Some(1), "{written}");
+    assert_eq!(written, format!("{warning}{failure}"));
+}
+
+#[test]
+fn on_a_terminal_keys_refuses_a_file_and_a_pipe_itself_and_reads_nothing_from_them() {
+    use std::fs::OpenOptions;
+    let private = tempfile::tempdir().unwrap();
+    // A press of KEY_RIGHTCTRL, which `keys` would show as `key 97` if it read it.
+    let mut press = [0u8; 24];
+    press[16] = 1;
+    press[18] = 97;
+    press[20] = 1;
+
+    // An existing file that holds the press.
+    let file = private.path().join("usb-File-event-kbd");
+    std::fs::write(&file, press).unwrap();
+    // An existing pipe that holds the press. This test has it open for reading and for
+    // writing, so that nothing here can block on it: a binary that opened it would get it
+    // open at once, read the press, show it, and then wait for ever for the next one.
+    let pipe = private.path().join("usb-Pipe-event-kbd");
+    let made = Command::new("mkfifo").arg(&pipe).status().unwrap();
+    assert!(made.success());
+    let mut held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&pipe)
+        .unwrap();
+    held.write_all(&press).unwrap();
+
+    for device in [&file, &pipe] {
+        let device = device.display().to_string();
+        // Within a bound: a binary that blocks on the pipe fails this, and does not hang it.
+        let (code, written) = on_a_terminal(private.path(), &["keys", &device], false);
+        // The refusal is the binary's own, in its own words, after the whole warning.
+        assert_eq!(
+            written,
+            format!(
+                "{}conch-voice: key device {device}: refused: it is not under /dev/input\n",
+                conch_voice::keys::warning(&device)
+            )
+        );
+        assert_eq!(code, Some(1));
+        assert!(!written.contains("key 97"), "{written}");
+        assert!(!written.contains("Reading."), "{written}");
+    }
+
+    // Nothing was taken from the pipe: the press is still in it, in front of this marker.
+    let marker = [0xa5u8; 24];
+    held.write_all(&marker).unwrap();
+    let mut left = [0u8; 96];
+    let count = held.read(&mut left).unwrap();
+    assert_eq!(left[..count], [press, marker].concat()[..]);
+    // And no option asks for another rule: there is none
+    // to ask for.
+    for option in ["--any-file", "--rule=any", "--no-check"] {
+        let mut command = conch_voice(private.path());
+        let (code, stdout, _) = run(command.args(["keys", option]).arg(&file));
+        assert_eq!(code, Some(2), "{option}");
+        assert_eq!(stdout, "", "{option}");
     }
 }

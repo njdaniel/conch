@@ -34,7 +34,7 @@
 //! | `track` | a remote speaker's audio track came or went | `speaker` (`p<principal id>`), `state`: `subscribed` or `unsubscribed`. |
 //! | `report` | a transmit report was not delivered at once | `state`: `started` or `stopped`. `problem`: `retrying` (with `attempt` and `of`), `gave_up`, `no_session` (409, not retried) or `rate_limited` (429, not retried). `detail`: the error's text. |
 //! | `microphone` | the microphone could not be opened | `detail`: the error's text. |
-//! | `key_device` | the key device was opened, or is not being read; written when that changes, not on every attempt to open it | `device`: the path that was configured. `state`: `open` or `missing`. With `missing`: `reason`: `cannot_open`, `refused` (it is not a character device under `/dev/input`), `read_failed`, `ended` or `partial_record`; `detail`: the reason in words; `retrying`: whether the client goes on trying to open it. Nothing here is derived from a key. |
+//! | `key_device` | the key device was opened, or is not being read; written when that changes, and when the client gives up trying, not on every attempt to open it | `device`: the path that was configured. `state`: `open` or `missing`. With `missing`: `reason`: `cannot_open`, `refused` (it is not an event device under `/dev/input`), `read_failed`, `ended` or `partial_record`; `detail`: the reason in words; `retrying`: whether the client goes on trying to open it; `presses_refused`: true if the device had been open, in which case a press is refused, from standard input too, until it is open again. Nothing here is derived from a key. |
 //! | `output_dropped` | lines were dropped because standard output was not being read, and it is being read again | `lines`: how many objects were not written since the last one that was. |
 //! | `stats` | once a second while connected | `frames_sent`: frames of this client's own audio handed to its track since the last `stats`; `frames_sent_total`: since it started. `reports_delivered`, `reports_dropped`: transmit reports since it started. `speakers`: for each remote speaker, `speaker`, and for the audio received from them since the last `stats`: `frames` (10 ms each, silent ones included), `audible_frames` (at or above -60 dB of full scale), `rms` (full scale is 1) and `dominant_hz` (the strongest of the tones `--sink` names, or `null` if none stood out or there was silence); and `frames_total` and `audible_frames_total` since the speaker was first heard. `mix`: `frames`, `audible_frames`, `rms` and `dominant_hz` of what was handed to the sink since the last `stats`; this client's own audio is never in it. |
 
@@ -270,17 +270,16 @@ impl Event<'_> {
                 object
             }
             Event::Microphone { detail } => json!({"event": "microphone", "detail": detail}),
-            Event::KeyDevice { device, state } => match state {
-                DeviceState::Ready => {
-                    json!({"event": "key_device", "device": device, "state": "open"})
-                }
-                DeviceState::Missing(problem) => json!({
+            Event::KeyDevice { device, state } => match state.problem() {
+                None => json!({"event": "key_device", "device": device, "state": "open"}),
+                Some(problem) => json!({
                     "event": "key_device",
                     "device": device,
                     "state": "missing",
                     "reason": problem.code(),
                     "detail": problem.to_string(),
                     "retrying": problem.retried(),
+                    "presses_refused": state.presses_refused(),
                 }),
             },
             Event::Stats(stats) => json!({
@@ -401,21 +400,10 @@ impl Event<'_> {
                 }
             }
             Event::Microphone { detail } => format!("no microphone: {detail}"),
-            Event::KeyDevice { device, state } => match state {
-                DeviceState::Ready => format!("key device {device}: open"),
-                DeviceState::Missing(problem) => {
-                    // Which device and why, and what the client does about it, in one line.
-                    let then = if problem.retried() {
-                        ", and trying again"
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "key device {device}: {problem}; taking down, up, mute, deafen and \
-                         quit from standard input{then}"
-                    )
-                }
-            },
+            // Which device and why, and what the client does about it, in one line.
+            Event::KeyDevice { device, state } => {
+                format!("key device {device}: {}", state.describe())
+            }
             Event::Track { .. } | Event::Stats(_) => return None,
         })
     }

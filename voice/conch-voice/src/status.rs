@@ -132,7 +132,7 @@ fn own_line(state: &State) -> String {
         None => parts.push(ShutReason::NotConnected.to_string()),
     }
     // Said the same way whether the device was lost or was never there.
-    if lost || matches!(state.key_device, Some(DeviceState::Missing(_))) {
+    if lost || state.key_device.is_some_and(|device| !device.is_ready()) {
         parts.push("key device missing".to_owned());
     }
     match state.report {

@@ -13,6 +13,15 @@
 //!   and a [`DeviceState`] (the device is open, or why it is not). Neither type can hold a
 //!   key code, a scan code, a time or a count of keys.
 //!
+//! **That is true of what the keys are, and not of when they are pressed.** The watcher
+//! does one blocking read for each packet the keyboard sends, so its thread wakes once for
+//! every key event, bound or not. The kernel publishes how often a thread has woken
+//! (`/proc/<pid>/task/<tid>/status`), and unless `/proc` is mounted with `hidepid` any
+//! local user can read that count and so see the rhythm of the typing, though never a
+//! key. The compositor's input thread shows the same, so this adds no exposure the machine
+//! did not have; and not waking for other keys needs the device's event mask, which is an
+//! `ioctl`, and the design allows none here.
+//!
 //! Input: the path of the device, the bindings, and the waits between attempts to open it.
 //! Output: [`Input::Key`] and [`Input::KeyDevice`] to the session loop, which owns every
 //! decision; this is one more source of what happened, like standard input.
@@ -21,10 +30,13 @@
 //! What it keeps:
 //!
 //! - **Only an event device is read.** Before it is opened the path is resolved, and it
-//!   must be a character device under `/dev/input`; after it is opened, the open file
-//!   itself must be that same character device. Anything else is refused and not read, and
-//!   a refusal is not tried again: it is about the configuration, not about a keyboard
-//!   coming and going.
+//!   must lead to a character device named `event` and a number, directly in `/dev/input`
+//!   (so not `mice`, `mouse0` or `js0`, whose records are another shape); after it is
+//!   opened, the open file itself must be that same character device. Anything else is
+//!   refused and not read. A refusal for what the path leads to is not tried again: it is
+//!   about the configuration, not about a keyboard coming and going. A device that was
+//!   replaced between the check and the open is a keyboard being plugged in at that
+//!   moment, and is tried again.
 //! - **Every way a read can go wrong is the device going away:** an error, a read of
 //!   nothing, and a read that leaves the decoder holding part of a record (an event device
 //!   returns whole records, so a fragment is a fault). The session loop is told first, so
@@ -32,9 +44,18 @@
 //!   device opened again, after a wait that doubles up to a bound. Nothing decoded from a
 //!   faulty read is passed on.
 //! - **The session loop is told once.** That the device is not there is said when it is
-//!   lost or first cannot be opened, not on every attempt. A device that opens and then
-//!   fails before one whole read is not announced as open again until a read has worked,
-//!   so a device that never works cannot make a line per attempt.
+//!   lost or first cannot be opened, not on every attempt; and once more if the watcher
+//!   then gives up, so that nothing goes on saying "trying again" when nothing is. A device
+//!   that opens and then fails before one whole read is not announced as open again until
+//!   a read has worked, so a device that never works cannot make a line per attempt.
+//! - **It says whether the device had been open.** A device that was being read and is
+//!   not any more is [`DeviceState::Lost`]: the push-to-talk machine then refuses every
+//!   press, from standard input too, until the device is back. One that has never been
+//!   read is [`DeviceState::Missing`], and standard input works as if there were none.
+//!
+//! What it cannot notice: permission is checked when a device is opened, so taking the
+//! permission away changes nothing for a watcher that already has the device open. It goes
+//! on reading until the keyboard is unplugged or the client exits.
 
 use std::fmt;
 use std::fs::{File, Metadata};
@@ -48,8 +69,11 @@ use tokio::sync::mpsc;
 
 use crate::session::Input;
 
-/// Where the kernel's input devices are. Only a character device under it is read.
+/// Where the kernel's input devices are. Only an event device directly in it is read.
 pub const DEV_INPUT: &str = "/dev/input";
+
+/// How the kernel names an event device there: this, and then a number.
+const EVENT_NAME: &str = "event";
 
 /// How many records one read can take. The kernel hands over as many whole records as fit.
 const RECORDS_PER_READ: usize = 64;
@@ -67,7 +91,8 @@ pub const BUFFER_LEN: usize = RECORDS_PER_READ * INPUT_EVENT_LEN;
 /// about where the path leads and what was opened.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceRule {
-    /// A character device under `/dev/input`, and nothing else.
+    /// An event device: a character device named `event` and a number, directly in
+    /// `/dev/input`. Nothing else.
     EventDevice,
     /// Anything that can be opened. For tests, which read named pipes and temporary files
     /// and never a keyboard. No code outside this file's own match on the rule names it.
@@ -79,9 +104,13 @@ pub enum DeviceRule {
 pub enum Refusal {
     /// The path leads somewhere that is not under `/dev/input`.
     OutsideDevInput,
+    /// It is under `/dev/input` and is not named as an event device is: `mice`, `mouse0`
+    /// and `js0` are devices of another kind, with records of another shape.
+    NotAnEventDevice,
     /// It is not a character device.
     NotCharacterDevice,
-    /// What was opened is not what the path named a moment before.
+    /// What was opened is not what the path named a moment before: the device was replaced
+    /// in between, as when a keyboard is plugged in. The only refusal that is tried again.
     Changed,
 }
 
@@ -89,6 +118,9 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Refusal::OutsideDevInput => "it is not under /dev/input",
+            Refusal::NotAnEventDevice => {
+                "it is not an event device (/dev/input/event and a number)"
+            }
             Refusal::NotCharacterDevice => "it is not a character device",
             Refusal::Changed => "it changed while it was being opened",
         })
@@ -158,10 +190,14 @@ impl Problem {
         }
     }
 
-    /// Whether the watcher goes on trying to open the device. A refusal is final.
+    /// Whether the watcher goes on trying to open the device. A refusal for what the path
+    /// leads to is final; one for a device that changed while it was being opened is not.
     #[must_use]
     pub fn retried(&self) -> bool {
-        !matches!(self, Problem::Refused(_))
+        match self {
+            Problem::Refused(refusal) => *refusal == Refusal::Changed,
+            _ => true,
+        }
     }
 }
 
@@ -184,8 +220,12 @@ impl fmt::Display for Problem {
 pub enum DeviceState {
     /// It is open, and what it is was checked.
     Ready,
-    /// It is not being read, and why.
+    /// It is not being read and has not been since the client started, and why. Nothing
+    /// was ever held on it, so presses from standard input work as if there were no device.
     Missing(Problem),
+    /// It was being read and is not any more, and why. The push-to-talk machine holds that
+    /// against every press, from standard input too, until the device is read again.
+    Lost(Problem),
 }
 
 impl DeviceState {
@@ -194,6 +234,59 @@ impl DeviceState {
     pub fn is_ready(&self) -> bool {
         matches!(self, DeviceState::Ready)
     }
+
+    /// Why the device is not being read, if it is not.
+    #[must_use]
+    pub fn problem(&self) -> Option<Problem> {
+        match self {
+            DeviceState::Ready => None,
+            DeviceState::Missing(problem) | DeviceState::Lost(problem) => Some(*problem),
+        }
+    }
+
+    /// True if a press is refused, from standard input too, for as long as this lasts.
+    #[must_use]
+    pub fn presses_refused(&self) -> bool {
+        matches!(self, DeviceState::Lost(_))
+    }
+
+    /// The state in words, for the one line that says it: why, and what the client does
+    /// about it. It says what is true of presses, which differs between a device that was
+    /// never open and one that was.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            DeviceState::Ready => "open".to_owned(),
+            DeviceState::Missing(problem) => {
+                let then = if problem.retried() {
+                    ", and trying again"
+                } else {
+                    ""
+                };
+                format!(
+                    "{problem}; taking down, up, mute, deafen and quit from standard input{then}"
+                )
+            }
+            DeviceState::Lost(problem) => {
+                let (until, then) = if problem.retried() {
+                    ("it is open again or ", "trying again")
+                } else {
+                    ("", "not trying again")
+                };
+                format!(
+                    "{problem}; a press is refused, from standard input too, until {until}\
+                     conch-voice is started again with --stdin-keys; {then}"
+                )
+            }
+        }
+    }
+}
+
+/// True for `event` followed by one or more digits: the name of an event device.
+fn is_event_name(name: &str) -> bool {
+    name.strip_prefix(EVENT_NAME).is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())
+    })
 }
 
 /// The rule itself, on facts that need nothing opened: where the resolved path is, and
@@ -201,13 +294,24 @@ impl DeviceState {
 ///
 /// # Errors
 ///
-/// The [`Refusal`] for a path that is not strictly under [`DEV_INPUT`], or for something
-/// that is not a character device.
+/// The [`Refusal`] for a path that is not strictly under [`DEV_INPUT`]; for one that is
+/// not `event` and a number directly in it; or for something that is not a character
+/// device.
 pub fn permitted(canonical: &Path, is_char_device: bool) -> Result<(), Refusal> {
     let dev_input = Path::new(DEV_INPUT);
     // By components, so `/dev/inputs/x` is outside; and the directory itself is not a device.
     if !canonical.starts_with(dev_input) || canonical == dev_input {
         return Err(Refusal::OutsideDevInput);
+    }
+    // Directly in the directory, under the name the kernel gives an event device. The
+    // links under `by-id` and `by-path` resolve to such a name; nothing else is one.
+    let named_as_event = canonical.parent() == Some(dev_input)
+        && canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_event_name);
+    if !named_as_event {
+        return Err(Refusal::NotAnEventDevice);
     }
     if !is_char_device {
         return Err(Refusal::NotCharacterDevice);
@@ -237,8 +341,9 @@ fn confirm(named: &Metadata, opened: &Metadata) -> Result<(), Refusal> {
 /// anything is read from it.
 ///
 /// Under [`DeviceRule::EventDevice`] the path is resolved first and nothing is opened
-/// unless it leads to a character device under `/dev/input`; what was then opened is
-/// checked again from the open file itself, so that the thing checked is the thing read.
+/// unless it leads to an event device, a character device named `event` and a number
+/// directly in `/dev/input`; what was then opened is checked again from the open file
+/// itself, so that the thing checked is the thing read.
 ///
 /// # Errors
 ///
@@ -343,18 +448,52 @@ struct Watcher {
     timings: KeyTimings,
     inputs: mpsc::UnboundedSender<Input>,
     reader: Reader,
-    /// What the session loop was last told: that the device is being read, or that it is
-    /// not. `None` before it has been told anything.
-    told: Option<bool>,
+    /// What the session loop was last told. `None` before it has been told anything.
+    told: Option<Told>,
+    /// Whether the session loop has ever been told the device is being read. From then on
+    /// a device that is not being read is one that was lost.
+    was_ready: bool,
+}
+
+/// What the session loop was last told about the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Told {
+    /// It is being read.
+    Ready,
+    /// It is not, and whether the watcher goes on trying to open it.
+    NotReady { retried: bool },
 }
 
 impl Watcher {
-    /// Tells the session loop the device's state, unless that is what it was last told.
-    fn tell(&mut self, state: DeviceState) -> Result<(), LoopGone> {
-        if self.told == Some(state.is_ready()) {
+    /// Tells the session loop the device is being read, unless that is what it was last
+    /// told.
+    fn ready(&mut self) -> Result<(), LoopGone> {
+        if self.told == Some(Told::Ready) {
             return Ok(());
         }
-        self.told = Some(state.is_ready());
+        self.told = Some(Told::Ready);
+        self.was_ready = true;
+        self.inputs
+            .send(Input::KeyDevice(DeviceState::Ready))
+            .map_err(|_| LoopGone)
+    }
+
+    /// Tells the session loop the device is not being read: when it stops being read, and
+    /// once more if the watcher then gives up. It is not said for each attempt, nor for a
+    /// reason that changes while the attempts go on.
+    fn not_ready(&mut self, problem: Problem) -> Result<(), LoopGone> {
+        let now = Told::NotReady {
+            retried: problem.retried(),
+        };
+        if self.told == Some(now) {
+            return Ok(());
+        }
+        self.told = Some(now);
+        let state = if self.was_ready {
+            DeviceState::Lost(problem)
+        } else {
+            DeviceState::Missing(problem)
+        };
         self.inputs
             .send(Input::KeyDevice(state))
             .map_err(|_| LoopGone)
@@ -369,7 +508,7 @@ impl Watcher {
                 Ok(events) => {
                     read_any = true;
                     // A key is passed on only while the loop knows the device is there.
-                    self.tell(DeviceState::Ready)?;
+                    self.ready()?;
                     for event in events {
                         self.inputs.send(Input::Key(event)).map_err(|_| LoopGone)?;
                     }
@@ -388,12 +527,12 @@ impl Watcher {
             match open(&self.device, self.rule) {
                 Ok(mut file) => {
                     if announce_on_open {
-                        self.tell(DeviceState::Ready)?;
+                        self.ready()?;
                     }
                     let (problem, read_any) = self.read_to_fault(&mut file)?;
                     // The machine first, so the gate shuts as for a release; then the
                     // decoder; and the device is closed before it is opened again.
-                    self.tell(DeviceState::Missing(problem))?;
+                    self.not_ready(problem)?;
                     self.reader.reset();
                     drop(file);
                     announce_on_open = read_any;
@@ -402,7 +541,7 @@ impl Watcher {
                     }
                 }
                 Err(problem) => {
-                    self.tell(DeviceState::Missing(problem))?;
+                    self.not_ready(problem)?;
                     if !problem.retried() {
                         return Ok(());
                     }
@@ -438,11 +577,13 @@ pub fn spawn(
         inputs,
         reader: Reader::new(bindings),
         told: None,
+        was_ready: false,
     };
     std::thread::Builder::new()
         .name("conch-voice-keys".to_owned())
         .spawn(move || {
-            // It ends when the session loop does, or on a refusal; either way silently.
+            // It ends when the session loop does, or on a refusal that is final; either way
+            // silently.
             let _ = watcher.run();
         })
         .map(|_| ())
@@ -487,13 +628,44 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_takes_a_character_device_under_dev_input_and_nothing_else() {
+    fn the_rule_takes_an_event_device_directly_under_dev_input_and_nothing_else() {
+        let not_event = Err(Refusal::NotAnEventDevice);
         // Paths that need no opening: the rule is about where a path leads and what is there.
         for (path, is_char_device, expected) in [
             ("/dev/input/event3", true, Ok(())),
-            ("/dev/input/by-id/usb-Example-event-kbd", true, Ok(())),
+            ("/dev/input/event0", true, Ok(())),
+            ("/dev/input/event127", true, Ok(())),
             ("/dev/input/event3", false, Err(Refusal::NotCharacterDevice)),
+            // Character devices under /dev/input that are not event devices: their records
+            // are another shape.
+            ("/dev/input/mice", true, not_event),
+            ("/dev/input/mouse0", true, not_event),
+            ("/dev/input/js0", true, not_event),
+            // Not `event` and then nothing but digits.
+            ("/dev/input/event", true, not_event),
+            ("/dev/input/event1x", true, not_event),
+            ("/dev/input/eventx", true, not_event),
+            ("/dev/input/event-1", true, not_event),
+            ("/dev/input/event 1", true, not_event),
+            ("/dev/input/event\u{0663}", true, not_event),
+            ("/dev/input/Event3", true, not_event),
+            ("/dev/input/xevent3", true, not_event),
+            // Not directly in the directory: a name under a subdirectory that resolves to
+            // itself is not what the kernel made. (A link there resolves to `eventN`.)
+            ("/dev/input/by-id/event3", true, not_event),
+            ("/dev/input/by-id/usb-Example-event-kbd", true, not_event),
+            (
+                "/dev/input/by-path/platform-i8042-serio-0-event-kbd",
+                true,
+                not_event,
+            ),
+            ("/dev/input/event3/event4", true, not_event),
+            // Never what resolving a path gives, and refused all the same.
+            ("/dev/input/..", true, not_event),
+            ("/dev/input/event3/..", true, not_event),
             ("/dev/input", true, Err(Refusal::OutsideDevInput)),
+            ("/dev/input/", true, Err(Refusal::OutsideDevInput)),
+            ("/dev/INPUT/event3", true, Err(Refusal::OutsideDevInput)),
             ("/dev/inputs/event3", true, Err(Refusal::OutsideDevInput)),
             ("/dev/tty", true, Err(Refusal::OutsideDevInput)),
             ("/dev/null", true, Err(Refusal::OutsideDevInput)),
@@ -597,11 +769,18 @@ mod tests {
             (Problem::CannotOpen(denied), "cannot_open", true),
             (Problem::Refused(Refusal::OutsideDevInput), "refused", false),
             (
+                Problem::Refused(Refusal::NotAnEventDevice),
+                "refused",
+                false,
+            ),
+            (
                 Problem::Refused(Refusal::NotCharacterDevice),
                 "refused",
                 false,
             ),
-            (Problem::Refused(Refusal::Changed), "refused", false),
+            // Replaced between the check and the open: a keyboard being plugged in, not a
+            // wrong configuration, so it is tried again.
+            (Problem::Refused(Refusal::Changed), "refused", true),
             (Problem::ReadFailed(denied), "read_failed", true),
             (Problem::Ended, "ended", true),
             (Problem::PartialRecord, "partial_record", true),
@@ -618,10 +797,140 @@ mod tests {
             Problem::Refused(Refusal::OutsideDevInput).to_string(),
             "refused: it is not under /dev/input"
         );
+        assert_eq!(
+            Problem::Refused(Refusal::NotAnEventDevice).to_string(),
+            "refused: it is not an event device (/dev/input/event and a number)"
+        );
         let unnumbered = OsError::from(&io::Error::from(io::ErrorKind::UnexpectedEof));
         assert_eq!(
             unnumbered.to_string(),
             io::ErrorKind::UnexpectedEof.to_string()
         );
+    }
+
+    /// A watcher that is never run, to see what it tells the session loop.
+    fn idle_watcher() -> (Watcher, mpsc::UnboundedReceiver<Input>) {
+        let (inputs, received) = mpsc::unbounded_channel();
+        let watcher = Watcher {
+            device: PathBuf::from("unused"),
+            rule: DeviceRule::AnyFileForTests,
+            timings: KeyTimings::default(),
+            inputs,
+            reader: Reader::new(bindings()),
+            told: None,
+            was_ready: false,
+        };
+        (watcher, received)
+    }
+
+    /// Everything the watcher has told the session loop since the last call.
+    fn told(received: &mut mpsc::UnboundedReceiver<Input>) -> Vec<DeviceState> {
+        let mut states = Vec::new();
+        while let Ok(input) = received.try_recv() {
+            let Input::KeyDevice(state) = input else {
+                panic!("not a device state: {input:?}");
+            };
+            states.push(state);
+        }
+        states
+    }
+
+    #[test]
+    fn a_loss_is_said_once_and_giving_up_after_it_is_said_too() {
+        let gone = Problem::CannotOpen(OsError::from(&io::Error::from_raw_os_error(2)));
+        let changed = Problem::Refused(Refusal::Changed);
+        let not_event = Problem::Refused(Refusal::NotAnEventDevice);
+
+        let (mut watcher, mut received) = idle_watcher();
+        watcher.ready().ok().unwrap();
+        watcher.ready().ok().unwrap();
+        assert_eq!(told(&mut received), [DeviceState::Ready], "said once");
+
+        // It was being read, so from here on it is lost, not merely missing.
+        watcher.not_ready(Problem::Ended).ok().unwrap();
+        assert_eq!(told(&mut received), [DeviceState::Lost(Problem::Ended)]);
+        // Attempts that fail, for whatever reason that is tried again: nothing is said.
+        watcher.not_ready(gone).ok().unwrap();
+        watcher.not_ready(changed).ok().unwrap();
+        watcher.not_ready(gone).ok().unwrap();
+        assert_eq!(told(&mut received), []);
+        // Then what is there turns out to be something that is refused for good: said, so
+        // that nothing goes on claiming the client is trying.
+        watcher.not_ready(not_event).ok().unwrap();
+        watcher.not_ready(not_event).ok().unwrap();
+        let said = told(&mut received);
+        assert_eq!(said, [DeviceState::Lost(not_event)]);
+        assert!(said[0].presses_refused() && !not_event.retried());
+    }
+
+    #[test]
+    fn a_device_that_was_never_read_is_missing_and_one_that_was_is_lost() {
+        let gone = Problem::CannotOpen(OsError::from(&io::Error::from_raw_os_error(2)));
+        let outside = Problem::Refused(Refusal::OutsideDevInput);
+
+        // Never opened: missing, and giving up is said as well.
+        let (mut watcher, mut received) = idle_watcher();
+        watcher.not_ready(gone).ok().unwrap();
+        watcher.not_ready(gone).ok().unwrap();
+        watcher.not_ready(outside).ok().unwrap();
+        let said = told(&mut received);
+        assert_eq!(
+            said,
+            [DeviceState::Missing(gone), DeviceState::Missing(outside)]
+        );
+        assert!(said.iter().all(|state| !state.presses_refused()));
+
+        // Missing, then there, then gone: the last is a loss.
+        let (mut watcher, mut received) = idle_watcher();
+        watcher.not_ready(gone).ok().unwrap();
+        watcher.ready().ok().unwrap();
+        watcher.not_ready(Problem::PartialRecord).ok().unwrap();
+        watcher.ready().ok().unwrap();
+        watcher.not_ready(gone).ok().unwrap();
+        assert_eq!(
+            told(&mut received),
+            [
+                DeviceState::Missing(gone),
+                DeviceState::Ready,
+                DeviceState::Lost(Problem::PartialRecord),
+                DeviceState::Ready,
+                DeviceState::Lost(gone),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_line_says_what_is_true_of_presses_for_each_state() {
+        let gone = Problem::CannotOpen(OsError::from(&io::Error::from_raw_os_error(2)));
+        let why = format!("cannot open it: {}", io::Error::from_raw_os_error(2));
+        assert_eq!(DeviceState::Ready.describe(), "open");
+        assert_eq!(DeviceState::Ready.problem(), None);
+        // Never open: standard input is the talk key, as if there were no device.
+        assert_eq!(
+            DeviceState::Missing(gone).describe(),
+            format!(
+                "{why}; taking down, up, mute, deafen and quit from standard input, and trying \
+                 again"
+            )
+        );
+        assert_eq!(
+            DeviceState::Missing(Problem::Refused(Refusal::NotAnEventDevice)).describe(),
+            "refused: it is not an event device (/dev/input/event and a number); taking down, \
+             up, mute, deafen and quit from standard input"
+        );
+        // It was open: the machine refuses every press until it is back.
+        assert_eq!(
+            DeviceState::Lost(Problem::Ended).describe(),
+            "it ended: a read returned nothing; a press is refused, from standard input too, \
+             until it is open again or conch-voice is started again with --stdin-keys; trying \
+             again"
+        );
+        assert_eq!(
+            DeviceState::Lost(Problem::Refused(Refusal::OutsideDevInput)).describe(),
+            "refused: it is not under /dev/input; a press is refused, from standard input too, \
+             until conch-voice is started again with --stdin-keys; not trying again"
+        );
+        assert_eq!(DeviceState::Lost(gone).problem(), Some(gone));
+        assert!(!DeviceState::Missing(gone).is_ready() && !DeviceState::Lost(gone).is_ready());
     }
 }

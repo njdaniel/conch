@@ -584,6 +584,7 @@ fn off_a_terminal_and_with_json_the_output_is_line_by_line_with_no_escape_sequen
                     "reason": "cannot_open",
                     "detail": format!("cannot open it: {}", std::io::Error::from_raw_os_error(13)),
                     "retrying": true,
+                    "presses_refused": false,
                 })
             );
             assert_eq!(
@@ -603,4 +604,56 @@ fn off_a_terminal_and_with_json_the_output_is_line_by_line_with_no_escape_sequen
             );
         }
     }
+}
+
+#[test]
+fn a_key_device_that_was_open_and_is_lost_says_that_presses_are_refused() {
+    // Never open and lost read the same in the user's own state, and differently in the
+    // one line that says what follows for a press.
+    let lost = Event::KeyDevice {
+        device: DEVICE,
+        state: DeviceState::Lost(Problem::Ended),
+    };
+    let shown = lines(&[Event::Own(after_ready(&[])), lost]);
+    assert_eq!(shown[1], "you: ready to talk; key device missing");
+    assert_eq!(
+        shown[3],
+        format!(
+            "key device {DEVICE}: it ended: a read returned nothing; a press is refused, from \
+             standard input too, until it is open again or conch-voice is started again with \
+             --stdin-keys; trying again"
+        )
+    );
+    let lost = Event::KeyDevice {
+        device: DEVICE,
+        state: DeviceState::Lost(Problem::Ended),
+    };
+    assert_eq!(
+        lost.json(),
+        serde_json::json!({
+            "event": "key_device",
+            "device": DEVICE,
+            "state": "missing",
+            "reason": "ended",
+            "detail": "it ended: a read returned nothing",
+            "retrying": true,
+            "presses_refused": true,
+        })
+    );
+
+    // Given up on after it was lost: not "trying again".
+    let gave_up = Event::KeyDevice {
+        device: DEVICE,
+        state: DeviceState::Lost(Problem::Refused(Refusal::NotAnEventDevice)),
+    };
+    assert_eq!(gave_up.json()["retrying"], false);
+    assert_eq!(gave_up.json()["presses_refused"], true);
+    assert_eq!(
+        lines(&[gave_up])[3],
+        format!(
+            "key device {DEVICE}: refused: it is not an event device (/dev/input/event and a \
+             number); a press is refused, from standard input too, until conch-voice is \
+             started again with --stdin-keys; not trying again"
+        )
+    );
 }

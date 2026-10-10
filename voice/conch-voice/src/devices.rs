@@ -8,14 +8,18 @@
 //!
 //! What the text keeps to:
 //!
-//! - It says what read access to a keyboard exposes **before** it says how to grant it.
+//! - It says what read access to a keyboard gives **before** it says how to grant it, and
+//!   all of it: every key, the means to take the keyboard from everything else, for a user
+//!   and not a session, and for whatever carries that name.
 //! - It grants one device to one user: a udev rule for that keyboard. It never suggests the
 //!   `input` group, and says why not.
+//! - It says that taking the grant back does not stop a program that has the device open.
 //! - It says what can swallow a release, and that only the transmit limit ends such a
 //!   transmission.
-//! - A rule is printed only for a name made of the characters udev itself puts in such a
-//!   name, so nothing a device calls itself can become part of a rule by surprise; and
-//!   every line passes [`one_line`].
+//! - A keyboard is shown, and a rule printed, only for a name made of the characters udev
+//!   itself puts in such a name. Any other entry is counted and not shown: nothing a
+//!   device calls itself can become part of a rule, a command or the terminal's display.
+//!   Every line passes [`one_line`] as well.
 
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -47,32 +51,51 @@ pub struct Keyboard {
     pub readable: Result<(), Problem>,
 }
 
-/// The keyboards in `by_id`, by name: every entry whose name ends in `-kbd`. Each is opened
-/// read-only, by the same check the watcher applies, and closed at once without a read.
+/// What the directory holds that claims to be a keyboard.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Found {
+    /// The keyboards whose names are fit to show, by name.
+    pub keyboards: Vec<Keyboard>,
+    /// How many more entries end in `-kbd` under a name that is not shown. Nothing is done
+    /// with them: they are not opened, and no path, rule or command is printed for them.
+    pub unshown: usize,
+}
+
+/// The keyboards in `by_id`, by name: every entry whose name ends in `-kbd`. Each one whose
+/// name is fit to show is opened read-only, by the same check the watcher applies, and
+/// closed at once without a read.
 ///
 /// # Errors
 ///
 /// What the operating system said, if the directory cannot be listed.
-pub fn keyboards(by_id: &Path, rule: DeviceRule) -> io::Result<Vec<Keyboard>> {
-    let mut found = Vec::new();
+pub fn keyboards(by_id: &Path, rule: DeviceRule) -> io::Result<Found> {
+    let mut found = Found::default();
     for entry in std::fs::read_dir(by_id)? {
         let entry = entry?;
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if !name.ends_with(KEYBOARD_SUFFIX) {
+        let name = entry.file_name();
+        if !name
+            .as_encoded_bytes()
+            .ends_with(KEYBOARD_SUFFIX.as_bytes())
+        {
             continue;
         }
-        // Opened and dropped: this is the whole of what is done with the device.
-        let readable = keydev::open(&entry.path(), rule).map(drop);
-        found.push(Keyboard { name, readable });
+        match name.into_string() {
+            Ok(name) if fit_for_a_rule(&name) => {
+                // Opened and dropped: this is the whole of what is done with the device.
+                let readable = keydev::open(&entry.path(), rule).map(drop);
+                found.keyboards.push(Keyboard { name, readable });
+            }
+            _ => found.unshown += 1,
+        }
     }
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.keyboards.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(found)
 }
 
-/// Whether a device's name is made only of what udev leaves in such a name: letters,
-/// digits and `#+-.:=@_`. Anything else is not put in a rule.
+/// Whether a device's name is made only of what udev leaves in such a name: ASCII letters
+/// and digits and `#+-.:=@_`. Anything else is not put in a rule, and is not shown at all:
+/// a name can hold characters that reorder or hide text on a terminal without being
+/// control characters.
 fn fit_for_a_rule(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -104,17 +127,31 @@ pub fn current_uid() -> Option<u32> {
         .map(|metadata| metadata.uid())
 }
 
-/// What read access to a keyboard exposes. Printed before any way of granting it.
+/// What read access to a keyboard gives. Printed before any way of granting it.
 const WHAT_IS_GRANTED: &str = "\
 What granting access means
   Read access to a keyboard's event device lets a program see every key pressed on that
-  keyboard, in every application, passwords included. conch-voice acts on the keys you
-  configure for talk, mute and deafen and discards every other key as it reads; but that is
-  a property of its code, not of the permission. Any other program running as you gets the
-  same access. So grant it for one keyboard, to one user, and only if you accept that.
+  keyboard, in every application, passwords included. It lets a program do more than read:
+  the kernel asks for no write access before a program takes the keyboard for itself, so
+  that nothing else (the desktop included) sees its keys until it lets go, or changes the
+  keyboard's key map and repeat rate until it is replugged.
+
+  The grant is to a user, not to a login session. It covers what is typed on that keyboard
+  at the login screen, in another user's session and at a console, for anything running as
+  that user. On a shared machine, granting it to someone gives them the means to capture
+  what others type on that keyboard.
+
+  conch-voice acts on the keys you configure for talk, mute and deafen and discards every
+  other key as it reads; but that is a property of its code, not of the permission. Any
+  other program running as you gets the same access. So grant it for one keyboard, to one
+  user, and only if you accept that.
+
+  \"One keyboard\" means one name: the rule below matches the name udev gave the device. A
+  second keyboard of the same model with no serial number, or a device that presents the
+  same identity strings, gets the same access.
 
   Do not use the `input` group for this: being in that group grants every input device on
-  the machine, to every program you run. The rule below grants one device.
+  the machine, to every program you run.
 ";
 
 /// What can keep a release from being seen.
@@ -153,9 +190,8 @@ fn grant(device: &str, name: &str, uid: Option<u32>) -> Vec<String> {
         ];
     }
     let Some(rule) = udev_rule(name, uid) else {
-        return vec![
-            "  no rule is shown: this name has characters udev does not put in one".to_owned(),
-        ];
+        // Not reached from `report`, which shows only names that are fit for a rule.
+        return vec!["  no rule is shown: this name is not one udev gives a device".to_owned()];
     };
     vec![
         format!("  to let user {uid} (you) read this one keyboard, put this line, as root, in"),
@@ -171,7 +207,11 @@ fn grant(device: &str, name: &str, uid: Option<u32>) -> Vec<String> {
         String::new(),
         format!("    sudo setfacl -m u:{uid}:r {device}"),
         String::new(),
-        format!("  To take it back, delete the line and run `sudo setfacl -x u:{uid} {device}`."),
+        format!("  To take it back, delete the line and run `sudo setfacl -x u:{uid} {device}`,"),
+        "  then unplug and replug the keyboard, or stop every program that has it open.".to_owned(),
+        "  Permission is checked when a device is opened: a program that already has it open"
+            .to_owned(),
+        "  (a running conch-voice included) goes on reading until then.".to_owned(),
         "  Then name it in the configuration file ($XDG_CONFIG_HOME/conch/voice.toml):".to_owned(),
         String::new(),
         "    [keys]".to_owned(),
@@ -211,7 +251,7 @@ pub fn report(
         "  event device, not a guarantee that it is one or that it is the only one)".to_owned(),
     );
     match keyboards(by_id, rule) {
-        Ok(found) if found.is_empty() => {
+        Ok(found) if found.keyboards.is_empty() && found.unshown == 0 => {
             lines.push(String::new());
             lines.push(
                 "  none. A laptop's built-in keyboard has no entry there; look for one ending"
@@ -220,12 +260,28 @@ pub fn report(
             lines.push("  in `-kbd` under /dev/input/by-path instead.".to_owned());
         }
         Ok(found) => {
-            for keyboard in found {
+            for keyboard in found.keyboards {
                 let device = format!("{directory}/{}", keyboard.name);
                 lines.push(String::new());
                 lines.push(device.clone());
                 lines.push(readable_line(&keyboard.readable));
                 lines.extend(grant(&device, &keyboard.name, uid));
+            }
+            // Counted, and nothing more: no name, no path, no rule and no command.
+            match found.unshown {
+                0 => {}
+                1 => {
+                    lines.push(String::new());
+                    lines.push(
+                        "  one entry whose name has characters that are not shown".to_owned(),
+                    );
+                }
+                more => {
+                    lines.push(String::new());
+                    lines.push(format!(
+                        "  {more} entries whose names have characters that are not shown"
+                    ));
+                }
             }
         }
         Err(error) => {
