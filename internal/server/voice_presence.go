@@ -90,7 +90,10 @@ const (
 	// voiceEvictTimeout bounds the immediate LiveKit work done inside an HTTP
 	// request (rotating a room and deleting the old one, removing a
 	// participant), so a LiveKit that does not answer cannot hold the
-	// response for long. Passes and sweeps retry.
+	// response for long. Passes and sweeps retry. It is also the bound on
+	// each store read a removal hook makes to learn which rooms to call
+	// LiveKit for (voicePoller.hookReadTimeout), so that the request answers
+	// in a time this file states, whatever the store is doing.
 	voiceEvictTimeout = 4 * time.Second
 	// voiceMinDelay keeps the loop from spinning if a deadline is already due
 	// but its call is being held back.
@@ -222,11 +225,18 @@ type voicePoller struct {
 	entitle     func(ctx context.Context, identity string, channelID int64) (int64, string, error)
 	storedRooms func(ctx context.Context) ([]store.VoiceRoom, error)
 	// memberRooms is Store.VoiceRoomsForMember, the read behind the
-	// immediate removal of a disabled principal. invalid is
-	// Store.InvalidVoiceRooms, the invariant check, and retiredRooms is
-	// Store.ListRetiredVoiceRooms. Test seams like the two above.
-	memberRooms func(ctx context.Context, principalID int64) ([]store.VoiceRoom, error)
-	invalid     func(ctx context.Context, now time.Time) ([]store.VoiceViolation, error)
+	// immediate removal of a disabled principal, and channelRooms is
+	// Store.VoiceRoomsForChannel, the read behind that of a removed member.
+	// invalid is Store.InvalidVoiceRooms, the invariant check, and
+	// retiredRooms is Store.ListRetiredVoiceRooms. Test seams like the two
+	// above.
+	memberRooms  func(ctx context.Context, principalID int64) ([]store.VoiceRoom, error)
+	channelRooms func(ctx context.Context, channelID int64) ([]store.VoiceRoom, error)
+	// hookReadTimeout is how long a removal hook waits for memberRooms or
+	// channelRooms: voiceEvictTimeout. Tests shorten it so that a store that
+	// does not answer is waited out in milliseconds; nothing else may.
+	hookReadTimeout time.Duration
+	invalid         func(ctx context.Context, now time.Time) ([]store.VoiceViolation, error)
 	// recordHolder is Store.RecordVoiceHolder, called by the session path
 	// before a token is signed. A test seam like the others.
 	recordHolder func(ctx context.Context, roomID, principalID, credentialID int64) error
@@ -270,20 +280,22 @@ type voicePoller struct {
 
 func newVoicePoller(s *Server) *voicePoller {
 	return &voicePoller{
-		s:            s,
-		now:          time.Now,
-		entitle:      s.voiceEntitlement,
-		storedRooms:  s.store.ListVoiceRooms,
-		memberRooms:  s.store.VoiceRoomsForMember,
-		invalid:      s.store.InvalidVoiceRooms,
-		retiredRooms: s.store.ListRetiredVoiceRooms,
-		recordHolder: s.store.RecordVoiceHolder,
-		gap:          voicePassGap,
-		appendAudit:  s.store.AppendAuditEventAt,
-		wakeLoop:     make(chan struct{}, 1),
-		rooms:        make(map[string]*voiceRoomState),
-		removed:      make(map[string]time.Time),
-		subs:         make(map[*voiceSub]struct{}),
+		s:               s,
+		now:             time.Now,
+		entitle:         s.voiceEntitlement,
+		storedRooms:     s.store.ListVoiceRooms,
+		memberRooms:     s.store.VoiceRoomsForMember,
+		channelRooms:    s.store.VoiceRoomsForChannel,
+		hookReadTimeout: voiceEvictTimeout,
+		invalid:         s.store.InvalidVoiceRooms,
+		retiredRooms:    s.store.ListRetiredVoiceRooms,
+		recordHolder:    s.store.RecordVoiceHolder,
+		gap:             voicePassGap,
+		appendAudit:     s.store.AppendAuditEventAt,
+		wakeLoop:        make(chan struct{}, 1),
+		rooms:           make(map[string]*voiceRoomState),
+		removed:         make(map[string]time.Time),
+		subs:            make(map[*voiceSub]struct{}),
 	}
 }
 
@@ -1573,6 +1585,13 @@ func withoutRotated(rooms []store.VoiceRoom, rotated []voiceRotation) []store.Vo
 // written, never fails the request, and runs on a context its caller cannot
 // cancel. What it cannot finish (LiveKit down, a store read failing) is left
 // to the sweep, which checks the same invariant for every stored room.
+//
+// A context that cannot be cancelled has no deadline either, so the steps
+// that wait on the store or on LiveKit before the response each set one: the
+// read of the rooms to remove someone from (hookReadTimeout, issue #210), the
+// holder check (voiceEnforceHolders) and the removal by name (evict). The
+// audit rows written on the way (writeEvents) are tied to no context, on
+// purpose, and have only SQLite's busy timeout.
 
 // voiceMemberRemoved runs after a principal's membership of channelID was
 // removed: their presence sockets on the channel close, the invariant is
@@ -1585,7 +1604,11 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	rooms, roomsErr := s.store.VoiceRoomsForChannel(ctx, channelID)
+	// A read that runs out of time fails like any other: logged below, and
+	// the passes remove them by entitlement.
+	rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
+	rooms, roomsErr := s.voice.channelRooms(rctx, channelID)
+	cancel()
 	rotated := s.voiceEnforceHolders(ctx)
 	if roomsErr != nil {
 		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "channel", channelID, "error", roomsErr)
@@ -1608,7 +1631,11 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 	var rooms []store.VoiceRoom
 	var roomsErr error
 	if reason == voiceReasonPrincipalOff {
-		rooms, roomsErr = s.voice.memberRooms(ctx, principalID)
+		// Bounded like the read in voiceMemberRemoved, and failing the same
+		// way when the time runs out.
+		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
+		rooms, roomsErr = s.voice.memberRooms(rctx, principalID)
+		cancel()
 	}
 	rotated := s.voiceEnforceHolders(ctx)
 	if reason != voiceReasonPrincipalOff {
