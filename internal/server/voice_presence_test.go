@@ -79,6 +79,12 @@ func TestVoicePollerSessionMarksRoomInUse(t *testing.T) {
 // TestVoicePollerSession is the scripted session: join, unmute, mute, leave.
 // The audit has exactly the expected events in order, once each, with the
 // principal as actor and source=observed.
+//
+// Ann never reports a press here, so from issue #135 her transmission is not
+// a voice_transmit_started row but an unreported one: opened on the second
+// pass that sees her unmuted and timed at the first, and closed by the poller
+// when she mutes (docs/design/conch-voice.md §6). Presence shows her talking
+// from the first pass, as before.
 func TestVoicePollerSession(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	room := f.inUse(t, f.ops)
@@ -96,7 +102,8 @@ func TestVoicePollerSession(t *testing.T) {
 			"ann", []string{"voice_joined " + f.actor("ann")}},
 		{"nothing changes", func() {}, "ann", nil},
 		{"ann unmutes", func() { f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) { p.muted = false }) },
-			"ann*", []string{"voice_transmit_started " + f.actor("ann")}},
+			"ann*", nil},
+		{"she is still talking on the next pass", func() {}, "ann*", []string{"voice_transmit_unreported " + f.actor("ann")}},
 		{"nothing changes while she talks", func() {}, "ann*", nil},
 		{"ann mutes", func() { f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) { p.muted = true }) },
 			"ann", []string{"voice_transmit_stopped " + f.actor("ann")}},
@@ -110,10 +117,14 @@ func TestVoicePollerSession(t *testing.T) {
 		{"ann2 leaves", func() { f.lk.setRoom(room) }, "", []string{"voice_left " + f.actor("ann2")}},
 	}
 	var wantAll []string
+	var unmutedAt time.Time
 	for _, st := range steps {
 		st.script()
+		if st.name == "ann unmutes" {
+			unmutedAt = f.clock.Now()
+		}
 		f.pass(t)
-		f.clock.Advance(voicePollInterval)
+		f.clock.Advance(testPassGap)
 		got := f.who(t, f.ops)
 		if got == "-" {
 			t.Fatalf("%s: snapshot has no room", st.name)
@@ -134,8 +145,17 @@ func TestVoicePollerSession(t *testing.T) {
 		if e.Subject != fmt.Sprintf("channel:%d", f.ops.ID) {
 			t.Errorf("%s subject = %q", e.Action, e.Subject)
 		}
-		if want := fmt.Sprintf("channel=%d audience=channel source=observed", f.ops.ID); e.Detail != want {
+		want := fmt.Sprintf("channel=%d audience=channel source=observed", f.ops.ID)
+		if e.Action == store.AuditVoiceTransmitStopped {
+			want += " reason=muted"
+		}
+		if e.Detail != want {
 			t.Errorf("%s detail = %q, want %q", e.Action, e.Detail, want)
+		}
+		// The unreported row is timed at the first pass that saw her
+		// unmuted, though it was written on the pass after.
+		if e.Action == store.AuditVoiceTransmitUnreported && !e.CreatedAt.Equal(unmutedAt) {
+			t.Errorf("%s is timed %v, want the first pass that saw her unmuted, %v", e.Action, e.CreatedAt, unmutedAt)
 		}
 	}
 }
@@ -189,16 +209,20 @@ func TestVoicePollerChangesBetweenPasses(t *testing.T) {
 	ann := f.identity("ann")
 	a := f.actor("ann")
 
+	// Ann reports nothing, and each time she is seen unmuted on one pass
+	// only. That is still an unreported transmission, one that began and
+	// ended: it is written, with its close, by the pass that finds her gone
+	// (docs/design/conch-voice.md §6).
 	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000, published: true})
-	f.pass(t) // joined, started
+	f.pass(t) // joined; unmuted on this one pass
 	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 5_000, published: true, muted: true})
-	f.pass(t) // displaced: stop, left, joined (not transmitting now)
+	f.pass(t) // displaced: unreported, stopped, left, joined (not transmitting now)
 	f.lk.setRoom(room)
 	f.pass(t) // left
 
 	want := []string{
-		"voice_joined " + a, "voice_transmit_started " + a,
-		"voice_transmit_stopped " + a, "voice_left " + a, "voice_joined " + a,
+		"voice_joined " + a,
+		"voice_transmit_unreported " + a, "voice_transmit_stopped " + a, "voice_left " + a, "voice_joined " + a,
 		"voice_left " + a,
 	}
 	if got := f.voiceAudit(t); !slices.Equal(got, want) {
@@ -212,9 +236,15 @@ func TestVoicePollerChangesBetweenPasses(t *testing.T) {
 	f.pass(t)
 	got := f.voiceAudit(t)
 	if tail := got[len(got)-4:]; !slices.Equal(tail, []string{
-		"voice_joined " + a, "voice_transmit_started " + a, "voice_transmit_stopped " + a, "voice_left " + a}) {
+		"voice_joined " + a, "voice_transmit_unreported " + a, "voice_transmit_stopped " + a, "voice_left " + a}) {
 		t.Fatalf("audit tail = %q", tail)
 	}
+	for _, e := range f.audits(t, store.AuditVoiceTransmitStopped) {
+		if want := fmt.Sprintf("channel=%d audience=channel source=observed reason=left", f.ops.ID); e.Detail != want {
+			t.Errorf("a transmission closed because its principal left: detail = %q, want %q", e.Detail, want)
+		}
+	}
+	assertTransmitPairs(t, f.audit(t))
 }
 
 // TestVoicePollerUnentitled: everyone who must not be in the room is removed
@@ -505,7 +535,7 @@ func TestVoicePollerIdle(t *testing.T) {
 
 	for range 5 {
 		f.pass(t)
-		f.clock.Advance(voicePollInterval)
+		f.clock.Advance(testPassGap)
 	}
 	if got := len(f.lk.calls()); got != 0 {
 		t.Fatalf("idle passes made %d calls", got)
@@ -523,8 +553,8 @@ func TestVoicePollerIdle(t *testing.T) {
 	f.lk.setRoom(room)
 	f.clock.Advance(voiceSweepInterval)
 	f.sweep(t)
-	if d := f.srv.voice.nextDelay(); d != voicePollInterval {
-		t.Fatalf("delay with a room in use = %v, want %v", d, voicePollInterval)
+	if d := f.srv.voice.nextDelay(); d != testPassGap {
+		t.Fatalf("delay with a room in use = %v, want %v", d, testPassGap)
 	}
 	f.pass(t)
 	if f.srv.voice.anyInUse() {
@@ -654,7 +684,7 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 
 				// Passes finish what a failure left: one retry removes her again.
 				f.lk.setRemoveStatus(0)
-				f.clock.Advance(voicePollInterval)
+				f.clock.Advance(testPassGap)
 				f.pass(t)
 				if got := f.who(t, f.ops); got != "ann2" {
 					t.Errorf("snapshot after a pass = %q, want ann2 only", got)
@@ -1157,7 +1187,7 @@ func TestVoicePollerOneFailedEntitlementCheck(t *testing.T) {
 	}
 	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: ann2, joinedMs: 2_000},
 		fakeParticipant{identity: f.identity("dora"), joinedMs: 3_000})
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if got := f.who(t, f.ops); got != "ann2*" {
 		t.Errorf("after the pass: %q, want ann gone, ann2 exactly as she was (still transmitting), the unreadable newcomer unseen", got)
@@ -1171,7 +1201,7 @@ func TestVoicePollerOneFailedEntitlementCheck(t *testing.T) {
 	// The store answers again: ann2's mute is noticed, the newcomer (who is
 	// disabled) is removed.
 	f.srv.voice.entitle = real
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if got := f.who(t, f.ops); got != "ann2" {
 		t.Errorf("once the store answers: %q, want ann2 not transmitting", got)
@@ -1257,7 +1287,7 @@ func TestVoicePollerRejoinRemovalIsAudited(t *testing.T) {
 	f.lk.setRoom(room, fakeParticipant{identity: bob, joinedMs: 1_000})
 	f.pass(t)
 	// He is back a moment later on the same token: a new connection.
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.lk.setRoom(room, fakeParticipant{identity: bob, joinedMs: 1_700})
 	f.pass(t)
 	if n := len(f.audits(t, store.AuditVoiceParticipantRemoved)); n != 2 {
@@ -1265,10 +1295,10 @@ func TestVoicePollerRejoinRemovalIsAudited(t *testing.T) {
 	}
 	// LiveKit slow to drop: the same connection is still listed on the next pass.
 	f.lk.setKeepAfterRemove(true)
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.lk.setRoom(room, fakeParticipant{identity: bob, joinedMs: 2_400})
 	f.pass(t)
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if n := len(f.audits(t, store.AuditVoiceParticipantRemoved)); n != 3 {
 		t.Errorf("voice_participant_removed = %d, want 3: one more for the third connection, none for seeing it twice", n)
@@ -1309,7 +1339,7 @@ func TestVoicePollerKeepsPollingARoomItCouldNotClear(t *testing.T) {
 			f.sweep(t)
 			tt.break_(f)
 			for i := 0; i < 4; i++ {
-				f.clock.Advance(voicePollInterval)
+				f.clock.Advance(testPassGap)
 				before := f.lk.count("ListParticipants")
 				f.pass(t)
 				if f.lk.count("ListParticipants") != before+1 {
@@ -1322,17 +1352,17 @@ func TestVoicePollerKeepsPollingARoomItCouldNotClear(t *testing.T) {
 					t.Fatalf("pass %d: the fake dropped bob although nothing could remove him", i)
 				}
 			}
-			if d := f.srv.voice.nextDelay(); d != voicePollInterval {
+			if d := f.srv.voice.nextDelay(); d != testPassGap {
 				t.Errorf("next delay = %v, want the polling interval", d)
 			}
 			tt.mend(f)
-			f.clock.Advance(voicePollInterval)
+			f.clock.Advance(testPassGap)
 			f.pass(t)
 			if f.lk.in(room, bob) {
 				t.Error("bob was not removed once it was possible")
 			}
 			// With him gone the room is no longer in use.
-			f.clock.Advance(voicePollInterval)
+			f.clock.Advance(testPassGap)
 			f.pass(t)
 			if f.srv.voice.anyInUse() {
 				t.Error("the empty room is still in use")
@@ -1366,7 +1396,7 @@ func TestVoiceDisableWhenTheRoomListCannotBeRead(t *testing.T) {
 	if f.lk.count("RemoveParticipant") != before {
 		t.Fatal("RemoveParticipant was called although the rooms could not be read")
 	}
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if f.lk.in(room, ann) {
 		t.Error("the pass did not remove the disabled ann")
@@ -1446,7 +1476,7 @@ func TestVoicePollerRemovalDuringAPassIsNotUndone(t *testing.T) {
 		}
 		return id, reason, err // the answer from before the removal
 	}
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if !fired {
 		t.Fatal("the removal never ran")
@@ -1455,7 +1485,7 @@ func TestVoicePollerRemovalDuringAPassIsNotUndone(t *testing.T) {
 		t.Errorf("after the pass that was in flight: %q, want ann2 only", got)
 	}
 	f.srv.voice.entitle = real
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if got := f.who(t, f.ops); got != "ann2" {
 		t.Errorf("a pass later: %q", got)
@@ -1513,7 +1543,7 @@ func TestVoicePollerRecoveryThroughASweepShowsNobodyUntilRead(t *testing.T) {
 		t.Fatalf("before: %q", got)
 	}
 	f.lk.setListStatus(http.StatusServiceUnavailable)
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if s := f.snap(t, f.ops); s.Available || len(s.Rooms) != 0 {
 		t.Fatalf("during the outage: %+v", s)
@@ -1556,7 +1586,7 @@ func TestVoicePollerOneUnreadableRoomIsNotAnOutage(t *testing.T) {
 	// Someone who must not be there walks into the good room.
 	f.lk.setRoom(good, fakeParticipant{identity: f.identity("ann"), joinedMs: 2_000}, fakeParticipant{identity: f.identity("bob"), joinedMs: 3_000})
 	for i := 0; i < 3; i++ {
-		f.clock.Advance(voicePollInterval)
+		f.clock.Advance(testPassGap)
 		before := f.lk.count("ListParticipants")
 		f.pass(t)
 		if got := f.lk.count("ListParticipants") - before; got != 2 {
@@ -1577,7 +1607,7 @@ func TestVoicePollerOneUnreadableRoomIsNotAnOutage(t *testing.T) {
 	}
 	// It becomes readable again: its occupant is shown, with no second join.
 	f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil })
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if got := f.who(t, f.ops); got != "ann2" {
 		t.Errorf("once readable again: %q", got)
@@ -1593,7 +1623,7 @@ func TestVoicePollerOneUnreadableRoomIsNotAnOutage(t *testing.T) {
 	}
 	// Every room unreadable is an outage.
 	f.lk.setListStatus(http.StatusServiceUnavailable)
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if s := f.snap(t, f.ops2); s.Available {
 		t.Error("presence still available with every room unreadable")
@@ -2044,7 +2074,7 @@ func TestVoiceAfterRotation(t *testing.T) {
 	// The old room is not shown even though LiveKit lists people in it, and
 	// the poller does not read it any more.
 	lists := f.lk.callsFor("ListParticipants", first)
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if got := f.who(t, f.ops); got != "" {
 		t.Errorf("presence = %q, want nobody (the people in the old room are not shown)", got)
@@ -2063,7 +2093,7 @@ func TestVoiceAfterRotation(t *testing.T) {
 	}
 	// The per-pass removal of an unentitled participant works in the new room.
 	f.lk.setRoom(next, fakeParticipant{identity: f.identity("ann"), joinedMs: 5_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 6_000})
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	if f.lk.in(next, f.identity("ann2")) || f.who(t, f.ops) != "ann" {
 		t.Errorf("ann2 in the new room = %v, presence %q; want her removed and only ann shown", f.lk.in(next, f.identity("ann2")), f.who(t, f.ops))
@@ -2103,7 +2133,7 @@ func TestVoiceRotationKeepsSecrets(t *testing.T) {
 		t.Fatal("room not rotated")
 	}
 	f.lk.setRoom(g3.Room, fakeParticipant{identity: f.identity("ann"), joinedMs: 9_000})
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 
 	needles := []string{g1.Room, g3.Room, g1.Token, g2.Token, g3.Token, voiceTestSecret}
@@ -2153,7 +2183,7 @@ func TestVoicePollerPassInFlightDuringARotationReportsNothing(t *testing.T) {
 		}
 		return real(ctx, identity, channelID)
 	}
-	f.clock.Advance(voicePollInterval)
+	f.clock.Advance(testPassGap)
 	f.pass(t)
 	f.srv.voice.entitle = real
 	if !fired {
@@ -2188,7 +2218,7 @@ func TestVoiceFailedDeleteBringsTheSweepForward(t *testing.T) {
 	f.sweep(t)
 	f.lk.setRoom(old, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: ann2, joinedMs: 2_000})
 	f.pass(t)
-	if d := f.srv.voice.nextDelay(); d > voicePollInterval {
+	if d := f.srv.voice.nextDelay(); d > testPassGap {
 		t.Fatalf("next delay before = %v", d)
 	}
 
