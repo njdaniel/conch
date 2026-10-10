@@ -5,7 +5,9 @@
 // returns the structured outcome; the audit log shows the full chain. This
 // program drives that loop against real conchd/conch binaries and asserts
 // every step, then reruns the approval half with ntfy unreachable to prove
-// graceful degradation. Nonzero exit on any assertion failure.
+// graceful degradation, and then kills conchd between a commit and its
+// notification to prove the next start makes and records the attempt (issue
+// #158). Nonzero exit on any assertion failure.
 //
 // The happy path authenticates the agent with a credential issued through
 // the REST API (issues #78, #97) and ends by revoking it and asserting the
@@ -72,6 +74,11 @@ func run() error {
 	fmt.Println("== degraded path (ntfy unreachable) ==")
 	if err := degradedPath(bin); err != nil {
 		return fmt.Errorf("degraded path: %w", err)
+	}
+
+	fmt.Println("== restart path (conchd killed between a commit and its notification) ==")
+	if err := restartPath(bin); err != nil {
+		return fmt.Errorf("restart path: %w", err)
 	}
 	return nil
 }
@@ -155,6 +162,69 @@ func newFakeNtfy() *fakeNtfy {
 
 func (f *fakeNtfy) Close() { f.srv.Close() }
 
+// gatedNtfy is an ntfy stand-in that can be told to hold every delivery
+// without answering, so the harness can stop conchd at the moment a
+// transition has committed and its notification is in flight.
+type gatedNtfy struct {
+	srv *httptest.Server
+	// arrived receives every delivery that reached the server, answered or
+	// not.
+	arrived chan ntfyHit
+	mu      sync.Mutex
+	hold    bool
+	hits    []ntfyHit // deliveries answered with 200
+}
+
+func newGatedNtfy() *gatedNtfy {
+	g := &gatedNtfy{arrived: make(chan ntfyHit, 64)}
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		hit := ntfyHit{
+			Topic:    strings.TrimPrefix(r.URL.Path, "/"),
+			Title:    r.Header.Get("Title"),
+			Priority: r.Header.Get("Priority"),
+			Body:     string(body),
+		}
+		g.mu.Lock()
+		hold := g.hold
+		if !hold {
+			g.hits = append(g.hits, hit)
+		}
+		g.mu.Unlock()
+		g.arrived <- hit
+		if hold {
+			<-r.Context().Done() // never answered; ends when conchd goes away
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	return g
+}
+
+func (g *gatedNtfy) Close() { g.srv.Close() }
+
+func (g *gatedNtfy) setHold(hold bool) {
+	g.mu.Lock()
+	g.hold = hold
+	g.mu.Unlock()
+}
+
+func (g *gatedNtfy) Hits() []ntfyHit {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]ntfyHit(nil), g.hits...)
+}
+
+// await returns the next delivery to reach the server.
+func (g *gatedNtfy) await(what string) (ntfyHit, error) {
+	select {
+	case hit := <-g.arrived:
+		return hit, nil
+	case <-time.After(10 * time.Second):
+		return ntfyHit{}, fmt.Errorf("the %s notification never reached ntfy", what)
+	}
+}
+
 func (f *fakeNtfy) Hits() []ntfyHit {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -169,6 +239,9 @@ type conchdProc struct {
 	cmd     *exec.Cmd
 	baseURL string
 	dataDir string
+	// bin and args are what conchd was started with, to start it again.
+	bin  string
+	args []string
 	// operatorToken is the credential bootstrap-operator printed.
 	operatorToken string
 }
@@ -224,7 +297,7 @@ func startConchd(bin binaries, ntfyServerURL string, staticToken bool) (*conchdP
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, dataDir: dataDir, operatorToken: operatorToken}
+	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, dataDir: dataDir, operatorToken: operatorToken, bin: bin.conchd, args: args}
 	if err := p.waitHealthy(10 * time.Second); err != nil {
 		_ = p.Stop()
 		return nil, err
@@ -263,6 +336,27 @@ func (p *conchdProc) Stop() error {
 	_ = p.cmd.Process.Kill()
 	_ = p.cmd.Wait()
 	return os.RemoveAll(p.dataDir)
+}
+
+// kill stops conchd the way a crash does: SIGKILL, nothing finished and
+// nothing flushed. The data directory stays.
+func (p *conchdProc) kill() {
+	_ = p.cmd.Process.Kill()
+	_ = p.cmd.Wait()
+}
+
+// startAgain runs conchd again on the same data directory and address, and
+// returns once it answers. conchd rehydrates its approvals before it accepts
+// a connection, so by then whatever a start does about the past is done.
+func (p *conchdProc) startAgain() error {
+	cmd := exec.Command(p.bin, p.args...) // #nosec G204 -- p.bin is a binary this program just built into a temp dir; args are local constants
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	p.cmd = cmd
+	return p.waitHealthy(10 * time.Second)
 }
 
 func (p *conchdProc) auditEvents() ([]store.AuditEvent, error) {
@@ -843,6 +937,208 @@ func degradedPath(bin binaries) error {
 	}
 
 	fmt.Println("degraded path: OK (approval resolved with ntfy unreachable, notify_failed audited)")
+	return nil
+}
+
+// restartPath kills conchd while two notifications are in flight: one for a
+// decision that has just resolved an approval, one for an approval that has
+// just been created. Both transitions are committed and neither has its
+// notify row. The next start must make both attempts and record them before
+// it serves anything, and the loop must still close afterwards: the second
+// approval is decided through the CLI and the agent reads the resolution.
+func restartPath(bin binaries) error {
+	ntfy := newGatedNtfy()
+	defer ntfy.Close()
+	proc, err := startConchd(bin, ntfy.srv.URL, false)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = proc.Stop() }()
+
+	channelID, err := createChannel(proc.operator(), "ops")
+	if err != nil {
+		return fmt.Errorf("create channel: %w", err)
+	}
+	agentID, err := createPrincipal(proc.operator(), schema.PrincipalAgent, "dogfood-agent")
+	if err != nil {
+		return fmt.Errorf("create agent principal: %w", err)
+	}
+	if err := provisionAgent(proc.operator(), agentID, "dogfood-agent", "ops", channelID); err != nil {
+		return err
+	}
+	_, agentToken, err := issueCredential(proc.operator(), agentID, "dogfood")
+	if err != nil {
+		return fmt.Errorf("issue agent credential: %w", err)
+	}
+	humanID, humanToken, err := newHuman(proc.operator(), "dogfood-human", "ops")
+	if err != nil {
+		return err
+	}
+	human, err := newConchUser(bin.conch, proc.baseURL)
+	if err != nil {
+		return err
+	}
+	defer human.cleanup()
+	human.env = append(human.env, "CONCH_TOKEN="+humanToken)
+
+	request := func(client *mcpclient.Client, title string) (int64, error) {
+		raw, err := client.CallTool(context.Background(), "request_approval", map[string]any{
+			"channel_id": channelID, "title": title, "body": "conchd is about to be killed",
+			"options": []map[string]any{
+				{"id": "approve", "kind": "approve", "label": "Approve"},
+				{"id": "reject", "kind": "reject", "label": "Reject"},
+			},
+			"deadline": time.Now().Add(time.Hour).Format(time.RFC3339),
+		})
+		if err != nil {
+			return 0, err
+		}
+		created, err := mcpclient.Decode[schema.RequestApprovalOutput](raw)
+		if err != nil {
+			return 0, err
+		}
+		return created.ID, nil
+	}
+
+	client := mcpclient.New(proc.baseURL, agentToken)
+	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
+		return fmt.Errorf("mcp initialize: %w", err)
+	}
+	first, err := request(client, "Decided before the crash")
+	if err != nil {
+		return fmt.Errorf("request_approval: %w", err)
+	}
+	if hit, err := ntfy.await("first approval's created"); err != nil {
+		return err
+	} else if hit.Topic != "approvals" || !strings.Contains(hit.Title, "Decided before the crash") {
+		return fmt.Errorf("first delivery = %+v, want the first approval's creation", hit)
+	}
+
+	// From here ntfy answers nothing. The decision commits and conchd is left
+	// inside the delivery; so is the creation of a second approval.
+	ntfy.setHold(true)
+	go func() {
+		_, _, _ = proc.as(humanToken).do(http.MethodPost, fmt.Sprintf("/v1/approvals/%d/decisions", first),
+			schema.CastDecisionRequestV1{PrincipalID: humanID, OptionID: "approve", Reason: "decided just before the crash"}, nil)
+	}()
+	if hit, err := ntfy.await("resolved"); err != nil {
+		return err
+	} else if !strings.Contains(hit.Title, "Decided before the crash") {
+		return fmt.Errorf("the delivery held at the kill = %+v, want the first approval's resolution", hit)
+	}
+	go func() { _, _ = request(client, "Created before the crash") }()
+	if hit, err := ntfy.await("second approval's created"); err != nil {
+		return err
+	} else if !strings.Contains(hit.Title, "Created before the crash") {
+		return fmt.Errorf("the delivery held at the kill = %+v, want the second approval's creation", hit)
+	}
+	proc.kill()
+
+	// What the crash left: both transitions in the log, neither with its
+	// notify row.
+	events, err := proc.auditEvents()
+	if err != nil {
+		return fmt.Errorf("read audit events: %w", err)
+	}
+	var second int64
+	for _, e := range events {
+		var id int64
+		if _, err := fmt.Sscanf(e.Subject, "approval:%d", &id); err == nil && e.Action == store.AuditApprovalCreated && id != first {
+			second = id
+		}
+	}
+	if second == 0 {
+		return fmt.Errorf("the second approval was not committed before conchd was killed")
+	}
+	if err := assertAuditChain(proc, first, []string{
+		store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved,
+	}); err != nil {
+		return fmt.Errorf("after the kill: %w", err)
+	}
+	if err := assertAuditChain(proc, second, []string{store.AuditApprovalCreated}); err != nil {
+		return fmt.Errorf("after the kill: %w", err)
+	}
+
+	// The next start, with ntfy answering again.
+	ntfy.setHold(false)
+	answered := len(ntfy.Hits())
+	if err := proc.startAgain(); err != nil {
+		return fmt.Errorf("start conchd again: %w", err)
+	}
+	caughtUp := ntfy.Hits()[answered:]
+	if len(caughtUp) != 2 {
+		return fmt.Errorf("the next start made %d deliveries, want 2 (the resolution, then the creation): %+v", len(caughtUp), caughtUp)
+	}
+	if caughtUp[0].Topic != "approvals" || !strings.Contains(caughtUp[0].Title, "Decided before the crash") ||
+		caughtUp[1].Topic != "approvals" || !strings.Contains(caughtUp[1].Title, "Created before the crash") {
+		return fmt.Errorf("deliveries at the next start = %+v, want the first approval's resolution then the second's creation", caughtUp)
+	}
+	if err := assertAuditChain(proc, first, []string{
+		store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent,
+	}); err != nil {
+		return fmt.Errorf("after the restart: %w", err)
+	}
+	if err := assertAuditChain(proc, second, []string{store.AuditApprovalCreated, approvals.AuditNotifySent}); err != nil {
+		return fmt.Errorf("after the restart: %w", err)
+	}
+	// The log says when each start happened and that notifications were on:
+	// the two rows that were owed come before the second start row.
+	events, err = proc.auditEvents()
+	if err != nil {
+		return fmt.Errorf("read audit events: %w", err)
+	}
+	var starts, notifyAfterSecondStart int
+	for _, e := range events {
+		switch {
+		case e.Action == approvals.AuditApprovalsStarted:
+			if !strings.HasPrefix(e.Detail, "notifications=on since=") {
+				return fmt.Errorf("approvals_started detail = %q, want notifications=on and where the next start reads from", e.Detail)
+			}
+			starts++
+		case starts == 2 && (e.Action == approvals.AuditNotifySent || e.Action == approvals.AuditNotifyFailed):
+			notifyAfterSecondStart++
+		}
+	}
+	if starts != 2 || notifyAfterSecondStart != 0 {
+		return fmt.Errorf("approvals_started rows = %d (want 2), notify rows after the second = %d (want 0: catch-up comes before the start row)", starts, notifyAfterSecondStart)
+	}
+
+	// The loop still closes: the second approval, which nobody had been told
+	// about when conchd died, is decided and the agent reads the resolution.
+	if _, err := human.run("", "approve", "--reason", "decided after the restart", strconv.FormatInt(second, 10)); err != nil {
+		return fmt.Errorf("conch approve after the restart: %w", err)
+	}
+	client = mcpclient.New(proc.baseURL, agentToken)
+	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
+		return fmt.Errorf("mcp initialize after the restart: %w", err)
+	}
+	for _, c := range []struct {
+		id     int64
+		reason string
+	}{{first, "decided just before the crash"}, {second, "decided after the restart"}} {
+		raw, err := client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": c.id})
+		if err != nil {
+			return fmt.Errorf("check_decision: %w", err)
+		}
+		checked, err := mcpclient.Decode[schema.CheckDecisionOutput](raw)
+		if err != nil {
+			return err
+		}
+		if checked.State != schema.ApprovalStateResolved || checked.Resolution == nil ||
+			len(checked.Resolution.Decisions) != 1 || checked.Resolution.Decisions[0].Reason != c.reason {
+			return fmt.Errorf("approval %d after the restart = %+v, want resolved with reason %q", c.id, checked, c.reason)
+		}
+	}
+	if err := assertAuditChain(proc, second, []string{
+		store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent,
+	}); err != nil {
+		return err
+	}
+	if got := len(ntfy.Hits()) - answered; got != 3 {
+		return fmt.Errorf("deliveries since the restart = %d, want 3 (two owed, one for the new resolution)", got)
+	}
+
+	fmt.Println("restart path: OK (two notifications owed at the kill were made and audited at the next start; the loop closed)")
 	return nil
 }
 

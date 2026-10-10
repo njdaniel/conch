@@ -65,14 +65,16 @@ func (n *slowNtfy) done() int {
 type notifyFixture struct {
 	// gone receives "METHOD path" each time the server sees a request's
 	// context end: when the request completes, or when its client hangs up.
-	gone    chan string
-	st      *store.Store
-	srv     *Server
-	addr    string
-	base    string
-	channel store.Channel
-	ids     map[string]int64
-	tokens  map[string]string
+	gone chan string
+	// returned receives "METHOD path" each time a handler has returned.
+	returned chan string
+	st       *store.Store
+	srv      *Server
+	addr     string
+	base     string
+	channel  store.Channel
+	ids      map[string]int64
+	tokens   map[string]string
 }
 
 func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
@@ -83,7 +85,7 @@ func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	f := &notifyFixture{st: st, ids: map[string]int64{}, tokens: map[string]string{}, gone: make(chan string, 64)}
+	f := &notifyFixture{st: st, ids: map[string]int64{}, tokens: map[string]string{}, gone: make(chan string, 64), returned: make(chan string, 64)}
 	f.srv = New(Config{AuthMode: AuthRequired, DataDir: t.TempDir(), Listen: "127.0.0.1:0", Version: "test",
 		Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 5 * time.Second}}, st)
 	if f.channel, err = st.CreateChannel(ctx, "ops"); err != nil {
@@ -110,21 +112,22 @@ func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 			f.gone <- what
 		}(r.Context(), r.Method+" "+r.URL.Path)
 		handler.ServeHTTP(w, r)
+		f.returned <- r.Method + " " + r.URL.Path
 	}))
 	t.Cleanup(web.Close)
 	f.base, f.addr = web.URL, strings.TrimPrefix(web.URL, "http://")
 	return f
 }
 
-// send writes one complete request and returns the open connection.
-func (f *notifyFixture) send(t *testing.T, method, target, who, body string) net.Conn {
+// send writes one complete POST and returns the open connection.
+func (f *notifyFixture) send(t *testing.T, target, who, body string) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", f.addr, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
-		method, target, f.addr, f.tokens[who], len(body), body)
+	req := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		target, f.addr, f.tokens[who], len(body), body)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +223,7 @@ func TestHangUpDuringNotificationDoesNotSuppressIt(t *testing.T) {
 			wantDone := 1
 
 			abandoned := "POST /v1/approvals"
-			conn := f.send(t, "POST", "/v1/approvals", "ann", createApprovalBody(f.channel.ID, f.ids["ann"]))
+			conn := f.send(t, "/v1/approvals", "ann", createApprovalBody(f.channel.ID, f.ids["ann"]))
 			if tt.resolve {
 				// Let the creation through whole; the hang-up is on the decision.
 				<-ntfy.arrived
@@ -231,7 +234,7 @@ func TestHangUpDuringNotificationDoesNotSuppressIt(t *testing.T) {
 				_ = conn.Close()
 				id := f.onlyApproval(t)
 				abandoned = fmt.Sprintf("POST /v1/approvals/%d/decisions", id)
-				conn = f.send(t, "POST", fmt.Sprintf("/v1/approvals/%d/decisions", id), "bob",
+				conn = f.send(t, fmt.Sprintf("/v1/approvals/%d/decisions", id), "bob",
 					fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, f.ids["bob"]))
 				wantDone = 2
 			}
@@ -382,5 +385,58 @@ func TestNotificationMatchesCommitUnderRandomDeadlines(t *testing.T) {
 	t.Logf("%d created, %d refused", ok, failed)
 	if failed == 0 || ok < 2 {
 		t.Errorf("created %d, refused %d: the deadlines exercised only one outcome", ok, failed)
+	}
+}
+
+// waitReturned blocks until the handler of the request what has returned.
+func (f *notifyFixture) waitReturned(t *testing.T, what string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case got := <-f.returned:
+			if got == what {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("the handler of %q never returned", what)
+		}
+	}
+}
+
+// A decider who hangs up while conchd is delivering the notification has
+// still decided. The handler then reads the approval back for a response
+// nobody will get; on the request context that read failed and the hang-up
+// was logged as a store failure (issue #158).
+func TestHangUpOnADecisionIsNotLoggedAsAStoreFailure(t *testing.T) {
+	logs := captureLogs(t)
+	ntfy := newSlowNtfy(t, http.StatusOK)
+	f := newNotifyFixture(t, ntfy.URL)
+
+	conn := f.send(t, "/v1/approvals", "ann", createApprovalBody(f.channel.ID, f.ids["ann"]))
+	<-ntfy.arrived
+	ntfy.release <- struct{}{}
+	if _, err := io.ReadAll(io.LimitReader(conn, 1)); err != nil {
+		t.Fatalf("read the creation's answer: %v", err)
+	}
+	_ = conn.Close()
+	id := f.onlyApproval(t)
+
+	path := fmt.Sprintf("/v1/approvals/%d/decisions", id)
+	conn = f.send(t, path, "bob", fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, f.ids["bob"]))
+	select {
+	case <-ntfy.arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notification never reached ntfy")
+	}
+	hangUp(conn)
+	f.waitGone(t, "POST "+path)
+	ntfy.release <- struct{}{}
+	f.waitReturned(t, "POST "+path)
+
+	f.chain(t, fmt.Sprintf("approval:%d", id), []string{
+		store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent})
+	if out := logs.buf.String(); strings.Contains(out, "level=ERROR") {
+		t.Errorf("a decider hanging up was logged as an error:\n%s", out)
 	}
 }
