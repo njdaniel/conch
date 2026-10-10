@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use crate::presence::Roster;
 use crate::receive::{Measured, MixStats};
 use crate::reports::ReportProblem;
+use crate::secrets::one_line;
 
 /// The state of the voice connection, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,7 +410,10 @@ impl Output {
             event.json().to_string()
         } else {
             match event.plain() {
-                Some(line) => line,
+                // A detail in it is an error's text. Each source already makes its text
+                // printable; this is the one place every line passes, so it is made sure
+                // of here that a line is one line and drives no terminal.
+                Some(line) => one_line(&line),
                 None => return,
             }
         };
@@ -571,6 +575,25 @@ mod tests {
         });
         output.show(&Event::PressIgnored(ShutReason::NotConnected));
         assert_eq!(written.text(), "connecting\npress ignored: not connected\n");
+    }
+
+    #[test]
+    fn a_plain_line_is_one_line_whatever_an_errors_text_holds() {
+        let written = Buffer::default();
+        let mut output = Output::new(false, Box::new(written.clone()));
+        output.show(&Event::Connection(&Connection::Waiting {
+            reason: "connect_failed",
+            detail: Some("refused\r\nconnected\x1b[2J".into()),
+            retry_in: Duration::ZERO,
+        }));
+        output.show(&Event::Microphone {
+            detail: "no\nsuch file".into(),
+        });
+        assert_eq!(
+            written.text(),
+            "not connected: connect failed (refused  connected [2J); asking conchd for a new session\n\
+             no microphone: no such file\n"
+        );
     }
 
     #[test]

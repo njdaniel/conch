@@ -13,7 +13,7 @@ use conch_voice_control::LineCommand::{Down, Quit};
 
 use support::fake::Call;
 use support::stub::{Reply, Stub};
-use support::{Rig, Setup, quick};
+use support::{Rig, Setup, quick, several_frames};
 
 /// Every way of asking the client to leave.
 const WAYS: [(&str, Input); 3] = [
@@ -75,6 +75,34 @@ async fn leaving_with_no_press_open_reports_nothing() {
         assert_eq!(ended.sdk.count(Call::Close), 1, "{way}");
         assert_eq!(ended.sdk.frames(), 0, "{way}");
     }
+}
+
+/// A connection attempt that is under way when the client leaves is not dropped where it
+/// stands: between the publish and the mute that would abandon a participant with an
+/// unmuted track, which `conchd` would record as a transmission nobody reported.
+#[tokio::test]
+async fn leaving_while_the_room_is_being_joined_mutes_the_track_and_leaves_the_room() {
+    let mut hold = None;
+    let rig = Rig::start_with(Stub::start().await, Setup::default(), |sdk| {
+        hold = Some(sdk.hold_publish());
+    })
+    .await;
+    let hold = hold.expect("the publish is held");
+    rig.until("the publish", |rig| rig.sdk.count(Call::Publish) == 1)
+        .await;
+    rig.input(Input::Signal);
+    // The client is leaving by now; the publish returns a little later.
+    several_frames().await;
+    assert_eq!(rig.sdk.count(Call::Close), 0);
+    hold.notify_one();
+    let (result, ended) = rig.ended().await;
+    assert!(result.is_ok());
+    assert_eq!(
+        ended.sdk.control_calls(),
+        vec![Call::Connect, Call::Publish, Call::Mute, Call::Close]
+    );
+    assert_eq!(ended.sdk.frames(), 0);
+    assert_eq!(ended.conchd.reported(), Vec::<String>::new());
 }
 
 #[tokio::test]

@@ -58,8 +58,12 @@ struct Inner {
     events: Option<mpsc::UnboundedSender<SdkEvent>>,
     /// What the next connection attempts fail with; when empty they succeed.
     connect_failures: VecDeque<String>,
+    /// What the next publishes fail with; when empty they succeed.
+    publish_failures: VecDeque<String>,
     /// While set, `publish_microphone` waits here after it has published.
     publish_hold: Option<Arc<Notify>>,
+    /// Audio sources handed out and not yet dropped.
+    feeds: u64,
     /// While set, handing over a frame never returns.
     sends_hang: bool,
     close_takes: Duration,
@@ -101,6 +105,16 @@ impl FakeSdk {
     /// nobody measured.
     pub fn fail_next_connect(&self, text: &str) {
         self.lock().connect_failures.push_back(text.to_owned());
+    }
+
+    /// The next publish fails with this text, after the room was joined.
+    pub fn fail_next_publish(&self, text: &str) {
+        self.lock().publish_failures.push_back(text.to_owned());
+    }
+
+    /// Audio sources the client still holds: handed out by a publish and not dropped.
+    pub fn feeds_held(&self) -> u64 {
+        self.lock().feeds
     }
 
     /// Makes `publish_microphone` stop after it has published and before it returns, until
@@ -277,6 +291,9 @@ impl RoomHandle for FakeRoom {
         let hold = {
             let mut inner = self.inner.lock().unwrap();
             inner.calls.push(Call::Publish);
+            if let Some(text) = inner.publish_failures.pop_front() {
+                return Err(SdkError::scrubbed(text));
+            }
             // Published: enabled and not muted, whatever came before.
             inner.muted = false;
             inner.enabled = true;
@@ -288,6 +305,7 @@ impl RoomHandle for FakeRoom {
         let track = FakeTrack {
             inner: Arc::clone(&self.inner),
         };
+        self.inner.lock().unwrap().feeds += 1;
         let feed = FakeFeed {
             inner: Arc::clone(&self.inner),
         };
@@ -342,6 +360,15 @@ impl MicTrack for FakeTrack {
 /// The fake's audio source: it counts what it is handed and keeps none of it.
 pub struct FakeFeed {
     inner: Arc<Mutex<Inner>>,
+}
+
+impl Drop for FakeFeed {
+    fn drop(&mut self) {
+        // Not `unwrap`: a test that failed elsewhere must not panic again here.
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.feeds = inner.feeds.saturating_sub(1);
+        }
+    }
 }
 
 impl MicFeed for FakeFeed {

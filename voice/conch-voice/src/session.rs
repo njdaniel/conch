@@ -29,7 +29,9 @@
 //!   them, for the task in `reports.rs`.
 //! - **The machine fails closed, and so does the exit.** The machine gets a tick at its
 //!   deadline. Leaving, for whatever reason, shuts the gate first, waits a bounded time for
-//!   the gate to say so, and sends a final `stopped` if a press was open either way.
+//!   the gate to say so, and sends a final `stopped` if a press was open either way. A
+//!   connection attempt that is under way is given a short time to finish, so that the
+//!   room it joins is left and its track is not abandoned unmuted.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -83,6 +85,9 @@ pub struct Timings {
     pub reconnect_grace: Duration,
     /// How long leaving a room may take. Closing during a reconnect was measured at 5 s.
     pub close_limit: Duration,
+    /// How long a connection attempt that is in progress when the client leaves is given to
+    /// finish, so that the room it joins is left and not abandoned.
+    pub attempt_limit: Duration,
     /// How long, beyond the release tail, the gate is given to say it has shut when the
     /// client is leaving.
     pub gate_shut_grace: Duration,
@@ -105,6 +110,7 @@ impl Default for Timings {
         Self {
             reconnect_grace: Duration::from_secs(20),
             close_limit: Duration::from_secs(10),
+            attempt_limit: Duration::from_secs(2),
             gate_shut_grace: Duration::from_millis(500),
             report_flush: Duration::from_secs(3),
             stats_every: Duration::from_secs(1),
@@ -884,18 +890,30 @@ impl<T: Transport> Session<T> {
         self.with_track(MicTrack::mute);
 
         let live = self.live.take();
-        let closing = match std::mem::replace(&mut self.phase, Phase::Settled) {
-            Phase::Closing(closing, _) => Some(closing),
-            _ => None,
-        };
         let close_limit = self.timings.close_limit;
+        let attempt_limit = self.timings.attempt_limit;
+        let phase = std::mem::replace(&mut self.phase, Phase::Settled);
         let left = async {
             if let Some(live) = live {
                 let _ = tokio::time::timeout(close_limit, live.room.close()).await;
                 drop(live.secrets);
             }
-            if let Some(closing) = closing {
-                let _ = tokio::time::timeout(close_limit, closing).await;
+            match phase {
+                Phase::Closing(closing, _) => {
+                    let _ = tokio::time::timeout(close_limit, closing).await;
+                }
+                // An attempt that is dropped where it stands can leave a participant in the
+                // room that nobody closes, and between its publish and its mute that
+                // participant has an unmuted track: `conchd` would record a transmission
+                // nobody reported. So the attempt is given a short time to finish (its
+                // track is then muted), and the room it joined is left like any other.
+                Phase::Establishing(attempt) => {
+                    if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
+                        let _ = tokio::time::timeout(close_limit, joined.room.close()).await;
+                        drop(joined.secrets);
+                    }
+                }
+                Phase::Ask(_) | Phase::Settled => {}
             }
         };
         let (delivered, ()) = tokio::join!(self.reports.flush(self.timings.report_flush), left);

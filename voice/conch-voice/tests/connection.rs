@@ -257,6 +257,62 @@ async fn a_conchd_that_cannot_reach_livekit_or_cannot_be_reached_is_tried_again(
     assert_eq!(rig.sdk.calls(), []);
 }
 
+/// A room that was joined and whose publish then failed is left before anything else: the
+/// next attempt joins as the same identity, and nothing would ever close the first.
+#[tokio::test]
+async fn a_join_whose_publish_fails_leaves_the_room_and_is_tried_again() {
+    let rig = Rig::start_with(Stub::start().await, Setup::default(), |sdk| {
+        sdk.fail_next_publish("the track was refused");
+    })
+    .await;
+    rig.connected(1).await;
+    assert_eq!(
+        rig.sdk.control_calls(),
+        [
+            Call::Connect,
+            Call::Publish,
+            Call::Close,
+            Call::Connect,
+            Call::Publish,
+            Call::Mute
+        ]
+    );
+    assert_eq!(rig.sdk.tokens(), [join_token(1), join_token(2)]);
+    let waiting = rig
+        .events_named("connection")
+        .into_iter()
+        .find(|event| event["state"] == "waiting")
+        .unwrap();
+    assert_eq!(waiting["reason"], "connect_failed");
+    assert_eq!(waiting["detail"], "the track was refused");
+}
+
+/// When a connection has ended the transmit task lets go of that track's audio source at
+/// once, not when the next connection replaces it: there is then nothing a frame could be
+/// handed to, whatever the gate does.
+#[tokio::test]
+async fn a_connection_that_ended_no_longer_holds_its_audio_source() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    assert_eq!(rig.sdk.feeds_held(), 1);
+
+    // The next join stops inside its publish, before it has an audio source of its own.
+    let hold = rig.sdk.hold_publish();
+    rig.sdk.disconnect(DisconnectReason::Lost);
+    rig.until("the second publish", |rig| {
+        rig.sdk.count(Call::Publish) == 2
+    })
+    .await;
+    rig.until("the first audio source to be let go", |rig| {
+        rig.sdk.feeds_held() == 0
+    })
+    .await;
+
+    hold.notify_one();
+    rig.connected(2).await;
+    assert_eq!(rig.sdk.feeds_held(), 1);
+}
+
 #[tokio::test]
 async fn a_failed_join_is_retried_each_time_with_a_session_of_its_own() {
     let rig = Rig::start_with(Stub::start().await, Setup::default(), |sdk| {

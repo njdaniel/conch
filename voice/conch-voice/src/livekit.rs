@@ -64,10 +64,10 @@ impl LiveKit {
     }
 }
 
-/// An error of the SDK's as one of ours: its text, scrubbed.
+/// An error of the SDK's as one of ours: its text, scrubbed and on one line.
 fn scrubbed(scrubber: &Scrubber, what: &str, error: &dyn std::fmt::Display) -> SdkError {
     let text = format!("{what}: {error}");
-    SdkError::scrubbed(scrubber.scrub(&text).into_owned())
+    SdkError::scrubbed(scrubber.scrub_line(&text))
 }
 
 /// The publication the SDK currently has for the microphone track. The SDK replaces it when
@@ -295,7 +295,7 @@ impl MicFeed for LiveKitFeed {
                 let text = error.to_string();
                 log::warn!(
                     "the SDK refused a frame of audio: {}",
-                    self.scrubber.scrub(&text)
+                    self.scrubber.scrub_line(&text)
                 );
             }
             Err(_) => {}
@@ -320,6 +320,13 @@ mod tests {
         );
         assert_eq!(source.sample_rate(), SAMPLE_RATE);
         assert_eq!(source.num_channels(), 1);
+    }
+
+    #[test]
+    fn an_sdk_error_is_one_line_whatever_the_server_put_in_it() {
+        let scrubber = Scrubber::new();
+        let error = scrubbed(&scrubber, "could not join", &"401\r\nconnected\x1b[2J");
+        assert_eq!(error.to_string(), "could not join: 401  connected [2J");
     }
 
     #[test]

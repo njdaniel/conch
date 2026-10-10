@@ -121,6 +121,22 @@ impl Scrubber {
         cleaned.push_str(out.get(from..).unwrap_or_default());
         Cow::Owned(cleaned)
     }
+
+    /// [`Scrubber::scrub`], and then every control character replaced by a space: text fit
+    /// to be one line on a terminal. A line break in it cannot pass for a line of this
+    /// program's, and an escape sequence cannot drive the terminal.
+    #[must_use]
+    pub fn scrub_line(&self, text: &str) -> String {
+        one_line(&self.scrub(text))
+    }
+}
+
+/// `text` with every control character replaced by a space.
+#[must_use]
+pub fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The join token and room name of one connection, registered with the scrubber. Dropping
@@ -276,6 +292,18 @@ mod tests {
         scrubber.always(&Secret::new(""));
         let _guard = scrubber.connection(&Secret::new(""), &Secret::new("r7"));
         assert_eq!(scrubber.scrub("room r7 is full"), "room [redacted] is full");
+    }
+
+    #[test]
+    fn a_scrubbed_line_has_no_control_character_and_no_secret() {
+        let scrubber = Scrubber::new();
+        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        let text = format!("refused\r\n\x1b[2Jconnected\x07 {FAKE_JOIN}\t{FAKE_ROOM}\u{85}end");
+        assert_eq!(
+            scrubber.scrub_line(&text),
+            "refused   [2Jconnected  [redacted] [redacted] end"
+        );
+        assert_eq!(one_line("plain text, ünïcödé"), "plain text, ünïcödé");
     }
 
     #[test]

@@ -117,6 +117,7 @@ pub fn quick() -> Timings {
     Timings {
         reconnect_grace: Duration::from_secs(20),
         close_limit: Duration::from_secs(2),
+        attempt_limit: Duration::from_millis(300),
         gate_shut_grace: Duration::from_millis(150),
         report_flush: Duration::from_secs(2),
         stats_every: Duration::from_millis(50),

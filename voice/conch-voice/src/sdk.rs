@@ -88,14 +88,16 @@ impl fmt::Debug for SdkEvent {
 }
 
 /// A failure the SDK reported. Its text is the SDK's own with every secret already replaced
-/// (see `secrets.rs`); an implementation must scrub before it makes one.
+/// and no control character left (see `secrets.rs`); an implementation must scrub before it
+/// makes one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdkError {
     scrubbed: String,
 }
 
 impl SdkError {
-    /// An error whose text holds no join token and no room name.
+    /// An error whose text holds no join token, no room name and no control character:
+    /// what [`crate::secrets::Scrubber::scrub_line`] returns.
     #[must_use]
     pub fn scrubbed(text: impl Into<String>) -> Self {
         Self {

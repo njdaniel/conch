@@ -5,13 +5,15 @@
 //! the whole upgrade request, bearer token included, and at info and debug the SDK logs the
 //! room name. So the rule here is by target, and its default is to deny:
 //!
-//! - A record from this workspace's own crates is written at the level the user asked for,
-//!   as it is.
+//! - A record from this workspace's own crates is written at the level the user asked for.
 //! - A record from anywhere else (`livekit`, `libwebrtc`, `webrtc`, `tungstenite`,
 //!   `tokio_tungstenite`, `reqwest`, `hyper`, `rustls`, `h2`, and any target this file does
 //!   not know) is written only at `Warn` and `Error`, whatever level the user asked for,
-//!   and only after the [`Scrubber`] has replaced the join token and room name in use and
-//!   anything shaped like a signed token.
+//!   with its target in front.
+//!
+//! Every record that is written, of either kind, first has the join token and room name in
+//! use, the login token and anything shaped like a signed token replaced by the
+//! [`Scrubber`], and its control characters replaced by spaces, so that it is one line.
 
 use std::fmt;
 use std::io::Write;
@@ -119,19 +121,16 @@ impl Log for Logger {
             return;
         }
         let level = record.level().as_str().to_ascii_lowercase();
-        let line = if is_own(record.target()) {
-            format!("conch-voice: {level}: {}", record.args())
+        // Whoever wrote it, the record is scrubbed and kept to one line. This workspace's
+        // own code holds its secrets where they cannot be printed, but its records quote
+        // what `conchd` and the SDK said, and a mistake here must not be the one way out.
+        let text = if is_own(record.target()) {
+            record.args().to_string()
         } else {
-            // Not this program's text: scrubbed, target included, and kept to one line.
-            let text = format!("{}: {}", record.target(), record.args());
-            let text: String = self
-                .scrubber
-                .scrub(&text)
-                .chars()
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
-            format!("conch-voice: {level}: {text}")
+            // Not this program's text: its target is shown, and scrubbed with it.
+            format!("{}: {}", record.target(), record.args())
         };
+        let line = format!("conch-voice: {level}: {}", self.scrubber.scrub_line(&text));
         let mut out = self.out.lock().unwrap_or_else(PoisonError::into_inner);
         // A logger has nowhere to report that it could not write.
         let _ = writeln!(out, "{line}");
@@ -263,9 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn this_workspaces_own_records_are_written_at_the_level_asked_for_and_not_altered() {
-        let (logger, written, scrubber) = logger(LevelFilter::Trace);
-        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+    fn this_workspaces_own_records_are_written_at_the_level_asked_for_without_a_target() {
+        let (logger, written, _scrubber) = logger(LevelFilter::Trace);
         for (level, target) in [
             (Level::Trace, "conch_voice"),
             (Level::Debug, "conch_voice::session"),
@@ -273,18 +271,33 @@ mod tests {
             (Level::Warn, "conch_voice_audio"),
             (Level::Error, "conch_voice_control::ptt"),
         ] {
-            // Not something this crate would write; it shows that nothing is replaced.
-            write(&logger, level, target, &format!("{target} says {FAKE_JWT}"));
+            write(&logger, level, target, &format!("{target} says so"));
         }
         assert_eq!(
             written.text(),
-            format!(
-                "conch-voice: trace: conch_voice says {FAKE_JWT}\n\
-                 conch-voice: debug: conch_voice::session says {FAKE_JWT}\n\
-                 conch-voice: info: conch_voice_api::client says {FAKE_JWT}\n\
-                 conch-voice: warn: conch_voice_audio says {FAKE_JWT}\n\
-                 conch-voice: error: conch_voice_control::ptt says {FAKE_JWT}\n"
-            )
+            "conch-voice: trace: conch_voice says so\n\
+             conch-voice: debug: conch_voice::session says so\n\
+             conch-voice: info: conch_voice_api::client says so\n\
+             conch-voice: warn: conch_voice_audio says so\n\
+             conch-voice: error: conch_voice_control::ptt says so\n"
+        );
+    }
+
+    /// This workspace's code cannot print a secret it holds, but its records quote what
+    /// `conchd` and the SDK said. They are scrubbed and kept to one line like any other.
+    #[test]
+    fn this_workspaces_own_records_are_scrubbed_and_kept_to_one_line_too() {
+        let (logger, written, scrubber) = logger(LevelFilter::Trace);
+        let _guard = scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
+        write(
+            &logger,
+            Level::Debug,
+            "conch_voice::presence",
+            &format!("the socket failed: {FAKE_ROOM}\n\x1b[2J{FAKE_JOIN} {FAKE_JWT}"),
+        );
+        assert_eq!(
+            written.text(),
+            "conch-voice: debug: the socket failed: [redacted]  [2J[redacted] [redacted]\n"
         );
     }
 
