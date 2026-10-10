@@ -178,6 +178,9 @@ type Model struct {
 	// after schedules msg to be delivered once d has elapsed. Injectable so
 	// tests can observe the delay instead of sleeping through it.
 	after func(d time.Duration, msg tea.Msg) tea.Cmd
+	// voice is the selected channel's presence subscription and roster. It is
+	// display only and never gets in the way of typing or messages.
+	voice voiceModel
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -218,6 +221,9 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter}
+	if v, ok := api.(VoiceAPI); ok {
+		m.voice.api = v
+	}
 	if len(clean) == 0 {
 		m.loadingChannels = true
 		return m
@@ -246,7 +252,7 @@ func (m Model) Init() tea.Cmd {
 	if m.loadingChannels {
 		return tea.Batch(who, m.loadChannels(), m.waitEvent())
 	}
-	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.waitEvent())
+	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.kickVoice(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -357,6 +363,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case voiceKick:
+		return m, m.beginVoice()
+	case voicePresenceReceived:
+		return m.voicePresence(msg)
+	case voiceEnded:
+		return m.voiceEnded(msg)
+	case voiceRetryDue:
+		return m.voiceRetry(msg)
 	case whoAmILoaded:
 		if msg.err != nil {
 			m.whoErr = msg.err
@@ -423,7 +437,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = nil
 		m.pendingNet = ""
 		m.subscribed[names[0]] = true
-		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription())
+		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.beginVoice())
 	case netsLoaded:
 		return m.netsLoaded(msg)
 	case messagesLoaded:
@@ -552,7 +566,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, "")}
+	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, ""), m.beginVoice()}
 	// A pending retry timer will start the subscription itself.
 	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
 		m.subscribed[m.current()] = true
@@ -732,7 +746,19 @@ func (m Model) View() string {
 		leftWidth = 14
 	}
 	rightWidth := width - leftWidth - 1
+	// The voice line, when there is one, takes a row from the panes rather
+	// than adding one to the screen, and it is one row however many people
+	// are in voice, so the layout does not move as the roster changes.
+	voice := ""
+	if m.mode == modeChannels {
+		if line := m.voiceLine(width); line != "" {
+			voice = statusStyle.Width(width).Render(line) + "\n"
+		}
+	}
 	contentHeight := height - 4
+	if voice != "" {
+		contentHeight--
+	}
 	if contentHeight < 4 {
 		contentHeight = 4
 	}
@@ -842,7 +868,7 @@ func (m Model) View() string {
 		status = m.userName + " | " + status
 	}
 	status = statusStyle.Width(width).Render(status)
-	return panes + "\n" + inputStr + "\n" + status
+	return panes + "\n" + voice + inputStr + "\n" + status
 }
 
 func clip(value string, width int) string {
