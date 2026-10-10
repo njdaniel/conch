@@ -148,6 +148,51 @@ func (s *Server) handleListOpenApprovals(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, schema.ListApprovalsResponseV1{Approvals: list})
 }
 
+// handleGetApproval serves GET /v1/approvals/{id}: one approval in any state,
+// with its resolution once terminal — the REST equivalent of MCP's
+// check_decision (issue #65). With an authenticated caller (issue #92) the
+// caller must be a member of the approval's channel; an approval elsewhere
+// gets the unknown-id answer, so approval ids cannot be probed. With no caller
+// (AuthOff) any approval is readable, as the open list is.
+func (s *Server) handleGetApproval(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	approvalID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || approvalID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "approval id must be a positive integer")
+		return
+	}
+	approval, err := s.store.ApprovalByID(ctx, approvalID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeApprovalNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "approvals: find approval failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if member, err := s.callerIsMember(r, approval.ChannelID); err != nil {
+		slog.ErrorContext(ctx, "approvals: check membership failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	} else if !member {
+		writeApprovalNotFound(w)
+		return
+	}
+
+	resp := schema.GetApprovalResponseV1{Approval: approval.ToSchema()}
+	if approval.State.IsTerminal() {
+		resolution, err := s.store.ResolutionByApprovalID(ctx, approvalID)
+		if err != nil {
+			slog.ErrorContext(ctx, "approvals: read resolution failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		resp.Resolution = &resolution
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleCastDecision serves POST /v1/approvals/{id}/decisions: a human
 // principal casts a decision with its required reason. Decisions are cast
 // only by humans (approval-object.md §3); an agent principal is refused.
