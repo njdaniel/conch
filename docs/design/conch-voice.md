@@ -57,16 +57,18 @@ microphone ─► capture ring ─► transmit gate ─► LiveKit track (publis
 remote tracks ─► one jitter buffer per speaker ─► mixer ─► playback ring ─► speakers
 ```
 
-- **Threads.** PipeWire's callbacks run on `dmn-audio`'s loop thread and only move samples to and from lock-free rings; they allocate nothing, lock nothing and log nothing (`daemon`'s rule, kept here). A pump on the client's side moves one frame every 10 ms in each direction.
+- **Threads.** PipeWire's callbacks run on `dmn-audio`'s loop thread and only move samples to and from lock-free rings; they allocate nothing, lock nothing and log nothing (`daemon`'s rule, kept here).
+- **The rings set the pace, not a timer.** The sending side forwards a frame whenever the capture ring holds a whole one. The playing side mixes a frame whenever the playback ring falls below its target fill. So the sound card's clock drives both directions and there is no second clock on this machine to drift against it. A remote speaker's clock does differ from the local one by a few parts per million; that speaker's jitter buffer absorbs it, at the cost of dropping or padding 10 ms once in a long while.
 - **Receiving.** Each remote microphone track feeds its own jitter buffer, which aims to hold 40 ms and never more than 200 ms: when it is over, the oldest audio is dropped, so a speaker is never heard late. The mixer adds the speakers' frames and clips the sum to the valid range. Per-speaker volume, stereo placement and ducking are V5.
 - **Devices.** The microphone and the speakers are PipeWire's defaults unless named in the configuration. When a device disappears the client keeps running: capture re-attaches through `dmn-audio`'s `Reattach`, and playback follows the default sink. While there is no microphone the gate stays shut and the status line says so.
-- **Echo.** V4 assumes headphones. The SDK's audio processing can be switched on in the configuration (`echo_cancellation`), with the playback mix as its reference. How well it removes echo from open speakers has not been measured (ADR-004), so it is off by default and the README says to wear headphones.
+- **Echo.** V4 assumes headphones. The SDK's audio processing can be switched on in the configuration (`echo_cancellation`), with the playback mix as its reference. How well it removes echo from open speakers has not been measured (ADR-004), so it is off by default and the README says to wear headphones. When it is on, captured frames pass through it *before* the gate, so the gate is still the last thing between the microphone and the track. This relies on the module only transforming the frames it is given, opening no device and sending nothing itself (§13); if that does not hold, the option is not shipped.
 
 ### The transmit gate
 
 This is the property a user relies on: **microphone audio leaves the machine only while the talk key is held.**
 
-- The gate is in `conch-voice-audio`, before any SDK call. While it is shut, captured frames are dropped and nothing is handed to the SDK. Muting the LiveKit track is a second layer and is what `conchd` observes; it is not the guarantee.
+- The gate is in `conch-voice-audio` and is the last step before the track. While it is shut, captured frames are dropped and nothing is handed to the track's audio source. Muting the LiveKit track is a second layer and is what `conchd` observes; it is not the guarantee.
+- The client never lets the SDK open the microphone. It captures through PipeWire itself and feeds the SDK frame by frame, so there is no SDK capture path that could go round the gate.
 - The track is published once on joining, muted. A press opens the gate and unmutes the track; a release shuts the gate and mutes it. Neither waits for the other, or for the report in §6. Publishing on each press was rejected in voice-control-plane.md §6: it clips the first word.
 - The gate also shuts, whatever the key is doing, when: the user has muted or deafened; the connection is not established; the session's grant has `can_publish: false`; the microphone is missing; the key device has gone away; or a single press has lasted longer than `max_transmit_secs` (default 120), which catches a stuck key or something resting on the keyboard. A shut gate reopens only on a new press.
 - The microphone stream stays open while joined, so the desktop's "microphone in use" indicator is on the whole time, although nothing is sent until a press. Opening it on each press would lose the start of every transmission.
@@ -76,7 +78,7 @@ This is the property a user relies on: **microphone audio leaves the machine onl
 
 A terminal cannot see a key being released, and COSMIC offers no global-shortcuts portal (V0 spike), so the client reads the keyboard's event device directly.
 
-- It opens the configured device read-only and reads fixed-size `input_event` records with ordinary file I/O: no crate, no `ioctl`, no `unsafe`. Only key events with a configured code are acted on (press, release; auto-repeat is ignored). Every other event is discarded as it is read. Nothing about keys is stored, logged or sent.
+- It opens the configured device read-only and reads fixed-size `input_event` records with ordinary file I/O: no crate, no `ioctl`, no `unsafe`. The record is 24 bytes on 64-bit Linux, the only target (ADR-006; the build refuses any other pointer width). Only key events with a configured code are acted on (press, release; auto-repeat is ignored). Every other event is discarded as it is read. Nothing about keys is stored, logged or sent.
 - The device is named by its stable path under `/dev/input/by-id/`, because `eventN` numbers change between boots.
 - **What this access exposes, stated plainly:** read access to a keyboard's event device lets a process see every key pressed on that keyboard, in every application, passwords included. That `conch-voice` looks only at the talk key is a property of its code, not of the permission, and any other process running as the same user gets the same access. Setup therefore grants access to one device, not to the `input` group, and the README says what is being granted before it says how.
 - Granting it is a one-line udev rule for that device, shown by `conch-voice devices`. A per-boot `setfacl` works for a trial.
@@ -89,7 +91,7 @@ A terminal cannot see a key being released, and COSMIC offers no global-shortcut
 
 The client follows voice-control-plane.md §4: it asks `conchd` for a session immediately before every connection attempt, and joins the room of the grant that has no `audience`.
 
-- **It never stores a join token, and never prints one.** Tokens, room names and the login token do not appear in any output, log line or error, in either the terminal or `--json` mode.
+- **It never stores a join token, and never prints one.** Tokens, room names and the login token do not appear in any output, log line or error, in either the terminal or `--json` mode. That includes what the SDK logs: a WebSocket address can carry the token as a query parameter, so the SDK's own log output is not passed through until it has been measured at every level (§13), and then only at the levels shown to be clean.
 - **Disconnects.** What it does next depends on why:
 
 | What happened | Next |
@@ -112,18 +114,38 @@ voice-control-plane.md §9 decision 1 left this to V4, and #135 recorded it: the
 - A report that does not change the state (a second `started`) succeeds and writes nothing.
 - Reports are bounded per principal. Past the bound the answer is 429, audited once per window, so the endpoint cannot be used to flood the audit log.
 
+**Two states, compared on every pass.** For each participant in a room `conchd` holds what the client last *reported* (`started` or `stopped`; `stopped` until told otherwise) and what the poller last *observed* (microphone unmuted or not). While they agree, the reports are the record and the poller writes nothing. A disagreement is given a short time to be an honest lag, and is then recorded as what the poller saw:
+
+- **Unmuted, but reported `stopped`.** If a `stopped` report arrived less than 1 s ago, this is the mute still on its way and is ignored. Otherwise a disagreement begins. Two seconds after it began it is judged: if a `started` report has arrived in the meantime, the report was late and nothing is written; if not, it is an unreported transmission, however short it turned out to be.
+- **Muted, but reported `started`**, for 2 s: the stop report was lost or never sent. The poller closes the transmission and sets the reported state to `stopped`.
+
 **Audit.**
 
 | Event | Written by | When |
 |---|---|---|
 | `voice_transmit_started`, `voice_transmit_stopped` with `source=reported` | the endpoint | each reported change of state |
-| `voice_transmit_unreported` with `source=observed` | the poller | it sees a microphone unmuted and no `started` report arrives within 2 s of first seeing it |
-| `voice_transmit_stopped` with `source=observed` | the poller | an unreported transmission ends; or a reported one is still open when the participant leaves or the room is rotated (`reason=left`) |
+| `voice_transmit_unreported` with `source=observed` | the poller | an unreported transmission, as judged above. Timed at the moment the disagreement began. |
+| `voice_transmit_stopped` with `source=observed` | the poller | an unreported transmission ends (the microphone is muted, or the participant leaves) |
+| `voice_transmit_stopped` with `source=observed` and `reason=no_stop_report` | the poller | muted for 2 s while reported `started` |
+| `voice_transmit_stopped` with `source=observed` and `reason=left` | the poller | the reported state is `started` when the participant leaves, is removed, or the room is rotated |
 
-- **This replaces V3's rows.** In V3 the poller wrote a `started` and a `stopped` row for every transmission it saw. From V4 it writes nothing for a transmission that was reported, so there is one pair of rows per press, with exact times, and an `unreported` row marks exactly the transmissions the client did not account for. A participant that never reports (the headless participant in `e2e/voice`, a modified client) shows up as `unreported` every time.
-- **What is still unrecorded:** a burst shorter than the poll interval from a client altered not to report it. That was the stated limit of decision 1 and it has not changed.
-- **A report with no audio** (a client that reports `started` and sends nothing) is recorded as reported. It claims more than happened, never less, so it is left alone.
-- **State is in memory.** After `conchd` restarts, a press already in progress is seen by the poller with no report and is recorded as unreported, once.
+Cases the rule is meant to get right:
+
+- **A press shorter than the poll interval.** The poller may never see it. The reported pair is the record. This is the case polling alone missed.
+- **A participant that never reports** (the headless participant in `e2e/voice`, a modified client). Every transmission the poller sees is recorded as unreported, at the resolution V3 had: one poll interval.
+- **A client that reports `started`, then `stopped`, and keeps transmitting.** The reported pair is written. From one second after the `stopped`, the unmuted microphone is a disagreement, and it is recorded as unreported. Reporting cannot be used to cover a transmission; at most it hides the second and a half after a false `stopped`.
+- **A client that alternates reports quickly to stay inside that second.** Each pair is a row, so the log shows it transmitting on and off throughout, and the bound on reports (above) ends it: once reports are refused the state stops changing and the rule applies.
+- **A `stopped` report that never arrives.** Closed by the poller after 2 s with `reason=no_stop_report`. A transmission is never left open in the log. A retry that arrives later changes nothing and writes nothing.
+- **A `started` report that arrives late**, after the poller has written `unreported`. It is written as reported, and from then on the transmission is a reported one: its end comes from the `stopped` report. The log shows `unreported`, then `started`, then `stopped`, which is what happened.
+- **A report with no audio** (`started` sent, microphone never unmuted). Closed after 2 s with `reason=no_stop_report`.
+- **`conchd` restarts during a press.** Reported state is in memory and is lost, so it reads `stopped`. The poller records the rest of the press as unreported; the client's `stopped` report then changes nothing; the poller writes the observed stop. The log has the reported start from before the restart, an `unreported` row and one observed stop: one row more than happened, and no missing end.
+- **Two devices for one principal.** There is one connection per principal per room (voice-control-plane.md §9, decision 3) and reported state is per principal. A device that is displaced stops and reports `stopped` for its own open press. If the new device was already holding its key, that closes the new device's press in the log and the poller records the rest of it as unreported. Rare, and it errs toward recording more.
+
+What follows from this:
+
+- **It replaces V3's rows.** In V3 the poller wrote a `started` and a `stopped` row for every transmission it saw. From V4 it writes nothing while the reports and what it sees agree, so there is one pair of rows per press, with exact times, and an `unreported` row marks exactly the transmissions the client did not account for.
+- **What is still unrecorded:** a burst shorter than the poll interval from a client altered not to report it (the stated limit of voice-control-plane.md §9 decision 1, unchanged), and up to about a second and a half of transmission after a false `stopped` (new; it is the price of not flagging an honest release whose mute the poller sees a moment late).
+- **State is in memory**, per room and principal, and is dropped with the room.
 
 **Client side.** The report is sent when the gate opens and when it shuts, without waiting for the answer. A failed report is retried briefly and shown in the status line. **Audio does not wait for, or depend on, the report:** if `conchd` cannot be reached the transmission goes ahead, and when `conchd` is back the poller records what it sees as unreported, which is the truthful record.
 
@@ -175,8 +197,8 @@ Tests never need a microphone, PipeWire, a keyboard or LiveKit unless they are m
 - **The exit test** extends `e2e/voice`, which already runs a real `conchd` and a real LiveKit in Docker. Three headless `conch-voice` processes join one channel, each with a different tone as its microphone, driven through standard input. It asserts:
   - while one holds the key, the other two receive that speaker's audio, at that speaker's tone, and the speaker receives nothing of their own;
   - while nobody holds a key, nobody receives audio, although every "microphone" is playing the whole time: the gate, not silence, is what is tested;
-  - each press and release is in the audit log as a reported pair, and the non-reporting headless participant's transmission is `voice_transmit_unreported`;
-  - when a member is removed, the room is rotated and the remaining clients are talking in the new room without being restarted, and the removed one stops with the right message;
+  - each press and release is in the audit log as a reported pair, and the non-reporting headless participant's transmission is `voice_transmit_unreported`; a client made to report `stopped` while still sending is flagged too;
+  - when a member is removed, the room is rotated; the remaining clients join the new room without being restarted and a new press there is heard (a press held across the rotation ends with it, §5); the removed one stops with the right message;
   - no token, room name or login appears in any client's output.
 - **By hand, with Nick:** three people on Linux talking in one channel with hold-to-talk. This is V4's exit in ROADMAP.md, and it cannot be automated.
 
@@ -184,7 +206,7 @@ Tests never need a microphone, PipeWire, a keyboard or LiveKit unless they are m
 
 Nick delegated design questions to the principal engineer on 2026-10-09 ("use your best judgment"). These are recorded with their reasons and he can reopen any of them.
 
-1. **Direct dependencies are gated by a script, and `cargo-deny` gates sources, advisories and licences.** ADR-006 says "a Rust allowlist enforced by `cargo-deny`, mirroring `deps-allowlist.txt` and `scripts/depgate.sh`". `cargo-deny`'s allow-list applies to every crate in the graph, about 316 here, so it would turn each routine update into a sign-off and bury the dozen choices that matter. The Go gate lists direct dependencies only, and this mirrors it. Whether `cargo-deny` can express a direct-only list is to be confirmed when the workspace lands (§13); if it can, the script goes.
+1. **Direct dependencies are gated by a script, and `cargo-deny` gates sources, advisories and licences.** ADR-006 says "a Rust allowlist enforced by `cargo-deny`, mirroring `deps-allowlist.txt` and `scripts/depgate.sh`". `cargo-deny`'s allow-list applies to every crate in the graph, about 316 here, so it would turn each routine update into a sign-off and bury the dozen choices that matter. The Go gate lists direct dependencies only, and this mirrors it. `cargo-deny`'s documentation confirms it has no direct-only list. Because this departs from the ADR's wording it is also listed in §12.
 2. **Four crates, three of them free of native code.** Most of the logic is then testable anywhere and quickly, and `unsafe` is forbidden in all of our own code.
 3. **The SDK's own resume is allowed** (§5).
 4. **The key is read from the event device with plain file I/O**, with no input crate (§4). The format is a fixed 24-byte record, and reading it needs no `unsafe`.
@@ -203,6 +225,7 @@ These are his under ADR-000 and are not settled by this note.
 2. **ADR-004 says the V0 manual checks "must be closed before V4".** They are still open (PR #88). Two of the three (two machines on a LAN, echo cancellation by ear) are better done with the real client than with spike code, and are part of V4's exit anyway. The first, hold-to-talk through the event device on COSMIC, is the one that could change §4, and takes five minutes with the spike. Proposed: Nick runs the first now, and the ADR's sentence becomes "before V4 exits" for the other two.
 3. **Where `dmn-audio` comes from.** `njdaniel/daemon` is private and Conch is public, so the git dependency ADR-006 decided cannot be built by CI or by anyone else as things stand (§9). Recommended: extract `dmn-audio` into its own public repository, with a licence file. Whichever option he picks, ADR-006's dependency line is amended to match. The two additions `dmn-audio` needs are then made wherever it lives, under that repository's own process; this project can write the issue.
 4. **CLAUDE.md gains Rust rules** beside rule 6, and a worker definition for `voice/` is added (ADR-006 foresaw both). They arrive with the workspace PR.
+5. **How the dependency list is enforced.** ADR-006 says the list is "enforced by `cargo-deny`". Decision 1 enforces the list of direct dependencies with a script and uses `cargo-deny` for sources, advisories and licences, because `cargo-deny`'s allow-list covers every crate in the graph (confirmed from its documentation: "any crate not in that list will be denied", with no direct-only option). That is a different mechanism from the ADR's words, so it is his to accept, with a one-line amendment to ADR-006 if he does.
 
 ## 13. Relied on, and not yet measured
 
@@ -213,10 +236,13 @@ These are his under ADR-000 and are not settled by this note.
 | 3 | The SDK's internal resume cannot be switched off, and gives up within a bounded time | Reading the SDK; not exercised | #178 |
 | 4 | One process can hold the connection, receive several speakers and publish at once at the measured cost | The spike measured listening in four rooms; publishing while listening was not measured | #178 |
 | 5 | `webrtc-sys` verifies the libwebrtc it downloads | Unknown | #177 |
-| 6 | `cargo-deny` cannot express a direct-only allow-list | Its documentation, from memory | #177 |
+| 6 | `cargo-deny` cannot express a direct-only allow-list | **Holds**, from its documentation (`[bans] allow`: "any crate not in that list will be denied"; `allow-workspace` and `wrappers` do something else). Checked 2026-10-09 against 0.20.2. | done |
 | 7 | `dmn-audio` builds as a dependency of another workspace, with the system's clang 18 generating its PipeWire bindings while the SDK is compiled with clang 22 | Not tried | #184 |
 | 8 | The event device delivers press and release for the chosen key on COSMIC | The spike's code was written and never run (V0 check 1) | Nick, §12 item 2 |
 | 9 | Echo cancellation is good enough for open speakers | Not measured | Nick, at the exit session |
+| 10 | The SDK's log output never contains a join token (for example inside a WebSocket address) | Unknown; raised in review | #178 |
+| 11 | The SDK's audio processing module only transforms frames it is given: it opens no audio device and sends nothing | The spike fed it frames by hand; not checked that it does nothing else | #186 |
+| 12 | With the track muted, nothing handed to the SDK's audio source reaches a listener | Assumed; the gate does not depend on it | #178 |
 
 Findings are written back into this table as they are made, as voice-control-plane.md §10 did.
 
