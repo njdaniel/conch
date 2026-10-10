@@ -40,7 +40,9 @@ type Config struct {
 	// AuthRequired; only an explicit AuthOff opens the server. See auth.go.
 	AuthMode AuthMode
 	// LiveKit configures optional voice. The zero value means voice is not
-	// configured; nothing contacts LiveKit at startup either way.
+	// configured. Building the server contacts nothing; when voice is
+	// configured, Serve looks at LiveKit once at start (the presence
+	// poller's first sweep) without waiting for the answer.
 	LiveKit livekit.Config
 }
 
@@ -92,9 +94,18 @@ func New(cfg Config, st *store.Store) *Server {
 	if broadcaster == nil {
 		broadcaster = noopBroadcaster{}
 	}
-	notifier, err := approvals.NewNtfyNotifier(cfg.Ntfy)
+	// With no ntfy server configured (or an invalid one) there is no notifier
+	// at all. The nil *NtfyNotifier must not be handed over as it is: inside
+	// the Notifier interface it would not compare equal to nil, the manager
+	// would take notifications to be on, and every transition would be
+	// recorded as notify_sent although nothing was sent (issue #158).
+	var notifier approvals.Notifier
+	ntfy, err := approvals.NewNtfyNotifier(cfg.Ntfy)
 	if err != nil {
 		slog.Error("server: ntfy disabled by invalid configuration", "error", err)
+	}
+	if ntfy != nil {
+		notifier = ntfy
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval}
 	s.voice = newVoicePoller(s)

@@ -161,6 +161,13 @@ bin/conch-bot
 ```
 
 It skips messages already present when it starts and ignores its own replies.
+It replies in kind: an answer to a net message goes to that net, an answer to
+a whisper goes to the same principals, and an answer to a channel-wide message
+is channel-wide. To reply on a net or to a whisper its manifest needs
+`post_net` or `whisper` (plus `whisper_agent` for a whisper that includes
+another agent). If the server refuses a scoped reply, the bot logs one line and
+posts nothing; it never falls back to a wider audience. It does not start
+scoped conversations.
 Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
 `CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
 `CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`. Like any
@@ -171,8 +178,8 @@ agent it needs channel membership and a manifest (next section) allowing
 
 Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the agent's token from step 3. Five tools are registered:
 
-- `post_message` — post a message to a channel as the authenticated agent.
-- `read_channel` — read one paginated page of messages from a channel.
+- `post_message` — post a message to a channel as the authenticated agent. With an `audience` (`{"kind":"net","net_id":N}` or `{"kind":"principals","principal_ids":[…]}`) it goes only to that net or those principals; the agent's manifest must grant `post_net`, or `whisper` (plus `whisper_agent` to reach another agent).
+- `read_channel` — read one paginated page of messages from a channel: channel-wide ones, and scoped ones the agent is a recipient of. A message with an `audience` was not sent to everyone; reply in kind by sending the same `audience` back.
 - `request_approval` — raise an approval as the authenticated agent.
 - `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
 - `check_decision` — read an approval's current state/resolution immediately, without blocking.
@@ -209,6 +216,85 @@ go run ./e2e/dogfood
 ```
 
 This drives the full loop live against freshly built binaries, authenticated end to end: it bootstraps an operator, a human signs in with `conch login`, an agent with an issued credential and a manifest posts via MCP and requests approval, ntfy fires, the human resolves it with `conch approve` and a reason, `await_decision` returns the structured outcome, and the audit log shows the whole chain. Along the way it asserts what must be refused — no credential, a decision in someone else's name, a non-member reading, posting or deciding, a second agent reaching outside its grant — then reruns the approval half with ntfy unreachable to prove it still resolves (ADR-002). Exits nonzero on any assertion failure.
+
+### 7. Nets and whispers: the squad layout
+
+A message goes to the whole channel, to a **net** (a named subset of the channel's members) or, as a **whisper**, to a list of principals. Who can see it is fixed when it is posted: joining a net later shows nothing earlier, and leaving it hides nothing already received. A net's **members** listen and speak; its **monitors** only listen. Nets overlap, which is how a lead hears her squad and the command net at once. The server never delivers a scoped message to anyone outside its audience, on any read path: REST, WebSocket, MCP and the CLI.
+
+This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and the `OP` and `J` variables from step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
+
+```sh
+umask 077; T=$(mktemp -d)        # a private directory for the tokens; removed at the end
+
+curl -s -X POST localhost:8080/v0/channels -H "$OP" -H "$J" -d '{"name":"squads"}'
+curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"lead"}'
+for n in a1 a2 a3 a4 b1 b2 b3 b4; do
+  curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d "{\"kind\":\"agent\",\"name\":\"$n\"}"
+done
+
+# a credential (kept in a private file, never printed) and channel membership for each of the nine
+for id in 2 3 4 5 6 7 8 9 10; do
+  curl -fsS -X POST localhost:8080/v1/principals/$id/credentials -H "$OP" -H "$J" -d '{"label":"squads"}' \
+    | sed 's/.*"token":"\([^"]*\)".*/\1/' > "$T/$id.token"
+  curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/members/$id -H "$OP"
+done
+
+# agents are deny-by-default: read the channel, and speak on a net they belong to
+for id in 3 4 5 6 7 8 9 10; do
+  curl -fsS -o /dev/null -X PUT localhost:8080/v1/principals/$id/manifest -H "$OP" -H "$J" -d '{
+      "display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
+      "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}'
+done
+```
+
+The nets are created empty; members are added one at a time. Net management is an operator action.
+
+```sh
+for net in alpha bravo command; do
+  curl -fsS -o /dev/null -X POST localhost:8080/v1/channels/squads/nets -H "$OP" -H "$J" -d "{\"name\":\"$net\"}"
+done
+net() { curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/nets/$1/members/$2 -H "$OP" -H "$J" -d "{\"role\":\"$3\"}"; }
+for id in 3 4 5 6;  do net alpha   $id member; done
+for id in 7 8 9 10; do net bravo   $id member; done
+net command 3 member; net command 7 member     # the two squad leads, a1 and b1
+net command 2 monitor                          # the human lead listens on command and cannot speak there
+curl -s localhost:8080/v1/channels/squads/nets -H "$OP"   # the nets, with their ids and members
+```
+
+Now speak. The human uses the CLI, signed in with her token as in step 4:
+
+```sh
+bin/conch login --server http://127.0.0.1:8080 < "$T/2.token"
+bin/conch tail squads &                                   # scoped messages carry [net:command] or [whisper:...] markers
+sleep 1                                                   # tail shows what arrives after it has connected, not what came before
+bin/conch send --to 3 squads "a word before you brief the squad"    # a whisper to a1
+```
+
+An agent speaks on a net over MCP by sending the net's id as the `audience` (here a1, principal 3, on `alpha`, whose id is 1 in the listing above). It replies in kind by sending back the `audience` of a message it received:
+
+```sh
+curl -s -X POST localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "Authorization: Bearer $(cat "$T/3.token")" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"post_message","arguments":{"channel":"squads","body":"alpha: hold position",
+        "audience":{"kind":"net","net_id":1}}}}'
+```
+
+Transmitting on a net needs the `post_net` grant in the agent's manifest, whispering needs `whisper` (and `whisper_agent` to whisper to another agent), and a channel-wide post needs `post`. A monitor who tries to speak on a net is refused, and an agent that is not on a net gets the same answer for it as for a net that does not exist.
+
+**Scoped messages are discretion, not secrecy.** There is no end-to-end encryption: the server controls who *receives* a message, not what a recipient repeats, and the operator of the instance holds the database. Every scoped message, whisper or net, is written to the audit log with its audience and the principals it reached (never its text), and `conch send --to` says so each time.
+
+When you are done, `rm -rf "$T"` removes the token files.
+
+The whole layout is also a test. This builds it with real binaries, posts into every audience, and asserts the exact set of message ids each participant sees over every surface there is (MCP `read_channel`; the REST v2, v1 and v0 lists; the v2, v1 and v0 WebSockets; `conch tail`), that every scoped message read back still carries its audience, the net list each participant is shown, the refusals, the audit log, and that nothing scoped reaches the v1 or v0 wire:
+
+```sh
+go run ./e2e/nets
+```
+
+CI runs it on every pull request, since any server change can open a read path.
 
 ### Upgrading an existing instance
 

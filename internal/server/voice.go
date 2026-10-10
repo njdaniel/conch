@@ -269,7 +269,7 @@ var errVoiceRoomChanging = errors.New("voice: the channel's room kept changing")
 //
 // The room row is created before LiveKit is asked (the name is the durable
 // thing), so a failed CreateRoom can leave a row behind. That is harmless: the
-// row is kept anyway and holds no token. CreateRoom runs on every request,
+// row is the channel's room from then on and holds no token. CreateRoom runs on every request,
 // before the token is signed, because LiveKit forgets empty rooms and loses
 // all rooms on restart (design note §3).
 func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.Channel) (schema.VoiceSessionResponseV1, []string, error) {

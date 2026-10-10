@@ -7,7 +7,7 @@ description: Scripted end-to-end approval-loop check — agent connects via MCP,
 
 The whole pitch of Conch is one loop (ROADMAP P1 success criterion). This skill verifies it end-to-end against a real running `conchd`.
 
-**Automated:** `go run ./e2e/dogfood` runs this whole loop against real `conchd`/`conch` binaries (both the happy path and the ntfy-unreachable degraded path) and exits nonzero on any assertion failure. CI runs it on every push to `main` and on any PR labeled `approval-path`. The manual steps below are the reference the script encodes — use them if the script itself needs debugging.
+**Automated:** `go run ./e2e/dogfood` runs this whole loop against real `conchd`/`conch` binaries (the happy path, the ntfy-unreachable degraded path, and a restart path that kills `conchd` between a commit and its notification and checks the next start makes and audits the attempt) and exits nonzero on any assertion failure. CI runs it on every push to `main` and on any PR labeled `approval-path`. The manual steps below are the reference the script encodes — use them if the script itself needs debugging.
 
 ## The loop under test
 

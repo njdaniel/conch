@@ -89,7 +89,8 @@ Flags for serve:
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
 read only from the environment, never a flag: CONCHD_LIVEKIT_API_KEY and
-CONCHD_LIVEKIT_API_SECRET. Startup does not contact LiveKit.
+CONCHD_LIVEKIT_API_SECRET. Startup does not wait for LiveKit: conchd starts and
+serves whether or not LiveKit answers, and looks at it once straight away.
 `)
 }
 
