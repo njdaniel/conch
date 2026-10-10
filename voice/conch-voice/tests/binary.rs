@@ -377,3 +377,98 @@ async fn with_the_real_sdk_at_trace_level_nothing_written_holds_a_token_or_a_roo
         }
     }
 }
+
+/// Sends a signal to a child with the system's `kill`: the standard library can only kill.
+fn signal(child: &Child, name: &str) {
+    let status = Command::new("kill")
+        .args([&format!("-{name}"), &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -{name} failed");
+}
+
+/// Waits for a child to exit by itself, for at most `within`. `None` if it did not.
+fn exit_within(child: &mut Child, within: Duration) -> Option<(Option<i32>, Duration)> {
+    let began = Instant::now();
+    while began.elapsed() < within {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some((status.code(), began.elapsed()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+/// The real process, with a standard output that is a pipe nobody reads. The client fills
+/// it (each line that is not a command is answered with one, and thirty thousand of them
+/// are far more than a pipe and the queue behind it hold). It must still leave on a
+/// signal, and on the end of its standard input, within a few seconds, and cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
+    for way in ["TERM", "INT", "the end of standard input"] {
+        let private = tempfile::tempdir().unwrap();
+        let conchd = Stub::start().await;
+        let not_livekit = NotLiveKit::start().await;
+        conchd.livekit_url(&not_livekit.url);
+
+        let mut command = conch_voice(private.path());
+        command
+            .args(["join", "ops", "--server", &conchd.url(), "--json"])
+            .args(["--mic", "none"])
+            .env("CONCH_TOKEN", FAKE_LOGIN)
+            // What it logs about the joins that fail is not what this is about.
+            .stderr(Stdio::null());
+        let (exited, unread) = tokio::task::spawn_blocking(move || {
+            let mut child = command.spawn().unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(&b"junk\n".repeat(30_000)).unwrap();
+            stdin.flush().unwrap();
+            // Long enough for the client to have read all of it and filled the pipe.
+            std::thread::sleep(Duration::from_millis(1500));
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "the client left by itself"
+            );
+
+            if way == "the end of standard input" {
+                drop(stdin);
+            } else {
+                signal(&child, way);
+                // Standard input stays open: it is the signal that is being tried.
+                std::mem::forget(stdin);
+            }
+            let exited = exit_within(&mut child, Duration::from_secs(8));
+            if exited.is_none() {
+                child.kill().unwrap();
+                child.wait().unwrap();
+            }
+            // What was in the pipe all along, read only now that the client is gone.
+            let mut unread = Vec::new();
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_end(&mut unread)
+                .unwrap();
+            (exited, unread)
+        })
+        .await
+        .unwrap();
+
+        let (code, took) = exited.unwrap_or_else(|| {
+            panic!("{way}: still running 8 s later, with nobody reading its standard output")
+        });
+        assert_eq!(code, Some(0), "{way}: a clean exit");
+        assert!(took < Duration::from_secs(8), "{way}: {took:?}");
+        // The pipe really was full: it holds what a pipe holds, and the client had more to
+        // say than that.
+        assert!(
+            unread.len() >= 60_000,
+            "{way}: only {} bytes were waiting in the pipe",
+            unread.len()
+        );
+        let unread = String::from_utf8_lossy(&unread);
+        assert!(unread.contains(r#"{"event":"unknown_command"}"#), "{way}");
+        assert!(!unread.contains(FAKE_LOGIN), "{way}");
+    }
+}

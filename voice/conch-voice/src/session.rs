@@ -33,6 +33,15 @@
 //!   the gate to say so, and sends a final `stopped` if a press was open either way. A
 //!   connection attempt that is under way is given a short time to finish, so that the
 //!   room it joins is left and its track is not abandoned unmuted.
+//! - **Nothing here waits for whoever reads the output.** A status line is handed to a
+//!   queue with a writer thread of its own (`lines.rs`) and this loop goes on: a reader
+//!   that stops reading loses lines, and the release of the key, `quit` and the exit are
+//!   acted on as ever. Only the very end waits for the last lines, up to a limit.
+//! - **The SDK is waited for only so long.** A join or a publish that never answers leaves
+//!   the client not connected, which is safe, and would leave it so for ever: each has a
+//!   limit, past which the attempt has failed and the policy decides what follows.
+//! - **An error's text is scrubbed where it is put into a status line.** `conchd`'s words,
+//!   or a proxy's, are shown as the `detail` of a refused session or a failed report.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -56,7 +65,7 @@ use crate::presence::{self, PresenceTimings, Roster};
 use crate::receive::{self, MixCommand, MixStats};
 use crate::reports::{MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
-use crate::secrets::{ConnectionSecrets, Scrubber};
+use crate::secrets::Scrubber;
 use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
 
 /// Opens the microphone source. Called at most once, and only when a session's grant allows
@@ -84,6 +93,13 @@ pub struct Timings {
     /// How long the SDK's own reconnect is allowed before the loop closes the connection
     /// and goes back to `conchd` (the design note's decision 3).
     pub reconnect_grace: Duration,
+    /// How long joining a room may take once `conchd` has issued the session. An SDK that
+    /// never answers would otherwise leave the client not connected for ever; past this
+    /// the attempt has failed, and the policy decides what follows.
+    pub connect_limit: Duration,
+    /// How long publishing the microphone track may take once the room is joined. Past
+    /// this the room is left, as for a publish that failed, and the attempt has failed.
+    pub publish_limit: Duration,
     /// How long leaving a room may take. Closing during a reconnect was measured at 5 s.
     pub close_limit: Duration,
     /// How long a connection attempt that is in progress when the client leaves is given to
@@ -94,6 +110,10 @@ pub struct Timings {
     pub gate_shut_grace: Duration,
     /// How long the last reports are given to be delivered when the client is leaving.
     pub report_flush: Duration,
+    /// How long the last lines of output are given to be written when the client is
+    /// leaving. A reader that is reading gets them; one that is not does not hold the
+    /// exit up for longer than this.
+    pub output_flush: Duration,
     /// How often `stats` is written while connected.
     pub stats_every: Duration,
     /// Every wait the connection policy asks for is divided by this. 1 outside tests.
@@ -110,10 +130,13 @@ impl Default for Timings {
     fn default() -> Self {
         Self {
             reconnect_grace: Duration::from_secs(20),
+            connect_limit: Duration::from_secs(30),
+            publish_limit: Duration::from_secs(30),
             close_limit: Duration::from_secs(10),
             attempt_limit: Duration::from_secs(2),
             gate_shut_grace: Duration::from_millis(500),
             report_flush: Duration::from_secs(3),
+            output_flush: Duration::from_secs(1),
             stats_every: Duration::from_secs(1),
             wait_divisor: 1,
             reports: ReportTimings::default(),
@@ -247,7 +270,6 @@ struct Established<T: Transport> {
     mic: Option<(Track<T>, Feed<T>)>,
     can_publish: bool,
     identity: String,
-    secrets: ConnectionSecrets,
 }
 
 /// Why there is no room.
@@ -257,50 +279,141 @@ enum Failure {
     Sdk(SdkError),
 }
 
+/// How long each step of a connection attempt that is the SDK's may take.
+#[derive(Clone, Copy)]
+struct AttemptLimits {
+    connect: Duration,
+    publish: Duration,
+    close: Duration,
+}
+
+/// What an attempt fails with when the SDK did not answer within a limit. The text is this
+/// program's own.
+fn took_too_long(what: &str, limit: Duration) -> Failure {
+    Failure::Sdk(SdkError::scrubbed(format!(
+        "{what} took longer than {} s",
+        limit.as_secs_f32()
+    )))
+}
+
+/// How much longer than the sum of its own limits the SDK's part of an attempt is waited
+/// for from outside, before the thread it runs on is taken to be stuck.
+const STUCK_AFTER: Duration = Duration::from_secs(1);
+
 /// One connection attempt, from the session request to a muted track.
+///
+/// The SDK's part of it runs on a thread of its own, not on the thread of whoever polls
+/// this. The SDK's join runs native code, and on a machine with an NVIDIA GPU that code
+/// prints a line to standard output where it stands (`docs/design/conch-voice.md` §5). With
+/// a standard output nobody reads, that print does not return. Polled from the session
+/// loop it would stop the loop there, and with it the release of the key, `quit` and every
+/// signal: seen with the real binary and a full pipe. On its own thread it stops only
+/// itself: the attempt is given up on from here after its limits, the loop goes on, and the
+/// thread is let go whenever the print returns.
 async fn establish<T: Transport>(
     client: Client,
     transport: Arc<T>,
     channel: String,
     scrubber: Arc<Scrubber>,
+    limits: AttemptLimits,
 ) -> Result<Established<T>, Failure> {
     // A new session, immediately before the attempt it is for.
     let session = client.session(&channel).await.map_err(Failure::Session)?;
     // The room of the grant with no audience. Any other grant is ignored: nets are V5.
     let grant = session.channel_grant().ok_or(Failure::NoChannelGrant)?;
-    let can_publish = grant.can_publish;
-    // From here until the connection has ended, the SDK's own output is searched for these
-    // two values.
-    let secrets = scrubber.connection(&grant.token, &grant.room);
-    let (room, events) = transport
-        .connect(&session.livekit_url, &grant.token)
-        .await
-        .map_err(Failure::Sdk)?;
-    let mic = if can_publish {
-        let published = room.publish_microphone().await;
-        match published {
-            Ok((track, feed)) => {
-                // Straight after the publish, which left the track enabled.
-                track.mute();
-                Some((track, feed))
+    // From here on, whatever the SDK writes is searched for these two values. They are not
+    // forgotten when the connection ends: the SDK's tasks for a room go on, and may log,
+    // after the room was left.
+    scrubber.connection(&grant.token, &grant.room);
+    // `session` is not used past this function. The join token goes to the SDK for this
+    // one join; this program's only other copy is the scrubber's, which replaces it in
+    // text and does nothing else with it.
+    let joining = join_room(
+        transport,
+        session.livekit_url.clone(),
+        grant.token.clone(),
+        grant.can_publish,
+        session.identity.clone(),
+        limits,
+    );
+    let runtime = tokio::runtime::Handle::current();
+    let (claim, claimed) = tokio::sync::oneshot::channel();
+    let on_its_own_thread = move || {
+        runtime.block_on(async move {
+            // If nobody is waiting for the room any more (the attempt was given up on, or
+            // the client is leaving), it is left here: nothing else would ever close it.
+            if let Err(Ok(unclaimed)) = claim.send(joining.await) {
+                let _ = tokio::time::timeout(limits.close, unclaimed.room.close()).await;
             }
-            Err(error) => {
-                room.close().await;
-                return Err(Failure::Sdk(error));
-            }
-        }
-    } else {
-        None
+        });
     };
-    // `session` ends here, and the join token with it: nothing keeps one.
-    Ok(Established {
-        room,
-        events,
-        mic,
-        can_publish,
-        identity: session.identity.clone(),
-        secrets,
-    })
+    // A thread of the attempt's own, and not one of the runtime's: one that gets stuck is
+    // then nobody else's loss, and nothing waits for it when the process ends.
+    std::thread::Builder::new()
+        .name("conch-voice-join".to_owned())
+        .spawn(on_its_own_thread)
+        .map_err(|_| {
+            Failure::Sdk(SdkError::scrubbed(
+                "no thread could be started for the join",
+            ))
+        })?;
+    let stuck_after = limits.connect + limits.publish + limits.close + STUCK_AFTER;
+    match tokio::time::timeout(stuck_after, claimed).await {
+        Ok(Ok(joined)) => joined,
+        Ok(Err(_)) => Err(Failure::Sdk(SdkError::scrubbed(
+            "the join ended without an answer",
+        ))),
+        Err(_) => Err(took_too_long("joining the voice room", stuck_after)),
+    }
+}
+
+/// The SDK's part of a connection attempt: the join, and for a grant that allows it the
+/// publish and, straight after it, the mute. Each step has a limit. A client whose join
+/// never answers has failed closed (it is not connected, so the gate is shut), but it must
+/// not wait for ever: past the limit the attempt has failed, and the policy tries again.
+async fn join_room<T: Transport>(
+    transport: Arc<T>,
+    livekit_url: String,
+    token: Secret,
+    can_publish: bool,
+    identity: String,
+    limits: AttemptLimits,
+) -> Result<Established<T>, Failure> {
+    let joining = transport.connect(&livekit_url, &token);
+    let (room, events) = match tokio::time::timeout(limits.connect, joining).await {
+        Ok(joined) => joined.map_err(Failure::Sdk)?,
+        Err(_) => return Err(took_too_long("joining the voice room", limits.connect)),
+    };
+    if !can_publish {
+        return Ok(Established {
+            room,
+            events,
+            mic: None,
+            can_publish,
+            identity,
+        });
+    }
+    let published = tokio::time::timeout(limits.publish, room.publish_microphone()).await;
+    let failure = match published {
+        Ok(Ok((track, feed))) => {
+            // Straight after the publish, which left the track enabled.
+            track.mute();
+            return Ok(Established {
+                room,
+                events,
+                mic: Some((track, feed)),
+                can_publish,
+                identity,
+            });
+        }
+        Ok(Err(error)) => Failure::Sdk(error),
+        Err(_) => took_too_long("publishing the microphone", limits.publish),
+    };
+    // The room was joined and has no track this client holds and could mute. It is left
+    // before anything else: the next attempt joins as the same identity, and nothing else
+    // would ever close this one.
+    let _ = tokio::time::timeout(limits.close, room.close()).await;
+    Err(failure)
 }
 
 /// A connection in use.
@@ -318,8 +431,6 @@ struct Live<T: Transport> {
     /// Whether a track beyond the bounds was ignored on this connection, which is said
     /// once.
     ignored_a_track: bool,
-    /// Forgotten by the scrubber when the connection has been closed.
-    secrets: ConnectionSecrets,
 }
 
 /// Why a connection ended or was not made, for the policy and for the status.
@@ -579,6 +690,11 @@ impl<T: Transport> Session<T> {
                     Arc::clone(&self.transport),
                     self.channel.clone(),
                     Arc::clone(&self.scrubber),
+                    AttemptLimits {
+                        connect: self.timings.connect_limit,
+                        publish: self.timings.publish_limit,
+                        close: self.timings.close_limit,
+                    },
                 )));
             }
             Progress::Established(Ok(established)) => self.connected(established),
@@ -590,7 +706,7 @@ impl<T: Transport> Session<T> {
                         Some((outcome, reason)) => self.decide(Ended {
                             outcome,
                             reason,
-                            detail: Some(error.to_string()),
+                            detail: Some(self.shown_text(&error)),
                         }),
                         None => self.exit = Some(Err(Error::Api(error))),
                     },
@@ -617,7 +733,6 @@ impl<T: Transport> Session<T> {
             mic,
             can_publish,
             identity,
-            secrets,
         } = established;
         self.tell(PttInput::PublishGrant(can_publish));
         let track = mic.map(|(track, feed)| {
@@ -634,7 +749,6 @@ impl<T: Transport> Session<T> {
             tracks: BTreeMap::new(),
             reconnecting_since: None,
             ignored_a_track: false,
-            secrets,
         });
         self.phase = Phase::Settled;
         self.show(Connection::Connected);
@@ -654,10 +768,20 @@ impl<T: Transport> Session<T> {
                 self.tell(PttInput::Microphone(true));
             }
             Ok(None) => {}
-            Err(error) => self.out.show(&Event::Microphone {
-                detail: error.to_string(),
-            }),
+            Err(error) => {
+                let detail = self.shown_text(&error);
+                self.out.show(&Event::Microphone { detail });
+            }
         }
+    }
+
+    /// An error's text as it is shown in the status: with the login token, the join tokens
+    /// and room names of recent connections and anything shaped like a signed token
+    /// replaced, and on one line. The text of an error of `conchd`'s is partly `conchd`'s
+    /// own words, or those of whatever answered in its place; the API crate keeps its own
+    /// secrets out of them and bounds their length, and cannot know these values.
+    fn shown_text(&self, error: &dyn std::fmt::Display) -> String {
+        self.scrubber.scrub_line(&error.to_string())
     }
 
     /// Asks the connection policy what follows, and does it.
@@ -825,10 +949,7 @@ impl<T: Transport> Session<T> {
         let limit = self.timings.close_limit;
         self.phase = Phase::Closing(
             Box::pin(async move {
-                let Live { room, secrets, .. } = live;
-                let _ = tokio::time::timeout(limit, room.close()).await;
-                // Only now does the scrubber forget this connection's token and room.
-                drop(secrets);
+                let _ = tokio::time::timeout(limit, live.room.close()).await;
             }),
             ended,
         );
@@ -875,10 +996,11 @@ impl<T: Transport> Session<T> {
     }
 
     fn on_report(&mut self, report: &ReportEvent) {
+        let detail = self.shown_text(&report.error);
         self.out.show(&Event::Report {
             state: report.state,
             problem: report.problem,
-            detail: report.error.to_string(),
+            detail,
         });
     }
 
@@ -935,7 +1057,6 @@ impl<T: Transport> Session<T> {
         let left = async {
             if let Some(live) = live {
                 let _ = tokio::time::timeout(close_limit, live.room.close()).await;
-                drop(live.secrets);
             }
             match phase {
                 Phase::Closing(closing, _) => {
@@ -949,7 +1070,6 @@ impl<T: Transport> Session<T> {
                 Phase::Establishing(attempt) => {
                     if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
                         let _ = tokio::time::timeout(close_limit, joined.room.close()).await;
-                        drop(joined.secrets);
                     }
                 }
                 Phase::Ask(_) | Phase::Settled => {}
@@ -961,6 +1081,12 @@ impl<T: Transport> Session<T> {
         }
         if result.is_ok() {
             self.show(Connection::Closed);
+        }
+        // The last lines are given a moment to be written, so that a reader who is reading
+        // has them before the process exits. One who is not reading does not hold the exit
+        // up: past the limit the lines are left where they are.
+        if !self.out.flush(self.timings.output_flush).await {
+            log::debug!("the last lines of output were not read before leaving");
         }
         result
     }
