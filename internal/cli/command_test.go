@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,7 +28,7 @@ func TestSendServerFlagOverridesEnvironment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(schema.PostMessageResponse{})
+		_ = json.NewEncoder(w).Encode(schema.PostMessageResponseV2{})
 	}))
 	defer server.Close()
 	t.Setenv("CONCH_SERVER", "http://127.0.0.1:1")
@@ -48,7 +49,7 @@ func TestSendUsesServerEnvironment(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(schema.PostMessageResponse{})
+		_ = json.NewEncoder(w).Encode(schema.PostMessageResponseV2{})
 	}))
 	defer server.Close()
 	t.Setenv("CONCH_SERVER", server.URL)
@@ -270,14 +271,14 @@ func newAuthFake(t *testing.T, enforce bool) *authFake {
 		switch key {
 		case "GET /v1/whoami":
 			_ = json.NewEncoder(w).Encode(schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator})
-		case "POST /v0/channels/general/messages":
-			var req schema.PostMessageRequest
+		case "POST /v2/channels/general/messages":
+			var req schema.PostMessageRequestV2
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			f.mu.Lock()
 			f.sentAs = req.AuthorID
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(schema.PostMessageResponse{Message: schema.MessageV0{ID: 1, AuthorID: req.AuthorID, Body: req.Body}})
+			_ = json.NewEncoder(w).Encode(schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, AuthorID: req.AuthorID, Body: req.Body}})
 		case "GET /v1/approvals":
 			_ = json.NewEncoder(w).Encode(schema.ListApprovalsResponseV1{})
 		case "POST /v1/approvals/1/decisions":
@@ -288,12 +289,12 @@ func newAuthFake(t *testing.T, enforce bool) *authFake {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(schema.CastDecisionResponseV1{State: schema.ApprovalStateResolved, Resolution: &schema.ApprovalResolutionV1{}})
-		case "GET /v0/ws":
+		case "GET /v2/ws":
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
 			}
-			_ = wsjson.Write(r.Context(), conn, schema.MessageV0{ID: 1, AuthorID: 42, Body: "hi", CreatedAt: time.Now()})
+			_ = wsjson.Write(r.Context(), conn, schema.MessageV2{ID: 1, AuthorID: 42, Body: "hi", CreatedAt: schema.NewTimestamp(time.Now())})
 			_ = conn.Close(websocket.StatusGoingAway, "bye")
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -322,8 +323,8 @@ func TestSubcommandsSendCredential(t *testing.T) {
 		args []string // --server is appended after the verb
 		key  string   // the request whose header is asserted
 	}{
-		{"send", []string{"send", "--author", "42", "general", "hello"}, "POST /v0/channels/general/messages"},
-		{"tail", []string{"tail", "general"}, "GET /v0/ws"},
+		{"send", []string{"send", "--author", "42", "general", "hello"}, "POST /v2/channels/general/messages"},
+		{"tail", []string{"tail", "general"}, "GET /v2/ws"},
 		{"approvals list", []string{"approvals", "list"}, "GET /v1/approvals"},
 		{"approve", []string{"approve", "--author", "42", "--reason", "ok", "1"}, "POST /v1/approvals/1/decisions"},
 		{"reject", []string{"reject", "--author", "42", "--reason", "no", "1"}, "POST /v1/approvals/1/decisions"},
@@ -736,5 +737,391 @@ func TestReadTokenFileStdinIsNotATerminal(t *testing.T) {
 	got, err := readToken(context.Background(), f, &stderr)
 	if err != nil || got != fakeToken || stderr.Len() != 0 {
 		t.Fatalf("readToken = %q, %v, stderr %q", got, err, stderr.String())
+	}
+}
+
+// netsFake is a conchd stand-in for the v2 message and nets routes. It records
+// every request line and the bodies it received, and can be told to refuse a
+// route with a server error.
+type netsFake struct {
+	*httptest.Server
+	mu       sync.Mutex
+	requests []string
+	posted   []schema.PostMessageRequestV2
+	puts     []schema.PutNetMemberRequestV1
+	nets     []schema.NetV1
+	stream   []schema.MessageV2
+	refuse   map[string]string // "METHOD path" -> server error code
+}
+
+func newNetsFake(t *testing.T) *netsFake {
+	t.Helper()
+	f := &netsFake{
+		nets: []schema.NetV1{
+			{ID: 4, Name: "alpha", Members: []schema.NetMember{{PrincipalID: 7, Role: schema.NetRoleMember}, {PrincipalID: 9, Role: schema.NetRoleMonitor}}},
+			{ID: 5, Name: "bravo", Members: []schema.NetMember{}},
+		},
+		refuse: map[string]string{},
+	}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		f.mu.Lock()
+		f.requests = append(f.requests, key)
+		code := f.refuse[key]
+		f.mu.Unlock()
+		if code != "" {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(schema.Error{Code: code, Message: "refused by test"})
+			return
+		}
+		switch key {
+		case "POST /v2/channels/general/messages":
+			var req schema.PostMessageRequestV2
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.mu.Lock()
+			f.posted = append(f.posted, req)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, Body: req.Body}})
+		case "GET /v1/channels/general/nets":
+			_ = json.NewEncoder(w).Encode(schema.ListNetsResponseV1{Nets: f.nets})
+		case "POST /v1/channels/general/nets":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(schema.CreateNetResponseV1{Net: schema.NetV1{ID: 6, Name: "charlie"}})
+		case "DELETE /v1/channels/general/nets/alpha",
+			"DELETE /v1/channels/general/nets/alpha/members/9":
+			w.WriteHeader(http.StatusNoContent)
+		case "PUT /v1/channels/general/nets/alpha/members/9":
+			var req schema.PutNetMemberRequestV1
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.mu.Lock()
+			f.puts = append(f.puts, req)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case "GET /v2/ws":
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			for _, m := range f.stream {
+				_ = wsjson.Write(r.Context(), conn, m)
+			}
+			_ = conn.Close(websocket.StatusGoingAway, "bye")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *netsFake) seen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+func TestSendScopes(t *testing.T) {
+	tests := []struct {
+		name         string
+		flags        []string
+		wantAudience *schema.Audience
+		wantNotice   bool
+		wantErr      string
+		wantNoPost   bool
+		wantNoReq    bool // no request of any kind may leave the client
+	}{
+		{name: "channel-wide", flags: nil},
+		{name: "net", flags: []string{"--net", "alpha"}, wantAudience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}},
+		{name: "whisper one", flags: []string{"--to", "3"}, wantNotice: true,
+			wantAudience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{3}}},
+		{name: "whisper many keeps order", flags: []string{"--to", "9,3,5"}, wantNotice: true,
+			wantAudience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{9, 3, 5}}},
+		{name: "both flags", flags: []string{"--net", "alpha", "--to", "3"}, wantErr: "cannot be used together", wantNoPost: true, wantNoReq: true},
+		{name: "unknown net", flags: []string{"--net", "zulu"}, wantErr: `no net "zulu"`, wantNoPost: true},
+		{name: "invalid net name", flags: []string{"--net", "Bad Name"}, wantErr: "--net", wantNoPost: true, wantNoReq: true},
+		{name: "to not a number", flags: []string{"--to", "3,x"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to empty element", flags: []string{"--to", "3,,5"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to zero", flags: []string{"--to", "0"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to negative", flags: []string{"--to", "-2"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to duplicate", flags: []string{"--to", "3,3"}, wantErr: "listed twice", wantNoPost: true, wantNoReq: true},
+		{name: "to with spaces", flags: []string{"--to", " 9, 3 ,5"}, wantNotice: true,
+			wantAudience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{9, 3, 5}}},
+		{name: "to duplicate with spaces", flags: []string{"--to", "3, 3"}, wantErr: "listed twice", wantNoPost: true, wantNoReq: true},
+		{name: "to blank element", flags: []string{"--to", "3, ,5"}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		// A flag given with an empty value (an unset shell variable) is a
+		// scope the user asked for and did not get: never a channel-wide post.
+		{name: "net given but empty", flags: []string{"--net", ""}, wantErr: "--net", wantNoPost: true, wantNoReq: true},
+		{name: "net given as empty with =", flags: []string{"--net="}, wantErr: "--net", wantNoPost: true, wantNoReq: true},
+		{name: "to given but empty", flags: []string{"--to", ""}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "to given but blank", flags: []string{"--to", " "}, wantErr: "--to", wantNoPost: true, wantNoReq: true},
+		{name: "empty net with to", flags: []string{"--net", "", "--to", "3"}, wantErr: "cannot be used together", wantNoPost: true, wantNoReq: true},
+		{name: "net with empty to", flags: []string{"--net", "alpha", "--to", ""}, wantErr: "cannot be used together", wantNoPost: true, wantNoReq: true},
+	}
+	const notice = "note: whispers are recorded in the audit log\n"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newNetsFake(t)
+			args := append([]string{"send", "--server", fake.URL, "--author", "7"}, tt.flags...)
+			args = append(args, "general", "hello")
+			stdout, stderr, err := runCLI(t, "", args...)
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				if strings.Contains(stderr, notice) {
+					t.Error("the audit-log notice must not print when nothing was sent")
+				}
+			} else if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if tt.wantNoPost && len(fake.posted) != 0 {
+				t.Errorf("posted %+v, want nothing", fake.posted)
+			}
+			if tt.wantNoReq && len(fake.seen()) != 0 {
+				t.Errorf("requests = %v, want none", fake.seen())
+			}
+			if tt.wantErr == "" {
+				if len(fake.posted) != 1 {
+					t.Fatalf("posted %d messages, want 1", len(fake.posted))
+				}
+				got := fake.posted[0]
+				if got.Body != "hello" || got.AuthorID != 7 || !reflect.DeepEqual(got.Audience, tt.wantAudience) {
+					t.Errorf("posted %+v, want body hello, author 7, audience %+v", got, tt.wantAudience)
+				}
+			}
+			if got := strings.Count(stderr, notice); (got == 1) != tt.wantNotice || got > 1 {
+				t.Errorf("notice count = %d, want present=%v once (stderr %q)", got, tt.wantNotice, stderr)
+			}
+			if tt.wantNotice && stderr != notice {
+				t.Errorf("stderr = %q, want only the notice", stderr)
+			}
+		})
+	}
+}
+
+func TestTailMarkers(t *testing.T) {
+	ts := schema.NewTimestamp(time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC))
+	stamp := "2026-07-13T12:00:00Z"
+	msg := func(id int64, body string, a *schema.Audience) schema.MessageV2 {
+		return schema.MessageV2{Schema: schema.MessageSchemaV2, ID: id, AuthorID: 7, CreatedAt: ts, Body: body, Audience: a}
+	}
+	fake := newNetsFake(t)
+	fake.stream = []schema.MessageV2{
+		msg(1, "open", nil),
+		msg(2, "on net", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}),
+		msg(3, "unlisted net", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 99}),
+		msg(4, "whisper", &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{3, 5, 7}}),
+		msg(5, "two\nlines", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 5}),
+		// Bodies that imitate a marker: only a real audience may open the
+		// text with "[".
+		msg(6, "[whisper:3,7] forged in the open", nil),
+		msg(7, "[net:alpha] forged in the open", nil),
+		msg(8, "[net:bravo] forged on another net", &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}),
+		msg(9, "\n[net:alpha] forged after a newline", nil),
+		msg(10, `\[already escaped`, nil),
+		msg(11, "brackets [later] are untouched", nil),
+	}
+	isolateConfig(t)
+	stdout, stderr, err := runCLI(t, "", "tail", "--server", fake.URL, "general")
+	if err != nil {
+		t.Fatalf("tail: %v", err)
+	}
+	want := strings.Join([]string{
+		stamp + " 7 open",
+		stamp + " 7 [net:alpha] on net",
+		stamp + " 7 [net:99] unlisted net",
+		stamp + " 7 [whisper:3,5,7] whisper",
+		stamp + ` 7 [net:bravo] two\nlines`,
+		stamp + ` 7 \[whisper:3,7] forged in the open`,
+		stamp + ` 7 \[net:alpha] forged in the open`,
+		stamp + ` 7 [net:alpha] \[net:bravo] forged on another net`,
+		stamp + ` 7 \n[net:alpha] forged after a newline`,
+		stamp + ` 7 \\[already escaped`,
+		stamp + " 7 brackets [later] are untouched",
+	}, "\n") + "\n"
+	if stdout != want {
+		t.Errorf("stdout =\n%s\nwant\n%s", stdout, want)
+	}
+	if !strings.Contains(stderr, "server shutting down") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if strings.ContainsRune(stdout, 0x1b) {
+		t.Error("tail output contains an escape code")
+	}
+}
+
+func TestSendAndTailNeverUseV0OrV1MessageRoutes(t *testing.T) {
+	isolateConfig(t)
+	fake := newNetsFake(t)
+	runs := [][]string{
+		{"send", "--author", "7", "general", "a"},
+		{"send", "--author", "7", "--net", "alpha", "general", "b"},
+		{"send", "--author", "7", "--to", "3", "general", "c"},
+		{"tail", "general"},
+	}
+	for _, run := range runs {
+		args := append([]string{run[0], "--server", fake.URL}, run[1:]...)
+		if _, _, err := runCLI(t, "", args...); err != nil {
+			t.Fatalf("%v: %v", run, err)
+		}
+	}
+	for _, req := range fake.seen() {
+		path := strings.SplitN(req, " ", 2)[1]
+		if strings.HasPrefix(path, "/v0/") || (strings.HasPrefix(path, "/v1/") && strings.Contains(path, "/messages")) || path == "/v1/ws" {
+			t.Errorf("used a v0/v1 message route: %s", req)
+		}
+	}
+	if len(fake.seen()) == 0 {
+		t.Fatal("no requests recorded")
+	}
+}
+
+func TestNetsCommands(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantReq    string
+		wantStdout string
+		wantPut    *schema.PutNetMemberRequestV1
+	}{
+		{name: "list", args: []string{"nets", "list", "general"}, wantReq: "GET /v1/channels/general/nets",
+			wantStdout: "alpha  7:member 9:monitor\nbravo  (empty)\n"},
+		{name: "create", args: []string{"nets", "create", "general", "charlie"}, wantReq: "POST /v1/channels/general/nets",
+			wantStdout: "created net charlie (id 6) in general\n"},
+		{name: "archive", args: []string{"nets", "archive", "general", "alpha"}, wantReq: "DELETE /v1/channels/general/nets/alpha",
+			wantStdout: "archived net alpha in general\n"},
+		{name: "add member", args: []string{"nets", "add", "general", "alpha", "9"}, wantReq: "PUT /v1/channels/general/nets/alpha/members/9",
+			wantStdout: "added 9 to net alpha as member\n", wantPut: &schema.PutNetMemberRequestV1{Role: schema.NetRoleMember}},
+		{name: "add monitor", args: []string{"nets", "add", "general", "alpha", "9", "--monitor"}, wantReq: "PUT /v1/channels/general/nets/alpha/members/9",
+			wantStdout: "added 9 to net alpha as monitor\n", wantPut: &schema.PutNetMemberRequestV1{Role: schema.NetRoleMonitor}},
+		{name: "add monitor flag first", args: []string{"nets", "add", "--monitor", "general", "alpha", "9"}, wantReq: "PUT /v1/channels/general/nets/alpha/members/9",
+			wantStdout: "added 9 to net alpha as monitor\n", wantPut: &schema.PutNetMemberRequestV1{Role: schema.NetRoleMonitor}},
+		{name: "remove", args: []string{"nets", "remove", "general", "alpha", "9"}, wantReq: "DELETE /v1/channels/general/nets/alpha/members/9",
+			wantStdout: "removed 9 from net alpha\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newNetsFake(t)
+			args := append([]string{tt.args[0], tt.args[1], "--server", fake.URL}, tt.args[2:]...)
+			stdout, stderr, err := runCLI(t, "", args...)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if stdout != tt.wantStdout {
+				t.Errorf("stdout = %q, want %q", stdout, tt.wantStdout)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			if got := fake.seen(); !reflect.DeepEqual(got, []string{tt.wantReq}) {
+				t.Errorf("requests = %v, want [%s]", got, tt.wantReq)
+			}
+			if tt.wantPut != nil && (len(fake.puts) != 1 || fake.puts[0] != *tt.wantPut) {
+				t.Errorf("put body = %+v, want %+v", fake.puts, *tt.wantPut)
+			}
+		})
+	}
+}
+
+func TestNetsUsageErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no subcommand", []string{"nets"}, "requires a subcommand"},
+		{"unknown subcommand", []string{"nets", "frob"}, "unknown nets subcommand"},
+		{"list without channel", []string{"nets", "list"}, "expected <channel>"},
+		{"create without name", []string{"nets", "create", "general"}, "expected <channel> <name>"},
+		{"add without id", []string{"nets", "add", "general", "alpha"}, "expected <channel> <name> <principal-id>"},
+		{"add bad id", []string{"nets", "add", "general", "alpha", "x"}, "positive integer"},
+		{"remove zero id", []string{"nets", "remove", "general", "alpha", "0"}, "positive integer"},
+		{"monitor only on add", []string{"nets", "remove", "--monitor", "general", "alpha", "9"}, "flag provided but not defined"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newNetsFake(t)
+			args := tt.args
+			if len(args) > 1 && args[1] != "frob" {
+				args = append([]string{args[0], args[1], "--server", fake.URL}, args[2:]...)
+			}
+			_, _, err := runCLI(t, "", args...)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+			if len(fake.seen()) != 0 {
+				t.Errorf("requests = %v, want none", fake.seen())
+			}
+		})
+	}
+}
+
+func TestScopedCommandsReportServerRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		key  string
+		code string
+	}{
+		{"send net", []string{"send", "--author", "7", "--net", "alpha", "general", "x"}, "POST /v2/channels/general/messages", "forbidden"},
+		{"send whisper", []string{"send", "--author", "7", "--to", "3", "general", "x"}, "POST /v2/channels/general/messages", "invalid_audience"},
+		{"send net list refused", []string{"send", "--author", "7", "--net", "alpha", "general", "x"}, "GET /v1/channels/general/nets", "channel_not_found"},
+		{"nets list", []string{"nets", "list", "general"}, "GET /v1/channels/general/nets", "channel_not_found"},
+		{"nets create", []string{"nets", "create", "general", "charlie"}, "POST /v1/channels/general/nets", "net_exists"},
+		{"nets archive", []string{"nets", "archive", "general", "alpha"}, "DELETE /v1/channels/general/nets/alpha", "net_not_found"},
+		{"nets add", []string{"nets", "add", "general", "alpha", "9"}, "PUT /v1/channels/general/nets/alpha/members/9", "not_a_channel_member"},
+		{"nets remove", []string{"nets", "remove", "general", "alpha", "9"}, "DELETE /v1/channels/general/nets/alpha/members/9", "forbidden"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			fake := newNetsFake(t)
+			fake.refuse[tt.key] = tt.code
+			verbs := 1
+			if tt.args[0] == "nets" {
+				verbs = 2
+			}
+			args := append(append(append([]string{}, tt.args[:verbs]...), "--server", fake.URL), tt.args[verbs:]...)
+			stdout, _, err := runCLI(t, "", args...)
+			if err == nil || !strings.Contains(err.Error(), tt.code) {
+				t.Fatalf("err = %v, want containing %q", err, tt.code)
+			}
+			if strings.Contains(err.Error(), "\n") {
+				t.Errorf("error is more than one line: %q", err)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty on refusal", stdout)
+			}
+		})
+	}
+}
+
+func TestSendNoticeNotPrintedWhenWhisperRefused(t *testing.T) {
+	isolateConfig(t)
+	fake := newNetsFake(t)
+	fake.refuse["POST /v2/channels/general/messages"] = "invalid_audience"
+	_, stderr, err := runCLI(t, "", "send", "--server", fake.URL, "--author", "7", "--to", "3", "general", "x")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if strings.Contains(stderr, "audit log") {
+		t.Errorf("stderr = %q, the notice must not claim a whisper was recorded", stderr)
+	}
+}
+
+func TestUsageMentionsNetsAndWhispers(t *testing.T) {
+	var out bytes.Buffer
+	Usage(&out)
+	for _, want := range []string{"--net <name>", "--to <id>", "conch nets list", "conch nets create", "conch nets archive", "conch nets add", "--monitor", "conch nets remove"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage lacks %q", want)
+		}
 	}
 }
