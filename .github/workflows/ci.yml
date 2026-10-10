@@ -194,7 +194,7 @@ jobs:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
-            ~/.cache/conch/voice-build
+            voice/target
           key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
           restore-keys: |
             voice-build-${{ runner.os }}-
