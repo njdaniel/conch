@@ -316,8 +316,12 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 	channelID, agentID, _ := fixture(t, s)
 
 	// First manager creates two approvals, then "crashes" (Close only stops
-	// timers; the store — our durable state — survives).
-	m1 := New(s, nil)
+	// timers; the store — our durable state — survives). It has a notifier,
+	// like the second: on a slow machine its 10 ms deadline can pass before
+	// Close, and then it is the one that escalates. With a notifier it leaves
+	// the same rows the second manager would have, so the chain asserted below
+	// does not depend on which of them got there first (issue #194).
+	m1 := New(s, &recordingNotifier{})
 	now := time.Now()
 	missed, err := m1.Create(ctx, params(channelID, agentID, now.Add(10*time.Millisecond), now.Add(20*time.Millisecond)))
 	if err != nil {
@@ -356,7 +360,11 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 		got, err := s.ApprovalByID(ctx, missed.ID)
 		return err == nil && got.State == schema.ApprovalStateExpired
 	})
-	want := []string{store.AuditApprovalCreated, store.AuditApprovalEscalated, AuditNotifySent, store.AuditApprovalExpired, AuditNotifySent}
+	want := []string{
+		store.AuditApprovalCreated, AuditNotifySent,
+		store.AuditApprovalEscalated, AuditNotifySent,
+		store.AuditApprovalExpired, AuditNotifySent,
+	}
 	waitFor(t, func() bool {
 		return len(auditChain(t, s, fmt.Sprintf("approval:%d", missed.ID))) >= len(want)
 	})
