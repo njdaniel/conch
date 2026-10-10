@@ -12,8 +12,15 @@
 //!
 //! Secrets never reach output. The login token, every join token and every room name are
 //! held in a [`Secret`], whose `Debug` is a placeholder and which has no `Display`; no
-//! [`Error`] carries one, a request header, or the body of a session. A public type added
+//! [`Error`] carries one, a request header, or the body of a session. That holds against a
+//! peer that sends the request back, too: a document that fails to decode is described by
+//! a position and never by its contents, and the client's own token is taken out of every
+//! string an error or an end-of-stream reason keeps from an answer. A public type added
 //! to this crate gets a line in `tests/secrets.rs`.
+//!
+//! The token goes only to the server the user named: in the `Authorization` header, never
+//! after a redirect, never through a proxy from the environment, never over plain HTTP to
+//! an `https` address, and never to a host other than the one its login is stored under.
 //!
 //! - [`ServerAddress`]: the address, and the key a login is stored under, as Go makes it.
 //! - [`resolve_token`], [`default_config_dir`]: the stored login.

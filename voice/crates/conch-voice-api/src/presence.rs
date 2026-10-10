@@ -14,6 +14,7 @@
 //! used for what follows the upgrade: the frames.
 
 use std::fmt;
+use std::future::Future;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -28,8 +29,8 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 
-use crate::client::{Client, Detail, decode, transport};
-use crate::error::{Error, MAX_TEXT_CHARS, bounded};
+use crate::client::{Client, decode, transport};
+use crate::error::{Error, MAX_TEXT_CHARS, Scrubber};
 use crate::types::VoicePresenceV1;
 
 /// The most one presence frame may hold. A snapshot is a few kilobytes; tungstenite's own
@@ -48,7 +49,8 @@ const CLOSE_NO_STATUS: u16 = 1005;
 /// Why a presence stream ended. The connection policy treats these differently, which is
 /// why they are told apart.
 ///
-/// `reason` is the text of the server's close frame, cut to a bounded length. It is the
+/// `reason` is the text of the server's close frame, cut to a bounded length and with this
+/// client's own login token taken out, should the peer have put it there. It is the
 /// server's text: escape it before printing, and do not build behaviour on its wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -98,6 +100,8 @@ pub enum PresenceEvent {
 pub struct PresenceStream {
     socket: Option<WebSocketStream<reqwest::Upgraded>>,
     end: Option<StreamEnd>,
+    /// For what the peer says in a close frame or by breaking the protocol.
+    scrubber: Scrubber,
 }
 
 impl Client {
@@ -133,12 +137,7 @@ impl Client {
         }
         check_upgrade(response.headers(), &key)?;
 
-        // The 101 is in hand, so this only takes the connection over; it is bounded all
-        // the same so that no await here is open-ended.
-        let upgraded = tokio::time::timeout(self.timeout(), response.upgrade())
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(transport)?;
+        let upgraded = take_over(self.scrubber(), self.timeout(), response.upgrade()).await?;
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_FRAME_BYTES))
             .max_frame_size(Some(MAX_FRAME_BYTES));
@@ -146,8 +145,26 @@ impl Client {
         Ok(PresenceStream {
             socket: Some(socket),
             end: None,
+            scrubber: self.scrubber().clone(),
         })
     }
+}
+
+/// Takes over the connection of a 101 answer, within `limit`.
+///
+/// hyper hands the connection over once the answer's head has been read, which it has
+/// been by the time this is called, so nothing a server is known to do makes this wait.
+/// It is bounded all the same: opening the socket must not contain an await that only a
+/// library's good behaviour ends.
+async fn take_over<T>(
+    scrubber: &Scrubber,
+    limit: Duration,
+    upgrade: impl Future<Output = reqwest::Result<T>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(limit, upgrade)
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|e| transport(scrubber, e))
 }
 
 /// Checks that a 101 answers this upgrade request, as RFC 6455 §4.1 requires of a client.
@@ -192,10 +209,12 @@ impl PresenceStream {
     ///   never passed over in silence. The stream is abandoned: the next call gives
     ///   [`StreamEnd::Abandoned`].
     ///
-    /// Waits as long as the channel is quiet. A link that dies without a word ends the
-    /// wait too, as [`StreamEnd::Dropped`], once TCP keep-alive has given up on it: about
-    /// a minute (see `KEEPALIVE_IDLE` in `client.rs`). Dropping the future before it
-    /// finishes loses nothing: a frame is either returned or still to be read.
+    /// Nothing here bounds the wait against a peer that stays connected and says nothing:
+    /// a quiet channel looks the same, and how long to believe it is the caller's policy.
+    /// A link that has died without a word is another matter: TCP keep-alive gives up on it
+    /// after about a minute (see `KEEPALIVE_IDLE` in `client.rs`) and the wait ends as
+    /// [`StreamEnd::Dropped`]. Dropping the future before it finishes loses nothing: a
+    /// frame is either returned or still to be read.
     pub async fn next(&mut self) -> Result<PresenceEvent, Error> {
         // A close frame was read by a call that was dropped before it returned.
         if let (Some(end), true) = (self.end.clone(), self.socket.is_some()) {
@@ -216,7 +235,7 @@ impl PresenceStream {
                 Some(Ok(Message::Close(frame))) => {
                     // Kept before anything else is awaited: if this call is dropped while
                     // the handshake finishes, the next one still knows why it ended.
-                    let end = close_reason(frame);
+                    let end = close_reason(&self.scrubber, frame);
                     self.end = Some(end.clone());
                     // Let the closing handshake finish, so the server is not left waiting
                     // for an answer to its close frame.
@@ -237,7 +256,7 @@ impl PresenceStream {
                     | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
                 )) => return Ok(self.finish(StreamEnd::Dropped)),
                 Some(Err(error)) => Error::SocketProtocol {
-                    detail: error.to_string(),
+                    detail: self.scrubber.detail(&error),
                 },
             };
             self.finish(StreamEnd::Abandoned);
@@ -268,17 +287,16 @@ impl fmt::Debug for PresenceStream {
 
 /// One frame's text as a presence document that may be believed.
 fn snapshot(text: &[u8]) -> Result<VoicePresenceV1, Error> {
-    // Presence carries no token and no room name, so its decoding errors may say why.
-    let presence: VoicePresenceV1 = decode(text, "voice presence frame", Detail::Full)?;
+    let presence: VoicePresenceV1 = decode(text, "voice presence frame")?;
     presence.validate()?;
     Ok(presence)
 }
 
-fn close_reason(frame: Option<CloseFrame>) -> StreamEnd {
+fn close_reason(scrubber: &Scrubber, frame: Option<CloseFrame>) -> StreamEnd {
     let (code, reason) = match frame {
         Some(frame) => (
             u16::from(frame.code),
-            bounded(frame.reason.as_str(), MAX_TEXT_CHARS),
+            scrubber.text(frame.reason.as_str(), MAX_TEXT_CHARS),
         ),
         None => (CLOSE_NO_STATUS, String::new()),
     };
@@ -294,6 +312,33 @@ mod tests {
     use reqwest::header::HeaderValue;
 
     use super::*;
+
+    fn scrubber() -> Scrubber {
+        Scrubber::new(&crate::types::Secret::new(
+            "conch_FAKE_login_token_do_not_print",
+        ))
+    }
+
+    #[tokio::test]
+    async fn taking_the_connection_over_is_bounded() {
+        // An upgrade that never finishes. No server is known to cause one, which is why
+        // the bound is tested here, at the one place it is applied.
+        let started = std::time::Instant::now();
+        let never = std::future::pending::<reqwest::Result<()>>();
+        let scrub = scrubber();
+        let bounded = take_over(&scrub, Duration::from_millis(100), never);
+        // The test's own limit, so that an unbounded wait is a failure and not a hang.
+        let result = tokio::time::timeout(Duration::from_secs(5), bounded)
+            .await
+            .expect("taking the connection over waited without a bound of its own");
+        assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+
+        // One that finishes is passed through.
+        let ready = std::future::ready(reqwest::Result::Ok(7));
+        let result = take_over(&scrubber(), Duration::from_millis(100), ready).await;
+        assert!(matches!(result, Ok(7)), "{result:?}");
+    }
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -362,41 +407,54 @@ mod tests {
             })
         };
         assert_eq!(
-            close_reason(frame(1001, "server shutting down")),
+            close_reason(&scrubber(), frame(1001, "server shutting down")),
             StreamEnd::ServerGoingAway {
                 reason: "server shutting down".into()
             }
         );
         assert_eq!(
-            close_reason(frame(1008, "no longer a member of this channel")),
+            close_reason(
+                &scrubber(),
+                frame(1008, "no longer a member of this channel")
+            ),
             StreamEnd::PolicyViolation {
                 reason: "no longer a member of this channel".into()
             }
         );
         assert_eq!(
-            close_reason(frame(1000, "")),
+            close_reason(&scrubber(), frame(1000, "")),
             StreamEnd::Closed {
                 code: 1000,
                 reason: String::new()
             }
         );
         assert_eq!(
-            close_reason(frame(1011, "internal error")),
+            close_reason(&scrubber(), frame(1011, "internal error")),
             StreamEnd::Closed {
                 code: 1011,
                 reason: "internal error".into()
             }
         );
         assert_eq!(
-            close_reason(None),
+            close_reason(&scrubber(), None),
             StreamEnd::Closed {
                 code: 1005,
                 reason: String::new()
             }
         );
-        match close_reason(frame(1008, &"x".repeat(5000))) {
+        match close_reason(&scrubber(), frame(1008, &"x".repeat(5000))) {
             StreamEnd::PolicyViolation { reason } => assert_eq!(reason.len(), MAX_TEXT_CHARS),
             other => panic!("{other:?}"),
         }
+        // A peer that says the client's own token back in its close frame.
+        assert_eq!(
+            close_reason(
+                &scrubber(),
+                frame(1008, "saw Bearer conch_FAKE_login_token_do_not_print")
+            ),
+            StreamEnd::PolicyViolation {
+                reason: "saw <redacted>".into()
+            }
+        );
     }
 }

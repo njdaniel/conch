@@ -16,11 +16,9 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
 use crate::error::Error;
 use crate::server::ServerAddress;
-use crate::types::Secret;
+use crate::types::{Secret, wire_object};
 
 /// The environment variable whose value the caller passes to [`resolve_token`] as
 /// `explicit`. It is how scripts and CI sign in.
@@ -76,11 +74,17 @@ pub fn resolve_token(
     })
 }
 
-#[derive(Deserialize)]
+/// One entry of the credentials file (`storedCredential` in Go).
 struct StoredCredential {
-    #[serde(default)]
     token: Option<Secret>,
 }
+
+// A JSON object and nothing else, as Go reads it. serde's derived decoder would also take
+// the array ["<token>"] for an entry, and then this program would find a login in a file
+// that `conch` refuses.
+wire_object!(StoredCredential, "a stored credential object", unknown = ignored, {
+    token: optional,
+});
 
 /// The token stored for `server` in the credentials file at `path`, if there is one.
 fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, Error> {
@@ -114,11 +118,13 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
         return Err(invalid("it is larger than 1 MiB".into()));
     }
 
-    // Go decodes the first JSON value in the file and stops, and reads null as no logins.
+    // Go decodes the first JSON value in the file and stops, and reads null as no logins
+    // and a null entry as an entry with no token. The file is an object of objects: any
+    // other shape, anywhere, is the whole file refused, as in Go.
     // A decoding error's own text can quote what it found, and what it found may be a
     // token, so only its position is kept.
     let mut values = serde_json::Deserializer::from_slice(&data)
-        .into_iter::<Option<HashMap<String, StoredCredential>>>();
+        .into_iter::<Option<HashMap<String, Option<StoredCredential>>>>();
     let logins = match values.next() {
         Some(Ok(logins)) => logins.unwrap_or_default(),
         Some(Err(e)) => {
@@ -133,7 +139,7 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
     Ok(logins
         .into_iter()
         .find(|(key, _)| key == server.key())
-        .and_then(|(_, credential)| credential.token)
+        .and_then(|(_, credential)| credential?.token)
         .filter(|token| !token.is_empty()))
 }
 
@@ -244,6 +250,7 @@ mod tests {
             r#"{"http://a:1": {"token": ""}}"#,
             r#"{"http://a:1": {}}"#,
             r#"{"http://a:1": {"token": null}}"#,
+            r#"{"http://a:1": null}"#,
             "{}",
             "null",
         ] {
@@ -358,6 +365,15 @@ mod tests {
             r#"{"http://a:1": "conch_FAKE_token_for_server_a"}"#,
             r#"{"http://a:1": {"token": 12345}}"#,
             r#"{"http://a:1": {"token": ["conch_FAKE_token_for_server_a"]}}"#,
+            // An entry, or the file, written as an array: Go refuses the file, and so
+            // must this, whichever server is asked for.
+            r#"{"http://a:1": ["conch_FAKE_token_for_server_a"]}"#,
+            r#"{"http://other:9": ["conch_FAKE_token_for_server_a"], "http://a:1": {"token": "conch_FAKE_token_for_server_a"}}"#,
+            r#"{"http://a:1": [{"token": "conch_FAKE_token_for_server_a"}]}"#,
+            r#"[{"http://a:1": {"token": "conch_FAKE_token_for_server_a"}}]"#,
+            r#"[["http://a:1", {"token": "conch_FAKE_token_for_server_a"}]]"#,
+            r#"{"http://a:1": "conch_FAKE_token_for_server_a", "http://b:2": {}}"#,
+            r#"{"http://a:1": {"token": "conch_FAKE_token_for_server_a", "token": "conch_FAKE_again"}}"#,
             r#"{"http://a:1": {"token": "conch_FAKE_token_for_server_a"}"#,
             r#"{"http://a:1": {"token": "conch_FAKE_token_for_server_a}}"#,
         ] {
@@ -392,10 +408,19 @@ mod tests {
         let padding = " ".repeat(usize::try_from(MAX_CREDENTIALS_BYTES).unwrap());
         let dir = config_with(&format!("{padding}{}", as_go_writes_it()), 0o600);
         let error = resolve(None, "http://a:1", &dir).unwrap_err();
-        assert!(
-            matches!(error, Error::CredentialsInvalid { .. }),
-            "{error:?}"
-        );
+        // Refused for its size, and said to be: not read to the bound and then called
+        // malformed where the read happened to stop.
+        match &error {
+            Error::CredentialsInvalid { detail, .. } => {
+                assert_eq!(detail, "it is larger than 1 MiB");
+            }
+            other => panic!("{other:?}"),
+        }
+        // One byte less is read, and is the login it holds.
+        let padding =
+            " ".repeat(usize::try_from(MAX_CREDENTIALS_BYTES).unwrap() - as_go_writes_it().len());
+        let dir = config_with(&format!("{padding}{}", as_go_writes_it()), 0o600);
+        assert_eq!(resolve(None, "http://a:1", &dir).unwrap().expose(), FAKE_A);
     }
 
     #[test]
@@ -411,6 +436,39 @@ mod tests {
             other => panic!("expected CredentialsUnreadable, got {other:?}"),
         }
         assert!(error.to_string().contains("credentials.json"));
+    }
+
+    #[test]
+    fn a_file_this_user_may_not_open_is_an_error_that_names_it_and_not_a_missing_login() {
+        let dir = config_with(&as_go_writes_it(), 0o000);
+        let path = credentials_path(dir.path());
+        if fs::File::open(&path).is_ok() {
+            // Root, or a process that may read anything: the mode stops nothing, so there
+            // is nothing here to test.
+            eprintln!("skipped: this process can open a file of mode 000");
+            return;
+        }
+        let error = resolve(None, "http://a:1", &dir).unwrap_err();
+        match &error {
+            Error::CredentialsUnreadable { path: p, source } => {
+                assert_eq!(p, &path);
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected CredentialsUnreadable, got {other:?}"),
+        }
+        assert!(error.to_string().contains("credentials.json"), "{error}");
+        assert!(!format!("{error} {error:?}").contains("FAKE"));
+
+        // The same for a directory on the way to the file that may not be entered.
+        let dir = config_with(&as_go_writes_it(), 0o600);
+        let conch = dir.path().join("conch");
+        fs::set_permissions(&conch, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = resolve(None, "http://a:1", &dir);
+        fs::set_permissions(&conch, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            matches!(result, Err(Error::CredentialsUnreadable { .. })),
+            "{result:?}"
+        );
     }
 
     #[test]
