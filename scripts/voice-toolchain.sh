@@ -72,6 +72,14 @@ fetch() {
 }
 
 mkdir -p "$cache"
+
+# One run at a time. Two started together (two worktrees, a hook and a shell)
+# would otherwise each replace the directory the other had just put in place,
+# under a build that may already be using it. The second waits, then finds
+# everything present.
+exec 9>"$cache/.toolchain.lock"
+flock 9
+
 work=$(mktemp -d "$cache/.fetch.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
@@ -113,7 +121,9 @@ elif [ -f "$webrtc_dir/$WEBRTC_TRIPLE/webrtc.ninja" ]; then
 else
     fetch "$WEBRTC_URL" "$WEBRTC_SHA256" "$work/$WEBRTC_ARCHIVE"
     mkdir "$work/webrtc"
-    # The archive's root is the one directory $WEBRTC_TRIPLE.
+    # The archive's root is the one directory $WEBRTC_TRIPLE. It has been
+    # verified above; zipfile also drops absolute paths and ".." components
+    # from member names, so nothing is written outside the directory given.
     python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$work/$WEBRTC_ARCHIVE" "$work/webrtc"
     rm -f "$work/$WEBRTC_ARCHIVE"
     test -f "$work/webrtc/$WEBRTC_TRIPLE/webrtc.ninja"
