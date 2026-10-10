@@ -469,7 +469,7 @@ func (m *Manager) attempt(ctx context.Context, deliverBy time.Time, n notice) (a
 		defer cancel()
 	}
 	if err := m.deliver(dctx, n, a, r); err != nil {
-		if errors.Is(err, ErrNoTopic) {
+		if errors.Is(err, errNoTopic) {
 			// Nothing was sent because nothing could be: the wording is fixed
 			// here and does not come from the notifier's error. conchd said
 			// which topic is missing once, when it started.

@@ -56,7 +56,7 @@ var topicCases = []struct {
 }
 
 // A notification whose topic was left empty is not sent, and says so with
-// ErrNoTopic: it used to return nil, which is what a delivered notification
+// errNoTopic: it used to return nil, which is what a delivered notification
 // returns (issue #170). Which topic each notification uses is unchanged.
 func TestNtfyTopicLeftEmptyIsNotSentAndSaysSo(t *testing.T) {
 	a := store.Approval{ID: 42, RequesterID: 7, ChannelID: 3, Title: "Ship it", Body: "Please review", Deadline: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
@@ -85,8 +85,8 @@ func TestNtfyTopicLeftEmptyIsNotSentAndSaysSo(t *testing.T) {
 			for _, s := range sends {
 				err := s.send()
 				if s.topic == "" {
-					if !errors.Is(err, ErrNoTopic) {
-						t.Errorf("%s with its topic left empty = %v, want ErrNoTopic", s.what, err)
+					if !errors.Is(err, errNoTopic) {
+						t.Errorf("%s with its topic left empty = %v, want errNoTopic", s.what, err)
 					}
 					continue
 				}
@@ -168,7 +168,7 @@ func TestTopicLeftEmptyIsAuditedAsNotAttempted(t *testing.T) {
 				t.Errorf("requests to ntfy = %v, want %v", got, wantRequests)
 			}
 			for _, r := range notifyRows() {
-				if strings.Contains(r, ErrNoTopic.Error()) {
+				if strings.Contains(r, errNoTopic.Error()) {
 					t.Errorf("row %q carries the notifier's own error text; the wording of a not-attempted row is the manager's", r)
 				}
 			}

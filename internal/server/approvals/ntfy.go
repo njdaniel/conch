@@ -23,12 +23,12 @@ import (
 
 const defaultNotifyTimeout = 2 * time.Second
 
-// ErrNoTopic is what a notification returns when the topic it is published on
+// errNoTopic is what a notification returns when the topic it is published on
 // was left empty in the configuration: nothing was sent, and nothing could
 // have been. The manager records it as a notification that was not attempted
 // (issue #170). It used to be a silent nil, which the manager recorded as
 // notify_sent.
-var ErrNoTopic = errors.New("ntfy: no topic configured for this notification")
+var errNoTopic = errors.New("ntfy: no topic configured for this notification")
 
 // NtfyConfig configures the optional ntfy approval notification integration.
 // ApprovalsTopic carries the created and the resolved (or expired)
@@ -103,7 +103,7 @@ func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) er
 		return nil
 	}
 	if n.approvalsTopic == "" {
-		return ErrNoTopic
+		return errNoTopic
 	}
 	// What conchd itself says comes first, before any text the requester
 	// wrote. The body is cut to fit one ntfy message (notificationBody), and
@@ -120,7 +120,7 @@ func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) 
 		return nil
 	}
 	if n.urgentTopic == "" {
-		return ErrNoTopic
+		return errNoTopic
 	}
 	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s\n\n%s",
 		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Title, a.Body)
@@ -132,7 +132,7 @@ func (n *NtfyNotifier) ApprovalResolved(ctx context.Context, a store.Approval, r
 		return nil
 	}
 	if n.approvalsTopic == "" {
-		return ErrNoTopic
+		return errNoTopic
 	}
 	body := fmt.Sprintf("Approval %d resolved: %s\nOption: %s\nDecisions: %d", a.ID, r.Outcome, r.OptionID, len(r.Decisions))
 	return n.post(ctx, n.approvalsTopic, "Approval resolved: "+a.Title, "default", notificationBody(body, a.ID))

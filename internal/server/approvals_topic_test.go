@@ -65,14 +65,19 @@ func TestNtfyTopicLeftEmptyFullChain(t *testing.T) {
 
 			channel, agent, human := approvalTestFixture(t, srv)
 
-			// Request: a deadline close enough to pass during the test.
+			// Request: a deadline close enough to pass during the test. The
+			// REST API has no field for the grace deadline, which defaults to
+			// as long again after the deadline: the decision below has to
+			// land between the two, so the window is two seconds and not a
+			// fraction of one.
+			const window = 2 * time.Second
 			body, err := json.Marshal(schema.CreateApprovalRequestV1{
 				RequesterID: agent.ID, ChannelID: channel.ID, Title: "Enter BTC long", Body: "Signal fired.",
 				Options: []schema.Option{
 					{ID: "approve", Label: "Approve", Kind: schema.OptionKindApprove},
 					{ID: "reject", Label: "Reject", Kind: schema.OptionKindReject},
 				},
-				Deadline: schema.NewTimestamp(time.Now().Add(300 * time.Millisecond)),
+				Deadline: schema.NewTimestamp(time.Now().Add(window)),
 			})
 			if err != nil {
 				t.Fatal(err)
