@@ -130,11 +130,11 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		_, _ = outFile.Close(), errFile.Close()
+		_, _, _ = outFile.Close(), errFile.Close(), stdin.Close()
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		_, _ = outFile.Close(), errFile.Close()
+		_, _, _ = outFile.Close(), errFile.Close(), stdin.Close()
 		return nil, err
 	}
 	c := &voiceClient{h: h, who: p, tone: tone, cmd: cmd, stdin: stdin, errPath: errPath, done: make(chan struct{})}
@@ -161,6 +161,10 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 			c.events = append(c.events, voiceEvent{at, obj})
 			c.mu.Unlock()
 		}
+		// If the scanner gave up (a line longer than its buffer), the rest is
+		// still read, into the file the leak scan reads: a client must never
+		// block on its own output because this program stopped listening.
+		_, _ = io.Copy(outFile, stdout)
 	}()
 	go func() {
 		<-read
@@ -371,6 +375,10 @@ type squad struct {
 	presses map[int64]int
 	// Since when each principal's rows are counted (reset after a rotation).
 	since time.Time
+	// Since when nobody has been transmitting, or zero while someone is.
+	// Every stats line from then until the next key goes down must be silent
+	// (stillQuiet), not only the first one after a release.
+	quietFrom time.Time
 	// Unreported rows allowed for a principal: the one the scenario provokes.
 	provoked map[int64]int
 }
@@ -379,6 +387,9 @@ type squad struct {
 // lines that lie inside the press, checks what each heard and sent, releases,
 // and checks that everything is silent again.
 func (s *squad) press(what string, talkers ...*voiceClient) error {
+	if err := s.stillQuiet("before " + what); err != nil {
+		return err
+	}
 	want := map[string]int{}
 	var on time.Time
 	for _, t := range talkers {
@@ -436,10 +447,33 @@ func (s *squad) press(what string, talkers ...*voiceClient) error {
 	return s.quiet(what+", after the release", off)
 }
 
+// stillQuiet checks every stats line since the last release (quiet set the
+// time) up to now: nobody was heard by anyone and nobody sent a frame, for
+// the whole of the time no key was down. It is called just before a key goes
+// down, and ends the quiet period.
+func (s *squad) stillQuiet(what string) error {
+	if s.quietFrom.IsZero() {
+		return nil
+	}
+	from, to := s.quietFrom, time.Now()
+	s.quietFrom = time.Time{}
+	for _, c := range s.clients {
+		if err := c.heard(what+", in all the time no key was down", from, to, 0, nil); err != nil {
+			return err
+		}
+		if err := c.sending(what+", in all the time no key was down", from, to, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // quiet checks that from a moment after `since` every client counts no audio
-// from anyone and sends none, for one whole stats line each.
+// from anyone and sends none, for one whole stats line each, and starts the
+// quiet period that stillQuiet checks to its end.
 func (s *squad) quiet(what string, since time.Time) error {
 	from := since.Add(hearMargin)
+	s.quietFrom = from
 	var to time.Time
 	for _, c := range s.clients {
 		at, err := c.waitStats(1, from)
@@ -648,6 +682,9 @@ func (l *live) voiceClients(ctx context.Context) error {
 		return err
 	}
 	// ---- a press shorter than the gap between two passes of the poller
+	if err := s.stillQuiet("before the 30 ms press"); err != nil {
+		return err
+	}
 	if err := cy.say("down"); err != nil {
 		return err
 	}
@@ -660,7 +697,7 @@ func (l *live) voiceClients(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	h.say("ok   conch-voice: each in turn, and ann and ben at once, were heard by the others by their own tone and by nobody else; a speaker never counted itself; with every key up all three counted silence though every source kept playing")
+	h.say("ok   conch-voice: each in turn, and ann and ben at once, were heard by the others by their own tone and by nobody else; a speaker never counted itself; with every key up all three counted silence, for the whole of the time between presses, though every source kept playing")
 	h.say("ok   conch-voice audit: every press, a 30 ms one included, is one reported voice_transmit_started and voice_transmit_stopped in order; no voice_transmit_unreported (presses recorded as reported late: %d, at most %d expected)", late, lateReports)
 
 	// ---- a client whose reports say stopped while it keeps sending
@@ -708,6 +745,9 @@ func (l *live) voiceClients(ctx context.Context) error {
 // cannot tell who holds the credential.
 func (s *squad) misreported(liar, listener *voiceClient) error {
 	l := s.l
+	if err := s.stillQuiet("before the misreported press"); err != nil {
+		return err
+	}
 	asked := time.Now()
 	if err := liar.say("down"); err != nil {
 		return err
@@ -776,6 +816,9 @@ func (s *squad) misreported(liar, listener *voiceClient) error {
 func (s *squad) removal(ctx context.Context, holder, other, gone *voiceClient) error {
 	l, h := s.l, s.l.h
 	if _, err := s.audited("before the removal"); err != nil {
+		return err
+	}
+	if err := s.stillQuiet("before the press held across the removal"); err != nil {
 		return err
 	}
 	asked := time.Now()
@@ -874,8 +917,29 @@ func (s *squad) removal(ctx context.Context, holder, other, gone *voiceClient) e
 	if err := holder.say("up"); err != nil {
 		return err
 	}
-	// From here the rows of the new room are counted on their own: the press
-	// that the rotation cut short was closed by the server, not by a report.
+	// The press the rotation cut short is in the audit log as opened by the
+	// holder's report and closed by the server because the room went away:
+	// one row each, in that order, and nothing else of the holder's since.
+	reported := fmt.Sprintf("channel=%d audience=channel source=reported", s.channelID)
+	holderActor := fmt.Sprintf("principal:%d", holder.who.id)
+	if err := waitFor("the press held across the rotation to be closed in the audit log with reason=left", 30*time.Second, func() (bool, string) {
+		all, err := l.d.audit()
+		if err != nil {
+			return false, err.Error()
+		}
+		var rows []string
+		for _, e := range all {
+			if e.Subject == s.subject && e.Actor == holderActor && !e.CreatedAt.Before(asked.Truncate(time.Millisecond)) && strings.HasPrefix(e.Action, "voice_transmit") {
+				rows = append(rows, e.Action+" "+e.Detail)
+			}
+		}
+		ok := len(rows) == 2 && rows[0] == store.AuditVoiceTransmitStarted+" "+reported &&
+			strings.HasPrefix(rows[1], store.AuditVoiceTransmitStopped+" ") && strings.HasSuffix(rows[1], "reason=left")
+		return ok, fmt.Sprintf("%q", rows)
+	}); err != nil {
+		return err
+	}
+	// From here the rows of the new room are counted on their own.
 	// Since the removal, not since the last of them was back: each said it
 	// was ready the moment it was connected itself. Neither wrote such a line
 	// between the removal and the disconnect, because nothing of its own
@@ -892,7 +956,7 @@ func (s *squad) removal(ctx context.Context, holder, other, gone *voiceClient) e
 	if _, err := s.audited("in the new room"); err != nil {
 		return err
 	}
-	h.say("ok   conch-voice: removing cy rotated the room; ann and ben joined the new one without a restart, the press ann held across the rotation ended with it and did not resume, a new press was heard there; cy's client stopped with exit status 1 and a message")
+	h.say("ok   conch-voice: removing cy rotated the room; ann and ben joined the new one without a restart, the press ann held across the rotation ended with it (closed in the audit log with reason=left) and did not resume, a new press was heard there; cy's client stopped with exit status 1 and a message")
 	return nil
 }
 
@@ -919,6 +983,11 @@ func (s *squad) outage(ctx context.Context, a, b *voiceClient) error {
 	// conchd has noticed too, so that the outage it audits is this one and
 	// not the next scenario's.
 	if err := l.waitAudit("one voice_enforcement_unavailable row for this outage", store.AuditVoiceEnforcementUnavailable, "", "", outagesBefore+1); err != nil {
+		return err
+	}
+	// Nothing was heard or sent up to here, the outage so far included. (A
+	// client prints stats only while connected, so this is what it has.)
+	if err := s.stillQuiet("before the press that is refused"); err != nil {
 		return err
 	}
 	// A press while not connected does nothing and says so.
