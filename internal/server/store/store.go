@@ -256,6 +256,29 @@ END`,
 )`,
 		`CREATE INDEX message_recipients_by_principal ON message_recipients (principal_id)`,
 	},
+	// 13: Voice rooms (issue #126, docs/design/voice-control-plane.md §3).
+	// conchd names the LiveKit room for an audience and keeps the name; LiveKit
+	// itself forgets rooms, so this row is the durable thing. net_id is NULL
+	// for the channel-wide room and unused until nets get rooms (V5). SQLite
+	// treats NULLs as distinct in a unique index, so "one room per audience"
+	// is two partial unique indexes: one for the channel-wide room, one for
+	// each net. room_name is unique across all rows. A net room must belong
+	// to the net's own channel: the composite foreign key says so (it needs
+	// the unique index on nets it references, and is not checked while net_id
+	// is NULL), so a row can never pair one channel with another's net.
+	{
+		`CREATE UNIQUE INDEX nets_id_channel ON nets (id, channel_id)`,
+		`CREATE TABLE voice_rooms (
+	id         INTEGER PRIMARY KEY,
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	net_id     INTEGER,
+	room_name  TEXT    NOT NULL UNIQUE,
+	created_at INTEGER NOT NULL,
+	FOREIGN KEY (net_id, channel_id) REFERENCES nets (id, channel_id)
+)`,
+		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL`,
+		`CREATE UNIQUE INDEX voice_rooms_by_net ON voice_rooms (net_id) WHERE net_id IS NOT NULL`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

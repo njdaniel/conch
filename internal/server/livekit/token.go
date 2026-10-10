@@ -2,6 +2,7 @@ package livekit
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -58,8 +59,13 @@ type adminGrant struct {
 }
 
 type claims struct {
-	Issuer    string `json:"iss"`
-	Subject   string `json:"sub,omitempty"`
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub,omitempty"`
+	// ID ("jti") is random and set on join tokens only. It makes every
+	// issued token distinct: "nbf" and "exp" have one-second resolution, so
+	// without it two tokens for one identity and room signed in the same
+	// second would be the same string.
+	ID        string `json:"jti,omitempty"`
 	NotBefore int64  `json:"nbf"`
 	Expires   int64  `json:"exp"`
 	Video     any    `json:"video"`
@@ -77,10 +83,15 @@ func (c *Client) JoinToken(p JoinParams) (string, error) {
 	if p.BackdateNotBefore < 0 {
 		return "", errors.New("livekit: join token backdate must not be negative")
 	}
+	var id [12]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", errors.New("livekit: generate token id")
+	}
 	now := c.now()
 	return c.sign(claims{
 		Issuer:    c.cfg.APIKey,
 		Subject:   p.Identity,
+		ID:        base64.RawURLEncoding.EncodeToString(id[:]),
 		NotBefore: now.Add(-p.BackdateNotBefore).Unix(),
 		Expires:   now.Add(p.Lifetime).Unix(),
 		Video: joinGrant{

@@ -226,10 +226,10 @@ func TestFailuresAreUnavailable(t *testing.T) {
 	}
 	for caseName, url := range failureCases(t) {
 		for opName, op := range ops {
-			if caseName == "malformed JSON" && (opName == "CreateRoom" || opName == "RemoveParticipant") {
-				continue // these ignore the body, so there is nothing to be malformed
+			if caseName == "malformed JSON" && opName == "RemoveParticipant" {
+				continue // it ignores the body, so there is nothing to be malformed
 			}
-			if caseName == "wrong JSON types" && (opName == "CreateRoom" || opName == "RemoveParticipant") {
+			if caseName == "wrong JSON types" && opName == "RemoveParticipant" {
 				continue
 			}
 			t.Run(caseName+"/"+opName, func(t *testing.T) {
@@ -309,7 +309,7 @@ func TestContextDeadlineHonoured(t *testing.T) {
 		}
 	})
 	t.Run("caller deadline longer than default is kept", func(t *testing.T) {
-		srv2, _ := fakeLiveKit(t, 200, `{}`)
+		srv2, _ := fakeLiveKit(t, 200, `{"name":"r"}`)
 		c := testClient(t, srv2.URL)
 		c.timeout = time.Nanosecond
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -465,5 +465,36 @@ func TestClientIgnoresEnvironmentProxy(t *testing.T) {
 	tr, ok := c.http.Transport.(*http.Transport)
 	if !ok || tr.Proxy != nil {
 		t.Fatalf("transport = %T with a proxy function set; want an *http.Transport with none", c.http.Transport)
+	}
+}
+
+// CreateRoom is believed only when the answer names the room that was asked
+// for. A 200 from something that is not LiveKit (a proxy's page, another
+// service on the address) must not pass for a room that exists.
+func TestCreateRoomRequiresTheRoomInTheAnswer(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"the room, as LiveKit answers", `{"sid":"RM_x","name":"conch-a","empty_timeout":300}`, false},
+		{"an empty object", `{}`, true},
+		{"another room", `{"name":"conch-b"}`, true},
+		{"an HTML page", `<html><body>welcome</body></html>`, true},
+		{"an empty body", ``, true},
+		{"a name of the wrong type", `{"name":7}`, true},
+		{"null", `null`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := fakeLiveKit(t, 200, tt.body)
+			err := testClient(t, srv.URL).CreateRoom(context.Background(), "conch-a")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, want an error: %v", err, tt.wantErr)
+			}
+			if err != nil && !errors.Is(err, ErrUnavailable) {
+				t.Errorf("err = %v, want it to wrap ErrUnavailable", err)
+			}
+		})
 	}
 }

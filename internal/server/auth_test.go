@@ -148,12 +148,16 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/channels/{channel}/messages":                             {classAuth, "/v1/channels/general/messages", "", 200},
 	"POST /v2/channels/{channel}/messages":                            {classAuth, "/v2/channels/general/messages", `{}`, 400},
 	"GET /v2/channels/{channel}/messages":                             {classAuth, "/v2/channels/general/messages", "", 200},
-	"PUT /v1/principals/{id}/manifest":                                {classOp, "/v1/principals/1/manifest", `{}`, 400},
-	"GET /v1/principals/{id}/manifest":                                {classSelf, "/v1/principals/1/manifest", "", 404},
-	"POST /v1/principals/{id}/credentials":                            {classOp, "/v1/principals/1/credentials", `{}`, 400},
-	"GET /v1/principals/{id}/credentials":                             {classOp, "/v1/principals/1/credentials", "", 200},
-	"POST /v1/credentials/{credential_id}/rotate":                     {classOp, "/v1/credentials/9999/rotate", "", 404},
-	"DELETE /v1/credentials/{credential_id}":                          {classOp, "/v1/credentials/9999", "", 404},
+	// Voice (issue #126). The fixture does not configure voice, so a member
+	// gets 503 voice_not_configured; AuthOff gets 400 and an agent 403 (both
+	// special-cased below).
+	"POST /v1/channels/{channel}/voice/session":   {classAuth, "/v1/channels/general/voice/session", "", 503},
+	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
+	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
+	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
+	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
+	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
+	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
@@ -270,7 +274,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") {
 				agentWant = http.StatusForbidden
 			}
 			cases := []struct {
@@ -305,6 +309,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				want := exp.allowed
 				if rt.pattern == "GET /v1/whoami" {
 					want = http.StatusUnauthorized // new route; no caller to report
+				}
+				if strings.Contains(rt.pattern, "/voice/session") {
+					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {

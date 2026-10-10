@@ -102,7 +102,19 @@ func (c *Client) CreateRoom(ctx context.Context, name string) error {
 	if name == "" {
 		return errors.New("livekit: CreateRoom needs a room name")
 	}
-	return c.call(ctx, "CreateRoom", adminGrant{RoomCreate: true}, map[string]any{"name": name}, nil)
+	// LiveKit answers with the room. Requiring the name back means a 200 from
+	// something that is not LiveKit (a proxy's error page, a wrong address)
+	// is not taken for a room that exists.
+	var room struct {
+		Name string `json:"name"`
+	}
+	if err := c.call(ctx, "CreateRoom", adminGrant{RoomCreate: true}, map[string]any{"name": name}, &room); err != nil {
+		return err
+	}
+	if room.Name != name {
+		return fmt.Errorf("%w: CreateRoom: the answer does not name the room", ErrUnavailable)
+	}
+	return nil
 }
 
 // ListRooms returns every room LiveKit currently has, with its participant

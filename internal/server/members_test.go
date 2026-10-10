@@ -151,6 +151,10 @@ func TestChannelContentLeak(t *testing.T) {
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
 		// Listing nets: members see their own nets, operators all of them.
 		{"net list", "GET", "/v1/channels/%s/nets", "", false, [4]int{ok, notFound, notFound, ok}},
+		// Voice (issue #126): this fixture does not configure voice, so a member
+		// is answered 503 voice_not_configured, and everyone else must still
+		// get the unknown-channel 404, with no hint that voice is not set up.
+		{"voice session", "POST", "/v1/channels/%s/voice/session", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
