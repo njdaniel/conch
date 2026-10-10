@@ -34,4 +34,7 @@ echo "pre-commit: schema compatibility"
 echo "pre-commit: dependency gate"
 ./scripts/depgate.sh
 
+echo "pre-commit: rust (voice/)"
+./scripts/rust-check.sh
+
 echo "pre-commit: OK"

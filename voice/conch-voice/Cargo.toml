@@ -1,0 +1,18 @@
+[package]
+name = "conch-voice"
+description = "The Conch voice client: push-to-talk voice for a channel, through LiveKit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+conch-voice-api = { path = "../crates/conch-voice-api" }
+conch-voice-audio = { path = "../crates/conch-voice-audio" }
+conch-voice-control = { path = "../crates/conch-voice-control" }
+livekit = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+# Direct dependencies of the voice/ workspace approved by Nick (ADR-000, ADR-006).
+# One crate name per line; comments and blank lines ignored.
+# Adding a line here requires Nick's sign-off in the same PR.
+# Enforced by scripts/voice-depgate.sh. Transitive crates follow these, pinned
+# by Cargo.lock; `cargo deny check` covers their sources and licences.
+#
+# Proposed with the workspace (issue #177), awaiting Nick's sign-off on that PR.
+# A crate marked "from #NNN" is not used yet; it is listed now so that the
+# slices of V4 do not each need a sign-off.
+
+# LiveKit's Rust SDK: the WebRTC transport (ADR-004, ADR-006). Pinned to an
+# exact version in voice/Cargo.toml; it links the prebuilt libwebrtc that
+# scripts/voice-toolchain.sh fetches and verifies.
+livekit
+# The async runtime the SDK requires; also timers and signal handling. From #183.
+tokio
+# Wire types to and from JSON, checked against pkg/schema's golden fixtures. From #180.
+serde
+serde_json
+# HTTP client for conchd's REST API, with rustls. Already in the tree through livekit. From #180.
+reqwest
+# WebSocket client for conchd's presence socket. Already in the tree through livekit. From #180.
+tokio-tungstenite
+# Stream and sink traits, needed to read and write that socket. Already in the tree. From #180.
+futures-util
+# One error enum per crate (CLAUDE.md). Already in the tree. From #180.
+thiserror
+# The configuration file is TOML (docs/design/conch-voice.md §8). From #182.
+toml
+# Command-line parsing for join, devices and keys. Already in the tree. From #183.
+clap
+# The logging facade the SDK itself uses, so its output can be filtered and
+# checked for secrets (docs/design/conch-voice.md §13 row 10). Already in the tree. From #183.
+log
+# Tests only: private temporary directories, so no test touches the user's files.
+tempfile

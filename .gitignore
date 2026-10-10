@@ -4,6 +4,10 @@
 /bin/
 /dist/
 
+# Rust (voice/). The shared target directory is in ~/.cache/conch; this is
+# for a cargo run without scripts/voice-env.sh.
+/voice/target/
+
 # Go
 *.test
 *.out

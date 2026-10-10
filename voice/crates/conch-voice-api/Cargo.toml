@@ -1,0 +1,14 @@
+[package]
+name = "conch-voice-api"
+description = "conch-voice's client of conchd: the stored login, the voice REST calls, the presence socket, and the wire types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
