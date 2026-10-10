@@ -71,6 +71,12 @@ type Message struct {
 	Body      string
 	Payload   *schema.Payload
 	CreatedAt time.Time
+	// Audience is nil for a channel-wide message. For a scoped message it is
+	// the wire form: a net audience carries only the net id, a principals
+	// audience the full normalized list including the author. The resolved
+	// recipients of a net message are deliberately not part of a Message; they
+	// are stored and returned only by InsertScopedMessage for fan-out.
+	Audience *schema.Audience
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text
@@ -266,44 +272,6 @@ func (s *Store) InsertMessageV1(
 	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now}, nil
 }
 
-// ListMessages returns up to limit messages in channelID with ID greater than
-// afterID, in ascending ID order (insertion order). Pass afterID = 0 to start
-// from the beginning; pass the last message's ID to fetch the next page.
-func (s *Store) ListMessages(ctx context.Context, channelID int64, afterID int64, limit int) ([]Message, error) {
-	if limit <= 0 {
-		return nil, fmt.Errorf("store: list messages: limit must be positive, got %d", limit)
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, channel_id, author_id, body, payload_schema, payload_json, created_at
-		 FROM messages WHERE channel_id = ? AND id > ?
-		 ORDER BY id ASC LIMIT ?`,
-		channelID, afterID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var msgs []Message
-	for rows.Next() {
-		var m Message
-		var payloadSchema sql.NullString
-		var payloadJSON []byte
-		var createdAt int64
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt); err != nil {
-			return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
-		}
-		m.CreatedAt = time.UnixMilli(createdAt)
-		if payloadSchema.Valid {
-			m.Payload = &schema.Payload{Schema: payloadSchema.String, Data: payloadJSON}
-		}
-		msgs = append(msgs, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
-	}
-	return msgs, nil
-}
-
 // AppendAuditEvent appends an entry to the audit log. There is deliberately
 // no corresponding update or delete: the log is append-only.
 func (s *Store) AppendAuditEvent(ctx context.Context, actor, action, subject, detail string) (AuditEvent, error) {
@@ -319,6 +287,35 @@ func (s *Store) AppendAuditEvent(ctx context.Context, actor, action, subject, de
 		return AuditEvent{}, fmt.Errorf("store: append audit event %q: %w", action, err)
 	}
 	return AuditEvent{ID: id, Actor: actor, Action: action, Subject: subject, Detail: detail, CreatedAt: now}, nil
+}
+
+// LastAuditEvent returns the most recent audit event with the given action,
+// or ErrNotFound when there is none.
+func (s *Store) LastAuditEvent(ctx context.Context, action string) (AuditEvent, error) {
+	var e AuditEvent
+	var createdAt int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, actor, action, subject, detail, created_at
+		 FROM audit_events WHERE action = ?
+		 ORDER BY id DESC LIMIT 1`, action).
+		Scan(&e.ID, &e.Actor, &e.Action, &e.Subject, &e.Detail, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditEvent{}, fmt.Errorf("store: last audit event %q: %w", action, ErrNotFound)
+	}
+	if err != nil {
+		return AuditEvent{}, fmt.Errorf("store: last audit event %q: %w", action, err)
+	}
+	e.CreatedAt = time.UnixMilli(createdAt)
+	return e, nil
+}
+
+// LastAuditID returns the id of the newest audit event, or 0 for an empty log.
+func (s *Store) LastAuditID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := s.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM audit_events").Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: last audit id: %w", err)
+	}
+	return id, nil
 }
 
 // ListAuditEvents returns up to limit audit events with ID greater than

@@ -41,6 +41,20 @@ const (
 	denyCapability        = "capability_not_granted"
 	denyNotMember         = "not_a_member"
 	denyChannelPermission = "channel_permission_not_granted"
+	// denyAudienceGrant is a scoped post without the grant for that kind of
+	// audience: post_net, whisper or whisper_agent (issue #117). It is its own
+	// reason so the audit log tells "may not post here" from "may post here,
+	// but not to that audience".
+	denyAudienceGrant = "audience_not_granted"
+	// denyNetMonitorOnly and denyNetNotOn are an agent's scoped post refused
+	// by the net's roster rather than by its manifest (issue #149): it only
+	// monitors the net, or it is not on it. "Not on it" also covers a net
+	// that is archived or does not exist: the store does not tell these
+	// apart, on purpose, and neither does the audit row, which carries no
+	// net id (an agent walking net ids must not fill the log with numbers of
+	// its choosing).
+	denyNetMonitorOnly    = "net_monitor_only"
+	denyNetNotOn          = "net_not_on"
 	denyAgentOnHumanRoute = "agents_use_mcp"
 )
 
@@ -104,12 +118,26 @@ func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, sub
 		reason = denyCapability
 	case channelID <= 0 || !m.AllowsChannel(channelID, permission):
 		reason = denyChannelPermission
+		if isAudiencePermission(permission) {
+			reason = denyAudienceGrant
+		}
 	}
 	if reason != "" {
 		s.auditAgentDenial(ctx, principalID, subject, capability, channelID, reason)
 		return false, nil
 	}
 	return true, nil
+}
+
+// isAudiencePermission reports whether permission grants an audience for a
+// scoped post rather than access to the channel as a whole.
+func isAudiencePermission(permission schema.ChannelPermission) bool {
+	switch permission {
+	case schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper, schema.ChannelPermissionWhisperAgent:
+		return true
+	default:
+		return false
+	}
 }
 
 // agentScope authorizes one MCP tool call for one agent. It is created by the
@@ -204,6 +232,9 @@ func (a *agentScope) channel(ctx context.Context, channel store.Channel, permiss
 type grantedChannel struct {
 	scope   *agentScope
 	channel store.Channel
+	// audience is set only by channelForAudience: the audience the agent was
+	// authorized to address. insertScopedMessage posts to exactly it.
+	audience *schema.Audience
 }
 
 // insertMessage stores a message in the channel, authored by the agent.
@@ -211,9 +242,28 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 	return g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
 }
 
-// listMessages reads one page of the channel's messages.
+// listMessages reads one page of the channel's messages as the agent: the
+// channel-wide ones, and the scoped ones it is a recipient of. The MCP tools
+// speak the v2 envelope (issue #117), so they can be given a message with an
+// audience; the visibility function decides which.
 func (g *grantedChannel) listMessages(ctx context.Context, after int64, limit int) ([]store.Message, error) {
-	return g.scope.s.store.ListMessages(ctx, g.channel.ID, after, limit)
+	return g.scope.s.store.ListVisibleMessages(ctx, g.channel.ID, g.scope.reader(), after, limit)
+}
+
+// insertScopedMessage stores a message for the audience this grant was
+// authorized for, and returns it with the recipients resolved at post time,
+// for fan-out. The author is the agent and the audience is the grant's: a tool
+// body cannot post as another principal or widen the audience after the check.
+// The refusals are computed by storeScopedPost, the same function the REST
+// post uses.
+func (g *grantedChannel) insertScopedMessage(ctx context.Context, body string, payload *schema.Payload) (schema.MessageV2, []int64, *schema.Error) {
+	if g.audience == nil {
+		slog.ErrorContext(ctx, "authz: scoped insert on a grant without an audience")
+		return schema.MessageV2{}, nil, errInternal
+	}
+	return g.scope.s.storeScopedPost(ctx, store.ScopedPost{
+		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, Body: body, Payload: payload, Audience: *g.audience,
+	}, g.scope.subject)
 }
 
 // createApproval raises an approval in the channel on the agent's behalf. The
@@ -268,6 +318,53 @@ func (a *agentScope) channelByName(ctx context.Context, name string, permission 
 		return nil, serr
 	}
 	return &grantedChannel{scope: a, channel: channel}, nil
+}
+
+// reader is the visibility reader for this agent: its authenticated identity,
+// which is the only thing a scope is ever built from, on a protocol that can
+// express an audience. MCP always authenticates, so there is always one.
+func (a *agentScope) reader() store.Reader {
+	return store.Reader{PrincipalID: a.identity.principalID, Scoped: true}
+}
+
+// channelForAudience resolves the channel named name for a post addressed to
+// aud, which must already be normalized. The order matches the REST post: an
+// unknown channel and one the agent is not a member of are the same answer;
+// then the agent's manifest must grant that kind of audience there
+// (authorizeScopedPost, the one policy function); the net itself is resolved
+// later, with the agent's seat, by the store. The capability for the tool was
+// checked when the scope was made.
+func (a *agentScope) channelForAudience(ctx context.Context, name string, aud schema.Audience) (*grantedChannel, *schema.Error) {
+	channel, err := a.s.store.ChannelByName(ctx, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, errChannelNotFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: find channel failed", "error", err)
+		return nil, errInternal
+	}
+	member, err := a.s.store.IsChannelMember(ctx, channel.ID, a.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: check membership failed", "error", err)
+		return nil, errInternal
+	}
+	if !member {
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyNotMember)
+		return nil, errChannelNotFound
+	}
+	// An MCP identity is always an agent (authenticateMCP admits no other
+	// kind), so the manifest rules always apply here; nothing a store row says
+	// can turn them off.
+	agent := store.Principal{ID: a.identity.principalID, Kind: store.PrincipalAgent}
+	allowed, err := a.s.authorizeScopedPost(ctx, agent, a.subject, channel.ID, aud)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: authorize scoped post failed", "error", err)
+		return nil, errInternal
+	}
+	if !allowed {
+		return nil, errForbidden
+	}
+	return &grantedChannel{scope: a, channel: channel, audience: &aud}, nil
 }
 
 // channelByID is channelByName for a channel id.
@@ -352,6 +449,65 @@ func (s *Server) agentCallerAllowed(w http.ResponseWriter, r *http.Request, capa
 		return false
 	}
 	return true
+}
+
+// authorizeScopedPost decides whether caller may post a message with audience
+// aud, already normalized, in channelID. It is the one place the policy lives,
+// so the MCP tools can reuse it (issue #117).
+//
+// Only agents are restricted: a human who is a member of the channel may post
+// to a net they are on or whisper to channel members, and the store enforces
+// those rules. An agent needs the matching grant in the channel: post_net for
+// a net; whisper for a whisper; and, when any target other than the agent
+// itself is an agent, whisper_agent as well. The channel permission "post"
+// grants none of these, because the permissions are independent. Every
+// refusal is audited once under subject, and a refusal never reaches the
+// store. A store failure is an error and not an allow.
+func (s *Server) authorizeScopedPost(ctx context.Context, caller store.Principal, subject string, channelID int64, aud schema.Audience) (bool, error) {
+	if caller.Kind != store.PrincipalAgent {
+		return true, nil
+	}
+	needed := schema.ChannelPermissionPostNet
+	if aud.Kind == schema.AudienceKindPrincipals {
+		needed = schema.ChannelPermissionWhisper
+	}
+	allowed, err := s.agentManifestAllows(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, needed)
+	if err != nil || !allowed {
+		return false, err
+	}
+	if aud.Kind != schema.AudienceKindPrincipals {
+		return true, nil
+	}
+	for _, id := range aud.PrincipalIDs {
+		if id == caller.ID {
+			continue
+		}
+		// Only a current member of the channel can be a whisper target, and
+		// the store refuses any other with one answer, invalid_audience. So a
+		// target who is not a member is left to the store, whatever kind of
+		// principal it is. Looking at its kind first would answer "forbidden"
+		// for an agent and "invalid audience" for a human or an unknown id,
+		// and so tell the caller which principal ids exist and which are
+		// agents, for principals it shares no channel with.
+		member, err := s.store.IsChannelMember(ctx, channelID, id)
+		if err != nil {
+			return false, err
+		}
+		if !member {
+			continue
+		}
+		target, err := s.store.PrincipalByID(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if target.Kind == store.PrincipalAgent {
+			return s.agentManifestAllows(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, schema.ChannelPermissionWhisperAgent)
+		}
+	}
+	return true, nil
 }
 
 // agentReadAllowed reports whether manifest m lets an agent read channelID.
