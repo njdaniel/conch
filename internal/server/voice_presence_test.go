@@ -575,10 +575,13 @@ func TestVoicePollerConcurrency(t *testing.T) {
 	}
 }
 
-// TestVoiceImmediateRemoval: removing a member, disabling a principal and
-// revoking all credentials each call RemoveParticipant before the HTTP
-// response is written, for every room of every affected channel; a failure
-// there does not fail the request and later passes finish the job.
+// TestVoiceImmediateRemoval: removing a member and disabling a principal each
+// call RemoveParticipant before the HTTP response is written, for every room of
+// every affected channel, for a person who was never issued a session (so no
+// rotation covers them); a failure there does not fail the request and later
+// passes finish the job. A revoke-all removes nobody by name any more: the rooms
+// its credentials held are rotated instead (issue #161), see
+// TestVoiceHookRotation.
 func TestVoiceImmediateRemoval(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -591,9 +594,6 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 	}{
 		{"member removed", "DELETE", func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, 204, []string{"ops"}, voiceReasonMemberRemoved},
 		{"principal disabled", "POST", func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, 204, []string{"ops", "ops2"}, voiceReasonPrincipalOff},
-		{"all credentials revoked", "POST", func(f *presenceFixture) string {
-			return fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids["ann"])
-		}, 200, []string{"ops", "ops2"}, voiceReasonCredsRevoked},
 	}
 	for _, tt := range tests {
 		for _, failing := range []bool{false, true} {
@@ -669,7 +669,7 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 						}
 					}
 				}
-				// Further passes make no more removals: pending is cleared.
+				// Further passes make no more removals: the retry succeeded.
 				calls := f.lk.count("RemoveParticipant")
 				f.pass(t)
 				if f.lk.count("RemoveParticipant") != calls {
@@ -1127,82 +1127,6 @@ func TestVoicePresenceKeepsSecrets(t *testing.T) {
 	}
 }
 
-// After a revoke-all the principal is still a member, so membership alone
-// would let a join token issued just before the revocation (usable for about
-// 75 seconds) bring them straight back, for as long as they liked. The
-// identity is removed on sight until voiceRevokeBar has passed.
-func TestVoicePollerRevokeAllBarsRejoin(t *testing.T) {
-	for _, failingFirst := range []bool{false, true} {
-		t.Run(fmt.Sprintf("first removal failing=%v", failingFirst), func(t *testing.T) {
-			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
-			room := f.inUse(t, f.ops)
-			ann := f.identity("ann")
-			annIn := fakeParticipant{identity: ann, joinedMs: 1_000}
-			f.lk.setRoom(room, annIn, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
-			f.pass(t)
-			if got := f.who(t, f.ops); got != "ann,ann2" {
-				t.Fatalf("before: %q", got)
-			}
-			if failingFirst {
-				f.lk.setRemoveStatus(http.StatusInternalServerError)
-			}
-			if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids["ann"]), f.rootTok); code != 200 {
-				t.Fatalf("revoke-all = %d", code)
-			}
-			if got := f.who(t, f.ops); got != "ann2" {
-				t.Fatalf("right after revoke-all: %q, want ann2 only", got)
-			}
-			if failingFirst {
-				// LiveKit keeps refusing for longer than the bar: the removal
-				// is still owed when it recovers.
-				for i := 0; i < 5; i++ {
-					f.clock.Advance(voiceRevokeBar / 2)
-					f.pass(t)
-					if got := f.who(t, f.ops); got != "ann2" {
-						t.Fatalf("while removal is failing: %q", got)
-					}
-				}
-				if !f.lk.in(room, ann) {
-					t.Fatal("the fake dropped ann although removal was failing")
-				}
-				f.lk.setRemoveStatus(0)
-				f.pass(t)
-				if f.lk.in(room, ann) {
-					t.Fatal("ann was not removed once LiveKit recovered")
-				}
-				return
-			}
-			// She comes back on an old token, several times, inside the bar.
-			for i, wait := range []time.Duration{10 * time.Second, 30 * time.Second, voiceRevokeBar - 45*time.Second} {
-				f.clock.Advance(wait)
-				rejoin := annIn
-				rejoin.joinedMs = int64(10_000 * (i + 1))
-				f.lk.setRoom(room, rejoin, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
-				before := f.lk.count("RemoveParticipant")
-				f.pass(t)
-				if f.lk.in(room, ann) || f.lk.count("RemoveParticipant") != before+1 {
-					t.Fatalf("rejoin %d inside the bar was not removed", i)
-				}
-				if got := f.who(t, f.ops); got != "ann2" {
-					t.Fatalf("rejoin %d was shown: %q", i, got)
-				}
-			}
-			if n := len(f.audits(t, store.AuditVoiceParticipantRemoved)); n < 2 {
-				t.Errorf("voice_participant_removed events = %d, want the rejoins audited too", n)
-			}
-			// Once the bar has run out no token from before the revocation
-			// can still be used; whoever joins now got a session since.
-			f.clock.Advance(time.Minute)
-			f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 900_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
-			before := f.lk.count("RemoveParticipant")
-			f.pass(t)
-			if f.lk.count("RemoveParticipant") != before || f.who(t, f.ops) != "ann,ann2" {
-				t.Errorf("after the bar: removals %d -> %d, presence %q; want her back", before, f.lk.count("RemoveParticipant"), f.who(t, f.ops))
-			}
-		})
-	}
-}
-
 // When one participant's entitlement cannot be read, that participant keeps
 // the state they had (or stays unseen if new), and everyone else in the room
 // is still handled on that pass: in particular someone removed on this pass
@@ -1417,10 +1341,12 @@ func TestVoicePollerKeepsPollingARoomItCouldNotClear(t *testing.T) {
 	}
 }
 
-// The bar after a revoke-all does not depend on knowing the principal's
-// rooms. If that read fails, she still leaves presence at once, and the next
-// pass removes her although her membership is intact.
-func TestVoiceRevokeAllWhenTheRoomListCannotBeRead(t *testing.T) {
+// Disabling a principal does not depend on knowing the principal's rooms. If
+// that read fails, she still leaves presence at once, and the next pass removes
+// her by entitlement. (This was the revoke-all test before issue #161 removed
+// the bar; a revoke-all now rotates the rooms her credentials held and reads no
+// room list, see TestVoiceHookRotation.)
+func TestVoiceDisableWhenTheRoomListCannotBeRead(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	room := f.inUse(t, f.ops)
 	ann := f.identity("ann")
@@ -1431,11 +1357,11 @@ func TestVoiceRevokeAllWhenTheRoomListCannotBeRead(t *testing.T) {
 	}
 	f.srv.voice.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
 	before := f.lk.count("RemoveParticipant")
-	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids["ann"]), f.rootTok); code != 200 {
-		t.Fatalf("revoke-all = %d: a store failure in the voice hook must not fail the request", code)
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]), f.rootTok); code != 204 {
+		t.Fatalf("disable = %d: a store failure in the voice hook must not fail the request", code)
 	}
 	if got := f.who(t, f.ops); got != "ann2" {
-		t.Errorf("right after revoke-all: %q, want ann out of presence at once", got)
+		t.Errorf("right after disable: %q, want ann out of presence at once", got)
 	}
 	if f.lk.count("RemoveParticipant") != before {
 		t.Fatal("RemoveParticipant was called although the rooms could not be read")
@@ -1443,7 +1369,7 @@ func TestVoiceRevokeAllWhenTheRoomListCannotBeRead(t *testing.T) {
 	f.clock.Advance(voicePollInterval)
 	f.pass(t)
 	if f.lk.in(room, ann) {
-		t.Error("the pass did not remove ann: the bar was not applied")
+		t.Error("the pass did not remove the disabled ann")
 	}
 	if got := f.who(t, f.ops); got != "ann2" {
 		t.Errorf("after the pass: %q", got)
@@ -1453,12 +1379,12 @@ func TestVoiceRevokeAllWhenTheRoomListCannotBeRead(t *testing.T) {
 		if e.Actor == f.actor("ann") && e.Action == store.AuditVoiceLeft {
 			left++
 		}
-		if e.Action == store.AuditVoiceParticipantRemoved && strings.Contains(e.Detail, "reason="+voiceReasonCredsRevoked) {
+		if e.Action == store.AuditVoiceParticipantRemoved && strings.Contains(e.Detail, "reason="+voiceReasonDisabled) {
 			removed++
 		}
 	}
 	if left != 1 || removed != 1 {
-		t.Errorf("voice_left for ann = %d, removals for revoked credentials = %d; want one of each", left, removed)
+		t.Errorf("voice_left for ann = %d, removals for a disabled principal = %d; want one of each", left, removed)
 	}
 }
 
@@ -1681,20 +1607,640 @@ func TestVoiceHooksIgnoreTheCallersCancellation(t *testing.T) {
 	room := f.inUse(t, f.ops)
 	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
 	f.pass(t)
+	// ann holds a session, so losing her credentials rotates the room; ann2
+	// does not, so her removal is by name.
+	f.holder(t, "ann", f.ops)
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann2"]); err != nil {
 		t.Fatal(err)
 	}
 	f.srv.voiceMemberRemoved(gone, f.ops.ID, f.ids["ann2"])
+	if f.lk.in(room, f.identity("ann2")) {
+		t.Errorf("ann2 still connected after the member-removed hook ran on a cancelled context")
+	}
 	if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.ids["ann"]); err != nil {
 		t.Fatal(err)
 	}
 	f.srv.voicePrincipalLostAccess(gone, f.ids["ann"], voiceReasonCredsRevoked)
+	if f.lk.has(room) || f.lk.callsFor("DeleteRoom", room) != 1 {
+		t.Errorf("the old room was not deleted by the hook on a cancelled context")
+	}
 	if f.lk.in(room, f.identity("ann")) || f.lk.in(room, f.identity("ann2")) {
 		t.Errorf("still connected after the hooks ran on a cancelled context: ann=%v ann2=%v", f.lk.in(room, f.identity("ann")), f.lk.in(room, f.identity("ann2")))
 	}
 	if got := f.who(t, f.ops); got != "" && got != "-" {
 		t.Errorf("presence = %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Room rotation (issue #161)
+
+// voiceTrigger is one of the four ways a holder stops being valid that a hook
+// handles in the same request, each as the operator would do it.
+type voiceTrigger struct {
+	name     string
+	method   string
+	path     func(t *testing.T, f *presenceFixture, who string) string
+	code     int
+	channels []string // channels whose rooms rotate when `who` holds them all
+	reason   string
+}
+
+func voiceTriggers() []voiceTrigger {
+	return []voiceTrigger{
+		{"member removed from ops", "DELETE", func(t *testing.T, f *presenceFixture, who string) string {
+			return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids[who])
+		}, 204, []string{"ops"}, store.VoiceRotateMemberRemoved},
+		{"principal disabled", "POST", func(t *testing.T, f *presenceFixture, who string) string {
+			return fmt.Sprintf("/v1/principals/%d/disable", f.ids[who])
+		}, 204, []string{"ops", "ops2"}, store.VoiceRotatePrincipalDisabled},
+		{"all credentials revoked", "POST", func(t *testing.T, f *presenceFixture, who string) string {
+			return fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids[who])
+		}, 200, []string{"ops", "ops2"}, store.VoiceRotateRevoked},
+		{"one credential revoked", "DELETE", func(t *testing.T, f *presenceFixture, who string) string {
+			return fmt.Sprintf("/v1/credentials/%d", f.credID(t, who))
+		}, 204, []string{"ops", "ops2"}, store.VoiceRotateRevoked},
+	}
+}
+
+// TestVoiceHookRotation: each trigger rotates exactly the rooms its principal
+// held a session for, deletes the old room in LiveKit before the HTTP response
+// is written, never fails the request (LiveKit refusing included), leaves
+// presence empty at once, writes one voice_room_rotated row per rotation with
+// a reason and no room name, and a later sweep finishes a deletion that
+// failed.
+func TestVoiceHookRotation(t *testing.T) {
+	for _, tt := range voiceTriggers() {
+		for _, deleteFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete fails=%v", tt.name, deleteFails), func(t *testing.T) {
+				f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+				ann, ann2 := f.identity("ann"), f.identity("ann2")
+				ops := f.inUse(t, f.ops)
+				ops2 := f.inUse(t, f.ops2)
+				olds := map[string]string{"ops": ops, "ops2": ops2}
+				f.holder(t, "ann", f.ops)
+				f.holder(t, "ann2", f.ops)
+				f.holder(t, "ann", f.ops2)
+				f.lk.setRoom(ops, fakeParticipant{identity: ann, joinedMs: 1_000, published: true}, fakeParticipant{identity: ann2, joinedMs: 2_000})
+				f.lk.setRoom(ops2, fakeParticipant{identity: ann, joinedMs: 3_000})
+				f.pass(t)
+				if got := f.who(t, f.ops); got != "ann*,ann2" {
+					t.Fatalf("before: %q", got)
+				}
+				base := len(f.lk.calls())
+				if deleteFails {
+					f.lk.setDeleteStatus(http.StatusInternalServerError)
+				}
+
+				if code := f.doOrdered(t, tt.method, tt.path(t, f, "ann"), f.rootTok); code != tt.code {
+					t.Fatalf("status = %d, want %d (LiveKit refusing must not fail the request)", code, tt.code)
+				}
+
+				var deleted []string
+				respAt := 0
+				for _, c := range f.lk.calls()[base:] {
+					switch c.method {
+					case "DeleteRoom":
+						if respAt != 0 {
+							t.Errorf("DeleteRoom (seq %d) came after the response (seq %d)", c.seq, respAt)
+						}
+						deleted = append(deleted, c.room)
+					case "RemoveParticipant":
+						t.Errorf("RemoveParticipant %q: a holder's room is rotated, nobody is removed by name", c.identity)
+					case "CreateRoom":
+						t.Errorf("CreateRoom %q: the new room is created by the next session, not by the hook", c.room)
+					case "http-response":
+						respAt = c.seq
+					}
+				}
+				var want []string
+				for _, ch := range tt.channels {
+					want = append(want, olds[ch])
+				}
+				slices.Sort(deleted)
+				slices.Sort(want)
+				if !slices.Equal(deleted, want) {
+					t.Fatalf("DeleteRoom for %d rooms, want the rooms of %v", len(deleted), tt.channels)
+				}
+				if respAt == 0 {
+					t.Fatal("no response marker")
+				}
+
+				for name, ch := range map[string]store.Channel{"ops": f.ops, "ops2": f.ops2} {
+					cur := f.room(t, ch)
+					if rotated := slices.Contains(tt.channels, name); rotated == (cur == olds[name]) {
+						t.Errorf("%s: rotated=%v but the room is %s", name, rotated, map[bool]string{true: "unchanged", false: "new"}[cur == olds[name]])
+					}
+					if slices.Contains(tt.channels, name) {
+						if f.lk.has(olds[name]) == !deleteFails {
+							t.Errorf("%s: old room in LiveKit = %v with delete failing=%v", name, f.lk.has(olds[name]), deleteFails)
+						}
+						// Presence shows the new room, empty.
+						if got := f.who(t, ch); got != "" {
+							t.Errorf("%s: presence right after = %q, want nobody", name, got)
+						}
+					}
+				}
+				// A channel whose room did not rotate keeps its people.
+				if !slices.Contains(tt.channels, "ops2") {
+					if got := f.who(t, f.ops2); got != "ann" {
+						t.Errorf("ops2 presence = %q, want it untouched", got)
+					}
+				}
+
+				// One audit row per rotation, with the reason and no room name.
+				rows := f.audits(t, store.AuditVoiceRoomRotated)
+				if len(rows) != len(tt.channels) {
+					t.Fatalf("voice_room_rotated rows = %d, want %d", len(rows), len(tt.channels))
+				}
+				subjects := map[string]bool{}
+				for _, e := range rows {
+					subjects[e.Subject] = true
+					if e.Actor != "system" || e.Detail != "reason="+tt.reason {
+						t.Errorf("rotation row = %+v, want actor system and reason=%s", e, tt.reason)
+					}
+				}
+				for _, ch := range tt.channels {
+					id := f.ops.ID
+					if ch == "ops2" {
+						id = f.ops2.ID
+					}
+					if !subjects[fmt.Sprintf("channel:%d", id)] {
+						t.Errorf("no rotation row for channel %s", ch)
+					}
+				}
+
+				if deleteFails {
+					// A later sweep finishes the deletion LiveKit refused.
+					f.lk.setDeleteStatus(0)
+					f.sweep(t)
+					for _, ch := range tt.channels {
+						if f.lk.has(olds[ch]) {
+							t.Errorf("%s: the sweep did not delete the retired room", ch)
+						}
+						if n := f.lk.callsFor("DeleteRoom", olds[ch]); n != 2 {
+							t.Errorf("%s: DeleteRoom calls = %d, want the hook's and the sweep's", ch, n)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// A person who was never issued a session for the current room rotates
+// nothing and disconnects nobody else, whichever way they lose their place.
+func TestVoiceHookNeverIssuedRotatesNothing(t *testing.T) {
+	for _, tt := range voiceTriggers() {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ann2 := f.identity("ann2")
+			ops := f.inUse(t, f.ops)
+			f.holder(t, "ann2", f.ops)
+			f.lk.setRoom(ops, fakeParticipant{identity: ann2, joinedMs: 2_000})
+			f.pass(t)
+			base := len(f.lk.calls())
+
+			if code := f.doOrdered(t, tt.method, tt.path(t, f, "ann"), f.rootTok); code != tt.code {
+				t.Fatalf("status = %d, want %d", code, tt.code)
+			}
+			for _, c := range f.lk.calls()[base:] {
+				switch c.method {
+				case "DeleteRoom", "CreateRoom":
+					t.Errorf("%s %q: nothing may be rotated or created", c.method, c.room)
+				case "RemoveParticipant":
+					if c.identity == ann2 {
+						t.Errorf("ann2 was removed")
+					}
+				}
+			}
+			if f.room(t, f.ops) != ops {
+				t.Error("the room was renamed")
+			}
+			if !f.lk.in(ops, ann2) || f.who(t, f.ops) != "ann2" {
+				t.Errorf("ann2 was disturbed: in room %v, presence %q", f.lk.in(ops, ann2), f.who(t, f.ops))
+			}
+			if n := len(f.audits(t, store.AuditVoiceRoomRotated)); n != 0 {
+				t.Errorf("voice_room_rotated rows = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// Revoking a credential nobody was issued a session under rotates nothing,
+// even for a principal who holds a session under another credential.
+func TestVoiceRevokingAnUnusedCredentialRotatesNothing(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	ops := f.inUse(t, f.ops)
+	f.holder(t, "ann", f.ops)
+	spare, _, err := f.srv.store.CreateCredential(ctx, "system", f.ids["ann"], "spare", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+	f.pass(t)
+	if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/credentials/%d", spare.ID), f.rootTok); code != 204 {
+		t.Fatalf("status = %d", code)
+	}
+	if f.lk.count("DeleteRoom") != 0 || f.room(t, f.ops) != ops || len(f.audits(t, store.AuditVoiceRoomRotated)) != 0 {
+		t.Error("revoking an unused credential rotated the room")
+	}
+	// Replacing the credential the session was issued under does rotate it.
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/credentials/%d/rotate", f.credID(t, "ann")), f.rootTok); code != 201 {
+		t.Fatalf("rotate status = %d", code)
+	}
+	if f.lk.callsFor("DeleteRoom", ops) != 1 || f.room(t, f.ops) == ops {
+		t.Error("rotating the session's credential did not rotate the room")
+	}
+}
+
+// credentialWithExpiry gives who a second credential that expires at exp and
+// returns its token.
+func (f *presenceFixture) credentialWithExpiry(t *testing.T, who string, exp time.Time) (int64, string) {
+	t.Helper()
+	cred, tok, err := f.srv.store.CreateCredential(context.Background(), "system", f.ids[who], "short", &exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cred.ID, tok
+}
+
+// TestVoiceSweepRotation: the invariant is also checked at every sweep, which
+// is what covers expiry, a restart, and a failed DeleteRoom.
+func TestVoiceSweepRotation(t *testing.T) {
+	t.Run("an expired credential's room is rotated within one sweep", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		ops := f.inUse(t, f.ops)
+		exp := time.Now().Add(time.Hour)
+		_, tok := f.credentialWithExpiry(t, "ann", exp)
+		if res := f.callREST(t, "POST", "/v1/channels/ops/voice/session", tok, ""); res.status != 200 {
+			t.Fatalf("session = %d %s", res.status, res.body)
+		}
+		f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+		f.clock.Set(exp.Add(-time.Minute))
+		f.sweep(t)
+		if f.lk.count("DeleteRoom") != 0 || f.room(t, f.ops) != ops {
+			t.Fatal("rotated before the credential expired")
+		}
+		f.clock.Set(exp.Add(time.Minute))
+		f.sweep(t)
+		if f.lk.callsFor("DeleteRoom", ops) != 1 || f.lk.has(ops) || f.room(t, f.ops) == ops {
+			t.Errorf("after expiry: DeleteRoom calls %d, old room present %v, room unchanged %v",
+				f.lk.callsFor("DeleteRoom", ops), f.lk.has(ops), f.room(t, f.ops) == ops)
+		}
+		rows := f.audits(t, store.AuditVoiceRoomRotated)
+		if len(rows) != 1 || rows[0].Detail != "reason="+store.VoiceRotateExpired {
+			t.Errorf("rotation rows = %+v", rows)
+		}
+		// Another sweep finds nothing more to do.
+		f.sweep(t)
+		if len(f.audits(t, store.AuditVoiceRoomRotated)) != 1 {
+			t.Error("a second sweep rotated again")
+		}
+	})
+
+	t.Run("a restart finds a room whose holder was invalidated while the server was down", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		ops := f.room(t, f.ops)
+		f.holder(t, "ann", f.ops)
+		f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+		// No hook runs: the change is made behind the server's back.
+		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
+			t.Fatal(err)
+		}
+		fresh := newVoicePoller(f.srv)
+		fresh.now = f.clock.Now
+		if !fresh.runSweep(context.Background()) {
+			t.Fatal("the sweep did not run")
+		}
+		if f.lk.callsFor("DeleteRoom", ops) != 1 || f.lk.has(ops) || f.room(t, f.ops) == ops {
+			t.Error("the restarted poller did not rotate and delete the room")
+		}
+		if rows := f.audits(t, store.AuditVoiceRoomRotated); len(rows) != 1 || rows[0].Detail != "reason="+store.VoiceRotateMemberRemoved {
+			t.Errorf("rotation rows = %+v", rows)
+		}
+	})
+
+	t.Run("a retired room LiveKit still lists is deleted, and left alone once it is gone", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		ctx := context.Background()
+		stuck := f.holder(t, "ann", f.ops)
+		unlisted := f.holder(t, "ann", f.ops2)
+		f.lk.setRoom(stuck.RoomName, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+		// A crash between the rotation and the DeleteRoom: the store has
+		// retired both rooms, LiveKit has only one of them.
+		for _, r := range []store.VoiceRoom{stuck, unlisted} {
+			if _, ok, err := f.srv.store.RotateVoiceRoom(ctx, r.ID, store.VoiceRotateMemberRemoved); err != nil || !ok {
+				t.Fatalf("rotate: %v %v", ok, err)
+			}
+		}
+		f.lk.setDeleteStatus(http.StatusInternalServerError)
+		f.sweep(t)
+		if !f.lk.has(stuck.RoomName) || f.lk.callsFor("DeleteRoom", stuck.RoomName) != 1 {
+			t.Fatal("the sweep did not try to delete the listed retired room")
+		}
+		f.lk.setDeleteStatus(0)
+		f.sweep(t)
+		if f.lk.has(stuck.RoomName) || f.lk.callsFor("DeleteRoom", stuck.RoomName) != 2 {
+			t.Fatal("the sweep did not finish the deletion")
+		}
+		f.sweep(t)
+		f.sweep(t)
+		if n := f.lk.callsFor("DeleteRoom", stuck.RoomName); n != 2 {
+			t.Errorf("DeleteRoom calls for a room LiveKit no longer lists = %d, want it left alone", n)
+		}
+		if n := f.lk.callsFor("DeleteRoom", unlisted.RoomName); n != 0 {
+			t.Errorf("DeleteRoom calls for a retired room LiveKit never listed = %d", n)
+		}
+	})
+
+	t.Run("a sweep rotates while LiveKit is down and deletes once it is back", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		ops := f.room(t, f.ops)
+		f.holder(t, "ann", f.ops)
+		f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
+			t.Fatal(err)
+		}
+		f.lk.setListStatus(http.StatusServiceUnavailable)
+		f.sweep(t)
+		if f.room(t, f.ops) == ops {
+			t.Error("the room was not rotated while LiveKit was down: the invariant needs only the store")
+		}
+		if !f.lk.has(ops) {
+			t.Fatal("the fake lost the room")
+		}
+		f.lk.setListStatus(0)
+		f.clock.Advance(time.Minute) // past the outage backoff
+		f.sweep(t)
+		if f.lk.has(ops) {
+			t.Error("the retired room was not deleted once LiveKit answered")
+		}
+	})
+
+	t.Run("a store failure on the invariant is retried soon and does not stop the rest", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		ops := f.inUse(t, f.ops)
+		f.holder(t, "ann", f.ops)
+		f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
+			t.Fatal(err)
+		}
+		real := f.srv.voice.invalid
+		f.srv.voice.invalid = func(context.Context, time.Time) ([]store.VoiceViolation, error) {
+			return nil, errors.New("store unavailable")
+		}
+		start := f.clock.Now()
+		f.sweep(t)
+		f.srv.voice.mu.Lock()
+		next := f.srv.voice.nextSweep
+		marked := f.srv.voice.rooms[ops] != nil && f.srv.voice.rooms[ops].marked
+		f.srv.voice.mu.Unlock()
+		if want := start.Add(voiceSweepRetry); !next.Equal(want) {
+			t.Errorf("next sweep = %v, want %v: a failed check must not wait a full interval", next.Sub(start), voiceSweepRetry)
+		}
+		if !marked {
+			t.Error("the rest of the sweep (marking rooms LiveKit lists) did not run")
+		}
+		if f.room(t, f.ops) != ops {
+			t.Error("rotated although the check failed")
+		}
+		f.srv.voice.invalid = real
+		f.clock.Advance(voiceSweepRetry)
+		f.sweep(t)
+		if f.room(t, f.ops) == ops || f.lk.has(ops) {
+			t.Error("the retry did not rotate and delete the room")
+		}
+	})
+}
+
+// After a rotation: the next session names the new room and CreateRoom is
+// called for it and never again for the old name; the per-pass removal still
+// works in the new room; a participant LiveKit still lists in the old room is
+// not shown.
+func TestVoiceAfterRotation(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	first := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	decodeSession(t, f.session(t, "ann2", "ops"))
+	f.lk.setRoom(first, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann,ann2" {
+		t.Fatalf("before: %q", got)
+	}
+	// ann2 leaves the channel; LiveKit refuses to delete, so the old room
+	// lingers with both of them in it.
+	f.lk.setDeleteStatus(http.StatusInternalServerError)
+	if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann2"]), f.rootTok); code != 204 {
+		t.Fatalf("remove member = %d", code)
+	}
+	if !f.lk.has(first) {
+		t.Fatal("the fake deleted the room although it was told to fail")
+	}
+	creates := f.lk.callsFor("CreateRoom", first)
+
+	// The old room is not shown even though LiveKit lists people in it, and
+	// the poller does not read it any more.
+	lists := f.lk.callsFor("ListParticipants", first)
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "" {
+		t.Errorf("presence = %q, want nobody (the people in the old room are not shown)", got)
+	}
+	if n := f.lk.callsFor("ListParticipants", first); n != lists {
+		t.Errorf("the poller read the retired room %d more times", n-lists)
+	}
+
+	// ann's next session is for the new room, which is created in LiveKit.
+	next := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+	if next == first || !voiceRoomNameRE.MatchString(next) {
+		t.Fatalf("new session names %q after rotating %q", next, first)
+	}
+	if f.lk.callsFor("CreateRoom", next) != 1 || f.lk.callsFor("CreateRoom", first) != creates {
+		t.Errorf("CreateRoom: new room %d times, old room %d more times", f.lk.callsFor("CreateRoom", next), f.lk.callsFor("CreateRoom", first)-creates)
+	}
+	// The per-pass removal of an unentitled participant works in the new room.
+	f.lk.setRoom(next, fakeParticipant{identity: f.identity("ann"), joinedMs: 5_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 6_000})
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	if f.lk.in(next, f.identity("ann2")) || f.who(t, f.ops) != "ann" {
+		t.Errorf("ann2 in the new room = %v, presence %q; want her removed and only ann shown", f.lk.in(next, f.identity("ann2")), f.who(t, f.ops))
+	}
+	// The sweep deletes the old room once LiveKit lets it, and never creates it.
+	f.lk.setDeleteStatus(0)
+	f.sweep(t)
+	if f.lk.has(first) {
+		t.Error("the sweep did not delete the retired room")
+	}
+	if f.lk.callsFor("CreateRoom", first) != creates {
+		t.Error("the old room was created again")
+	}
+	// The member who is still entitled can rejoin; the removed one is refused.
+	if res := f.session(t, "ann2", "ops"); res.status != 404 {
+		t.Errorf("removed member's session = %d", res.status)
+	}
+}
+
+// TestVoiceRotationKeepsSecrets: across a rotation neither room name, no
+// token, and not the API secret appears in an audit row, a captured log line
+// or a presence document.
+func TestVoiceRotationKeepsSecrets(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	g1 := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0]
+	g2 := decodeSession(t, f.session(t, "ann2", "ops")).Rooms[0]
+	f.lk.setRoom(g1.Room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	f.lk.setDeleteStatus(http.StatusInternalServerError) // exercise the failure log too
+	if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann2"]), f.rootTok); code != 204 {
+		t.Fatalf("remove member = %d", code)
+	}
+	f.lk.setDeleteStatus(0)
+	f.sweep(t)
+	g3 := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0]
+	if g3.Room == g1.Room {
+		t.Fatal("room not rotated")
+	}
+	f.lk.setRoom(g3.Room, fakeParticipant{identity: f.identity("ann"), joinedMs: 9_000})
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+
+	needles := []string{g1.Room, g3.Room, g1.Token, g2.Token, g3.Token, voiceTestSecret}
+	var haystack strings.Builder
+	for _, e := range f.audit(t) {
+		fmt.Fprintf(&haystack, "%s %s %s %s\n", e.Actor, e.Action, e.Subject, e.Detail)
+	}
+	haystack.WriteString(f.logs.buf.String())
+	for _, ch := range []store.Channel{f.ops, f.ops2} {
+		raw, err := json.Marshal(f.snap(t, ch))
+		if err != nil {
+			t.Fatal(err)
+		}
+		haystack.Write(raw)
+	}
+	for i, n := range needles {
+		if strings.Contains(haystack.String(), n) {
+			t.Errorf("needle %d (%d chars) appears in an audit row, log line or presence document", i, len(n))
+		}
+	}
+	if !strings.Contains(haystack.String(), "voice_room_rotated") {
+		t.Error("the run did not rotate a room")
+	}
+}
+
+// A room rotated away while a pass is reading it: what the pass saw is in a
+// room that no longer exists, so it reports nothing. Without this a person
+// who joined the old room in that instant would be audited as joining after
+// everyone in it had been recorded as leaving.
+func TestVoicePollerPassInFlightDuringARotationReportsNothing(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	ann, ann2 := f.identity("ann"), f.identity("ann2")
+	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000})
+	f.pass(t)
+	if got := f.who(t, f.ops); got != "ann" {
+		t.Fatalf("before: %q", got)
+	}
+	// ann2 joins; while the pass is checking her, the room is rotated away.
+	f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: ann2, joinedMs: 2_000, published: true})
+	real := f.srv.voice.entitle
+	fired := false
+	f.srv.voice.entitle = func(ctx context.Context, identity string, channelID int64) (int64, string, error) {
+		if identity == ann2 && !fired {
+			fired = true
+			f.srv.voice.forgetRoom(ctx, room)
+		}
+		return real(ctx, identity, channelID)
+	}
+	f.clock.Advance(voicePollInterval)
+	f.pass(t)
+	f.srv.voice.entitle = real
+	if !fired {
+		t.Fatal("the rotation never ran")
+	}
+	if got := f.who(t, f.ops); got != "" && got != "-" {
+		t.Errorf("presence after the rotation = %q, want nobody", got)
+	}
+	var events []string
+	for _, e := range f.audit(t) {
+		if strings.HasPrefix(e.Action, "voice_") && e.Action != store.AuditVoiceSessionIssued {
+			events = append(events, e.Actor+" "+e.Action)
+		}
+	}
+	want := []string{f.actor("ann") + " " + store.AuditVoiceJoined, f.actor("ann") + " " + store.AuditVoiceLeft}
+	if !slices.Equal(events, want) {
+		t.Errorf("voice events = %v, want %v: nothing from the pass that was in flight", events, want)
+	}
+}
+
+// A retired room that could not be deleted is not left for half a minute:
+// until it is gone, the person who lost their place is still connected to it
+// and nobody is shown in presence. The sweep is brought forward, and keeps
+// coming soon for as long as the delete fails. (Security review of #166, S1.)
+func TestVoiceFailedDeleteBringsTheSweepForward(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	ann, ann2 := f.identity("ann"), f.identity("ann2")
+	old := f.inUse(t, f.ops)
+	f.holder(t, "ann", f.ops)
+	f.holder(t, "ann2", f.ops)
+	f.sweep(t)
+	f.lk.setRoom(old, fakeParticipant{identity: ann, joinedMs: 1_000}, fakeParticipant{identity: ann2, joinedMs: 2_000})
+	f.pass(t)
+	if d := f.srv.voice.nextDelay(); d > voicePollInterval {
+		t.Fatalf("next delay before = %v", d)
+	}
+
+	f.lk.setDeleteStatus(http.StatusInternalServerError)
+	if rec := f.do(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove = %d %s", rec.Code, rec.Body)
+	}
+	if !f.lk.in(old, ann) {
+		t.Fatal("the fake deleted the room although it answered 500")
+	}
+	f.srv.voice.mu.Lock()
+	due := f.srv.voice.nextSweep.Sub(f.clock.Now())
+	f.srv.voice.mu.Unlock()
+	if due > voiceSweepRetry {
+		t.Fatalf("next sweep in %v after a failed delete, want within %v", due, voiceSweepRetry)
+	}
+
+	// Still failing: the sweep tries, fails, and is due soon again.
+	deletes := f.lk.callsFor("DeleteRoom", old)
+	f.clock.Advance(voiceSweepRetry)
+	f.srv.voice.tick(ctx)
+	if got := f.lk.callsFor("DeleteRoom", old); got != deletes+1 {
+		t.Fatalf("DeleteRoom calls after the retry interval = %d, want %d", got, deletes+1)
+	}
+	f.srv.voice.mu.Lock()
+	due = f.srv.voice.nextSweep.Sub(f.clock.Now())
+	f.srv.voice.mu.Unlock()
+	if due > voiceSweepRetry {
+		t.Fatalf("next sweep in %v after a second failed delete, want within %v", due, voiceSweepRetry)
+	}
+
+	// LiveKit answers: the room goes one retry interval later.
+	f.lk.setDeleteStatus(0)
+	f.clock.Advance(voiceSweepRetry)
+	f.srv.voice.tick(ctx)
+	if f.lk.has(old) {
+		t.Error("the retired room is still in LiveKit one retry interval after it could be deleted")
+	}
+}
+
+// A sweep's read of the holders failing is logged: while it fails, a
+// credential expiring rotates nothing. (Security review of #166, S4.)
+func TestVoiceSweepLogsAFailedHolderCheck(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	f.srv.voice.invalid = func(context.Context, time.Time) ([]store.VoiceViolation, error) {
+		return nil, errors.New("store unavailable")
+	}
+	f.sweep(t)
+	if !strings.Contains(f.logs.buf.String(), "could not check the holders") {
+		t.Errorf("no log line for the failed check:\n%s", f.logs.buf.String())
+	}
+	if d := f.srv.voice.nextDelay(); d > voiceSweepRetry {
+		t.Errorf("next delay = %v, want at most %v", d, voiceSweepRetry)
 	}
 }

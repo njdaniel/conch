@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -656,5 +658,325 @@ func TestVoiceSessionCancelledCallerIsNotLoggedAsAnOutage(t *testing.T) {
 	// And the store is intact: the next caller is served.
 	if res := f.session(t, "ann2", "ops"); res.status != http.StatusOK {
 		t.Errorf("the next session = %d %s", res.status, res.body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Holders (issue #161)
+
+// A session records its holder: one row per (room, principal, credential),
+// the same row again on a repeat, and nothing at all for a request that is
+// refused before a room is looked at.
+func TestVoiceSessionRecordsTheHolder(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	holders := func() []store.VoiceHolder {
+		t.Helper()
+		var all []store.VoiceHolder
+		for _, ch := range []store.Channel{f.ops, f.ops2} {
+			rooms, err := f.srv.store.VoiceRoomsForChannel(ctx, ch.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range rooms {
+				h, err := f.srv.store.VoiceRoomHolders(ctx, r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				all = append(all, h...)
+			}
+		}
+		return all
+	}
+
+	steps := []struct {
+		name    string
+		who     string
+		channel string
+		status  int
+		want    int // holder rows after the step
+	}{
+		{"the first session", "ann", "ops", 200, 1},
+		{"the same session again", "ann", "ops", 200, 1},
+		{"another member", "ann2", "ops", 200, 2},
+		{"the same member in another channel", "ann", "ops2", 200, 3},
+		{"a non-member is refused", "bob", "ops", 404, 3},
+		{"an agent is refused", "robo", "ops", 403, 3},
+		{"a channel that does not exist", "ann", "nowhere", 404, 3},
+		{"a disabled principal", "dora", "ops", 401, 3},
+	}
+	for _, st := range steps {
+		res := f.session(t, st.who, st.channel)
+		if res.status != st.status {
+			t.Fatalf("%s: status = %d, want %d; %s", st.name, res.status, st.status, res.body)
+		}
+		if got := len(holders()); got != st.want {
+			t.Fatalf("%s: holder rows = %d, want %d", st.name, got, st.want)
+		}
+	}
+	room := f.room(t, f.ops)
+	_ = room
+	annCred := f.credID(t, "ann")
+	var found bool
+	for _, h := range holders() {
+		if h.PrincipalID == f.ids["ann"] && h.CredentialID == annCred {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ann's row does not name the credential she used")
+	}
+}
+
+// The holder is recorded before LiveKit is asked for the room and so before a
+// token exists; if it cannot be recorded no token is returned.
+func TestVoiceSessionHolderIsRecordedBeforeAnyToken(t *testing.T) {
+	t.Run("recorded first", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		real := f.srv.voice.recordHolder
+		calls := 0
+		f.srv.voice.recordHolder = func(ctx context.Context, room, principal, cred int64) error {
+			calls++
+			if n := f.lk.count("CreateRoom"); n != 0 {
+				t.Errorf("CreateRoom was called %d times before the holder was recorded", n)
+			}
+			return real(ctx, room, principal, cred)
+		}
+		decodeSession(t, f.session(t, "ann", "ops"))
+		if calls != 1 {
+			t.Errorf("recordHolder calls = %d, want 1", calls)
+		}
+	})
+	t.Run("recording fails", func(t *testing.T) {
+		f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+		f.srv.voice.recordHolder = func(context.Context, int64, int64, int64) error { return errors.New("store unavailable") }
+		res := f.session(t, "ann", "ops")
+		if res.status != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; %s", res.status, res.body)
+		}
+		if strings.Contains(res.body, "token") || strings.Contains(res.body, "eyJ") {
+			t.Errorf("the failure carries a token: %s", res.body)
+		}
+		if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+			t.Errorf("voice_session_issued = %d, want 0", n)
+		}
+		if f.lk.count("CreateRoom") != 0 {
+			t.Error("LiveKit was asked for a room although the holder could not be recorded")
+		}
+	})
+}
+
+// A session request racing a rotation must not hand out a token for a retired
+// room: it starts over against the new room, and gives up (nothing issued)
+// when the room keeps changing.
+func TestVoiceSessionRacingARotation(t *testing.T) {
+	tests := []struct {
+		name      string
+		rotations int // rotations that land while CreateRoom is in flight
+		wantCode  int
+	}{
+		{"no rotation", 0, http.StatusOK},
+		{"one rotation", 1, http.StatusOK},
+		{"two rotations", 2, http.StatusOK},
+		{"the room keeps changing", voiceRoomAttempts, http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ctx := context.Background()
+			var left atomic.Int64
+			left.Store(int64(tt.rotations))
+			var seen []string
+			var mu sync.Mutex
+			f.lk.setOnCreate(func(room string) {
+				mu.Lock()
+				seen = append(seen, room)
+				mu.Unlock()
+				if left.Add(-1) < 0 {
+					return
+				}
+				cur, err := f.srv.store.ChannelVoiceRoom(ctx, f.ops.ID)
+				if err != nil {
+					t.Errorf("room: %v", err)
+					return
+				}
+				if _, _, err := f.srv.store.RotateVoiceRoom(ctx, cur.ID, store.VoiceRotateMemberRemoved); err != nil {
+					t.Errorf("rotate: %v", err)
+				}
+			})
+			res := f.session(t, "ann", "ops")
+			if res.status != tt.wantCode {
+				t.Fatalf("status = %d, want %d; %s", res.status, tt.wantCode, res.body)
+			}
+			cur := f.room(t, f.ops)
+			mu.Lock()
+			defer mu.Unlock()
+			if len(seen) != tt.rotations+1 && tt.wantCode == http.StatusOK || len(seen) != voiceRoomAttempts && tt.wantCode != http.StatusOK {
+				t.Errorf("CreateRoom calls = %d: %v", len(seen), len(seen))
+			}
+			if tt.wantCode != http.StatusOK {
+				if errCode(t, res.body) != schema.ErrorCodeVoiceUnavailable || strings.Contains(res.body, "eyJ") {
+					t.Errorf("answer = %s, want voice_unavailable and no token", res.body)
+				}
+				if n := len(f.audits(t, store.AuditVoiceSessionIssued)); n != 0 {
+					t.Errorf("voice_session_issued = %d, want 0", n)
+				}
+				return
+			}
+			g := decodeSession(t, res).Rooms[0]
+			if g.Room != cur {
+				t.Errorf("the token names %q, not the channel's current room", g.Room)
+			}
+			if len(seen) > 0 && seen[len(seen)-1] != cur {
+				t.Errorf("the last room asked of LiveKit was not the current one")
+			}
+			// Only the live room has the holder; the retired ones were never signed for.
+			live, err := f.srv.store.VoiceRoomsForChannel(context.Background(), f.ops.ID)
+			if err != nil || len(live) != 1 {
+				t.Fatalf("live rooms = %+v, %v", live, err)
+			}
+			if h, _ := f.srv.store.VoiceRoomHolders(context.Background(), live[0].ID); len(h) != 1 {
+				t.Errorf("holders of the live room = %+v, want ann", h)
+			}
+			// The poller keeps no state for a retired room.
+			f.srv.voice.mu.Lock()
+			defer f.srv.voice.mu.Unlock()
+			for _, name := range seen[:len(seen)-1] {
+				if f.srv.voice.rooms[name] != nil {
+					t.Error("the poller still tracks a retired room")
+				}
+			}
+		})
+	}
+}
+
+// A rotation that lands after a request recorded its holder and before its
+// CreateRoom deletes the room first, and the request then creates it again.
+// The request must not leave it: a stale token would work there until the
+// next sweep. It deletes the room, forgets it, and (if still entitled) goes on
+// to the channel's new room. (Security review of #166, S2.)
+func TestVoiceSessionDeletesARetiredRoomItRecreated(t *testing.T) {
+	tests := []struct {
+		name     string
+		removed  string // who the operator removes while ann's request is in flight
+		wantCode int
+	}{
+		{"another holder is removed", "ann2", http.StatusOK},
+		{"the caller is removed", "ann", http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			old := f.holder(t, "ann2", f.ops)
+			f.lk.setRoom(old.RoomName)
+			real := f.srv.voice.recordHolder
+			var once sync.Once
+			f.srv.voice.recordHolder = func(ctx context.Context, roomID, principalID, credentialID int64) error {
+				err := real(ctx, roomID, principalID, credentialID)
+				once.Do(func() {
+					// The hook rotates the room and deletes it in LiveKit
+					// before this request has asked LiveKit for it.
+					rec := f.do(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids[tt.removed]), f.rootTok, "")
+					if rec.Code != http.StatusNoContent {
+						t.Errorf("remove = %d %s", rec.Code, rec.Body)
+					}
+					if f.lk.has(old.RoomName) {
+						t.Error("the hook did not delete the old room")
+					}
+				})
+				return err
+			}
+			res := f.session(t, "ann", "ops")
+			if res.status != tt.wantCode {
+				t.Fatalf("status = %d, want %d; %s", res.status, tt.wantCode, res.body)
+			}
+			if f.lk.callsFor("CreateRoom", old.RoomName) != 1 {
+				t.Fatalf("CreateRoom for the old room = %d: the race this test is about did not happen", f.lk.callsFor("CreateRoom", old.RoomName))
+			}
+			if f.lk.has(old.RoomName) {
+				t.Error("the retired room exists in LiveKit after the request")
+			}
+			f.srv.voice.mu.Lock()
+			tracked := f.srv.voice.rooms[old.RoomName] != nil
+			f.srv.voice.mu.Unlock()
+			if tracked {
+				t.Error("the poller tracks the retired room after the request")
+			}
+			cur := f.room(t, f.ops)
+			if cur == old.RoomName {
+				t.Fatal("the room was not rotated")
+			}
+			if tt.wantCode == http.StatusOK {
+				if g := decodeSession(t, res).Rooms[0]; g.Room != cur {
+					t.Error("the token does not name the channel's current room")
+				}
+			} else if strings.Contains(res.body, "eyJ") {
+				t.Errorf("the refusal carries a token: %s", res.body)
+			}
+		})
+	}
+}
+
+// A caller who lost their place after the handler's check is refused before a
+// holder is recorded for them. Recorded first, the row would outlive the
+// refused request and the next sweep would rotate the room, disconnecting
+// everyone for a session that was never issued. (Security review of #166, S3.)
+func TestVoiceSessionRecordsNoHolderForACallerAlreadyGone(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		lose func(f *presenceFixture) error
+	}{
+		{"removed from the channel", func(f *presenceFixture) error {
+			_, err := f.srv.store.RemoveChannelMember(ctx, "system", f.ops.ID, f.ids["ann"])
+			return err
+		}},
+		{"principal disabled", func(f *presenceFixture) error {
+			_, err := f.srv.store.DisablePrincipal(ctx, "system", f.ids["ann"])
+			return err
+		}},
+		{"all credentials revoked", func(f *presenceFixture) error {
+			_, err := f.srv.store.RevokeAllCredentials(ctx, "system", f.ids["ann"])
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ann2 := f.identity("ann2")
+			room := f.holder(t, "ann2", f.ops)
+			f.srv.voice.noteSession(room)
+			f.lk.setRoom(room.RoomName, fakeParticipant{identity: ann2, joinedMs: 1_000})
+			f.pass(t)
+			ann, err := f.srv.store.PrincipalByID(ctx, f.ids["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			credID := f.credID(t, "ann")
+			// The handler has checked ann; she loses her place before the
+			// session is built.
+			if err := tt.lose(f); err != nil {
+				t.Fatal(err)
+			}
+			base := len(f.lk.calls())
+			_, _, err = f.srv.voiceSession(withCredentialID(ctx, credID), ann, f.ops)
+			if !errors.Is(err, errVoiceNoLongerEntitled) {
+				t.Fatalf("voiceSession error = %v, want errVoiceNoLongerEntitled", err)
+			}
+			if calls := f.lk.calls()[base:]; len(calls) != 0 {
+				t.Errorf("LiveKit was called for a caller already gone: %+v", calls)
+			}
+			holders, err := f.srv.store.VoiceRoomHolders(ctx, room.ID)
+			if err != nil || len(holders) != 1 || holders[0].PrincipalID != f.ids["ann2"] {
+				t.Fatalf("holders = %+v, %v; want ann2 alone", holders, err)
+			}
+			f.sweep(t)
+			if n := len(f.audits(t, store.AuditVoiceRoomRotated)); n != 0 {
+				t.Errorf("voice_room_rotated rows = %d, want 0: a session that was never issued rotated the room", n)
+			}
+			if f.room(t, f.ops) != room.RoomName || !f.lk.in(room.RoomName, ann2) {
+				t.Error("the bystander's room was rotated or deleted")
+			}
+		})
 	}
 }

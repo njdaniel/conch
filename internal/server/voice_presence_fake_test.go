@@ -39,6 +39,12 @@ func (c *testClock) Now() time.Time {
 	return c.t
 }
 
+func (c *testClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
 func (c *testClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -80,6 +86,9 @@ type scriptedLiveKit struct {
 	removeStatus int
 	// listFail names rooms whose ListParticipants fails while others answer.
 	listFail map[string]bool
+	// deleteStatus is the status of DeleteRoom; 0 means 200, or 404 not_found
+	// when LiveKit does not have the room, as it answers.
+	deleteStatus int
 	// keepAfterRemove makes RemoveParticipant answer 200 without dropping the
 	// participant, as when LiveKit is slow to close the connection.
 	keepAfterRemove bool
@@ -91,6 +100,9 @@ type scriptedLiveKit struct {
 	entered chan struct{}
 	// inflight and maxInflight count ListParticipants requests being served.
 	inflight, maxInflight int
+	// onCreate runs while CreateRoom is being answered, before the answer: the
+	// moment between a session request's room lookup and its token.
+	onCreate func(room string)
 	// onRemove runs while RemoveParticipant is being answered, before it takes
 	// effect: the moment a snapshot taken mid-removal would catch.
 	onRemove func(room, identity string)
@@ -126,7 +138,11 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		if _, ok := f.rooms[req.Name]; !ok {
 			f.rooms[req.Name] = nil
 		}
+		hook := f.onCreate
 		f.mu.Unlock()
+		if hook != nil {
+			hook(req.Name)
+		}
 		writeFakeJSON(w, http.StatusOK, map[string]any{"sid": "RM_test", "name": req.Name})
 	case "ListRooms":
 		f.record(method, "", "")
@@ -199,6 +215,23 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 			f.drop(req.Room, req.Identity)
 		}
 		writeFakeJSON(w, http.StatusOK, map[string]any{})
+	case "DeleteRoom":
+		// Deleting a room disconnects everyone in it and forgets it.
+		f.record(method, req.Room, "")
+		status := f.deleteStatus
+		_, had := f.rooms[req.Room]
+		if status == 0 && had {
+			delete(f.rooms, req.Room)
+		}
+		f.mu.Unlock()
+		switch {
+		case status != 0:
+			writeFakeJSON(w, status, map[string]any{"code": "internal"})
+		case !had:
+			writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "not_found", "msg": "requested room does not exist"})
+		default:
+			writeFakeJSON(w, http.StatusOK, map[string]any{})
+		}
 	default:
 		f.record(method, "", "")
 		f.mu.Unlock()
@@ -244,11 +277,17 @@ func (f *scriptedLiveKit) setListStatus(s int) {
 func (f *scriptedLiveKit) setRemoveStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.removeStatus = s })
 }
+func (f *scriptedLiveKit) setDeleteStatus(s int) {
+	f.config(func(l *scriptedLiveKit) { l.deleteStatus = s })
+}
 func (f *scriptedLiveKit) setKeepAfterRemove(k bool) {
 	f.config(func(l *scriptedLiveKit) { l.keepAfterRemove = k })
 }
 func (f *scriptedLiveKit) setHoldList(c chan struct{}) {
 	f.config(func(l *scriptedLiveKit) { l.holdList = c })
+}
+func (f *scriptedLiveKit) setOnCreate(fn func(room string)) {
+	f.config(func(l *scriptedLiveKit) { l.onCreate = fn })
 }
 func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 	f.config(func(l *scriptedLiveKit) { l.onRemove = fn })
@@ -295,6 +334,25 @@ func (f *scriptedLiveKit) mark(label string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record(label, "", "")
+}
+
+// has reports whether LiveKit has the room.
+func (f *scriptedLiveKit) has(room string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.rooms[room]
+	return ok
+}
+
+// callsFor returns how many logged calls of method name room.
+func (f *scriptedLiveKit) callsFor(method, room string) int {
+	n := 0
+	for _, c := range f.calls() {
+		if c.method == method && c.room == room {
+			n++
+		}
+	}
+	return n
 }
 
 // calls returns a copy of the log.
@@ -434,6 +492,32 @@ func (f *presenceFixture) inUse(t *testing.T, ch store.Channel) string {
 	}
 	f.srv.voice.noteSession(r)
 	return r.RoomName
+}
+
+// credID is the id of the credential the fixture issued to who.
+func (f *presenceFixture) credID(t *testing.T, who string) int64 {
+	t.Helper()
+	_, id, err := f.srv.store.ResolveCredentialDetail(context.Background(), f.tokens[who])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// holder records, in the store, a voice session for who in ch as the session
+// endpoint would: against the credential the fixture issued them.
+func (f *presenceFixture) holder(t *testing.T, who string, ch store.Channel) store.VoiceRoom {
+	t.Helper()
+	ctx := context.Background()
+	credID := f.credID(t, who)
+	room, err := f.srv.store.ChannelVoiceRoom(ctx, ch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.store.RecordVoiceHolder(ctx, room.ID, f.ids[who], credID); err != nil {
+		t.Fatal(err)
+	}
+	return room
 }
 
 func (f *presenceFixture) pass(t *testing.T) {

@@ -228,6 +228,24 @@ func (c *Client) Evict(ctx context.Context, room, identity string) (removed bool
 	return err == nil, err
 }
 
+// DeleteRoom deletes the named room and disconnects everyone in it. Deleting
+// a room LiveKit no longer has succeeds: LiveKit closes empty rooms and loses
+// all of them on a restart, and the outcome the caller wants already holds. It
+// says so with the Twirp answer {"code":"not_found"}; only that exact answer
+// counts (see RemoveParticipant). LiveKit's DeleteRoom needs the room-create
+// permission, so the signed grant is the one CreateRoom uses.
+func (c *Client) DeleteRoom(ctx context.Context, name string) error {
+	if name == "" {
+		return errors.New("livekit: DeleteRoom needs a room name")
+	}
+	err := c.call(ctx, "DeleteRoom", adminGrant{RoomCreate: true}, map[string]any{"room": name}, nil)
+	var status httpStatusError
+	if errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
+		return nil
+	}
+	return err
+}
+
 // httpStatusError is a non-2xx answer from LiveKit. It is always wrapped in
 // ErrUnavailable; it exists so a caller inside this package can tell LiveKit's
 // "not found" from an outage. twirpCode is the "code" of a Twirp JSON error

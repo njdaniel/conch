@@ -279,6 +279,40 @@ END`,
 		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL`,
 		`CREATE UNIQUE INDEX voice_rooms_by_net ON voice_rooms (net_id) WHERE net_id IS NOT NULL`,
 	},
+	// 14: Rotating voice rooms (issue #161, docs/design/voice-control-plane.md
+	// §5). LiveKit gives every connected participant a renewable token of its
+	// own, so removing someone from a room never stops them rejoining; the room
+	// has to change name instead. A rotated room is retired, not deleted: its
+	// row stays so the name is never handed out again and the sweep can find
+	// rooms LiveKit still has to delete. "One room per audience" becomes "one
+	// live room per audience", so the two partial unique indexes are dropped
+	// (SQLite cannot alter a partial index) and recreated over live rows.
+	// room_name stays unique across live and retired rows. voice_room_holders
+	// records, durably, every credential a session was issued under for a room:
+	// the set of people who may hold a token LiveKit will renew. Its rows go
+	// when the room is retired.
+	//
+	// Rooms that exist before this migration have no holder rows, although
+	// tokens for them may be out and LiveKit may be renewing them, so nobody
+	// losing their place could ever rotate them. They are all retired here:
+	// the first sweep deletes any that LiveKit still has, and the next session
+	// for a channel creates its room afresh, with holders recorded.
+	{
+		`ALTER TABLE voice_rooms ADD COLUMN retired_at INTEGER`,
+		`UPDATE voice_rooms SET retired_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000`,
+		`DROP INDEX voice_rooms_channel_wide`,
+		`DROP INDEX voice_rooms_by_net`,
+		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL AND retired_at IS NULL`,
+		`CREATE UNIQUE INDEX voice_rooms_by_net ON voice_rooms (net_id) WHERE net_id IS NOT NULL AND retired_at IS NULL`,
+		`CREATE TABLE voice_room_holders (
+	room_id       INTEGER NOT NULL REFERENCES voice_rooms (id),
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	credential_id INTEGER NOT NULL REFERENCES credentials (id),
+	created_at    INTEGER NOT NULL,
+	PRIMARY KEY (room_id, principal_id, credential_id)
+)`,
+		`CREATE INDEX voice_room_holders_by_credential ON voice_room_holders (credential_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
