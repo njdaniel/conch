@@ -40,7 +40,9 @@ type Config struct {
 	// AuthRequired; only an explicit AuthOff opens the server. See auth.go.
 	AuthMode AuthMode
 	// LiveKit configures optional voice. The zero value means voice is not
-	// configured; nothing contacts LiveKit at startup either way.
+	// configured. Building the server contacts nothing; when voice is
+	// configured, Serve looks at LiveKit once at start (the presence
+	// poller's first sweep) without waiting for the answer.
 	LiveKit livekit.Config
 }
 
