@@ -851,6 +851,31 @@ type livekitServer struct {
 // server-side unmute otherwise); conchd needs no such setting. The container is registered for removal
 // before it is started, so a failure at any point still removes it.
 func (h *harness) startLiveKit(ctx context.Context) (*livekitServer, error) {
+	// The ports are chosen by asking the kernel for free ones and letting them
+	// go again, so something else on the machine can take one before LiveKit
+	// binds it. LiveKit then exits saying so, and the answer is other ports.
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var srv *livekitServer
+		srv, err = h.startLiveKitOnce(ctx)
+		if err == nil {
+			return srv, nil
+		}
+		if !strings.Contains(err.Error(), "address already in use") || stopCtx.Err() != nil {
+			return nil, err
+		}
+		h.say("     LiveKit could not bind a port that was free a moment before (attempt %d of 3); starting it on others", attempt)
+	}
+	return nil, err
+}
+
+// probeClient asks whether LiveKit is up. It gives up quickly: if LiveKit lost
+// the race for its port, whatever won it may accept a connection and never
+// answer, and a request with no timeout would wait for it for ever.
+var probeClient = &http.Client{Timeout: 2 * time.Second}
+
+// startLiveKitOnce is one attempt of startLiveKit, on ports of its own.
+func (h *harness) startLiveKitOnce(ctx context.Context) (*livekitServer, error) {
 	httpAddr, err := freeAddr()
 	if err != nil {
 		return nil, err
@@ -920,15 +945,20 @@ room:
 	if err != nil {
 		return nil, fmt.Errorf("docker run: %s", h.redact(out))
 	}
-	if err := waitFor("LiveKit to answer on "+srv.apiURL, 60*time.Second, func() (bool, string) {
-		resp, err := http.Get(srv.apiURL) // #nosec G107 -- the container this run started
+	if err := waitForOrFail("LiveKit to answer on "+srv.apiURL, 60*time.Second, func() (bool, string, error) {
+		resp, err := probeClient.Get(srv.apiURL) // #nosec G107 -- the container this run started
 		if err != nil {
-			return false, unwrapURLError(err).Error()
+			// A container that has exited will never answer.
+			if state, derr := docker(ctx, "inspect", "--format", "{{.State.Status}}", srv.name); derr == nil && strings.TrimSpace(state) == "exited" {
+				return false, "", errors.New("the LiveKit container exited")
+			}
+			return false, unwrapURLError(err).Error(), nil
 		}
 		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode)
+		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode), nil
 	}); err != nil {
 		logs, _ := docker(ctx, "logs", "--tail", "20", srv.name)
+		srv.remove()
 		return nil, fmt.Errorf("%w\ncontainer log:\n%s", err, h.redact(logs))
 	}
 	return srv, nil
@@ -964,6 +994,22 @@ func (s *livekitServer) stop(ctx context.Context) error {
 		return fmt.Errorf("docker stop: %s", out)
 	}
 	return nil
+}
+
+// start starts the stopped container again and waits for LiveKit to answer.
+// It is a new LiveKit process on the same address: every room is gone.
+func (s *livekitServer) start(ctx context.Context) error {
+	if out, err := docker(ctx, "start", s.name); err != nil {
+		return fmt.Errorf("docker start: %s", out)
+	}
+	return waitFor("LiveKit to answer again on "+s.apiURL, 60*time.Second, func() (bool, string) {
+		resp, err := probeClient.Get(s.apiURL) // #nosec G107 -- the container this run started
+		if err != nil {
+			return false, unwrapURLError(err).Error()
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode)
+	})
 }
 
 // remove removes the container, running or not, by its id. It is safe to call

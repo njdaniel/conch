@@ -241,8 +241,10 @@ Tests never need a microphone, PipeWire, a keyboard or LiveKit unless they are m
 - **The exit test** extends `e2e/voice`, which already runs a real `conchd` and a real LiveKit in Docker. Three headless `conch-voice` processes join one channel, each with a different tone as its microphone, driven through standard input. It asserts:
   - while one holds the key, the other two receive that speaker's audio, at that speaker's tone, and the speaker receives nothing of their own;
   - while nobody holds a key, nobody receives audio, although every "microphone" is playing the whole time: the gate, not silence, is what is tested;
-  - each press and release is in the audit log as a reported pair, and the non-reporting headless participant's transmission is `voice_transmit_unreported`; a client made to report `stopped` while still sending is flagged too;
+  - each press and release is in the audit log as a reported pair, and the non-reporting headless participant's transmission is `voice_transmit_unreported`; a `stopped` report sent while a client is still sending is flagged too. That false report is sent by the test program with the client's own credential, which is all `conchd` can tell a lying client by: the shipped client has no option to misreport, test-only or otherwise;
+  - at most one press in a run may be recorded as reported late (an unreported row closed with `reason=reported`, §6): the rule records one now and then on a loaded machine, and a test that failed on it would be a test of the machine;
   - when a member is removed, the room is rotated; the remaining clients join the new room without being restarted and a new press there is heard (a press held across the rotation ends with it, §5); the removed one stops with the right message;
+  - when LiveKit is stopped and started again the clients reconnect by themselves and are heard again. A restarted LiveKit has lost every room, the SDK cannot know that and keeps trying to resume, so this takes the client's own limit on the SDK's reconnect (20 s, §5) and then one request to `conchd`;
   - no token, room name or login appears in any client's output.
 - **By hand, with Nick:** three people on Linux talking in one channel with hold-to-talk. This is V4's exit in ROADMAP.md, and it cannot be automated.
 
