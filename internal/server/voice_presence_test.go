@@ -1552,7 +1552,12 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 				if read.gaveUp {
 					t.Fatalf("the read was still waiting after %v: its context has no deadline and nothing bounds the request", giveUp)
 				}
-				if !read.bounded || read.budget <= 0 || read.budget > limit {
+				// With the shortened bound the deadline may already have passed
+				// by the time the read looks at it, on a runner that paused the
+				// goroutine for 20 ms: that it is set and no further off than
+				// the bound is what matters. With the full bound it is seconds
+				// away, and must be.
+				if !read.bounded || read.budget > limit || (!stall && read.budget <= 0) {
 					t.Errorf("the read's context: deadline set = %v, %v away; want one at most %v away", read.bounded, read.budget, limit)
 				}
 				if code != http.StatusNoContent {
