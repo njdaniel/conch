@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -338,4 +339,126 @@ func TestApprovalWithControlCharactersInTitleIsNotified(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Issue #164, the whole chain, both halves. A megabyte of approval body still
+// gets its notifications (cut to fit one ntfy message), and when ntfy cannot
+// be reached the failure is audited and logged without the topic, which on a
+// public ntfy server is what lets someone read the notifications.
+func TestApprovalNotificationBodyAndTransportErrors(t *testing.T) {
+	const topic = "tpc-SECRET-grep-me"
+	t.Run("a huge body is still notified", func(t *testing.T) {
+		var mu sync.Mutex
+		var sizes []int
+		ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			sizes = append(sizes, len(raw))
+			mu.Unlock()
+			if len(raw) > 4096 { // a self-hosted ntfy without attachments
+				http.Error(w, "attachments not allowed", http.StatusBadRequest)
+			}
+		}))
+		defer ntfy.Close()
+		srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Ntfy: approvals.NtfyConfig{Server: ntfy.URL, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: time.Second}})
+		channel, agent, human := approvalTestFixture(t, srv)
+		var req schema.CreateApprovalRequestV1
+		if err := json.Unmarshal([]byte(createApprovalBody(channel.ID, agent.ID)), &req); err != nil {
+			t.Fatal(err)
+		}
+		req.Body = strings.Repeat("Deploy everything to prod. ", 4000) // about 100 KiB
+		body, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := postJSON(t, srv, "/v1/approvals", string(body))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body)
+		}
+		var created schema.CreateApprovalResponseV1
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		if created.Approval.Body != req.Body {
+			t.Error("the stored approval body was changed")
+		}
+		decision := fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, human.ID)
+		if rec := postJSON(t, srv, fmt.Sprintf("/v1/approvals/%d/decisions", created.Approval.ID), decision); rec.Code != http.StatusOK {
+			t.Fatalf("decide = %d %s", rec.Code, rec.Body)
+		}
+		events, err := srv.store.ListAuditEvents(context.Background(), 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var chain []string
+		for _, e := range events {
+			if e.Subject == fmt.Sprintf("approval:%d", created.Approval.ID) {
+				chain = append(chain, e.Action)
+			}
+		}
+		want := []string{store.AuditApprovalCreated, approvals.AuditNotifySent, store.AuditDecisionCast, store.AuditApprovalResolved, approvals.AuditNotifySent}
+		if !equalStringSlices(chain, want) {
+			t.Errorf("audit chain = %v, want %v", chain, want)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, n := range sizes {
+			if n > 4096 {
+				t.Errorf("a notification body of %d bytes was sent", n)
+			}
+		}
+	})
+	t.Run("an unreachable ntfy is recorded without the topic", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		logs := captureLogs(t)
+		srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Ntfy: approvals.NtfyConfig{Server: "http://alice:hunter2@" + addr, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: 300 * time.Millisecond}})
+		channel, agent, human := approvalTestFixture(t, srv)
+		rec := postJSON(t, srv, "/v1/approvals", createApprovalBody(channel.ID, agent.ID))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body)
+		}
+		var created schema.CreateApprovalResponseV1
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		decision := fmt.Sprintf(`{"principal_id":%d,"option_id":"approve","reason":"fine"}`, human.ID)
+		if rec := postJSON(t, srv, fmt.Sprintf("/v1/approvals/%d/decisions", created.Approval.ID), decision); rec.Code != http.StatusOK {
+			t.Fatalf("decide = %d %s", rec.Code, rec.Body)
+		}
+		events, err := srv.store.ListAuditEvents(context.Background(), 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		failed := 0
+		for _, e := range events {
+			text := e.Actor + " " + e.Action + " " + e.Subject + " " + e.Detail
+			for _, secret := range []string{topic, "hunter2", addr} {
+				if strings.Contains(text, secret) {
+					t.Errorf("an audit row names %q: %s", secret, text)
+				}
+			}
+			if e.Action == approvals.AuditNotifyFailed {
+				failed++
+				if !strings.Contains(e.Detail, "connection refused") {
+					t.Errorf("notify_failed detail lost the cause: %q", e.Detail)
+				}
+			}
+		}
+		if failed != 2 {
+			t.Errorf("notify_failed rows = %d, want 2", failed)
+		}
+		for _, secret := range []string{topic, "hunter2", addr} {
+			if strings.Contains(logs.buf.String(), secret) {
+				t.Errorf("a log line names %q", secret)
+			}
+		}
+		if !strings.Contains(logs.buf.String(), "notification failed") {
+			t.Error("the log capture is not seeing the notifier's lines")
+		}
+	})
 }
