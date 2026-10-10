@@ -122,6 +122,9 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// The old credential is revoked: a voice room it held a session for is
+	// rotated before the response is written (issue #161).
+	s.voiceCredentialRevoked(ctx)
 	writeSecretJSON(w, http.StatusCreated, schema.RotateCredentialResponseV1{Credential: cred, Token: token})
 }
 
@@ -144,5 +147,9 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// A voice room this credential held a session for is rotated before the
+	// response is written, so a token LiveKit renewed for it is useless
+	// (issue #161). It cannot fail the request.
+	s.voiceCredentialRevoked(ctx)
 	w.WriteHeader(http.StatusNoContent)
 }

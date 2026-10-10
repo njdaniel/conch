@@ -256,6 +256,63 @@ END`,
 )`,
 		`CREATE INDEX message_recipients_by_principal ON message_recipients (principal_id)`,
 	},
+	// 13: Voice rooms (issue #126, docs/design/voice-control-plane.md §3).
+	// conchd names the LiveKit room for an audience and keeps the name; LiveKit
+	// itself forgets rooms, so this row is the durable thing. net_id is NULL
+	// for the channel-wide room and unused until nets get rooms (V5). SQLite
+	// treats NULLs as distinct in a unique index, so "one room per audience"
+	// is two partial unique indexes: one for the channel-wide room, one for
+	// each net. room_name is unique across all rows. A net room must belong
+	// to the net's own channel: the composite foreign key says so (it needs
+	// the unique index on nets it references, and is not checked while net_id
+	// is NULL), so a row can never pair one channel with another's net.
+	{
+		`CREATE UNIQUE INDEX nets_id_channel ON nets (id, channel_id)`,
+		`CREATE TABLE voice_rooms (
+	id         INTEGER PRIMARY KEY,
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	net_id     INTEGER,
+	room_name  TEXT    NOT NULL UNIQUE,
+	created_at INTEGER NOT NULL,
+	FOREIGN KEY (net_id, channel_id) REFERENCES nets (id, channel_id)
+)`,
+		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL`,
+		`CREATE UNIQUE INDEX voice_rooms_by_net ON voice_rooms (net_id) WHERE net_id IS NOT NULL`,
+	},
+	// 14: Rotating voice rooms (issue #161, docs/design/voice-control-plane.md
+	// §5). LiveKit gives every connected participant a renewable token of its
+	// own, so removing someone from a room never stops them rejoining; the room
+	// has to change name instead. A rotated room is retired, not deleted: its
+	// row stays so the name is never handed out again and the sweep can find
+	// rooms LiveKit still has to delete. "One room per audience" becomes "one
+	// live room per audience", so the two partial unique indexes are dropped
+	// (SQLite cannot alter a partial index) and recreated over live rows.
+	// room_name stays unique across live and retired rows. voice_room_holders
+	// records, durably, every credential a session was issued under for a room:
+	// the set of people who may hold a token LiveKit will renew. Its rows go
+	// when the room is retired.
+	//
+	// Rooms that exist before this migration have no holder rows, although
+	// tokens for them may be out and LiveKit may be renewing them, so nobody
+	// losing their place could ever rotate them. They are all retired here:
+	// the first sweep deletes any that LiveKit still has, and the next session
+	// for a channel creates its room afresh, with holders recorded.
+	{
+		`ALTER TABLE voice_rooms ADD COLUMN retired_at INTEGER`,
+		`UPDATE voice_rooms SET retired_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000`,
+		`DROP INDEX voice_rooms_channel_wide`,
+		`DROP INDEX voice_rooms_by_net`,
+		`CREATE UNIQUE INDEX voice_rooms_channel_wide ON voice_rooms (channel_id) WHERE net_id IS NULL AND retired_at IS NULL`,
+		`CREATE UNIQUE INDEX voice_rooms_by_net ON voice_rooms (net_id) WHERE net_id IS NOT NULL AND retired_at IS NULL`,
+		`CREATE TABLE voice_room_holders (
+	room_id       INTEGER NOT NULL REFERENCES voice_rooms (id),
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	credential_id INTEGER NOT NULL REFERENCES credentials (id),
+	created_at    INTEGER NOT NULL,
+	PRIMARY KEY (room_id, principal_id, credential_id)
+)`,
+		`CREATE INDEX voice_room_holders_by_credential ON voice_room_holders (credential_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -268,6 +325,10 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 // Store is the embedded SQLite database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
+	// rollbackSQL replaces "ROLLBACK" in withImmediateTx when set. Tests set
+	// it to a statement that fails, to exercise the path where a transaction
+	// cannot be ended and the connection must be discarded.
+	rollbackSQL string
 }
 
 // Open opens (creating if necessary) the database at path, enables WAL mode

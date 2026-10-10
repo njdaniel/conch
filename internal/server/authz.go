@@ -56,6 +56,7 @@ const (
 	denyNetMonitorOnly    = "net_monitor_only"
 	denyNetNotOn          = "net_not_on"
 	denyAgentOnHumanRoute = "agents_use_mcp"
+	denyAgentVoice        = "agents_no_voice"
 )
 
 var (

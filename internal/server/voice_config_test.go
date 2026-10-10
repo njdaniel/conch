@@ -10,7 +10,9 @@ import (
 	"github.com/njdaniel/conch/internal/server/livekit"
 )
 
-func TestVoiceConfiguredAndStartupNeverContactsLiveKit(t *testing.T) {
+// Building the server contacts nothing. (Serving does, once, at start: the
+// presence poller's first sweep; see TestVoicePollerLoopRunsTheFirstSweepAtStart.)
+func TestVoiceConfiguredAndBuildingTheServerNeverContactsLiveKit(t *testing.T) {
 	var hits atomic.Int32
 	lk := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 	defer lk.Close()
@@ -32,7 +34,7 @@ func TestVoiceConfiguredAndStartupNeverContactsLiveKit(t *testing.T) {
 		})
 	}
 	if n := hits.Load(); n != 0 {
-		t.Errorf("LiveKit received %d request(s) during startup, want 0", n)
+		t.Errorf("LiveKit received %d request(s) while the server was built, want 0", n)
 	}
 }
 
