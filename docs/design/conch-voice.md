@@ -114,40 +114,48 @@ voice-control-plane.md §9 decision 1 left this to V4, and #135 recorded it: the
 - A report that does not change the state (a second `started`) succeeds and writes nothing.
 - Reports are bounded per principal. Past the bound the answer is 429, audited once per window, so the endpoint cannot be used to flood the audit log.
 
-**Two states, compared on every pass.** For each participant in a room `conchd` holds what the client last *reported* (`started` or `stopped`; `stopped` until told otherwise) and what the poller last *observed* (microphone unmuted or not). While they agree, the reports are the record and the poller writes nothing. A disagreement is given a short time to be an honest lag, and is then recorded as what the poller saw:
+**Two states, compared on every pass.** For each participant in a room `conchd` holds what the client last *reported* (`started` or `stopped`; `stopped` until told otherwise) and what the poller *observes* on each pass (microphone unmuted or not). While they agree, the reports are the record and the poller writes nothing.
 
-- **Unmuted, but reported `stopped`.** If a `stopped` report arrived less than 1 s ago, this is the mute still on its way and is ignored. Otherwise a disagreement begins. Two seconds after it began it is judged: if a `started` report has arrived in the meantime, the report was late and nothing is written; if not, it is an unreported transmission, however short it turned out to be.
-- **Muted, but reported `started`**, for 2 s: the stop report was lost or never sent. The poller closes the transmission and sets the reported state to `stopped`.
+- **An unaccounted pass** is one that sees the microphone unmuted while the reported state is `stopped`.
+- **One unaccounted pass alone is tolerated if a report arrived within one poll interval of it**, before or after. A report and a mute travel separately, so a pass can catch a release between its `stopped` report and its mute, or a press between its unmute and its `started` report. With no report near it, a lone unaccounted pass is an unreported transmission that began and ended.
+- **Two unaccounted passes in a row open an unreported transmission**, timed at the first of them. No report excuses that.
+- **An unreported transmission is closed** by the first later pass that sees the microphone muted, the participant gone, or the reported state `started` (the client has caught up, and from there its reports are the record again).
+- **Muted on every pass for 2 s while the reported state is `started`**: the stop report was lost or never sent. The poller closes the transmission and sets the reported state to `stopped`.
+
+The rule looks only at the reported state at the instant of each pass. A client cannot satisfy it with reports that are merely frequent or recent; to avoid two unaccounted passes in a row its reports have to be true to within about one poll interval.
 
 **Audit.**
 
 | Event | Written by | When |
 |---|---|---|
 | `voice_transmit_started`, `voice_transmit_stopped` with `source=reported` | the endpoint | each reported change of state |
-| `voice_transmit_unreported` with `source=observed` | the poller | an unreported transmission, as judged above. Timed at the moment the disagreement began. |
-| `voice_transmit_stopped` with `source=observed` | the poller | an unreported transmission ends (the microphone is muted, or the participant leaves) |
+| `voice_transmit_unreported` with `source=observed` | the poller | an unreported transmission opens. Timed at its first unaccounted pass. |
+| `voice_transmit_stopped` with `source=observed` | the poller | an unreported transmission closes: `reason=muted`, `reason=left`, or `reason=reported` when the client caught up |
 | `voice_transmit_stopped` with `source=observed` and `reason=no_stop_report` | the poller | muted for 2 s while reported `started` |
 | `voice_transmit_stopped` with `source=observed` and `reason=left` | the poller | the reported state is `started` when the participant leaves, is removed, or the room is rotated |
+
+Every row that opens a transmission has a row that closes it, except across a `conchd` restart (below).
 
 Cases the rule is meant to get right:
 
 - **A press shorter than the poll interval.** The poller may never see it. The reported pair is the record. This is the case polling alone missed.
-- **A participant that never reports** (the headless participant in `e2e/voice`, a modified client). Every transmission the poller sees is recorded as unreported, at the resolution V3 had: one poll interval.
-- **A client that reports `started`, then `stopped`, and keeps transmitting.** The reported pair is written. From one second after the `stopped`, the unmuted microphone is a disagreement, and it is recorded as unreported. Reporting cannot be used to cover a transmission; at most it hides the second and a half after a false `stopped`.
-- **A client that alternates reports quickly to stay inside that second.** Each pair is a row, so the log shows it transmitting on and off throughout, and the bound on reports (above) ends it: once reports are refused the state stops changing and the rule applies.
-- **A `stopped` report that never arrives.** Closed by the poller after 2 s with `reason=no_stop_report`. A transmission is never left open in the log. A retry that arrives later changes nothing and writes nothing.
-- **A `started` report that arrives late**, after the poller has written `unreported`. It is written as reported, and from then on the transmission is a reported one: its end comes from the `stopped` report. The log shows `unreported`, then `started`, then `stopped`, which is what happened.
+- **A participant that never reports** (the headless participant in `e2e/voice`, a modified client). Every transmission the poller sees, even on a single pass, is recorded as unreported: the resolution V3 had.
+- **A client that reports `started`, then `stopped`, and keeps transmitting.** The reported pair is written. The second pass after the false `stopped` opens an unreported transmission, timed at the first. Reporting cannot be used to cover a transmission.
+- **A client that sends many short `started`/`stopped` pairs while transmitting continuously.** What counts is the reported state at each pass, and that is `stopped` almost always, so an unreported transmission opens and stays open.
+- **A `stopped` report that never arrives.** Closed by the poller after 2 s with `reason=no_stop_report`. A retry that arrives later changes nothing and writes nothing.
+- **A `started` report that arrives late**, after an unreported transmission was opened. The report is written; the next pass closes the unreported transmission with `reason=reported`; the press then ends with its reported `stopped`. The log shows the part nobody accounted for and the part the client did, each opened and closed.
 - **A report with no audio** (`started` sent, microphone never unmuted). Closed after 2 s with `reason=no_stop_report`.
-- **`conchd` restarts during a press.** Reported state is in memory and is lost, so it reads `stopped`. The poller records the rest of the press as unreported; the client's `stopped` report then changes nothing; the poller writes the observed stop. The log has the reported start from before the restart, an `unreported` row and one observed stop: one row more than happened, and no missing end.
-- **Two devices for one principal.** There is one connection per principal per room (voice-control-plane.md §9, decision 3) and reported state is per principal. A device that is displaced stops and reports `stopped` for its own open press. If the new device was already holding its key, that closes the new device's press in the log and the poller records the rest of it as unreported. Rare, and it errs toward recording more.
+- **`conchd` restarts during a press.** Reported state is in memory and is lost, so it reads `stopped`. The poller opens an unreported transmission and closes it when the microphone is muted; the client's `stopped` report changes nothing. The `started` row written before the restart is the one row in the log with no closing row of its own; the restart is itself in the audit log, between them.
+- **Two devices for one principal.** There is one connection per principal per room (voice-control-plane.md §9, decision 3) and reported state is per principal, so a last report from a displaced device can change the state the new device set. The comparison corrects the record within two passes. Rare, and it errs toward recording more.
 
 What follows from this:
 
-- **It replaces V3's rows.** In V3 the poller wrote a `started` and a `stopped` row for every transmission it saw. From V4 it writes nothing while the reports and what it sees agree, so there is one pair of rows per press, with exact times, and an `unreported` row marks exactly the transmissions the client did not account for.
-- **What is still unrecorded:** a burst shorter than the poll interval from a client altered not to report it (the stated limit of voice-control-plane.md §9 decision 1, unchanged), and up to about a second and a half of transmission after a false `stopped` (new; it is the price of not flagging an honest release whose mute the poller sees a moment late).
+- **It replaces V3's rows.** In V3 the poller wrote a `started` and a `stopped` row for every transmission it saw. From V4 it writes nothing while the reports and what it sees agree, so an honest client's press is one pair of rows, and an `unreported` row marks exactly the transmissions the client did not account for.
+- **Times.** A reported row carries the moment `conchd` received the report, which is the press or release plus the network delay. That is far closer than a poll interval, and it is the server's clock.
+- **What is still unrecorded:** a burst shorter than the poll interval from a client that does not report it (the stated limit of voice-control-plane.md §9 decision 1, unchanged), and misreporting of up to about one poll interval at the edges of a transmission.
 - **State is in memory**, per room and principal, and is dropped with the room.
 
-**Client side.** The report is sent when the gate opens and when it shuts, without waiting for the answer. A failed report is retried briefly and shown in the status line. **Audio does not wait for, or depend on, the report:** if `conchd` cannot be reached the transmission goes ahead, and when `conchd` is back the poller records what it sees as unreported, which is the truthful record.
+**Client side.** A report is queued when the gate opens and when it shuts. The client sends its reports one at a time, in order, each after the answer to the one before, because the server takes them in arrival order: two requests in flight at once could arrive reversed and leave the state wrong. A failed report is retried briefly, in place, and shown in the status line. **Audio does not wait for, or depend on, the report:** if `conchd` cannot be reached the transmission goes ahead, and when `conchd` is back the poller records what it sees as unreported, which is the truthful record.
 
 ## 7. Presence and the status display
 
