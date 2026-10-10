@@ -199,7 +199,10 @@ pub enum PttInput {
     PublishGrant(bool),
     /// Whether there is a microphone.
     Microphone(bool),
-    /// Whether the key device is open and readable.
+    /// Whether the key device is open and readable. Send `false` whenever a read fails, the
+    /// device is closed, or it is about to be reopened: that ends whatever was held on it,
+    /// since its release will never be read. A key event counts as proof that the device is
+    /// there, so a loss is acted on even if `true` was never sent.
     KeyDevice(bool),
     /// The gate reports that it has actually shut, after a `Shut` (when its release tail has
     /// run out) or a `ForceShut`. Deliver one for each time the gate goes from open to shut.
@@ -351,6 +354,14 @@ impl Ptt {
             && now.saturating_sub(since) >= self.max_transmit
         {
             self.force_shut(ShutReason::MaxTransmit, &mut out);
+        }
+
+        // A key event proves there is a key device, whether or not the caller announced
+        // one. Without this, a caller that reports only the loss of the device would have
+        // that loss ignored, and a press held at the time would stay open: no release can
+        // come from a device that is gone.
+        if matches!(input, PttInput::Key(_)) {
+            self.key_device_present = true;
         }
 
         match input {
@@ -1453,11 +1464,41 @@ mod tests {
         );
         assert_eq!(harness.send(PttInput::Tick), []);
         harness.send(DOWN);
+        let deadline = harness.ptt.deadline();
         assert_eq!(harness.send(DOWN), [], "a second down with no up between");
+        assert_eq!(
+            harness.ptt.deadline(),
+            deadline,
+            "a repeated down must not restart the transmit limit"
+        );
         assert_eq!(harness.send(key(Key::Talk, KeyAction::Press)), []);
         assert_eq!(harness.send(PttInput::Tick), []);
         assert_eq!(harness.send(PttInput::Connected(true)), []);
         assert_eq!(harness.finish(), 1);
+    }
+
+    /// A caller that never said the key device was there, and then says it is gone: the
+    /// press that came from it proved it was there, so its loss ends the transmission.
+    #[test]
+    fn losing_a_key_device_that_was_never_announced_still_shuts_the_gate() {
+        let (mut harness, _) = Harness::new();
+        harness.send(PttInput::Microphone(true));
+        harness.send(PttInput::PublishGrant(true));
+        harness.send(PttInput::Connected(true));
+        let opened = harness.send(key(Key::Talk, KeyAction::Press));
+        assert!(
+            opened.contains(&PttOutput::Gate(GateCommand::Open)),
+            "{opened:?}"
+        );
+
+        let lost = harness.send(PttInput::KeyDevice(false));
+        assert!(
+            lost.contains(&PttOutput::Gate(GateCommand::ForceShut(
+                ShutReason::KeyDeviceLost
+            ))),
+            "the loss of the device must shut the gate: {lost:?}"
+        );
+        assert_ne!(harness.gate, FakeGate::Open);
     }
 
     #[test]

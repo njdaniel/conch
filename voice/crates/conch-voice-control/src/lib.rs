@@ -26,10 +26,10 @@
 // `struct input_event` begins with a `struct timeval`, which is two machine words. On a
 // 32-bit system the record is 16 bytes, not 24, and the decoder would read every event out
 // of step. Linux on 64 bits is the only target (ADR-006).
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(not(all(target_pointer_width = "64", target_endian = "little")))]
 compile_error!(
-    "conch-voice-control decodes the 24-byte input_event of 64-bit Linux and must not be \
-     built for any other pointer width"
+    "conch-voice-control decodes the 24-byte little-endian input_event of 64-bit Linux and \
+     must not be built for any other pointer width or byte order"
 );
 
 mod config;
@@ -40,7 +40,7 @@ mod ptt;
 
 pub use config::{
     AudioConfig, Config, ConfigOverrides, DEFAULT_MAX_TRANSMIT_SECS, DEFAULT_RELEASE_TAIL_MS,
-    DEFAULT_SERVER, KeysConfig,
+    DEFAULT_SERVER, KeysConfig, MAX_MAX_TRANSMIT_SECS, MAX_RELEASE_TAIL_MS,
 };
 pub use error::Error;
 pub use keys::{KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent};

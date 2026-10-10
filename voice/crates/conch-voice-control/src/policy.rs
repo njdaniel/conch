@@ -124,6 +124,10 @@ pub struct ConnectionPolicy {
     asked_at_once: bool,
     /// When the current connection was established, if there is one.
     connected_at: Option<Duration>,
+    /// The stop that was given, if one was. A stop is final: every later call returns it
+    /// again, so a second event after it (another disconnect, say) cannot restart the client
+    /// and set two devices displacing each other.
+    stopped: Option<&'static str>,
 }
 
 impl ConnectionPolicy {
@@ -154,11 +158,21 @@ impl ConnectionPolicy {
             self.asked_at_once = false;
         }
 
-        match outcome.rule() {
-            Rule::Stop(message) => NextStep::Stop {
+        if let Some(message) = self.stopped {
+            return NextStep::Stop {
                 message,
                 exit_code: EXIT_STOPPED,
-            },
+            };
+        }
+
+        match outcome.rule() {
+            Rule::Stop(message) => {
+                self.stopped = Some(message);
+                NextStep::Stop {
+                    message,
+                    exit_code: EXIT_STOPPED,
+                }
+            }
             Rule::AskOnce if !self.asked_at_once => {
                 self.asked_at_once = true;
                 NextStep::AskNow
@@ -308,12 +322,25 @@ mod tests {
         for _ in 0..4 {
             policy.next(secs(1), Outcome::ConnectionLost, LATEST);
         }
-        let before = policy.clone();
-        assert!(matches!(
-            policy.next(secs(2), Outcome::DuplicateIdentity, LATEST),
-            NextStep::Stop { .. }
-        ));
-        assert_eq!(policy, before, "a stop changes nothing");
+        let stop = policy.next(secs(2), Outcome::DuplicateIdentity, LATEST);
+        assert!(matches!(stop, NextStep::Stop { .. }));
+
+        // And it stays a stop, with the same message, whatever is reported afterwards:
+        // nothing that happens after a stop may set the client going again.
+        for later in [
+            Outcome::ConnectionLost,
+            Outcome::RoomDeleted,
+            Outcome::ServerUnreachable,
+            Outcome::NotAMember,
+        ] {
+            assert_eq!(policy.next(secs(3), later, EARLIEST), stop, "{later:?}");
+        }
+        policy.connected(secs(4));
+        assert_eq!(
+            policy.next(secs(100), Outcome::ConnectionLost, EARLIEST),
+            stop,
+            "not even a connection that lasted clears it"
+        );
     }
 
     #[test]

@@ -82,6 +82,12 @@ impl Default for AudioConfig {
     }
 }
 
+/// The longest release tail accepted, in milliseconds. The gate stays open for the tail
+/// after the key is released, and nothing else bounds it.
+pub const MAX_RELEASE_TAIL_MS: u32 = 2_000;
+/// The longest transmit limit accepted, in seconds. Beyond this it would not be a limit.
+pub const MAX_MAX_TRANSMIT_SECS: u32 = 600;
+
 /// One layer of values to put over a [`Config`]: the environment, or the command line. A
 /// field left `None` leaves the configuration as it was.
 ///
@@ -123,7 +129,7 @@ impl Config {
     /// - [`Error::UnknownConfigKey`] for a key this version does not know, so that a typo is
     ///   not silently ignored.
     /// - [`Error::InvalidConfigValue`] for a value of the wrong type, a key name that is not
-    ///   in the table, two bindings to one key, or `max_transmit_secs = 0`.
+    ///   in the table, two bindings to one key, or a value [`Config::validate`] refuses.
     /// - [`Error::InvalidConfig`] for text that is not TOML.
     ///
     /// All three name `file`, and the first two name the key.
@@ -149,14 +155,6 @@ impl Config {
             mute: key_code("keys.mute", raw.keys.mute)?,
             deafen: key_code("keys.deafen", raw.keys.deafen)?,
         };
-        if let Err(error) = KeyBindings::new(keys.talk, keys.mute, keys.deafen) {
-            let key = match &error {
-                Error::DuplicateKeyBinding { second, .. } => format!("keys.{second}"),
-                _ => "keys".to_owned(),
-            };
-            return Err(invalid(&key, error.to_string()));
-        }
-
         let defaults = AudioConfig::default();
         let audio = AudioConfig {
             input: raw.audio.input,
@@ -174,24 +172,109 @@ impl Config {
                 .max_transmit_secs
                 .unwrap_or(defaults.max_transmit_secs),
         };
-        if audio.max_transmit_secs == 0 {
-            return Err(invalid(
-                "audio.max_transmit_secs",
-                "must be at least 1: a limit of 0 would shut the gate on every press".to_owned(),
-            ));
-        }
-
-        Ok(Self {
+        let config = Self {
             server: raw.server,
             channel: raw.channel,
             keys,
             audio,
-        })
+        };
+        config.validate(file)?;
+        Ok(config)
     }
 
-    /// Puts one layer of overrides on top. Apply the environment's and then the command
-    /// line's for the usual order.
-    pub fn apply(&mut self, overrides: ConfigOverrides) {
+    /// Checks the values that have a range. [`Config::parse`] and [`Config::apply`] both end
+    /// here, so no layer can put in what another would have refused. `source` is the name
+    /// errors give for where the values came from.
+    ///
+    /// The two times are bounded because each keeps the microphone open: the release tail
+    /// after the key is up (nothing else limits it), and the longest single press, which is
+    /// the only thing that ends a transmission whose release was lost.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfigValue`] naming the key.
+    pub fn validate(&self, source: &str) -> Result<(), Error> {
+        let invalid = |key: &str, message: String| Error::InvalidConfigValue {
+            file: source.to_owned(),
+            key: key.to_owned(),
+            message,
+        };
+        if self.audio.release_tail_ms > MAX_RELEASE_TAIL_MS {
+            return Err(invalid(
+                "audio.release_tail_ms",
+                format!(
+                    "must be at most {MAX_RELEASE_TAIL_MS}: the microphone stays open this long after the key is released"
+                ),
+            ));
+        }
+        if !(1..=MAX_MAX_TRANSMIT_SECS).contains(&self.audio.max_transmit_secs) {
+            return Err(invalid(
+                "audio.max_transmit_secs",
+                format!(
+                    "must be from 1 to {MAX_MAX_TRANSMIT_SECS}: 0 would shut the gate on every press, and more would be no limit on a stuck key"
+                ),
+            ));
+        }
+        if let Some(server) = &self.server {
+            // The value itself is not put in the message: it may hold a password.
+            let rest = server
+                .strip_prefix("http://")
+                .or_else(|| server.strip_prefix("https://"));
+            let authority = rest.map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
+            match authority {
+                None | Some("") => {
+                    return Err(invalid(
+                        "server",
+                        "must be an http:// or https:// address with a host".to_owned(),
+                    ));
+                }
+                Some(authority) if authority.contains('@') => {
+                    return Err(invalid(
+                        "server",
+                        "must not contain a user name or password: sign in with `conch login`"
+                            .to_owned(),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if let Err(error) = KeyBindings::new(self.keys.talk, self.keys.mute, self.keys.deafen) {
+            let key = match &error {
+                Error::DuplicateKeyBinding { second, .. } => format!("keys.{second}"),
+                _ => "keys".to_owned(),
+            };
+            return Err(invalid(&key, error.to_string()));
+        }
+        if let Some(device) = &self.keys.device
+            && (!device.starts_with("/dev/input/")
+                || device.split('/').any(|part| part == ".." || part == "."))
+        {
+            return Err(invalid(
+                "keys.device",
+                "must be a path under /dev/input/, such as /dev/input/by-id/...-event-kbd"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Puts one layer of overrides on top, then checks the result as [`Config::validate`]
+    /// does. Apply the environment's and then the command line's for the usual order.
+    /// `source` names the layer in an error ("the command line").
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfigValue`] if the result is out of range. The configuration is
+    /// then left as it was.
+    pub fn apply(&mut self, overrides: ConfigOverrides, source: &str) -> Result<(), Error> {
+        let mut next = self.clone();
+        next.put(overrides);
+        next.validate(source)?;
+        *self = next;
+        Ok(())
+    }
+
+    fn put(&mut self, overrides: ConfigOverrides) {
         fn put<T>(slot: &mut Option<T>, value: Option<T>) {
             if value.is_some() {
                 *slot = value;
@@ -395,6 +478,7 @@ mod tests {
     use super::*;
 
     const FILE: &str = "/home/someone/.config/conch/voice.toml";
+    const SOURCE: &str = "the command line";
 
     /// Every key of the note's §8, each with a value that is not its default.
     const EVERY_KEY: &str = r#"
@@ -717,15 +801,20 @@ max_transmit_secs = 45
     #[test]
     fn overrides_replace_only_what_they_set() {
         let mut config = every_key();
-        config.apply(ConfigOverrides::default());
+        config.apply(ConfigOverrides::default(), SOURCE).unwrap();
         assert_eq!(config, every_key());
 
-        config.apply(ConfigOverrides {
-            channel: Some("general".to_owned()),
-            talk: key("KEY_F15"),
-            max_transmit_secs: Some(30),
-            ..ConfigOverrides::default()
-        });
+        config
+            .apply(
+                ConfigOverrides {
+                    channel: Some("general".to_owned()),
+                    talk: key("KEY_F15"),
+                    max_transmit_secs: Some(30),
+                    ..ConfigOverrides::default()
+                },
+                SOURCE,
+            )
+            .unwrap();
         let mut want = every_key();
         want.channel = Some("general".to_owned());
         want.keys.talk = key("KEY_F15");
@@ -736,19 +825,24 @@ max_transmit_secs = 45
     #[test]
     fn every_field_can_be_overridden() {
         let mut config = Config::default();
-        config.apply(ConfigOverrides {
-            server: Some("https://conch.example.test".to_owned()),
-            channel: Some("ops".to_owned()),
-            key_device: Some("/dev/input/by-id/usb-Example_Keyboard-event-kbd".to_owned()),
-            talk: key("KEY_RIGHTCTRL"),
-            mute: key("KEY_F13"),
-            deafen: key("KEY_F14"),
-            input: Some("alsa_input.example-mic".to_owned()),
-            output: Some("alsa_output.example-headset".to_owned()),
-            echo_cancellation: Some(true),
-            release_tail_ms: Some(250),
-            max_transmit_secs: Some(45),
-        });
+        config
+            .apply(
+                ConfigOverrides {
+                    server: Some("https://conch.example.test".to_owned()),
+                    channel: Some("ops".to_owned()),
+                    key_device: Some("/dev/input/by-id/usb-Example_Keyboard-event-kbd".to_owned()),
+                    talk: key("KEY_RIGHTCTRL"),
+                    mute: key("KEY_F13"),
+                    deafen: key("KEY_F14"),
+                    input: Some("alsa_input.example-mic".to_owned()),
+                    output: Some("alsa_output.example-headset".to_owned()),
+                    echo_cancellation: Some(true),
+                    release_tail_ms: Some(250),
+                    max_transmit_secs: Some(45),
+                },
+                SOURCE,
+            )
+            .unwrap();
         assert_eq!(config, every_key());
         assert_eq!(config.server_or_default(), "https://conch.example.test");
     }
@@ -765,29 +859,175 @@ max_transmit_secs = 45
             channel: Some("from-flag".to_owned()),
             ..ConfigOverrides::default()
         };
-        config.apply(environment);
-        config.apply(command_line);
+        config.apply(environment, SOURCE).unwrap();
+        config.apply(command_line, SOURCE).unwrap();
         assert_eq!(config.channel.as_deref(), Some("from-flag"));
         assert_eq!(config.server.as_deref(), Some("http://from-env.test"));
     }
 
     #[test]
-    fn overrides_that_collide_are_caught_when_the_bindings_are_built() {
+    fn overrides_that_collide_are_refused_and_change_nothing() {
         let mut config = every_key();
-        config.apply(ConfigOverrides {
-            deafen: key("KEY_RIGHTCTRL"),
-            ..ConfigOverrides::default()
-        });
-        assert_eq!(
-            config.key_bindings(),
-            Err(Error::DuplicateKeyBinding {
-                first: crate::Key::Talk,
-                second: crate::Key::Deafen
-            })
+        let error = config
+            .apply(
+                ConfigOverrides {
+                    deafen: key("KEY_RIGHTCTRL"),
+                    ..ConfigOverrides::default()
+                },
+                SOURCE,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidConfigValue { file, key, .. } if file == SOURCE && key == "keys.deafen"),
+            "{error:?}"
         );
+        assert_eq!(config, every_key(), "a refused layer leaves nothing behind");
         assert_eq!(
             every_key().key_bindings().unwrap().talk(),
             key("KEY_RIGHTCTRL")
+        );
+    }
+
+    /// The two times that keep the microphone open are bounded, and the bound holds for
+    /// the file and for every layer over it.
+    #[test]
+    fn the_times_that_keep_the_microphone_open_are_bounded_in_every_layer() {
+        let in_file = [
+            ("[audio]\nrelease_tail_ms = 2001\n", "audio.release_tail_ms"),
+            (
+                "[audio]\nrelease_tail_ms = 4294967295\n",
+                "audio.release_tail_ms",
+            ),
+            (
+                "[audio]\nmax_transmit_secs = 0\n",
+                "audio.max_transmit_secs",
+            ),
+            (
+                "[audio]\nmax_transmit_secs = 601\n",
+                "audio.max_transmit_secs",
+            ),
+            (
+                "[audio]\nmax_transmit_secs = 4294967295\n",
+                "audio.max_transmit_secs",
+            ),
+        ];
+        for (text, want) in in_file {
+            let error = Config::parse(text, FILE).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == want),
+                "{text:?}: {error:?}"
+            );
+        }
+        for (text, tail, limit) in [
+            (
+                "[audio]\nrelease_tail_ms = 2000\nmax_transmit_secs = 600\n",
+                2000,
+                600,
+            ),
+            (
+                "[audio]\nrelease_tail_ms = 0\nmax_transmit_secs = 1\n",
+                0,
+                1,
+            ),
+        ] {
+            let config = Config::parse(text, FILE).unwrap();
+            assert_eq!(
+                (config.audio.release_tail_ms, config.audio.max_transmit_secs),
+                (tail, limit)
+            );
+        }
+
+        let layers = [
+            (
+                ConfigOverrides {
+                    release_tail_ms: Some(u32::MAX),
+                    ..ConfigOverrides::default()
+                },
+                "audio.release_tail_ms",
+            ),
+            (
+                ConfigOverrides {
+                    max_transmit_secs: Some(0),
+                    ..ConfigOverrides::default()
+                },
+                "audio.max_transmit_secs",
+            ),
+            (
+                ConfigOverrides {
+                    max_transmit_secs: Some(u32::MAX),
+                    ..ConfigOverrides::default()
+                },
+                "audio.max_transmit_secs",
+            ),
+        ];
+        for (layer, want) in layers {
+            let mut config = Config::default();
+            let error = config.apply(layer, SOURCE).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == want),
+                "{error:?}"
+            );
+            assert_eq!(config, Config::default());
+        }
+    }
+
+    #[test]
+    fn a_server_must_be_http_with_a_host_and_no_password() {
+        for bad in [
+            "",
+            "conch.example.test",
+            "ftp://conch.example.test",
+            "http://",
+            "https:///path",
+            "https://user:FAKE-PASSWORD@conch.example.test",
+            "http://user@conch.example.test/prefix",
+        ] {
+            let text = format!("server = {bad:?}\n");
+            let error = Config::parse(&text, FILE).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == "server"),
+                "{bad:?}: {error:?}"
+            );
+            assert!(
+                !error.to_string().contains("FAKE-PASSWORD"),
+                "the value is not echoed: {error}"
+            );
+        }
+        for good in [
+            "http://127.0.0.1:8080",
+            "https://conch.example.test/prefix",
+            "http://[::1]:8080",
+        ] {
+            let text = format!("server = {good:?}\n");
+            assert_eq!(
+                Config::parse(&text, FILE).unwrap().server.as_deref(),
+                Some(good)
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_device_must_be_under_dev_input() {
+        for bad in [
+            "",
+            "/etc/shadow",
+            "../../relative",
+            "/dev/input/../sda",
+            "/dev/input/./event3",
+            "/dev/inputs/event3",
+        ] {
+            let text = format!("[keys]\ndevice = {bad:?}\n");
+            let error = Config::parse(&text, FILE).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == "keys.device"),
+                "{bad:?}: {error:?}"
+            );
+        }
+        let good = "/dev/input/by-id/usb-Example_Keyboard-event-kbd";
+        let text = format!("[keys]\ndevice = {good:?}\n");
+        assert_eq!(
+            Config::parse(&text, FILE).unwrap().keys.device.as_deref(),
+            Some(good)
         );
     }
 }

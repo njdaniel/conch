@@ -11,6 +11,9 @@
 //!   or a command-line value, never from a byte that was read.
 //! - [`KeyDecoder`] keeps the bindings and at most one incomplete record (23 bytes) between
 //!   calls. A complete record is examined in a local and is gone when the call returns.
+//!   While a fragment is pending it can hold the bytes of another key's event; it is wiped
+//!   when the record completes and by [`KeyDecoder::reset`]. A keyboard's event device
+//!   returns whole records, so a fragment only arises if the caller's reads are split.
 //!
 //! One event that is not a key is acted on: `SYN_DROPPED`, the kernel saying that it lost
 //! events. A lost release of the talk key would leave the microphone open, so it is reported
@@ -370,6 +373,10 @@ impl KeyDecoder {
 
     /// Forgets an incomplete record. Call it when the device is closed or reopened: a newly
     /// opened device starts at a record boundary.
+    ///
+    /// It reports nothing. A release that happened while the device was closed is never
+    /// read, so the caller must also tell the push-to-talk machine that the device went
+    /// away (`PttInput::KeyDevice(false)`), which ends whatever was held on it.
     pub fn reset(&mut self) {
         self.discard_partial();
     }
@@ -637,6 +644,10 @@ mod tests {
         assert_eq!(decoder.feed(&other[..20]), []);
         decoder.reset();
         assert_eq!(decoder.pending_len(), 0);
+        assert_eq!(
+            decoder.partial, [0; INPUT_EVENT_LEN],
+            "the bytes are wiped, not just their count"
+        );
         // Without the reset these 24 bytes would be read 20 bytes out of step.
         assert_eq!(
             decoder.feed(&record(2, 0, EV_KEY, 97, 1)),
@@ -787,6 +798,16 @@ mod tests {
             vec![event(TALK, PRESS), event(TALK, RELEASE)],
             "an ordinary sync report yields nothing; a dropped one releases the talk key"
         );
+
+        // Only a synchronisation event with that code means lost events: a key whose code
+        // happens to be 3 does not release anything.
+        let mut decoder = KeyDecoder::new(bindings());
+        assert_eq!(decoder.feed(&record(3, 0, EV_KEY, SYN_DROPPED, 1)), []);
+        assert_eq!(decoder.feed(&record(3, 0, EV_KEY, SYN_DROPPED, 0)), []);
+
+        // A code is compared whole: one that matches the talk key in its low byte only is
+        // another key.
+        assert_eq!(decoder.feed(&record(4, 0, EV_KEY, talk + 0x100, 1)), []);
 
         // With no talk key bound there is nothing to release.
         let unbound = KeyBindings::new(None, Some(code("KEY_F13")), None).unwrap();
