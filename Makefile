@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check check schema-compat depgate hooks-install clean
+.PHONY: build test lint vet fmt fmt-check check schema-compat depgate rust-check rust-build hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -28,7 +28,18 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check vet lint test schema-compat depgate
+check: fmt-check vet lint test schema-compat depgate rust-check
+
+# The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
+# dependency gate and cargo-deny, with the pinned toolchain. Fetch that once
+# with scripts/voice-toolchain.sh; without it this fails, it does not skip.
+rust-check:
+	./scripts/rust-check.sh
+
+# Builds bin/conch-voice. Not part of `build`: conchd and conch need no Rust.
+rust-build:
+	@mkdir -p bin
+	bash -c '. ./scripts/voice-env.sh && cd voice && cargo build --locked --release && cp target/release/conch-voice ../bin/conch-voice'
 
 schema-compat:
 	./scripts/schema-compat.sh
@@ -41,4 +52,4 @@ hooks-install:
 	@echo "git hooks installed (.githooks)"
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ voice/target/
