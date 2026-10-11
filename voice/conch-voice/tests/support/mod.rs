@@ -10,11 +10,12 @@
 #![allow(dead_code)]
 
 pub mod fake;
+pub mod keyboard;
 pub mod stub;
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use conch_voice::Error;
@@ -48,6 +49,46 @@ impl Write for Written {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(bytes);
         Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Whoever reads the client's standard output, who can stop reading: while stopped, a write
+/// does not return, as a write to a full pipe or to a terminal under Ctrl-S does not. What
+/// was read goes where the test reads it back.
+#[derive(Clone, Default)]
+pub struct Reader {
+    read: Written,
+    stopped: Arc<(Mutex<bool>, Condvar)>,
+    /// True while a write is waiting for the reader.
+    waiting: Arc<AtomicBool>,
+}
+
+impl Reader {
+    /// Stops reading, or reads again.
+    pub fn stop(&self, stopped: bool) {
+        *self.stopped.0.lock().unwrap() = stopped;
+        self.stopped.1.notify_all();
+    }
+
+    /// Whether a write is stuck waiting to be read.
+    pub fn is_waited_for(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst)
+    }
+}
+
+impl Write for Reader {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut stopped = self.stopped.0.lock().unwrap();
+        while *stopped {
+            self.waiting.store(true, Ordering::SeqCst);
+            stopped = self.stopped.1.wait(stopped).unwrap();
+        }
+        self.waiting.store(false, Ordering::SeqCst);
+        self.read.write(bytes)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -116,10 +157,15 @@ pub async fn several_frames() {
 pub fn quick() -> Timings {
     Timings {
         reconnect_grace: Duration::from_secs(20),
+        // Longer than any test holds a join or a publish; the tests of these two limits
+        // shorten them themselves.
+        connect_limit: Duration::from_secs(5),
+        publish_limit: Duration::from_secs(5),
         close_limit: Duration::from_secs(2),
         attempt_limit: Duration::from_millis(300),
         gate_shut_grace: Duration::from_millis(150),
         report_flush: Duration::from_secs(2),
+        output_flush: Duration::from_millis(200),
         stats_every: Duration::from_millis(50),
         // A wait of one second becomes five milliseconds.
         wait_divisor: 200,
@@ -147,6 +193,13 @@ pub struct Setup {
     pub server: Option<String>,
     /// Write to the process's standard output as well.
     pub also_stdout: bool,
+    /// The key device the session is told it has, for the status. The test starts the
+    /// watcher itself, on [`Rig::inputs`].
+    pub key_device: Option<String>,
+    /// Write as the real client does, through the queue and its writer thread, to a
+    /// [`Reader`] that the test can stop. Otherwise each line is written where it is
+    /// shown, which keeps a test's view of the output exact.
+    pub queued: bool,
 }
 
 impl Default for Setup {
@@ -160,6 +213,8 @@ impl Default for Setup {
             sink_tones: vec![440.0, 880.0],
             server: None,
             also_stdout: false,
+            key_device: None,
+            queued: false,
         }
     }
 }
@@ -170,6 +225,8 @@ pub struct Rig {
     pub conchd: Stub,
     pub scrubber: Arc<Scrubber>,
     pub out: Written,
+    /// Who reads the output, when it is queued ([`Setup::queued`]).
+    pub reader: Reader,
     inputs: mpsc::UnboundedSender<Input>,
     /// How many times the microphone source was opened.
     mic_opened: Arc<AtomicU32>,
@@ -221,6 +278,7 @@ impl Rig {
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
+            key_device: setup.key_device,
             timings: setup.timings,
         };
         let out = Written::default();
@@ -229,6 +287,15 @@ impl Rig {
         } else {
             Box::new(out.clone())
         };
+        let reader = Reader {
+            read: out.clone(),
+            ..Reader::default()
+        };
+        let output = if setup.queued {
+            Output::queued(setup.json, Box::new(reader.clone()))
+        } else {
+            Output::new(setup.json, writer)
+        };
         let (inputs, received) = mpsc::unbounded_channel();
         let session = tokio::spawn(session::join(
             settings,
@@ -236,13 +303,14 @@ impl Rig {
             sdk.clone(),
             Arc::clone(&scrubber),
             received,
-            Output::new(setup.json, writer),
+            output,
         ));
         Self {
             sdk,
             conchd,
             scrubber,
             out,
+            reader,
             inputs,
             mic_opened,
             session,
@@ -256,6 +324,11 @@ impl Rig {
 
     pub fn input(&self, input: Input) {
         self.inputs.send(input).unwrap();
+    }
+
+    /// Where the session takes its inputs from: for a key device's watcher to write to.
+    pub fn inputs(&self) -> mpsc::UnboundedSender<Input> {
+        self.inputs.clone()
     }
 
     /// How many times the microphone source was opened.
@@ -363,6 +436,7 @@ impl Rig {
             sdk: self.sdk,
             conchd: self.conchd,
             out: self.out,
+            reader: self.reader,
         };
         (result, ended)
     }
@@ -373,4 +447,5 @@ pub struct Ended {
     pub sdk: FakeSdk,
     pub conchd: Stub,
     pub out: Written,
+    pub reader: Reader,
 }

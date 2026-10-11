@@ -425,3 +425,138 @@ async fn a_stop_is_final_whatever_happens_after_it() {
     assert_eq!(ended.conchd.session_requests(), 2);
     assert_eq!(ended.sdk.count(Call::Connect), 1);
 }
+
+/// A join that never answers leaves the client not connected, which is safe, and would
+/// leave it so for ever. Past its limit the attempt has failed like any other: a new
+/// session, and a new join.
+#[tokio::test]
+async fn a_join_that_never_answers_is_given_up_on_and_tried_again() {
+    let setup = Setup {
+        timings: conch_voice::session::Timings {
+            connect_limit: Duration::from_millis(80),
+            ..quick()
+        },
+        ..Setup::default()
+    };
+    let began = tokio::time::Instant::now();
+    let rig = Rig::start_with(Stub::start().await, setup, |sdk| sdk.hang_next_connect()).await;
+    rig.connected(1).await;
+    assert!(
+        began.elapsed() >= Duration::from_millis(80),
+        "not before the limit"
+    );
+
+    assert_eq!(rig.sdk.tokens(), [join_token(1), join_token(2)]);
+    assert_eq!(
+        rig.sdk.control_calls(),
+        [Call::Connect, Call::Connect, Call::Publish, Call::Mute]
+    );
+    let waiting = rig
+        .events_named("connection")
+        .into_iter()
+        .find(|event| event["state"] == "waiting")
+        .unwrap();
+    assert_eq!(waiting["reason"], "connect_failed");
+    assert_eq!(
+        waiting["detail"],
+        "joining the voice room took longer than 0.08 s"
+    );
+    // Until it was connected nothing was sent.
+    assert_eq!(rig.sdk.frames(), 0);
+}
+
+/// A publish that never answers, in a room that was joined: past its limit the room is
+/// left, as for a publish that failed, and the attempt is made again.
+#[tokio::test]
+async fn a_publish_that_never_answers_leaves_the_room_and_is_tried_again() {
+    let setup = Setup {
+        timings: conch_voice::session::Timings {
+            publish_limit: Duration::from_millis(80),
+            ..quick()
+        },
+        ..Setup::default()
+    };
+    let mut hold = None;
+    let rig = Rig::start_with(Stub::start().await, setup, |sdk| {
+        // Held and never let go: the publish does not return.
+        hold = Some(sdk.hold_publish());
+    })
+    .await;
+    rig.until("the first publish", |rig| rig.sdk.count(Call::Publish) == 1)
+        .await;
+    rig.line(Down);
+    rig.connected(1).await;
+
+    assert_eq!(
+        rig.sdk.control_calls(),
+        [
+            Call::Connect,
+            Call::Publish,
+            // The room whose publish never answered is left before the next is joined.
+            Call::Close,
+            Call::Connect,
+            Call::Publish,
+            Call::Mute
+        ]
+    );
+    assert_eq!(rig.sdk.tokens(), [join_token(1), join_token(2)]);
+    let waiting = rig
+        .events_named("connection")
+        .into_iter()
+        .find(|event| event["state"] == "waiting")
+        .unwrap();
+    assert_eq!(waiting["reason"], "connect_failed");
+    assert_eq!(
+        waiting["detail"],
+        "publishing the microphone took longer than 0.08 s"
+    );
+    // The press during the publish that hung was refused, and opened nothing.
+    assert_eq!(
+        rig.events_named("press_ignored")[0]["reason"],
+        "not_connected"
+    );
+    support::several_frames().await;
+    assert_eq!(rig.sdk.frames(), 0);
+    assert!(rig.sdk.is_muted());
+    drop(hold);
+}
+
+/// What `conchd` says when it refuses a session is shown as the `detail` of the status
+/// line. They are `conchd`'s words, or those of a proxy in front of it, and such words can
+/// name what is in use. The API crate takes this client's login token out of them (as
+/// `<redacted>`) and cannot know a room name or a join token: those are scrubbed here.
+#[tokio::test]
+async fn what_conchd_says_when_it_refuses_a_session_is_scrubbed_before_it_is_shown() {
+    use support::stub::{FAKE_LOGIN, room_name};
+    const FAKE_JWT: &str = "eyJGQUtFIjoiaGVhZGVyIn0.eyJGQUtFIjoiY2xhaW1zIn0.RkFLRS1zaWduYXR1cmU";
+
+    let rig = Rig::start().await;
+    rig.ready().await;
+    let message = format!(
+        "room {} is being rotated; you sent Bearer {FAKE_LOGIN}; try {FAKE_JWT}",
+        room_name(1)
+    );
+    let refusal = json!({"code": "voice_unavailable", "message": message});
+    rig.conchd
+        .next_session(Reply::Json(503, refusal.to_string()));
+    rig.sdk.disconnect(DisconnectReason::Lost);
+    rig.connected(2).await;
+
+    let waits: Vec<Value> = rig
+        .events_named("connection")
+        .into_iter()
+        .filter(|event| event["state"] == "waiting")
+        .collect();
+    assert_eq!(waits.len(), 2);
+    assert_eq!(waits[1]["reason"], "voice_unavailable");
+    let detail = waits[1]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("room [redacted] is being rotated; you sent <redacted>; try [redacted]"),
+        "{}",
+        detail.replace("FAKE", "F4KE")
+    );
+    let written = rig.out.text();
+    for secret in [room_name(1), FAKE_LOGIN.to_owned(), FAKE_JWT.to_owned()] {
+        assert!(!written.contains(&secret), "a secret was written");
+    }
+}

@@ -287,3 +287,40 @@ async fn a_report_given_up_on_while_unanswered_leaves_no_connection_that_could_d
     })
     .await;
 }
+
+/// What `conchd` says when it refuses a report is shown as the `detail` of the status line,
+/// and is scrubbed first, like its words about a session.
+#[tokio::test]
+async fn what_conchd_says_about_a_failed_report_is_scrubbed_before_it_is_shown() {
+    use support::stub::{FAKE_LOGIN, room_name};
+    const FAKE_JWT: &str = "eyJGQUtFIjoiaGVhZGVyIn0.eyJGQUtFIjoiY2xhaW1zIn0.RkFLRS1zaWduYXR1cmU";
+
+    let conchd = Stub::start().await;
+    let message = format!(
+        "no session in {} for Bearer {FAKE_LOGIN} or {FAKE_JWT}",
+        room_name(1)
+    );
+    let refusal = serde_json::json!({"code": "voice_no_session", "message": message});
+    conchd.next_transmit(Reply::Json(409, refusal.to_string()));
+    let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
+    rig.ready().await;
+    rig.line(Down);
+    rig.until("the refusal to be shown", |rig| {
+        !rig.events_named("report").is_empty()
+    })
+    .await;
+    rig.line(Up);
+
+    let shown = &rig.events_named("report")[0];
+    assert_eq!(shown["problem"], "no_session");
+    let detail = shown["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("no session in [redacted] for <redacted> or [redacted]"),
+        "{}",
+        detail.replace("FAKE", "F4KE")
+    );
+    let written = rig.out.text();
+    for secret in [room_name(1), FAKE_LOGIN.to_owned(), FAKE_JWT.to_owned()] {
+        assert!(!written.contains(&secret), "a secret was written");
+    }
+}

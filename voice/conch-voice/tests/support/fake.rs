@@ -58,6 +58,10 @@ struct Inner {
     events: Option<mpsc::UnboundedSender<SdkEvent>>,
     /// What the next connection attempts fail with; when empty they succeed.
     connect_failures: VecDeque<String>,
+    /// How many of the next connection attempts never answer.
+    connects_hang: u32,
+    /// How long the next connection attempt blocks the thread it is polled on.
+    connect_blocks: Option<Duration>,
     /// What the next publishes fail with; when empty they succeed.
     publish_failures: VecDeque<String>,
     /// While set, `publish_microphone` waits here after it has published.
@@ -105,6 +109,18 @@ impl FakeSdk {
     /// nobody measured.
     pub fn fail_next_connect(&self, text: &str) {
         self.lock().connect_failures.push_back(text.to_owned());
+    }
+
+    /// The next connection attempt never answers: an SDK that has hung in its join.
+    pub fn hang_next_connect(&self) {
+        self.lock().connects_hang += 1;
+    }
+
+    /// The next connection attempt blocks the thread it is polled on for this long, and
+    /// then fails: native code in the SDK's join that writes to a standard output nobody
+    /// reads. It does not yield to the runtime; whatever else that thread was to do waits.
+    pub fn block_next_connect(&self, time: Duration) {
+        self.lock().connect_blocks = Some(time);
     }
 
     /// The next publish fails with this text, after the room was joined.
@@ -248,14 +264,29 @@ impl Transport for FakeSdk {
     type Room = FakeRoom;
 
     async fn connect(&self, url: &str, token: &Secret) -> Result<Joined<FakeRoom>, SdkError> {
-        let (failure, records) = {
+        let (failure, records, hangs, blocks) = {
             let mut inner = self.lock();
             inner.calls.push(Call::Connect);
             inner
                 .connects
                 .push((url.to_owned(), token.expose().to_owned()));
-            (inner.connect_failures.pop_front(), inner.records.clone())
+            let hangs = inner.connects_hang > 0;
+            inner.connects_hang = inner.connects_hang.saturating_sub(1);
+            (
+                inner.connect_failures.pop_front(),
+                inner.records.clone(),
+                hangs,
+                inner.connect_blocks.take(),
+            )
         };
+        if let Some(time) = blocks {
+            // On purpose not an await: the thread itself is held, as by a blocking write.
+            std::thread::sleep(time);
+            return Err(SdkError::scrubbed("the join was blocked, and then failed"));
+        }
+        if hangs {
+            std::future::pending::<()>().await;
+        }
         let fill = |text: &str| {
             text.replace("{token}", token.expose())
                 .replace("{room}", &room_of(token.expose()))
