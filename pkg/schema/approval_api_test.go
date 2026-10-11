@@ -15,6 +15,8 @@ func TestApprovalAPIGoldenFixtures(t *testing.T) {
 		{"create-approval-request-v1.json", func() any { return new(CreateApprovalRequestV1) }},
 		{"create-approval-response-v1.json", func() any { return new(CreateApprovalResponseV1) }},
 		{"list-approvals-response-v1.json", func() any { return new(ListApprovalsResponseV1) }},
+		{"get-approval-response-v1.json", func() any { return new(GetApprovalResponseV1) }},
+		{"get-approval-response-v1-pending.json", func() any { return new(GetApprovalResponseV1) }},
 		{"cast-decision-request-v1.json", func() any { return new(CastDecisionRequestV1) }},
 		{"cast-decision-response-v1.json", func() any { return new(CastDecisionResponseV1) }},
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -77,6 +78,56 @@ func TestCreateChannelValidation(t *testing.T) {
 			srv.Handler().ServeHTTP(rec, req)
 
 			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
+		})
+	}
+}
+
+// TestCreateChannelNameRule applies issue #204's name rule to channel names:
+// the accepted examples are created; names with control characters,
+// separators, bidi controls or fringe whitespace are refused with 400 and a
+// message naming the rule.
+func TestCreateChannelNameRule(t *testing.T) {
+	srv := newTestServer(t)
+
+	for _, name := range []string{"Zoë Müller", "山田 太郎", "o'brien-smith"} {
+		t.Run("accepted/"+name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v0/channels",
+				bytes.NewBufferString(fmt.Sprintf(`{"name":%s}`, jsonString(t, name)))))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	refused := []struct {
+		name    string
+		input   string
+		message string
+	}{
+		{"escape sequence", "ops\x1b[31m", "control characters"},
+		{"newline", "ops\nalerts", "control characters"},
+		{"paragraph separator", "a\u2029b", "control characters"},
+		{"bidi override", "a\u202eb", "bidi controls"},
+		{"leading space", " ops", "whitespace"},
+		{"trailing space", "ops ", "whitespace"},
+		{"over length", strings.Repeat("a", schema.MaxChannelNameLength+1), "at most"},
+	}
+	for _, tt := range refused {
+		t.Run("refused/"+tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v0/channels",
+				bytes.NewBufferString(fmt.Sprintf(`{"name":%s}`, jsonString(t, tt.input)))))
+			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
+			}
+			if strings.Contains(e.Message, tt.input) {
+				t.Errorf("message echoes the refused name: %q", e.Message)
+			}
 		})
 	}
 }

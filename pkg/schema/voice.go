@@ -1,8 +1,10 @@
 package schema
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,6 +16,10 @@ import (
 // are what conchd hands a client so it can join (the session response) and
 // what it tells everyone about who is there (the presence document). All of
 // them are new types; nothing published changes.
+//
+// One shape travels the other way: the transmit report (issue #179), which a
+// client sends conchd when a press starts and stops. It was added later, also
+// as a new type, and is at the end of this file.
 //
 // Room names and tokens are opaque strings. The schema checks that they are
 // present, never what they contain: a token is a credential conchd signed and
@@ -40,6 +46,16 @@ const (
 	// ErrorCodeVoiceRequiresAuth: the caller is not a verified principal
 	// (conchd runs with authentication off). Voice is never anonymous.
 	ErrorCodeVoiceRequiresAuth = "voice_requires_auth"
+	// ErrorCodeVoiceNoSession: the caller holds no session for this channel's
+	// current room, so it has nothing to report a transmission in (HTTP 409).
+	// The room was rotated or the session is otherwise gone; the client goes
+	// back for a session, it does not retry the report.
+	ErrorCodeVoiceNoSession = "voice_no_session"
+	// ErrorCodeVoiceReportRateLimited: the caller sent more transmit reports
+	// than the per-principal bound allows (HTTP 429). Neither the package nor
+	// the server had a rate-limit code before this one, so it is named for
+	// the one endpoint that has a bound rather than as a general code.
+	ErrorCodeVoiceReportRateLimited = "voice_report_rate_limited"
 )
 
 // VoiceRoomGrant is one room a voice session may join: the LiveKit room name,
@@ -296,4 +312,119 @@ func (p VoicePresenceV1) Validate() error {
 		seen[key] = struct{}{}
 	}
 	return nil
+}
+
+// VoiceTransmitState is what a transmit report says about the caller's own
+// transmission: that it began or that it ended. The vocabulary is closed and
+// case-sensitive; a value outside it fails validation, so a report conchd does
+// not understand is never recorded as either.
+type VoiceTransmitState string
+
+// Voice transmit states.
+const (
+	// VoiceTransmitStateStarted reports that the caller began transmitting
+	// (the push-to-talk gate opened).
+	VoiceTransmitStateStarted VoiceTransmitState = "started"
+	// VoiceTransmitStateStopped reports that the caller stopped transmitting
+	// (the gate shut).
+	VoiceTransmitStateStopped VoiceTransmitState = "stopped"
+)
+
+// Valid reports whether s is a recognized transmit state.
+func (s VoiceTransmitState) Valid() bool {
+	switch s {
+	case VoiceTransmitStateStarted, VoiceTransmitStateStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceTransmitReportV1 is the body of POST /v1/channels/{channel}/voice/transmit
+// (issue #179; design note docs/design/conch-voice.md §6): what the voice
+// client sends when a press starts and when it stops, so that a press shorter
+// than the poller's interval is still in the audit log. Like the session
+// response it is a REST body with no schema-name field, versioned by the V1
+// type suffix. A successful report is answered 204 with no body; there is no
+// response type.
+//
+// The shape is deliberately this small, and what it leaves out is part of the
+// contract:
+//
+//   - No time. conchd stamps the moment it receives the report, so a client
+//     cannot back-date or post-date its own audit record; the server's clock
+//     is the only one in the audit log.
+//   - No sequence number. The client sends its reports one at a time and
+//     conchd takes them in arrival order (design note §6 says why numbering
+//     was left out).
+//   - No principal, room or token. Who is reporting is the authenticated
+//     caller, and the room is the channel's current room for the audience;
+//     neither is the client's to assert.
+//
+// A field of that kind in the body would otherwise be dropped in silence, and
+// could later be trusted by a reader that finds it in a captured request. So a
+// report is decoded with DecodeVoiceTransmitReportV1, which rejects any field
+// this type does not declare. That is stricter than presence, which tolerates
+// unknown fields: presence is read by clients of a newer server, while a
+// report is written by a client into the audit trail. A report that needs
+// another field is a new version of this shape.
+type VoiceTransmitReportV1 struct {
+	// State is what the caller reports about its transmission: started or
+	// stopped. A report that does not change the state conchd holds (a second
+	// started) is still a valid report; the schema does not know the state.
+	State VoiceTransmitState `json:"state"`
+	// Audience is the audience transmitted to; nil (omitted) means the whole
+	// channel, exactly as on VoiceRoomGrant. V4 reports are all channel-wide;
+	// a net audience arrives with V5.
+	Audience *Audience `json:"audience,omitempty"`
+}
+
+// Validate reports whether the report is structurally well-formed: a state of
+// started or stopped, and a present audience that satisfies
+// Audience.Validate, so an unknown audience kind fails the report as it fails
+// a grant or a message. It does not check that the caller may transmit to the
+// audience, holds a session, or is within the report bound; those are the
+// endpoint's to decide.
+func (r VoiceTransmitReportV1) Validate() error {
+	if !r.State.Valid() {
+		return fmt.Errorf("schema: voice transmit report state %q is not one of started, stopped", r.State)
+	}
+	if r.Audience != nil {
+		if err := r.Audience.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DecodeVoiceTransmitReportV1 reads one transmit report from r and is the
+// only way a request body should become a VoiceTransmitReportV1. It rejects,
+// in this order: a body that is not a JSON object of the declared fields (any
+// unknown field at any depth fails, including at, time, seq, principal_id,
+// room and token, and an unknown field inside audience); anything after that
+// one object; and a report that does not satisfy Validate. A returned report
+// is therefore one a handler can act on without further structural checks.
+//
+// It does not bound how much it reads; the caller wraps the body (for a
+// handler, http.MaxBytesReader). An error from r is wrapped, so errors.As
+// still finds an *http.MaxBytesError. A JSON null for audience is the same as
+// leaving it out.
+func DecodeVoiceTransmitReportV1(r io.Reader) (VoiceTransmitReportV1, error) {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	var report VoiceTransmitReportV1
+	if err := dec.Decode(&report); err != nil {
+		return VoiceTransmitReportV1{}, fmt.Errorf("schema: decode voice transmit report: %w", err)
+	}
+	var extra json.RawMessage
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		return VoiceTransmitReportV1{}, errors.New("schema: voice transmit report body must contain one JSON object")
+	case !errors.Is(err, io.EOF):
+		return VoiceTransmitReportV1{}, fmt.Errorf("schema: decode voice transmit report: %w", err)
+	}
+	if err := report.Validate(); err != nil {
+		return VoiceTransmitReportV1{}, err
+	}
+	return report, nil
 }

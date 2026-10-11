@@ -3,11 +3,10 @@
 #   . scripts/voice-env.sh && (cd voice && cargo build --locked)
 #
 # It puts the pinned clang and cargo-deny that scripts/voice-toolchain.sh
-# fetched on PATH, points the C and C++ compilers at that clang and the livekit
-# crate at the verified libwebrtc, and gives
-# every checkout one shared cargo target directory, so a new git worktree does
-# not rebuild every crate. It fails, and says what to run, if the toolchain is
-# missing: building voice/ never falls back to the system compiler.
+# fetched on PATH, and points the C and C++ compilers at that clang and the
+# livekit crate at the verified libwebrtc. It fails, and says what to run, if
+# the toolchain is missing: building voice/ never falls back to the system
+# compiler.
 
 # BASH_SOURCE: this file is sourced, so $0 is the caller.
 . "$(dirname "${BASH_SOURCE[0]}")/voice-pins.sh"
@@ -54,6 +53,17 @@ export CXXFLAGS="$CFLAGS"
 # The livekit crate links this copy, which scripts/voice-toolchain.sh verified,
 # and does not download its own.
 export LK_CUSTOM_WEBRTC="$_conch_webrtc"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$_conch_cache/voice-target}"
+# Cargo's build directory is left where cargo puts it, voice/target in this
+# checkout, and must not be shared between checkouts. Cargo names a workspace
+# crate's build by its path inside the workspace, which is the same in every
+# checkout, and decides whether it is up to date by file times. With one
+# directory for two git worktrees, the second is told that the first one's
+# build of conch-voice is "fresh" and links it: its tests then run another
+# checkout's code and say they passed. (Measured, issue #185. A shared
+# CARGO_TARGET_DIR does the same, and replaces the binary under a running test
+# as well.) A new worktree therefore compiles the dependencies once for itself.
+if [ -n "${CARGO_BUILD_BUILD_DIR:-}${CARGO_TARGET_DIR:-}" ]; then
+    echo "voice: note: CARGO_BUILD_BUILD_DIR or CARGO_TARGET_DIR is set; make sure no other checkout builds into the same directory" >&2
+fi
 
 unset _conch_cache _conch_llvm _conch_deny _conch_webrtc _conch_gcc _conch_dir

@@ -275,10 +275,24 @@ func (s *Store) InsertMessageV1(
 // AppendAuditEvent appends an entry to the audit log. There is deliberately
 // no corresponding update or delete: the log is append-only.
 func (s *Store) AppendAuditEvent(ctx context.Context, actor, action, subject, detail string) (AuditEvent, error) {
-	now := time.Now()
+	return s.AppendAuditEventAt(ctx, actor, action, subject, detail, time.Now())
+}
+
+// AppendAuditEventAt appends an entry whose time is at rather than the moment
+// of the write. It is for events whose time the server fixes before it can
+// write them: a transmit report is stamped at the instant it is applied, and
+// an unreported transmission is timed at the first pass that saw it, which is
+// known to be one only at a later pass (issue #135,
+// docs/design/conch-voice.md §6). at is always the server's own clock; a
+// caller must never pass a time a client supplied.
+//
+// Rows are still appended in the order they are written, so created_at is not
+// guaranteed to rise with id: id order is the order of writing, created_at is
+// when the thing happened.
+func (s *Store) AppendAuditEventAt(ctx context.Context, actor, action, subject, detail string, at time.Time) (AuditEvent, error) {
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, ?, ?)",
-		actor, action, subject, detail, now.UnixMilli())
+		actor, action, subject, detail, at.UnixMilli())
 	if err != nil {
 		return AuditEvent{}, fmt.Errorf("store: append audit event %q: %w", action, err)
 	}
@@ -286,7 +300,7 @@ func (s *Store) AppendAuditEvent(ctx context.Context, actor, action, subject, de
 	if err != nil {
 		return AuditEvent{}, fmt.Errorf("store: append audit event %q: %w", action, err)
 	}
-	return AuditEvent{ID: id, Actor: actor, Action: action, Subject: subject, Detail: detail, CreatedAt: now}, nil
+	return AuditEvent{ID: id, Actor: actor, Action: action, Subject: subject, Detail: detail, CreatedAt: at}, nil
 }
 
 // LastAuditEvent returns the most recent audit event with the given action,

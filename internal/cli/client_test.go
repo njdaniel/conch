@@ -936,3 +936,30 @@ func TestClientSubscribeVoicePresenceRefusedUpgrade(t *testing.T) {
 		})
 	}
 }
+
+func TestServerErrorKeepsStatusAndCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"voice_requires_auth","message":"voice needs a signed-in caller"}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]func() error{
+		"snapshot": func() error { _, err := client.VoicePresence(context.Background(), "general"); return err },
+		"socket": func() error {
+			return client.SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV1) error { return nil })
+		},
+	} {
+		err := call()
+		var serverErr *ServerError
+		if !errors.As(err, &serverErr) || serverErr.Status != http.StatusBadRequest || serverErr.Code != schema.ErrorCodeVoiceRequiresAuth {
+			t.Fatalf("%s: err = %#v", name, err)
+		}
+		if want := "cli: server error voice_requires_auth: voice needs a signed-in caller"; !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: text = %q, want it to contain %q", name, err.Error(), want)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +34,7 @@ func hookFixture(t *testing.T) (*Store, Channel, Principal) {
 func TestHookRoundTrip(t *testing.T) {
 	s, channel, principal := hookFixture(t)
 	ctx := context.Background()
-	created, err := s.CreateHookWithLabel(ctx, "test-token", "ci", channel.ID, principal.ID)
+	created, err := s.CreateHookWithLabel(ctx, "system", "test-token", "ci", channel.ID, principal.ID)
 	if err != nil {
 		t.Fatalf("CreateHook: %v", err)
 	}
@@ -66,11 +67,140 @@ func TestHookRoundTrip(t *testing.T) {
 func TestCreateHookDuplicateToken(t *testing.T) {
 	s, channel, principal := hookFixture(t)
 	ctx := context.Background()
-	if _, err := s.CreateHook(ctx, "same", channel.ID, principal.ID); err != nil {
+	if _, err := s.CreateHook(ctx, "system", "same", channel.ID, principal.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateHook(ctx, "same", channel.ID, principal.ID); !errors.Is(err, ErrDuplicate) {
+	if _, err := s.CreateHook(ctx, "system", "same", channel.ID, principal.ID); !errors.Is(err, ErrDuplicate) {
 		t.Errorf("duplicate token error = %v, want ErrDuplicate", err)
+	}
+}
+
+// hookCreatedEvents returns the hook_created events of the store.
+func hookCreatedEvents(t *testing.T, s *Store) []AuditEvent {
+	t.Helper()
+	events, err := s.ListAuditEvents(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []AuditEvent
+	for _, e := range events {
+		if e.Action == "hook_created" {
+			found = append(found, e)
+		}
+	}
+	return found
+}
+
+// TestCreateHookWritesHookCreated: one successful create appends exactly one
+// hook_created event with the caller as actor, the hook's principal as
+// subject and hook=<id> channel=<id> label=<quoted label> as detail.
+func TestCreateHookWritesHookCreated(t *testing.T) {
+	s, channel, principal := hookFixture(t)
+	ctx := context.Background()
+	hook, err := s.CreateHookWithLabel(ctx, "principal:1", "audit-token", "ci builds", channel.ID, principal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := hookCreatedEvents(t, s)
+	if len(found) != 1 {
+		t.Fatalf("hook_created events = %+v, want exactly one", found)
+	}
+	e := found[0]
+	wantDetail := fmt.Sprintf("hook=%d channel=%d label=%q", hook.ID, channel.ID, "ci builds")
+	if e.Actor != "principal:1" || e.Subject != principalActor(principal.ID) || e.Detail != wantDetail {
+		t.Errorf("audit event = %+v, want actor principal:1, subject %q, detail %q",
+			e, principalActor(principal.ID), wantDetail)
+	}
+	if !e.CreatedAt.Equal(hook.CreatedAt) {
+		t.Errorf("event time %v, want the hook's created_at %v", e.CreatedAt, hook.CreatedAt)
+	}
+}
+
+// TestCreateHookFailureWritesNeitherRowNorEvent: a create that fails — unknown
+// channel, unknown principal, duplicate token — leaves no hook row and no
+// audit event.
+func TestCreateHookFailureWritesNeitherRowNorEvent(t *testing.T) {
+	s, channel, principal := hookFixture(t)
+	ctx := context.Background()
+	if _, err := s.CreateHook(ctx, "system", "taken", channel.ID, principal.ID); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name                   string
+		token                  string
+		channelID, principalID int64
+	}{
+		{"unknown channel", "fresh-token-1", 9999, principal.ID},
+		{"unknown principal", "fresh-token-2", channel.ID, 9999},
+		{"duplicate token", "taken", channel.ID, principal.ID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hooks := countRows(t, s, "hooks")
+			events := countRows(t, s, "audit_events")
+			if _, err := s.CreateHook(ctx, "system", tt.token, tt.channelID, tt.principalID); err == nil {
+				t.Fatal("CreateHook succeeded, want an error")
+			}
+			if got := countRows(t, s, "hooks"); got != hooks {
+				t.Errorf("hooks rows = %d, want %d (the failed create left a row)", got, hooks)
+			}
+			if got := countRows(t, s, "audit_events"); got != events {
+				t.Errorf("audit events = %d, want %d (the failed create wrote an event)", got, events)
+			}
+		})
+	}
+}
+
+// TestCreateHookAuditFailureLeavesNoHook: the audit append shares the hook
+// insert's transaction, so when it cannot be written there is no hook either
+// (the same seam TestRevokeAllCredentialsAtomic uses for credentials).
+func TestCreateHookAuditFailureLeavesNoHook(t *testing.T) {
+	s, channel, principal := hookFixture(t)
+	ctx := context.Background()
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_audit BEFORE INSERT ON audit_events
+		WHEN NEW.action = 'hook_created' BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateHook(ctx, "system", "unaudited", channel.ID, principal.ID); err == nil {
+		t.Fatal("CreateHook succeeded with the audit table broken")
+	}
+	if n := countRows(t, s, "hooks"); n != 0 {
+		t.Errorf("hooks rows = %d, want 0: a failed audit must not leave a hook", n)
+	}
+	if _, err := s.HookByToken(ctx, "unaudited"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the unaudited hook resolves: %v", err)
+	}
+}
+
+// TestHookDetailQuotesTheLabel: a label holding a quote, a newline and an
+// equals sign still yields a one-line detail. A reader recovers the label by
+// taking everything after the final "label=" and applying strconv.Unquote;
+// because the label comes last and is quoted, the ids parse unambiguously
+// even when the label itself contains "channel=" or a newline.
+func TestHookDetailQuotesTheLabel(t *testing.T) {
+	s, channel, principal := hookFixture(t)
+	ctx := context.Background()
+	const label = "ci \"nightly\"\nchannel=alpha"
+	hook, err := s.CreateHookWithLabel(ctx, "system", "quoted-label-token", label, channel.ID, principal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := hookCreatedEvents(t, s)
+	if len(found) != 1 {
+		t.Fatalf("hook_created events = %+v, want exactly one", found)
+	}
+	detail := found[0].Detail
+	if strings.ContainsAny(detail, "\n\r") {
+		t.Errorf("detail spans lines: %q", detail)
+	}
+	prefix := fmt.Sprintf("hook=%d channel=%d label=", hook.ID, channel.ID)
+	rest, ok := strings.CutPrefix(detail, prefix)
+	if !ok {
+		t.Fatalf("detail = %q, want prefix %q", detail, prefix)
+	}
+	got, err := strconv.Unquote(rest)
+	if err != nil || got != label {
+		t.Errorf("Unquote(%q) = %q, %v; want the label back", rest, got, err)
 	}
 }
 
@@ -80,7 +210,7 @@ func TestHookStoresOnlyTheHash(t *testing.T) {
 	s, channel, principal := hookFixture(t)
 	ctx := context.Background()
 	const token = "plaintext-hook-token-do-not-store" // #nosec G101 -- test input, not a credential
-	if _, err := s.CreateHookWithLabel(ctx, token, "label", channel.ID, principal.ID); err != nil {
+	if _, err := s.CreateHookWithLabel(ctx, "system", token, "label", channel.ID, principal.ID); err != nil {
 		t.Fatal(err)
 	}
 	var hash string
@@ -109,11 +239,11 @@ func TestHookStoresOnlyTheHash(t *testing.T) {
 func TestRevokeHook(t *testing.T) {
 	s, channel, principal := hookFixture(t)
 	ctx := context.Background()
-	hook, err := s.CreateHookWithLabel(ctx, "to-revoke", `a "quoted" label`, channel.ID, principal.ID)
+	hook, err := s.CreateHookWithLabel(ctx, "system", "to-revoke", `a "quoted" label`, channel.ID, principal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.CreateHook(ctx, "bystander", channel.ID, principal.ID)
+	other, err := s.CreateHook(ctx, "system", "bystander", channel.ID, principal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +335,7 @@ func TestListHooksEmptyIsNotNil(t *testing.T) {
 func TestRevokeHookConcurrentAuditsOnce(t *testing.T) {
 	s, channel, principal := hookFixture(t)
 	ctx := context.Background()
-	hook, err := s.CreateHook(ctx, "racy", channel.ID, principal.ID)
+	hook, err := s.CreateHook(ctx, "system", "racy", channel.ID, principal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +511,7 @@ func TestHookMigrationFromSchema9(t *testing.T) {
 				t.Errorf("hooks rows = %d, want %d", count, len(tokens))
 			}
 			// New hooks work after the migration and ids do not collide.
-			if _, err := s.CreateHook(ctx, "post-migration", 1, 2); err != nil {
+			if _, err := s.CreateHook(ctx, "system", "post-migration", 1, 2); err != nil {
 				t.Errorf("create after migration: %v", err)
 			}
 			if err := s.Close(); err != nil {
