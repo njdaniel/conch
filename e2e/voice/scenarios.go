@@ -148,6 +148,7 @@ func (l *live) removed(ctx context.Context) error {
 	}
 	// A token for the rejoin attempt, fresh so that it cannot be refused for
 	// having expired.
+	removedAt := time.Now()
 	fresh, err := h.session(bob, "bridge")
 	if err != nil {
 		return err
@@ -262,7 +263,35 @@ func (l *live) removed(ctx context.Context) error {
 			return err
 		}
 	}
-	h.say("ok   removed: bob's removal disconnected everyone and deleted the old room, closed his presence socket (policy violation); both his tokens (conchd's, LiveKit's) are refused 404; alice got a new room and is shown there; one voice_room_rotated reason=member_removed; voice_left for alice and bob")
+	// alice was left unmuted and reports nothing, so she had an unreported
+	// transmission open in the old room. The rotation closed it at once, with
+	// reason=left, before it recorded her leaving (issue #135,
+	// docs/design/conch-voice.md §6).
+	aliceActor := fmt.Sprintf("principal:%d", aliceID)
+	if err := waitFor("alice's open transmission to be closed with reason=left by the rotation", 30*time.Second, func() (bool, string) {
+		_, stops, _, err := l.transmitRows(l.bridgeSubject, aliceActor, removedAt)
+		if err != nil {
+			return false, err.Error()
+		}
+		if len(stops) == 0 {
+			return false, "no observed voice_transmit_stopped row for alice since the removal"
+		}
+		lefts, err := l.d.auditRows(store.AuditVoiceLeft)
+		if err != nil {
+			return false, err.Error()
+		}
+		var left store.AuditEvent
+		for _, e := range lefts {
+			if e.Subject == l.bridgeSubject && e.Actor == aliceActor {
+				left = e
+			}
+		}
+		return strings.HasSuffix(stops[0].Detail, " source=observed reason=left") && stops[0].ID < left.ID,
+			fmt.Sprintf("the first stop since the removal has detail %q and id %d; her last voice_left has id %d", stops[0].Detail, stops[0].ID, left.ID)
+	}); err != nil {
+		return err
+	}
+	h.say("ok   removed: bob's removal disconnected everyone and deleted the old room, closed his presence socket (policy violation); both his tokens (conchd's, LiveKit's) are refused 404; alice got a new room and is shown there; one voice_room_rotated reason=member_removed; alice's unreported transmission closed with reason=left, then voice_left for alice and bob")
 	return nil
 }
 
