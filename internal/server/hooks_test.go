@@ -401,6 +401,49 @@ func TestCreateHookRejectsLongLabel(t *testing.T) {
 	}
 }
 
+// TestCreateHookLabelRule applies issue #204's name rule to hook labels at the
+// handler level: separators and bidi controls join the already-refused control
+// characters; a label in any script is accepted.
+func TestCreateHookLabelRule(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	create := func(label string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"channel":"general","principal":%d,"label":%q}`, f.alice.ID, label)
+		return f.do(t, "POST", "/v1/hooks", f.rootTok, body)
+	}
+	for _, label := range []string{"ci builds", "夜間ビルド", "Zoë's deploys"} {
+		t.Run("accepted/"+label, func(t *testing.T) {
+			if rec := create(label); rec.Code != http.StatusCreated {
+				t.Errorf("status = %d, want 201; body = %s", rec.Code, rec.Body)
+			}
+		})
+	}
+	refused := []struct {
+		name    string
+		label   string
+		message string
+	}{
+		{"newline", "ci\nbuilds", "control characters"},
+		{"line separator", "ci\u2028builds", "control characters"},
+		{"bidi override", "ci\u202ebuilds", "bidi controls"},
+		{"leading space", " ci", "whitespace"},
+	}
+	for _, tt := range refused {
+		t.Run("refused/"+tt.name, func(t *testing.T) {
+			rec := create(tt.label)
+			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
+			}
+			if strings.Contains(e.Message, tt.label) {
+				t.Errorf("message echoes the refused label: %q", e.Message)
+			}
+		})
+	}
+}
+
 // TestHookAdminAuthOff: with authentication off the admin endpoints are open
 // like the other admin endpoints, and the revocation is attributed to "system".
 func TestHookAdminAuthOff(t *testing.T) {
