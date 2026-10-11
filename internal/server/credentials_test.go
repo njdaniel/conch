@@ -130,6 +130,34 @@ func TestCredentialEndpointsTable(t *testing.T) {
 	}
 }
 
+// TestCredentialLabelRuleMessage: the label refusal names the rule and does
+// not echo the label (the table above pins the status and code).
+func TestCredentialLabelRuleMessage(t *testing.T) {
+	f := newManifestFixture(t)
+	tests := []struct {
+		name    string
+		label   string
+		message string
+	}{
+		{"newline", "ci\nbuilds", "control characters"},
+		{"bidi override", "ci\u202ebuilds", "bidi controls"},
+		{"leading space", " ci", "whitespace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, http.MethodPost, credentialsPath(f.agent.ID),
+				fmt.Sprintf(`{"label":%q}`, tt.label))
+			assertErrorBody(t, rec, http.StatusBadRequest, "invalid_request")
+			if !strings.Contains(rec.Body.String(), tt.message) {
+				t.Errorf("body = %s, want a message naming the rule (%q)", rec.Body.String(), tt.message)
+			}
+			if strings.Contains(rec.Body.String(), tt.label) {
+				t.Errorf("body echoes the refused label: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func (f manifestFixture) createCredential(t *testing.T, principalID int64, body string) schema.CreateCredentialResponseV1 {
 	t.Helper()
 	rec := f.do(t, http.MethodPost, credentialsPath(principalID), body)
