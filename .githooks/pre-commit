@@ -34,4 +34,13 @@ echo "pre-commit: schema compatibility"
 echo "pre-commit: dependency gate"
 ./scripts/depgate.sh
 
+# The hook that runs may belong to another checkout (core.hooksPath can be an
+# absolute path shared by every worktree), so it can be newer than the branch
+# being committed. A branch from before voice/ existed has no Rust leg to run.
+# Where the script exists it always runs, and fails if its toolchain is missing.
+if [ -f ./scripts/rust-check.sh ]; then
+    echo "pre-commit: rust (voice/)"
+    bash ./scripts/rust-check.sh
+fi
+
 echo "pre-commit: OK"

@@ -49,6 +49,15 @@ make check   # fmt, vet, lint, tests, schema-compat, dependency gate — run bef
 
 `make check` lints with the `golangci-lint` version in `.golangci-lint-version` (the one CI runs) and refuses any other; install it with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(cat .golangci-lint-version)`.
 
+`make check` also checks the Rust voice client under `voice/` ([ADR-006](docs/adr/ADR-006-rust-voice-client.md)), which is not finished and is not needed to run `conchd` or `conch`. That leg needs [rustup](https://rustup.rs), `g++`, `jq`, GLib's headers (`sudo apt install libglib2.0-dev pkg-config`) and three things no distribution packages at the right version, which one script fetches into `~/.cache/conch` (about 1.3 GB unpacked, from a 2.1 GB download; no root, nothing installed system-wide):
+
+```sh
+scripts/voice-toolchain.sh   # once: clang 22, cargo-deny and LiveKit's prebuilt libwebrtc, each verified against a pinned SHA-256
+make rust-check              # fmt, clippy, tests, dependency gate, licences and sources; part of make check
+```
+
+Without that toolchain `make check` fails and names the script; it does not skip the Rust leg. `make build` is unaffected: it builds only the Go binaries.
+
 ### 2. Create the operator and start `conchd`
 
 `conchd` requires authentication by default, so the first step is an operator — the one principal who can administer the instance:
