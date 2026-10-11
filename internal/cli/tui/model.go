@@ -185,6 +185,10 @@ type Model struct {
 	// voice is the selected channel's presence subscription and roster. It is
 	// display only and never gets in the way of typing or messages.
 	voice voiceModel
+	// wrapped holds the selected approval's body as last laid out. It is a
+	// pointer so View, which cannot change the model, can fill it: a body
+	// can be megabytes, too much to lay out again on every keystroke.
+	wrapped *wrappedBody
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -224,7 +228,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 	m := Model{ctx: ctx, api: api, authorID: authorID,
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
-		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter}
+		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{}}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -998,7 +1002,7 @@ func (m Model) approvalDetails(app schema.ApprovalV1, cols, rows int) (details, 
 	if decision {
 		optHead = 1
 	}
-	body := bodyLines(app.Body, cols-cellWidth(bodyGutter))
+	body := m.wrapped.lines(app.Body, cols-cellWidth(bodyGutter))
 	avail := rows - len(header)
 	bodyRows, optRows := avail-optHead-len(app.Options), len(app.Options)
 	windowed := bodyRows < min(len(body), 2)
@@ -1074,6 +1078,26 @@ func bodyMark(above, below, cols int) string {
 
 // bodyLines is an approval body as lines of at most cols cells: its own line
 // breaks are kept, long lines are wrapped, and control characters removed.
+// wrappedBody is bodyLines remembered for the last body and width asked for.
+type wrappedBody struct {
+	body   string
+	cols   int
+	result []string
+	valid  bool
+}
+
+// lines is bodyLines(body, cols), laid out again only when either changed. A
+// nil cache (a Model not made by NewModel) lays it out every time.
+func (w *wrappedBody) lines(body string, cols int) []string {
+	if w == nil {
+		return bodyLines(body, cols)
+	}
+	if !w.valid || w.cols != cols || w.body != body {
+		*w = wrappedBody{body: body, cols: cols, result: bodyLines(body, cols), valid: true}
+	}
+	return w.result
+}
+
 func bodyLines(body string, cols int) []string {
 	body = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(body)
 	body = strings.TrimRight(body, "\n")
@@ -1163,7 +1187,7 @@ func fitCells(s string, width int) string {
 // wrapCells cuts s into lines of at most width cells; "" is one empty line.
 func wrapCells(s string, width int) []string {
 	width = max(width, 1)
-	if len(s) <= width { // no rune is wider in cells than in bytes
+	if cellWidth(s) <= width {
 		return []string{s}
 	}
 	var lines []string

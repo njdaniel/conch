@@ -2068,3 +2068,45 @@ func TestManyApprovalsFitTheInbox(t *testing.T) {
 		t.Errorf("want the selected approval with marks above and below:\n%s", view)
 	}
 }
+
+// TestApprovalViewWideRunes: runes that take more cells than bytes (U+2E3B
+// is 3 bytes and 4 cells) are still wrapped to the pane, so the view keeps
+// the terminal's height and the title stays on screen. Found in the
+// security review of #205.
+func TestApprovalViewWideRunes(t *testing.T) {
+	for _, size := range []struct{ width, height, dashes int }{{80, 24, 19}, {minApprovalWidth, minApprovalHeight, 7}} {
+		body := strings.Repeat(strings.Repeat("⸻", size.dashes)+"\n", 40)
+		for _, md := range []mode{modeInbox, modeDecision} {
+			m := approvalModel(t, md, size.width, size.height, testApproval(body, 2))
+			lines := viewLines(t, m)
+			view := strings.Join(lines, "\n")
+			if len(lines) != size.height || !strings.Contains(view, "Requester: 3") {
+				t.Errorf("%dx%d mode %d: %d lines, want %d with the requester shown:\n%s", size.width, size.height, md, len(lines), size.height, view)
+			}
+			for i, line := range lines {
+				if w := lipgloss.Width(line); w > size.width {
+					t.Errorf("%dx%d mode %d: line %d is %d cells wide", size.width, size.height, md, i, w)
+				}
+			}
+		}
+	}
+}
+
+// TestLargeBodyIsLaidOutOnce: typing a reason under a huge body does not lay
+// the body out again for every frame.
+func TestLargeBodyIsLaidOutOnce(t *testing.T) {
+	m := approvalModel(t, modeDecision, 80, 24, testApproval(strings.Repeat("x\n", 1<<20), 2))
+	_ = m.View()
+	first := m.wrapped.result
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	m = next.(Model)
+	_ = m.View()
+	if len(first) == 0 || &m.wrapped.result[0] != &first[0] {
+		t.Error("the body was laid out again although neither it nor the width changed")
+	}
+	m.width = 100
+	_ = m.View()
+	if &m.wrapped.result[0] == &first[0] {
+		t.Error("a new width must lay the body out again")
+	}
+}
