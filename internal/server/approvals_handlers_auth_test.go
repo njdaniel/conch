@@ -210,3 +210,38 @@ func TestCastDecisionIsBoundToCallerAndMembership(t *testing.T) {
 		t.Errorf("decision_cast events = %d, want exactly 1", cast)
 	}
 }
+
+func TestGetApprovalIsBoundToMembership(t *testing.T) {
+	f := newMemberFixture(t)
+	rec := f.do(t, "POST", "/v1/approvals", f.aliceTok, createApprovalBody(f.alpha.ID, 0))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	id := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval.ID
+	path := fmt.Sprintf("/v1/approvals/%d", id)
+
+	// A member reads it.
+	rec = f.do(t, "GET", path, f.aliceTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member read = %d %s", rec.Code, rec.Body)
+	}
+	if got := decodeBody[schema.GetApprovalResponseV1](t, rec).Approval.ID; got != id {
+		t.Errorf("approval read = %d, want %d", got, id)
+	}
+
+	// A human who is not a member of the approval's channel sees exactly what
+	// an unknown approval id looks like — for carol (member of nothing) and
+	// for the operator (member of general only).
+	unknown := f.do(t, "GET", "/v1/approvals/9999", f.carolTok, "")
+	unknownBody := unknown.Body.String()
+	assertErrorBody(t, unknown, http.StatusNotFound, "approval_not_found")
+	for who, tok := range map[string]string{"non-member": f.carolTok, "non-member operator": f.rootTok} {
+		rec := f.do(t, "GET", path, tok, "")
+		if rec.Code != http.StatusNotFound || rec.Body.String() != unknownBody {
+			t.Errorf("%s read = %d %s, want the unknown-approval response 404 %s", who, rec.Code, rec.Body, unknownBody)
+		}
+	}
+
+	// Without a credential there is no read at all.
+	assertErrorBody(t, f.do(t, "GET", path, "", ""), http.StatusUnauthorized, "unauthenticated")
+}

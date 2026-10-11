@@ -816,6 +816,18 @@ func happyPath(bin binaries) error {
 	if !reflect.DeepEqual(resolvedCheck.Resolution, awaited.out.Resolution) {
 		return fmt.Errorf("await/check resolutions differ: await=%+v check=%+v", awaited.out.Resolution, resolvedCheck.Resolution)
 	}
+	// Step 6b: the human reads the same approval by id over REST (issue #65,
+	// parity with check_decision) and sees the identical resolution.
+	var restRead schema.GetApprovalResponseV1
+	if err := proc.as(humanToken).call(http.MethodGet, fmt.Sprintf("/v1/approvals/%d", created.ID), nil, &restRead); err != nil {
+		return fmt.Errorf("REST get approval: %w", err)
+	}
+	if restRead.Approval.ID != created.ID || restRead.Approval.State != schema.ApprovalStateResolved {
+		return fmt.Errorf("REST get approval = %+v, want approval %d resolved", restRead.Approval, created.ID)
+	}
+	if !reflect.DeepEqual(restRead.Resolution, awaited.out.Resolution) {
+		return fmt.Errorf("REST/MCP resolutions differ: REST=%+v MCP=%+v", restRead.Resolution, awaited.out.Resolution)
+	}
 
 	// Step 4: the ntfy notification fired.
 	hits := ntfy.Hits()
