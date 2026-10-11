@@ -144,6 +144,10 @@ type Model struct {
 	approvals     []schema.ApprovalV1
 	selApproval   int
 	selOption     int
+	// bodyOffset is the first line of the selected approval's body shown in
+	// the details pane. Only pgup/pgdn move it, and it is back to 0 whenever
+	// the selected approval changes.
+	bodyOffset int
 	// loadingChannels is true while the channel list is being fetched from the
 	// server; the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
@@ -288,6 +292,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.selectChannel(-1)
 			case modeInbox:
 				m.selApproval = max(0, m.selApproval-1)
+				m.bodyOffset = 0
 				return m, nil
 			case modeDecision:
 				m.selOption = max(0, m.selOption-1)
@@ -301,6 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.approvals) > 0 {
 					m.selApproval = min(len(m.approvals)-1, m.selApproval+1)
 				}
+				m.bodyOffset = 0
 				return m, nil
 			case modeDecision:
 				if len(m.approvals) == 0 || m.selApproval >= len(m.approvals) {
@@ -312,6 +318,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.selOption = min(len(app.Options)-1, m.selOption+1)
 				return m, nil
+			}
+		case "pgup", "pgdown":
+			if m.mode == modeInbox || m.mode == modeDecision {
+				return m.scrollBody(msg.String() == "pgdown"), nil
 			}
 		case "enter":
 			switch m.mode {
@@ -343,6 +353,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				app := m.approvals[m.selApproval]
 				if len(app.Options) == 0 || m.selOption < 0 || m.selOption >= len(app.Options) {
 					m.setStatus(modeInbox, "select a decision option")
+					return m, nil
+				}
+				// Only an option the person can see may be cast: on a terminal
+				// too small to lay the decision out, nothing is chosen.
+				if d, ok := m.selectedDetails(); !ok || !d.optionShown {
+					m.setStatus(modeInbox, "terminal too small to decide; enlarge it")
 					return m, nil
 				}
 				opt := app.Options[m.selOption]
@@ -387,6 +403,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.approvals = msg.approvals
 			m.selApproval = 0
+			m.bodyOffset = 0
 			// A slower load can land after the user has already moved into
 			// modeDecision on a stale (now-refreshed) list. If the refresh
 			// came back empty there is nothing left to decide on; otherwise
@@ -734,18 +751,8 @@ var (
 
 // View renders a compact two-pane layout that fits an 80x24 terminal.
 func (m Model) View() string {
-	width, height := m.width, m.height
-	if width <= 0 {
-		width = 80
-	}
-	if height <= 0 {
-		height = 24
-	}
-	leftWidth := 18
-	if width < 60 {
-		leftWidth = 14
-	}
-	rightWidth := width - leftWidth - 1
+	width, height := m.size()
+	leftWidth, rightWidth := paneWidths(width)
 	// The voice line, when there is one, takes a row from the panes rather
 	// than adding one to the screen, and it is one row however many people
 	// are in voice, so the layout does not move as the roster changes.
@@ -765,51 +772,13 @@ func (m Model) View() string {
 
 	var panes string
 	if m.mode == modeInbox || m.mode == modeDecision {
-		inboxLines := []string{}
-		for i, app := range m.approvals {
-			prefix := "  "
-			if i == m.selApproval {
-				prefix = activeStyle.Render("› ")
-			}
-			esc := ""
-			if app.State == schema.ApprovalStateEscalated {
-				esc = badgeStyle.Render(" [ESC]")
-			}
-			title := clip(fmt.Sprintf("%d: %s", app.RequesterID, app.Title), leftWidth-4-utf8.RuneCountInString(esc))
-			inboxLines = append(inboxLines, prefix+title+esc)
+		if width < minApprovalWidth || height < minApprovalHeight {
+			return tooSmall(width, height)
 		}
-		if len(inboxLines) == 0 {
-			inboxLines = append(inboxLines, statusStyle.Render("No pending approvals"))
-		}
-		inbox := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(inboxLines, "\n"))
-
-		detailsLines := []string{}
-		if len(m.approvals) > 0 && m.selApproval < len(m.approvals) {
-			app := m.approvals[m.selApproval]
-			detailsLines = append(detailsLines, activeStyle.Render(app.Title))
-			detailsLines = append(detailsLines, fmt.Sprintf("Requester: %d  Deadline: %s", app.RequesterID, app.Deadline.Time().Format("Jan 02 15:04")))
-			if app.Payload != nil {
-				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", app.Payload.Schema)))
-			}
-			detailsLines = append(detailsLines, "", app.Body, "")
-			if m.mode == modeDecision {
-				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
-				for i, opt := range app.Options {
-					prefix := "  "
-					if i == m.selOption {
-						prefix = activeStyle.Render("› ")
-					}
-					detailsLines = append(detailsLines, prefix+opt.Label)
-				}
-			} else {
-				for _, opt := range app.Options {
-					detailsLines = append(detailsLines, "  - "+opt.Label)
-				}
-			}
-		}
-		visible := contentHeight - 1
-		if len(detailsLines) > visible {
-			detailsLines = detailsLines[:visible]
+		inbox := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(m.inboxLines(leftWidth-2, contentHeight), "\n"))
+		var detailsLines []string
+		if d, ok := m.selectedDetails(); ok {
+			detailsLines = d.lines
 		}
 		details := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(detailsLines, "\n"))
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
@@ -863,12 +832,353 @@ func (m Model) View() string {
 		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
 
-	status := m.status() + statusKeys
+	status := m.status()
 	if m.userName != "" {
 		status = m.userName + " | " + status
 	}
+	if m.mode == modeChannels {
+		status += statusKeys
+	} else {
+		// One line whatever it holds, so the panes are never pushed up off
+		// the screen: the message is what is cut, never the key hints.
+		status = fitCells(sanitize(status), width-cellWidth(statusKeys)) + statusKeys
+		status = fitCells(status, width)
+	}
 	status = statusStyle.Width(width).Render(status)
 	return panes + "\n" + voice + inputStr + "\n" + status
+}
+
+// size is the terminal size, or 80x24 before the first WindowSizeMsg.
+func (m Model) size() (width, height int) {
+	width, height = m.width, m.height
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	return width, height
+}
+
+// paneWidths is the outer width of the left and right panes; together with
+// the gap between them they fill the terminal's width.
+func paneWidths(width int) (left, right int) {
+	left = 18
+	if width < 60 {
+		left = 14
+	}
+	return left, width - left - 1
+}
+
+// The smallest terminal the inbox and decision views are laid out for. On a
+// smaller one they show tooSmall instead, and no decision can be cast.
+const (
+	minApprovalWidth  = 40
+	minApprovalHeight = 14
+)
+
+// tooSmall fills the terminal, exactly, with a request to enlarge it.
+func tooSmall(width, height int) string {
+	lines := make([]string, height)
+	text := []string{"Terminal too small for approvals.", fmt.Sprintf("Need at least %dx%d.", minApprovalWidth, minApprovalHeight), "tab: channels  esc: quit/cancel"}
+	for i := range lines {
+		if i < len(text) {
+			lines[i] = fitCells(text[i], width)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// inboxLines is the approval list in rows lines of at most cols cells. A list
+// longer than that shows the part around the selection, with how many
+// approvals are above and below it.
+func (m Model) inboxLines(cols, rows int) []string {
+	if len(m.approvals) == 0 {
+		return []string{statusStyle.Render(fitCells("No pending approvals", cols))}
+	}
+	start, end, marks := 0, len(m.approvals), false
+	if len(m.approvals) > rows {
+		marks = true
+		start, end = window(len(m.approvals), m.selApproval, rows-2)
+	}
+	lines := make([]string, 0, rows)
+	if marks {
+		lines = append(lines, moreMark("↑", start, "", cols))
+	}
+	for i := start; i < end; i++ {
+		app := m.approvals[i]
+		prefix := "  "
+		if i == m.selApproval {
+			prefix = activeStyle.Render("› ")
+		}
+		esc, escWidth := "", 0
+		if app.State == schema.ApprovalStateEscalated {
+			esc, escWidth = badgeStyle.Render(" [ESC]"), 6
+		}
+		title := fitCells(fmt.Sprintf("%d: %s", app.RequesterID, sanitize(app.Title)), cols-2-escWidth)
+		lines = append(lines, prefix+title+esc)
+	}
+	if marks {
+		lines = append(lines, moreMark("↓", len(m.approvals)-end, "", cols))
+	}
+	return lines
+}
+
+// moreMark is the line standing for n items that are not shown, or an empty
+// line when there are none.
+func moreMark(arrow string, n int, what string, cols int) string {
+	if n <= 0 {
+		return ""
+	}
+	return statusStyle.Render(fitCells(fmt.Sprintf("%s %d more%s", arrow, n, what), cols))
+}
+
+// window is the part [start, end) of n items, rows long, that shows sel.
+func window(n, sel, rows int) (start, end int) {
+	if n == 0 {
+		return 0, 0
+	}
+	rows = max(1, min(rows, n))
+	if sel >= rows {
+		start = min(sel-rows+1, n-rows)
+	}
+	return start, start + rows
+}
+
+// details is the details pane of one approval as it is drawn.
+type details struct {
+	lines []string
+	// bodyRows is how many body lines are shown at once, maxOffset the
+	// largest useful bodyOffset (0 when the whole body is shown).
+	bodyRows, maxOffset int
+	// optionShown is true when, in decision mode, the selected option is one
+	// of the lines.
+	optionShown bool
+}
+
+// bodyGutter starts every line of an approval's body. Nothing else in the
+// pane starts with it, so a body cannot pass for the title, the requester,
+// a mark, or an option, whatever text it contains.
+const bodyGutter = "┊ "
+
+// selectedDetails lays out the selected approval for the current terminal.
+// View draws it and Update acts on it, so a key can only reach what is on the
+// screen. ok is false when nothing is selected or the terminal is too small.
+func (m Model) selectedDetails() (details, bool) {
+	width, height := m.size()
+	if len(m.approvals) == 0 || m.selApproval < 0 || m.selApproval >= len(m.approvals) ||
+		width < minApprovalWidth || height < minApprovalHeight {
+		return details{}, false
+	}
+	_, rightWidth := paneWidths(width)
+	return m.approvalDetails(m.approvals[m.selApproval], rightWidth-2, height-4)
+}
+
+// approvalDetails lays out app in rows lines of at most cols cells. The
+// title, the requester, the deadline and the options are always shown, in the
+// same places; the body gets the rows left over. A body that does not fit is
+// shown from bodyOffset, followed by a line saying how much is not shown, and
+// options that do not fit are shown around the selected one, between lines
+// saying how many are above and below. ok is false if even that does not fit.
+func (m Model) approvalDetails(app schema.ApprovalV1, cols, rows int) (details, bool) {
+	header := []string{activeStyle.Render(fitCells(sanitize(app.Title), cols))}
+	requester := fmt.Sprintf("Requester: %d", app.RequesterID)
+	deadline := "Deadline: " + app.Deadline.Time().Format("Jan 02 15:04")
+	if both := requester + "  " + deadline; cellWidth(both) <= cols {
+		header = append(header, both)
+	} else {
+		header = append(header, fitCells(requester, cols), fitCells(deadline, cols))
+	}
+	if app.Payload != nil {
+		header = append(header, badgeStyle.Render("["+fitCells(sanitize(app.Payload.Schema), cols-2)+"]"))
+	}
+
+	decision := m.mode == modeDecision
+	optHead := 0
+	if decision {
+		optHead = 1
+	}
+	body := bodyLines(app.Body, cols-cellWidth(bodyGutter))
+	avail := rows - len(header)
+	bodyRows, optRows := avail-optHead-len(app.Options), len(app.Options)
+	windowed := bodyRows < min(len(body), 2)
+	if windowed {
+		// Every option cannot be shown with room for the body: the body gets
+		// two lines (one and the mark), the options the rest, less two marks.
+		bodyRows = min(len(body), 2)
+		optRows = avail - bodyRows - optHead - 2
+		if optRows < 1 {
+			return details{}, false
+		}
+	}
+
+	d := details{lines: header, bodyRows: bodyRows}
+	switch {
+	case len(body) <= bodyRows:
+		spare := bodyRows - len(body)
+		if spare >= 2 && len(body) > 0 {
+			d.lines = append(d.lines, "")
+		}
+		d.lines = append(d.lines, gutter(body)...)
+		if spare >= 1 {
+			d.lines = append(d.lines, "")
+		}
+	default:
+		shown := bodyRows - 1
+		d.bodyRows, d.maxOffset = shown, len(body)-shown
+		offset := min(max(m.bodyOffset, 0), d.maxOffset)
+		d.lines = append(d.lines, gutter(body[offset:offset+shown])...)
+		d.lines = append(d.lines, bodyMark(offset, len(body)-offset-shown, cols))
+	}
+
+	if decision {
+		d.lines = append(d.lines, activeStyle.Render("Decision Options:"))
+	}
+	sel := 0
+	if decision {
+		sel = m.selOption
+	}
+	start, end := window(len(app.Options), sel, optRows)
+	if windowed {
+		d.lines = append(d.lines, moreMark("↑", start, " options", cols))
+	}
+	for i := start; i < end; i++ {
+		label := sanitize(app.Options[i].Label)
+		switch {
+		case !decision:
+			d.lines = append(d.lines, "  - "+fitCells(label, cols-4))
+		case i == m.selOption:
+			d.optionShown = true
+			d.lines = append(d.lines, activeStyle.Render("› ")+fitCells(label, cols-2))
+		default:
+			d.lines = append(d.lines, "  "+fitCells(label, cols-2))
+		}
+	}
+	if windowed {
+		d.lines = append(d.lines, moreMark("↓", len(app.Options)-end, " options", cols))
+	}
+	return d, true
+}
+
+// bodyMark says how much of a cut body is above and below what is shown.
+func bodyMark(above, below, cols int) string {
+	parts := []string{}
+	if below > 0 {
+		parts = append(parts, fmt.Sprintf("%d more lines", below))
+	}
+	if above > 0 {
+		parts = append(parts, fmt.Sprintf("%d above", above))
+	}
+	return statusStyle.Render(fitCells("… "+strings.Join(parts, ", ")+" (pgup/pgdn)", cols))
+}
+
+// bodyLines is an approval body as lines of at most cols cells: its own line
+// breaks are kept, long lines are wrapped, and control characters removed.
+func bodyLines(body string, cols int) []string {
+	body = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(body)
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return nil
+	}
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		// sanitize without its line-break handling: there are none left.
+		line = strings.Map(func(r rune) rune {
+			switch {
+			case r == '\t':
+				return ' '
+			case unicode.IsControl(r):
+				return -1
+			}
+			return r
+		}, line)
+		lines = append(lines, wrapCells(line, cols)...)
+	}
+	return lines
+}
+
+// gutter is body lines as drawn, each behind bodyGutter. Only the lines on
+// screen are styled: a long body would otherwise cost a render per line.
+func gutter(lines []string) []string {
+	mark := statusStyle.Render(bodyGutter)
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = mark + line
+	}
+	return out
+}
+
+// scrollBody moves the selected approval's body one page down (or up).
+func (m Model) scrollBody(down bool) Model {
+	d, ok := m.selectedDetails()
+	if !ok || d.maxOffset == 0 {
+		return m
+	}
+	step := max(1, d.bodyRows-1)
+	if !down {
+		step = -step
+	}
+	m.bodyOffset = min(max(m.bodyOffset+step, 0), d.maxOffset)
+	return m
+}
+
+// runeCells is how many cells r takes on a terminal, rounded up: never less
+// than lipgloss measures it as, so text fitted with it cannot wrap.
+func runeCells(r rune) int {
+	if r < utf8.RuneSelf {
+		return 1
+	}
+	return max(1, lipgloss.Width(string(r)))
+}
+
+// cellWidth is the width of s as runeCells counts it.
+func cellWidth(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeCells(r)
+	}
+	return n
+}
+
+// fitCells is s in at most width cells, ending in "…" when it was cut.
+func fitCells(s string, width int) string {
+	if width < 1 {
+		return ""
+	}
+	if cellWidth(s) <= width {
+		return s
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		if used+runeCells(r) > width-1 {
+			break
+		}
+		used += runeCells(r)
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
+}
+
+// wrapCells cuts s into lines of at most width cells; "" is one empty line.
+func wrapCells(s string, width int) []string {
+	width = max(width, 1)
+	if len(s) <= width { // no rune is wider in cells than in bytes
+		return []string{s}
+	}
+	var lines []string
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		if w := runeCells(r); used+w > width && used > 0 {
+			lines = append(lines, b.String())
+			b.Reset()
+			used = 0
+		}
+		used += runeCells(r)
+		b.WriteRune(r)
+	}
+	return append(lines, b.String())
 }
 
 func clip(value string, width int) string {
