@@ -40,6 +40,110 @@ func TestCreateHook(t *testing.T) {
 	}
 }
 
+// TestCreateHookAuditActor: creating a hook appends exactly one hook_created
+// event; under --auth required its actor is the caller, under --auth off it
+// is "system".
+func TestCreateHookAuditActor(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      AuthMode
+		token     func(f *authFixture) string
+		wantActor func(f *authFixture) string
+	}{
+		{"auth required attributes the caller", AuthRequired,
+			func(f *authFixture) string { return f.rootTok },
+			func(f *authFixture) string { return fmt.Sprintf("principal:%d", f.root.ID) }},
+		{"auth off attributes system", AuthOff,
+			func(f *authFixture) string { return "" },
+			func(f *authFixture) string { return "system" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAuthFixture(t, tt.mode)
+			rec := f.do(t, http.MethodPost, "/v1/hooks", tt.token(f),
+				fmt.Sprintf(`{"channel":"general","principal":%d,"label":"ci"}`, f.alice.ID))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create: %d %s", rec.Code, rec.Body)
+			}
+			resp := decodeBody[schema.CreateHookResponse](t, rec)
+			general, err := f.srv.store.ChannelByName(context.Background(), "general")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var created []store.AuditEvent
+			for _, e := range f.audit(t) {
+				if e.Action == "hook_created" {
+					created = append(created, e)
+				}
+			}
+			wantDetail := fmt.Sprintf("hook=%d channel=%d label=%q", resp.ID, general.ID, "ci")
+			if len(created) != 1 || created[0].Actor != tt.wantActor(f) ||
+				created[0].Subject != fmt.Sprintf("principal:%d", f.alice.ID) || created[0].Detail != wantDetail {
+				t.Errorf("hook_created events = %+v, want one with actor %q, subject principal:%d, detail %q",
+					created, tt.wantActor(f), f.alice.ID, wantDetail)
+			}
+		})
+	}
+}
+
+// TestHookRedaction mirrors TestCredentialRedaction for hooks: across success
+// and failure creates, an ingest and a store outage, the hook's token and its
+// hash appear in no audit event, no log line and no response body other than
+// the create response's token field.
+func TestHookRedaction(t *testing.T) {
+	logs := captureServerLogs(t)
+	f := newAuthFixture(t, AuthRequired)
+
+	created := f.do(t, http.MethodPost, "/v1/hooks", f.rootTok,
+		fmt.Sprintf(`{"channel":"general","principal":%d,"label":"redact"}`, f.alice.ID))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body)
+	}
+	// The create body is the one place the token may appear; it is not scanned.
+	token := decodeBody[schema.CreateHookResponse](t, created).Token
+	secrets := []string{token, sha256Hex(token)}
+
+	var texts []string
+	record := func(rec *httptest.ResponseRecorder) { texts = append(texts, rec.Body.String()) }
+
+	// Failure cases: unknown channel, unknown principal, malformed body, too
+	// long a label; and the list and the ingest of the live hook.
+	record(f.do(t, http.MethodPost, "/v1/hooks", f.rootTok, `{"channel":"missing","principal":1}`))
+	record(f.do(t, http.MethodPost, "/v1/hooks", f.rootTok, `{"channel":"general","principal":9999}`))
+	record(f.do(t, http.MethodPost, "/v1/hooks", f.rootTok, `{"channel":"general"`))
+	record(f.do(t, http.MethodPost, "/v1/hooks", f.rootTok,
+		fmt.Sprintf(`{"channel":"general","principal":%d,"label":%q}`, f.alice.ID, strings.Repeat("x", schema.MaxHookLabelLength+1))))
+	record(f.do(t, http.MethodGet, "/v1/hooks", f.rootTok, ""))
+	record(ingest(f, t, token))
+
+	for _, e := range f.audit(t) {
+		texts = append(texts, e.Actor+e.Action+e.Subject+e.Detail)
+	}
+
+	// A store outage exercises the 500 paths and their log lines.
+	if err := f.srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(t, http.MethodPost, "/v1/hooks", f.rootTok,
+		fmt.Sprintf(`{"channel":"general","principal":%d}`, f.alice.ID))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("create during outage = %d, want 500", rec.Code)
+	}
+	record(rec)
+
+	if logs.Len() == 0 {
+		t.Fatal("no log output captured; the outage case should have logged")
+	}
+	texts = append(texts, logs.String())
+	for i, text := range texts {
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Errorf("output %d contains hook token material %q...: %.200s", i, secret[:6], text)
+			}
+		}
+	}
+}
+
 func TestHookIngestPostsBroadcastsAndAudits(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -57,7 +161,7 @@ func TestHookIngestPostsBroadcastsAndAudits(t *testing.T) {
 			srv := newTestServer(t)
 			channel, principal := createTestChannelAndPrincipal(t, srv)
 			const token = "hook-token"
-			if _, err := srv.store.CreateHook(context.Background(), token, channel.ID, principal.ID); err != nil {
+			if _, err := srv.store.CreateHook(context.Background(), "system", token, channel.ID, principal.ID); err != nil {
 				t.Fatalf("CreateHook: %v", err)
 			}
 			sub := srv.hub.SubscribeV1(channel.ID, 0, 1)
@@ -96,10 +200,16 @@ func TestHookIngestPostsBroadcastsAndAudits(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListAuditEvents: %v", err)
 			}
+			var posted []store.AuditEvent
+			for _, e := range events {
+				if e.Action == "message.post" {
+					posted = append(posted, e)
+				}
+			}
 			wantActor := fmt.Sprintf("principal:%d", principal.ID)
-			if len(events) != 1 || events[0].Actor != wantActor || events[0].Action != "message.post" ||
-				events[0].Subject != fmt.Sprintf("message:%d", message.ID) {
-				t.Errorf("audit events = %+v", events)
+			if len(posted) != 1 || posted[0].Actor != wantActor ||
+				posted[0].Subject != fmt.Sprintf("message:%d", message.ID) {
+				t.Errorf("message.post audit events = %+v", posted)
 			}
 		})
 	}
@@ -122,7 +232,7 @@ func TestHookIngestErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newTestServer(t)
 			channel, principal := createTestChannelAndPrincipal(t, srv)
-			if _, err := srv.store.CreateHook(context.Background(), "hook-token", channel.ID, principal.ID); err != nil {
+			if _, err := srv.store.CreateHook(context.Background(), "system", "hook-token", channel.ID, principal.ID); err != nil {
 				t.Fatalf("CreateHook: %v", err)
 			}
 			req := httptest.NewRequest(http.MethodPost, "/v1/hooks/"+tt.token, strings.NewReader(tt.body))
@@ -288,6 +398,49 @@ func TestCreateHookRejectsLongLabel(t *testing.T) {
 	body := fmt.Sprintf(`{"channel":"general","principal":%d,"label":%q}`, f.alice.ID, strings.Repeat("x", schema.MaxHookLabelLength+1))
 	if rec := f.do(t, "POST", "/v1/hooks", f.rootTok, body); rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+// TestCreateHookLabelRule applies issue #204's name rule to hook labels at the
+// handler level: separators and bidi controls join the already-refused control
+// characters; a label in any script is accepted.
+func TestCreateHookLabelRule(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	create := func(label string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"channel":"general","principal":%d,"label":%q}`, f.alice.ID, label)
+		return f.do(t, "POST", "/v1/hooks", f.rootTok, body)
+	}
+	for _, label := range []string{"ci builds", "夜間ビルド", "Zoë's deploys"} {
+		t.Run("accepted/"+label, func(t *testing.T) {
+			if rec := create(label); rec.Code != http.StatusCreated {
+				t.Errorf("status = %d, want 201; body = %s", rec.Code, rec.Body)
+			}
+		})
+	}
+	refused := []struct {
+		name    string
+		label   string
+		message string
+	}{
+		{"newline", "ci\nbuilds", "control characters"},
+		{"line separator", "ci\u2028builds", "control characters"},
+		{"bidi override", "ci\u202ebuilds", "bidi controls"},
+		{"leading space", " ci", "whitespace"},
+	}
+	for _, tt := range refused {
+		t.Run("refused/"+tt.name, func(t *testing.T) {
+			rec := create(tt.label)
+			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
+			}
+			if strings.Contains(e.Message, tt.label) {
+				t.Errorf("message echoes the refused label: %q", e.Message)
+			}
+		})
 	}
 }
 

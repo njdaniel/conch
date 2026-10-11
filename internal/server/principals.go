@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -23,12 +22,8 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
 		return
 	}
-	if req.Kind != schema.PrincipalHuman && req.Kind != schema.PrincipalAgent {
-		writeError(w, http.StatusBadRequest, "invalid_request", `kind must be "human" or "agent"`)
-		return
-	}
-	if strings.TrimSpace(req.Name) == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "name must not be empty")
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 

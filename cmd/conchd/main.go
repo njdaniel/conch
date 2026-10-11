@@ -21,6 +21,7 @@ import (
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 var version = "v0.0.0-dev"
@@ -214,6 +215,12 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 	if strings.TrimSpace(*name) == "" {
 		return errors.New("bootstrap-operator: --name is required")
+	}
+	// The operator's name enters logs, audit details and every client's
+	// terminal like any principal name, so the same rule applies as to
+	// POST /v0/principals (issue #204).
+	if err := schema.ValidateDisplayName("operator name", *name, schema.MaxPrincipalNameLength); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
 		return fmt.Errorf("bootstrap-operator: create data dir: %w", err)
