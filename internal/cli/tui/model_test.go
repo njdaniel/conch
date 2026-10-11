@@ -1979,4 +1979,3 @@ func TestSanitizeMultiline(t *testing.T) {
 		})
 	}
 }
-
