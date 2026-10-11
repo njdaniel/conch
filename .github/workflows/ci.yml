@@ -155,12 +155,14 @@ jobs:
   voice-check:
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
     # CLI and a real LiveKit server in Docker, plus the proof that the core is
-    # unaffected with LiveKit down or not configured. It runs on every pull
-    # request and every push to main, like check. CI=true makes a skip a
-    # failure: if Docker, the LiveKit image or lk cannot be had, this job is
-    # red rather than quietly green.
+    # unaffected with LiveKit down or not configured. From V4 (issue #188) it
+    # also runs three real conch-voice clients against them, so the job builds
+    # the Rust client first. It runs on every pull request and every push to
+    # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
+    # image, lk or the Rust toolchain cannot be had, this job is red rather
+    # than quietly green.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CI: "true"
       # Labels this run's LiveKit container, so the clean-up step below can
@@ -172,6 +174,36 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # The same pinned toolchain and build directory as the check job, read
+      # from its caches and never written from here: check builds everything
+      # this job needs (cargo test builds the conch-voice binary), so with a
+      # warm cache the program's own `cargo build` has nothing left to do.
+      - name: rust toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-build-${{ runner.os }}-
+
+      - name: rust system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
 
       - name: voice-check
         run: go run ./e2e/voice
