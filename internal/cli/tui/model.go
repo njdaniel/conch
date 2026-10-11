@@ -792,7 +792,11 @@ func (m Model) View() string {
 			if app.Payload != nil {
 				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", sanitize(app.Payload.Schema))))
 			}
-			detailsLines = append(detailsLines, "", sanitizeMultiline(app.Body), "")
+			// The body keeps its line breaks; each becomes its own line so the
+			// truncation below counts the rows it really takes.
+			detailsLines = append(detailsLines, "")
+			detailsLines = append(detailsLines, strings.Split(sanitizeMultiline(app.Body), "\n")...)
+			detailsLines = append(detailsLines, "")
 			if m.mode == modeDecision {
 				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
 				for i, opt := range app.Options {
@@ -868,7 +872,9 @@ func (m Model) View() string {
 	if name := sanitize(m.userName); name != "" {
 		status = name + " | " + status
 	}
-	status = statusStyle.Width(width).Render(status)
+	// Clip before styling: a name or status longer than the terminal would
+	// wrap and break the layout, and Width only pads, it does not truncate.
+	status = statusStyle.Width(width).Render(clip(status, width))
 	return panes + "\n" + voice + inputStr + "\n" + status
 }
 

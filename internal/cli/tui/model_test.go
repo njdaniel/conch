@@ -1814,8 +1814,10 @@ func TestUserNameIsSanitizedInView(t *testing.T) {
 	m.width, m.height = 120, 24
 
 	view := m.View()
-	if strings.Contains(view, "\x1b") {
-		t.Errorf("rendered view contains raw ESC sequence:\n%s", view)
+	// Assert against the hostile sequence with its context, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on.
+	if strings.Contains(view, "\x1b[31muser") {
+		t.Errorf("rendered view contains the raw escape sequence from the name:\n%s", view)
 	}
 	if strings.Contains(view, "\u202e") {
 		t.Errorf("rendered view contains raw bidi override:\n%s", view)
@@ -1846,7 +1848,7 @@ func TestUserNameIsSanitizedInView(t *testing.T) {
 	m2.userName = hostile
 	m2.width, m2.height = 120, 24
 	v2 := m2.View()
-	if strings.Contains(v2, "\x1b") || strings.Contains(v2, "\u202e") {
+	if strings.Contains(v2, "\x1b[31muser") || strings.Contains(v2, "\u202e") {
 		t.Errorf("direct userName rendered view contains raw escape or bidi override:\n%s", v2)
 	}
 	lines2 := strings.Split(v2, "\n")
@@ -1855,6 +1857,22 @@ func TestUserNameIsSanitizedInView(t *testing.T) {
 	}
 	if !strings.Contains(lines2[len(lines2)-1], "[31muser ↵ name | ") {
 		t.Errorf("direct userName status line = %q", lines2[len(lines2)-1])
+	}
+}
+
+// A name longer than the terminal is clipped rather than wrapped: the status
+// line never exceeds the width, so the layout holds.
+func TestLongUserNameIsClippedInStatusLine(t *testing.T) {
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.userName = strings.Repeat("a", 300)
+	m.width, m.height = 80, 24
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 24 {
+		t.Fatalf("view has %d lines, want 24:\n%s", len(lines), m.View())
+	}
+	statusLine := lines[len(lines)-1]
+	if utf8.RuneCountInString(statusLine) > 80 {
+		t.Errorf("status line is %d runes, want at most 80: %q", utf8.RuneCountInString(statusLine), statusLine)
 	}
 }
 
@@ -1882,8 +1900,13 @@ func TestApprovalFieldsAreSanitizedInView(t *testing.T) {
 	m.width, m.height = 80, 24
 
 	inboxView := m.View()
-	if strings.Contains(inboxView, "\x1b") {
-		t.Errorf("inbox view contains raw ESC sequence:\n%s", inboxView)
+	// Assert against the hostile sequences specifically, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on. The palette
+	// (colors 8, 6, 3) never produces [31m, [32m, or [2J.
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(inboxView, hostile) {
+			t.Errorf("inbox view contains the raw hostile sequence %q:\n%s", hostile, inboxView)
+		}
 	}
 	if strings.Contains(inboxView, "\u202e") {
 		t.Errorf("inbox view contains raw bidi override:\n%s", inboxView)
@@ -1892,11 +1915,20 @@ func TestApprovalFieldsAreSanitizedInView(t *testing.T) {
 	if len(inboxLines) != 24 {
 		t.Errorf("inbox view has %d lines, want 24:\n%s", len(inboxLines), inboxView)
 	}
+	// Positive pins: the sanitized text is what is drawn. These fail if a
+	// newline in Title or Body survives, which the line count alone cannot see.
+	for _, want := range []string{"hostile[31m ↵ title", "body line 1[2J", "body line 2", "schema[32m.v1", "  - opt[33m ↵ label"} {
+		if !strings.Contains(inboxView, want) {
+			t.Errorf("inbox view missing sanitized %q:\n%s", want, inboxView)
+		}
+	}
 
 	m.mode = modeDecision
 	decisionView := m.View()
-	if strings.Contains(decisionView, "\x1b") {
-		t.Errorf("decision view contains raw ESC sequence:\n%s", decisionView)
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(decisionView, hostile) {
+			t.Errorf("decision view contains the raw hostile sequence %q:\n%s", hostile, decisionView)
+		}
 	}
 	if strings.Contains(decisionView, "\u202e") {
 		t.Errorf("decision view contains raw bidi override:\n%s", decisionView)
@@ -1904,6 +1936,35 @@ func TestApprovalFieldsAreSanitizedInView(t *testing.T) {
 	decisionLines := strings.Split(decisionView, "\n")
 	if len(decisionLines) != 24 {
 		t.Errorf("decision view has %d lines, want 24:\n%s", len(decisionLines), decisionView)
+	}
+	for _, want := range []string{"hostile[31m ↵ title", "opt[33m ↵ label"} {
+		if !strings.Contains(decisionView, want) {
+			t.Errorf("decision view missing sanitized %q:\n%s", want, decisionView)
+		}
+	}
+}
+
+// A body that keeps its line breaks takes one pane row per line, so the
+// pane's truncation accounts for it and the layout never overflows.
+func TestMultilineBodyCountsItsLines(t *testing.T) {
+	body := strings.Repeat("body line\n", 30)
+	app := schema.ApprovalV1{
+		ID:          1,
+		RequesterID: 42,
+		Title:       "long body",
+		Body:        body,
+		Options:     []schema.Option{{ID: "opt1", Label: "approve"}},
+		Deadline:    schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt:   schema.NewTimestamp(time.Now()),
+		Quorum:      1,
+		State:       schema.ApprovalStatePending,
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.mode = modeDecision
+	m.approvals = []schema.ApprovalV1{app}
+	m.width, m.height = 80, 24
+	if lines := strings.Split(m.View(), "\n"); len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (multiline body overflowed the pane):\n%s", len(lines), m.View())
 	}
 }
 
