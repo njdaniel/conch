@@ -431,11 +431,14 @@ func TestCreateHookLabelRule(t *testing.T) {
 		t.Run("refused/"+tt.name, func(t *testing.T) {
 			rec := create(tt.label)
 			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
-			if !strings.Contains(rec.Body.String(), tt.message) {
-				t.Errorf("body = %s, want a message naming the rule (%q)", rec.Body.String(), tt.message)
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
 			}
-			if strings.Contains(rec.Body.String(), tt.label) {
-				t.Errorf("body echoes the refused label: %s", rec.Body.String())
+			if strings.Contains(e.Message, tt.label) {
+				t.Errorf("message echoes the refused label: %q", e.Message)
 			}
 		})
 	}

@@ -119,11 +119,14 @@ func TestCreateChannelNameRule(t *testing.T) {
 			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v0/channels",
 				bytes.NewBufferString(fmt.Sprintf(`{"name":%s}`, jsonString(t, tt.input)))))
 			assertAPIError(t, rec, http.StatusBadRequest, "invalid_request")
-			if !strings.Contains(rec.Body.String(), tt.message) {
-				t.Errorf("body = %s, want a message naming the rule (%q)", rec.Body.String(), tt.message)
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
 			}
-			if strings.Contains(rec.Body.String(), tt.input) {
-				t.Errorf("body echoes the refused name: %s", rec.Body.String())
+			if strings.Contains(e.Message, tt.input) {
+				t.Errorf("message echoes the refused name: %q", e.Message)
 			}
 		})
 	}
