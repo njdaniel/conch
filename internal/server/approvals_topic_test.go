@@ -20,22 +20,23 @@ import (
 )
 
 // Issue #170, the whole chain (CLAUDE.md rule 3): request, notify, escalate,
-// resolve, audit, through the REST API, with an ntfy server set and one of its
-// two topics left empty. The notification that has no topic is not sent and
-// is audited as not attempted; it used to be audited as notify_sent. The
-// others are sent and audited as before, the approval's life is the same in
-// every case, and conchd says once at start which topic is missing.
+// resolve, audit, through the REST API, with an ntfy server set and one or
+// both of its two topics left empty. The notification that has no topic is
+// not sent and is audited as not attempted; it used to be audited as
+// notify_sent. The others are sent and audited as before, the approval's life
+// is the same in every case, and conchd says once at start what is missing.
 func TestNtfyTopicLeftEmptyFullChain(t *testing.T) {
 	const notAttempted = ` error="not attempted: no ntfy topic configured for this notification"`
 	for _, tt := range []struct {
 		name              string
 		approvals, urgent string
-		// warns is the flag the start-up warning names, or "" for no warning.
+		// warns is what the start-up warning names, or "" for no warning.
 		warns string
 	}{
 		{"both topics set", "approvals", "urgent", ""},
 		{"the urgent topic left empty", "approvals", "", "--ntfy-urgent-topic"},
 		{"the approvals topic left empty", "", "urgent", "--ntfy-topic"},
+		{"both topics left empty", "", "", "--ntfy-topic, --ntfy-urgent-topic"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			logs := captureLogsLocked(t)
