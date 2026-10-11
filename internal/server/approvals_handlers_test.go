@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -116,6 +117,87 @@ func TestCreateListDecideApprovalOverREST(t *testing.T) {
 	}
 	if len(listed.Approvals) != 0 {
 		t.Fatalf("open approvals after resolve = %+v, want none", listed.Approvals)
+	}
+}
+
+func getJSON(t *testing.T, srv *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+// TestGetApprovalByID reads one approval by id in each state (issue #65): a
+// pending one carries no resolution; a resolved one carries the same
+// resolution the deciding call returned.
+func TestGetApprovalByID(t *testing.T) {
+	srv := newTestServer(t)
+	channel, agent, human := approvalTestFixture(t, srv)
+	create := func() schema.ApprovalV1 {
+		t.Helper()
+		rec := postJSON(t, srv, "/v1/approvals", createApprovalBody(channel.ID, agent.ID))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
+		}
+		return decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval
+	}
+	pending := create()
+	resolved := create()
+	decideRec := postJSON(t, srv, fmt.Sprintf("/v1/approvals/%d/decisions", resolved.ID),
+		fmt.Sprintf(`{"principal_id":%d,"option_id":"reject","reason":"too risky"}`, human.ID))
+	if decideRec.Code != http.StatusOK {
+		t.Fatalf("decide status = %d, body = %s", decideRec.Code, decideRec.Body.String())
+	}
+	decided := decodeBody[schema.CastDecisionResponseV1](t, decideRec)
+
+	tests := []struct {
+		name           string
+		approval       schema.ApprovalV1
+		wantState      schema.ApprovalState
+		wantResolution *schema.ApprovalResolutionV1
+	}{
+		{"pending has no resolution", pending, schema.ApprovalStatePending, nil},
+		{"resolved carries its resolution", resolved, schema.ApprovalStateResolved, decided.Resolution},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := getJSON(t, srv, fmt.Sprintf("/v1/approvals/%d", tt.approval.ID))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("get status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			got := decodeBody[schema.GetApprovalResponseV1](t, rec)
+			if err := got.Approval.Validate(); err != nil {
+				t.Fatalf("approval invalid on the wire: %v", err)
+			}
+			want := tt.approval
+			want.State = tt.wantState
+			if !reflect.DeepEqual(got.Approval, want) {
+				t.Errorf("approval = %+v, want %+v", got.Approval, want)
+			}
+			if !reflect.DeepEqual(got.Resolution, tt.wantResolution) {
+				t.Errorf("resolution = %+v, want %+v", got.Resolution, tt.wantResolution)
+			}
+		})
+	}
+}
+
+func TestGetApprovalErrors(t *testing.T) {
+	srv := newTestServer(t)
+	tests := []struct {
+		name     string
+		path     string
+		wantCode int
+		wantErr  string
+	}{
+		{"unknown id", "/v1/approvals/9999", http.StatusNotFound, "approval_not_found"},
+		{"zero id", "/v1/approvals/0", http.StatusBadRequest, "invalid_request"},
+		{"negative id", "/v1/approvals/-1", http.StatusBadRequest, "invalid_request"},
+		{"non-numeric id", "/v1/approvals/abc", http.StatusBadRequest, "invalid_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertErrorBody(t, getJSON(t, srv, tt.path), tt.wantCode, tt.wantErr)
+		})
 	}
 }
 

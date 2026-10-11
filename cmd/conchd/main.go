@@ -81,8 +81,10 @@ Flags for serve:
   --auth    REST/WebSocket authentication: required or off (env CONCHD_AUTH, default required)
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
-  --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
-  --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
+  --ntfy-topic           topic for new and resolved approvals (env CONCHD_NTFY_TOPIC)
+  --ntfy-urgent-topic    topic for escalations (env CONCHD_NTFY_URGENT_TOPIC)
+                         With --ntfy-server, set both: what a missing topic
+                         would carry is not sent.
   --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
   --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
                          default: --livekit-url with ws->http, wss->https)

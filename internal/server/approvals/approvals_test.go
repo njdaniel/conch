@@ -315,15 +315,19 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 	ctx := context.Background()
 	channelID, agentID, _ := fixture(t, s)
 
-	// First manager creates two approvals, then "crashes" (Close only stops
-	// timers; the store — our durable state — survives).
-	m1 := New(s, nil)
+	// The state a crash leaves behind: two open approvals in the store and no
+	// manager, so nothing has a timer. They are written straight to the store.
+	// Creating them through a first manager and closing it left that manager's
+	// own timers racing the test: on a slow machine it escalated the first
+	// approval itself before it was closed (issue #194). Here the only manager
+	// that ever exists is the one that rehydrates, so every transition below is
+	// its work.
 	now := time.Now()
-	missed, err := m1.Create(ctx, params(channelID, agentID, now.Add(10*time.Millisecond), now.Add(20*time.Millisecond)))
+	missed, err := s.CreateApproval(ctx, params(channelID, agentID, now.Add(-20*time.Millisecond), now.Add(-10*time.Millisecond)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	future, err := m1.Create(ctx, store.ApprovalParams{
+	future, err := s.CreateApproval(ctx, store.ApprovalParams{
 		RequesterID: agentID,
 		ChannelID:   channelID,
 		Title:       "Second approval",
@@ -339,11 +343,8 @@ func TestRehydrateRearmsTimers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m1.Close()
 
-	// Let both deadlines pass while "down".
-	time.Sleep(30 * time.Millisecond)
-
+	// Both of the first approval's deadlines passed while "down".
 	m2 := New(s, &recordingNotifier{})
 	defer m2.Close()
 	if err := m2.Rehydrate(ctx); err != nil {
