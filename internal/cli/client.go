@@ -354,7 +354,23 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError); err != nil {
 		return fmt.Errorf("cli: server returned %s", resp.Status)
 	}
-	return fmt.Errorf("cli: server error %s: %s", serverError.Code, serverError.Message)
+	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message}
+}
+
+// ServerError is a refusal the server explained in its error body. Its text
+// is the same one-line form every client error has always had; the fields let
+// a caller tell a permanent refusal (a 4xx) from a passing one.
+type ServerError struct {
+	// Status is the HTTP status of the refusal.
+	Status int
+	// Code and Message are the server's own words and are not safe to print
+	// unescaped.
+	Code    string
+	Message string
+}
+
+func (e *ServerError) Error() string {
+	return fmt.Sprintf("cli: server error %s: %s", e.Code, e.Message)
 }
 
 // roundTrip sends one JSON request and, when out is non-nil, decodes the

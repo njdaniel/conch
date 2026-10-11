@@ -335,23 +335,57 @@ func TestNotificationMatchesCommitUnderRandomDeadlines(t *testing.T) {
 			Deadline: deadline, GraceDeadline: deadline.Add(time.Hour), Quorum: 1,
 		}
 	}
-	// Deadlines are spread over twice the time one whole Create takes here.
-	started := time.Now()
-	if _, err := f.srv.approvals.Create(bg, params()); err != nil {
-		t.Fatal(err)
-	}
-	span := 2 * time.Since(started)
-	rng := rand.New(rand.NewSource(5)) // #nosec G404 -- test timing only
-	ok, failed := 1, 0
-	for i := 0; i < 200; i++ {
-		ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
-		_, err := f.srv.approvals.Create(ctx, params())
-		cancel()
-		if err == nil {
+	ok, failed := 0, 0
+	create := func(ctx context.Context) {
+		if _, err := f.srv.approvals.Create(ctx, params()); err == nil {
 			ok++
 		} else {
 			failed++
 		}
+	}
+
+	// How long one whole Create takes here, for the clock-driven loop below.
+	started := time.Now()
+	create(bg)
+	oneCreate := time.Since(started)
+	if ok != 1 {
+		t.Fatal("Create with nothing cancelling it was refused")
+	}
+
+	// First, cancellation placed by construction. A countdown context cancels
+	// itself the n-th time it is consulted, so stepping n from 1 lands the
+	// cancellation at each point where Create looks at its context, one after
+	// the other, whatever the machine's speed or number of processors. The
+	// database driver looks a varying number of times, so the count is not the
+	// same in every run; the loop stops only once Create has got through ten
+	// times running, well past its last look.
+	const through = 10
+	throughInARow := 0
+	for n := 1; n <= 1000 && throughInARow < through; n++ {
+		before := ok
+		create(newCountdownContext(bg, n))
+		if ok > before {
+			throughInARow++
+		} else {
+			throughInARow = 0
+		}
+	}
+	placedOK, placedFailed := ok, failed
+	if placedFailed == 0 || throughInARow < through {
+		t.Fatalf("placed cancellations: %d created, %d refused, %d through in a row at the end: both outcomes must occur", placedOK, placedFailed, throughInARow)
+	}
+
+	// Then cancellation by the clock, which also reaches a deadline that passes
+	// while the database driver is working. How these split between created and
+	// refused depends on the machine (with one processor no timer fires inside
+	// Create at all), so nothing is required of the split: the loop above is
+	// what guarantees both outcomes.
+	span := 2 * oneCreate
+	rng := rand.New(rand.NewSource(5)) // #nosec G404 -- test timing only
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
+		create(ctx)
+		cancel()
 	}
 	events, err := f.st.ListAuditEvents(bg, 0, 10000)
 	if err != nil {
@@ -382,9 +416,53 @@ func TestNotificationMatchesCommitUnderRandomDeadlines(t *testing.T) {
 	if len(notified) != ok {
 		t.Errorf("notify rows for %d approvals, want %d", len(notified), ok)
 	}
-	t.Logf("%d created, %d refused", ok, failed)
-	if failed == 0 || ok < 2 {
-		t.Errorf("created %d, refused %d: the deadlines exercised only one outcome", ok, failed)
+	t.Logf("placed: %d created, %d refused; by the clock: %d created, %d refused", placedOK, placedFailed, ok-placedOK, failed-placedFailed)
+}
+
+// countdownContext is a context that cancels itself the n-th time it is
+// consulted (Done or Err). It lets a test put a cancellation at an exact point
+// in the code under test instead of hoping a timer lands there.
+//
+// It is cancelled by being asked, not by time passing: code that took the
+// channel earlier and is waiting on it is woken when a later consultation
+// reaches n, and never if none does. That is what a test wants (the n-th look
+// is where the cancellation lands), and it is why this is not a general
+// context: a parent's own cancellation is reported by Err but does not close
+// this channel.
+type countdownContext struct {
+	context.Context
+	mu   sync.Mutex
+	left int
+	done chan struct{}
+}
+
+func newCountdownContext(parent context.Context, n int) *countdownContext {
+	return &countdownContext{Context: parent, left: n, done: make(chan struct{})}
+}
+
+func (c *countdownContext) consult() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.left > 0 {
+		c.left--
+		if c.left == 0 {
+			close(c.done)
+		}
+	}
+}
+
+func (c *countdownContext) Done() <-chan struct{} {
+	c.consult()
+	return c.done
+}
+
+func (c *countdownContext) Err() error {
+	c.consult()
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return c.Context.Err()
 	}
 }
 

@@ -651,7 +651,7 @@ func TestAgentWithoutManifestAndApprovalRoutes(t *testing.T) {
 func TestHookForAgentFollowsManifest(t *testing.T) {
 	ctx := context.Background()
 	f := newMemberFixture(t)
-	if _, err := f.srv.store.CreateHook(ctx, "agent-hook", f.general.ID, f.bot.ID); err != nil {
+	if _, err := f.srv.store.CreateHook(ctx, "system", "agent-hook", f.general.ID, f.bot.ID); err != nil {
 		t.Fatal(err)
 	}
 	unknown := f.do(t, "POST", "/v1/hooks/no-such-token", "", `{"body":"x"}`)
@@ -764,7 +764,7 @@ func TestAgentNonMemberRefusalsAreAuditedOnWebSocketAndHooks(t *testing.T) {
 	ctx := context.Background()
 	f := newMemberFixture(t) // bot's manifest allows alpha, but it is not a member
 	base := wsTestServer(t, f.srv)
-	if _, err := f.srv.store.CreateHook(ctx, "alpha-hook", f.alpha.ID, f.bot.ID); err != nil {
+	if _, err := f.srv.store.CreateHook(ctx, "system", "alpha-hook", f.alpha.ID, f.bot.ID); err != nil {
 		t.Fatal(err)
 	}
 	notMember := func() map[string]int {

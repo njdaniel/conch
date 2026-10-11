@@ -80,27 +80,53 @@ func hashPlaintextHooks(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// CreateHook provisions an unlabeled ingest token for an existing channel and
-// principal. Only the token's hash is stored.
-func (s *Store) CreateHook(ctx context.Context, token string, channelID, principalID int64) (Hook, error) {
-	return s.CreateHookWithLabel(ctx, token, "", channelID, principalID)
+// hookDetail is the audit detail of a hook event: the hook's id, its channel
+// and its label. The ids are decimal and the label is last and quoted the way
+// strconv.Quote does it, so the detail is one line whatever the label holds
+// and a reader recovers the label with strconv.Unquote. It never contains the
+// token or its hash.
+func hookDetail(id, channelID int64, label string) string {
+	return fmt.Sprintf("hook=%d channel=%d label=%q", id, channelID, label)
 }
 
-// CreateHookWithLabel is CreateHook with an operator-chosen label.
-func (s *Store) CreateHookWithLabel(ctx context.Context, token, label string, channelID, principalID int64) (Hook, error) {
+// CreateHook provisions an unlabeled ingest token for an existing channel and
+// principal. Only the token's hash is stored. See CreateHookWithLabel for the
+// audit event it writes.
+func (s *Store) CreateHook(ctx context.Context, actor, token string, channelID, principalID int64) (Hook, error) {
+	return s.CreateHookWithLabel(ctx, actor, token, "", channelID, principalID)
+}
+
+// CreateHookWithLabel is CreateHook with an operator-chosen label. A hook is
+// a posting credential for its principal, so a hook_created audit event is
+// appended in the same transaction as the insert, as credential_created is
+// for a bearer credential: actor is who created it, the subject is the hook's
+// principal, and the detail names the hook id, channel and label, never the
+// token or its hash.
+//
+// It returns ErrDuplicate for a token that is already stored, and an error
+// for an unknown channel or principal; a failed create writes neither a hook
+// nor an event.
+func (s *Store) CreateHookWithLabel(ctx context.Context, actor, token, label string, channelID, principalID int64) (Hook, error) {
 	now := time.Now().Truncate(time.Millisecond)
-	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at) VALUES (?, ?, ?, ?, ?)",
-		hashHookToken(token), label, channelID, principalID, now.UnixMilli())
-	if isUniqueConstraintErr(err) {
-		return Hook{}, fmt.Errorf("store: create hook: %w", ErrDuplicate)
-	}
+	var id int64
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		res, err := tx.ExecContext(ctx,
+			"INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at) VALUES (?, ?, ?, ?, ?)",
+			hashHookToken(token), label, channelID, principalID, now.UnixMilli())
+		if isUniqueConstraintErr(err) {
+			return fmt.Errorf("store: create hook: %w", ErrDuplicate)
+		}
+		if err != nil {
+			return fmt.Errorf("store: create hook: %w", err)
+		}
+		if id, err = res.LastInsertId(); err != nil {
+			return fmt.Errorf("store: create hook: %w", err)
+		}
+		return appendAuditEventTx(ctx, tx, actor, "hook_created", principalActor(principalID),
+			hookDetail(id, channelID, label), now)
+	})
 	if err != nil {
-		return Hook{}, fmt.Errorf("store: create hook: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Hook{}, fmt.Errorf("store: create hook: %w", err)
+		return Hook{}, err
 	}
 	return Hook{ID: id, Label: label, ChannelID: channelID, PrincipalID: principalID, CreatedAt: now}, nil
 }
@@ -202,6 +228,6 @@ func (s *Store) RevokeHook(ctx context.Context, actor string, hookID int64) erro
 			return nil
 		}
 		return appendAuditEventTx(ctx, tx, actor, "hook_revoked", principalActor(principalID),
-			fmt.Sprintf("hook=%d channel=%d label=%q", hookID, channelID, label), now)
+			hookDetail(hookID, channelID, label), now)
 	})
 }

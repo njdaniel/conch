@@ -174,7 +174,40 @@ func (l *live) joinedTransmittingOutsider(ctx context.Context) error {
 	return l.enforcedByName(ctx)
 }
 
+// transmitRows returns actor's transmit rows in subject's channel that are
+// timed at or after since, in the order they were written: the unreported
+// openings, the closes the poller wrote, and any voice_transmit_started.
+func (l *live) transmitRows(subject, actor string, since time.Time) (unreported, observedStops, started []store.AuditEvent, err error) {
+	all, err := l.d.audit()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Audit times are whole milliseconds.
+	since = since.Truncate(time.Millisecond)
+	for _, e := range all {
+		if e.Subject != subject || e.Actor != actor || e.CreatedAt.Before(since) {
+			continue
+		}
+		switch {
+		case e.Action == store.AuditVoiceTransmitUnreported:
+			unreported = append(unreported, e)
+		case e.Action == store.AuditVoiceTransmitStopped && strings.Contains(e.Detail, "source=observed"):
+			observedStops = append(observedStops, e)
+		case e.Action == store.AuditVoiceTransmitStarted:
+			started = append(started, e)
+		}
+	}
+	return unreported, observedStops, started, nil
+}
+
 // transmitting: unmute and mute, seen in presence and audited.
+//
+// The headless participant never reports a press (it is lk, not conch-voice),
+// so from V4 (issue #135, docs/design/conch-voice.md §6) what the poller sees
+// of it is recorded as an unreported transmission: voice_transmit_unreported,
+// timed at the first pass that saw the microphone unmuted, and an observed
+// voice_transmit_stopped with reason=muted when it mutes. The poller writes no
+// voice_transmit_started any more; that row is a client's report.
 func (l *live) transmitting(ctx context.Context) error {
 	h, bob, alice := l.h, l.bob, l.alice
 	aliceID, bridgeRoom, bridgeSubject := alice.id, l.bridgeRoom, l.bridgeSubject
@@ -225,16 +258,38 @@ func (l *live) transmitting(ctx context.Context) error {
 	if err := seen(false); err != nil {
 		return err
 	}
-	started, _ := l.auditCount(store.AuditVoiceTransmitStarted, bridgeSubject, actor)
-	stopped, _ := l.auditCount(store.AuditVoiceTransmitStopped, bridgeSubject, actor)
+	// Rows are picked by their time, not counted from a baseline: a row is
+	// written a moment after presence changes, and lk joined unmuted, so the
+	// rows of that first transmission may still be arriving.
+	unmutedAt := time.Now()
 	if err := setMuted(false); err != nil {
 		return err
 	}
 	if err := seen(true); err != nil {
 		return err
 	}
-	if err := l.waitAudit("a voice_transmit_started row after the unmute", store.AuditVoiceTransmitStarted, bridgeSubject, actor, started+1); err != nil {
+	seenAt := time.Now()
+	var opened store.AuditEvent
+	if err := waitFor("one voice_transmit_unreported row for alice's unmute", 30*time.Second, func() (bool, string) {
+		unreported, stops, _, err := l.transmitRows(bridgeSubject, actor, unmutedAt)
+		if err != nil {
+			return false, err.Error()
+		}
+		if len(unreported) == 1 {
+			opened = unreported[0]
+		}
+		return len(unreported) == 1 && len(stops) == 0, fmt.Sprintf("%d unreported rows and %d observed stops since the unmute, want 1 and 0", len(unreported), len(stops))
+	}); err != nil {
 		return err
+	}
+	if want := "channel=" + strings.TrimPrefix(bridgeSubject, "channel:") + " audience=channel source=observed"; opened.Detail != want {
+		return fmt.Errorf("alice's voice_transmit_unreported row has detail %q, want %q", opened.Detail, want)
+	}
+	// Timed at first sight: no later than the moment presence showed her
+	// talking, though the row is written a pass after that one.
+	if opened.CreatedAt.After(seenAt) {
+		return fmt.Errorf("alice's voice_transmit_unreported row is timed %s after presence first showed her talking: it must carry the time of the first pass that saw her, not of the pass that wrote it",
+			opened.CreatedAt.Sub(seenAt).Round(time.Millisecond))
 	}
 	if out, err := bob.cli.run("", "voice", "status", "bridge"); err != nil || !strings.Contains(out, fmt.Sprintf("%d - talking ", aliceID)) {
 		return fmt.Errorf("conch voice status while alice is unmuted: exit=%s output=%q, want her line to say talking", exitText(err), strings.TrimSpace(out))
@@ -245,7 +300,31 @@ func (l *live) transmitting(ctx context.Context) error {
 	if err := seen(false); err != nil {
 		return err
 	}
-	if err := l.waitAudit("a voice_transmit_stopped row after the mute", store.AuditVoiceTransmitStopped, bridgeSubject, actor, stopped+1); err != nil {
+	if err := waitFor("one observed voice_transmit_stopped row, reason=muted, for alice's mute", 30*time.Second, func() (bool, string) {
+		unreported, stops, _, err := l.transmitRows(bridgeSubject, actor, unmutedAt)
+		if err != nil {
+			return false, err.Error()
+		}
+		if len(unreported) != 1 || len(stops) != 1 {
+			return false, fmt.Sprintf("%d unreported rows and %d observed stops since the unmute, want 1 and 1", len(unreported), len(stops))
+		}
+		want := "channel=" + strings.TrimPrefix(bridgeSubject, "channel:") + " audience=channel source=observed reason=muted"
+		return stops[0].Detail == want && stops[0].ID > unreported[0].ID && !stops[0].CreatedAt.Before(unreported[0].CreatedAt),
+			fmt.Sprintf("the stop has detail %q (want %q), id %d against the opening's %d", stops[0].Detail, want, stops[0].ID, unreported[0].ID)
+	}); err != nil {
+		return err
+	}
+	// Everything of hers so far pairs up, the transmission lk joined with
+	// included, and none of it is a voice_transmit_started: she reported
+	// nothing, and the poller does not write that row.
+	if err := waitFor("every unreported transmission of alice's to have its closing row", 30*time.Second, func() (bool, string) {
+		unreported, stops, started, err := l.transmitRows(bridgeSubject, actor, time.Time{})
+		if err != nil {
+			return false, err.Error()
+		}
+		return len(unreported) == len(stops) && len(started) == 0,
+			fmt.Sprintf("%d unreported rows, %d observed stops, %d voice_transmit_started rows", len(unreported), len(stops), len(started))
+	}); err != nil {
 		return err
 	}
 	// Leave her transmitting for what follows.
@@ -255,7 +334,7 @@ func (l *live) transmitting(ctx context.Context) error {
 	if err := seen(true); err != nil {
 		return err
 	}
-	h.say("ok   transmitting: unmute shows talking and writes voice_transmit_started; mute shows quiet and writes voice_transmit_stopped")
+	h.say("ok   transmitting: lk never reports, so its unmute shows talking and is audited as voice_transmit_unreported (source=observed, timed at first sight) and its mute as voice_transmit_stopped (source=observed reason=muted); no voice_transmit_started")
 	return nil
 }
 

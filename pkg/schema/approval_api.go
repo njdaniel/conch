@@ -85,6 +85,16 @@ type ListApprovalsResponseV1 struct {
 	Approvals []ApprovalV1 `json:"approvals"`
 }
 
+// GetApprovalResponseV1 is the response body for reading one approval by id,
+// in any state: the approval as stored and, once it is terminal (resolved or
+// expired), its resolution event, identical to what every other reader of the
+// shared resolution store sees.
+type GetApprovalResponseV1 struct {
+	Approval ApprovalV1 `json:"approval"`
+	// Resolution is present only when the approval is terminal.
+	Resolution *ApprovalResolutionV1 `json:"resolution,omitempty"`
+}
+
 // CastDecisionRequestV1 is the request body for casting one human principal's
 // decision on an approval. The reason is required at the schema layer, not
 // merely by the CLI (approval-object.md §3).

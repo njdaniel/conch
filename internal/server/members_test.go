@@ -155,6 +155,9 @@ func TestChannelContentLeak(t *testing.T) {
 		// is answered 503 voice_not_configured, and everyone else must still
 		// get the unknown-channel 404, with no hint that voice is not set up.
 		{"voice session", "POST", "/v1/channels/%s/voice/session", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// Transmit reports (issue #135) answer as the session endpoint does:
+		// a non-member is told nothing, whatever the body says.
+		{"voice transmit report", "POST", "/v1/channels/%s/voice/transmit", `{"state":"started"}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.
@@ -713,10 +716,10 @@ func TestHookIngestRequiresMembership(t *testing.T) {
 	f := newMemberFixture(t)
 	const memberHook, outsiderHook = "hook-for-alice", "hook-for-bot"
 	// alpha has alice only; bot is not a member.
-	if _, err := f.srv.store.CreateHook(ctx, memberHook, f.alpha.ID, f.alice.ID); err != nil {
+	if _, err := f.srv.store.CreateHook(ctx, "system", memberHook, f.alpha.ID, f.alice.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.srv.store.CreateHook(ctx, outsiderHook, f.alpha.ID, f.bot.ID); err != nil {
+	if _, err := f.srv.store.CreateHook(ctx, "system", outsiderHook, f.alpha.ID, f.bot.ID); err != nil {
 		t.Fatal(err)
 	}
 	countMessages := func() int {
@@ -771,7 +774,7 @@ func TestHookIngestIgnoresMembershipWhenAuthOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := srv.store.CreateHook(ctx, "open-hook", channel.ID, agent.ID); err != nil {
+	if _, err := srv.store.CreateHook(ctx, "system", "open-hook", channel.ID, agent.ID); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()

@@ -178,10 +178,14 @@ type Model struct {
 	// after schedules msg to be delivered once d has elapsed. Injectable so
 	// tests can observe the delay instead of sleeping through it.
 	after func(d time.Duration, msg tea.Msg) tea.Cmd
+	// voice is the selected channel's presence subscription and roster. It is
+	// display only and never gets in the way of typing or messages.
+	voice voiceModel
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
 func (m *Model) setStatus(mode mode, status string) {
+	status = sanitize(status)
 	if mode == modeChannels {
 		m.channelStatus = status
 		return
@@ -218,6 +222,9 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter}
+	if v, ok := api.(VoiceAPI); ok {
+		m.voice.api = v
+	}
 	if len(clean) == 0 {
 		m.loadingChannels = true
 		return m
@@ -246,7 +253,7 @@ func (m Model) Init() tea.Cmd {
 	if m.loadingChannels {
 		return tea.Batch(who, m.loadChannels(), m.waitEvent())
 	}
-	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.waitEvent())
+	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.kickVoice(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -357,6 +364,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case voiceKick:
+		return m, m.beginVoice()
+	case voicePresenceReceived:
+		return m.voicePresence(msg)
+	case voiceEnded:
+		return m.voiceEnded(msg)
+	case voiceRetryDue:
+		return m.voiceRetry(msg)
 	case whoAmILoaded:
 		if msg.err != nil {
 			m.whoErr = msg.err
@@ -366,7 +381,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
-		m.setStatus(modeChannels, "signed in as "+msg.who.Name)
+		m.setStatus(modeChannels, "signed in as "+sanitize(msg.who.Name))
 	case approvalsLoaded:
 		if msg.err != nil {
 			m.setStatus(modeInbox, msg.err.Error())
@@ -423,7 +438,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = nil
 		m.pendingNet = ""
 		m.subscribed[names[0]] = true
-		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription())
+		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.beginVoice())
 	case netsLoaded:
 		return m.netsLoaded(msg)
 	case messagesLoaded:
@@ -552,7 +567,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, "")}
+	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, ""), m.beginVoice()}
 	// A pending retry timer will start the subscription itself.
 	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
 		m.subscribed[m.current()] = true
@@ -732,7 +747,19 @@ func (m Model) View() string {
 		leftWidth = 14
 	}
 	rightWidth := width - leftWidth - 1
+	// The voice line, when there is one, takes a row from the panes rather
+	// than adding one to the screen, and it is one row however many people
+	// are in voice, so the layout does not move as the roster changes.
+	voice := ""
+	if m.mode == modeChannels {
+		if line := m.voiceLine(width); line != "" {
+			voice = statusStyle.Width(width).Render(line) + "\n"
+		}
+	}
 	contentHeight := height - 4
+	if voice != "" {
+		contentHeight--
+	}
 	if contentHeight < 4 {
 		contentHeight = 4
 	}
@@ -746,10 +773,14 @@ func (m Model) View() string {
 				prefix = activeStyle.Render("› ")
 			}
 			esc := ""
+			escWidth := 0
 			if app.State == schema.ApprovalStateEscalated {
+				// Measure before styling: the rendered badge carries escape
+				// sequences that are not cells.
+				escWidth = utf8.RuneCountInString(" [ESC]")
 				esc = badgeStyle.Render(" [ESC]")
 			}
-			title := clip(fmt.Sprintf("%d: %s", app.RequesterID, app.Title), leftWidth-4-utf8.RuneCountInString(esc))
+			title := clip(fmt.Sprintf("%d: %s", app.RequesterID, sanitize(app.Title)), leftWidth-4-escWidth)
 			inboxLines = append(inboxLines, prefix+title+esc)
 		}
 		if len(inboxLines) == 0 {
@@ -760,12 +791,16 @@ func (m Model) View() string {
 		detailsLines := []string{}
 		if len(m.approvals) > 0 && m.selApproval < len(m.approvals) {
 			app := m.approvals[m.selApproval]
-			detailsLines = append(detailsLines, activeStyle.Render(app.Title))
+			detailsLines = append(detailsLines, activeStyle.Render(sanitize(app.Title)))
 			detailsLines = append(detailsLines, fmt.Sprintf("Requester: %d  Deadline: %s", app.RequesterID, app.Deadline.Time().Format("Jan 02 15:04")))
 			if app.Payload != nil {
-				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", app.Payload.Schema)))
+				detailsLines = append(detailsLines, badgeStyle.Render(fmt.Sprintf("[%s]", sanitize(app.Payload.Schema))))
 			}
-			detailsLines = append(detailsLines, "", app.Body, "")
+			// The body keeps its line breaks; each becomes its own line so the
+			// truncation below counts the rows it really takes.
+			detailsLines = append(detailsLines, "")
+			detailsLines = append(detailsLines, strings.Split(sanitizeMultiline(app.Body), "\n")...)
+			detailsLines = append(detailsLines, "")
 			if m.mode == modeDecision {
 				detailsLines = append(detailsLines, activeStyle.Render("Decision Options:"))
 				for i, opt := range app.Options {
@@ -773,11 +808,11 @@ func (m Model) View() string {
 					if i == m.selOption {
 						prefix = activeStyle.Render("› ")
 					}
-					detailsLines = append(detailsLines, prefix+opt.Label)
+					detailsLines = append(detailsLines, prefix+sanitize(opt.Label))
 				}
 			} else {
 				for _, opt := range app.Options {
-					detailsLines = append(detailsLines, "  - "+opt.Label)
+					detailsLines = append(detailsLines, "  - "+sanitize(opt.Label))
 				}
 			}
 		}
@@ -790,7 +825,7 @@ func (m Model) View() string {
 	} else {
 		channelLines := make([]string, len(m.channels))
 		for i, channel := range m.channels {
-			channel = clip(channel, leftWidth-4)
+			channel = clip(sanitize(channel), leftWidth-4)
 			prefix := "  "
 			if i == m.selected {
 				prefix = activeStyle.Render("› ")
@@ -838,11 +873,17 @@ func (m Model) View() string {
 	}
 
 	status := m.status() + statusKeys
-	if m.userName != "" {
-		status = m.userName + " | " + status
+	if name := sanitize(m.userName); name != "" {
+		// The name gets the room the status and key hints leave; when they
+		// already fill the line the name goes, never the hints. lipgloss's
+		// Width only pads, so without this clip a long name wraps and breaks
+		// the layout.
+		if room := width - utf8.RuneCountInString(status) - 3; room > 0 {
+			status = clip(name, room) + " | " + status
+		}
 	}
 	status = statusStyle.Width(width).Render(status)
-	return panes + "\n" + inputStr + "\n" + status
+	return panes + "\n" + voice + inputStr + "\n" + status
 }
 
 func clip(value string, width int) string {
@@ -1088,11 +1129,35 @@ func (m Model) netsLoaded(msg netsLoaded) (tea.Model, tea.Cmd) {
 
 // sanitize makes server- or author-supplied text safe to put on one terminal
 // line: line breaks become a visible mark, tabs a space, and every other
-// control character (ESC included, so no escape sequence survives) is dropped.
+// control character (ESC included, so no escape sequence survives) or bidi
+// control is dropped. Dropping Bidi_Control characters deliberately strips
+// all direction marks (including LRM, RLM) for safety against display spoofing.
 func sanitize(text string) string {
-	text = strings.NewReplacer("\r\n", " ↵ ", "\n", " ↵ ", "\r", " ↵ ", "\t", " ").Replace(text)
+	text = strings.NewReplacer("\r\n", " ↵ ", "\n", " ↵ ", "\r", " ↵ ", "\u2028", " ↵ ", "\u2029", " ↵ ", "\t", " ").Replace(text)
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// sanitizeMultiline strips control characters and bidi controls from
+// multiline text while preserving newlines. Tabs are mapped to a space,
+// and lone carriage returns as well as U+2028 and U+2029 are normalized to newlines.
+func sanitizeMultiline(text string) string {
+	text = strings.NewReplacer(
+		"\r\n", "\n",
+		"\r", "\n",
+		"\u2028", "\n",
+		"\u2029", "\n",
+		"\t", " ",
+	).Replace(text)
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
 			return -1
 		}
 		return r

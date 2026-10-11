@@ -23,8 +23,15 @@ import (
 const AuditVoiceSessionIssued = "voice_session_issued"
 
 // Audit actions written by the voice presence poller (issue #127, design note
-// §7). Their times are accurate to one polling interval. The detail of each
+// §7). Their times are accurate to one gap between passes. The detail of each
 // carries source=observed; none carries a token or a room name.
+//
+// From issue #135 the two transmit actions are written by the transmit-report
+// endpoint, with source=reported, for each press and release a client reports.
+// The poller no longer writes voice_transmit_started at all; it writes
+// voice_transmit_stopped, with source=observed and a reason, to close a
+// transmission where what it sees and what was reported disagree
+// (docs/design/conch-voice.md §6).
 const (
 	AuditVoiceJoined                 = "voice_joined"
 	AuditVoiceLeft                   = "voice_left"
@@ -32,6 +39,19 @@ const (
 	AuditVoiceTransmitStopped        = "voice_transmit_stopped"
 	AuditVoiceParticipantRemoved     = "voice_participant_removed"
 	AuditVoiceEnforcementUnavailable = "voice_enforcement_unavailable"
+)
+
+// Audit actions added with transmit reports (issue #135,
+// docs/design/conch-voice.md §6). Neither carries a token or a room name.
+const (
+	// AuditVoiceTransmitUnreported is written by the poller when it sees a
+	// transmission the client did not report. Its time is that of the first
+	// pass that saw it, which is earlier than the moment the row is written.
+	AuditVoiceTransmitUnreported = "voice_transmit_unreported"
+	// AuditVoiceReportRateLimited is written by the transmit-report endpoint
+	// when a principal goes past the bound on reports: once per window of
+	// refusals, never once per refused request.
+	AuditVoiceReportRateLimited = "voice_report_rate_limited"
 )
 
 // AuditVoiceRoomRotated is written, by the store and in the transaction that

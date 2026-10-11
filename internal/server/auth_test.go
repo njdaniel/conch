@@ -152,6 +152,10 @@ var routeExpectations = map[string]routeExpectation{
 	// gets 503 voice_not_configured; AuthOff gets 400 and an agent 403 (both
 	// special-cased below).
 	"POST /v1/channels/{channel}/voice/session": {classAuth, "/v1/channels/general/voice/session", "", 503},
+	// Transmit reports (issue #135) check the caller as a session does, by
+	// the same code: 503 for a member here, 400 under AuthOff, 403 for an
+	// agent. The body is not read before those answers.
+	"POST /v1/channels/{channel}/voice/transmit": {classAuth, "/v1/channels/general/voice/transmit", `{"state":"started"}`, 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
@@ -175,6 +179,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
+	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
 	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
 	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
 }
@@ -280,7 +285,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 				agentWant = http.StatusForbidden
 			}
 			cases := []struct {
@@ -316,7 +321,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if rt.pattern == "GET /v1/whoami" {
 					want = http.StatusUnauthorized // new route; no caller to report
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)

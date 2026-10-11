@@ -67,6 +67,7 @@ const (
 const (
 	whyNotLoaded   = "not attempted: the approval could not be loaded"
 	whyBudgetSpent = "not attempted: start-up time budget spent"
+	whyNoTopic     = "not attempted: no ntfy topic configured for this notification"
 )
 
 // ErrInvalid wraps every validation failure of a create request, so the API
@@ -468,6 +469,13 @@ func (m *Manager) attempt(ctx context.Context, deliverBy time.Time, n notice) (a
 		defer cancel()
 	}
 	if err := m.deliver(dctx, n, a, r); err != nil {
+		if errors.Is(err, errNoTopic) {
+			// Nothing was sent because nothing could be: the wording is fixed
+			// here and does not come from the notifier's error. conchd said
+			// which topic is missing once, when it started.
+			action, detail = notAttempted(n, whyNoTopic)
+			return action, detail, nil
+		}
 		slog.ErrorContext(ctx, "approvals: notification failed", "approval", n.approval, "event", n.event, "error", err)
 		return AuditNotifyFailed, fmt.Sprintf("event=%s error=%q", n.event, err), nil
 	}
