@@ -1,0 +1,41 @@
+{
+  "approval": {
+    "id": 42,
+    "requester_id": 3,
+    "channel_id": 7,
+    "title": "Approve trade: buy 0.5 BTC-USD",
+    "body": "Leviathan proposes buy 0.5 BTC-USD @ 65000.00 (momentum, conf 0.82).",
+    "payload": {
+      "schema": "leviathan.trade_signal.v1",
+      "data": {
+        "symbol": "BTC-USD",
+        "side": "buy",
+        "quantity": "0.5",
+        "limit_price": "65000.00",
+        "confidence": 0.82,
+        "strategy": "momentum",
+        "issued_at": "2026-07-14T11:59:30.500Z"
+      }
+    },
+    "options": [
+      {
+        "id": "approve",
+        "label": "Approve",
+        "kind": "approve"
+      },
+      {
+        "id": "reject",
+        "label": "Reject",
+        "kind": "reject"
+      }
+    ],
+    "deadline": "2026-07-14T18:00:00.000Z",
+    "quorum": 1,
+    "escalation_target": {
+      "kind": "ntfy_topic",
+      "topic": "conch-approvals-urgent"
+    },
+    "state": "pending",
+    "created_at": "2026-07-14T12:00:00.000Z"
+  }
+}

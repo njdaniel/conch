@@ -179,6 +179,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
+	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
 	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
 	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
 }

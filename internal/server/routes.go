@@ -72,6 +72,7 @@ func (s *Server) routeTable() []route {
 		// so an agent credential is refused here (issue #79).
 		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleCreateApproval))),
 		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleListOpenApprovals))),
+		rt("GET /v1/approvals/{id}", accessAuthenticated, s.humansOnly(hf(s.handleGetApproval))),
 		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(hf(s.handleCastDecision))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
