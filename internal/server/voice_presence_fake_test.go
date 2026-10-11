@@ -23,6 +23,11 @@ import (
 // and participants a test sets, a manual clock, and a fixture wiring them to a
 // server. Nothing here sleeps; the poller is driven by runPass and runSweep.
 
+// testPassGap is the gap between passes in the fixture, where the tests choose
+// when a pass happens. The real gap is drawn at random (voicePassGap), which
+// TestVoicePassGap covers.
+const testPassGap = 500 * time.Millisecond
+
 // testClock is the poller's injected clock.
 type testClock struct {
 	mu sync.Mutex
@@ -419,6 +424,7 @@ func newPresenceFixture(t *testing.T, o presenceOpts) *presenceFixture {
 	srv := newTestServerWithConfig(t, cfg)
 	clock := newTestClock()
 	srv.voice.now = clock.Now
+	srv.voice.gap = func() time.Duration { return testPassGap }
 	ctx := context.Background()
 	root, _, rootTok, err := srv.store.BootstrapOperator(ctx, "root")
 	if err != nil {

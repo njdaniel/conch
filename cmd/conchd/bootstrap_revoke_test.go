@@ -110,7 +110,7 @@ func TestBootstrapOperatorNotices(t *testing.T) {
 		if _, _, err := st.PutAgentManifest(ctx, "system", agent.ID, schema.PutAgentManifestRequestV1{DisplayName: "Old", Tier: schema.AgentTierC}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.CreateHook(ctx, "pre-operator-hook", channel.ID, agent.ID); err != nil {
+		if _, err := st.CreateHook(ctx, "system", "pre-operator-hook", channel.ID, agent.ID); err != nil {
 			t.Fatal(err)
 		}
 		_ = st.Close()
