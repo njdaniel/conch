@@ -21,6 +21,7 @@ import (
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 var version = "v0.0.0-dev"
@@ -80,8 +81,10 @@ Flags for serve:
   --auth    REST/WebSocket authentication: required or off (env CONCHD_AUTH, default required)
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
-  --ntfy-topic           normal approvals topic (env CONCHD_NTFY_TOPIC)
-  --ntfy-urgent-topic    urgent escalation topic (env CONCHD_NTFY_URGENT_TOPIC)
+  --ntfy-topic           topic for new and resolved approvals (env CONCHD_NTFY_TOPIC)
+  --ntfy-urgent-topic    topic for escalations (env CONCHD_NTFY_URGENT_TOPIC)
+                         With --ntfy-server, set both: what a missing topic
+                         would carry is not sent.
   --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
   --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
                          default: --livekit-url with ws->http, wss->https)
@@ -212,6 +215,12 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 	if strings.TrimSpace(*name) == "" {
 		return errors.New("bootstrap-operator: --name is required")
+	}
+	// The operator's name enters logs, audit details and every client's
+	// terminal like any principal name, so the same rule applies as to
+	// POST /v0/principals (issue #204).
+	if err := schema.ValidateDisplayName("operator name", *name, schema.MaxPrincipalNameLength); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
 		return fmt.Errorf("bootstrap-operator: create data dir: %w", err)

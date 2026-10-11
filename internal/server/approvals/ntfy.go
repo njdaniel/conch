@@ -23,8 +23,18 @@ import (
 
 const defaultNotifyTimeout = 2 * time.Second
 
+// errNoTopic is what a notification returns when the topic it is published on
+// was left empty in the configuration: nothing was sent, and nothing could
+// have been. The manager records it as a notification that was not attempted
+// (issue #170). It used to be a silent nil, which the manager recorded as
+// notify_sent.
+var errNoTopic = errors.New("ntfy: no topic configured for this notification")
+
 // NtfyConfig configures the optional ntfy approval notification integration.
-// Empty topic fields disable delivery for that lifecycle class.
+// ApprovalsTopic carries the created and the resolved (or expired)
+// notification, UrgentTopic the escalation. With a server set, a topic left
+// empty means those notifications are not sent, and each is audited as not
+// attempted.
 type NtfyConfig struct {
 	Server         string
 	ApprovalsTopic string
@@ -71,9 +81,29 @@ func NewNtfyNotifier(cfg NtfyConfig) (*NtfyNotifier, error) {
 	}, nil
 }
 
-func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) error {
-	if n == nil || n.approvalsTopic == "" {
+// MissingTopics names the settings left empty, by their flag: the
+// notifications that use them will not be sent. It is empty when both topics
+// are set.
+func (n *NtfyNotifier) MissingTopics() []string {
+	if n == nil {
 		return nil
+	}
+	var missing []string
+	if n.approvalsTopic == "" {
+		missing = append(missing, "--ntfy-topic")
+	}
+	if n.urgentTopic == "" {
+		missing = append(missing, "--ntfy-urgent-topic")
+	}
+	return missing
+}
+
+func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) error {
+	if n == nil {
+		return nil
+	}
+	if n.approvalsTopic == "" {
+		return errNoTopic
 	}
 	// What conchd itself says comes first, before any text the requester
 	// wrote. The body is cut to fit one ntfy message (notificationBody), and
@@ -86,8 +116,11 @@ func (n *NtfyNotifier) ApprovalCreated(ctx context.Context, a store.Approval) er
 }
 
 func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) error {
-	if n == nil || n.urgentTopic == "" {
+	if n == nil {
 		return nil
+	}
+	if n.urgentTopic == "" {
+		return errNoTopic
 	}
 	body := fmt.Sprintf("Deadline passed for approval %d\nRequester: principal:%d\nChannel: %d\nDeadline: %s\n\n%s\n\n%s",
 		a.ID, a.RequesterID, a.ChannelID, a.Deadline.UTC().Format(time.RFC3339), a.Title, a.Body)
@@ -95,8 +128,11 @@ func (n *NtfyNotifier) ApprovalEscalated(ctx context.Context, a store.Approval) 
 }
 
 func (n *NtfyNotifier) ApprovalResolved(ctx context.Context, a store.Approval, r schema.ApprovalResolutionV1) error {
-	if n == nil || n.approvalsTopic == "" {
+	if n == nil {
 		return nil
+	}
+	if n.approvalsTopic == "" {
+		return errNoTopic
 	}
 	body := fmt.Sprintf("Approval %d resolved: %s\nOption: %s\nDecisions: %d", a.ID, r.Outcome, r.OptionID, len(r.Decisions))
 	return n.post(ctx, n.approvalsTopic, "Approval resolved: "+a.Title, "default", notificationBody(body, a.ID))

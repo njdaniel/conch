@@ -107,6 +107,9 @@ func TestCreateCredentialRequestValidate(t *testing.T) {
 		{"blank label", CreateCredentialRequestV1{Label: " \t\n"}, "blank"},
 		{"label too long", CreateCredentialRequestV1{Label: strings.Repeat("a", 101)}, "at most 100"},
 		{"multibyte label too long", CreateCredentialRequestV1{Label: strings.Repeat("é", 101)}, "at most 100"},
+		{"label with newline", CreateCredentialRequestV1{Label: "ci\nbuilds"}, "control characters"},
+		{"label with bidi override", CreateCredentialRequestV1{Label: "ci\u202ebuilds"}, "bidi controls"},
+		{"label with leading space", CreateCredentialRequestV1{Label: " ci"}, "whitespace"},
 		{"expiry in past", CreateCredentialRequestV1{Label: "ci", ExpiresAt: &past}, "future"},
 		{"expiry exactly now", CreateCredentialRequestV1{Label: "ci", ExpiresAt: &atNow}, "future"},
 	}

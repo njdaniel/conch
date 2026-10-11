@@ -186,6 +186,8 @@ func TestBootstrapOperatorUsage(t *testing.T) {
 		{"no data", nil},
 		{"no name", []string{"--data", "x"}},
 		{"blank name", []string{"--data", "x", "--name", "  "}},
+		{"name with a newline", []string{"--data", "x", "--name", "a\nb"}},
+		{"name with a bidi override", []string{"--data", "x", "--name", "a\u202eb"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,12 +1,5 @@
 package schema
 
-import (
-	"errors"
-	"fmt"
-	"unicode"
-	"unicode/utf8"
-)
-
 // MaxHookLabelLength is the longest allowed hook label, in characters.
 const MaxHookLabelLength = 100
 
@@ -19,22 +12,14 @@ type CreateHookRequest struct {
 	Label     string `json:"label,omitempty"`
 }
 
-// Validate reports whether the optional label is acceptable.
+// Validate reports whether the optional label is acceptable. The label is
+// shown in lists and written to the audit log, so it passes the display-name
+// rule of ValidateDisplayName; empty stays allowed.
 func (r CreateHookRequest) Validate() error {
-	if !utf8.ValidString(r.Label) {
-		return errors.New("schema: hook label must be valid UTF-8")
+	if r.Label == "" {
+		return nil
 	}
-	if n := utf8.RuneCountInString(r.Label); n > MaxHookLabelLength {
-		return fmt.Errorf("schema: hook label must be at most %d characters, got %d", MaxHookLabelLength, n)
-	}
-	// A label is shown in lists and written to the audit log; a newline or
-	// escape sequence in it would let one hook's entry imitate another line.
-	for _, c := range r.Label {
-		if unicode.IsControl(c) {
-			return errors.New("schema: hook label must not contain control characters")
-		}
-	}
-	return nil
+	return ValidateDisplayName("hook label", r.Label, MaxHookLabelLength)
 }
 
 // CreateHookResponse is the response body after a hook is provisioned. The

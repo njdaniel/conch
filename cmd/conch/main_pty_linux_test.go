@@ -52,6 +52,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// Re-run as the session-leader helper the background-job tests use
+	// (main_foreground_linux_test.go); it never returns.
+	if os.Getenv(foregroundHelperEnv) == "1" {
+		runForegroundHelper()
+	}
 	// A test binary has arguments, so termquiet's init treated it as a plain
 	// command and set TERM=dumb. main never runs here, so put it back.
 	termquiet.Restore()
