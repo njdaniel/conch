@@ -1800,3 +1800,243 @@ func TestServerErrorTextIsSanitized(t *testing.T) {
 		t.Errorf("input = %q, want it kept after the refusal", m.input)
 	}
 }
+
+// A user name from whoami is sanitized before drawing in the status line:
+// escape sequences, newlines, and bidi overrides are stripped or replaced
+// so they cannot drive the terminal or break line layout.
+func TestUserNameIsSanitizedInView(t *testing.T) {
+	hostile := "\x1b[31muser\n\u202ename"
+	api := &identityAPI{who: schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: hostile, Role: schema.RoleOperator}}
+	model := NewModel(context.Background(), api, 0, []string{"general"}).WithCredential()
+	whoMsg := model.loadWhoAmI()()
+	updated, _ := model.Update(whoMsg)
+	m := updated.(Model)
+	m.width, m.height = 120, 24
+
+	view := m.View()
+	// Assert against the hostile sequence with its context, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on.
+	if strings.Contains(view, "\x1b[31muser") {
+		t.Errorf("rendered view contains the raw escape sequence from the name:\n%s", view)
+	}
+	if strings.Contains(view, "\u202e") {
+		t.Errorf("rendered view contains raw bidi override:\n%s", view)
+	}
+
+	lines := strings.Split(view, "\n")
+	if len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (line layout broken):\n%s", len(lines), view)
+	}
+
+	statusLine := lines[len(lines)-1]
+	if !strings.Contains(statusLine, "[31muser ↵ name | signed in as [31muser ↵ name") {
+		t.Errorf("status line = %q, want sanitized username and status", statusLine)
+	}
+
+	// Compare with clean baseline: hostile username preserves line count.
+	cleanModel := NewModel(context.Background(), &identityAPI{who: schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "clean", Role: schema.RoleOperator}}, 0, []string{"general"}).WithCredential()
+	cleanWho := cleanModel.loadWhoAmI()()
+	updatedClean, _ := cleanModel.Update(cleanWho)
+	cm := updatedClean.(Model)
+	cm.width, cm.height = 120, 24
+	if len(lines) != len(strings.Split(cm.View(), "\n")) {
+		t.Errorf("hostile model has %d lines, clean model has %d lines", len(lines), len(strings.Split(cm.View(), "\n")))
+	}
+
+	// Direct assignment to model.userName is also sanitized in View.
+	m2 := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m2.userName = hostile
+	m2.width, m2.height = 120, 24
+	v2 := m2.View()
+	if strings.Contains(v2, "\x1b[31muser") || strings.Contains(v2, "\u202e") {
+		t.Errorf("direct userName rendered view contains raw escape or bidi override:\n%s", v2)
+	}
+	lines2 := strings.Split(v2, "\n")
+	if len(lines2) != 24 {
+		t.Errorf("direct userName view has %d lines, want 24:\n%s", len(lines2), v2)
+	}
+	if !strings.Contains(lines2[len(lines2)-1], "[31muser ↵ name | ") {
+		t.Errorf("direct userName status line = %q", lines2[len(lines2)-1])
+	}
+}
+
+// A name longer than the terminal is clipped rather than wrapped: the status
+// line never exceeds the width, so the layout holds.
+func TestLongUserNameIsClippedInStatusLine(t *testing.T) {
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.userName = strings.Repeat("a", 300)
+	m.width, m.height = 80, 24
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 24 {
+		t.Fatalf("view has %d lines, want 24:\n%s", len(lines), m.View())
+	}
+	statusLine := lines[len(lines)-1]
+	if utf8.RuneCountInString(statusLine) > 80 {
+		t.Errorf("status line is %d runes, want at most 80: %q", utf8.RuneCountInString(statusLine), statusLine)
+	}
+}
+
+func TestApprovalFieldsAreSanitizedInView(t *testing.T) {
+	app := schema.ApprovalV1{
+		ID:          1,
+		RequesterID: 42,
+		Title:       "hostile\x1b[31m\ntitle\u202e",
+		Body:        "body line 1\x1b[2J\nbody line 2\u202e",
+		Payload:     &schema.Payload{Schema: "schema\x1b[32m\u202e.v1"},
+		Options: []schema.Option{
+			{ID: "opt1", Label: "opt\x1b[33m\nlabel\u202e"},
+		},
+		Deadline:  schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt: schema.NewTimestamp(time.Now()),
+		Quorum:    1,
+		State:     schema.ApprovalStatePending,
+	}
+
+	api := stubAPI{}
+	m := NewModel(context.Background(), api, 42, []string{"general"})
+	m.mode = modeInbox
+	m.approvals = []schema.ApprovalV1{app}
+	m.selApproval = 0
+	m.width, m.height = 80, 24
+
+	inboxView := m.View()
+	// Assert against the hostile sequences specifically, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on. The palette
+	// (colors 8, 6, 3) never produces [31m, [32m, or [2J.
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(inboxView, hostile) {
+			t.Errorf("inbox view contains the raw hostile sequence %q:\n%s", hostile, inboxView)
+		}
+	}
+	if strings.Contains(inboxView, "\u202e") {
+		t.Errorf("inbox view contains raw bidi override:\n%s", inboxView)
+	}
+	inboxLines := strings.Split(inboxView, "\n")
+	if len(inboxLines) != 24 {
+		t.Errorf("inbox view has %d lines, want 24:\n%s", len(inboxLines), inboxView)
+	}
+	// Positive pins: the sanitized text is what is drawn. These fail if a
+	// newline in Title or Body survives, which the line count alone cannot see.
+	for _, want := range []string{"hostile[31m ↵ title", "body line 1[2J", "body line 2", "schema[32m.v1", "  - opt[33m ↵ label"} {
+		if !strings.Contains(inboxView, want) {
+			t.Errorf("inbox view missing sanitized %q:\n%s", want, inboxView)
+		}
+	}
+
+	m.mode = modeDecision
+	decisionView := m.View()
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(decisionView, hostile) {
+			t.Errorf("decision view contains the raw hostile sequence %q:\n%s", hostile, decisionView)
+		}
+	}
+	if strings.Contains(decisionView, "\u202e") {
+		t.Errorf("decision view contains raw bidi override:\n%s", decisionView)
+	}
+	decisionLines := strings.Split(decisionView, "\n")
+	if len(decisionLines) != 24 {
+		t.Errorf("decision view has %d lines, want 24:\n%s", len(decisionLines), decisionView)
+	}
+	for _, want := range []string{"hostile[31m ↵ title", "opt[33m ↵ label"} {
+		if !strings.Contains(decisionView, want) {
+			t.Errorf("decision view missing sanitized %q:\n%s", want, decisionView)
+		}
+	}
+}
+
+// A body that keeps its line breaks takes one pane row per line, so the
+// pane's truncation accounts for it and the layout never overflows.
+func TestMultilineBodyCountsItsLines(t *testing.T) {
+	body := strings.Repeat("body line\n", 30)
+	app := schema.ApprovalV1{
+		ID:          1,
+		RequesterID: 42,
+		Title:       "long body",
+		Body:        body,
+		Options:     []schema.Option{{ID: "opt1", Label: "approve"}},
+		Deadline:    schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt:   schema.NewTimestamp(time.Now()),
+		Quorum:      1,
+		State:       schema.ApprovalStatePending,
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.mode = modeDecision
+	m.approvals = []schema.ApprovalV1{app}
+	m.width, m.height = 80, 24
+	if lines := strings.Split(m.View(), "\n"); len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (multiline body overflowed the pane):\n%s", len(lines), m.View())
+	}
+}
+
+// setStatus sanitizes error text independently when called directly, ensuring
+// escape sequences, newlines, and bidi overrides cannot leak into status lines.
+func TestSetStatusSanitizesError(t *testing.T) {
+	var m Model
+	err := errors.New("network error: \x1b[31mfailure\x1b[0m\r\nsubtext\u202e")
+	m.setStatus(modeChannels, err.Error())
+	if strings.Contains(m.channelStatus, "\x1b") || strings.Contains(m.channelStatus, "\u202e") || strings.ContainsAny(m.channelStatus, "\r\n") {
+		t.Errorf("channelStatus carries control chars or bidi overrides: %q", m.channelStatus)
+	}
+	want := "network error: [31mfailure[0m ↵ subtext"
+	if m.channelStatus != want {
+		t.Errorf("channelStatus = %q, want %q", m.channelStatus, want)
+	}
+
+	m.setStatus(modeInbox, err.Error())
+	if m.inboxStatus != want {
+		t.Errorf("inboxStatus = %q, want %q", m.inboxStatus, want)
+	}
+}
+
+func TestSanitizeMultiline(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "tabs map to spaces",
+			input: "col1\tcol2\t\tcol3",
+			want:  "col1 col2  col3",
+		},
+		{
+			name:  "lone carriage return becomes newline",
+			input: "line1\rline2\rline3",
+			want:  "line1\nline2\nline3",
+		},
+		{
+			name:  "crlf becomes newline",
+			input: "line1\r\nline2",
+			want:  "line1\nline2",
+		},
+		{
+			name:  "unicode line separator U+2028 becomes newline",
+			input: "first\u2028second",
+			want:  "first\nsecond",
+		},
+		{
+			name:  "unicode paragraph separator U+2029 becomes newline",
+			input: "para1\u2029para2",
+			want:  "para1\npara2",
+		},
+		{
+			name:  "control characters and bidi overrides stripped",
+			input: "hello\x1b[31m \u202eworld\u200e\a\b",
+			want:  "hello[31m world",
+		},
+		{
+			name:  "combined multiline with tabs lone cr and separators",
+			input: "heading\tvalue\rbody line 1\r\nbody\tline\t2\u2028subline\u2029footer\x1b[0m",
+			want:  "heading value\nbody line 1\nbody line 2\nsubline\nfooter[0m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeMultiline(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeMultiline(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
