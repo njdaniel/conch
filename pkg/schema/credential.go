@@ -2,10 +2,8 @@ package schema
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Credential wire shapes (issue #78). A credential binds one bearer token to
@@ -45,14 +43,15 @@ type CreateCredentialRequestV1 struct {
 }
 
 // Validate reports whether the request is well-formed at the instant now: the
-// label must be non-blank and at most MaxCredentialLabelLength characters, and
-// expires_at, when present, must be in the future.
+// label must be non-blank, pass ValidateDisplayName and be at most
+// MaxCredentialLabelLength characters, and expires_at, when present, must be
+// in the future.
 func (r CreateCredentialRequestV1) Validate(now time.Time) error {
 	if strings.TrimSpace(r.Label) == "" {
 		return errors.New("schema: credential label must not be blank")
 	}
-	if n := utf8.RuneCountInString(r.Label); n > MaxCredentialLabelLength {
-		return fmt.Errorf("schema: credential label must be at most %d characters, got %d", MaxCredentialLabelLength, n)
+	if err := ValidateDisplayName("credential label", r.Label, MaxCredentialLabelLength); err != nil {
+		return err
 	}
 	if r.ExpiresAt != nil && !r.ExpiresAt.Time().After(now) {
 		return errors.New("schema: credential expires_at must be in the future")

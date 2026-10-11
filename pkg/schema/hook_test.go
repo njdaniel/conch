@@ -42,7 +42,12 @@ func TestCreateHookRequestValidate(t *testing.T) {
 		{"newline", "ci\nbuilds", true},
 		{"escape sequence", "ci\x1b[31m", true},
 		{"tab", "ci\tbuilds", true},
+		{"line separator", "ci\u2028builds", true},
+		{"bidi override", "ci\u202ebuilds", true},
+		{"leading space", " ci", true},
+		{"trailing space", "ci ", true},
 		{"punctuation and spaces are fine", "CI: nightly builds (eu-west)", false},
+		{"unicode label", "夜間ビルド", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
