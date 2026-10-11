@@ -4,8 +4,9 @@
 /bin/
 /dist/
 
-# Rust (voice/). What a build produces for this checkout. Cargo's intermediate
-# files are shared between checkouts, in ~/.cache/conch (scripts/voice-env.sh).
+# Rust (voice/). What a build produces for this checkout; it is per-checkout
+# on purpose, so that no two worktrees build into the same directory
+# (scripts/voice-env.sh).
 /voice/target/
 
 # Go
