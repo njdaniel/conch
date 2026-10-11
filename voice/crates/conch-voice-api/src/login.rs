@@ -2,8 +2,9 @@
 //!
 //! The reference is `internal/cli/credentials.go`. The file is
 //! `<configuration directory>/conch/credentials.json`, a JSON object from a server's key
-//! ([`ServerAddress::key`]) to `{"token": "..."}`; a file that group or others can touch is
-//! refused; and `CONCH_TOKEN`, when it is set to more than white space, wins over the file.
+//! ([`ServerAddress::key`]) to `{"token": "..."}`; on unix a file that group or others can
+//! touch is refused; and `CONCH_TOKEN`, when it is set to more than white space, wins over
+//! the file.
 //!
 //! This module never writes that file and never reads the environment: the caller hands
 //! in the value of `CONCH_TOKEN` and the directory, so a test can never reach the real
@@ -13,6 +14,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -98,12 +100,16 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
         Err(e) => return Err(unreadable(e)),
     };
     // The open file is what is checked, so the check cannot be about another file.
-    let mode = file.metadata().map_err(unreadable)?.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(Error::CredentialsExposed {
-            path: path.to_owned(),
-            mode,
-        });
+    // The mode bits exist on unix only; elsewhere there is no group/other rule to apply.
+    #[cfg(unix)]
+    {
+        let mode = file.metadata().map_err(unreadable)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(Error::CredentialsExposed {
+                path: path.to_owned(),
+                mode,
+            });
+        }
     }
 
     let mut data = Vec::new();
@@ -143,7 +149,7 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
         .filter(|token| !token.is_empty()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
 
