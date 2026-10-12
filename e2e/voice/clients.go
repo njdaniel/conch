@@ -141,13 +141,15 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 	read := make(chan struct{})
 	go func() {
 		defer close(read)
-		lines := bufio.NewScanner(stdout)
+		// Capture before parsing: Scanner can consume a whole buffer before
+		// rejecting an oversized line, so copying only its unread remainder
+		// would lose that prefix (and any secret it held) from the leak scan.
+		captured := io.TeeReader(stdout, outFile)
+		lines := bufio.NewScanner(captured)
 		lines.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for lines.Scan() {
 			line := lines.Text()
 			at := time.Now()
-			// Every line is kept for the leak scan, whatever it is.
-			_, _ = outFile.WriteString(line + "\n")
 			// libwebrtc prints a line of its own on a machine with an NVIDIA
 			// GPU, so a line that is not an object is skipped, not an error.
 			if !strings.HasPrefix(line, "{") {
@@ -164,7 +166,7 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 		// If the scanner gave up (a line longer than its buffer), the rest is
 		// still read, into the file the leak scan reads: a client must never
 		// block on its own output because this program stopped listening.
-		_, _ = io.Copy(outFile, stdout)
+		_, _ = io.Copy(io.Discard, captured)
 	}()
 	go func() {
 		<-read
