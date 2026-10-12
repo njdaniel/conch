@@ -344,3 +344,65 @@ func TestCredentialsTightenLooseDirectory(t *testing.T) {
 		t.Errorf("dir mode = %o, want 700", fi.Mode().Perm())
 	}
 }
+
+func TestCredentialsRefusedHosts(t *testing.T) {
+	isolateConfig(t)
+	refused := []string{
+		"https://\u0130stanbul.example",
+		"https://\u0130STANBUL.example:8443/conch",
+		"http://conch.\u0130stanbul.example",
+		"https://%C4%B0stanbul.example",
+		"http://%c4%b0stanbul.example",
+		"https://STRA\u1e9eE.example",
+		"http://STRA\u1e9eE.example:8080/prefix",
+		"https://stra%e1%ba%9ee.example",
+		"https://stra%E1%BA%9Ee.example",
+	}
+	for _, raw := range refused {
+		t.Run("load/"+raw, func(t *testing.T) {
+			_, err := LoadToken(raw)
+			if err == nil {
+				t.Fatalf("LoadToken(%q) succeeded; want refusal", raw)
+			}
+			if !strings.Contains(err.Error(), "cannot be used safely") {
+				t.Errorf("error = %v, want 'cannot be used safely'", err)
+			}
+			if strings.Contains(err.Error(), "stanbul") || strings.Contains(err.Error(), "stra") || strings.Contains(err.Error(), raw) {
+				t.Errorf("error %q leaks server", err.Error())
+			}
+			// Environment variable must not bypass the refusal.
+			t.Setenv("CONCH_TOKEN", "secret-token")
+			_, err = LoadToken(raw)
+			if err == nil || !strings.Contains(err.Error(), "cannot be used safely") {
+				t.Errorf("LoadToken with CONCH_TOKEN = %v, want refusal", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "secret-token") {
+				t.Errorf("error %q leaks token", err.Error())
+			}
+		})
+		t.Run("save/"+raw, func(t *testing.T) {
+			err := SaveToken(raw, "my-secret-token")
+			if err == nil {
+				t.Fatalf("SaveToken(%q) succeeded; want refusal", raw)
+			}
+			if !strings.Contains(err.Error(), "cannot be used safely") {
+				t.Errorf("error = %v, want 'cannot be used safely'", err)
+			}
+			if strings.Contains(err.Error(), "my-secret-token") || strings.Contains(err.Error(), raw) {
+				t.Errorf("error %q leaks secret or server", err.Error())
+			}
+		})
+		t.Run("delete/"+raw, func(t *testing.T) {
+			err := DeleteToken(raw)
+			if err == nil {
+				t.Fatalf("DeleteToken(%q) succeeded; want refusal", raw)
+			}
+			if !strings.Contains(err.Error(), "cannot be used safely") {
+				t.Errorf("error = %v, want 'cannot be used safely'", err)
+			}
+			if strings.Contains(err.Error(), raw) {
+				t.Errorf("error %q leaks server", err.Error())
+			}
+		})
+	}
+}

@@ -246,6 +246,9 @@ func (c *Client) Subscribe(ctx context.Context, channel string, receive func(sch
 
 // NewClient creates a client for server, which must be an HTTP or HTTPS URL.
 func NewClient(server string, httpClient *http.Client) (*Client, error) {
+	if err := checkSafeServer(server); err != nil {
+		return nil, err
+	}
 	baseURL, err := url.Parse(server)
 	if err != nil {
 		return nil, fmt.Errorf("cli: parse server URL: %w", err)
@@ -333,13 +336,22 @@ func (c *Client) Tail(ctx context.Context, channel string, receive func(schema.M
 
 func (c *Client) resolve(parts ...string) *url.URL {
 	base := *c.baseURL
-	baseEscapedPath := base.EscapedPath()
-	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.Join(parts, "/")
+	prefixEscaped := strings.TrimRight(base.EscapedPath(), "/")
+	prefixUnescaped, err := url.PathUnescape(prefixEscaped)
+	if err != nil {
+		prefixUnescaped = prefixEscaped
+	}
 	escapedParts := make([]string, len(parts))
 	for i, part := range parts {
 		escapedParts[i] = url.PathEscape(part)
 	}
-	base.RawPath = strings.TrimRight(baseEscapedPath, "/") + "/" + strings.Join(escapedParts, "/")
+	if len(parts) == 0 {
+		base.Path = prefixUnescaped
+		base.RawPath = prefixEscaped
+		return &base
+	}
+	base.Path = prefixUnescaped + "/" + strings.Join(parts, "/")
+	base.RawPath = prefixEscaped + "/" + strings.Join(escapedParts, "/")
 	return &base
 }
 
