@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -279,10 +280,11 @@ func (r *run) all(want map[string]bool) error {
 }
 
 // buildProbe builds the Rust probe with the pinned toolchain and copies it
-// into this run's directory, so that another build into the shared target
-// directory cannot replace it under a running measurement.
+// into this run's directory, so that another build cannot replace it under
+// a running measurement. Cargo's metadata names the target directory even
+// when CARGO_TARGET_DIR is unset or a Cargo configuration file sets it.
 func (r *run) buildProbe() error {
-	script := `. scripts/voice-env.sh && cd voice && cargo build --locked --release -p conch-voice --example sdk_probe 1>&2 && printf %s "$CARGO_TARGET_DIR"`
+	script := `. scripts/voice-env.sh && cd voice && cargo build --locked --release -p conch-voice --example sdk_probe 1>&2 && cargo metadata --locked --no-deps --format-version 1`
 	cmd := exec.CommandContext(stopCtx, "bash", "-c", script) // #nosec G204 -- a constant script
 	cmd.Dir = r.repo
 	var stderr strings.Builder
@@ -294,7 +296,13 @@ func (r *run) buildProbe() error {
 	if err != nil {
 		return fmt.Errorf("building the probe: %w\n%s", err, tail(stderr.String(), 2000))
 	}
-	built := filepath.Join(strings.TrimSpace(string(out)), "release", "examples", "sdk_probe")
+	var metadata struct {
+		TargetDirectory string `json:"target_directory"`
+	}
+	if err := json.Unmarshal(out, &metadata); err != nil || !filepath.IsAbs(metadata.TargetDirectory) {
+		return errors.New("cargo metadata did not name an absolute target directory")
+	}
+	built := filepath.Join(metadata.TargetDirectory, "release", "examples", "sdk_probe")
 	data, err := os.ReadFile(built) // #nosec G304 -- the binary cargo just built
 	if err != nil {
 		return fmt.Errorf("the probe was built but is not where cargo puts examples: %w", err)
