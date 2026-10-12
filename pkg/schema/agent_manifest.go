@@ -201,6 +201,12 @@ func (g ChannelGrant) Validate() error {
 	return nil
 }
 
+// ErrorCodeRateLimited is the Error.Code of a call refused because the agent
+// has used its RateLimit for that capability (HTTP 429 over REST). The
+// refusal spends nothing: the call may be retried once the window has
+// moved on.
+const ErrorCodeRateLimited = "rate_limited"
+
 // RateLimit caps how often an agent may exercise one capability: at most Max
 // uses in any window of WindowSeconds. The manifest only declares the policy;
 // counting and backpressure belong to the server (issue #80).

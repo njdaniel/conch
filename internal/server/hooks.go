@@ -161,7 +161,7 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 		// the agent's manifest (issue #79). A refusal is audited and looks
 		// like an unknown token to the sender.
 		if hookPrincipal.Kind == store.PrincipalAgent {
-			allowed, err := s.agentManifestAllows(ctx, hookPrincipal.ID, r.Pattern, schema.CapabilityMessagesPost, hook.ChannelID, schema.ChannelPermissionPost)
+			m, allowed, err := s.agentManifestCheck(ctx, hookPrincipal.ID, r.Pattern, schema.CapabilityMessagesPost, hook.ChannelID, schema.ChannelPermissionPost)
 			if err != nil {
 				slog.ErrorContext(ctx, "hooks: load manifest failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -169,6 +169,16 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 			}
 			if !allowed {
 				writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")
+				return
+			}
+			// A hook is a posting credential for its agent, so a post through
+			// it spends the agent's messages.post budget like any other
+			// (issue #80): otherwise a hook would be the way round the limit.
+			// Unlike the refusals above this one is not disguised: only a
+			// sender holding a working token can reach it, and 429 with
+			// Retry-After is what a webhook sender knows how to obey.
+			if limited := s.spendAgentBudget(ctx, hookPrincipal.ID, r.Pattern, m, schema.CapabilityMessagesPost); limited != nil {
+				writeRateLimited(w, limited)
 				return
 			}
 		}

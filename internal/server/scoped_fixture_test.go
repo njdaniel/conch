@@ -75,6 +75,11 @@ func newScopedFixture(t *testing.T) *scopedFixture {
 	ctx := context.Background()
 	rec := &tapBroadcaster{}
 	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, Broadcaster: rec})
+	// These tests assert one access_denied row per refusal, with the same
+	// principal refused the same way in several cases. Each clock read is
+	// therefore a window later, so no denial is coalesced with an earlier one
+	// (coalescing has its own tests, with a controlled clock).
+	srv.now = newSteppingClock(denialCoalesceWindow)
 	root, _, rootTok, err := srv.store.BootstrapOperator(ctx, "root")
 	if err != nil {
 		t.Fatal(err)

@@ -86,6 +86,12 @@ type Server struct {
 	// credRecheckInterval is how often an authenticated WebSocket re-checks
 	// its own credential. Unexported so tests can shorten it before serving.
 	credRecheckInterval time.Duration
+	// limits counts agents' uses against their manifest rate limits and
+	// denials coalesces repeated access_denied rows (issue #80). Both are in
+	// memory only. now is their clock; tests replace it before serving.
+	limits  agentRateLimiter
+	denials denialCoalescer
+	now     func() time.Time
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -115,7 +121,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now}
 	s.voice = newVoicePoller(s)
 	s.routes = s.routeTable()
 	s.routeByPattern = make(map[string]route, len(s.routes))

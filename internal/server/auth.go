@@ -208,7 +208,15 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 	if subject == "" {
 		subject = "<unmatched>"
 	}
-	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, code); err != nil {
+	// Repeated identical denials from one principal are thinned out, so a
+	// caller cannot grow the audit log with every refused request; the first
+	// of each kind is written at once (issue #80, denialCoalescer).
+	write, count := s.denials.admit(fmt.Sprintf("%d|%s|%s", caller.ID, subject, code), s.now())
+	if !write {
+		writeError(w, http.StatusForbidden, code, message)
+		return
+	}
+	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, denialDetail(code, count)); err != nil {
 		slog.ErrorContext(ctx, "auth: audit access_denied failed", "principal", caller.ID, "error", err)
 	}
 	writeError(w, http.StatusForbidden, code, message)
