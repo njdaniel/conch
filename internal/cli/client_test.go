@@ -963,3 +963,152 @@ func TestServerErrorKeepsStatusAndCode(t *testing.T) {
 		}
 	}
 }
+
+func TestClientResolve(t *testing.T) {
+	tests := []struct {
+		name     string
+		server   string
+		parts    []string
+		wantPath string
+		wantRaw  string
+		wantURL  string
+	}{
+		{
+			name:     "no prefix",
+			server:   "http://127.0.0.1:8080",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/v0/channels/war room/α/messages",
+			wantRaw:  "/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "trailing slash prefix",
+			server:   "http://127.0.0.1:8080/",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/v0/channels/war room/α/messages",
+			wantRaw:  "/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "plain path prefix",
+			server:   "http://127.0.0.1:8080/conch",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/conch/v0/channels/war room/α/messages",
+			wantRaw:  "/conch/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/conch/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "plain path prefix with trailing slash",
+			server:   "http://127.0.0.1:8080/conch/",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/conch/v0/channels/war room/α/messages",
+			wantRaw:  "/conch/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/conch/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "prefix ending in %2F",
+			server:   "http://127.0.0.1:8080/conch%2F",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/conch//v0/channels/war room/α/messages",
+			wantRaw:  "/conch%2F/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/conch%2F/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "prefix ending in %2f",
+			server:   "http://127.0.0.1:8080/conch%2f",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/conch//v0/channels/war room/α/messages",
+			wantRaw:  "/conch%2f/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/conch%2f/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "prefix ending in %2F with trailing slash",
+			server:   "http://127.0.0.1:8080/conch%2F/",
+			parts:    []string{"v0", "channels", "war room/α", "messages"},
+			wantPath: "/conch//v0/channels/war room/α/messages",
+			wantRaw:  "/conch%2F/v0/channels/war%20room%2F%CE%B1/messages",
+			wantURL:  "http://127.0.0.1:8080/conch%2F/v0/channels/war%20room%2F%CE%B1/messages",
+		},
+		{
+			name:     "nested prefix with %2F and trailing slashes",
+			server:   "http://127.0.0.1:8080/conch%2Fone/Two//",
+			parts:    []string{"v1", "channels", "war room/α", "voice"},
+			wantPath: "/conch/one/Two/v1/channels/war room/α/voice",
+			wantRaw:  "/conch%2Fone/Two/v1/channels/war%20room%2F%CE%B1/voice",
+			wantURL:  "http://127.0.0.1:8080/conch%2Fone/Two/v1/channels/war%20room%2F%CE%B1/voice",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(tt.server, nil)
+			if err != nil {
+				t.Fatalf("NewClient(%q): %v", tt.server, err)
+			}
+			resolved := client.resolve(tt.parts...)
+			if got := resolved.Path; got != tt.wantPath {
+				t.Errorf("Path = %q, want %q", got, tt.wantPath)
+			}
+			if got := resolved.EscapedPath(); got != tt.wantRaw {
+				t.Errorf("EscapedPath = %q, want %q", got, tt.wantRaw)
+			}
+			if got := resolved.String(); got != tt.wantURL {
+				t.Errorf("String = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestNewClientRefusedHosts(t *testing.T) {
+	refused := []string{
+		"https://\u0130stanbul.example",
+		"https://\u0130STANBUL.example:8443/conch",
+		"http://conch.\u0130stanbul.example",
+		"https://%C4%B0stanbul.example",
+		"http://%c4%b0stanbul.example",
+		"https://STRA\u1e9eE.example",
+		"http://STRA\u1e9eE.example:8080/prefix",
+		"https://stra%e1%ba%9ee.example",
+		"https://stra%E1%BA%9Ee.example",
+	}
+	for _, raw := range refused {
+		t.Run("refuse/"+raw, func(t *testing.T) {
+			_, err := NewClient(raw, nil)
+			if err == nil {
+				t.Fatalf("NewClient(%q) succeeded; want refusal", raw)
+			}
+			if !strings.Contains(err.Error(), "cannot be used safely") {
+				t.Errorf("error = %v; want 'cannot be used safely'", err)
+			}
+			shown := err.Error()
+			for _, leak := range []string{"stanbul", "STRA", "stra", raw} {
+				if strings.Contains(shown, leak) {
+					t.Errorf("error %q leaks server address component %q", shown, leak)
+				}
+			}
+		})
+	}
+
+	accepted := []string{
+		"https://istanbul.example",
+		"https://ISTANBUL.example",
+		"http://127.0.0.1:8080",
+		"http://localhost:8080/",
+		"http://Host:80",
+		"https://Conch.Example.COM:443",
+		"https://conch.example/Conch/V1/",
+		"http://B\u00fccher.example",
+		"http://xn--bcher-kva.example",
+		"http://host/path/\u0130stanbul",
+	}
+	for _, raw := range accepted {
+		t.Run("accept/"+raw, func(t *testing.T) {
+			client, err := NewClient(raw, nil)
+			if err != nil {
+				t.Fatalf("NewClient(%q) failed: %v", raw, err)
+			}
+			if client == nil {
+				t.Fatal("client is nil")
+			}
+		})
+	}
+}
