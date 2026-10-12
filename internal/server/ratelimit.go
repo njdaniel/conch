@@ -39,12 +39,14 @@ import (
 
 const (
 	// agentLimitAuditWindow is the window in which the refusals of one
-	// (principal, capability) are thinned out: the 1st, 2nd, 4th, 8th, ...
-	// in it writes a row carrying its number. The first refusal is recorded
-	// at once, and the last row says at least half of how many there were,
-	// whether or not the agent ever calls again (see denialCoalescer for why
-	// the count does not wait for a later row).
+	// (principal, capability) are thinned out by the rule of writeNth, each
+	// row carrying its number (see denialCoalescer for why the count does
+	// not wait for a later row).
 	agentLimitAuditWindow = time.Minute
+
+	// thinAfter is how many identical events of one window are each written
+	// before thinning starts; see writeNth.
+	thinAfter = 8
 
 	// maxLimitWindow is the longest window the limiter counts over. A
 	// manifest may declare more (the schema only requires a positive number
@@ -133,7 +135,7 @@ func (l *agentRateLimiter) take(key agentLimitKey, limit schema.RateLimit, at ti
 		e.refusedAt, e.refusals = at, 0
 	}
 	e.refusals++
-	return limitDecision{retryAfter: retry, audit: isPowerOfTwo(e.refusals), count: e.refusals}
+	return limitDecision{retryAfter: retry, audit: writeNth(e.refusals), count: e.refusals}
 }
 
 // limitWindow is the window a manifest's window_seconds stands for, held to
@@ -150,8 +152,13 @@ func limitWindow(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// isPowerOfTwo reports whether n is 1, 2, 4, 8, ...
-func isPowerOfTwo(n int) bool { return n > 0 && n&(n-1) == 0 }
+// writeNth reports whether the n-th identical audit event of a window is
+// written: each of the first thinAfter, and after that only the 16th, 32nd,
+// 64th, ... So what happens at an ordinary rate is recorded in full, exactly
+// as it always was; a flood of n costs thinAfter plus about log2(n) rows; and
+// the last row written always says more than half of how many there were,
+// even if the caller then stops for good.
+func writeNth(n int) bool { return n > 0 && (n <= thinAfter || n&(n-1) == 0) }
 
 // prune drops entries that hold nothing: every use expired and no audit
 // window running. At most once per audit window, so the map is bounded by the
@@ -226,12 +233,11 @@ func writeRateLimited(w http.ResponseWriter, e *rateLimitedError) {
 // principal could add a row with every refused request. The requests
 // themselves are not limited. The zero value is ready to use.
 //
-// Within a window, the 1st, 2nd, 4th, 8th, ... identical denial is written,
-// each row after the first carrying its number. So the first denial of each
-// kind is recorded at once, a flood of n costs about log2(n) rows, and the
-// last row always says at least half of how many there were. Nothing is
-// written later on a timer: a count that waited for "the next row" would be
-// lost whenever the caller simply stopped, which is exactly when it matters.
+// Within a window identical denials are written by the rule of writeNth: the
+// first thinAfter exactly as they always were, then the 16th, 32nd, ... each
+// carrying its number. Nothing is written later on a timer: a count that
+// waited for "the next row" would be lost whenever the caller simply stopped,
+// which is exactly when it matters.
 type denialCoalescer struct {
 	mu      sync.Mutex
 	entries map[string]*denialEntry
@@ -270,13 +276,14 @@ func (c *denialCoalescer) admit(key string, now time.Time) (write bool, count in
 		return true, 1
 	}
 	e.count++
-	return isPowerOfTwo(e.count), e.count
+	return writeNth(e.count), e.count
 }
 
 // denialDetail is the audit detail of the count-th identical denial in its
-// window: the first is written exactly as it always was.
+// window: until thinning starts a row is written exactly as it always was,
+// and after that it carries its number.
 func denialDetail(detail string, count int) string {
-	if count <= 1 {
+	if count <= thinAfter {
 		return detail
 	}
 	return fmt.Sprintf("%s count=%d", detail, count)

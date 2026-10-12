@@ -2,7 +2,6 @@ package server
 
 import (
 	"math"
-	"math/bits"
 	"reflect"
 	"strconv"
 	"sync"
@@ -34,15 +33,6 @@ func (c *manualClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
-}
-
-// newSteppingClock is a clock that is step later on every read.
-func newSteppingClock(step time.Duration) func() time.Time {
-	c := newManualClock()
-	return func() time.Time {
-		c.Advance(step)
-		return c.Now()
-	}
 }
 
 func TestAgentRateLimiterWindow(t *testing.T) {
@@ -221,10 +211,15 @@ func TestAgentRateLimiterConcurrentBurst(t *testing.T) {
 			if admitted.Load() != want {
 				t.Errorf("admitted = %d, want exactly %d", admitted.Load(), want)
 			}
-			// Of r concurrent refusals the 1st, 2nd, 4th, ... are rows: exactly
-			// bits.Len(r) of them, however the goroutines interleave.
-			if want := int64(bits.Len(uint(tt.callers - int(want)))); audits.Load() != want {
-				t.Errorf("refusals to audit = %d, want %d", audits.Load(), want)
+			// Of r concurrent refusals the first eight and then the 16th,
+			// 32nd, ... are rows, however the goroutines interleave.
+			refused := tt.callers - int(want)
+			wantRows := int64(min(refused, 8))
+			for nth := 16; nth <= refused; nth *= 2 {
+				wantRows++
+			}
+			if audits.Load() != wantRows {
+				t.Errorf("refusals to audit = %d of %d, want %d", audits.Load(), refused, wantRows)
 			}
 		})
 	}
@@ -244,29 +239,25 @@ func TestDenialCoalescer(t *testing.T) {
 		steps []step
 	}{
 		{"the first denial of a kind is written at once", []step{{"a", 0, true, 1}}},
-		{"in a window the 1st, 2nd, 4th and 8th are written, each with its number", []step{
-			{"a", 0, true, 1},
-			{"a", time.Second, true, 2},
-			{"a", 2 * time.Second, false, 3},
-			{"a", 3 * time.Second, true, 4},
-			{"a", 4 * time.Second, false, 5},
-			{"a", 5 * time.Second, false, 6},
-			{"a", 6 * time.Second, false, 7},
-			{"a", denialCoalesceWindow - time.Nanosecond, true, 8},
+		{"in a window the first eight are written, then only the 16th", []step{
+			{"a", 0, true, 1}, {"a", time.Second, true, 2}, {"a", 2 * time.Second, true, 3}, {"a", 3 * time.Second, true, 4},
+			{"a", 4 * time.Second, true, 5}, {"a", 5 * time.Second, true, 6}, {"a", 6 * time.Second, true, 7}, {"a", 7 * time.Second, true, 8},
+			{"a", 8 * time.Second, false, 9}, {"a", 9 * time.Second, false, 10}, {"a", 10 * time.Second, false, 11}, {"a", 11 * time.Second, false, 12},
+			{"a", 12 * time.Second, false, 13}, {"a", 13 * time.Second, false, 14}, {"a", 14 * time.Second, false, 15},
+			{"a", denialCoalesceWindow - time.Nanosecond, true, 16},
 		}},
 		{"a new window starts the count again", []step{
 			{"a", 0, true, 1},
 			{"a", time.Second, true, 2},
-			{"a", 2 * time.Second, false, 3},
 			{"a", denialCoalesceWindow, true, 1},
 			{"a", denialCoalesceWindow + time.Second, true, 2},
 			{"a", 10 * denialCoalesceWindow, true, 1},
 		}},
-		{"a different kind is its own first denial", []step{
+		{"a different kind has its own count", []step{
 			{"a", 0, true, 1},
 			{"a", time.Second, true, 2},
 			{"b", 2 * time.Second, true, 1},
-			{"a", 3 * time.Second, false, 3},
+			{"a", 3 * time.Second, true, 3},
 		}},
 	}
 	for _, tt := range tests {
@@ -282,24 +273,25 @@ func TestDenialCoalescer(t *testing.T) {
 		})
 	}
 
-	// A flood costs about log2(n) rows, and the last row written says at
-	// least half of how many there were, whenever the caller stops.
-	t.Run("a flood of n writes log2(n)+1 rows and loses less than half the count", func(t *testing.T) {
+	// A flood costs eight rows and then about log2(n) more, and the last row
+	// written says more than half of how many there were, whenever the caller
+	// stops. Until thinning starts every denial is a row.
+	t.Run("a flood is thinned and loses less than half the count", func(t *testing.T) {
 		t.Parallel()
-		for _, n := range []int{1, 2, 3, 49, 1000, 100000} {
+		for _, tt := range []struct{ n, rows int }{{1, 1}, {2, 2}, {3, 3}, {8, 8}, {9, 8}, {15, 8}, {16, 9}, {49, 10}, {1000, 14}, {100000, 21}} {
 			var c denialCoalescer
 			rows, last := 0, 0
-			for range n {
+			for range tt.n {
 				if write, count := c.admit("a", start); write {
 					rows++
 					last = count
 				}
 			}
-			if wantRows := bits.Len(uint(n)); rows != wantRows {
-				t.Errorf("n=%d: %d rows, want %d", n, rows, wantRows)
+			if rows != tt.rows {
+				t.Errorf("n=%d: %d rows, want %d", tt.n, rows, tt.rows)
 			}
-			if 2*last <= n {
-				t.Errorf("n=%d: the last row says %d, less than half", n, last)
+			if 2*last <= tt.n {
+				t.Errorf("n=%d: the last row says %d, not more than half", tt.n, last)
 			}
 		}
 	})
@@ -319,9 +311,10 @@ func TestDenialCoalescerBounded(t *testing.T) {
 	}
 }
 
-// Refusals are thinned out as denials are: within the audit window the 1st,
-// 2nd, 4th, 8th, ... is the one to write a row for, with its number, so the
-// log says how hard an agent pushed even if it never calls again.
+// Refusals are thinned out as denials are: within the audit window the first
+// eight and then the 16th, 32nd, ... are the ones to write a row for, each
+// with its number, so the log says how hard an agent pushed even if it never
+// calls again.
 func TestAgentRateLimiterRefusalRows(t *testing.T) {
 	t.Parallel()
 	limit := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 1, WindowSeconds: 3600}
@@ -341,7 +334,7 @@ func TestAgentRateLimiterRefusalRows(t *testing.T) {
 			written = append(written, d.count)
 		}
 	}
-	if want := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512}; !reflect.DeepEqual(written, want) {
+	if want := []int{1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128, 256, 512}; !reflect.DeepEqual(written, want) {
 		t.Errorf("rows written for 1000 refusals = %v, want %v", written, want)
 	}
 	// A minute after the first refusal the count starts again.

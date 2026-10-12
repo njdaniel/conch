@@ -306,7 +306,7 @@ curl -s -X PUT localhost:8080/v1/principals/3/manifest -H "$OP" -H "$J" -d '{
   }'
 ```
 
-Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`; each is granted separately. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log (a caller repeating the same denial within a minute gets a row for the 1st, 2nd, 4th, 8th… with its number, not one per request). A manifest may also cap a capability with `rate_limits`; over the cap the call is refused with `429` and `Retry-After` (REST, and a webhook bound to the agent) or the `rate_limited` error (MCP). The counters are in memory, so a restart starts every window afresh. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
+Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`; each is granted separately. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log (a caller repeating the same denial gets a row for each of the first eight in a minute and then only for the 16th, 32nd… with its number, not one per request for ever). A manifest may also cap a capability with `rate_limits`; over the cap the call is refused with `429` and `Retry-After` (REST, and a webhook bound to the agent) or the `rate_limited` error (MCP). The counters are in memory, so a restart starts every window afresh. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
 
 A raw JSON-RPC example (most agents will instead use an MCP client SDK):
 

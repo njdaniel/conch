@@ -438,8 +438,8 @@ func TestRateLimitAudit(t *testing.T) {
 	f.restPost(t, "aria", `{"body":"x"}`)
 	f.restPost(t, "aria", `{"body":"x"}`) // first refusal
 
-	// Refusals are thinned out: the 1st, 2nd, 4th and 8th of a minute are
-	// rows, each with its number, and a new minute starts the count again.
+	// Refusals are thinned out: the first eight of a minute are rows, then
+	// the 16th, each with its number, and a new minute starts the count again.
 	steps := []struct {
 		name    string
 		advance time.Duration
@@ -448,11 +448,10 @@ func TestRateLimitAudit(t *testing.T) {
 		last    string
 	}{
 		{"the first refusal wrote one row", 0, 0, 1, "count=1"},
-		{"the second is a row too", time.Second, 1, 2, "count=2"},
-		{"the third is not", time.Second, 1, 2, "count=2"},
-		{"the fourth is, and the fifth to seventh are not", time.Second, 4, 3, "count=4"},
-		{"just under a minute after the first: the eighth", 56*time.Second + 990*time.Millisecond, 1, 4, "count=8"},
-		{"a minute after the first: the count starts again", 10 * time.Millisecond, 1, 5, "count=1"},
+		{"the next seven are rows too", time.Second, 7, 8, "count=8"},
+		{"the ninth to fifteenth are not", time.Second, 7, 8, "count=8"},
+		{"just under a minute after the first: the sixteenth is", 57*time.Second + 990*time.Millisecond, 1, 9, "count=16"},
+		{"a minute after the first: the count starts again", 10 * time.Millisecond, 1, 10, "count=1"},
 	}
 	for _, s := range steps {
 		f.clock.Advance(s.advance)
@@ -488,8 +487,8 @@ func TestRateLimitAudit(t *testing.T) {
 	f.limit(t, "arlo", rl(schema.CapabilityMessagesPost, 1, 3600))
 	f.restPost(t, "arlo", `{"body":"x"}`)
 	f.restPost(t, "arlo", `{"body":"x"}`)
-	if rows := f.rateLimitedRows(t); len(rows) != 6 {
-		t.Errorf("rows after a second agent was refused = %d, want 6", len(rows))
+	if rows := f.rateLimitedRows(t); len(rows) != 11 {
+		t.Errorf("rows after a second agent was refused = %d, want 11", len(rows))
 	}
 }
 
@@ -507,36 +506,38 @@ func TestAccessDeniedIsCoalesced(t *testing.T) {
 	for range 49 {
 		post()
 	}
-	// 50 identical denials: the 1st, 2nd, 4th, 8th, 16th and 32nd are rows.
+	// 50 identical denials: the first eight, the 16th and the 32nd are rows.
 	rows := deniedRows()
-	if len(rows) != 6 {
-		t.Fatalf("rows after 50 identical denials = %d, want 6", len(rows))
+	if len(rows) != 10 {
+		t.Fatalf("rows after 50 identical denials = %d, want 10", len(rows))
 	}
-	// The first row was written exactly as it was before coalescing existed,
-	// and the last says at least half of how many there were.
-	if first := rows[0]; strings.Contains(first.Detail, "count=") {
-		t.Errorf("first row detail = %q, want no count", first.Detail)
+	// Until thinning starts a row is written exactly as it was before it
+	// existed, and the last says more than half of how many there were.
+	for _, row := range rows[:8] {
+		if strings.Contains(row.Detail, "count=") {
+			t.Errorf("row detail = %q, want no count on the first eight", row.Detail)
+		}
 	}
 	if last := rows[len(rows)-1]; !strings.HasSuffix(last.Detail, " count=32") {
 		t.Errorf("last row detail = %q, want it to end in count=32", last.Detail)
 	}
 	// A different kind of denial is its own first.
 	f.restRead(t, "nomad") // a different capability and subject
-	if n := len(deniedRows()); n != 7 {
-		t.Fatalf("rows after a different kind = %d, want 7", n)
+	if n := len(deniedRows()); n != 11 {
+		t.Fatalf("rows after a different kind = %d, want 11", n)
 	}
 	// Another principal's identical denial is not counted with it.
 	f.add(t, "nomad2", store.PrincipalAgent, false)
 	f.restPost(t, "nomad2", `{"body":"x"}`)
-	if n := len(deniedRows()); n != 8 {
-		t.Fatalf("rows after another principal's denial = %d, want 8", n)
+	if n := len(deniedRows()); n != 12 {
+		t.Fatalf("rows after another principal's denial = %d, want 12", n)
 	}
 	// A minute on, the count starts again: a plain first row.
 	f.clock.Advance(denialCoalesceWindow)
 	post()
 	rows = deniedRows()
-	if len(rows) != 9 {
-		t.Fatalf("rows after the window = %d, want 9", len(rows))
+	if len(rows) != 13 {
+		t.Fatalf("rows after the window = %d, want 13", len(rows))
 	}
 	if last := rows[len(rows)-1]; strings.Contains(last.Detail, "count=") {
 		t.Errorf("first row of the new window = %q, want no count", last.Detail)

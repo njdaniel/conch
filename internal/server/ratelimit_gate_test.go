@@ -218,10 +218,14 @@ func TestRouteDenialsAreThinnedOut(t *testing.T) {
 	for range 50 {
 		denied(http.MethodGet, "/v1/hooks")
 	}
-	// Written: the 1st, 2nd, 4th, 8th, 16th and 32nd. The first is exactly
-	// the row there always was; the last says at least half of how many.
-	want := []string{"GET /v1/hooks forbidden"}
-	for _, n := range []int{2, 4, 8, 16, 32} {
+	// Written: the first eight, exactly the rows there always were, then the
+	// 16th and the 32nd with their numbers; the last says more than half of
+	// how many there were.
+	var want []string
+	for range 8 {
+		want = append(want, "GET /v1/hooks forbidden")
+	}
+	for _, n := range []int{16, 32} {
 		want = append(want, fmt.Sprintf("GET /v1/hooks forbidden count=%d", n))
 	}
 	if got := details(); !reflect.DeepEqual(got, want) {
