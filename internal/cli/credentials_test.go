@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // TestMain keeps every test away from the real user configuration and from a
@@ -59,6 +63,80 @@ func TestNormalizeServer(t *testing.T) {
 				t.Fatalf("NormalizeServer(%q) = %q, %v; want %q (err %v)", tt.in, got, err, tt.want, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestNormalizeServerSharedVectors runs testdata/credentials-vectors.json
+// through NormalizeServer. The same file drives a test of the Rust voice
+// client (voice/crates/conch-voice-api/src/server.rs), which reads the login
+// this package stores: the key a server address is stored under is a contract
+// between the two programs (docs/design/conch-voice.md §8), and this file is
+// what keeps them from drifting.
+//
+// Every vector was produced by running NormalizeServer, none by hand. So a
+// failure here means that what a key is has changed, in this package or
+// underneath it (net/url, or the Unicode tables strings.ToLower uses): logins
+// stored under the old key are no longer found, and the Rust side has to
+// change in the same pull request.
+//
+// Two changes underneath are expected, and the file is built to notice both.
+// The vectors cannot hold every letter, so the Unicode version is asserted
+// outright. And Go releases after 1.25.0 refuse a bracketed host that is not
+// an IPv6 address (http://[evil.com]); ten vectors have such a host, so this
+// test fails when go.mod moves to one of those releases.
+func TestNormalizeServerSharedVectors(t *testing.T) {
+	// The Unicode version the Go and Rust lower-casing were compared under.
+	const comparedUnderUnicode = "15.0.0"
+	if unicode.Version != comparedUnderUnicode {
+		t.Fatalf("this Go lower-cases with Unicode %s, and the shared vectors were made under %s. "+
+			"Run the comparison again: every code point as a host (http://<c>.x) through NormalizeServer "+
+			"and through the Rust ServerAddress::parse. Then bring newer_than_gos_tables in "+
+			"voice/crates/conch-voice-api/src/server.rs and testdata/credentials-vectors.json up to date, "+
+			"and this constant last.", unicode.Version, comparedUnderUnicode)
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "credentials-vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct {
+		Input string  `json:"input"`
+		Key   *string `json:"key"`
+		Error bool    `json:"error"`
+		Note  string  `json:"note"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&vectors); err != nil {
+		t.Fatalf("credentials-vectors.json: %v", err)
+	}
+	if len(vectors) < 160 {
+		t.Fatalf("credentials-vectors.json has %d vectors; the file was cut short", len(vectors))
+	}
+	keys, refusals := 0, 0
+	for _, v := range vectors {
+		t.Run(fmt.Sprintf("%q", v.Input), func(t *testing.T) {
+			if (v.Key != nil) == v.Error {
+				t.Fatalf("vector must have a key or error: true, not both and not neither (%s)", v.Note)
+			}
+			got, err := NormalizeServer(v.Input)
+			if v.Error {
+				if err == nil || got != "" {
+					t.Fatalf("NormalizeServer(%q) = %q, %v; want an error (%s)", v.Input, got, err, v.Note)
+				}
+				return
+			}
+			if err != nil || got != *v.Key {
+				t.Fatalf("NormalizeServer(%q) = %q, %v; want %q (%s)", v.Input, got, err, *v.Key, v.Note)
+			}
+		})
+		if v.Error {
+			refusals++
+		} else {
+			keys++
+		}
+	}
+	if keys < 20 || refusals < 10 {
+		t.Fatalf("credentials-vectors.json has %d keys and %d refusals; it must exercise both", keys, refusals)
 	}
 }
 
