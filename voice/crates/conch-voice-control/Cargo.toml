@@ -1,0 +1,19 @@
+[package]
+name = "conch-voice-control"
+description = "conch-voice's decision logic: configuration, key decoding, push-to-talk, and the connection policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Only Deserialize is derived, for the configuration file.
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+# Parsing only: the crate never writes TOML, so the "display" feature (and toml_writer) is left out.
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
+
+[lints]
+workspace = true

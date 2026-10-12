@@ -1,0 +1,27 @@
+[package]
+name = "conch-voice"
+description = "The Conch voice client: push-to-talk voice for a channel, through LiveKit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+conch-voice-api = { path = "../crates/conch-voice-api" }
+conch-voice-audio = { path = "../crates/conch-voice-audio" }
+conch-voice-control = { path = "../crates/conch-voice-control" }
+livekit = { workspace = true }
+
+# Only examples/sdk_probe.rs uses these (issue #178): the probe that measures the SDK
+# behaviours docs/design/conch-voice.md §13 relies on. All four are in deps-allowlist.txt and
+# were already in the tree through livekit. tokio becomes a normal dependency with #183.
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false }
+log = "0.4"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

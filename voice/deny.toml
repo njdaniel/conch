@@ -1,0 +1,49 @@
+# cargo-deny configuration for the voice/ workspace (ADR-006).
+#
+# The list of crates this workspace may depend on directly is
+# deps-allowlist.txt, enforced by scripts/voice-depgate.sh: cargo-deny's own
+# allow-list covers every crate in the graph, transitive ones included, so it
+# cannot express "direct dependencies only". cargo-deny checks what a list of
+# names cannot: where every crate comes from, its licence, and known
+# advisories.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[sources]
+# Every crate comes from crates.io. A git or other-registry source fails; the
+# one planned exception (dmn-audio, docs/design/conch-voice.md §9) is added
+# here, by exact URL, when Nick has decided where it lives.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+# This repository is AGPL-3.0. Everything linked into conch-voice must be
+# compatible with distributing the result under it.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace's own crates are not published.
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+# A version requirement of "*" is refused. The workspace's own crates depend on
+# each other by path, which is not a wildcard in any sense that matters.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[advisories]
+# Checked by a job of its own in CI (it needs the network and its result can
+# change with no change here), not by `make check`.

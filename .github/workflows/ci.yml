@@ -60,6 +60,58 @@ jobs:
       - name: dependency gate
         run: ./scripts/depgate.sh
 
+      # The Rust voice client under voice/ (ADR-006). The toolchain script
+      # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
+      # against the SHA-256 in scripts/voice-pins.sh, which is therefore the
+      # cache key. rustup, already on the runner, installs the Rust version
+      # voice/rust-toolchain.toml names.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          # After a dependency change, start from the last build instead of
+          # from nothing; cargo rebuilds only what changed.
+          restore-keys: |
+            voice-build-${{ runner.os }}-
+
+      # The SDK's build needs GLib's headers (found through pkg-config) and
+      # nothing else from the system. scripts/voice-env.sh says so if they
+      # are missing.
+      - name: rust system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: rust check
+        run: make rust-check
+
+  rust-advisories:
+    # Known advisories against the crates conch-voice links (RustSec). A job of
+    # its own and not part of check: it reads a database on the network, and a
+    # new advisory turns it red with no change here. Red means look at it, and
+    # either update the crate or record why not in voice/deny.toml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: advisories
+        run: ./scripts/voice-advisories.sh
+
   dogfood-check:
     # The P1 release canary (ROADMAP success criterion,
     # .claude/skills/dogfood-check/): runs on every push to main (the closest

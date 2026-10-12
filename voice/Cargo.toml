@@ -1,0 +1,31 @@
+# The Rust voice client, conch-voice (ADR-006). Its own Cargo workspace:
+# conchd and conch are Go and do not depend on anything here.
+# Design: docs/design/conch-voice.md.
+[workspace]
+resolver = "3"
+members = ["crates/*", "conch-voice"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/njdaniel/conch"
+rust-version = "1.96"
+publish = false
+
+# Direct dependencies are listed in deps-allowlist.txt; a crate that is not
+# there fails scripts/voice-depgate.sh. New crates need Nick's sign-off.
+[workspace.dependencies]
+# Exact: its build downloads a prebuilt libwebrtc chosen by this version.
+livekit = "=0.9.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

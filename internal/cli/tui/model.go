@@ -193,6 +193,7 @@ type Model struct {
 
 // setStatus records status for mode; modeDecision shares the inbox's.
 func (m *Model) setStatus(mode mode, status string) {
+	status = sanitize(status)
 	if mode == modeChannels {
 		m.channelStatus = status
 		return
@@ -400,7 +401,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
-		m.setStatus(modeChannels, "signed in as "+msg.who.Name)
+		m.setStatus(modeChannels, "signed in as "+sanitize(msg.who.Name))
 	case approvalsLoaded:
 		if msg.err != nil {
 			m.setStatus(modeInbox, msg.err.Error())
@@ -789,7 +790,7 @@ func (m Model) View() string {
 	} else {
 		channelLines := make([]string, len(m.channels))
 		for i, channel := range m.channels {
-			channel = clip(channel, leftWidth-4)
+			channel = clip(sanitize(channel), leftWidth-4)
 			prefix := "  "
 			if i == m.selected {
 				prefix = activeStyle.Render("› ")
@@ -837,12 +838,21 @@ func (m Model) View() string {
 	}
 
 	status := m.status()
-	if m.userName != "" {
-		status = m.userName + " | " + status
-	}
 	if m.mode == modeChannels {
 		status += statusKeys
+		if name := sanitize(m.userName); name != "" {
+			// The name gets the room the status and key hints leave; when they
+			// already fill the line the name goes, never the hints. lipgloss's
+			// Width only pads, so without this clip a long name wraps and breaks
+			// the layout.
+			if room := width - utf8.RuneCountInString(status) - 3; room > 0 {
+				status = clip(name, room) + " | " + status
+			}
+		}
 	} else {
+		if name := sanitize(m.userName); name != "" {
+			status = name + " | " + status
+		}
 		// One line whatever it holds, so the panes are never pushed up off
 		// the screen: the message is what is cut, never the key hints.
 		status = fitCells(sanitize(status), width-cellWidth(statusKeys)) + statusKeys
@@ -1099,23 +1109,13 @@ func (w *wrappedBody) lines(body string, cols int) []string {
 }
 
 func bodyLines(body string, cols int) []string {
-	body = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(body)
+	body = sanitizeMultiline(body)
 	body = strings.TrimRight(body, "\n")
 	if body == "" {
 		return nil
 	}
 	var lines []string
 	for _, line := range strings.Split(body, "\n") {
-		// sanitize without its line-break handling: there are none left.
-		line = strings.Map(func(r rune) rune {
-			switch {
-			case r == '\t':
-				return ' '
-			case unicode.IsControl(r):
-				return -1
-			}
-			return r
-		}, line)
 		lines = append(lines, wrapCells(line, cols)...)
 	}
 	return lines
@@ -1448,11 +1448,35 @@ func (m Model) netsLoaded(msg netsLoaded) (tea.Model, tea.Cmd) {
 
 // sanitize makes server- or author-supplied text safe to put on one terminal
 // line: line breaks become a visible mark, tabs a space, and every other
-// control character (ESC included, so no escape sequence survives) is dropped.
+// control character (ESC included, so no escape sequence survives) or bidi
+// control is dropped. Dropping Bidi_Control characters deliberately strips
+// all direction marks (including LRM, RLM) for safety against display spoofing.
 func sanitize(text string) string {
-	text = strings.NewReplacer("\r\n", " ↵ ", "\n", " ↵ ", "\r", " ↵ ", "\t", " ").Replace(text)
+	text = strings.NewReplacer("\r\n", " ↵ ", "\n", " ↵ ", "\r", " ↵ ", "\u2028", " ↵ ", "\u2029", " ↵ ", "\t", " ").Replace(text)
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+// sanitizeMultiline strips control characters and bidi controls from
+// multiline text while preserving newlines. Tabs are mapped to a space,
+// and lone carriage returns as well as U+2028 and U+2029 are normalized to newlines.
+func sanitizeMultiline(text string) string {
+	text = strings.NewReplacer(
+		"\r\n", "\n",
+		"\r", "\n",
+		"\u2028", "\n",
+		"\u2029", "\n",
+		"\t", " ",
+	).Replace(text)
+	return strings.Map(func(r rune) rune {
+		if r == '\n' {
+			return r
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
 			return -1
 		}
 		return r
