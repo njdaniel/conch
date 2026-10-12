@@ -74,6 +74,10 @@ func TestCredentialEndpointsTable(t *testing.T) {
 		{"create human", "POST", credentialsPath(f.human.ID), `{"label":"h"}`, 201, ""},
 		{"create with future expiry", "POST", credentialsPath(f.agent.ID), `{"label":"a","expires_at":"` + future + `"}`, 201, ""},
 		{"create blank label", "POST", credentialsPath(f.agent.ID), `{"label":"  "}`, 400, "invalid_request"},
+		{"create label with newline", "POST", credentialsPath(f.agent.ID), `{"label":"ci\nbuilds"}`, 400, "invalid_request"},
+		{"create label with bidi override", "POST", credentialsPath(f.agent.ID), `{"label":"ci\u202ebuilds"}`, 400, "invalid_request"},
+		{"create label with leading space", "POST", credentialsPath(f.agent.ID), `{"label":" ci"}`, 400, "invalid_request"},
+		{"create unicode label", "POST", credentialsPath(f.agent.ID), `{"label":"夜間ビルド"}`, 201, ""},
 		{"create missing label", "POST", credentialsPath(f.agent.ID), `{}`, 400, "invalid_request"},
 		{"create long label", "POST", credentialsPath(f.agent.ID), `{"label":"` + strings.Repeat("x", 101) + `"}`, 400, "invalid_request"},
 		{"create past expiry", "POST", credentialsPath(f.agent.ID), `{"label":"a","expires_at":"` + past + `"}`, 400, "invalid_request"},
@@ -121,6 +125,37 @@ func TestCredentialEndpointsTable(t *testing.T) {
 				if rec.Body.Len() != 0 {
 					t.Errorf("204 with body %q", rec.Body)
 				}
+			}
+		})
+	}
+}
+
+// TestCredentialLabelRuleMessage: the label refusal names the rule and does
+// not echo the label (the table above pins the status and code).
+func TestCredentialLabelRuleMessage(t *testing.T) {
+	f := newManifestFixture(t)
+	tests := []struct {
+		name    string
+		label   string
+		message string
+	}{
+		{"newline", "ci\nbuilds", "control characters"},
+		{"bidi override", "ci\u202ebuilds", "bidi controls"},
+		{"leading space", " ci", "whitespace"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, http.MethodPost, credentialsPath(f.agent.ID),
+				fmt.Sprintf(`{"label":%q}`, tt.label))
+			assertErrorBody(t, rec, http.StatusBadRequest, "invalid_request")
+			// Decode the error: the wire form escapes what a raw body scan
+			// would miss, so scan the message itself.
+			e := decodeBody[schema.Error](t, rec)
+			if !strings.Contains(e.Message, tt.message) {
+				t.Errorf("message = %q, want it to name the rule (%q)", e.Message, tt.message)
+			}
+			if strings.Contains(e.Message, tt.label) {
+				t.Errorf("message echoes the refused label: %q", e.Message)
 			}
 		})
 	}

@@ -54,10 +54,43 @@ func credentialsPath() string {
 	return filepath.Join(dir, credentialsDirName, credentialsFileName)
 }
 
+// errUnsafeServerHost is returned when a server host cannot be used safely.
+// The error message never echoes the server address or credentials.
+var errUnsafeServerHost = errors.New("cli: server host cannot be used safely: the name its login is stored under and the name it would be reached at are different hosts")
+
+// checkSafeServer verifies that server's host does not have ambiguous unicode characters
+// (such as U+0130 and U+1E9E) where the stored key and dialed name would disagree.
+func checkSafeServer(server string) error {
+	u, err := url.Parse(server)
+	if err != nil {
+		return fmt.Errorf("cli: parse server URL: %w", err)
+	}
+	if hostContainsRefusedRune(u.Host) {
+		return errUnsafeServerHost
+	}
+	return nil
+}
+
+func hostContainsRefusedRune(host string) bool {
+	if strings.ContainsRune(host, '\u0130') || strings.ContainsRune(host, '\u1e9e') {
+		return true
+	}
+	if unescaped, err := url.PathUnescape(host); err == nil {
+		if strings.ContainsRune(unescaped, '\u0130') || strings.ContainsRune(unescaped, '\u1e9e') {
+			return true
+		}
+	}
+	lower := strings.ToLower(host)
+	return strings.Contains(lower, "%c4%b0") || strings.Contains(lower, "%e1%ba%9e")
+}
+
 // LoadToken returns the bearer token for server: CONCH_TOKEN when set and
 // non-empty, otherwise the stored credential. An empty token with a nil error
 // means no credential is available.
 func LoadToken(server string) (string, error) {
+	if err := checkSafeServer(server); err != nil {
+		return "", err
+	}
 	if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
 		return token, nil
 	}
@@ -75,6 +108,9 @@ func LoadToken(server string) (string, error) {
 // SaveToken stores token for server, creating the directory (0700) and file
 // (0600) as needed. The file is replaced atomically.
 func SaveToken(server, token string) error {
+	if err := checkSafeServer(server); err != nil {
+		return err
+	}
 	key, err := NormalizeServer(server)
 	if err != nil {
 		return err
@@ -90,6 +126,9 @@ func SaveToken(server, token string) error {
 // DeleteToken removes the stored credential for server, deleting the file when
 // it becomes empty. Removing a credential that is not there is not an error.
 func DeleteToken(server string) error {
+	if err := checkSafeServer(server); err != nil {
+		return err
+	}
 	key, err := NormalizeServer(server)
 	if err != nil {
 		return err

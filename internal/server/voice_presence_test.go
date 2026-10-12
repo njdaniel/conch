@@ -1418,6 +1418,259 @@ func TestVoiceDisableWhenTheRoomListCannotBeRead(t *testing.T) {
 	}
 }
 
+// stalledRead stands in for one of the two store reads a removal hook makes
+// (voicePoller.channelRooms, voicePoller.memberRooms) and records the context
+// the hook gave it. When stall is set it does not answer: it returns when its
+// context ends, with that context's error wrapped as the store wraps it,
+// which is what a query still waiting does. A context that never ends would
+// hold the test for ever, so after giveUp it stops waiting and says so.
+type stalledRead struct {
+	stall  bool
+	giveUp time.Duration
+
+	calls int
+	// bounded is whether the context had a deadline, and budget how far off
+	// it was when the read began.
+	bounded bool
+	budget  time.Duration
+	// ended is what the context ended with; gaveUp is set when it never did.
+	ended  error
+	gaveUp bool
+}
+
+func (r *stalledRead) read(ctx context.Context, real func() ([]store.VoiceRoom, error)) ([]store.VoiceRoom, error) {
+	r.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		r.bounded, r.budget = true, time.Until(deadline)
+	}
+	if !r.stall {
+		return real()
+	}
+	select {
+	case <-ctx.Done():
+		r.ended = ctx.Err()
+		return nil, fmt.Errorf("store: list voice rooms: %w", ctx.Err())
+	case <-time.After(r.giveUp):
+		r.gaveUp = true
+		return nil, errors.New("store unavailable")
+	}
+}
+
+// TestVoiceRemovalHookReadIsBounded: a removal hook runs on a context its
+// caller cannot cancel, which has no deadline either, so the read of the rooms
+// to remove someone from is given one of its own (issue #210).
+//
+// With a store that answers, the read is handed a deadline no further off than
+// voiceEvictTimeout and the removal happens in the request, as before. With a
+// store that does not answer, the hook waits no longer than its bound: the
+// read fails as any other does, the failure is logged with the channel or the
+// principal and never a room name, LiveKit is asked to remove nobody, the
+// request is answered all the same, and the next pass removes the participant
+// by entitlement. Nothing here waits longer than the shortened bound.
+func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
+	// The bound the hooks are given in the cases where the store stalls: the
+	// only real time this test waits out.
+	const bound = 20 * time.Millisecond
+	// How long a stalled read waits for a context that never ends before it
+	// gives up: reached only when the read has no deadline, which fails the
+	// case.
+	const giveUp = 2 * time.Second
+	const failedLine = "voice: list rooms for removal failed; passes will remove"
+
+	hooks := []struct {
+		name   string
+		method string
+		path   func(f *presenceFixture) string
+		// seam puts read in place of the store read this hook makes.
+		seam func(f *presenceFixture, read *stalledRead)
+		// logged is the attribute that names what could not be read.
+		logged func(f *presenceFixture) string
+		// outAtOnce is whether a failed read still takes ann out of presence
+		// before the response: so for a disabled principal
+		// (forgetEverywhere). A removed member is left to the pass.
+		outAtOnce bool
+		// passReason is why the pass removes ann once the hook has not.
+		passReason string
+	}{
+		{
+			name:   "member removed",
+			method: "DELETE",
+			path:   func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) },
+			seam: func(f *presenceFixture, read *stalledRead) {
+				real := f.srv.voice.channelRooms
+				f.srv.voice.channelRooms = func(ctx context.Context, channelID int64) ([]store.VoiceRoom, error) {
+					return read.read(ctx, func() ([]store.VoiceRoom, error) { return real(ctx, channelID) })
+				}
+			},
+			logged:     func(f *presenceFixture) string { return fmt.Sprintf("channel=%d", f.ops.ID) },
+			passReason: voiceReasonNotMember,
+		},
+		{
+			name:   "principal disabled",
+			method: "POST",
+			path:   func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) },
+			seam: func(f *presenceFixture, read *stalledRead) {
+				real := f.srv.voice.memberRooms
+				f.srv.voice.memberRooms = func(ctx context.Context, principalID int64) ([]store.VoiceRoom, error) {
+					return read.read(ctx, func() ([]store.VoiceRoom, error) { return real(ctx, principalID) })
+				}
+			},
+			logged:     func(f *presenceFixture) string { return fmt.Sprintf("principal=%d", f.ids["ann"]) },
+			outAtOnce:  true,
+			passReason: voiceReasonDisabled,
+		},
+	}
+	for _, tt := range hooks {
+		for _, stall := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/store stalls=%v", tt.name, stall), func(t *testing.T) {
+				f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+				room := f.inUse(t, f.ops)
+				ann := f.identity("ann")
+				f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000, published: true},
+					fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+				f.pass(t)
+				if got := f.who(t, f.ops); got != "ann*,ann2" {
+					t.Fatalf("before: %q", got)
+				}
+				if got := f.srv.voice.hookReadTimeout; got != voiceEvictTimeout {
+					t.Fatalf("a server's hook read bound = %v, want voiceEvictTimeout (%v)", got, voiceEvictTimeout)
+				}
+				limit := voiceEvictTimeout
+				if stall {
+					limit = bound
+					f.srv.voice.hookReadTimeout = bound
+				}
+				read := &stalledRead{stall: stall, giveUp: giveUp}
+				tt.seam(f, read)
+				before := f.lk.count("RemoveParticipant")
+
+				code := f.doOrdered(t, tt.method, tt.path(f), f.rootTok)
+
+				if read.calls != 1 {
+					t.Fatalf("the hook read the rooms %d times, want once", read.calls)
+				}
+				if read.gaveUp {
+					t.Fatalf("the read was still waiting after %v: its context has no deadline and nothing bounds the request", giveUp)
+				}
+				// With the shortened bound the deadline may already have passed
+				// by the time the read looks at it, on a runner that paused the
+				// goroutine for 20 ms: that it is set and no further off than
+				// the bound is what matters. With the full bound it is seconds
+				// away, and must be.
+				if !read.bounded || read.budget > limit || (!stall && read.budget <= 0) {
+					t.Errorf("the read's context: deadline set = %v, %v away; want one at most %v away", read.bounded, read.budget, limit)
+				}
+				if code != http.StatusNoContent {
+					t.Fatalf("status = %d, want 204: the voice hook must not fail the request", code)
+				}
+				logs := f.logs.buf.String()
+				// The buffer is not printed on failure: the point of one of
+				// these checks is that it might hold a room name.
+				if strings.Contains(logs, room) {
+					t.Error("a log line carries the room name")
+				}
+				var failed []string
+				for line := range strings.SplitSeq(logs, "\n") {
+					if strings.Contains(line, failedLine) {
+						failed = append(failed, line)
+					}
+				}
+				removals := f.lk.count("RemoveParticipant") - before
+
+				if !stall {
+					// The store answered: nothing has changed for the hook.
+					if len(failed) != 0 {
+						t.Errorf("%d log lines for a failed read, want none", len(failed))
+					}
+					if removals != 1 || f.lk.in(room, ann) {
+						t.Errorf("RemoveParticipant calls in the request = %d, ann still connected = %v; want her removed by the hook", removals, f.lk.in(room, ann))
+					}
+					if got := f.who(t, f.ops); got != "ann2" {
+						t.Errorf("snapshot right after = %q, want ann2 only", got)
+					}
+					return
+				}
+
+				if !errors.Is(read.ended, context.DeadlineExceeded) {
+					t.Errorf("the stalled read ended with %v, want its deadline", read.ended)
+				}
+				if len(failed) != 1 {
+					t.Fatalf("%d log lines for the failed read, want one", len(failed))
+				}
+				for _, want := range []string{"level=ERROR", tt.logged(f), context.DeadlineExceeded.Error()} {
+					if !strings.Contains(failed[0], want) {
+						t.Errorf("the log line for the failed read lacks %q", want)
+					}
+				}
+				// Which rooms to call LiveKit for is unknown: nobody is
+				// removed by name in the request.
+				if removals != 0 || !f.lk.in(room, ann) {
+					t.Fatalf("RemoveParticipant calls in the request = %d, ann still connected = %v; want nobody removed while the rooms are unread", removals, f.lk.in(room, ann))
+				}
+				if got := f.who(t, f.ops); tt.outAtOnce && got != "ann2" {
+					t.Errorf("snapshot right after = %q, want ann out of presence at once", got)
+				}
+
+				// The next pass finds her by entitlement and removes her.
+				f.clock.Advance(testPassGap)
+				f.pass(t)
+				if f.lk.in(room, ann) {
+					t.Error("the pass did not remove ann")
+				}
+				if got := f.who(t, f.ops); got != "ann2" {
+					t.Errorf("snapshot after the pass = %q, want ann2 only", got)
+				}
+				var left, removed int
+				for _, e := range f.audit(t) {
+					if e.Actor == f.actor("ann") && e.Action == store.AuditVoiceLeft {
+						left++
+					}
+					if e.Action == store.AuditVoiceParticipantRemoved && strings.Contains(e.Detail, "reason="+tt.passReason) {
+						removed++
+					}
+				}
+				if left != 1 || removed != 1 {
+					t.Errorf("voice_left for ann = %d, removals with reason=%s = %d; want one of each", left, tt.passReason, removed)
+				}
+			})
+		}
+	}
+}
+
+// TestVoiceRemovalHookReadsEndAtTheirDeadline: the two reads as a server makes
+// them, against its own store, on a context whose deadline has passed. Each
+// fails with the deadline's error rather than answering, which is what the
+// bound relies on, and the error names the channel or the principal and never
+// a room.
+func TestVoiceRemovalHookReadsEndAtTheirDeadline(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.room(t, f.ops)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	tests := []struct {
+		name string
+		read func() ([]store.VoiceRoom, error)
+	}{
+		{"rooms of a channel", func() ([]store.VoiceRoom, error) { return f.srv.voice.channelRooms(ctx, f.ops.ID) }},
+		{"rooms of a member's channels", func() ([]store.VoiceRoom, error) { return f.srv.voice.memberRooms(ctx, f.ids["ann"]) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rooms, err := tt.read()
+			if err == nil {
+				t.Fatalf("the read answered with %d rooms past its deadline", len(rooms))
+			}
+			// Checked before the error is printed anywhere.
+			if strings.Contains(err.Error(), room) {
+				t.Fatal("the error carries the room name")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || len(rooms) != 0 {
+				t.Errorf("err = %v with %d rooms, want the deadline's error and no rooms", err, len(rooms))
+			}
+		})
+	}
+}
+
 // Asking for sessions in a loop does not make the poller run faster than its
 // interval: only a room the loop was not watching wakes it.
 func TestVoicePollerSessionsDoNotSpinTheLoop(t *testing.T) {

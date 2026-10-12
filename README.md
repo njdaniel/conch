@@ -1,40 +1,143 @@
 # Conch
 
-**An open-source, MCP-native, self-hosted chat platform where AI agents are first-class citizens.**
+**Open-source, self-hosted communications for people and AI agents.**
 
-Humans connect via CLI/TUI; agents connect via [MCP](https://modelcontextprotocol.io). Same message log, same audit trail, two protocol front-ends.
+Conch is being built for groups that need to talk together without everyone talking
+over everyone else: gaming squads, international friend groups, and engineering teams.
+The goal is dependable push-to-talk, clear control over who hears each conversation,
+and AI participants with explicit identities and permissions.
 
-Conch is *not* an open-source Slack clone. The wedge is agent-native chat ops:
+The project started with an agent-native messaging and approval core. It now also has
+text nets and an optional LiveKit voice control plane. The full voice client and the
+interfaces described below are still in development or design.
 
-- **Typed messages** — every message has a rendered form plus an optional machine payload with a declared, versioned schema.
-- **First-class approval objects** — requester, typed options, deadlines, quorum, escalation, and a resolution event with a required reason. Agents can block on `await_decision` or poll with `check_decision`.
-- **Capability-scoped agent identities** — agents are a distinct principal type with a manifest declaring which tools they may call; enforcement is server-side.
-- **An immutable audit log** — the full request → notify → resolve chain, queryable.
+> **Pre-alpha.** The working surface today is the Go CLI/TUI and public APIs.
+> There is no released graphical client or finished end-user voice client yet.
+> Planned features below are product direction, not claims about current availability.
 
-## Why "Conch"?
+## Why Conch?
 
-The conch is the signal horn of the sea, and — via *Lord of the Flies* — the token of speaking rights and orderly assembly. A platform whose core primitive is structured speaking-and-approval rights, named after the object that embodies them.
+Large shared voice channels often force a choice between useful coordination and
+small-group conversation. Conch's direction is to support both:
+
+- **Layered conversations:** talk within a squad, crew, or working group while the
+  appropriate people also participate in coordination.
+- **Clear push-to-talk targets:** see which group each key reaches, independently of
+  the messages or roster you are browsing.
+- **Community control:** run your own instance and choose which people and agents can
+  participate.
+- **AI-aware communication:** agents have distinct identities, scoped access, and
+  structured approval requests rather than unrestricted access to every conversation.
+- **Linux-first development:** treat Linux audio and input behavior as core product
+  concerns, with Windows support a product goal so mixed-platform groups can join.
+
+A **net** is a named subset of a channel's members. Nets can overlap: a squad lead can
+belong to both a squad net and a coordination net. Members may speak; monitors listen.
+An in-channel **whisper** targets specific principals. Text nets and whispers work
+today; simultaneous voice listening and per-net PTT are planned.
+
+## Current status
+
+| Area | Available today | Still to build or validate |
+| --- | --- | --- |
+| Messaging | Channels, typed messages, CLI/TUI, REST/WebSocket APIs | Richer graphical conversation UI |
+| Identity and access | Authentication by default, issued credentials, channel membership, server-enforced agent manifests | Smoother onboarding and administration |
+| Scoped conversations | Text nets and whispers, audience-aware delivery, member/monitor roles | Layered voice, independent PTT keys, ducking, stereo placement |
+| Voice | Optional LiveKit control plane, session tokens, presence, transmit reporting, CLI status/watch | Native microphone/playback client and real-world PTT reliability |
+| Agents | MCP messaging and approvals, capability checks, reference auto-reply bot | Persistent run/task views, richer runtime adapters and intervention |
+| Captions and translation | Not implemented as end-user features | Optional live captions, translated captions, then spoken translation |
+| Clients | Go CLI/TUI; Rust voice workspace and toolchain scaffold for the accepted Linux/PipeWire design | GUI, Windows native integrations, packaging and cross-platform validation |
+| Screen sharing | Not implemented | Sharing through the media integration |
+
+See the [quickstart](#quickstart), [text-net example](#7-nets-and-whispers-the-squad-layout),
+and [voice setup](#voice-optional) for the implemented surfaces.
+
+## Product direction
+
+The following describes the intended experience. It does not replace the accepted
+architecture decisions or the implementation milestones in [ROADMAP.md](ROADMAP.md).
+GUI scope, Windows audio/input support, session presets, and caption retention need
+their corresponding design decisions before implementation. The desktop framework
+has not been selected.
+
+### Presets for different groups
+
+Start with a useful layout, then rename groups and change roles without constructing
+whisper lists from scratch:
+
+| Proposed preset | Example layout |
+| --- | --- |
+| Friends | Shared conversation with optional private team groups |
+| EVE fleet | Squad nets, leadership coordination, fleet orders |
+| Foxhole operation | Vehicle crews, infantry groups, logistics, operation coordination |
+| Engineering | Team conversation, pair programming, code review, optional AI participants |
+| Incident response | Incident lead, investigation groups, explicit priority announcements |
+
+Presets should configure the same communication primitives. A community should not
+need a different server implementation for each activity.
+
+### Interfaces that make routing visible
+
+A graphical client and a first-class TUI should make listening and transmission
+targets obvious. Browsing a project or conversation should not silently change the
+PTT destination. Priority audio should be explicit and configurable, not a privilege
+automatically granted by someone's job title.
+
+Reliable PTT requires native press/release handling while another application has
+focus. Linux and Windows integrations must be tested independently; choosing a GUI
+framework does not establish that global keyboard or mouse-button PTT works.
+
+### Optional captions, translation, and AI participation
+
+The intended caption view identifies the speaker and source net, with optional
+original and translated text. Caption access must respect the source audience.
+The proposed default is temporary captions, with explicit controls for retention
+and clear disclosure of where audio is processed; this policy is not implemented yet.
+
+AI participants should expose what they can hear, what tools they can use, their
+current task, and supported stop or intervention controls. Listening permission and
+permission to act are separate. Conch's approval records govern actions only when the
+executing tool or runtime actually checks and enforces those decisions.
 
 ## Architecture at a glance
 
-- One Go module, two binaries: **`conchd`** (server) and **`conch`** (CLI/TUI client).
-- **Single-binary invariant:** core function requires no external processes. SQLite is embedded (pure Go, WAL mode, FTS5). Integrations like [ntfy](https://ntfy.sh) push notifications and Litestream backups are optional and degrade gracefully.
-- **API parity:** anything the CLI/TUI can do exists in the REST/WS API first. Agents get MCP; both front the same core.
-- Mobile reachability via ntfy push; decisions happen through `conch` (SSH from a phone is a supported workflow).
+- **Core:** Go server `conchd`, Go CLI/TUI `conch`, and the optional reference adapter
+  `conch-bot`.
+- **Dependency-free core:** embedded SQLite in WAL mode; messaging, approvals, and
+  audit do not require a separate database, broker, or media service.
+- **Optional media:** LiveKit runs as a separate service. `conchd` handles access and
+  voice control; LiveKit transports audio. Core messaging and approvals remain usable
+  when media is unavailable.
+- **Native voice direction:** the Rust workspace under `voice/` scaffolds a separate
+  `conch-voice` client, initially targeting Linux/PipeWire as accepted in
+  [ADR-006](docs/adr/ADR-006-rust-voice-client.md). The current executable reports its
+  version; microphone, playback, and PTT commands are still to come.
+- **API parity:** clients use public REST/WebSocket APIs; agents use
+  [MCP](https://modelcontextprotocol.io) over the same core.
+- **Deployment:** one instance serves one community or organization today. Hosted
+  multi-tenancy and large-scale orchestration are not implemented.
+- **Optional integrations:** ntfy notifications; optional backup tooling such as
+  Litestream. See the ADRs for the integration boundaries.
 
-See [ROADMAP.md](ROADMAP.md) and the ADRs in [docs/adr/](docs/adr/) for where this is headed and why.
+## Trust and scope
 
-## Explicit non-goals
+Conch currently uses a **server-trust model, not end-to-end encryption**. The server
+operator controls the database. Audience checks determine delivery; they cannot stop
+a recipient from repeating what they received.
 
-- **No E2EE.** Server-trust model — E2EE kills search, bots, and agent participation.
-- **No federation, no custom protocol.** If interop ever matters: a Matrix bridge, later.
-- **No voice/video** before P3, and then only via LiveKit integration, never bespoke WebRTC.
-- **No multi-tenancy.** One binary = one org.
-- **Web UI is P3 at earliest, possibly never.** CLI/TUI is the human interface.
+Audit records make actions inspectable, but they are not a cryptographic guarantee
+against an operator modifying the database. Agent manifests restrict Conch access;
+they do not by themselves sandbox an agent's external tools.
 
-## Status
+There is no federation or bespoke WebRTC stack. The CLI/TUI remains the implemented
+human interface. The [charter](docs/adr/ADR-000-charter.md) and
+[ADRs](docs/adr/) record the accepted implementation constraints; the
+[roadmap](ROADMAP.md) retains the existing phase gates until explicitly amended.
 
-Pre-alpha. The project charter is [ADR-000](docs/adr/ADR-000-charter.md); work is tracked in [GitHub issues](https://github.com/njdaniel/conch/issues) by milestone.
+## Why "Conch"?
+
+A conch is a signal horn and a symbol of speaking rights. The name reflects the goal:
+help people and agents know when to speak, whom they are addressing, and who can hear.
 
 ## Quickstart
 
@@ -73,7 +176,7 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 - `--data` (or `CONCHD_DATA`) is required — directory for the embedded SQLite database.
 - `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
 - `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
-- `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the deployment invariant (ADR-002) requires no other external process for core function.
+- `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. Set both topics with the server: a new approval and its resolution are pushed to `--ntfy-topic`, an escalation to `--ntfy-urgent-topic`. With a topic left empty the notifications that use it are not sent; `conchd` warns once at start and records each in the audit log as `notify_failed`, not attempted. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the deployment invariant (ADR-002) requires no other external process for core function.
 
 ### 3. Create a channel, people, and an agent
 
@@ -115,7 +218,7 @@ bin/conch login --server http://127.0.0.1:8080 < alice.token
 bin/conch whoami
 ```
 
-Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as:
+Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
 
 ```sh
 bin/conch

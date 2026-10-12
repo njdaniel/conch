@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -1798,5 +1799,577 @@ func TestServerErrorTextIsSanitized(t *testing.T) {
 	}
 	if m.input != "hello" {
 		t.Errorf("input = %q, want it kept after the refusal", m.input)
+	}
+}
+
+// A user name from whoami is sanitized before drawing in the status line:
+// escape sequences, newlines, and bidi overrides are stripped or replaced
+// so they cannot drive the terminal or break line layout.
+func TestUserNameIsSanitizedInView(t *testing.T) {
+	hostile := "\x1b[31muser\n\u202ename"
+	api := &identityAPI{who: schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: hostile, Role: schema.RoleOperator}}
+	model := NewModel(context.Background(), api, 0, []string{"general"}).WithCredential()
+	whoMsg := model.loadWhoAmI()()
+	updated, _ := model.Update(whoMsg)
+	m := updated.(Model)
+	m.width, m.height = 120, 24
+
+	view := m.View()
+	// Assert against the hostile sequence with its context, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on.
+	if strings.Contains(view, "\x1b[31muser") {
+		t.Errorf("rendered view contains the raw escape sequence from the name:\n%s", view)
+	}
+	if strings.Contains(view, "\u202e") {
+		t.Errorf("rendered view contains raw bidi override:\n%s", view)
+	}
+
+	lines := strings.Split(view, "\n")
+	if len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (line layout broken):\n%s", len(lines), view)
+	}
+
+	statusLine := lines[len(lines)-1]
+	if !strings.Contains(statusLine, "[31muser ↵ name | signed in as [31muser ↵ name") {
+		t.Errorf("status line = %q, want sanitized username and status", statusLine)
+	}
+
+	// Compare with clean baseline: hostile username preserves line count.
+	cleanModel := NewModel(context.Background(), &identityAPI{who: schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "clean", Role: schema.RoleOperator}}, 0, []string{"general"}).WithCredential()
+	cleanWho := cleanModel.loadWhoAmI()()
+	updatedClean, _ := cleanModel.Update(cleanWho)
+	cm := updatedClean.(Model)
+	cm.width, cm.height = 120, 24
+	if len(lines) != len(strings.Split(cm.View(), "\n")) {
+		t.Errorf("hostile model has %d lines, clean model has %d lines", len(lines), len(strings.Split(cm.View(), "\n")))
+	}
+
+	// Direct assignment to model.userName is also sanitized in View.
+	m2 := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m2.userName = hostile
+	m2.width, m2.height = 120, 24
+	v2 := m2.View()
+	if strings.Contains(v2, "\x1b[31muser") || strings.Contains(v2, "\u202e") {
+		t.Errorf("direct userName rendered view contains raw escape or bidi override:\n%s", v2)
+	}
+	lines2 := strings.Split(v2, "\n")
+	if len(lines2) != 24 {
+		t.Errorf("direct userName view has %d lines, want 24:\n%s", len(lines2), v2)
+	}
+	if !strings.Contains(lines2[len(lines2)-1], "[31muser ↵ name | ") {
+		t.Errorf("direct userName status line = %q", lines2[len(lines2)-1])
+	}
+}
+
+// A name longer than the terminal is clipped rather than wrapped: the status
+// line never exceeds the width, so the layout holds.
+func TestLongUserNameIsClippedInStatusLine(t *testing.T) {
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.userName = strings.Repeat("a", 300)
+	m.width, m.height = 80, 24
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 24 {
+		t.Fatalf("view has %d lines, want 24:\n%s", len(lines), m.View())
+	}
+	statusLine := lines[len(lines)-1]
+	// lipgloss.Width, not RuneCountInString: when styling is on the line
+	// carries escape sequences that are not cells.
+	if lipgloss.Width(statusLine) > 80 {
+		t.Errorf("status line is %d cells, want at most 80: %q", lipgloss.Width(statusLine), statusLine)
+	}
+}
+
+func TestApprovalFieldsAreSanitizedInView(t *testing.T) {
+	app := schema.ApprovalV1{
+		ID:          1,
+		RequesterID: 42,
+		Title:       "hostile\x1b[31m\ntitle\u202e",
+		Body:        "body line 1\x1b[2J\nbody line 2\u202e",
+		Payload:     &schema.Payload{Schema: "schema\x1b[32m\u202e.v1"},
+		Options: []schema.Option{
+			{ID: "opt1", Label: "opt\x1b[33m\nlabel\u202e"},
+		},
+		Deadline:  schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt: schema.NewTimestamp(time.Now()),
+		Quorum:    1,
+		State:     schema.ApprovalStatePending,
+	}
+
+	api := stubAPI{}
+	m := NewModel(context.Background(), api, 42, []string{"general"})
+	m.mode = modeInbox
+	m.approvals = []schema.ApprovalV1{app}
+	m.selApproval = 0
+	m.width, m.height = 80, 24
+
+	inboxView := m.View()
+	// Assert against the hostile sequences specifically, not a bare ESC:
+	// lipgloss legitimately emits escape codes when styling is on. The palette
+	// (colors 8, 6, 3) never produces [31m, [32m, or [2J.
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(inboxView, hostile) {
+			t.Errorf("inbox view contains the raw hostile sequence %q:\n%s", hostile, inboxView)
+		}
+	}
+	if strings.Contains(inboxView, "\u202e") {
+		t.Errorf("inbox view contains raw bidi override:\n%s", inboxView)
+	}
+	inboxLines := strings.Split(inboxView, "\n")
+	if len(inboxLines) != 24 {
+		t.Errorf("inbox view has %d lines, want 24:\n%s", len(inboxLines), inboxView)
+	}
+	// Positive pins: the sanitized text is what is drawn. These fail if a
+	// newline in Title or Body survives, which the line count alone cannot see.
+	for _, want := range []string{"hostile[31m ↵ title", "body line 1[2J", "body line 2", "schema[32m.v1", "  - opt[33m ↵ label"} {
+		if !strings.Contains(inboxView, want) {
+			t.Errorf("inbox view missing sanitized %q:\n%s", want, inboxView)
+		}
+	}
+
+	m.mode = modeDecision
+	decisionView := m.View()
+	for _, hostile := range []string{"\x1b[2J", "\x1b[31m", "\x1b[32m"} {
+		if strings.Contains(decisionView, hostile) {
+			t.Errorf("decision view contains the raw hostile sequence %q:\n%s", hostile, decisionView)
+		}
+	}
+	if strings.Contains(decisionView, "\u202e") {
+		t.Errorf("decision view contains raw bidi override:\n%s", decisionView)
+	}
+	decisionLines := strings.Split(decisionView, "\n")
+	if len(decisionLines) != 24 {
+		t.Errorf("decision view has %d lines, want 24:\n%s", len(decisionLines), decisionView)
+	}
+	for _, want := range []string{"hostile[31m ↵ title", "opt[33m ↵ label"} {
+		if !strings.Contains(decisionView, want) {
+			t.Errorf("decision view missing sanitized %q:\n%s", want, decisionView)
+		}
+	}
+}
+
+// A body that keeps its line breaks takes one pane row per line, so the
+// pane's truncation accounts for it and the layout never overflows.
+func TestMultilineBodyCountsItsLines(t *testing.T) {
+	body := strings.Repeat("body line\n", 30)
+	app := schema.ApprovalV1{
+		ID:          1,
+		RequesterID: 42,
+		Title:       "long body",
+		Body:        body,
+		Options:     []schema.Option{{ID: "opt1", Label: "approve"}},
+		Deadline:    schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt:   schema.NewTimestamp(time.Now()),
+		Quorum:      1,
+		State:       schema.ApprovalStatePending,
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.mode = modeDecision
+	m.approvals = []schema.ApprovalV1{app}
+	m.width, m.height = 80, 24
+	if lines := strings.Split(m.View(), "\n"); len(lines) != 24 {
+		t.Errorf("view has %d lines, want 24 (multiline body overflowed the pane):\n%s", len(lines), m.View())
+	}
+}
+
+// An escalated approval keeps its title in the inbox list: the [ESC] badge's
+// width is measured before styling, so its escape sequences cannot eat the
+// title's room and clip it to nothing.
+func TestEscalatedApprovalKeepsItsTitle(t *testing.T) {
+	app := schema.ApprovalV1{
+		ID: 1, RequesterID: 42, Title: "deploy friday",
+		Deadline:  schema.NewTimestamp(time.Now().Add(time.Hour)),
+		CreatedAt: schema.NewTimestamp(time.Now()),
+		Quorum:    1,
+		State:     schema.ApprovalStateEscalated,
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.mode = modeInbox
+	m.approvals = []schema.ApprovalV1{app}
+	m.width, m.height = 80, 24
+	v := m.View()
+	if !strings.Contains(v, "42: d") || !strings.Contains(v, "[ESC]") {
+		t.Errorf("escalated approval lost its title or badge:\n%s", v)
+	}
+}
+
+// setStatus sanitizes error text independently when called directly, ensuring
+// escape sequences, newlines, and bidi overrides cannot leak into status lines.
+func TestSetStatusSanitizesError(t *testing.T) {
+	var m Model
+	err := errors.New("network error: \x1b[31mfailure\x1b[0m\r\nsubtext\u202e")
+	m.setStatus(modeChannels, err.Error())
+	if strings.Contains(m.channelStatus, "\x1b") || strings.Contains(m.channelStatus, "\u202e") || strings.ContainsAny(m.channelStatus, "\r\n") {
+		t.Errorf("channelStatus carries control chars or bidi overrides: %q", m.channelStatus)
+	}
+	want := "network error: [31mfailure[0m ↵ subtext"
+	if m.channelStatus != want {
+		t.Errorf("channelStatus = %q, want %q", m.channelStatus, want)
+	}
+
+	m.setStatus(modeInbox, err.Error())
+	if m.inboxStatus != want {
+		t.Errorf("inboxStatus = %q, want %q", m.inboxStatus, want)
+	}
+}
+
+func TestSanitizeMultiline(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "tabs map to spaces",
+			input: "col1\tcol2\t\tcol3",
+			want:  "col1 col2  col3",
+		},
+		{
+			name:  "lone carriage return becomes newline",
+			input: "line1\rline2\rline3",
+			want:  "line1\nline2\nline3",
+		},
+		{
+			name:  "crlf becomes newline",
+			input: "line1\r\nline2",
+			want:  "line1\nline2",
+		},
+		{
+			name:  "unicode line separator U+2028 becomes newline",
+			input: "first\u2028second",
+			want:  "first\nsecond",
+		},
+		{
+			name:  "unicode paragraph separator U+2029 becomes newline",
+			input: "para1\u2029para2",
+			want:  "para1\npara2",
+		},
+		{
+			name:  "control characters and bidi overrides stripped",
+			input: "hello\x1b[31m \u202eworld\u200e\a\b",
+			want:  "hello[31m world",
+		},
+		{
+			name:  "combined multiline with tabs lone cr and separators",
+			input: "heading\tvalue\rbody line 1\r\nbody\tline\t2\u2028subline\u2029footer\x1b[0m",
+			want:  "heading value\nbody line 1\nbody line 2\nsubline\nfooter[0m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeMultiline(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeMultiline(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// approvalModel is a model showing one approval in mode at width x height.
+func approvalModel(t *testing.T, mode mode, width, height int, app schema.ApprovalV1) Model {
+	t.Helper()
+	m := NewModel(context.Background(), stubAPI{}, 7, []string{"general"})
+	m.width, m.height, m.mode = width, height, mode
+	m.approvals = []schema.ApprovalV1{app}
+	return m
+}
+
+// testApproval has a body of the given lines (or text, when lines is
+// negative) and n options labelled "Option 01"...
+func testApproval(body string, n int) schema.ApprovalV1 {
+	app := schema.ApprovalV1{ID: 1, RequesterID: 3, Title: "Restart the ingest worker",
+		Deadline: schema.NewTimestamp(time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC)), Body: body}
+	for i := range n {
+		app.Options = append(app.Options, schema.Option{ID: fmt.Sprintf("o%d", i+1), Label: fmt.Sprintf("Option %02d", i+1)})
+	}
+	return app
+}
+
+func numberedBody(n int) string {
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("body line %04d", i+1)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func viewLines(t *testing.T, m Model) []string {
+	t.Helper()
+	return strings.Split(m.View(), "\n")
+}
+
+// TestApprovalViewFitsTheTerminal is issue #205: whatever the body, the title
+// and the number of options, the inbox and the decision prompt fill the
+// terminal exactly and always show the title, requester, deadline and the
+// options, cutting the body (visibly) instead.
+func TestApprovalViewFitsTheTerminal(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+		cut  bool // cut at every size and option count tested
+	}{
+		{"1 line", numberedBody(1), false},
+		{"20 lines", numberedBody(20), false},
+		{"200 lines", numberedBody(200), true},
+		{"5000 lines", numberedBody(5000), true},
+		{"one 10000-char line", strings.Repeat("abcdefghij", 1000), true},
+	}
+	sizes := []struct{ width, height int }{{80, 24}, {minApprovalWidth, minApprovalHeight}, {59, 20}, {200, 60}}
+	for _, size := range sizes {
+		for _, b := range bodies {
+			for _, options := range []int{1, 2, 30} {
+				for _, md := range []mode{modeInbox, modeDecision} {
+					for _, last := range []bool{false, true} {
+						if last && md != modeDecision {
+							continue
+						}
+						name := fmt.Sprintf("%dx%d/%s/%d options/mode %d/last %v", size.width, size.height, b.name, options, md, last)
+						t.Run(name, func(t *testing.T) {
+							m := approvalModel(t, md, size.width, size.height, testApproval(b.body, options))
+							if last {
+								m.selOption = options - 1
+							}
+							lines := viewLines(t, m)
+							view := strings.Join(lines, "\n")
+							if len(lines) != size.height {
+								t.Fatalf("view has %d lines, want %d:\n%s", len(lines), size.height, view)
+							}
+							for i, line := range lines {
+								if w := lipgloss.Width(line); w > size.width {
+									t.Errorf("line %d is %d cells wide, want at most %d: %q", i, w, size.width, line)
+								}
+							}
+							for _, want := range []string{"Restart the", "Requester: 3", "Deadline: Oct 12 09:30"} {
+								if !strings.Contains(view, want) {
+									t.Errorf("view is missing %q:\n%s", want, view)
+								}
+							}
+							if md == modeDecision && !strings.Contains(view, "Decision Options:") {
+								t.Errorf("decision view is missing its options header:\n%s", view)
+							}
+							shown := 0
+							for i := range options {
+								if strings.Contains(view, fmt.Sprintf("Option %02d", i+1)) {
+									shown++
+								}
+							}
+							if shown < options && !strings.Contains(view, "more options") {
+								t.Errorf("%d of %d options shown with no mark saying so:\n%s", shown, options, view)
+							}
+							if shown == 0 {
+								t.Errorf("no option shown:\n%s", view)
+							}
+							if md == modeDecision {
+								sel := fmt.Sprintf("› Option %02d", m.selOption+1)
+								if !strings.Contains(view, sel) {
+									t.Errorf("the selected option %q is not on screen:\n%s", sel, view)
+								}
+								if d, ok := m.selectedDetails(); !ok || !d.optionShown {
+									t.Errorf("selectedDetails = %+v, %v; want the selected option shown", d.optionShown, ok)
+								}
+							}
+							d, _ := m.selectedDetails()
+							cutMark := strings.Contains(view, "more lines")
+							if cut := d.maxOffset > 0; cut != cutMark {
+								t.Errorf("body cut = %v but cut mark shown = %v:\n%s", cut, cutMark, view)
+							}
+							if b.cut && !cutMark {
+								t.Errorf("a body this long must be cut, with a mark:\n%s", view)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestApprovalViewTooSmall: below the smallest supported size the approval
+// views still fill the terminal exactly, and no decision can be cast from
+// options that are not on screen.
+func TestApprovalViewTooSmall(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{minApprovalWidth - 1, 24}, {80, minApprovalHeight - 1}, {20, 5}, {1, 1}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			api := &identityAPI{}
+			m := approvalModel(t, modeDecision, size.width, size.height, testApproval("body", 2))
+			m.api, m.authorID, m.input = api, 7, "looks fine"
+			lines := viewLines(t, m)
+			if len(lines) != size.height {
+				t.Fatalf("view has %d lines, want %d", len(lines), size.height)
+			}
+			for i, line := range lines {
+				if w := lipgloss.Width(line); w > size.width {
+					t.Errorf("line %d is %d cells wide, want at most %d", i, w, size.width)
+				}
+			}
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			got := next.(Model)
+			if cmd != nil {
+				t.Fatal("enter on a too-small terminal returned a command; no decision may be cast")
+			}
+			if got.input != "looks fine" || !strings.Contains(got.inboxStatus, "too small") {
+				t.Errorf("input = %q, status = %q; want the reason kept and a too-small status", got.input, got.inboxStatus)
+			}
+		})
+	}
+}
+
+// TestApprovalBodyScrolls: pgdn/pgup move through the body and change only
+// the body's lines; the title, requester, deadline and options stay put.
+func TestApprovalBodyScrolls(t *testing.T) {
+	for _, md := range []mode{modeInbox, modeDecision} {
+		t.Run(fmt.Sprintf("mode %d", md), func(t *testing.T) {
+			m := approvalModel(t, md, 80, 24, testApproval(numberedBody(200), 3))
+			before := viewLines(t, m)
+			if !strings.Contains(strings.Join(before, "\n"), "body line 0001") {
+				t.Fatalf("a fresh view starts at the body's first line:\n%s", strings.Join(before, "\n"))
+			}
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+			m = next.(Model)
+			after := viewLines(t, m)
+			if len(after) != len(before) {
+				t.Fatalf("scrolling changed the view from %d to %d lines", len(before), len(after))
+			}
+			changed := 0
+			for i := range before {
+				if before[i] == after[i] {
+					continue
+				}
+				changed++
+				for _, line := range []string{before[i], after[i]} {
+					if !strings.Contains(line, bodyGutter) && !strings.Contains(line, "more lines") {
+						t.Errorf("row %d is not a body line but changed:\n  %q\n  %q", i, before[i], after[i])
+					}
+				}
+			}
+			if changed == 0 {
+				t.Fatal("pgdn did not scroll the body")
+			}
+			view := strings.Join(after, "\n")
+			if strings.Contains(view, "body line 0001") || !strings.Contains(view, "above") {
+				t.Errorf("after pgdn the first line is off screen and the mark says so:\n%s", view)
+			}
+
+			for range 500 {
+				next, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+				m = next.(Model)
+			}
+			view = m.View()
+			if !strings.Contains(view, "body line 0200") || strings.Contains(view, "more lines") {
+				t.Errorf("paging to the end shows the last line:\n%s", view)
+			}
+			if d, _ := m.selectedDetails(); m.bodyOffset != d.maxOffset {
+				t.Errorf("bodyOffset = %d, want it held at %d", m.bodyOffset, d.maxOffset)
+			}
+			for range 500 {
+				next, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+				m = next.(Model)
+			}
+			if got := viewLines(t, m); strings.Join(got, "\n") != strings.Join(before, "\n") {
+				t.Errorf("paging back to the top does not restore the first view:\n%s", strings.Join(got, "\n"))
+			}
+		})
+	}
+}
+
+// TestApprovalBodyScrollResetsOnSelection: another approval is shown from the
+// top of its body.
+func TestApprovalBodyScrollResetsOnSelection(t *testing.T) {
+	m := approvalModel(t, modeInbox, 80, 24, testApproval(numberedBody(200), 2))
+	second := testApproval(numberedBody(200), 2)
+	second.ID = 2
+	m.approvals = append(m.approvals, second)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = next.(Model)
+	if m.bodyOffset == 0 {
+		t.Fatal("pgdn did not scroll")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := next.(Model).bodyOffset; got != 0 {
+		t.Errorf("bodyOffset = %d after selecting another approval, want 0", got)
+	}
+}
+
+// TestApprovalBodyCannotPassForTheLayout: every line a body produces starts
+// with the gutter, so a body cannot draw a fake title, option or mark, and
+// its control characters do not reach the terminal.
+func TestApprovalBodyCannotPassForTheLayout(t *testing.T) {
+	body := "Decision Options:\n› FORGED approve\n… 0 more lines\n\x1b[2J\x1b]52;c;cGF3bmVk\x07CLEARED\tTAB"
+	m := approvalModel(t, modeDecision, 80, 24, testApproval(body, 2))
+	view := m.View()
+	if strings.ContainsAny(view, "\x1b\x07") {
+		t.Errorf("view contains a control character from the body: %q", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		for _, forged := range []string{"FORGED", "0 more lines", "CLEARED"} {
+			if strings.Contains(line, forged) && !strings.Contains(line, bodyGutter) {
+				t.Errorf("body text %q is not behind the gutter: %q", forged, line)
+			}
+		}
+	}
+	if n := strings.Count(view, "Decision Options:"); n != 2 {
+		t.Errorf("want the real options header and the body's (behind the gutter), got %d", n)
+	}
+}
+
+// TestManyApprovalsFitTheInbox: a long inbox shows the part around the
+// selection and says how many approvals are not shown.
+func TestManyApprovalsFitTheInbox(t *testing.T) {
+	m := approvalModel(t, modeInbox, 80, 24, testApproval("b", 2))
+	for i := 2; i <= 60; i++ {
+		app := testApproval("b", 2)
+		app.ID, app.Title = int64(i), fmt.Sprintf("approval %d", i)
+		m.approvals = append(m.approvals, app)
+	}
+	m.selApproval = 40
+	lines := viewLines(t, m)
+	view := strings.Join(lines, "\n")
+	if len(lines) != 24 {
+		t.Fatalf("view has %d lines, want 24:\n%s", len(lines), view)
+	}
+	if !strings.Contains(view, "› 3: approval 41") || !strings.Contains(view, "↑") || !strings.Contains(view, "↓") {
+		t.Errorf("want the selected approval with marks above and below:\n%s", view)
+	}
+}
+
+// TestApprovalViewWideRunes: runes that take more cells than bytes (U+2E3B
+// is 3 bytes and 4 cells) are still wrapped to the pane, so the view keeps
+// the terminal's height and the title stays on screen. Found in the
+// security review of #205.
+func TestApprovalViewWideRunes(t *testing.T) {
+	for _, size := range []struct{ width, height, dashes int }{{80, 24, 19}, {minApprovalWidth, minApprovalHeight, 7}} {
+		body := strings.Repeat(strings.Repeat("⸻", size.dashes)+"\n", 40)
+		for _, md := range []mode{modeInbox, modeDecision} {
+			m := approvalModel(t, md, size.width, size.height, testApproval(body, 2))
+			lines := viewLines(t, m)
+			view := strings.Join(lines, "\n")
+			if len(lines) != size.height || !strings.Contains(view, "Requester: 3") {
+				t.Errorf("%dx%d mode %d: %d lines, want %d with the requester shown:\n%s", size.width, size.height, md, len(lines), size.height, view)
+			}
+			for i, line := range lines {
+				if w := lipgloss.Width(line); w > size.width {
+					t.Errorf("%dx%d mode %d: line %d is %d cells wide", size.width, size.height, md, i, w)
+				}
+			}
+		}
+	}
+}
+
+// TestLargeBodyIsLaidOutOnce: typing a reason under a huge body does not lay
+// the body out again for every frame.
+func TestLargeBodyIsLaidOutOnce(t *testing.T) {
+	m := approvalModel(t, modeDecision, 80, 24, testApproval(strings.Repeat("x\n", 1<<20), 2))
+	_ = m.View()
+	first := m.wrapped.result
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	m = next.(Model)
+	_ = m.View()
+	if len(first) == 0 || &m.wrapped.result[0] != &first[0] {
+		t.Error("the body was laid out again although neither it nor the width changed")
+	}
+	m.width = 100
+	_ = m.View()
+	if &m.wrapped.result[0] == &first[0] {
+		t.Error("a new width must lay the body out again")
 	}
 }
