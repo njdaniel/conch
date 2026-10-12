@@ -73,5 +73,8 @@ func runTUI(ctx context.Context) error {
 		}
 	}
 	channels := strings.Split(os.Getenv("CONCH_CHANNELS"), ",")
-	return tui.Run(ctx, client, authorID, authenticated, channels, os.Stdin, os.Stdout)
+	// Mouse reporting is on unless CONCH_MOUSE=0: it takes the terminal's own
+	// text selection away (Shift+drag gets it back).
+	mouse := os.Getenv("CONCH_MOUSE") != "0"
+	return tui.Run(ctx, client, authorID, authenticated, channels, mouse, os.Stdin, os.Stdout)
 }

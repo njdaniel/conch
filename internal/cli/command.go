@@ -110,6 +110,7 @@ Environment:
   CONCH_TOKEN   bearer token; overrides the stored login
   CONCH_AUTHOR  author ID (deprecated; with a login the server decides who you are)
   CONCH_CHANNELS optional comma-separated TUI channel override (default: all channels from the server)
+  CONCH_MOUSE   set to 0 to turn off TUI mouse support (click, wheel) and keep the terminal's own text selection
 `)
 }
 
