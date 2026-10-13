@@ -21,9 +21,8 @@ const (
 	// A client reading with a smaller limit is disconnected by any message
 	// over it, which any member of the channel can send (issue #231).
 	//
-	// The REST post routes and the webhook route hold requests to
-	// MaxPostRequestBytes. The MCP endpoint does not yet (issue #237): until
-	// it does, an agent that may post can still store a message too large
-	// for this limit.
+	// Every way a message is posted holds its request to MaxPostRequestBytes:
+	// the REST post routes, the webhook route, and the MCP endpoint (issue
+	// #237). A new one must too, or it reopens the hole.
 	MaxMessageFrameBytes = 6*MaxPostRequestBytes + 64<<10
 )
