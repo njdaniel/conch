@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -208,7 +209,10 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	var post schema.PostMessageRequestV1
 	if mediaType == "text/plain" {
-		post = schema.PostMessageRequestV1{Body: string(body)}
+		// A stored body is always valid UTF-8: the JSON routes get that from
+		// the decoder, which replaces each byte that is not with U+FFFD, and
+		// rendered text must end up the same as if it had been sent that way.
+		post = schema.PostMessageRequestV1{Body: strings.ToValidUTF8(string(body), string(utf8.RuneError))}
 	} else if err := decodeHookPost(body, &post); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a v1 post message object")
 		return
@@ -224,16 +228,18 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	post.AuthorID = hook.PrincipalID
-	normalized, err := json.Marshal(post)
-	if err != nil {
-		slog.ErrorContext(ctx, "hooks: normalize request failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+	// The post is stored from the decoded value, not re-encoded into the
+	// request body for handlePostMessageV1: json.Marshal writes each <, > and
+	// & as a six-byte escape, so a body inside the limit could be measured
+	// again over it (issue #238). The limit has applied once, to what the
+	// sender sent. This route has no verified caller, so there is no author
+	// binding to do; the author is the hook's principal set above.
+	if err := post.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(normalized))
-	r.Header.Set("Content-Type", "application/json")
 	r.SetPathValue("channel", channel.Name)
-	s.handlePostMessageV1(w, r)
+	s.postMessage(w, r, post.AuthorID, post.Body, post.Payload, apiV1)
 }
 
 func decodeHookPost(body []byte, post *schema.PostMessageRequestV1) error {
