@@ -20,6 +20,8 @@ func TestMessageV2GoldenFixtures(t *testing.T) {
 		{name: "channel-wide", file: "message-v2.json", new: func() any { return &MessageV2{} }},
 		{name: "net", file: "message-v2-net.json", new: func() any { return &MessageV2{} }},
 		{name: "whisper", file: "message-v2-whisper.json", new: func() any { return &MessageV2{} }},
+		{name: "reply", file: "message-v2-reply.json", new: func() any { return &MessageV2{} }},
+		{name: "post request reply", file: "post-message-request-v2-reply.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post request", file: "post-message-request-v2.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post request net", file: "post-message-request-v2-net.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post request whisper", file: "post-message-request-v2-whisper.json", new: func() any { return &PostMessageRequestV2{} }},
@@ -113,6 +115,10 @@ func TestMessageV2Validate(t *testing.T) {
 		{name: "valid principals audience of two", mutate: func(m *MessageV2) {
 			m.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 4}}
 		}},
+		{name: "valid reply", mutate: func(m *MessageV2) { m.ID, m.ThreadRootID = 5, 4 }},
+		{name: "negative thread root", mutate: func(m *MessageV2) { m.ThreadRootID = -1 }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
+		{name: "thread root is itself", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
+		{name: "thread root is later", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID + 1 }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
 
 		// Everything MessageV1.Validate enforces.
 		{name: "v1 schema", mutate: func(m *MessageV2) { m.Schema = MessageSchemaV1 }, wantErr: `schema must be "conch.message.v2"`},
@@ -340,6 +346,8 @@ func TestPostMessageRequestV2Validate(t *testing.T) {
 		{name: "whisper to the named author alone", mutate: func(r *PostMessageRequestV2) {
 			r.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3}}
 		}, wantErr: "at least one principal other than the author"},
+		{name: "valid reply", mutate: func(r *PostMessageRequestV2) { r.ThreadRootID = 9 }},
+		{name: "negative thread root", mutate: func(r *PostMessageRequestV2) { r.ThreadRootID = -1 }, wantErr: "thread_root_id must not be negative, got -1"},
 		{name: "negative author", mutate: func(r *PostMessageRequestV2) { r.AuthorID = -1 }, wantErr: "author_id must not be negative, got -1"},
 		{name: "empty body", mutate: func(r *PostMessageRequestV2) { r.Body = "" }, wantErr: "body is required"},
 		{name: "payload bad name", mutate: func(r *PostMessageRequestV2) {
@@ -509,6 +517,29 @@ func TestMessageV1FromV2RejectsScopedMessages(t *testing.T) {
 		if _, err := MessageV1FromV2(m); err == nil {
 			t.Errorf("MessageV1FromV2 with audience %+v = nil error; want a rejection", a)
 		}
+	}
+}
+
+// thread_root_id is additive: a message that is not a reply encodes with no
+// trace of it, byte for byte as it did before the field existed, and a reply
+// carries it (issue #25).
+func TestThreadRootIDIsOmittedUnlessSet(t *testing.T) {
+	plain, err := json.Marshal(validMessageV2())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "thread") {
+		t.Errorf("a message that is not a reply encodes %s; want no thread_root_id", plain)
+	}
+	req, err := json.Marshal(PostMessageRequestV2{Body: "x"})
+	if err != nil || string(req) != `{"body":"x"}` {
+		t.Errorf("a post request with no root encodes %s (%v); want {\"body\":\"x\"}", req, err)
+	}
+	reply := validMessageV2()
+	reply.ID, reply.ThreadRootID = 5, 4
+	got, err := json.Marshal(reply)
+	if err != nil || !strings.HasSuffix(string(got), `,"thread_root_id":4}`) {
+		t.Errorf("a reply encodes %s (%v); want thread_root_id last", got, err)
 	}
 }
 

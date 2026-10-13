@@ -77,6 +77,8 @@ type Message struct {
 	// recipients of a net message are deliberately not part of a Message; they
 	// are stored and returned only by InsertScopedMessage for fan-out.
 	Audience *schema.Audience
+	// ThreadRootID is the message this one replies to; zero when it is not a reply.
+	ThreadRootID int64
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text
@@ -239,39 +241,53 @@ func (s *Store) InsertMessageV1(
 	// returned value to the same precision so a POST response exactly describes
 	// what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
-	var payloadSchema any
-	var payloadJSON any
-	if payload != nil {
-		payloadSchema = payload.Schema
-		payloadJSON = []byte(payload.Data)
-	}
 	var id int64
 	// BEGIN IMMEDIATE, like the scoped insert: the message insert fires the
 	// full-text index trigger (migration 15), and with a deferred transaction
 	// concurrent posts failed with SQLITE_BUSY that the busy timeout does not
 	// retry. Taking the write lock first makes them queue instead.
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			channelID, authorID, body, now.UnixMilli(), payloadSchema, payloadJSON)
-		if err != nil {
-			return fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, '', ?)`,
-			fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
-			return fmt.Errorf("store: audit inserted message %d: %w", id, err)
-		}
-		return attachFilesTx(ctx, tx, channelID, authorID, id, payload, now)
+		var err error
+		id, err = insertChannelWideTx(ctx, tx, channelID, authorID, body, payload, 0, now)
+		return err
 	})
 	if err != nil {
 		return Message{}, err
 	}
 	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now}, nil
+}
+
+// insertChannelWideTx stores a channel-wide message (a reply to a channel-wide
+// root when rootID is not zero), its author-attributed audit event and any file
+// it attaches, in the caller's transaction, and returns its id.
+func insertChannelWideTx(
+	ctx context.Context, tx execer, channelID, authorID int64, body string, payload *schema.Payload, rootID int64, now time.Time,
+) (int64, error) {
+	var payloadSchema, payloadJSON, thread any
+	if payload != nil {
+		payloadSchema = payload.Schema
+		payloadJSON = []byte(payload.Data)
+	}
+	if rootID > 0 {
+		thread = rootID
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json, thread_root_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		channelID, authorID, body, now.UnixMilli(), payloadSchema, payloadJSON, thread)
+	if err != nil {
+		return 0, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, '', ?)`,
+		fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
+		return 0, fmt.Errorf("store: audit inserted message %d: %w", id, err)
+	}
+	return id, attachFilesTx(ctx, tx, channelID, authorID, id, payload, now)
 }
 
 // AppendAuditEvent appends an entry to the audit log. There is deliberately

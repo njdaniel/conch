@@ -198,6 +198,30 @@ func (h *Hub) BroadcastMessageV1(_ context.Context, msg schema.MessageV1) {
 	}
 }
 
+// BroadcastReply delivers a reply to a channel-wide root. A v1 subscription
+// receives v1, where a reply is an ordinary message, and a v2 subscription
+// receives v2, which carries thread_root_id; BroadcastMessageV1 would hand v2
+// subscriptions a converted v1 envelope that has lost it. v1 and v2 must be the
+// same message.
+func (h *Hub) BroadcastReply(_ context.Context, v1 schema.MessageV1, v2 schema.MessageV2) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subsV1[v1.ChannelID] {
+		select {
+		case sub.msgs <- v1:
+		default:
+			h.dropV1Locked(sub)
+		}
+	}
+	for sub := range h.subsV2[v2.ChannelID] {
+		select {
+		case sub.msgs <- v2:
+		default:
+			h.dropV2Locked(sub)
+		}
+	}
+}
+
 // BroadcastMessageV2 delivers msg to V2 subscriptions only. recipients is the
 // set of principal ids resolved when the message was posted. A message with an
 // audience, or with any recipients, is scoped: it goes only to a subscription
