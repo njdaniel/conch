@@ -666,6 +666,10 @@ async fn live_ten_minutes_of_pacing_from_the_rings_drops_nothing_and_inserts_no_
         }
     }
     let elapsed = started.elapsed();
+    // The streams are still running while these are read, so what was captured is read on
+    // either side of what was forwarded: the lower bound is held against the earlier count
+    // and the upper against the later.
+    let pushed_before = mic_status.pushed() - base.1;
     let forwarded_now = forwarded.load(Ordering::Relaxed) - base.0;
     let pushed = mic_status.pushed() - base.1;
     let dropped = mic_status.dropped() - base.2;
@@ -695,8 +699,8 @@ async fn live_ten_minutes_of_pacing_from_the_rings_drops_nothing_and_inserts_no_
     // Every captured sample was forwarded (what is not is less than a frame, plus the few
     // frames the task had not yet got to when the count was taken).
     assert!(
-        forwarded_now + 3 >= pushed / FRAME_LEN as u64,
-        "captured {pushed} samples, forwarded {forwarded_now} frames"
+        forwarded_now + 3 >= pushed_before / FRAME_LEN as u64,
+        "captured {pushed_before} samples, forwarded {forwarded_now} frames"
     );
     assert!(forwarded_now <= pushed / FRAME_LEN as u64 + 1);
     assert_eq!(silence, 0, "silence was inserted");

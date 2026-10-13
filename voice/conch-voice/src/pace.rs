@@ -70,8 +70,10 @@ impl Pace {
     /// Completes when the source or sink is to be looked at again.
     pub async fn wait(&mut self) {
         if self.more {
-            self.more = false;
+            // Cleared only once the yield is over: if a command wins the `select!` meanwhile
+            // and this future is dropped, the look that was owed is still owed.
             tokio::task::yield_now().await;
+            self.more = false;
         } else {
             self.tick.tick().await;
         }
@@ -100,8 +102,10 @@ mod tests {
             pace.found(true);
             pace.wait().await;
         }
+        // Waited for, fifty looks take fifty times `RING_LOOK`. Not waited for they take
+        // well under a millisecond; the bound leaves a loaded machine most of the difference.
         assert!(
-            begun.elapsed() < RING_LOOK * 10,
+            begun.elapsed() < RING_LOOK * 40,
             "fifty looks in a row took {:?}",
             begun.elapsed()
         );

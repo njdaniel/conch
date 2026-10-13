@@ -19,8 +19,9 @@
 //! What paces the task is the microphone (`pace.rs`): one with a clock of its own, the
 //! sound card's, is forwarded from as its ring fills, and a task that was late forwards
 //! every frame that built up meanwhile; one without, a tone or a file, is read every 10 ms.
-//! Either way a frame reaches the track only by way of the gate. A press that finds frames
-//! waiting from before it discards them first (`discard_waiting`), so that catching up never
+//! Either way a frame reaches the track only by way of the gate. A press first discards what
+//! the microphone captured before it and has not handed over (`discard_waiting`), the part
+//! of a frame included, so that neither catching up nor the first frame of a transmission
 //! sends audio captured while the gate was shut.
 
 use std::sync::Arc;
@@ -171,17 +172,17 @@ impl<F: MicFeed> Task<F> {
         }
     }
 
-    /// Throws away whole frames the microphone's ring has been holding, while the gate is
-    /// shut. A press that arrives behind a stalled task must not send what was captured
-    /// before it: the gate judges a frame when it is passed, not when it was captured.
-    /// Nothing here reaches the track; the frames go nowhere.
+    /// Throws away what the microphone has captured and not yet handed over, while the gate
+    /// is shut: whole frames a stalled task let build up, and the part of a frame that is
+    /// always waiting. A press must not send what was captured before it, and the gate
+    /// judges a frame when it is passed, not when it was captured. Nothing here reaches the
+    /// track; the samples go nowhere.
     fn discard_waiting(&mut self) {
         if !matches!(self.gate.status(), GateStatus::Shut(_)) {
             return;
         }
-        if let Some(mic) = self.mic.as_mut().filter(|mic| mic.pacing() == Pacing::Ring) {
-            let mut scratch = SILENCE;
-            while mic.read(&mut scratch) == MicRead::Ready {}
+        if let Some(mic) = self.mic.as_mut() {
+            mic.forget_waiting();
         }
     }
 
@@ -278,18 +279,27 @@ mod tests {
 
     use super::*;
 
-    /// A stand-in for a capture ring: frames pushed by the test, read by the task.
+    /// A stand-in for a capture ring: frames pushed by the test, read by the task. `part`
+    /// stands for the samples short of a frame that a real ring is always holding.
     #[derive(Clone, Default)]
-    struct Ring(Arc<Mutex<VecDeque<Frame>>>);
+    struct Ring {
+        frames: Arc<Mutex<VecDeque<Frame>>>,
+        part: Arc<AtomicU64>,
+    }
 
     impl Ring {
         /// Frame number `n` is `n` in every sample, so that a frame is told by its first.
         fn push(&self, n: usize) {
-            self.0.lock().unwrap().push_back([n as f32; FRAME_LEN]);
+            self.frames.lock().unwrap().push_back([n as f32; FRAME_LEN]);
         }
 
         fn waiting(&self) -> usize {
-            self.0.lock().unwrap().len()
+            self.frames.lock().unwrap().len()
+        }
+
+        /// Samples short of a frame that are waiting.
+        fn part(&self) -> u64 {
+            self.part.load(Ordering::Relaxed)
         }
     }
 
@@ -298,7 +308,7 @@ mod tests {
 
     impl MicSource for RingMic {
         fn read(&mut self, frame: &mut Frame) -> MicRead {
-            match self.0.0.lock().unwrap().pop_front() {
+            match self.0.frames.lock().unwrap().pop_front() {
                 Some(next) => {
                     *frame = next;
                     MicRead::Ready
@@ -309,6 +319,11 @@ mod tests {
 
         fn pacing(&self) -> Pacing {
             Pacing::Ring
+        }
+
+        fn forget_waiting(&mut self) {
+            self.0.frames.lock().unwrap().clear();
+            self.0.part.store(0, Ordering::Relaxed);
         }
     }
 
@@ -426,8 +441,12 @@ mod tests {
         for n in 1..=5 {
             ring.push(n);
         }
+        // And 120 samples short of a frame, which reading frame by frame would leave to
+        // become the start of the first frame sent.
+        ring.part.store(120, Ordering::Relaxed);
         task.obey(TxCommand::Gate(GateCommand::Open));
         assert_eq!(ring.waiting(), 0, "what was waiting is gone");
+        assert_eq!(ring.part(), 0, "down to the last sample");
         let mut captured = SILENCE;
         assert!(!task.frame(&mut captured).await);
         // What is captured after the press goes through.
@@ -457,8 +476,9 @@ mod tests {
         for n in 1..=3 {
             ring.push(n);
         }
+        ring.part.store(120, Ordering::Relaxed);
         task.obey(TxCommand::Gate(GateCommand::Open));
-        assert_eq!(ring.waiting(), 3);
+        assert_eq!((ring.waiting(), ring.part()), (3, 120));
         let mut captured = SILENCE;
         while task.frame(&mut captured).await {}
         assert_eq!(record.heard(), [1.0, 2.0, 3.0]);

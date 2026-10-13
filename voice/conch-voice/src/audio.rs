@@ -315,6 +315,13 @@ impl MicSource for PipeWireMic {
     fn pacing(&self) -> Pacing {
         Pacing::Ring
     }
+
+    /// Empties the capture ring, down to the last sample: what is left of a frame would
+    /// otherwise be the start of the first frame sent after a press.
+    fn forget_waiting(&mut self) {
+        let all = self.ring.queued();
+        discard(&mut self.ring, all);
+    }
 }
 
 impl std::fmt::Debug for PipeWireMic {
@@ -329,6 +336,8 @@ impl std::fmt::Debug for PipeWireMic {
 pub trait Room {
     /// Samples written and not yet played.
     fn queued(&self) -> usize;
+    /// Samples the ring can still take.
+    fn vacant(&self) -> usize;
     /// Writes as many of `samples` as fit and says how many.
     fn write(&mut self, samples: &[f32]) -> usize;
 }
@@ -336,6 +345,10 @@ pub trait Room {
 impl Room for PlaybackWriter {
     fn queued(&self) -> usize {
         PlaybackWriter::queued(self)
+    }
+
+    fn vacant(&self) -> usize {
+        PlaybackWriter::vacant(self)
     }
 
     fn write(&mut self, samples: &[f32]) -> usize {
@@ -349,7 +362,8 @@ pub enum Put {
     /// The frame was queued.
     Queued,
     /// Nothing is playing (a named speaker is unplugged, or the stream is not up yet): the
-    /// frame was dropped, so that nothing stale is waiting to be played when it is.
+    /// frame was dropped, so that nothing more piles up behind what the ring already held
+    /// (at most [`TARGET_FILL`], which is played when the speaker is back).
     NotPlaying,
     /// The ring could not take a whole frame. [`frames_wanted`] asks for a frame only when
     /// the ring holds less than [`TARGET_FILL`], which is far below its size, so this is
@@ -364,7 +378,8 @@ pub fn put_frame(ring: &mut impl Room, playing: bool, frame: &Frame) -> Put {
     if !playing {
         return Put::NotPlaying;
     }
-    if ring.write(frame) < FRAME_LEN {
+    // Whole or not at all: part of a frame followed by the next frame is a click.
+    if ring.vacant() < FRAME_LEN || ring.write(frame) < FRAME_LEN {
         return Put::NoRoom;
     }
     Put::Queued
@@ -412,8 +427,8 @@ impl IdleClock {
 /// many as bring it up to [`TARGET_FILL`], none if it is there already. The sound card
 /// empties the ring at its own pace, so this is the card's clock setting the pace of the
 /// mix: a frame is mixed when the ring has room for one, and a look that comes late is owed
-/// more than one. At the start the ring is empty, so the first look mixes a full ring's
-/// worth, and a ring that ran dry is filled again the same way, with no silence added.
+/// more than one. At the start the ring is empty, so the first look mixes up to the
+/// target fill, and a ring that ran dry is filled again the same way, with no silence added.
 ///
 /// When the speakers are not playing the ring cannot say, and `idle` does ([`IdleClock`]).
 pub fn frames_wanted(ring: &impl Room, playing: bool, idle: &mut IdleClock, now: Instant) -> usize {
@@ -512,6 +527,11 @@ mod tests {
     impl Room for Fake {
         fn queued(&self) -> usize {
             self.samples.len()
+        }
+
+        fn vacant(&self) -> usize {
+            self.room
+                .map_or(usize::MAX, |room| room.saturating_sub(self.samples.len()))
         }
 
         fn write(&mut self, samples: &[f32]) -> usize {
@@ -744,6 +764,7 @@ mod tests {
         };
         let frame = [0.5; FRAME_LEN];
         assert_eq!(put_frame(&mut ring, true, &frame), Put::NoRoom);
+        assert_eq!(Room::queued(&ring), 0, "no part of the frame was queued");
         let mut ring = Fake::default();
         assert_eq!(put_frame(&mut ring, true, &frame), Put::Queued);
         assert_eq!(Room::queued(&ring), FRAME_LEN, "only the frame, no silence");

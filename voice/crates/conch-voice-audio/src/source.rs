@@ -41,6 +41,12 @@ pub trait MicSource {
     fn pacing(&self) -> Pacing {
         Pacing::Timer
     }
+
+    /// Throws away everything captured and not yet read, the part of a frame included. A
+    /// press calls it before the gate opens, so that the first frame sent holds nothing
+    /// captured before the press. A source that holds nothing between reads (a tone, a
+    /// file) has nothing to forget, which is the default.
+    fn forget_waiting(&mut self) {}
 }
 
 /// A microphone for tests: a steady sine tone, always [`MicRead::Ready`].

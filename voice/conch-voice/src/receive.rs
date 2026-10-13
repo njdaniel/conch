@@ -398,7 +398,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(played.load(Ordering::Relaxed), 5);
 
-        // And a sink that asks for far more is held to a bounded burst.
+        // And a sink that asks for far more gets a bounded burst from the one look that
+        // hears it ask (this sink asks once: `frames_wanted` takes what it wanted).
         wanted.store(1_000, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(played.load(Ordering::Relaxed), 5 + MAX_PER_LOOK as u64);
