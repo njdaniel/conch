@@ -13,6 +13,7 @@ func TestMessageGoldenFixtures(t *testing.T) {
 		{name: "post response", file: "post-message-response-v0.json", new: func() any { return &PostMessageResponse{} }},
 		{name: "list response", file: "list-messages-response-v0.json", new: func() any { return &ListMessagesResponse{} }},
 		{name: "error", file: "error.json", new: func() any { return &Error{} }},
+		{name: "error with a retry delay", file: "error-rate-limited.json", new: func() any { return &Error{} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
