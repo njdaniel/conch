@@ -25,6 +25,14 @@ jobs:
           out=$(gofmt -l .)
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
 
+      # No tracked text file may hold a bidi control, a line or paragraph
+      # separator, or a control character other than tab, LF and CR (#244).
+      # The script's own test runs first.
+      - name: invisible characters
+        run: |
+          ./scripts/invisible-chars-test.sh
+          ./scripts/invisible-chars.sh
+
       - name: go vet
         run: go vet ./...
 
