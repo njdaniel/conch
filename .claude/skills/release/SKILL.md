@@ -11,10 +11,12 @@ sign-off act; `release.yml` turns a `v*` tag into a draft GitHub release.
 ## Preconditions — all four, verified fresh, before any tag
 
 1. CI green on `main` (`gh run list --branch main`), including the
-   dogfood-check job.
-2. `go run ./e2e/dogfood` passes locally against the release commit — the
-   ROADMAP success criterion is the release canary; a release **does not
-   ship** on a failing dogfood-check.
+   dogfood-check and p2-hardening-check jobs.
+2. `go run ./e2e/p2-hardening` passes locally against the release commit. It
+   is the P2 exit gate (issue #81) and runs the P1 canary, `e2e/dogfood`, as
+   its last step, so this one command is both. A release **does not ship**
+   when it fails. What it proves and how to read a failure: the README
+   section "The P2 hardening gate".
 3. The latest principal-review report shows no unresolved invariant drift
    (open drift → fix or get Nick's explicit acceptance first).
 4. **Nick's sign-off is recorded** — on the release issue or in writing.
@@ -31,14 +33,15 @@ sign-off act; `release.yml` turns a `v*` tag into a draft GitHub release.
 3. Tag: annotated, on the reviewed `main` commit —
    `git tag -a vX.Y.Z -m "..."` — pushed **by Nick**, or by the session only
    under his explicit, recorded authorization for this release.
-4. Verify the `release.yml` run: `make check` + dogfood-check re-ran green,
-   binaries built for all three platforms, draft release created.
+4. Verify the `release.yml` run: `make check`, dogfood-check and
+   p2-hardening-check re-ran green, binaries built for all three platforms,
+   draft release created.
 5. Sanity-check the artifacts (download one, `--version`, run against a temp
    db), note the dogfood-check run in the release notes, hand the draft to
    Nick to publish.
 
 ## Never
 
-- Tag on a failing or stale dogfood-check.
+- Tag on a failing or stale dogfood-check or p2-hardening-check.
 - Tag without recorded sign-off, or move/delete a pushed tag.
 - Edit a published release's artifacts — regressions get a new patch release.

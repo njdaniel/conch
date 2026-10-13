@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Regenerates p1.sql, the P1 database that p2-hardening-check upgrades.
+#
+# It is not part of any check and nothing runs it: p1.sql is checked in, and
+# is what a P1 conchd wrote, so that the upgrade is tested against a database
+# no current code had a hand in. Run this only to change what the fixture
+# holds, and review the diff of p1.sql.
+#
+# Usage: make-p1-fixture.sh <path to a P1 conchd> > p1.sql
+#
+# The P1 conchd is the one built from commit 5e9932d, the last commit on main
+# whose schema is P1's (migrations 1 to 4):
+#
+#   git worktree add --detach /tmp/conch-p1 5e9932d
+#   (cd /tmp/conch-p1 && go build -o /tmp/conchd-p1 ./cmd/conchd)
+#
+# Needs Linux (GNU date), bash, curl, jq, python3 and sqlite3.
+set -euo pipefail
+
+conchd=${1:?usage: make-p1-fixture.sh <path to a P1 conchd>}
+work=$(mktemp -d)
+pid=
+cleanup() {
+	if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+	rm -rf -- "$work"
+}
+trap cleanup EXIT
+
+port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+base="http://127.0.0.1:$port"
+# ntfy points at a port nothing listens on, so every notification fails and
+# the log holds notify_failed rows, as it does on a machine whose ntfy is down.
+"$conchd" serve --data "$work" --listen "127.0.0.1:$port" \
+	--ntfy-server http://127.0.0.1:9 --ntfy-topic approvals --ntfy-urgent-topic approvals-urgent \
+	>"$work/conchd.log" 2>&1 &
+pid=$!
+for _ in $(seq 1 100); do
+	if curl -fsS "$base/healthz" >/dev/null 2>&1; then break; fi
+	sleep 0.1
+done
+
+post() { curl -fsS -X POST -H 'Content-Type: application/json' -d "$2" "$base$1"; }
+
+nick=$(post /v0/principals '{"kind":"human","name":"nick"}' | jq .principal.id)
+leviathan=$(post /v0/principals '{"kind":"agent","name":"leviathan"}' | jq .principal.id)
+scout=$(post /v0/principals '{"kind":"agent","name":"scout"}' | jq .principal.id)
+ana=$(post /v0/principals '{"kind":"human","name":"ana"}' | jq .principal.id)
+post /v0/channels '{"name":"general"}' >/dev/null
+ops=$(post /v0/channels '{"name":"ops"}' | jq .channel.id)
+
+# Messages: a v0 one, typed v1 ones, text that is not ASCII, a body of more
+# than one line, and one that arrives through a webhook.
+post /v0/channels/general/messages "{\"author_id\":$nick,\"body\":\"hello from P1\"}" >/dev/null
+post /v1/channels/ops/messages "{\"author_id\":$leviathan,\"body\":\"deploy candidate 41 ready\",\"payload\":{\"schema\":\"leviathan.deploy.v1\",\"data\":{\"env\":\"prod\",\"build\":41}}}" >/dev/null
+post /v1/channels/ops/messages "{\"author_id\":$ana,\"body\":\"déploiement terminé, ça marche\"}" >/dev/null
+post /v1/channels/ops/messages "{\"author_id\":$scout,\"body\":\"scan finished\\nno findings; it's quiet\",\"payload\":{\"schema\":\"scout.scan.v1\",\"data\":{\"findings\":[]}}}" >/dev/null
+hook=$(post /v1/hooks "{\"channel\":\"ops\",\"principal\":$scout}" | jq -r .token)
+post "/v1/hooks/$hook" '{"body":"alert from the P1 webhook"}' >/dev/null
+post /v1/channels/general/messages "{\"author_id\":$nick,\"body\":\"the walrus keeps the lighthouse\"}" >/dev/null
+
+approval() { # title, deadline, quorum
+	post /v1/approvals "{\"requester_id\":$leviathan,\"channel_id\":$ops,\"title\":\"$1\",\"body\":\"raised under P1\",\"options\":[{\"id\":\"approve\",\"kind\":\"approve\",\"label\":\"Approve\"},{\"id\":\"reject\",\"kind\":\"reject\",\"label\":\"Reject\"}],\"deadline\":\"$2\",\"quorum\":$3}" | jq .approval.id
+}
+decide() { # approval, principal, option, reason
+	post "/v1/approvals/$1/decisions" "{\"principal_id\":$2,\"option_id\":\"$3\",\"reason\":\"$4\"}" >/dev/null
+}
+far=2099-01-01T00:00:00Z
+
+# One approval in every state P1 could leave behind.
+approved=$(approval "Deploy build 41" "$far" 1)
+decide "$approved" "$nick" approve "looks good"
+rejected=$(approval "Drop the staging database" "$far" 1)
+decide "$rejected" "$ana" reject "not on a Friday"
+# Past its deadline with nobody deciding: escalated, then expired.
+approval "Rotate the signing key" "$(date -u -d '+1 second' +%Y-%m-%dT%H:%M:%SZ)" 1 >/dev/null
+# Still open at the upgrade: one that nobody has decided, and one that needs
+# two decisions and has the first.
+approval "Deploy build 42" "$far" 1 >/dev/null
+half=$(approval "Raise the spend limit" "$far" 2)
+decide "$half" "$nick" approve "first of two"
+
+# The third approval escalates at its deadline and expires one deadline window
+# later; wait for both.
+for _ in $(seq 1 100); do
+	if [ "$(sqlite3 "$work/conch.db" "SELECT count(*) FROM audit_events WHERE action = 'approval_expired'")" = 1 ]; then break; fi
+	sleep 0.1
+done
+[ "$(sqlite3 "$work/conch.db" "SELECT count(*) FROM audit_events WHERE action = 'approval_expired'")" = 1 ]
+
+kill -TERM "$pid"
+wait "$pid" 2>/dev/null || true
+pid=
+
+version=$(sqlite3 "$work/conch.db" 'PRAGMA user_version')
+[ "$version" = 4 ] || { echo "the database is at schema version $version, want 4 (P1)" >&2; exit 1; }
+echo "-- A P1 database (schema version 4), written by the conchd built from commit"
+echo "-- 5e9932d. Generated by make-p1-fixture.sh; do not edit by hand."
+sqlite3 "$work/conch.db" .dump
+echo "PRAGMA user_version = $version;"

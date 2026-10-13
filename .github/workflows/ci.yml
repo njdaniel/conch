@@ -122,11 +122,11 @@ jobs:
 
   dogfood-check:
     # The P1 release canary (ROADMAP success criterion,
-    # .claude/skills/dogfood-check/): runs on every push to main (the closest
-    # proxy to "before releases" — there is no separate release workflow)
-    # and on any PR labeled approval-path, per issue #19's acceptance
-    # criteria. A release does not ship, and an approval-path PR does not
-    # merge, on a failing dogfood-check.
+    # .claude/skills/dogfood-check/): runs on every push to main and on any
+    # PR labeled approval-path, per issue #19's acceptance criteria; the
+    # release workflow (release.yml) runs it again on every tag. A release
+    # does not ship, and an approval-path PR does not merge, on a failing
+    # dogfood-check.
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'approval-path')
     runs-on: ubuntu-latest
     steps:
@@ -159,6 +159,28 @@ jobs:
 
       - name: nets-check
         run: go run ./e2e/nets
+
+  p2-hardening-check:
+    # The P2 exit gate (issue #81): a database written by a P1 conchd is
+    # upgraded, and real conchd/conch binaries are driven through everything
+    # P2 added on it: credentials, manifests and their refusals, rate limits,
+    # the approval chain with ntfy up and down, the channel list (in the real
+    # TUI too), audit export, search, files, threads and the principal-review
+    # post. It ends by running e2e/dogfood itself and by checking it left
+    # nothing behind. Like nets-check it runs on every pull request and every
+    # push to main: what it guards is spread over the whole server and both
+    # clients, so there is no set of paths or labels that could safely skip it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: p2-hardening-check
+        run: go run ./e2e/p2-hardening
 
   voice-check:
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
