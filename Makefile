@@ -28,7 +28,14 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check vet lint test schema-compat depgate rust-check
+check: fmt-check invisible-check vet lint test schema-compat depgate rust-check
+
+# No tracked text file may hold a bidi control, a line or paragraph separator
+# or a control character other than tab, LF and CR (issue #244). The script's
+# own test runs first, so a check that has stopped checking fails here too.
+invisible-check:
+	./scripts/invisible-chars-test.sh
+	./scripts/invisible-chars.sh
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once

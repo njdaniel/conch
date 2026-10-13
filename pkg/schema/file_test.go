@@ -101,7 +101,7 @@ func TestValidateFileName(t *testing.T) {
 		{"escape", "a\x1b[31m", true},
 		{"DEL", "a\x7fb", true},
 		{"C1 control", "a\u0085b", true},
-		{"line separator", "a b", true},
+		{"line separator", "a" + string(rune(0x2028)) + "b", true},
 		{"bidi override", "a\u202eb", true},
 		{"invalid UTF-8", "a\xffb", true},
 	}

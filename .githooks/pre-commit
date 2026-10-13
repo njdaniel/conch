@@ -14,6 +14,9 @@ if [ -n "$unformatted" ]; then
     exit 1
 fi
 
+echo "pre-commit: invisible characters"
+./scripts/invisible-chars.sh
+
 echo "pre-commit: go vet"
 go vet ./...
 

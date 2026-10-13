@@ -94,7 +94,7 @@ func TestPostKeepsAwkwardBytes(t *testing.T) {
 		"three trailing spaces   ",
 		"a carriage return at the end\r",
 		"a bell \x07 and an escape \x1b[31m sequence",
-		"line separators   and   inside",
+		"line separators " + string(rune(0x2028)) + " and " + string(rune(0x2029)) + " inside",
 		`backslashes \n \t \\ \x41 \0 \c and a trailing one \`,
 		"%s %d %n %% %5$s",
 		"-",
