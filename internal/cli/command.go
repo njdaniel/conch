@@ -41,6 +41,10 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runTail(ctx, args[1:], stdout, stderr)
 	case "search":
 		return runSearch(ctx, args[1:], stdout, stderr)
+	case "upload":
+		return runUpload(ctx, args[1:], stdout, stderr)
+	case "download":
+		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
 	case "voice":
@@ -79,6 +83,8 @@ Usage:
   conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...]] <channel> <text>
   conch tail [--server <url>] <channel>
   conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>
+  conch upload [--server <url>] [--message <text>] <channel> <path>
+  conch download [--server <url>] [-o <path>] <file-id>
   conch nets list [--server <url>] <channel>
   conch nets create [--server <url>] <channel> <name>
   conch nets archive [--server <url>] <channel> <name>
@@ -105,6 +111,14 @@ Scope:
   never a query language. No match prints nothing and exits 0. --limit caps
   the count (1 to 100); when more remain, standard error names the --before
   value that continues.
+  upload sends a file to a channel, posts one message to the whole channel
+  that attaches it (--message is its text; the file's name by default), and
+  prints the file id. The server stores the file on its own disk; it can be
+  fetched by its uploader and by exactly the people who can see the message
+  it is attached to. download writes a file to -o, or to its own name in the
+  current directory; it never overwrites an existing file, and a name the
+  server sends that could point anywhere else is refused (use -o then).
+  Files are for people: agents cannot use them.
   voice status shows who is connected to a channel's voice and who is talking;
   it only reads presence and never joins. One line per participant, in
   principal id order:

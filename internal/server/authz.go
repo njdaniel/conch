@@ -611,14 +611,27 @@ func (s *Server) agentMayNoLongerRead(ctx context.Context, principalID, channelI
 // REST approval routes would bypass them. With no caller (AuthOff) or a human
 // caller the handler runs unchanged.
 func (s *Server) humansOnly(next http.Handler) http.Handler {
+	return s.humansOnlyBecause(denyAgentOnHumanRoute, "agents use the MCP endpoint for approvals", next)
+}
+
+// humansOnlyFiles refuses an agent caller on a file route (issue #23). The
+// manifest has no capability for files, so an agent can neither upload nor
+// fetch; the refusal comes before the handler looks at the channel or the file.
+func (s *Server) humansOnlyFiles(next http.Handler) http.Handler {
+	return s.humansOnlyBecause(denyAgentFiles, "agents cannot use files", next)
+}
+
+// humansOnlyBecause is humansOnly with the audit reason and the message of the
+// refusal.
+func (s *Server) humansOnlyBecause(reason, message string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if caller, ok := callerFrom(r.Context()); ok && caller.Kind == store.PrincipalAgent {
 			subject := r.Pattern
 			if subject == "" {
 				subject = "<unmatched>"
 			}
-			s.auditAgentDenial(r.Context(), caller.ID, subject, "", 0, denyAgentOnHumanRoute)
-			writeError(w, http.StatusForbidden, errForbidden.Code, "agents use the MCP endpoint for approvals")
+			s.auditAgentDenial(r.Context(), caller.ID, subject, "", 0, reason)
+			writeError(w, http.StatusForbidden, errForbidden.Code, message)
 			return
 		}
 		next.ServeHTTP(w, r)

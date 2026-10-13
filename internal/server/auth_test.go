@@ -149,6 +149,12 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v2/channels/{channel}/messages":                            {classAuth, "/v2/channels/general/messages", `{}`, 400},
 	"GET /v2/channels/{channel}/messages":                             {classAuth, "/v2/channels/general/messages", "", 200},
 	"GET /v2/channels/{channel}/messages/search":                      {classAuth, "/v2/channels/general/messages/search?q=hi", "", 200},
+	// Files (issue #23). The fixture leaves uploads disabled, so a member is
+	// refused with 403 uploads_disabled; AuthOff gets 400 and an agent 403
+	// (special-cased below). The file routes use an id that does not exist.
+	"POST /v2/channels/{channel}/files": {classAuth, "/v2/channels/general/files?filename=a.txt", "x", 403},
+	"GET /v2/files/{id}/meta":           {classAuth, "/v2/files/9999/meta", "", 404},
+	"GET /v2/files/{id}":                {classAuth, "/v2/files/9999", "", 404},
 	// Voice (issue #126). The fixture does not configure voice, so a member
 	// gets 503 voice_not_configured; AuthOff gets 400 and an agent 403 (both
 	// special-cased below).
@@ -186,6 +192,12 @@ var routeExpectations = map[string]routeExpectation{
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
 	"GET /v1/audit": {classOp, "/v1/audit?limit=0", "", 400},
+}
+
+// isFileRoute reports whether pattern is one of the file routes (issue #23),
+// which are humans-only and never anonymous.
+func isFileRoute(pattern string) bool {
+	return strings.Contains(pattern, "/v2/files/") || strings.HasSuffix(pattern, "/files")
 }
 
 func routeMethod(pattern string) string {
@@ -289,7 +301,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			cases := []struct {
@@ -327,6 +339,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
+				}
+				if isFileRoute(rt.pattern) {
+					want = http.StatusBadRequest // files_require_auth: files are never anonymous
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
