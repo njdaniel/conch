@@ -268,8 +268,20 @@ type grantedChannel struct {
 
 // insertMessage stores a message in the channel, authored by the agent.
 func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload *schema.Payload) (store.Message, error) {
-	return g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
+	msg, err := g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
+	if errors.Is(err, store.ErrFileAttachment) {
+		// A refusal of the post, not a failure of the store; the tools tell
+		// the two apart by this error, without reaching into the store
+		// themselves (issue #240).
+		return store.Message{}, errAttachmentRefused
+	}
+	return msg, err
 }
+
+// errAttachmentRefused is insertMessage's error for a post whose file
+// attachment cannot be honoured (an agent cannot upload, so for an agent that
+// is every attachment). Nothing was stored.
+var errAttachmentRefused = errors.New("server: file attachment refused")
 
 // listMessages reads one page of the channel's messages as the agent: the
 // channel-wide ones, and the scoped ones it is a recipient of. The MCP tools

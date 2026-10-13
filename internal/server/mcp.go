@@ -267,6 +267,14 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 		return schema.PostMessageResponseV2{}, serr
 	}
 	stored, err := channel.insertMessage(ctx, in.Body, schemaPayload)
+	if errors.Is(err, errAttachmentRefused) {
+		// The caller's mistake, not ours: nothing was stored, and the answer
+		// is the one the REST post routes and the scoped path give (issue
+		// #240). An agent cannot upload, so its attachment can never be
+		// honoured; as a server failure this was an error line in the log
+		// that any agent with the post grant could write at will.
+		return schema.PostMessageResponseV2{}, errInvalidFileAttachment
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: insert failed", "error", err)
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
