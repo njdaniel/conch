@@ -1,0 +1,23 @@
+[Unit]
+Description=Conch principal review (one report -> one PR -> summary posted into Conch)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/conch-principal-review run
+# conch must be on this PATH for the summary to be posted, for example
+# `go build -o ~/bin/conch ./cmd/conch`, and `conch login` must have been run
+# for the server it posts to. Without either the review and its PR still
+# happen and the unit ends with status 3.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CONCH_REPO=%h/code/github.com/njdaniel/conch
+# conch posts to http://127.0.0.1:8080 unless told otherwise:
+#Environment=CONCH_SERVER=https://conch.example
+# Hard ceiling on a wedged run: the wait for the lock shared with conch-agent
+# (up to 5400 s) plus the session (3600 s), with room for the push, the PR
+# and the post. The script applies both of its own limits first. A oneshot
+# unit is "starting" for as long as it runs, so this is the limit that
+# applies to it; systemd ignores RuntimeMaxSec= here.
+TimeoutStartSec=10800
+Nice=10

@@ -1,0 +1,20 @@
+--net=ops "Principal review" — $(touch pwned-title) `touch pwned-title-tick`
+
+Sections:
+- Merged work (3 PRs): 3 items
+- Invariant status: 2 items
+- Backlog delta: no list items
+- Decisions needed from Nick: 6 items
+
+Decisions needed from Nick:
+- --server http://127.0.0.1:1 is text, not an option
+-n
+-e \n \t \\ \0 %s %d %n
+--
+1. $(touch pwned-dollar-paren) and ${HOME} and $HOME and $((6*7)) and $'\x41'
+2. `touch pwned-backtick` and 'single' and "double" and \"escaped\"
+3. ; touch pwned-semicolon && touch pwned-and || touch pwned-or | cat > pwned-redirect < /dev/null &
+4. * ? [a-z] {a,b} ~ ! # <tag attr="v"> & </tag> é — → 日本語
+5. 'an unterminated " quote, a ` tick and a $( paren
+
+PR: https://github.com/njdaniel/conch/pull/4242

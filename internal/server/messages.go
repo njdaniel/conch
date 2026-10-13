@@ -17,7 +17,9 @@ import (
 const (
 	defaultMessageLimit = 50
 	maxMessageLimit     = 100
-	maxMessageBodyBytes = 1 << 20
+	// What a client must be able to read back is derived from this limit
+	// (schema.MaxMessageFrameBytes), which is why it is the schema's.
+	maxMessageBodyBytes = schema.MaxPostRequestBytes
 )
 
 // apiVersion is the protocol generation a request speaks. It decides the
