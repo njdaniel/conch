@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -79,7 +78,7 @@ func runSearch(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		}
 	}
 	for _, message := range result.Messages {
-		if _, err := fmt.Fprintf(stdout, "%s %d %s%s\n", message.CreatedAt.Time().Format(time.RFC3339Nano), message.AuthorID, scopeMarker(message.Audience, names), tailBody(message.Body)); err != nil {
+		if _, err := fmt.Fprintln(stdout, messageLine(message, names)); err != nil {
 			return err
 		}
 	}

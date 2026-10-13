@@ -163,6 +163,7 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "send", quietWhenOK: true, whoamiOK: true, args: func(u, _ string) []string { return []string{"send", "--server", u, "general", "hello"} }},
 		{key: "tail", args: func(u, _ string) []string { return []string{"tail", "--server", u, "general"} }},
 		{key: "search", args: func(u, _ string) []string { return []string{"search", "--server", u, "general", "hello"} }},
+		{key: "thread", args: func(u, _ string) []string { return []string{"thread", "--server", u, "general", "3"} }},
 		{key: "upload", quietWhenOK: true, whoamiOK: true, args: func(u, dir string) []string {
 			return []string{"upload", "--server", u, "general", filepath.Join(dir, "note.txt")}
 		}},
@@ -237,6 +238,12 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile)})
 		case "POST /v2/channels/general/messages":
 			write(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, Body: hostile, CreatedAt: ts}})
+		case "GET /v2/channels/general/messages":
+			// The thread listing (?thread=3): a root and a reply, each hostile.
+			write(w, http.StatusOK, schema.ListMessagesResponseV2{Messages: []schema.MessageV2{
+				{Schema: schema.MessageSchemaV2, ID: 3, AuthorID: 42, Body: hostile, CreatedAt: ts, Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}},
+				{Schema: schema.MessageSchemaV2, ID: 4, AuthorID: 42, Body: hostile, CreatedAt: ts, ThreadRootID: 3, Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}},
+			}})
 		case "GET /v2/channels/general/messages/search":
 			write(w, http.StatusOK, schema.SearchMessagesResponseV2{Messages: []schema.MessageV2{
 				{Schema: schema.MessageSchemaV2, ID: 3, AuthorID: 42, Body: hostile, CreatedAt: ts},

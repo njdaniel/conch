@@ -353,6 +353,17 @@ END`,
 )`,
 		`CREATE INDEX files_by_message ON files (message_id) WHERE message_id IS NOT NULL`,
 	},
+	// 17: Threads (issue #25). thread_root_id is the message a reply answers,
+	// NULL for every message that is not a reply, which includes all that exist
+	// before this migration (nothing is backfilled). Threads are one level deep:
+	// the server only ever stores a root that is itself not a reply, and the
+	// reply's audience is its root's (decided in audience.go, in the insert
+	// transaction), so the column carries no access rule of its own. The index
+	// serves the thread listing.
+	{
+		`ALTER TABLE messages ADD COLUMN thread_root_id INTEGER REFERENCES messages (id)`,
+		`CREATE INDEX messages_by_thread ON messages (thread_root_id, id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

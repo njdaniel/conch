@@ -186,9 +186,29 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 	}
 	limit := int(parsedLimit)
 
+	// ?thread=<root id> narrows a v2 listing to one thread (issue #25). v0 and v1
+	// have no threads and ignore it.
+	thread := int64(0)
+	if version == apiV2 && r.URL.Query().Has("thread") {
+		thread, err = strconv.ParseInt(r.URL.Query().Get("thread"), 10, 64)
+		if err != nil || thread <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request", "thread must be a positive integer")
+			return
+		}
+	}
+
 	// Fetch one extra row so the response only advertises a next page when one
 	// is currently available.
-	stored, err := s.store.ListVisibleMessages(ctx, channel.ID, readerFor(r, version), after, limit+1)
+	var stored []store.Message
+	if thread > 0 {
+		stored, err = s.store.ListThreadMessages(ctx, channel.ID, readerFor(r, version), thread, after, limit+1)
+	} else {
+		stored, err = s.store.ListVisibleMessages(ctx, channel.ID, readerFor(r, version), after, limit+1)
+	}
+	if errors.Is(err, store.ErrThreadNotFound) {
+		writeThreadNotFound(w)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -316,6 +336,7 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		a.PrincipalIDs = append([]int64(nil), a.PrincipalIDs...)
 		m.Audience = &a
 	}
+	m.ThreadRootID = message.ThreadRootID
 	return m
 }
 
@@ -365,6 +386,12 @@ func (s *Server) handlePostMessageV2(w http.ResponseWriter, r *http.Request) {
 	if !s.decodePostRequest(w, r, &req) {
 		return
 	}
+	if req.ThreadRootID != 0 && req.Audience != nil {
+		// A reply has its root's audience and cannot choose its own, so this is
+		// a malformed request whatever the root is; nothing is looked up.
+		writeError(w, http.StatusBadRequest, errThreadAudience.Code, errThreadAudience.Message)
+		return
+	}
 	if req.Audience != nil {
 		// A scoped post needs a verified author, and with authentication off
 		// the author is whatever the body says. Refuse before anything else
@@ -387,6 +414,10 @@ func (s *Server) handlePostMessageV2(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if req.ThreadRootID > 0 {
+		s.postReply(w, r, req)
 		return
 	}
 	if req.Audience == nil {
@@ -439,13 +470,7 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 	}
 	// Only an agent's refusals are audited as access_denied; for a human
 	// the subject is empty and nothing is written.
-	agentSubject := ""
-	if caller.Kind == store.PrincipalAgent {
-		// Never empty for an agent: empty means "not an agent" below.
-		if agentSubject = r.Pattern; agentSubject == "" {
-			agentSubject = "<unmatched>"
-		}
-	}
+	agentSubject := agentSubjectFor(r, caller)
 	message, recipients, serr := s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: channel.ID, AuthorID: req.AuthorID, Body: req.Body, Payload: req.Payload, Audience: audience,
 	}, agentSubject)
@@ -470,36 +495,169 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 // record it alike (issue #149). The answer to the caller does not change.
 func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, agentSubject string) (schema.MessageV2, []int64, *schema.Error) {
 	stored, recipients, err := s.store.InsertScopedMessage(ctx, post)
+	if serr := s.scopedPostRefusal(ctx, err, post.ChannelID, post.AuthorID, agentSubject); serr != nil {
+		return schema.MessageV2{}, nil, serr
+	}
+	return messageV2FromStore(stored), recipients, nil
+}
+
+// scopedPostRefusal turns an error of a scoped insert (a post or a reply) into
+// its wire error, or nil for none. See storeScopedPost.
+func (s *Server) scopedPostRefusal(ctx context.Context, err error, channelID, authorID int64, agentSubject string) *schema.Error {
 	denied := func(reason string) {
 		if agentSubject != "" {
-			s.auditAgentDenial(ctx, post.AuthorID, agentSubject, schema.CapabilityMessagesPost, post.ChannelID, reason)
+			s.auditAgentDenial(ctx, authorID, agentSubject, schema.CapabilityMessagesPost, channelID, reason)
 		}
 	}
 	switch {
+	case err == nil:
+		return nil
 	case errors.Is(err, store.ErrNetNotFound):
 		denied(denyNetNotOn)
-		return schema.MessageV2{}, nil, &schema.Error{Code: "net_not_found", Message: "net not found"}
+		return &schema.Error{Code: "net_not_found", Message: "net not found"}
 	case errors.Is(err, store.ErrNetMonitorOnly):
 		denied(denyNetMonitorOnly)
-		return schema.MessageV2{}, nil, &schema.Error{Code: errForbidden.Code, Message: "a monitor of a net may listen but not transmit"}
+		return &schema.Error{Code: errForbidden.Code, Message: "a monitor of a net may listen but not transmit"}
 	case errors.Is(err, store.ErrInvalidAudience):
-		return schema.MessageV2{}, nil, &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
+		return &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
 	case errors.Is(err, store.ErrFileAttachment):
-		return schema.MessageV2{}, nil, errInvalidFileAttachment
+		return errInvalidFileAttachment
+	case errors.Is(err, store.ErrThreadNotFound):
+		// The root became unusable between the check and the insert.
+		return errThreadNotFound
 	case errors.Is(err, store.ErrNotChannelMember):
 		// Removed from the channel after the caller's membership check.
-		return schema.MessageV2{}, nil, errChannelNotFound
-	case err != nil:
+		return errChannelNotFound
+	default:
 		slog.ErrorContext(ctx, "messages: insert scoped failed", "error", err)
-		return schema.MessageV2{}, nil, errInternal
+		return errInternal
 	}
-	return messageV2FromStore(stored), recipients, nil
+}
+
+// agentSubjectFor is the audit subject ("<route pattern>") when the author is
+// an agent, and empty otherwise. Only an agent's refusals are audited as
+// access_denied; for a human the subject is empty and nothing is written.
+func agentSubjectFor(r *http.Request, caller store.Principal) string {
+	if caller.Kind != store.PrincipalAgent {
+		return ""
+	}
+	// Never empty for an agent: empty means "not an agent".
+	if r.Pattern == "" {
+		return "<unmatched>"
+	}
+	return r.Pattern
+}
+
+var (
+	// errThreadNotFound is the one answer to every reply or thread read whose
+	// root the caller cannot use: unknown, in another channel, itself a reply,
+	// or not visible to them. Message ids are sequential, so any difference
+	// between those would let a caller probe for scoped messages.
+	errThreadNotFound = &schema.Error{Code: "thread_not_found", Message: "thread not found"}
+	// errThreadAudience refuses a post that names both a thread and an audience.
+	errThreadAudience = &schema.Error{Code: "thread_audience_conflict", Message: "a reply takes its root's audience; thread_root_id and audience cannot be combined"}
+)
+
+func writeThreadNotFound(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, errThreadNotFound.Code, errThreadNotFound.Message)
+}
+
+// postReply stores a reply to a message and delivers it to exactly the
+// principals who can see that message (issue #25). The order of the checks is
+// part of the security design, as for postScopedMessage: channel membership
+// first (the unknown-channel 404); then whether the caller can see the root,
+// where unknown, other-channel, a reply and not-visible all give errThreadNotFound
+// and nothing else is looked at first; only then the agent's manifest, decided
+// from the root's audience (a reply to a net or a whisper is a post to that net
+// or whisper, which has its own grants). The store decides visibility of the
+// root again inside the insert transaction.
+func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.PostMessageRequestV2) {
+	ctx := r.Context()
+	caller, _ := callerFrom(ctx)
+	channel, ok := s.channelForScopedPost(w, r)
+	if !ok {
+		return
+	}
+	root, err := s.store.ReplyRootMessage(ctx, channel.ID, readerFor(r, apiV2), req.ThreadRootID)
+	if errors.Is(err, store.ErrThreadNotFound) {
+		writeThreadNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "messages: find thread root failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+
+	if root.Audience == nil {
+		if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesPost, channel.ID, schema.ChannelPermissionPost) {
+			return
+		}
+	} else {
+		allowed, err := s.authorizeScopedPost(ctx, caller, r.Pattern, channel.ID, root.Audience.Normalize(req.AuthorID))
+		var limited *rateLimitedError
+		if errors.As(err, &limited) {
+			writeRateLimited(w, limited)
+			return
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "messages: authorize reply failed", "error", err)
+			writeInternalError(w)
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, errForbidden.Code, errForbidden.Message)
+			return
+		}
+	}
+
+	// As for any post: attaching a file takes the uploader's own credential.
+	if req.Payload != nil && req.Payload.Schema == schema.FileAttachmentV1Name {
+		if _, verified := callerFrom(ctx); !verified {
+			writeError(w, http.StatusBadRequest, errFilesNeedAuth.Code, "attaching a file requires the uploader's own credential")
+			return
+		}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
+		return
+	}
+	if _, err := s.store.PrincipalByID(ctx, req.AuthorID); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "author_not_found", "author not found")
+		return
+	} else if err != nil {
+		slog.ErrorContext(ctx, "messages: find author failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+
+	stored, recipients, err := s.store.InsertReplyMessage(ctx, store.ReplyPost{
+		ChannelID: channel.ID, AuthorID: req.AuthorID, RootID: req.ThreadRootID, Body: req.Body, Payload: req.Payload,
+	}, readerFor(r, apiV2))
+	if serr := s.scopedPostRefusal(ctx, err, channel.ID, req.AuthorID, agentSubjectFor(r, caller)); serr != nil {
+		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
+		return
+	}
+	message := messageV2FromStore(stored)
+	// Persist-then-broadcast. A scoped reply goes to its recipients' v2 sockets
+	// only. A reply to a channel-wide root is an ordinary message to a v0 or v1
+	// socket and carries thread_root_id on v2 (BroadcastReply, not
+	// BroadcastMessageV1, which would hand v2 sockets an envelope without it).
+	if stored.Audience != nil {
+		s.hub.BroadcastMessageV2(ctx, message, recipients)
+	} else {
+		messageV0 := messageV0FromStore(stored)
+		s.hub.BroadcastMessage(ctx, messageV0)
+		s.hub.BroadcastReply(ctx, messageV1FromStore(stored), message)
+		s.broadcaster.BroadcastMessage(ctx, messageV0)
+	}
+	writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: message})
 }
 
 // scopedPostStatus is the HTTP status for a storeScopedPost refusal.
 func scopedPostStatus(code string) int {
 	switch code {
-	case "net_not_found", errChannelNotFound.Code:
+	case "net_not_found", errChannelNotFound.Code, errThreadNotFound.Code:
 		return http.StatusNotFound
 	case errForbidden.Code:
 		return http.StatusForbidden

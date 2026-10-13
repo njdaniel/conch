@@ -209,3 +209,30 @@ func TestV2SubscriptionsAreDropped(t *testing.T) {
 	}
 	b.Cancel() // idempotent after a drop
 }
+
+// A reply to a channel-wide root reaches a v1 subscription as the v1 message it
+// is and a v2 subscription as the v2 message that carries thread_root_id, which
+// BroadcastMessageV1's conversion would lose (issue #25). It reaches v0 through
+// BroadcastMessage, not here.
+func TestBroadcastReplyKeepsThreadRootOnV2(t *testing.T) {
+	h := New()
+	v1 := h.SubscribeV1(1, 7, 4)
+	v2 := h.SubscribeV2(1, 8, 4)
+	v2Other := h.SubscribeV2(2, 8, 4)
+	reply := schema.MessageV2{Schema: schema.MessageSchemaV2, ID: 5, ChannelID: 1, AuthorID: 1, Body: "re", ThreadRootID: 3}
+	h.BroadcastReply(context.Background(), schema.MessageV1{Schema: schema.MessageSchemaV1, ID: 5, ChannelID: 1, AuthorID: 1, Body: "re"}, reply)
+	if got := drainV1(v1); !equalIDs(got, ids(5)) {
+		t.Errorf("v1 subscription got %v, want [5]", got)
+	}
+	select {
+	case m := <-v2.Messages():
+		if m.ThreadRootID != 3 {
+			t.Errorf("v2 message thread_root_id = %d, want 3", m.ThreadRootID)
+		}
+	default:
+		t.Error("v2 subscription got nothing")
+	}
+	if got, _ := drainV2(v2Other); len(got) != 0 {
+		t.Errorf("a subscription to another channel got %v", got)
+	}
+}

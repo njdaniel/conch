@@ -104,7 +104,7 @@ func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader
 }
 
 // messageColumns is the column list scanMessages reads.
-const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id`
+const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id`
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -168,11 +168,12 @@ func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, er
 		var m Message
 		var payloadSchema, kind sql.NullString
 		var payloadJSON []byte
-		var netID sql.NullInt64
+		var netID, threadRoot sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot); err != nil {
 			return nil, err
 		}
+		m.ThreadRootID = threadRoot.Int64 // zero when NULL
 		m.CreatedAt = time.UnixMilli(createdAt)
 		if payloadSchema.Valid {
 			m.Payload = &schema.Payload{Schema: payloadSchema.String, Data: payloadJSON}
@@ -405,6 +406,259 @@ func attachFilesTx(ctx context.Context, tx execer, channelID, authorID, messageI
 	return nil
 }
 
+// Threads (issue #25). A thread is a root message and the replies that name it,
+// one level deep. A thread is not an audience of its own: a reply has the
+// audience its root has, and the three functions below ask the visibility
+// question with the same constants as the list, the search and the file check,
+// in the same statement as the selection. Nothing is filtered in Go afterwards.
+
+// ErrThreadNotFound is returned when a thread's root cannot be used by the
+// reader: it does not exist, is in another channel, is itself a reply, or is
+// not visible to the reader. These are deliberately one error, because message
+// ids are sequential and any difference between them would let a reader probe
+// for messages scoped away from them.
+var ErrThreadNotFound = errors.New("store: thread root not found")
+
+// rootFrom is the selection of a thread root: a message of the channel that is
+// not itself a reply, and that the reader may see (the visibility condition is
+// appended). Both the read and the check inside the insert transaction use it.
+const rootFrom = ` FROM messages m
+		 WHERE m.id = ? AND m.channel_id = ? AND m.thread_root_id IS NULL AND `
+
+func rootSQL(columns string, scoped bool) string {
+	if scoped {
+		return `SELECT ` + columns + rootFrom + visibleToScopedReader
+	}
+	return `SELECT ` + columns + rootFrom + visibleToAnyReader
+}
+
+// ReplyRootMessage returns the message rootID of channelID if reader may reply
+// to it: it exists in the channel, is not itself a reply and is visible to
+// reader by the list's own rule. Every other case is ErrThreadNotFound.
+func (s *Store) ReplyRootMessage(ctx context.Context, channelID int64, reader Reader, rootID int64) (Message, error) {
+	scoped, predArgs := visibilityArgs(reader)
+	rows, err := s.db.QueryContext(ctx, rootSQL(messageColumns, scoped),
+		append([]any{rootID, channelID}, predArgs...)...)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read thread root %d: %w", rootID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := s.scanMessages(ctx, rows)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read thread root %d: %w", rootID, err)
+	}
+	if len(msgs) != 1 {
+		return Message{}, ErrThreadNotFound
+	}
+	return msgs[0], nil
+}
+
+// ListThreadMessages returns up to limit messages of the thread rootID in
+// channelID with ID greater than afterID that reader may see, in ascending ID
+// order: the root first (on the page that starts before it), then the replies.
+// It is ListVisibleMessages narrowed to one thread: the same visibility
+// condition in the same statement as the selection, so a reader gets exactly
+// the channel listing's rows that belong to the thread, and a hidden reply
+// neither fills a page nor moves a cursor. If the reader cannot see the root
+// the answer is ErrThreadNotFound, whatever the thread holds.
+func (s *Store) ListThreadMessages(ctx context.Context, channelID int64, reader Reader, rootID, afterID int64, limit int) ([]Message, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list thread: limit must be positive, got %d", limit)
+	}
+	if _, err := s.ReplyRootMessage(ctx, channelID, reader, rootID); err != nil {
+		return nil, err
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	rows, err := s.db.QueryContext(ctx, threadSQL(scoped),
+		append(append([]any{channelID, rootID, rootID, afterID}, predArgs...), limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list thread %d: %w", rootID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := s.scanMessages(ctx, rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: list thread %d: %w", rootID, err)
+	}
+	return msgs, nil
+}
+
+const (
+	threadHead = `SELECT ` + messageColumns + ` FROM messages m
+		 WHERE m.channel_id = ? AND (m.id = ? OR m.thread_root_id = ?) AND m.id > ? AND `
+)
+
+func threadSQL(scoped bool) string {
+	if scoped {
+		return threadHead + visibleToScopedReader + listTail
+	}
+	return threadHead + visibleToAnyReader + listTail
+}
+
+// ReplyPost is a reply to store. It carries no audience: the reply's is its
+// root's, read inside the insert transaction.
+type ReplyPost struct {
+	ChannelID int64
+	AuthorID  int64
+	// RootID is the message replied to.
+	RootID  int64
+	Body    string
+	Payload *schema.Payload
+}
+
+// InsertReplyMessage stores a reply to post.RootID and returns it with the
+// resolved recipient ids for fan-out (nil for a reply to a channel-wide root).
+// Whether reader may see the root is decided in the same IMMEDIATE transaction
+// that inserts the reply, with the list's visibility condition, so a reply is
+// never stored for a caller who could see the root a moment ago and cannot
+// now. reader is the verified poster; with no verified identity
+// (PrincipalID 0) only a channel-wide root can be replied to.
+//
+// A reply reaches those who can see its root at this moment and are still
+// entitled to its audience, never anyone else:
+//
+//   - channel-wide root: the reply is channel-wide;
+//   - net root: a post to the net under the net rules (the author must be on it
+//     and not a monitor), delivered to those of the root's recipients who are
+//     on the net now;
+//   - whisper root: the root's recipients, the author of the root among them,
+//     whoever of them replies.
+//
+// "The root's recipients" are those stored for the root who are still channel
+// members, because that is what visibility asks. Someone who joined the net
+// after the root was posted is not one: they cannot see the root, and must not
+// be handed a reply to a message they cannot see. Someone taken off the net
+// since can still see the root (what they were sent stays theirs), but gets
+// no reply: taking a principal off a net is how they are cut off from what is
+// said on it from then on, and an old thread must not be a way round that.
+//
+// A refused reply stores nothing. ErrThreadNotFound covers every way the root
+// is unusable (see its doc); ErrNotChannelMember a poster removed from the
+// channel; ErrNetNotFound and ErrNetMonitorOnly the net rules; ErrInvalidAudience
+// a whisper left with no recipient but its poster.
+func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader Reader) (Message, []int64, error) {
+	if reader.PrincipalID != 0 && reader.PrincipalID != post.AuthorID {
+		// The reader is who visibility is asked for; it must be the poster.
+		return Message{}, nil, ErrThreadNotFound
+	}
+	now := time.Now().Truncate(time.Millisecond)
+	scoped, predArgs := visibilityArgs(reader)
+	var msg Message
+	var recipients []int64
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		if reader.PrincipalID > 0 {
+			member, err := isChannelMemberTx(ctx, tx, post.ChannelID, post.AuthorID)
+			if err != nil {
+				return err
+			}
+			if !member {
+				return ErrNotChannelMember
+			}
+		}
+		var kind sql.NullString
+		var rootNet sql.NullInt64
+		switch err := tx.QueryRowContext(ctx, rootSQL("m.audience_kind, m.net_id", scoped),
+			append([]any{post.RootID, post.ChannelID}, predArgs...)...).Scan(&kind, &rootNet); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrThreadNotFound
+		case err != nil:
+			return fmt.Errorf("store: check thread root %d: %w", post.RootID, err)
+		}
+		if !kind.Valid {
+			id, err := insertChannelWideTx(ctx, tx, post.ChannelID, post.AuthorID, post.Body, post.Payload, post.RootID, now)
+			if err != nil {
+				return err
+			}
+			msg = Message{ID: id, ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload,
+				CreatedAt: now, ThreadRootID: post.RootID}
+			return nil
+		}
+		// The candidates are the people who can see the root now: its
+		// recipients, less any who have since left the channel. Not the net's
+		// roster as it stands, which would reach someone who joined the net
+		// after the root and cannot see it. For a net root the roster then
+		// narrows them further, below.
+		rootRecipients, err := messageRecipientsTx(ctx, tx, post.RootID)
+		if err != nil {
+			return err
+		}
+		for _, id := range rootRecipients {
+			member, err := isChannelMemberTx(ctx, tx, post.ChannelID, id)
+			if err != nil {
+				return err
+			}
+			if member {
+				recipients = append(recipients, id)
+			}
+		}
+		scopedPost := ScopedPost{ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload}
+		var audience schema.Audience
+		var net any
+		switch schema.AudienceKind(kind.String) {
+		case schema.AudienceKindNet:
+			if !rootNet.Valid {
+				return fmt.Errorf("store: message %d has a net audience with no net", post.RootID)
+			}
+			// Posting to a net is for those on it who may transmit, and what
+			// is said on a net goes to those on it now: of the root's
+			// recipients, only the ones the roster still holds.
+			roster, err := resolveNetRecipientsTx(ctx, tx, post.ChannelID, rootNet.Int64, post.AuthorID)
+			if err != nil {
+				return err
+			}
+			onNet := make(map[int64]bool, len(roster))
+			for _, id := range roster {
+				onNet[id] = true
+			}
+			kept := recipients[:0]
+			for _, id := range recipients {
+				if onNet[id] {
+					kept = append(kept, id)
+				}
+			}
+			recipients = kept
+			audience = schema.Audience{Kind: schema.AudienceKindNet, NetID: rootNet.Int64}
+			net = rootNet.Int64
+		case schema.AudienceKindPrincipals:
+			if len(recipients) < 2 {
+				return fmt.Errorf("%w: a whisper needs a recipient other than the author", ErrInvalidAudience)
+			}
+			audience = schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: append([]int64(nil), recipients...)}
+		default:
+			// Never read an audience we do not understand as something wider.
+			return fmt.Errorf("store: message %d has an unreadable audience %q", post.RootID, kind.String)
+		}
+		scopedPost.Audience = audience
+		msg, err = insertScopedTx(ctx, tx, scopedPost, post.RootID, net, audience, recipients, now)
+		return err
+	})
+	if err != nil {
+		return Message{}, nil, err
+	}
+	return msg, recipients, nil
+}
+
+// messageRecipientsTx returns the recipient ids stored for messageID, ascending.
+func messageRecipientsTx(ctx context.Context, tx execer, messageID int64) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT principal_id FROM message_recipients WHERE message_id = ? ORDER BY principal_id ASC", messageID)
+	if err != nil {
+		return nil, fmt.Errorf("store: read recipients of message %d: %w", messageID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: read recipients of message %d: %w", messageID, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read recipients of message %d: %w", messageID, err)
+	}
+	return ids, nil
+}
+
 // CountMessages returns how many messages channelID holds, scoped ones
 // included. It exists for tests, which use it to assert that a refused post
 // stored nothing. It must never be served to a caller: the count reveals that
@@ -478,48 +732,61 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 			return fmt.Errorf("%w: kind %q", ErrInvalidAudience, p.Audience.Kind)
 		}
 
-		var payloadSchema, payloadJSON any
-		if p.Payload != nil {
-			payloadSchema = p.Payload.Schema
-			payloadJSON = []byte(p.Payload.Data)
-		}
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json, audience_kind, net_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			p.ChannelID, p.AuthorID, p.Body, now.UnixMilli(), payloadSchema, payloadJSON, string(p.Audience.Kind), netID)
-		if err != nil {
-			return fmt.Errorf("store: insert scoped message in channel %d: %w", p.ChannelID, err)
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("store: insert scoped message in channel %d: %w", p.ChannelID, err)
-		}
-		for _, r := range recipients {
-			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO message_recipients (message_id, principal_id) VALUES (?, ?)", id, r); err != nil {
-				return fmt.Errorf("store: store recipient %d of message %d: %w", r, id, err)
-			}
-		}
-		actor := principalActor(p.AuthorID)
-		subject := fmt.Sprintf("message:%d", id)
-		if err := appendAuditEventTx(ctx, tx, actor, "message.post", subject, "", now); err != nil {
-			return err
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageScoped, subject,
-			scopedDetail(p.ChannelID, audience, recipients), now); err != nil {
-			return err
-		}
-		if err := attachFilesTx(ctx, tx, p.ChannelID, p.AuthorID, id, p.Payload, now); err != nil {
-			return err
-		}
-		msg = Message{ID: id, ChannelID: p.ChannelID, AuthorID: p.AuthorID, Body: p.Body, Payload: p.Payload,
-			CreatedAt: now, Audience: &audience}
-		return nil
+		msg, err = insertScopedTx(ctx, tx, p, 0, netID, audience, recipients, now)
+		return err
 	})
 	if err != nil {
 		return Message{}, nil, err
 	}
 	return msg, recipients, nil
+}
+
+// insertScopedTx stores a scoped message (a reply when rootID is not zero), its
+// recipients, its audit events and any file it attaches, in the caller's
+// transaction. Posts and replies end here, so a reply writes the same rows,
+// including the message_scoped audit event, as any scoped post.
+func insertScopedTx(
+	ctx context.Context, tx execer, p ScopedPost, rootID int64, netID any, audience schema.Audience, recipients []int64, now time.Time,
+) (Message, error) {
+	var payloadSchema, payloadJSON, thread any
+	if p.Payload != nil {
+		payloadSchema = p.Payload.Schema
+		payloadJSON = []byte(p.Payload.Data)
+	}
+	if rootID > 0 {
+		thread = rootID
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json, audience_kind, net_id, thread_root_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ChannelID, p.AuthorID, p.Body, now.UnixMilli(), payloadSchema, payloadJSON, string(audience.Kind), netID, thread)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: insert scoped message in channel %d: %w", p.ChannelID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Message{}, fmt.Errorf("store: insert scoped message in channel %d: %w", p.ChannelID, err)
+	}
+	for _, r := range recipients {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO message_recipients (message_id, principal_id) VALUES (?, ?)", id, r); err != nil {
+			return Message{}, fmt.Errorf("store: store recipient %d of message %d: %w", r, id, err)
+		}
+	}
+	actor := principalActor(p.AuthorID)
+	subject := fmt.Sprintf("message:%d", id)
+	if err := appendAuditEventTx(ctx, tx, actor, "message.post", subject, "", now); err != nil {
+		return Message{}, err
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditMessageScoped, subject,
+		scopedDetail(p.ChannelID, audience, recipients), now); err != nil {
+		return Message{}, err
+	}
+	if err := attachFilesTx(ctx, tx, p.ChannelID, p.AuthorID, id, p.Payload, now); err != nil {
+		return Message{}, err
+	}
+	return Message{ID: id, ChannelID: p.ChannelID, AuthorID: p.AuthorID, Body: p.Body, Payload: p.Payload,
+		CreatedAt: now, Audience: &audience, ThreadRootID: rootID}, nil
 }
 
 // scopedDetail is the message_scoped audit detail. It names who was addressed,

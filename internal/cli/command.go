@@ -42,6 +42,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runTail(ctx, args[1:], stdout, stderr)
 	case "search":
 		return runSearch(ctx, args[1:], stdout, stderr)
+	case "thread":
+		return runThread(ctx, args[1:], stdout, stderr)
 	case "upload":
 		return runUpload(ctx, args[1:], stdout, stderr)
 	case "download":
@@ -81,8 +83,9 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `conch — the Conch command-line client
 
 Usage:
-  conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...]] <channel> <text>
+  conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...] | --reply-to <id>] <channel> <text>
   conch tail [--server <url>] <channel>
+  conch thread [--server <url>] <channel> <id>
   conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>
   conch upload [--server <url>] [--message <text>] <channel> <path>
   conch download [--server <url>] [-o <path>] <file-id>
@@ -106,6 +109,14 @@ Scope:
   --to whispers to the listed principals (recorded in the audit log). Giving
   both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>];
   a message body that itself starts with [ is printed as \[.
+  send --reply-to <id> replies to message <id> (a reply to a reply is refused;
+  threads are one level). A reply is seen only by people who can see the
+  message it answers (on a net, those of them still on the net), so --net
+  and --to cannot be combined with it. A
+  message you cannot see, one that does not exist and one in another channel
+  all give the same "thread not found" answer. tail marks a reply
+  [reply:<id>] with its root's id. thread prints message <id> and its replies,
+  in order, in tail's format; it shows only what tail would show you.
   search prints the messages of one channel that contain every one of the
   words (case-insensitive, whole words, any order), newest first, in tail's
   format; it shows only what tail would show you. The words are plain text,
@@ -158,6 +169,7 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	author := fs.String("author", os.Getenv("CONCH_AUTHOR"), "message author ID")
 	netName := fs.String("net", "", "send to the named net instead of the whole channel")
 	to := fs.String("to", "", "whisper to these principal IDs (comma-separated) instead of the whole channel")
+	replyTo := fs.Int64("reply-to", 0, "reply to this message id; the reply has that message's audience")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("cli: send: %w", err)
 	}
@@ -174,6 +186,12 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	switch {
 	case given["net"] && given["to"]:
 		return errors.New("cli: send: --net and --to cannot be used together")
+	case given["reply-to"] && (given["net"] || given["to"]):
+		return errors.New("cli: send: --reply-to cannot be combined with --net or --to: a reply has its root's audience")
+	case given["reply-to"]:
+		if *replyTo <= 0 {
+			return errors.New("cli: send: --reply-to must be a positive message id")
+		}
 	case given["net"]:
 		if err := schema.ValidateNetName(*netName); err != nil {
 			return fmt.Errorf("cli: send: --net: %w", err)
@@ -192,6 +210,10 @@ func runSend(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	authorID, err := resolveAuthor(ctx, client, hasCredential, *author, "send", stderr)
 	if err != nil {
+		return err
+	}
+	if given["reply-to"] {
+		_, err := client.PostReplyV2(ctx, channel, authorID, *replyTo, fs.Arg(1))
 		return err
 	}
 	var audience *schema.Audience
@@ -345,7 +367,7 @@ func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		}
 	}
 	err = client.SubscribeV2(ctx, fs.Arg(0), func(message schema.MessageV2) error {
-		_, writeErr := fmt.Fprintf(stdout, "%s %d %s%s\n", message.CreatedAt.Time().Format(time.RFC3339Nano), message.AuthorID, scopeMarker(message.Audience, names), tailBody(message.Body))
+		_, writeErr := fmt.Fprintln(stdout, messageLine(message, names))
 		return writeErr
 	})
 	if websocket.CloseStatus(err) == websocket.StatusGoingAway {

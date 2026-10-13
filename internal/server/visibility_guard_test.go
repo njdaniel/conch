@@ -122,13 +122,18 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				switch name {
 				// SearchVisibleMessages (issue #22) is the other visibility
 				// function; it is held to the same reader rule below.
-				case "ListVisibleMessages", "SearchVisibleMessages", "InsertMessage", "InsertMessageV1", "InsertScopedMessage":
+				// ListThreadMessages, ReplyRootMessage and InsertReplyMessage
+				// (issue #25) ask the visibility question about a thread's root
+				// and are held to the same reader rule below.
+				case "ListVisibleMessages", "SearchVisibleMessages", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
+					"InsertMessage", "InsertMessageV1", "InsertScopedMessage":
 				default:
-					t.Errorf("%s: %s calls the store's %s; server code may only use ListVisibleMessages, SearchVisibleMessages and the three inserts", path, fset.Position(x.Pos()), name)
+					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
 					return true
 				}
 			}
-			listsMessages := strings.Contains(name, "Message") &&
+			takesReader := name == "ReplyRootMessage" || name == "InsertReplyMessage" || name == "ListThreadMessages"
+			listsMessages := takesReader || strings.Contains(name, "Message") &&
 				(strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Read") || strings.HasPrefix(name, "Get") ||
 					strings.HasPrefix(name, "Fetch") || strings.HasPrefix(name, "Query") || strings.HasPrefix(name, "Search") ||
 					strings.HasPrefix(name, "Since") || strings.HasPrefix(name, "Recent") ||
@@ -138,7 +143,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			if !listsMessages {
 				return true
 			}
-			if name != "ListVisibleMessages" && name != "SearchVisibleMessages" {
+			if name != "ListVisibleMessages" && name != "SearchVisibleMessages" && !takesReader {
 				// The Client types in internal/cli list over HTTP; nothing under
 				// the walked roots has such a method, so any other is a store read.
 				t.Errorf("%s: %s calls %s; use ListVisibleMessages so the audience filter applies", path, fset.Position(x.Pos()), name)
