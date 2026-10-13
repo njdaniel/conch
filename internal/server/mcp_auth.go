@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -48,6 +50,28 @@ func (s *Server) mcpHandler() http.Handler {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="conch-mcp"`)
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
+		}
+		// A request is held to the size a REST post may be (issue #237).
+		// Without a bound an agent could store a message of any size, which
+		// the server would then hold several times over and send to
+		// subscribers as a frame none of them will read (clients read at most
+		// schema.MaxMessageFrameBytes, sized for a request within this limit).
+		// It is read here, after authentication and never before, so that the
+		// refusal is one stable answer instead of whatever the MCP library
+		// makes of a body that ends early.
+		if r.Method == http.MethodPost && r.Body != nil {
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, schema.MaxPostRequestBytes))
+			if err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+					return
+				}
+				writeError(w, http.StatusBadRequest, "invalid_request", "request body could not be read")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
 		}
 		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpIdentityKey{}, identity)))
 	})
