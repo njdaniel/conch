@@ -121,6 +121,18 @@ that finds an issue not executable removes `agent/todo` along with adding
 `blocked`, so a rewritten issue needs fresh approval before the runner touches
 it again.
 
+`ops/principal-review.sh` (systemd timer, weekly) is the second unattended
+path. It dispatches no issue: `run` starts a headless session that follows the
+`principal-review` skill in its own worktree on `principal-review/YYYY-MM-DD`,
+then commits the one report the session wrote, pushes, opens a PR (`Refs #26`)
+and posts a summary of the report into Conch with `conch send` (`post` does
+that last step alone). It never commits to `main` and never merges. It takes
+the same lock as `conch-agent`, waiting for an issue run to finish rather than
+skipping its week, so the two never work in the repository at once. A failed
+post costs only the post: the report and the PR exist, the script exits 3, and
+the next review posts its own report. `conchd` knows nothing of the timer
+(ADR-002).
+
 ## Authorization boundaries
 
 - **Codex full-auto** disables its approval gate; the user must name that mode
