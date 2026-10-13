@@ -9,6 +9,8 @@ The whole pitch of Conch is one loop (ROADMAP P1 success criterion). This skill 
 
 **Automated:** `go run ./e2e/dogfood` runs this whole loop against real `conchd`/`conch` binaries (the happy path, the ntfy-unreachable degraded path, and a restart path that kills `conchd` between a commit and its notification and checks the next start makes and audits the attempt) and exits nonzero on any assertion failure. CI runs it on every push to `main` and on any PR labeled `approval-path`. The manual steps below are the reference the script encodes — use them if the script itself needs debugging.
 
+**The P2 gate runs this too.** `go run ./e2e/p2-hardening` (issue #81) is the wider release canary: it upgrades a P1 database and drives everything P2 added, then runs `e2e/dogfood` as its last step. Before a release run that one command; run `e2e/dogfood` on its own when you are working on the approval path.
+
 ## The loop under test
 
 1. Start `conchd` fresh (temp SQLite db, test config, ntfy topic pointed at a test topic or a local ntfy container — remember ntfy is *optional*: also verify step 4 still works with ntfy unreachable).
