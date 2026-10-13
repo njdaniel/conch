@@ -81,6 +81,21 @@ func (s *Server) postMessage(
 		return
 	}
 
+	// Attaching a file publishes something only its uploader could read, so
+	// it takes the uploader's own verified credential (issue #23). Two posts
+	// arrive here without one. A webhook posts as its principal without being
+	// that principal: whoever holds the hook's token could otherwise attach
+	// the principal's unattached uploads to a channel-wide message and read
+	// them. And with authentication off the author is whatever the body says.
+	// Neither may attach; the store's "uploaded by the author" check cannot
+	// tell them from the author.
+	if payload != nil && payload.Schema == schema.FileAttachmentV1Name {
+		if _, verified := callerFrom(ctx); !verified {
+			writeError(w, http.StatusBadRequest, errFilesNeedAuth.Code, "attaching a file requires the uploader's own credential")
+			return
+		}
+	}
+
 	if authorID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request", "author_id must be positive")
 		return
@@ -99,6 +114,12 @@ func (s *Server) postMessage(
 	}
 
 	stored, err := s.store.InsertMessageV1(ctx, channel.ID, authorID, body, payload)
+	if errors.Is(err, store.ErrFileAttachment) {
+		// Nothing was stored, and the answer is the same whichever file was
+		// at fault (issue #23).
+		writeError(w, http.StatusBadRequest, errInvalidFileAttachment.Code, errInvalidFileAttachment.Message)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -463,6 +484,8 @@ func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, age
 		return schema.MessageV2{}, nil, &schema.Error{Code: errForbidden.Code, Message: "a monitor of a net may listen but not transmit"}
 	case errors.Is(err, store.ErrInvalidAudience):
 		return schema.MessageV2{}, nil, &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
+	case errors.Is(err, store.ErrFileAttachment):
+		return schema.MessageV2{}, nil, errInvalidFileAttachment
 	case errors.Is(err, store.ErrNotChannelMember):
 		// Removed from the channel after the caller's membership check.
 		return schema.MessageV2{}, nil, errChannelNotFound
@@ -480,7 +503,7 @@ func scopedPostStatus(code string) int {
 		return http.StatusNotFound
 	case errForbidden.Code:
 		return http.StatusForbidden
-	case "invalid_audience":
+	case "invalid_audience", errInvalidFileAttachment.Code:
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

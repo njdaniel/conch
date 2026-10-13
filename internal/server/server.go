@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,10 @@ type Config struct {
 	// configured, Serve looks at LiveKit once at start (the presence
 	// poller's first sweep) without waiting for the answer.
 	LiveKit livekit.Config
+	// MaxUploadBytes is the largest file an upload may carry. Zero or less
+	// disables uploads (fetching existing files still works). conchd defaults
+	// it to DefaultMaxUploadBytes; the zero value here is off.
+	MaxUploadBytes int64
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -92,6 +97,10 @@ type Server struct {
 	limits  agentRateLimiter
 	denials denialCoalescer
 	now     func() time.Time
+	// renameFile moves a finished upload into place. It is os.Rename; tests
+	// replace it to fail the step between the temporary file and the final
+	// name.
+	renameFile func(oldpath, newpath string) error
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -121,7 +130,8 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now, renameFile: os.Rename}
+	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.routes = s.routeTable()
 	s.routeByPattern = make(map[string]route, len(s.routes))

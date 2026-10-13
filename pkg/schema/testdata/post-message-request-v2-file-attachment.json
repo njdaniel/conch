@@ -1,0 +1,12 @@
+{
+  "author_id": 3,
+  "body": "the plan",
+  "payload": {
+    "schema": "conch.file_attachment.v1",
+    "data": {
+      "file_ids": [
+        7
+      ]
+    }
+  }
+}

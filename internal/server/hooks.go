@@ -213,6 +213,16 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a v1 post message object")
 		return
 	}
+	// A hook posts as its principal without being that principal, so it may
+	// not attach files (issue #23): its holder could otherwise publish, and
+	// then read, an upload only the principal could see. postMessage refuses
+	// the same payload for any post without a verified caller; this route is
+	// the one that asserts an author and passes on a payload, so it says no
+	// itself rather than rely on where it happens to hand the request.
+	if post.Payload != nil && post.Payload.Schema == schema.FileAttachmentV1Name {
+		writeError(w, http.StatusBadRequest, errFilesNeedAuth.Code, "a webhook cannot attach files")
+		return
+	}
 	post.AuthorID = hook.PrincipalID
 	normalized, err := json.Marshal(post)
 	if err != nil {
