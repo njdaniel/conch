@@ -79,10 +79,18 @@ func TestMCPRequestSizeLimit(t *testing.T) {
 		channel.ID, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 	const limit = schema.MaxPostRequestBytes
 
+	// A payload carries its bytes in a nested object, not a top-level string.
+	payloadRequest := func(size int) string {
+		const shape = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"post_message","arguments":{"channel":%q,"body":"b","payload":{"schema":"test.thing.v1","data":{"k":"%s"}}}}}`
+		empty := fmt.Sprintf(shape, channel.Name, "")
+		return fmt.Sprintf(shape, channel.Name, strings.Repeat("x", size-len(empty)))
+	}
+
 	over := []struct {
 		name    string
 		request string
 	}{
+		{"post_message, payload one byte over", payloadRequest(limit + 1)},
 		{"post_message, body one byte over", mcpToolCall(t, "post_message", fmt.Sprintf(`"channel":%q`, channel.Name), "body", limit+1)},
 		{"post_message, far over", mcpToolCall(t, "post_message", fmt.Sprintf(`"channel":%q`, channel.Name), "body", 8*limit)},
 		{"request_approval, body one byte over", mcpToolCall(t, "request_approval", approvalArgs, "body", limit+1)},
