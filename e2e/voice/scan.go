@@ -120,3 +120,23 @@ func (p *conchdProc) registerStoreRooms() error {
 	}
 	return nil
 }
+
+// voiceRooms returns the names of the live rooms this conchd has stored for a
+// channel. V4 has one: the channel's own.
+func (p *conchdProc) voiceRooms(channelID int64) ([]string, error) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(p.dataDir, "conch.db"))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = st.Close() }()
+	rooms, err := st.VoiceRoomsForChannel(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rooms))
+	for _, r := range rooms {
+		names = append(names, r.RoomName)
+	}
+	return names, nil
+}
