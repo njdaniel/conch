@@ -51,7 +51,9 @@ expect_refused "delete" "U+007F" '\x7f'
 new_repo
 printf 'x := "\xe2\x80\xae and \xe2\x80\xa8"\n' >"$WORK/repo/two.md"
 git -C "$WORK/repo" add two.md
-out=$("$CHECK" "$WORK/repo" 2>&1) && fail "two characters in one line passed"
+status=0
+out=$("$CHECK" "$WORK/repo" 2>&1) || status=$?
+[ "$status" -eq 1 ] || fail "two characters in one line: exit status $status, want 1; output: $out"
 case "$out" in
     *"U+2028"*"U+202E"*) ;;
     *) fail "two characters in one line are not both named: $out" ;;
@@ -73,8 +75,30 @@ printf '\x00\x01\x02binary\xe2\x80\xae' >"$WORK/repo/blob.bin"
 git -C "$WORK/repo" add blob.bin
 out=$("$CHECK" "$WORK/repo" 2>&1) || fail "an untracked or binary file was refused: $out"
 
-# The check does not depend on the caller's locale: in the C locale git grep
-# refuses a pattern that names code points, so the script sets its own.
+# Awkward paths: a colon, a space and a leading dash in a name must neither
+# hide a file nor be taken for something else.
+new_repo
+mkdir -p "$WORK/repo/dir:with colon"
+printf 'clean\nx := "\xe2\x80\xae"\n' >"$WORK/repo/dir:with colon/a b:c.go"
+printf 'x := "\xe2\x80\xa8"\n' >"$WORK/repo/-dash.go"
+git -C "$WORK/repo" add -- "dir:with colon/a b:c.go" "-dash.go"
+status=0
+out=$("$CHECK" "$WORK/repo" 2>&1) || status=$?
+[ "$status" -eq 1 ] || fail "awkward paths: exit status $status, want 1; output: $out"
+case "$out" in
+    *"dir:with colon/a b:c.go:2: U+202E"*) ;;
+    *) fail "a path with a colon and a space is not reported with its line: $out" ;;
+esac
+case "$out" in
+    *"-dash.go:1: U+2028"*) ;;
+    *) fail "a file name starting with a dash is not reported: $out" ;;
+esac
+
+# An empty repository passes.
+new_repo
+out=$("$CHECK" "$WORK/repo" 2>&1) || fail "an empty repository was refused: $out"
+
+# The check does not depend on the caller's locale.
 new_repo
 printf 'x := "\xe2\x80\xae"\n' >"$WORK/repo/c-locale.go"
 git -C "$WORK/repo" add c-locale.go

@@ -22,48 +22,56 @@
 #
 # Binary files are skipped (git decides what is binary). A text file that must
 # hold such a character goes in ALLOW below, with the reason.
+#
+# It needs git and perl and nothing else: the matching is done in perl, on
+# decoded text, so it does not depend on the caller's locale or on how git was
+# built.
 set -euo pipefail
 
-# The pattern below names code points, which git grep -P reads as such only in
-# a UTF-8 locale; in the C locale it refuses the pattern. Whatever the caller's
-# locale is (a hook run from an editor, a bare CI shell), the check runs in
-# this one.
-export LC_ALL=C.UTF-8
-
-cd "${1:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)}"
+cd -- "${1:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)}"
 
 # Paths (git pathspecs) allowed to contain forbidden characters, each with
 # why. Empty on purpose: add to it only with a reason a reviewer can check.
 ALLOW=()
 
-PATTERN='[\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{2028}\x{2029}\x{0080}-\x{009F}]|[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
-
 pathspec=(.)
-for allowed in "${ALLOW[@]+"${ALLOW[@]}"}"; do
-    pathspec+=(":(exclude)$allowed")
-done
-
-# git grep exits 1 when nothing matches, which is the passing case.
-status=0
-hits=$(git grep -I -n -P "$PATTERN" -- "${pathspec[@]}") || status=$?
-if [ "$status" -gt 1 ]; then
-    echo "invisible-chars: git grep failed: this needs a git built with PCRE and the C.UTF-8 locale" >&2
-    exit 2
+if [ "${#ALLOW[@]}" -gt 0 ]; then
+    for allowed in "${ALLOW[@]}"; do
+        pathspec+=(":(exclude)$allowed")
+    done
 fi
+
+# One line per offending line, "path:line: U+XXXX, U+YYYY"; the line's own
+# text is never printed. git lists the tracked files it does not consider
+# binary (-I; the empty pattern matches every line); perl decodes each as
+# UTF-8 and looks for the characters by code point.
+# shellcheck disable=SC2016  # the dollars are perl's
+SCAN='
+    use strict;
+    use warnings;
+    my $bad = qr/[\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{2028}\x{2029}\x{0080}-\x{009F}\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+    binmode(STDOUT, ":encoding(UTF-8)");
+    for my $file (@ARGV) {
+        open(my $fh, "<:raw", $file) or next;
+        local $/ = "\n";
+        while (my $line = <$fh>) {
+            utf8::decode($line);
+            my %seen;
+            $seen{sprintf("U+%04X", ord($1))}++ while $line =~ /($bad)/g;
+            print "$file:$.: ", join(", ", sort keys %seen), "\n" if %seen;
+        }
+        close($fh);
+    }
+'
+# git grep exits 1 when it lists nothing (an empty repository, or only binary
+# files), which is not a failure here; anything above 1 is.
+hits=$({ git grep -I -l -z -e '' -- "${pathspec[@]}" || [ "$?" -eq 1 ]; } | xargs -0 -r perl -e "$SCAN" --)
 if [ -z "$hits" ]; then
     echo "invisible-chars: OK"
     exit 0
 fi
 
 echo "invisible-chars: forbidden characters in tracked files:" >&2
-# Name each character by code point; the line itself is not echoed raw.
-printf '%s\n' "$hits" | perl -CSD -ne '
-    my ($file, $line, $text) = /^([^:]+):(\d+):(.*)$/s or next;
-    my %seen;
-    while ($text =~ /([\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{2028}\x{2029}\x{0080}-\x{009F}\x00-\x08\x0B\x0C\x0E-\x1F\x7F])/g) {
-        $seen{sprintf("U+%04X", ord($1))}++;
-    }
-    print STDERR "  $file:$line: ", join(", ", sort keys %seen), "\n";
-'
+printf '%s\n' "$hits" | sed 's/^/  /' >&2
 echo "invisible-chars: build such a character by number where a test needs one (see the header of $0)" >&2
 exit 1

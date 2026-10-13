@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check check schema-compat depgate rust-check rust-build hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build hooks-install clean
 
 build:
 	$(GO) build ./...
