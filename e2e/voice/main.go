@@ -159,11 +159,14 @@ func degraded(h *harness) error {
 	if err := notConfigured(h); err != nil {
 		return fmt.Errorf("not configured: %w", err)
 	}
-	// An address nothing listens on: a port that was free a moment ago.
-	dead, err := freeAddr()
+	// An address nothing listens on, and that stays that way: reserved for
+	// the length of this half, so the dogfood run below cannot be given the
+	// port for a listener of its own (issue #245).
+	dead, release, err := deadAddr()
 	if err != nil {
 		return err
 	}
+	defer release()
 	cfg := &livekitSettings{url: "ws://" + dead, key: "voicecheckkey", secret: "voice-check-NOT-FOR-PRODUCTION-" + randHex(24)}
 	h.secret("the LiveKit API secret", cfg.secret)
 	if err := unreachable(h, cfg, "LiveKit is not running"); err != nil {
