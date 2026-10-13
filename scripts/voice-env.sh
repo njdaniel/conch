@@ -16,7 +16,7 @@ _conch_llvm="$_conch_cache/llvm-$CONCH_LLVM_VERSION"
 _conch_deny="$_conch_cache/cargo-deny-$CONCH_DENY_VERSION"
 # What is linked is not the download itself but the copy beside it without its PipeWire
 # stand-ins (scripts/voice-pins.sh says why), in a directory named by its archive's hash.
-_conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG-linked-${CONCH_WEBRTC_LINKED_SHA256:0:12}/linux-x64-release"
+_conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG-linked-$(printf %s "$CONCH_WEBRTC_LINKED_SHA256" | cut -c1-12)/linux-x64-release"
 
 if [ ! -x "$_conch_llvm/bin/clang" ] || [ ! -x "$_conch_deny/cargo-deny" ] || [ ! -f "$_conch_webrtc/webrtc.ninja" ]; then
     echo "voice: FAIL: the pinned clang $CONCH_LLVM_VERSION, cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is not in $_conch_cache; run scripts/voice-toolchain.sh" >&2
@@ -48,7 +48,16 @@ if ! pkg-config --exists libpipewire-0.3 libspa-0.2; then
     echo "voice: FAIL: PipeWire's development headers are not installed (Ubuntu: sudo apt install libpipewire-0.3-dev)" >&2
     return 1 2>/dev/null || exit 1
 fi
-if [ -z "${LIBCLANG_PATH:-}" ] && ! ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1; then
+# One match in either place is enough. (Not `ls` over both patterns: it fails when either
+# one matches nothing, which is the usual case.)
+_conch_libclang=""
+for _conch_file in /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so*; do
+    if [ -e "$_conch_file" ]; then
+        _conch_libclang=$_conch_file
+        break
+    fi
+done
+if [ -z "${LIBCLANG_PATH:-}" ] && [ -z "$_conch_libclang" ]; then
     echo "voice: FAIL: libclang is not installed, and the PipeWire bindings need it (Ubuntu: sudo apt install libclang-dev), or set LIBCLANG_PATH to the directory holding libclang.so" >&2
     return 1 2>/dev/null || exit 1
 fi
@@ -88,4 +97,4 @@ if [ -n "${CARGO_BUILD_BUILD_DIR:-}${CARGO_TARGET_DIR:-}" ]; then
     echo "voice: note: CARGO_BUILD_BUILD_DIR or CARGO_TARGET_DIR is set; make sure no other checkout builds into the same directory" >&2
 fi
 
-unset _conch_cache _conch_llvm _conch_deny _conch_webrtc _conch_gcc _conch_dir
+unset _conch_cache _conch_llvm _conch_deny _conch_webrtc _conch_gcc _conch_dir _conch_libclang _conch_file

@@ -4,7 +4,8 @@
 //! Input: the command line; the configuration file `$XDG_CONFIG_HOME/conch/voice.toml`;
 //! `CONCH_SERVER` and `CONCH_TOKEN`, or the login `conch login` stored; `conchd`'s answers
 //! (voice sessions, the presence socket); the audio and events of the channel's LiveKit
-//! room; the configured keyboard's event device, for the talk, mute and deafen keys and
+//! room; the microphone PipeWire has, or the one `audio.input` names, captured only while a
+//! session that may publish is joined ([`audio`]); the configured keyboard's event device, for the talk, mute and deafen keys and
 //! nothing else ([`keydev`]); and standard input, one command per line, `down`, `up`,
 //! `mute`, `deafen`, `quit`, where the end of input counts as `up`, and then as `quit`
 //! unless a key device is watched.
@@ -14,7 +15,8 @@
 //! `{`, because libwebrtc prints one of its own on a machine with an NVIDIA GPU). On
 //! standard error, log records and the one line that says why the client stopped. To
 //! `conchd`, a transmit report for each press and release. To LiveKit, a microphone track
-//! that carries audio only while the transmit gate is open. No join token, room name or
+//! that carries audio only while the transmit gate is open. To the output PipeWire has, or
+//! the one `audio.output` names, the mix of what the channel's speakers say ([`audio`]). No join token, room name or
 //! login token is in anything this program writes, and nothing it does waits for what it
 //! writes to be read.
 //!

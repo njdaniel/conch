@@ -390,56 +390,9 @@ impl std::fmt::Debug for PipeWireSpeakers {
     }
 }
 
-/// What a name in the configuration amounts to, against what PipeWire lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Selection {
-    /// PipeWire's default; the name is the one it has now, if it has one.
-    Default(Option<String>),
-    /// A device by name, and whether it is listed now.
-    Named {
-        /// The `node.name`.
-        name: String,
-        /// Whether it is in the list now.
-        present: bool,
-    },
-}
-
-fn named(configured: Option<&str>) -> Option<&str> {
-    match configured.map(str::trim) {
-        None | Some("" | "default") => None,
-        Some(name) => Some(name),
-    }
-}
-
-/// What `audio.input` selects, among the microphones in `table`.
-#[must_use]
-pub fn select_input(configured: Option<&str>, table: &NodeTable) -> Selection {
-    match named(configured) {
-        None => Selection::Default(table.default_capture().map(|node| node.name.clone())),
-        Some(name) => Selection::Named {
-            present: table.sources().any(|node| node.name == name),
-            name: name.to_owned(),
-        },
-    }
-}
-
-/// What `audio.output` selects, among the speakers in `table`.
-#[must_use]
-pub fn select_output(configured: Option<&str>, table: &NodeTable) -> Selection {
-    match named(configured) {
-        None => Selection::Default(table.default_playback().map(|node| node.name.clone())),
-        Some(name) => Selection::Named {
-            present: table.sinks().any(|node| node.name == name),
-            name: name.to_owned(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-
-    use dmn_audio::RegistryEvent;
 
     use super::*;
 
@@ -689,84 +642,5 @@ mod tests {
         let ring_samples = |ms: u32| (SAMPLE_RATE * ms / 1000) as usize;
         assert!(MAX_QUEUED + (PRIME_FRAMES + 1) * FRAME_LEN <= ring_samples(PLAYBACK_RING_MS));
         assert!(MAX_BACKLOG < ring_samples(CAPTURE_RING_MS));
-    }
-
-    fn table(events: Vec<RegistryEvent>) -> NodeTable {
-        let mut table = NodeTable::default();
-        for event in events {
-            table.apply(event);
-        }
-        table
-    }
-
-    fn node(id: u32, class: &str, name: &str) -> RegistryEvent {
-        RegistryEvent::Added {
-            id,
-            props: vec![
-                ("media.class".to_owned(), class.to_owned()),
-                ("node.name".to_owned(), name.to_owned()),
-            ],
-        }
-    }
-
-    #[test]
-    fn a_name_is_looked_for_among_the_right_kind_of_device() {
-        let table = table(vec![
-            node(1, "Audio/Source", "alsa_input.usb-headset"),
-            node(2, "Audio/Source", "alsa_input.builtin"),
-            node(3, "Audio/Sink", "alsa_output.usb-headset"),
-            RegistryEvent::DefaultSource(Some("alsa_input.builtin".to_owned())),
-            RegistryEvent::DefaultSink(Some("alsa_output.usb-headset".to_owned())),
-            RegistryEvent::Synced,
-        ]);
-        let named = |name: &str, present| Selection::Named {
-            name: name.to_owned(),
-            present,
-        };
-        assert_eq!(
-            select_input(None, &table),
-            Selection::Default(Some("alsa_input.builtin".to_owned()))
-        );
-        assert_eq!(
-            select_output(None, &table),
-            Selection::Default(Some("alsa_output.usb-headset".to_owned()))
-        );
-        // `default` and an empty name are PipeWire's default, as `dmn-audio` takes them.
-        assert_eq!(
-            select_input(Some("default"), &table),
-            select_input(None, &table)
-        );
-        assert_eq!(select_input(Some(" "), &table), select_input(None, &table));
-        assert_eq!(
-            select_input(Some("alsa_input.usb-headset"), &table),
-            named("alsa_input.usb-headset", true)
-        );
-        // A speaker is not a microphone, and the other way round.
-        assert_eq!(
-            select_input(Some("alsa_output.usb-headset"), &table),
-            named("alsa_output.usb-headset", false)
-        );
-        assert_eq!(
-            select_output(Some("alsa_input.usb-headset"), &table),
-            named("alsa_input.usb-headset", false)
-        );
-        assert_eq!(
-            select_output(Some("alsa_output.usb-headset"), &table),
-            named("alsa_output.usb-headset", true)
-        );
-        // Unplugged: no longer present.
-        let mut table = table;
-        table.apply(RegistryEvent::Removed(1));
-        assert_eq!(
-            select_input(Some("alsa_input.usb-headset"), &table),
-            named("alsa_input.usb-headset", false)
-        );
-    }
-
-    #[test]
-    fn a_default_that_is_not_listed_is_no_name() {
-        let table = table(vec![RegistryEvent::Synced]);
-        assert_eq!(select_input(None, &table), Selection::Default(None));
-        assert_eq!(select_output(None, &table), Selection::Default(None));
     }
 }
