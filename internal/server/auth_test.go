@@ -182,6 +182,9 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
 	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
 	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
+	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
+	// audit count below is unaffected by a route that audits every success.
+	"GET /v1/audit": {classOp, "/v1/audit?limit=0", "", 400},
 }
 
 func routeMethod(pattern string) string {

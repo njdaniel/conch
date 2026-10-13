@@ -208,6 +208,8 @@ On a machine you share, a header given with `-H "..."` is visible in the process
 
 A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. Other operator actions: `DELETE /v1/credentials/{id}` revokes one credential, `POST /v1/credentials/{id}/rotate` replaces one, `POST /v1/principals/{id}/disable` switches a principal off entirely (and `/enable` back on), and `DELETE /v1/channels/{channel}/members/{id}` removes a member.
 
+**Audit export.** An operator can read the audit trail as JSON Lines: `GET /v1/audit?after=<id>&limit=<n>` (both optional) streams one `conch.audit_event.v1` object per line, in ascending id order, `Content-Type: application/x-ndjson`, up to the last event at the moment the request started. To follow on, pass the last id you received as `after`. The trail names every principal and every refusal, so no one but an operator can read any of it, and each export is itself recorded as an `audit_exported` event (naming the caller and the range) that is not part of that export. `conch audit export [--after N] [--limit N]` writes the same lines to standard output unchanged: `conch audit export > audit.jsonl`.
+
 ### 4. Human side: `conch`
 
 Each person signs in once with the token the operator gave them. The token is read from stdin and stored under your user config directory, readable only by you:

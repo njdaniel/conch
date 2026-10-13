@@ -1,0 +1,9 @@
+{
+  "schema": "conch.audit_event.v1",
+  "id": 43,
+  "actor": "system",
+  "action": "audit_exported",
+  "subject": "",
+  "detail": "",
+  "created_at": "2026-10-12T18:00:01.250Z"
+}
