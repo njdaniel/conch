@@ -17,6 +17,11 @@
 //     an outsider is refused, a removed member loses the room (rotation, #161),
 //     a member who was never issued a session rotates nothing, and LiveKit is
 //     stopped. LiveKit itself is asked for ground truth throughout.
+//   - Within the live half, the V4 scenario (issue #188, clients.go): three
+//     real conch-voice processes with tones for microphones talk in one
+//     channel. It builds conch-voice with the pinned Rust toolchain
+//     (scripts/voice-toolchain.sh); without that toolchain the scenario alone
+//     is skipped, and the last line says so.
 //
 // Also checked throughout: the join token's own claims (claims.go); that no
 // token, secret or room name appears in anything conchd sends to a client
@@ -24,8 +29,8 @@
 // audit log, in lk's output or in this program's (scan.go).
 //
 // With no Docker, or no network to pull the image or lk, the live half is
-// skipped with one line and the program exits 0, unless CI is set: then a skip
-// is a failure. An image or lk that is not the pinned one fails everywhere. It
+// skipped with one line and the program exits 0, unless CI is set: then any
+// skip is a failure. An image or lk that is not the pinned one fails everywhere. It
 // prints one "voice-check: PASS" line when everything ran. A SIGINT or SIGTERM
 // stops the run and removes what it started.
 package main
@@ -89,7 +94,7 @@ func realMain() int {
 		fmt.Fprintln(os.Stderr, "voice-check: FAIL:", h.redact(err.Error()))
 		return 1
 	case skipped != "":
-		fmt.Printf("voice-check: SKIPPED the live half (%s); the degraded half passed in %s\n", skipped, time.Since(start).Round(time.Second))
+		fmt.Printf("voice-check: SKIPPED %s; everything else passed in %s\n", skipped, time.Since(start).Round(time.Second))
 		return 0
 	}
 	fmt.Printf("voice-check: PASS in %s\n", time.Since(start).Round(time.Second))
@@ -135,10 +140,13 @@ func run(ctx context.Context, h *harness) (skipped string, err error) {
 		if inCI() {
 			return "", fmt.Errorf("live half cannot run in CI: %s", reason)
 		}
-		return reason, nil
+		return "the live half: " + reason, nil
 	}
 	if err := lv.run(ctx); err != nil {
 		return "", fmt.Errorf("live half: %w", err)
+	}
+	if lv.voiceSkip != "" {
+		return "the conch-voice scenario: " + lv.voiceSkip, nil
 	}
 	return "", nil
 }
@@ -277,6 +285,8 @@ type live struct {
 	d     *conchdProc
 	lkBin string
 	ogg   string
+	// The conch-voice binary, or why this machine could not build it.
+	voiceBin, voiceSkip string
 
 	// Set by the first scenario, used by the later ones.
 	alice, bob, carol *person
@@ -332,7 +342,14 @@ func prepareLive(ctx context.Context, h *harness) (*live, string, error) {
 	if err := writeSilentOpus(ogg, 900); err != nil {
 		return nil, "", err
 	}
-	return &live{h: h, lkBin: lkBin, ogg: ogg}, "", nil
+	voiceBin, voiceSkip, err := h.buildVoiceClient()
+	if err != nil {
+		return nil, "", err
+	}
+	if voiceSkip != "" && inCI() {
+		return nil, "", fmt.Errorf("the conch-voice scenario cannot run in CI: %s", voiceSkip)
+	}
+	return &live{h: h, lkBin: lkBin, ogg: ogg, voiceBin: voiceBin, voiceSkip: voiceSkip}, "", nil
 }
 
 // looksOffline reports whether a failed pull is about reaching the registry,
@@ -385,6 +402,7 @@ func (l *live) run(ctx context.Context) error {
 		{"other ways of losing the room", l.rotationScenario},
 		{"never issued", l.neverIssued},
 		{"credential expiring by itself", l.credentialExpires},
+		{"conch-voice clients", l.voiceClients},
 		{"LiveKit down", l.liveKitDown},
 	}
 	for _, s := range steps {

@@ -18,14 +18,19 @@ import (
 // message nobody was left to read; Run then waited for the handler for ever
 // (issue #192).
 //
+// mouse turns on mouse reporting: a click selects and the wheel scrolls. The
+// terminal then keeps its own click-and-drag text selection for itself unless
+// Shift is held, which is why callers can turn it off (CONCH_MOUSE=0). The
+// mouse is only ever an addition to the keyboard.
+//
 // Being asked to stop is not a failure: once ctx has ended Run restores the
 // terminal and returns nil, as it does when the user quits with a key.
-func Run(ctx context.Context, api API, authorID int64, authenticated bool, channels []string, input io.Reader, output io.Writer) error {
+func Run(ctx context.Context, api API, authorID int64, authenticated bool, channels []string, mouse bool, input io.Reader, output io.Writer) error {
 	model := NewModel(ctx, api, authorID, channels)
 	if authenticated {
 		model = model.WithCredential()
 	}
-	_, err := tea.NewProgram(model, tea.WithContext(ctx), tea.WithoutSignalHandler(), tea.WithInput(input), tea.WithOutput(output), tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(model, programOptions(ctx, input, output, mouse)...).Run()
 	if cause := ctx.Err(); cause != nil && errors.Is(err, cause) {
 		// Bubble Tea reports the end of its context as "program was killed:
 		// context canceled". A panic in the program is reported differently and
@@ -33,4 +38,14 @@ func Run(ctx context.Context, api API, authorID int64, authenticated bool, chann
 		return nil
 	}
 	return err
+}
+
+// programOptions is how Run starts Bubble Tea. Mouse reporting is the only
+// part that depends on mouse.
+func programOptions(ctx context.Context, input io.Reader, output io.Writer, mouse bool) []tea.ProgramOption {
+	options := []tea.ProgramOption{tea.WithContext(ctx), tea.WithoutSignalHandler(), tea.WithInput(input), tea.WithOutput(output), tea.WithAltScreen()}
+	if mouse {
+		options = append(options, tea.WithMouseCellMotion())
+	}
+	return options
 }
