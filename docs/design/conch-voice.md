@@ -6,7 +6,7 @@
 - **Issues:** epic #176, this note #175. Slices: workspace #177, SDK measurements #178, schema #179, server #135, the three library crates #180 to #182, the binary #183, devices #184, keys #185, echo #186, TUI #187, end-to-end #188, exit #189.
 - **Evidence:** the V0 spike report (`docs/reports/2026-10-05-voice-spike.md`, PR #88) and voice-control-plane.md §10.
 
-The ADRs decide that voice has one native client, `conch-voice`: a Rust binary under `voice/`, a client of the public API, Linux with PipeWire, built on LiveKit's Rust SDK and on `dmn-audio` from `njdaniel/daemon`. This note says how it is built and how it behaves. It covers the client and the one server addition the client needs (transmit reports, §6).
+The ADRs decide that voice has one native client, `conch-voice`: a Rust binary under `voice/`, a client of the public API, Linux with PipeWire, built on LiveKit's Rust SDK and on `dmn-audio` (written in `njdaniel/daemon`, and since 2026-10-13 its own public repository, §9). This note says how it is built and how it behaves. It covers the client and the one server addition the client needs (transmit reports, §6).
 
 ## 1. What V4 ships, and what it does not
 
