@@ -30,7 +30,7 @@ import (
 //
 // This is the only place the policy lives. The MCP tools reach channels and
 // approvals only through agentScope, and the REST/WebSocket handlers call
-// agentManifestAllows for agent callers, so no path acts for an agent
+// agentManifestCheck for agent callers, so no path acts for an agent
 // principal without passing through it.
 
 // Denial reasons recorded in the audit log.
@@ -81,6 +81,13 @@ func (s *Server) auditAgentDenial(ctx context.Context, principalID int64, subjec
 	detail := fmt.Sprintf("capability=%s target=%s reason=%s", named, target, reason)
 	// The caller may already be gone; the denial must still be recorded.
 	actx := context.WithoutCancel(ctx)
+	// Repeated identical denials from one principal are thinned out; the
+	// first of each kind is written at once (issue #80, denialCoalescer).
+	write, count := s.denials.admit(principalID, subject+"|"+detail, s.now())
+	if !write {
+		return
+	}
+	detail = denialDetail(detail, count)
 	if _, err := s.store.AppendAuditEvent(actx, fmt.Sprintf("principal:%d", principalID), "access_denied", subject, detail); err != nil {
 		slog.ErrorContext(actx, "authz: audit access_denied failed", "principal", principalID, "error", err)
 	}
@@ -103,15 +110,19 @@ func (s *Server) agentManifest(ctx context.Context, principalID int64) (schema.A
 	}
 }
 
-// agentManifestAllows is the manifest gate alone: does the agent's manifest
+// agentManifestCheck is the manifest gate alone: does the agent's manifest
 // grant capability, and permission in channel channelID? Denials are audited
 // under subject. A store failure is reported as an error and is not an allow.
 // The channel is required: a caller with no channel to name is refused rather
 // than checked on capability alone.
-func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, subject string, capability schema.Capability, channelID int64, permission schema.ChannelPermission) (bool, error) {
+//
+// It also returns the manifest it decided on, so the caller can spend the rate
+// limit from the same read (issue #80). Every caller does: a check that is not
+// followed by spendAgentBudget is a way round the agent's limit.
+func (s *Server) agentManifestCheck(ctx context.Context, principalID int64, subject string, capability schema.Capability, channelID int64, permission schema.ChannelPermission) (schema.AgentManifestV1, bool, error) {
 	m, reason, err := s.agentManifest(ctx, principalID)
 	if err != nil {
-		return false, err
+		return schema.AgentManifestV1{}, false, err
 	}
 	switch {
 	case reason != "":
@@ -125,9 +136,9 @@ func (s *Server) agentManifestAllows(ctx context.Context, principalID int64, sub
 	}
 	if reason != "" {
 		s.auditAgentDenial(ctx, principalID, subject, capability, channelID, reason)
-		return false, nil
+		return schema.AgentManifestV1{}, false, nil
 	}
-	return true, nil
+	return m, true, nil
 }
 
 // isAudiencePermission reports whether permission grants an audience for a
@@ -153,6 +164,10 @@ type agentScope struct {
 	tool       string
 	capability schema.Capability
 	manifest   schema.AgentManifestV1
+	// spent says this call has already used its rate-limit budget. A scope is
+	// one tool call, and await_decision looks the approval up on every poll;
+	// the call is one use, not one per poll.
+	spent bool
 }
 
 // newAgentScope checks the capability gate for tool: the tool must be mapped
@@ -225,6 +240,19 @@ func (a *agentScope) channel(ctx context.Context, channel store.Channel, permiss
 		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyChannelPermission)
 		return errForbidden
 	}
+	return a.spend(ctx)
+}
+
+// spend uses one of the call's budget once both gates have allowed it, so a
+// refused call never costs anything (issue #80).
+func (a *agentScope) spend(ctx context.Context) *schema.Error {
+	if a.spent {
+		return nil
+	}
+	if limited := a.s.spendAgentBudget(ctx, a.identity.principalID, a.subject, a.manifest, a.capability); limited != nil {
+		return limited.schemaError()
+	}
+	a.spent = true
 	return nil
 }
 
@@ -358,6 +386,10 @@ func (a *agentScope) channelForAudience(ctx context.Context, name string, aud sc
 	// can turn them off.
 	agent := store.Principal{ID: a.identity.principalID, Kind: store.PrincipalAgent}
 	allowed, err := a.s.authorizeScopedPost(ctx, agent, a.subject, channel.ID, aud)
+	var limited *rateLimitedError
+	if errors.As(err, &limited) {
+		return nil, limited.schemaError()
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: authorize scoped post failed", "error", err)
 		return nil, errInternal
@@ -439,7 +471,7 @@ func (s *Server) agentCallerAllowed(w http.ResponseWriter, r *http.Request, capa
 	if subject == "" {
 		subject = "<unmatched>"
 	}
-	allowed, err := s.agentManifestAllows(r.Context(), caller.ID, subject, capability, channelID, permission)
+	m, allowed, err := s.agentManifestCheck(r.Context(), caller.ID, subject, capability, channelID, permission)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "authz: load manifest failed", "principal", caller.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, errInternal.Code, errInternal.Message)
@@ -447,6 +479,11 @@ func (s *Server) agentCallerAllowed(w http.ResponseWriter, r *http.Request, capa
 	}
 	if !allowed {
 		writeError(w, http.StatusForbidden, errForbidden.Code, errForbidden.Message)
+		return false
+	}
+	// Last, so only a call every gate allowed uses budget (issue #80).
+	if limited := s.spendAgentBudget(r.Context(), caller.ID, subject, m, capability); limited != nil {
+		writeRateLimited(w, limited)
 		return false
 	}
 	return true
@@ -468,16 +505,34 @@ func (s *Server) authorizeScopedPost(ctx context.Context, caller store.Principal
 	if caller.Kind != store.PrincipalAgent {
 		return true, nil
 	}
+	m, allowed, err := s.authorizeScopedPostGates(ctx, caller, subject, channelID, aud)
+	if err != nil || !allowed {
+		return false, err
+	}
+	// Once, and last: a post that any gate refused costs no budget, and the
+	// manifest checks above are one post, not several uses (issue #80). The
+	// rate limit is returned as the error, a *rateLimitedError, for callers to
+	// answer 429.
+	if limited := s.spendAgentBudget(ctx, caller.ID, subject, m, schema.CapabilityMessagesPost); limited != nil {
+		return false, limited
+	}
+	return true, nil
+}
+
+// authorizeScopedPostGates is the manifest and roster part of
+// authorizeScopedPost, for an agent caller. It returns the manifest it decided
+// on.
+func (s *Server) authorizeScopedPostGates(ctx context.Context, caller store.Principal, subject string, channelID int64, aud schema.Audience) (schema.AgentManifestV1, bool, error) {
 	needed := schema.ChannelPermissionPostNet
 	if aud.Kind == schema.AudienceKindPrincipals {
 		needed = schema.ChannelPermissionWhisper
 	}
-	allowed, err := s.agentManifestAllows(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, needed)
+	m, allowed, err := s.agentManifestCheck(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, needed)
 	if err != nil || !allowed {
-		return false, err
+		return schema.AgentManifestV1{}, false, err
 	}
 	if aud.Kind != schema.AudienceKindPrincipals {
-		return true, nil
+		return m, true, nil
 	}
 	for _, id := range aud.PrincipalIDs {
 		if id == caller.ID {
@@ -492,7 +547,7 @@ func (s *Server) authorizeScopedPost(ctx context.Context, caller store.Principal
 		// agents, for principals it shares no channel with.
 		member, err := s.store.IsChannelMember(ctx, channelID, id)
 		if err != nil {
-			return false, err
+			return schema.AgentManifestV1{}, false, err
 		}
 		if !member {
 			continue
@@ -502,13 +557,13 @@ func (s *Server) authorizeScopedPost(ctx context.Context, caller store.Principal
 			continue
 		}
 		if err != nil {
-			return false, err
+			return schema.AgentManifestV1{}, false, err
 		}
 		if target.Kind == store.PrincipalAgent {
-			return s.agentManifestAllows(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, schema.ChannelPermissionWhisperAgent)
+			return s.agentManifestCheck(ctx, caller.ID, subject, schema.CapabilityMessagesPost, channelID, schema.ChannelPermissionWhisperAgent)
 		}
 	}
-	return true, nil
+	return m, true, nil
 }
 
 // agentReadAllowed reports whether manifest m lets an agent read channelID.

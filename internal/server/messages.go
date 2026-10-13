@@ -334,6 +334,11 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 	}
 	audience := req.Audience.Normalize(req.AuthorID)
 	allowed, err := s.authorizeScopedPost(ctx, caller, r.Pattern, channel.ID, audience)
+	var limited *rateLimitedError
+	if errors.As(err, &limited) {
+		writeRateLimited(w, limited)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: authorize scoped post failed", "error", err)
 		writeInternalError(w)
