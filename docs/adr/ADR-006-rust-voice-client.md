@@ -4,6 +4,7 @@
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #84 · **Amends:** [ADR-000](ADR-000-charter.md) D1
+- **Amended 2026-10-13** (#251, Nick's decision): `dmn-audio` comes from its own public repository. The dependency line and the last-but-one consequence below carry the change.
 
 ## Context
 
@@ -18,7 +19,7 @@ Voice ([ADR-004](ADR-004-voice-via-livekit.md)) needs a native client: low-laten
 - `conch-voice` lives in this repo under `voice/` as its own Cargo workspace.
 - It is a client of the public REST/WS API (D6). It gets no private server surface.
 - **Schema-first holds** (D8): its wire types are checked in CI against the golden fixtures in `pkg/schema/testdata`. `pkg/schema` stays the single source of truth.
-- **Dependencies:** a Rust allowlist enforced by `cargo-deny`, mirroring `deps-allowlist.txt` and `scripts/depgate.sh`. New crates need Nick's sign-off. `dmn-audio` is a git dependency pinned to a commit.
+- **Dependencies:** a Rust allowlist enforced by `cargo-deny`, mirroring `deps-allowlist.txt` and `scripts/depgate.sh`. New crates need Nick's sign-off. `dmn-audio` is a git dependency pinned to a commit of its own public repository, [`njdaniel/dmn-audio`](https://github.com/njdaniel/dmn-audio) (*amended 2026-10-13*; as accepted, this line did not say where the crate lived).
 - **Platform:** Linux with PipeWire. Other platforms need a different audio layer and a later decision.
 - `make check` gains a Rust leg (fmt, clippy, test, deny) once `voice/` exists.
 
@@ -28,5 +29,5 @@ Voice ([ADR-004](ADR-004-voice-via-livekit.md)) needs a native client: low-laten
 - **Build toolchain (spike finding):** the LiveKit SDK's prebuilt libwebrtc requires clang 21 or newer. Ubuntu/Pop!_OS 24.04 ships 18 and packages at most 20, so CI will install a pinned LLVM release (cached) and the repo will document the same step. This is a standing cost for anyone building `voice/`; it does not affect building `conchd` or `conch`.
 - The spike bypassed `dmn-audio` (it piped `pw-record`/`pw-play`), so integrating it remains unproven V4 work.
 - The deployment invariant (D3) is unaffected: text, approvals, and audit need neither `conch-voice` nor LiveKit.
-- Conch is coupled to `daemon`'s `dmn-audio`, which must first gain a configurable sample rate and an output stream. If both projects keep changing it, extract it to its own repo.
+- Conch is coupled to `dmn-audio`, which must first gain a configurable sample rate and an output stream. *Amended 2026-10-13:* as accepted, this read "coupled to `daemon`'s `dmn-audio` … If both projects keep changing it, extract it to its own repo." The extraction came first and for a different reason: `daemon` is a private repository and Conch is public, so the dependency could not be fetched by CI or by anyone building from a public checkout. The crate now lives in `njdaniel/dmn-audio` (MIT), extracted unchanged from `daemon` commit `360d613`, and the two additions are made there.
 - CLAUDE.md rule 6 ("Idiomatic Go") and the worker agent definitions need Rust counterparts when the crate lands.

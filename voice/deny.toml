@@ -14,7 +14,8 @@ all-features = true
 [sources]
 # Every crate comes from crates.io. A git or other-registry source fails; the
 # one planned exception (dmn-audio, docs/design/conch-voice.md §9) is added
-# here, by exact URL, when Nick has decided where it lives.
+# here, by exact URL (https://github.com/njdaniel/dmn-audio, ADR-006 as
+# amended), with the dependency itself in issue #184.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
