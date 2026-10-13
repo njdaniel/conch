@@ -13,6 +13,11 @@ via LiveKit, never bespoke WebRTC.
 > the numbered phases — see [its section](#parallel-track--nets-and-voice-v0v6). It pulls
 > P2 auth and multi-human access forward and starts voice before P8.
 
+> **Amended 2026-10-13 (ADR-007, #259):** P3's first slice is a **local multi-client
+> prototype**: two terminal clients, a small read/write browser client and two scripted
+> agents on one server. See the P3 section and the plan on
+> [#260](https://github.com/njdaniel/conch/issues/260).
+
 > **Amended 2026-10-13:** **P2 is done** (#253). Its exit gate, `go run ./e2e/p2-hardening`
 > (#81), runs on every pull request. Password login and OIDC (#24) did not ship in it and
 > move to P7; see the P2 paragraph. P3 is next among the numbered phases.
@@ -82,12 +87,12 @@ Two things this paragraph used to list did not ship here:
 
 ## The long arc
 
-> **Proposed client/P3 amendment (2026-10-13, #259):**
-> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the UI planning direction
-> and proposes a small read/write browser prototype alongside the TUI at P3.
-> Acceptance is pending review; the [P3 local prototype brief](docs/design/p3-local-prototype.md)
-> defines the next planning target, not functionality shipped by this document.
-> No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
+> **Client/P3 amendment (2026-10-13, #259):**
+> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the client stack and adds a
+> small read/write browser prototype alongside the TUI at P3. The
+> [P3 local prototype brief](docs/design/p3-local-prototype.md) and the plan on
+> [#260](https://github.com/njdaniel/conch/issues/260) define the work; none of it is
+> built yet. No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
 
 ### P3 — Agent presence & runs 🎯 *next*
 Make agents visible, first-class **workspace members**, not just participants that read
@@ -125,7 +130,7 @@ Ships:
   agents.
 - **Intervention capabilities**, declared per adapter: message / cancel / pause / resume.
 
-> **First local prototype — proposed in ADR-007:** register + heartbeat + status,
+> **First local prototype (ADR-007):** register + heartbeat + status,
 > basic runs/activity, TUI and minimal browser lobby/chat/agent views, two scripted
 > agents and one opt-in real adapter. Nick can connect from two isolated TUI clients
 > and a browser at once, then repeat with multiple sessions of one identity.
@@ -138,7 +143,7 @@ Ships:
 > running simultaneously, sees what each is doing, opens each activity stream, and sends
 > an instruction to one — without switching terminals.
 
-*Deployment: dependency-free core, local, Nick + his agents in the TUI; proposed
+*Deployment: dependency-free core, local, Nick + his agents in the TUI;
 ADR-007 adds a statically served browser prototype without a required Node service.
 LiveKit remains optional for the parallel voice track.*
 
@@ -147,8 +152,8 @@ LiveKit remains optional for the parallel voice track.*
 > read-only dashboard GUI over the existing API may be built *whenever it earns its
 > place* — as early as alongside P3 — and is deliberately **decoupled** from the
 > Slack-style multi-human GUI in P7. The TUI stays first-class for ops and approvals.
-> **Proposed extension:** ADR-007 broadens this early GUI allowance to the bounded
-> read/write local prototype above; it supersedes the read-only limit only on acceptance.
+> **Extended by ADR-007:** the early GUI allowance now covers the bounded read/write
+> local prototype above, and no more than that.
 
 ### Parallel track — nets and voice (V0–V6)
 
@@ -244,10 +249,11 @@ happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 ### P7 — Small-team multi-human + Slack-style GUI ⚠️ *charter amendment*
 
-The proposed ADR-007 brings the shared React foundation and a limited browser
-lobby/chat/agent view into P3. P7 still owns the full small-team GUI and social /
+ADR-007 brings the shared React foundation and a limited browser lobby/chat/agent
+view into P3, and with it a basic online / stale / offline roster for people as well
+as agents. P7 still owns the full small-team GUI, presence preferences and social /
 onboarding polish; an early prototype is not completion of this phase. Electron
-is the proposed desktop shell, sharing browser UI; platform release scope and
+is the chosen desktop shell, sharing browser UI; platform release scope and
 native media/input support need their own measured implementation work.
 
 Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 adds what
@@ -294,7 +300,7 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | Phase | Focus | Deployment |
 | ----- | ----- | ---------- |
 | P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
-| **P3** | **Agent presence, sessions, runs, activity, adapters**; proposed local multi-client prototype | Core, local, TUI + minimal browser under proposed ADR-007 |
+| **P3** | **Agent presence, sessions, runs, activity, adapters**; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
 | **P4** | **Assemblies / floor-controlled multi-agent rooms** | Core, local, solo+agents |
 | **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |

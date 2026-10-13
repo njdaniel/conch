@@ -5,7 +5,7 @@ conversation and the follow-up client-design conversation on 2026-10-13.
 Collected for implementation reference.
 
 Behavior is specified in [client experience](../client-experience.md); scope and
-stack are in [proposed ADR-007](../../adr/ADR-007-client-interfaces.md).
+stack are in [ADR-007](../../adr/ADR-007-client-interfaces.md).
 The [P3 planning brief](../p3-local-prototype.md) selects the initial prototype subset.
 These are visual targets, not screenshots of working features. Accepted ADRs and
 the project roadmap remain authoritative for architecture and delivery scope.

@@ -1,10 +1,10 @@
 # ADR-007: Client interfaces and a local multi-client P3 prototype
 
-- **Status:** Proposed — selected planning direction, pending Nick's acceptance of this text
+- **Status:** Accepted (Nick, with the merge of #261)
 - **Date:** 2026-10-13
 - **Decider:** Nick (Tier-H)
 - **Proposal:** [#259](https://github.com/njdaniel/conch/issues/259)
-- **Amends on acceptance:** ADR-000's early-GUI non-goal and D1/D5 client scope;
+- **Amends:** ADR-000's early-GUI non-goal and D1/D5 client scope;
   the P3/P7 boundary in ROADMAP.md. Extends ADR-006's client lifecycle without
   changing its Linux/PipeWire implementation or silently approving other audio backends.
 
@@ -21,7 +21,7 @@ narrow for this concrete P3 interoperability test: the browser must participate
 in chat and expose agent activity. A bounded prototype can establish the shared
 UI foundation without pulling every P7 or media feature into P3.
 
-## Decision proposed for acceptance
+## Decision
 
 | Surface | Stack / boundary | Scope |
 | --- | --- | --- |
@@ -131,8 +131,11 @@ when implementation starts.
 
 ## Acceptance record
 
-Nick authorized adding the discussed stack, UX and P3 local prototype direction
-on 2026-10-13. This text remains Proposed for review; recording a proposed ADR or
-merging its documentation alone must not be presented as implemented functionality.
-On acceptance, record the decision/PR and update the linked charter/roadmap status
-together. Dependency pins, wire changes and media release gates remain separate.
+Nick authorized the stack, UX and P3 local prototype direction on 2026-10-13. The
+same day he approved the P3 plan built on this ADR, with its eleven decisions, on
+[#260](https://github.com/njdaniel/conch/issues/260). This text is accepted by the
+merge of #261, made on his instruction; the charter and roadmap were updated in the
+same pull request.
+
+Accepting this ADR does not mean any of it is built. Dependency pins, wire changes
+and media release gates remain separate decisions, each signed off where it lands.

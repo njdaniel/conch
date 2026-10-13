@@ -1,10 +1,10 @@
 # P3 planning brief: a local multi-client prototype
 
-**Status:** Input to the next planning session; no commands or prototype claimed built.
-**Next session:** [P3 planning issue #260](https://github.com/njdaniel/conch/issues/260).
+**Status:** Planning brief; no commands or prototype claimed built. The plan made from it is on #260.
+**Plan:** [P3 planning issue #260](https://github.com/njdaniel/conch/issues/260).
 **Owner request:** Nick, 2026-10-13: test on his computer with multiple TUI clients,
 a browser, and AI or VM participants.
-**Decision:** [ADR-007](../adr/ADR-007-client-interfaces.md), proposed.
+**Decision:** [ADR-007](../adr/ADR-007-client-interfaces.md).
 **Behavior:** [client experience](client-experience.md).
 
 ## 1. Outcome

@@ -1,7 +1,7 @@
 # Conch client experience
 
 **Status:** Design specification for planning, 2026-10-13; not a feature inventory.
-**Architecture:** [ADR-007](../adr/ADR-007-client-interfaces.md), proposed in #259.
+**Architecture:** [ADR-007](../adr/ADR-007-client-interfaces.md) (#259).
 **Immediate target:** [P3 local prototype](p3-local-prototype.md).
 
 ## 1. Scope and language
