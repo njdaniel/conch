@@ -382,7 +382,11 @@ func TestAgentRateLimiterRefusalRows(t *testing.T) {
 func TestAgentRateLimiterHugeWindow(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for _, seconds := range []int{10_000_000_000, 1 << 62, math.MaxInt64, int(maxLimitWindow/time.Second) + 1} {
+	for _, wide := range []int64{10_000_000_000, 1 << 62, math.MaxInt64, int64(maxLimitWindow/time.Second) + 1} {
+		if wide > math.MaxInt {
+			continue // where int is 32 bits a manifest cannot say this at all
+		}
+		seconds := int(wide)
 		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
 			t.Parallel()
 			limit := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 2, WindowSeconds: seconds}
