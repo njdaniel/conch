@@ -55,8 +55,10 @@ const (
 	// "never again" and short enough that no arithmetic on it can overflow.
 	// Without the clamp a window_seconds past about 9.2e9 would wrap to a
 	// negative duration, every use would count as expired, and the limit
-	// would be declared, shown and never enforced.
-	maxLimitWindow = 100 * 365 * 24 * time.Hour
+	// would be declared, shown and never enforced. Fifty years, not more, so
+	// that the delay in whole seconds also fits an int where int is 32 bits:
+	// it goes out as Retry-After and as retry_after_seconds.
+	maxLimitWindow = 50 * 365 * 24 * time.Hour
 
 	// denialCoalesceWindow is the window in which repeated identical
 	// access_denied events are thinned out (issue #80, comment from the
@@ -206,11 +208,15 @@ func (e *rateLimitedError) Error() string { return "agent rate limit exceeded" }
 // seconds is the retry delay in whole seconds, at least 1.
 func (e *rateLimitedError) seconds() int { return int(e.retryAfter / time.Second) }
 
-// schemaError is the refusal on the wire. Neither schema.Error nor an MCP tool
-// error has a field for the delay, so it is in the message as well as in the
-// Retry-After header REST adds.
+// schemaError is the refusal on the wire. The delay is a field of its own, so
+// an MCP caller, who gets no Retry-After header, need not read it out of the
+// message (issue #228).
 func (e *rateLimitedError) schemaError() *schema.Error {
-	return &schema.Error{Code: schema.ErrorCodeRateLimited, Message: fmt.Sprintf("rate limit exceeded; retry in %d seconds", e.seconds())}
+	return &schema.Error{
+		Code:              schema.ErrorCodeRateLimited,
+		Message:           fmt.Sprintf("rate limit exceeded; retry in %d seconds", e.seconds()),
+		RetryAfterSeconds: e.seconds(),
+	}
 }
 
 // spendAgentBudget spends one use of capability from the agent's budget, if
@@ -244,8 +250,7 @@ func (s *Server) spendAgentBudget(ctx context.Context, principalID int64, subjec
 // limit: 429, Retry-After in whole seconds, and the standard error body.
 func writeRateLimited(w http.ResponseWriter, e *rateLimitedError) {
 	w.Header().Set("Retry-After", strconv.Itoa(e.seconds()))
-	serr := e.schemaError()
-	writeError(w, http.StatusTooManyRequests, serr.Code, serr.Message)
+	writeJSON(w, http.StatusTooManyRequests, e.schemaError())
 }
 
 // denialCoalescer keeps repeated identical access_denied events from growing
