@@ -212,7 +212,7 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 		// A stored body is always valid UTF-8: the JSON routes get that from
 		// the decoder, which replaces each byte that is not with U+FFFD, and
 		// rendered text must end up the same as if it had been sent that way.
-		post = schema.PostMessageRequestV1{Body: strings.ToValidUTF8(string(body), string(utf8.RuneError))}
+		post = schema.PostMessageRequestV1{Body: validUTF8(string(body))}
 	} else if err := decodeHookPost(body, &post); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a v1 post message object")
 		return
@@ -240,6 +240,17 @@ func (s *Server) handleIngestHook(w http.ResponseWriter, r *http.Request) {
 	}
 	r.SetPathValue("channel", channel.Name)
 	s.postMessage(w, r, post.AuthorID, post.Body, post.Payload, apiV1)
+}
+
+// validUTF8 returns s with each byte that is not part of valid UTF-8 replaced
+// by U+FFFD, one replacement for each such byte: what encoding/json does when
+// it decodes or encodes the same bytes. (strings.ToValidUTF8 replaces a whole
+// run of them with one, which would make two stray bytes read as one.)
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return string([]rune(s))
 }
 
 func decodeHookPost(body []byte, post *schema.PostMessageRequestV1) error {

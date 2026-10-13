@@ -190,13 +190,22 @@ func TestHookIngestStoresValidUTF8(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &hook); err != nil || hook.Token == "" {
 		t.Fatalf("hook token missing from %s (%v)", created.Body.String(), err)
 	}
-	stray := string([]byte{'a', 0xff, 'b', 0xc3, 'c'}) // 0xff is never valid; 0xc3 starts a sequence it does not finish
+	// 0xff is never valid; 0xc3 starts a sequence it does not finish; then two
+	// stray bytes in a row, which must become two replacements, not one; and
+	// 0xe2 followed by a byte that cannot continue it.
+	stray := string([]byte{'a', 0xff, 'b', 0xc3, 'c', 0xff, 0xfe, 'd', 0xe2, '(', 'e'})
 	rec := ingestHook(t, srv, hook.Token, "text/plain", stray)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("ingest = %d: %s", rec.Code, rec.Body.String())
 	}
 	replacement := string(rune(0xfffd))
-	want := "a" + replacement + "b" + replacement + "c"
+	want := "a" + replacement + "b" + replacement + "c" + replacement + replacement + "d" + replacement + "(e"
+	// The reference is what the JSON decoder makes of the same bytes inside a
+	// string: the two routes must agree.
+	var viaJSON string
+	if err := json.Unmarshal([]byte(`"`+stray+`"`), &viaJSON); err != nil || viaJSON != want {
+		t.Fatalf("the JSON decoder gives %q (%v), want %q: the test's own expectation is wrong", viaJSON, err, want)
+	}
 	msgs, err := srv.store.ListVisibleMessages(context.Background(), channel.ID, store.ChannelWideOnly, 0, 10)
 	if err != nil {
 		t.Fatal(err)
