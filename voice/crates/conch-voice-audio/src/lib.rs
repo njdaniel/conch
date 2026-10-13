@@ -8,7 +8,9 @@
 //!
 //! The edges are two traits, [`MicSource`] and [`SpeakerSink`], so the binary can put real
 //! devices behind them. This crate ships the test implementations: [`ToneSource`] and
-//! [`WavSource`] for the microphone, [`CountingSink`] for the speakers.
+//! [`WavSource`] for the microphone, [`CountingSink`] for the speakers. Each says what paces
+//! it ([`Pacing`]): the test ones have no clock and are paced by a timer, which is the
+//! default; a device with a clock of its own says its ring paces it.
 //!
 //! A captured frame is meant to reach the network only as a [`GatedFrame`], and the only way
 //! to get one is [`TransmitGate::pass`]: whatever feeds the track should take that type and
@@ -35,7 +37,7 @@ pub use gate::{
 pub use jitter::{JITTER_CAP_MS, JITTER_TARGET_MS, JitterBuffer, JitterStats, Popped, Pushed};
 pub use mixer::Mixer;
 pub use sink::{CountingSink, SignalMeter, SpeakerSink};
-pub use source::{MicRead, MicSource, ToneSource};
+pub use source::{MicRead, MicSource, Pacing, ToneSource};
 pub use wav::WavSource;
 
 /// Sample rate of every frame in this crate, in Hz.

@@ -15,15 +15,26 @@
 //! callback. This file is on the other side of the ring, in the transmit and mix tasks, where
 //! it may allocate, lock and log, and does only the first and last sparingly.
 //!
+//! What paces them. Both devices say [`Pacing::Ring`]: the sound card's clock sets the pace
+//! and there is no second clock to drift against it. The transmit task forwards a frame
+//! whenever the capture ring holds a whole one, and the mix task mixes a frame whenever the
+//! playback ring holds less than [`TARGET_FILL`] ([`frames_wanted`]). `dmn-audio`'s rings are
+//! lock-free and cannot wake a task, so the tasks look at them every
+//! [`RING_LOOK`](crate::pace::RING_LOOK) (`pace.rs`); what they do on a look is decided by
+//! what the ring holds, so a late look catches up by handling several frames, and nothing is
+//! dropped and no silence is added to correct for drift.
+//!
 //! The decisions that are this file's own are small functions of plain values, so that they
 //! are tested without PipeWire: [`availability`] (when the microphone counts as there),
-//! [`take_frame`] (what a read does with the capture ring) and [`put_frame`] (what a write
-//! does with the playback ring).
+//! [`take_frame`] (what a read does with the capture ring), [`frames_wanted`] (how many
+//! frames the playback ring is short of) and [`put_frame`] (what a write does with it).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource, SAMPLE_RATE, SILENCE, SpeakerSink};
+use conch_voice_audio::{
+    FRAME_LEN, FRAME_MS, Frame, MicRead, MicSource, Pacing, SAMPLE_RATE, SILENCE, SpeakerSink,
+};
 use dmn_audio::{
     CaptureState, CaptureTarget, MicCapture, MicReader, MicStatus, NodeTable, PipeWireContext,
     Playback, PlaybackStatus, PlaybackWriter, SinkTarget,
@@ -31,27 +42,22 @@ use dmn_audio::{
 
 use crate::error::Error;
 
-/// How much audio the capture ring holds. It only has to outlast a read that is late: the
-/// transmit task reads every 10 ms, and [`MAX_BACKLOG`] keeps what it holds short.
+/// How much audio the capture ring holds. It has to outlast a look that is late: the
+/// transmit task looks every [`RING_LOOK`](crate::pace::RING_LOOK), and a stall of the
+/// runtime it shares with the SDK is made up for by forwarding what built up. Only a stall
+/// longer than this loses audio, and `dmn-audio` counts it (`MicStatus::dropped`).
 const CAPTURE_RING_MS: u32 = 200;
 /// How much audio the playback ring holds. What is queued when a named speaker is unplugged
-/// is played when it returns, so this is short; [`MAX_QUEUED`] keeps what is in it shorter.
+/// is played when it returns, so this is short; [`TARGET_FILL`] keeps what is in it shorter.
 const PLAYBACK_RING_MS: u32 = 200;
 
-/// More than this much captured audio waiting means a read stalled (the tasks share their
-/// threads with the SDK's), and the oldest is thrown away rather than sent late: a speaker
-/// hears a press as it happens or not at all.
-const MAX_BACKLOG: usize = 4 * FRAME_LEN;
-/// What a read that finds more than [`MAX_BACKLOG`] leaves behind.
-const KEEP_BACKLOG: usize = 2 * FRAME_LEN;
-
-/// Silence written before the first frame, and again after the ring ran dry, so that the
-/// mix task's timer (which does not run on the sound card's clock) can be a little late
-/// without the speakers hearing a gap.
-const PRIME_FRAMES: usize = 2;
-/// A frame is dropped, not queued, when the ring already holds more than this: the sound card
-/// is slower than the timer, and queuing on would delay what is heard by more each second.
-const MAX_QUEUED: usize = 8 * FRAME_LEN;
+/// How much the playback ring is kept filled to: a mix is made whenever it holds less. It is
+/// the delay this side adds to what is heard, and the room a late look has before the sound
+/// card finds the ring dry. PipeWire takes the ring a quantum at a time (10 ms is asked for,
+/// and the graph's own, 21 ms by default, is what it may be given), so it has to be a few
+/// quanta; it is kept there by the card's clock, not by a count of ticks, so it does not
+/// drift. The ring holds at most a frame more than this.
+const TARGET_FILL: usize = 4 * FRAME_LEN;
 
 /// How long `devices` waits for PipeWire to finish listing what it has.
 pub const LISTING_WAIT: Duration = Duration::from_secs(3);
@@ -142,7 +148,7 @@ impl PipeWire {
             playback,
             ring,
             status,
-            primed: false,
+            idle: IdleClock::default(),
         })
     }
 }
@@ -228,17 +234,14 @@ fn discard(ring: &mut impl Samples, mut count: usize) {
 /// While the microphone is not usable ([`Availability::Streaming`] is the only usable one)
 /// everything in the ring is thrown away, so that audio from before an unplug, or from a
 /// stand-in, is never the first thing sent when the microphone is back. Otherwise a whole
-/// frame is handed over when there is one; and when a stalled reader has let more than
-/// [`MAX_BACKLOG`] pile up, the oldest is dropped first so the audio heard is recent.
+/// frame is handed over when there is one, oldest first. A reader that was late is not
+/// skipped ahead: it reads again, and gets the next frame, until the ring has none (the
+/// transmit task does, and a press discards what was waiting before it: `transmit.rs`).
 pub fn take_frame(ring: &mut impl Samples, usable: bool, frame: &mut Frame) -> MicRead {
     if !usable {
         let all = ring.queued();
         discard(ring, all);
         return MicRead::NoMicrophone;
-    }
-    let queued = ring.queued();
-    if queued > MAX_BACKLOG {
-        discard(ring, queued - KEEP_BACKLOG);
     }
     if ring.queued() < FRAME_LEN {
         return MicRead::NotYet;
@@ -265,6 +268,13 @@ pub struct PipeWireMic {
 }
 
 impl PipeWireMic {
+    /// The stream's counters (`MicStatus::pushed`, `MicStatus::dropped`), shared with the
+    /// stream: still readable after the microphone has been handed to the transmit task.
+    #[must_use]
+    pub fn status(&self) -> Arc<MicStatus> {
+        Arc::clone(&self.status)
+    }
+
     /// Logs a change in whether the microphone can be used. Never called from a PipeWire
     /// callback.
     fn note(&mut self, now: Availability) {
@@ -300,6 +310,18 @@ impl MicSource for PipeWireMic {
         self.note(now);
         take_frame(&mut self.ring, now == Availability::Streaming, frame)
     }
+
+    /// The sound card's clock paces the microphone: it is read when the ring has a frame.
+    fn pacing(&self) -> Pacing {
+        Pacing::Ring
+    }
+
+    /// Empties the capture ring, down to the last sample: what is left of a frame would
+    /// otherwise be the start of the first frame sent after a press.
+    fn forget_waiting(&mut self) {
+        let all = self.ring.queued();
+        discard(&mut self.ring, all);
+    }
 }
 
 impl std::fmt::Debug for PipeWireMic {
@@ -314,6 +336,8 @@ impl std::fmt::Debug for PipeWireMic {
 pub trait Room {
     /// Samples written and not yet played.
     fn queued(&self) -> usize;
+    /// Samples the ring can still take.
+    fn vacant(&self) -> usize;
     /// Writes as many of `samples` as fit and says how many.
     fn write(&mut self, samples: &[f32]) -> usize;
 }
@@ -321,6 +345,10 @@ pub trait Room {
 impl Room for PlaybackWriter {
     fn queued(&self) -> usize {
         PlaybackWriter::queued(self)
+    }
+
+    fn vacant(&self) -> usize {
+        PlaybackWriter::vacant(self)
     }
 
     fn write(&mut self, samples: &[f32]) -> usize {
@@ -334,34 +362,83 @@ pub enum Put {
     /// The frame was queued.
     Queued,
     /// Nothing is playing (a named speaker is unplugged, or the stream is not up yet): the
-    /// frame was dropped, so that nothing stale is waiting to be played when it is.
+    /// frame was dropped, so that nothing more piles up behind what the ring already held
+    /// (at most [`TARGET_FILL`], which is played when the speaker is back).
     NotPlaying,
-    /// The ring held too much already: the frame was dropped.
-    TooMuchQueued,
+    /// The ring could not take a whole frame. [`frames_wanted`] asks for a frame only when
+    /// the ring holds less than [`TARGET_FILL`], which is far below its size, so this is
+    /// the ring being full of something else: the frame was dropped.
+    NoRoom,
 }
 
-/// What one write of a frame does with the playback ring.
-///
-/// `primed` says whether the cushion of silence is in the ring; it is false at the start and
-/// after the speakers were gone, and this sets it.
-pub fn put_frame(ring: &mut impl Room, playing: bool, primed: &mut bool, frame: &Frame) -> Put {
+/// What one write of a frame does with the playback ring: it queues it. Nothing is added
+/// before it or dropped for it: how much the ring holds is kept by how many frames are asked
+/// for ([`frames_wanted`]), not by correcting afterwards.
+pub fn put_frame(ring: &mut impl Room, playing: bool, frame: &Frame) -> Put {
     if !playing {
-        *primed = false;
         return Put::NotPlaying;
     }
-    if ring.queued() > MAX_QUEUED {
-        return Put::TooMuchQueued;
+    // Whole or not at all: part of a frame followed by the next frame is a click.
+    if ring.vacant() < FRAME_LEN || ring.write(frame) < FRAME_LEN {
+        return Put::NoRoom;
     }
-    // A ring found empty after the first frame ran dry (an underrun is silence) and needs
-    // its cushion again.
-    if !*primed || ring.queued() == 0 {
-        for _ in 0..PRIME_FRAMES {
-            ring.write(&SILENCE);
-        }
-        *primed = true;
-    }
-    ring.write(frame);
     Put::Queued
+}
+
+/// The frames owed to the speakers when they are not playing (a named speaker is unplugged,
+/// or the stream is not up yet). The ring does not drain then, so it cannot say when a frame
+/// is due; without something that does, the mix would stop and the speakers' jitter buffers
+/// would fill and drop. This is a clock of one frame, for as long as they are not playing.
+/// The frames it is owed for are dropped by [`put_frame`].
+#[derive(Debug, Default)]
+pub struct IdleClock {
+    since: Option<Instant>,
+}
+
+impl IdleClock {
+    /// The most frames owed at once: a clock that was not asked for longer than this starts
+    /// again instead of paying out a burst.
+    const MAX_OWED: u128 = 4;
+
+    fn reset(&mut self) {
+        self.since = None;
+    }
+
+    /// How many whole frames have gone by since this was last asked (none the first time).
+    fn due(&mut self, now: Instant) -> usize {
+        let Some(since) = self.since else {
+            self.since = Some(now);
+            return 0;
+        };
+        let frame = Duration::from_millis(u64::from(FRAME_MS));
+        let owed = now.saturating_duration_since(since).as_millis() / frame.as_millis();
+        if owed > Self::MAX_OWED {
+            self.since = Some(now);
+            return Self::MAX_OWED as usize;
+        }
+        // At most MAX_OWED, so the conversions cannot fail.
+        let owed_frames = u32::try_from(owed).unwrap_or(0);
+        self.since = Some(since + frame * owed_frames);
+        owed_frames as usize
+    }
+}
+
+/// How many frames to mix now for speakers whose ring holds `ring.queued()` samples: as
+/// many as bring it up to [`TARGET_FILL`], none if it is there already. The sound card
+/// empties the ring at its own pace, so this is the card's clock setting the pace of the
+/// mix: a frame is mixed when the ring has room for one, and a look that comes late is owed
+/// more than one. At the start the ring is empty, so the first look mixes up to the
+/// target fill, and a ring that ran dry is filled again the same way, with no silence added.
+///
+/// When the speakers are not playing the ring cannot say, and `idle` does ([`IdleClock`]).
+pub fn frames_wanted(ring: &impl Room, playing: bool, idle: &mut IdleClock, now: Instant) -> usize {
+    if !playing {
+        return idle.due(now);
+    }
+    idle.reset();
+    TARGET_FILL
+        .saturating_sub(ring.queued())
+        .div_ceil(FRAME_LEN)
 }
 
 /// The speakers: PipeWire's default output, or the one named in the configuration. The
@@ -371,14 +448,39 @@ pub struct PipeWireSpeakers {
     playback: Playback,
     ring: PlaybackWriter,
     status: Arc<PlaybackStatus>,
-    primed: bool,
+    idle: IdleClock,
+}
+
+impl PipeWireSpeakers {
+    /// The stream's counters (`PlaybackStatus::played`, `silence`, `underruns`), shared with
+    /// the stream: still readable after the speakers have been handed to the mix task.
+    #[must_use]
+    pub fn status(&self) -> Arc<PlaybackStatus> {
+        Arc::clone(&self.status)
+    }
+}
+
+impl PipeWireSpeakers {
+    /// Whether the stream is up and playing the ring.
+    fn playing(&self) -> bool {
+        self.status.state() == CaptureState::Streaming && self.status.playing_rate().is_some()
+    }
 }
 
 impl SpeakerSink for PipeWireSpeakers {
     fn play(&mut self, frame: &Frame) {
-        let playing =
-            self.status.state() == CaptureState::Streaming && self.status.playing_rate().is_some();
-        put_frame(&mut self.ring, playing, &mut self.primed, frame);
+        let playing = self.playing();
+        put_frame(&mut self.ring, playing, frame);
+    }
+
+    /// The sound card's clock paces the mix: a frame is made whenever the ring is short.
+    fn pacing(&self) -> Pacing {
+        Pacing::Ring
+    }
+
+    fn frames_wanted(&mut self) -> usize {
+        let playing = self.playing();
+        frames_wanted(&self.ring, playing, &mut self.idle, Instant::now())
     }
 }
 
@@ -425,6 +527,11 @@ mod tests {
     impl Room for Fake {
         fn queued(&self) -> usize {
             self.samples.len()
+        }
+
+        fn vacant(&self) -> usize {
+            self.room
+                .map_or(usize::MAX, |room| room.saturating_sub(self.samples.len()))
         }
 
         fn write(&mut self, samples: &[f32]) -> usize {
@@ -563,84 +670,138 @@ mod tests {
         assert_eq!(frame[0], 1000.0);
     }
 
+    /// A late read is not skipped ahead: it gets every frame the ring built up, oldest first,
+    /// in as many reads as there are frames.
     #[test]
-    fn a_reader_that_fell_behind_skips_to_recent_audio() {
-        let total = MAX_BACKLOG + 3 * FRAME_LEN;
-        let mut ring = ramp(0, total);
+    fn a_reader_that_fell_behind_catches_up_without_dropping_a_sample() {
+        let frames = 15;
+        let mut ring = ramp(0, frames * FRAME_LEN + 7);
         let mut frame = SILENCE;
-        assert_eq!(take_frame(&mut ring, true, &mut frame), MicRead::Ready);
-        // The newest KEEP_BACKLOG samples were kept, and the first of them was read.
-        assert_eq!(frame[0], (total - KEEP_BACKLOG) as f32);
-        assert_eq!(Samples::queued(&ring), KEEP_BACKLOG - FRAME_LEN);
-
-        // Exactly at the limit is not behind.
-        let mut ring = ramp(0, MAX_BACKLOG);
-        assert_eq!(take_frame(&mut ring, true, &mut frame), MicRead::Ready);
-        assert_eq!(frame[0], 0.0);
+        for n in 0..frames {
+            assert_eq!(take_frame(&mut ring, true, &mut frame), MicRead::Ready);
+            assert_eq!(frame[0], (n * FRAME_LEN) as f32, "frame {n}, in order");
+            assert_eq!(frame[FRAME_LEN - 1], ((n + 1) * FRAME_LEN - 1) as f32);
+        }
+        assert_eq!(take_frame(&mut ring, true, &mut frame), MicRead::NotYet);
+        assert_eq!(Samples::queued(&ring), 7, "and the partial frame is kept");
     }
 
     fn room_with(samples: usize) -> Fake {
         ramp(0, samples)
     }
 
+    /// The speakers' side of the same: a ring is filled to its target and no further, by
+    /// asking for frames, however the card drains it.
     #[test]
-    fn the_first_frame_is_written_behind_a_cushion_of_silence() {
-        let mut ring = Fake::default();
-        let mut primed = false;
-        let frame = [0.5; FRAME_LEN];
-        assert_eq!(put_frame(&mut ring, true, &mut primed, &frame), Put::Queued);
-        assert!(primed);
-        assert_eq!(Room::queued(&ring), (PRIME_FRAMES + 1) * FRAME_LEN);
-        let queued: Vec<f32> = ring.samples.iter().copied().collect();
-        assert!(queued[..PRIME_FRAMES * FRAME_LEN].iter().all(|s| *s == 0.0));
-        assert!(queued[PRIME_FRAMES * FRAME_LEN..].iter().all(|s| *s == 0.5));
-
-        // The next frame follows with no more silence.
-        assert_eq!(put_frame(&mut ring, true, &mut primed, &frame), Put::Queued);
-        assert_eq!(Room::queued(&ring), (PRIME_FRAMES + 2) * FRAME_LEN);
+    fn frames_are_wanted_while_the_ring_holds_less_than_its_target_and_not_after() {
+        let mut idle = IdleClock::default();
+        let now = Instant::now();
+        let wanted = |samples: usize, idle: &mut IdleClock| {
+            frames_wanted(&room_with(samples), true, idle, now)
+        };
+        let target_frames = TARGET_FILL / FRAME_LEN;
+        // Empty (the start, or a ring that ran dry): the whole target at once.
+        assert_eq!(wanted(0, &mut idle), target_frames);
+        // The card took a frame, then a bit more than that.
+        assert_eq!(wanted(TARGET_FILL - FRAME_LEN, &mut idle), 1);
+        assert_eq!(wanted(TARGET_FILL - FRAME_LEN - 1, &mut idle), 2);
+        // A frame short by one sample is still short: writing a whole frame passes the target.
+        assert_eq!(wanted(TARGET_FILL - 1, &mut idle), 1);
+        // At the target, and above it: nothing, whatever the timer would have said.
+        assert_eq!(wanted(TARGET_FILL, &mut idle), 0);
+        assert_eq!(wanted(TARGET_FILL + FRAME_LEN, &mut idle), 0);
     }
 
+    /// Whatever the card does, asking for what is wanted and writing it keeps the ring
+    /// between the target and the target plus a frame, without a frame dropped or a sample
+    /// of silence added: no drift to correct.
     #[test]
-    fn a_ring_that_ran_dry_gets_its_cushion_back() {
+    fn a_ring_drained_at_any_rate_stays_within_a_frame_of_its_target() {
         let mut ring = Fake::default();
-        let mut primed = true;
+        let mut idle = IdleClock::default();
+        let now = Instant::now();
         let frame = [0.5; FRAME_LEN];
-        assert_eq!(put_frame(&mut ring, true, &mut primed, &frame), Put::Queued);
-        assert_eq!(Room::queued(&ring), (PRIME_FRAMES + 1) * FRAME_LEN);
+        let (mut written, mut drained) = (0_usize, 0_usize);
+        // A card slightly faster than the 10 ms the timer would have kept, then slower, with
+        // drains of odd sizes (a quantum of 1024) and looks of every size in between.
+        for step in 0..20_000_usize {
+            let drain = match step % 3 {
+                0 => 1024,
+                1 => 0,
+                _ => 17 + step % 5,
+            };
+            let got = ring.samples.len().min(drain);
+            ring.samples.drain(..got);
+            drained += got;
+            for _ in 0..frames_wanted(&ring, true, &mut idle, now) {
+                assert_eq!(put_frame(&mut ring, true, &frame), Put::Queued);
+                written += FRAME_LEN;
+            }
+            let queued = Room::queued(&ring);
+            assert!(queued >= TARGET_FILL, "step {step}: {queued} queued");
+            assert!(queued < TARGET_FILL + FRAME_LEN, "step {step}: {queued}");
+        }
+        assert_eq!(
+            written,
+            drained + Room::queued(&ring),
+            "no sample lost or added"
+        );
     }
 
     #[test]
     fn nothing_is_queued_for_speakers_that_are_not_playing() {
         let mut ring = room_with(FRAME_LEN);
-        let mut primed = true;
         let frame = [0.5; FRAME_LEN];
-        assert_eq!(
-            put_frame(&mut ring, false, &mut primed, &frame),
-            Put::NotPlaying
-        );
-        assert!(!primed, "the cushion is wanted again when they are back");
+        assert_eq!(put_frame(&mut ring, false, &frame), Put::NotPlaying);
         assert_eq!(Room::queued(&ring), FRAME_LEN, "nothing was added");
     }
 
     #[test]
-    fn a_ring_that_holds_too_much_drops_the_frame() {
-        let mut ring = room_with(MAX_QUEUED + 1);
-        let mut primed = true;
+    fn a_ring_with_no_room_for_a_frame_says_so() {
+        let mut ring = Fake {
+            samples: VecDeque::new(),
+            room: Some(FRAME_LEN - 1),
+        };
         let frame = [0.5; FRAME_LEN];
+        assert_eq!(put_frame(&mut ring, true, &frame), Put::NoRoom);
+        assert_eq!(Room::queued(&ring), 0, "no part of the frame was queued");
+        let mut ring = Fake::default();
+        assert_eq!(put_frame(&mut ring, true, &frame), Put::Queued);
+        assert_eq!(Room::queued(&ring), FRAME_LEN, "only the frame, no silence");
+    }
+
+    /// While the speakers are not playing the ring cannot say when a frame is due, so a
+    /// clock of one frame does, and it does not pay out a burst after a long gap.
+    #[test]
+    fn speakers_that_are_not_playing_are_owed_a_frame_every_ten_milliseconds() {
+        let ring = Fake::default();
+        let mut idle = IdleClock::default();
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(0)), 0, "starts");
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(9)), 0);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(10)), 1);
+        // A look that is 25 ms on is owed two, and the 5 ms over is kept.
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(35)), 2);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(39)), 0);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(40)), 1);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(50)), 1);
+        // A long gap is not made up.
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(5_000)), 4);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(5_005)), 0);
+        // And when they play, the ring decides, and the clock starts again next time.
         assert_eq!(
-            put_frame(&mut ring, true, &mut primed, &frame),
-            Put::TooMuchQueued
+            frames_wanted(&ring, true, &mut idle, at(5_010)),
+            TARGET_FILL / FRAME_LEN
         );
-        assert_eq!(Room::queued(&ring), MAX_QUEUED + 1);
-        // At the limit it still takes one.
-        let mut ring = room_with(MAX_QUEUED);
-        assert_eq!(put_frame(&mut ring, true, &mut primed, &frame), Put::Queued);
+        assert_eq!(frames_wanted(&ring, false, &mut idle, at(6_000)), 0);
     }
 
     #[test]
-    fn the_rings_are_shorter_than_their_limits_say() {
+    fn the_rings_hold_what_is_asked_of_them() {
         let ring_samples = |ms: u32| (SAMPLE_RATE * ms / 1000) as usize;
-        assert!(MAX_QUEUED + (PRIME_FRAMES + 1) * FRAME_LEN <= ring_samples(PLAYBACK_RING_MS));
-        assert!(MAX_BACKLOG < ring_samples(CAPTURE_RING_MS));
+        assert!(TARGET_FILL + FRAME_LEN <= ring_samples(PLAYBACK_RING_MS));
+        assert!(ring_samples(PLAYBACK_RING_MS).is_multiple_of(FRAME_LEN));
+        assert!(FRAME_LEN <= ring_samples(CAPTURE_RING_MS));
     }
 }

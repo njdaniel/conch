@@ -481,3 +481,231 @@ fn by_hand_playback_to_the_default_follows_it_when_the_default_changes() {
         "after the default moved, without a restart"
     );
 }
+
+/// A feed that counts what the transmit task hands it and keeps none of it.
+struct CountingFeed(Arc<std::sync::atomic::AtomicU64>);
+
+impl conch_voice::sdk::MicFeed for CountingFeed {
+    fn send(
+        &mut self,
+        _frame: conch_voice_audio::GatedFrame<'_>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async {}
+    }
+}
+
+/// "Over a ten-minute run against virtual devices, no frame is dropped and no silence is
+/// inserted for drift" (issue #258): the real transmit and mix tasks, paced by the rings, on
+/// two virtual device pairs. `CONCH_VOICE_PACE_SECS` shortens the run (default 600).
+///
+/// Microphone side: a second client plays a tone into the first pair's sink, the client's
+/// microphone is that pair's source, and the transmit task (gate held open, a counting feed
+/// for a track) forwards what it captures. Speaker side: a task standing in for a remote
+/// speaker sends a tone to the mix task, the client's speakers are the second pair's sink,
+/// and a second client records that pair's source. Nothing is audible: both pairs are
+/// virtual, named, and checked with `pw-link` before a sample is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs PipeWire with a session manager, pw-loopback and pw-link; uses only two virtual device pairs it makes; takes ten minutes"]
+async fn live_ten_minutes_of_pacing_from_the_rings_drops_nothing_and_inserts_no_silence() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use conch_voice::receive::{self, MixCommand};
+    use conch_voice::transmit::{self, BoxedMic, TxCommand};
+    use conch_voice_control::GateCommand;
+
+    let secs: u64 = std::env::var("CONCH_VOICE_PACE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    refuse_if_streams_exist();
+    let pid = std::process::id();
+    let mic_pair = format!("conch-voice-test-pace-mic-{pid}");
+    let spk_pair = format!("conch-voice-test-pace-spk-{pid}");
+    let (mic_sink, spk_sink) = (format!("{mic_pair}-sink"), format!("{spk_pair}-sink"));
+    let pw = PipeWire::connect().expect("PipeWire running");
+    let _mic_loopback = Loopback::new(&mic_pair);
+    let _spk_loopback = Loopback::new(&spk_pair);
+    wait_for("the virtual devices", Duration::from_secs(5), || {
+        let table = pw.nodes(Duration::from_millis(100));
+        [&mic_sink, &spk_sink]
+            .iter()
+            .all(|s| table.sinks().any(|n| &n.name == *s))
+            && [&mic_pair, &spk_pair]
+                .iter()
+                .all(|s| table.sources().any(|n| &n.name == *s))
+    });
+
+    // The client under test.
+    let mic = pw.microphone(Some(&mic_pair)).unwrap();
+    let mic_status = mic.status();
+    let speakers = pw.speakers(Some(&spk_sink)).unwrap();
+    let spk_status = speakers.status();
+    // The second client: a tone into the microphone's pair, and a recording of the speakers'.
+    let other = Arc::new(PipeWireContext::connect().expect("PipeWire running"));
+    let mut injector = Playback::new(
+        Arc::clone(&other),
+        SinkTarget::Named(mic_sink.clone()),
+        SAMPLE_RATE,
+        200,
+    )
+    .unwrap();
+    let mut injected = injector.start().unwrap();
+    let mut recorder = MicCapture::new(
+        other,
+        CaptureTarget::Mic(Some(spk_pair.clone())),
+        SAMPLE_RATE,
+        2_000,
+    )
+    .unwrap();
+    let mut recorded = recorder.start().unwrap();
+
+    // Nothing has been written. Every stream must be linked to its own pair and to nothing
+    // else before one is.
+    wait_for("the streams to link", Duration::from_secs(5), || {
+        let listing = pw_link();
+        peers_of(&listing, "dmn.playback").len() >= 2
+            && peers_of(&listing, "dmn.capture").len() >= 2
+    });
+    assert_linked_only_to("dmn.playback", &[&mic_sink, &spk_sink]);
+    assert_linked_only_to("dmn.capture", &[&mic_pair, &spk_pair]);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let injector_thread = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut tone = Tone::new(TONE_HZ);
+            while !stop.load(Ordering::Relaxed) {
+                while injected.queued() < 4 * FRAME_LEN {
+                    injected.write(&tone.frame());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let recorder_thread = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut meter = SignalMeter::new(&[500.0, TONE_HZ, 2000.0]).unwrap();
+            let mut block = [0.0_f32; FRAME_LEN];
+            while !stop.load(Ordering::Relaxed) {
+                while recorded.queued() >= FRAME_LEN {
+                    recorded.pop(&mut block);
+                    meter.push(&block);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            meter
+        })
+    };
+
+    // The client's own tasks. The gate is held open for the whole run.
+    let forwarded = Arc::new(AtomicU64::new(0));
+    let config = transmit::gate_config(0, Duration::from_secs(secs + 3_600));
+    let transmitter = transmit::spawn::<CountingFeed>(config).unwrap();
+    for command in [
+        TxCommand::Microphone(Box::new(mic) as BoxedMic),
+        TxCommand::Attach(CountingFeed(Arc::clone(&forwarded))),
+        TxCommand::Gate(GateCommand::Open),
+    ] {
+        assert!(transmitter.commands.send(command).is_ok());
+    }
+    let receiver = receive::spawn(&[TONE_HZ], Box::new(speakers)).unwrap();
+    let (remote, remote_frames) = tokio::sync::mpsc::channel(16);
+    let added = MixCommand::Add {
+        speaker: "p1".to_owned(),
+        track: "TR_1".to_owned(),
+        frames: remote_frames,
+    };
+    assert!(receiver.commands.send(added).is_ok());
+    let remote_task = tokio::spawn(async move {
+        let mut tone = Tone::new(TONE_HZ);
+        let mut every = tokio::time::interval(Duration::from_millis(10));
+        let (mut sent, mut refused) = (0_u64, 0_u64);
+        loop {
+            every.tick().await;
+            match remote.try_send(tone.frame()) {
+                Ok(()) => sent += 1,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => refused += 1,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+            }
+        }
+        (sent, refused)
+    });
+
+    // Warm up: the speakers play the tone, and the microphone has delivered.
+    wait_for("audio on both paths", Duration::from_secs(10), || {
+        forwarded.load(Ordering::Relaxed) > 10 && spk_status.played() > 20 * FRAME_LEN as u64
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    let started = Instant::now();
+    let base = (
+        forwarded.load(Ordering::Relaxed),
+        mic_status.pushed(),
+        mic_status.dropped(),
+        spk_status.played(),
+        spk_status.silence(),
+        spk_status.underruns(),
+    );
+    println!("warm: {base:?} (forwarded, pushed, dropped, played, silence, underruns)");
+    let mut next_report = 60;
+    while started.elapsed() < Duration::from_secs(secs) {
+        std::thread::sleep(Duration::from_millis(500));
+        if started.elapsed().as_secs() >= next_report {
+            next_report += 60;
+            println!(
+                "{:>4}s forwarded {} pushed {} dropped {} played {} silence {} underruns {}",
+                started.elapsed().as_secs(),
+                forwarded.load(Ordering::Relaxed) - base.0,
+                mic_status.pushed() - base.1,
+                mic_status.dropped() - base.2,
+                spk_status.played() - base.3,
+                spk_status.silence() - base.4,
+                spk_status.underruns() - base.5,
+            );
+        }
+    }
+    let elapsed = started.elapsed();
+    // The streams are still running while these are read, so what was captured is read on
+    // either side of what was forwarded: the lower bound is held against the earlier count
+    // and the upper against the later.
+    let pushed_before = mic_status.pushed() - base.1;
+    let forwarded_now = forwarded.load(Ordering::Relaxed) - base.0;
+    let pushed = mic_status.pushed() - base.1;
+    let dropped = mic_status.dropped() - base.2;
+    let played = spk_status.played() - base.3;
+    let silence = spk_status.silence() - base.4;
+    let underruns = spk_status.underruns() - base.5;
+
+    stop.store(true, Ordering::Relaxed);
+    drop(transmitter);
+    drop(receiver);
+    let (remote_sent, remote_refused) = remote_task.await.unwrap();
+    injector_thread.join().unwrap();
+    let meter = recorder_thread.join().unwrap();
+    println!(
+        "after {:.1}s: forwarded {forwarded_now} frames of the {} captured ({} samples waiting), \
+         ring overruns (dropped) {dropped}; played {played} samples, silence {silence}, \
+         underruns {underruns}; the remote sent {remote_sent} frames, {remote_refused} refused; \
+         recorded {} frames, strongest of 500/1000/2000 Hz: {:?}",
+        elapsed.as_secs_f32(),
+        pushed / FRAME_LEN as u64,
+        pushed % FRAME_LEN as u64,
+        meter.frames(),
+        meter.dominant(),
+    );
+
+    assert_eq!(dropped, 0, "the capture ring overran");
+    // Every captured sample was forwarded (what is not is less than a frame, plus the few
+    // frames the task had not yet got to when the count was taken).
+    assert!(
+        forwarded_now + 3 >= pushed_before / FRAME_LEN as u64,
+        "captured {pushed_before} samples, forwarded {forwarded_now} frames"
+    );
+    assert!(forwarded_now <= pushed / FRAME_LEN as u64 + 1);
+    assert_eq!(silence, 0, "silence was inserted");
+    assert_eq!(underruns, 0, "the playback ring ran dry");
+    assert_eq!(meter.dominant(), Some(TONE_HZ));
+    drop(recorder);
+    drop(injector);
+}

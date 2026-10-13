@@ -62,6 +62,7 @@ pub mod lines;
 pub mod livekit;
 pub mod logger;
 pub mod output;
+pub mod pace;
 pub mod presence;
 pub mod receive;
 pub mod reports;
