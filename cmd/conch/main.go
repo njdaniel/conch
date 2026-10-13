@@ -33,7 +33,7 @@ func main() {
 		err = cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, version)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "conch:", err)
+		fmt.Fprintln(os.Stderr, "conch:", cli.ErrorLine(err))
 		os.Exit(1)
 	}
 }

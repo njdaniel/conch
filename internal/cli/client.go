@@ -372,14 +372,14 @@ func (c *Client) resolve(parts ...string) *url.URL {
 
 func (c *Client) decodeError(resp *http.Response) error {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", resp.Header.Get("Location"), resp.StatusCode)
+		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &UnauthenticatedError{Server: c.Server()}
 	}
 	var serverError schema.Error
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError); err != nil {
-		return fmt.Errorf("cli: server returned %s", resp.Status)
+		return fmt.Errorf("cli: server returned %s", safeLine(resp.Status))
 	}
 	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message}
 }
@@ -397,7 +397,7 @@ type ServerError struct {
 }
 
 func (e *ServerError) Error() string {
-	return fmt.Sprintf("cli: server error %s: %s", e.Code, e.Message)
+	return fmt.Sprintf("cli: server error %s: %s", safeLine(e.Code), safeLine(e.Message))
 }
 
 // roundTrip sends one JSON request and, when out is non-nil, decodes the
