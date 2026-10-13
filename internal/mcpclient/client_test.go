@@ -60,13 +60,16 @@ func TestPostMessageToSendsAudienceAsGiven(t *testing.T) {
 
 func TestToolErrorCarriesTheCode(t *testing.T) {
 	tests := []struct {
-		name     string
-		text     string
-		wantCode string
-		wantText string
+		name      string
+		text      string
+		wantCode  string
+		wantRetry int
+		wantText  string
 	}{
-		{"schema error", `{"code":"net_not_found","message":"no such net"}`, "net_not_found", `mcp tools/call tool error: {"code":"net_not_found","message":"no such net"}`},
-		{"plain text has no code", "boom", "", "mcp tools/call tool error: boom"},
+		{"schema error", `{"code":"net_not_found","message":"no such net"}`, "net_not_found", 0, `mcp tools/call tool error: {"code":"net_not_found","message":"no such net"}`},
+		{"a rate limit carries its retry delay", `{"code":"rate_limited","message":"rate limit exceeded; retry in 42 seconds","retry_after_seconds":42}`, "rate_limited", 42,
+			`mcp tools/call tool error: {"code":"rate_limited","message":"rate limit exceeded; retry in 42 seconds","retry_after_seconds":42}`},
+		{"plain text has no code", "boom", "", 0, "mcp tools/call tool error: boom"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,6 +84,9 @@ func TestToolErrorCarriesTheCode(t *testing.T) {
 			}
 			if toolErr.Code != tt.wantCode {
 				t.Errorf("code = %q, want %q", toolErr.Code, tt.wantCode)
+			}
+			if toolErr.RetryAfterSeconds != tt.wantRetry {
+				t.Errorf("retry delay = %d, want %d", toolErr.RetryAfterSeconds, tt.wantRetry)
 			}
 			// The message text is unchanged from before ToolError existed.
 			if !strings.Contains(err.Error(), tt.wantText) {

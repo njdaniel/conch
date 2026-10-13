@@ -60,6 +60,7 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperator, hf(s.handleRevokeAllCredentials)),
+		rt("GET /v1/audit", accessOperator, hf(s.handleExportAudit)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
 		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),

@@ -31,8 +31,15 @@ type ListMessagesResponse struct {
 	NextAfter int64       `json:"next_after,omitempty"`
 }
 
-// Error is the structured error body returned by REST endpoints.
+// Error is the structured error body returned by REST endpoints, and the body
+// of an MCP tool error.
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// RetryAfterSeconds is how long to wait before the same call can succeed,
+	// in whole seconds. It is set only on an error that waiting cures (today
+	// ErrorCodeRateLimited) and omitted otherwise. Over REST it equals the
+	// Retry-After header; an MCP tool error has no headers, so this is where
+	// an agent reads the delay (issue #228).
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
 }

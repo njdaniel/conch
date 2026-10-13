@@ -1,0 +1,5 @@
+{
+  "code": "rate_limited",
+  "message": "rate limit exceeded; retry in 120 seconds",
+  "retry_after_seconds": 120
+}

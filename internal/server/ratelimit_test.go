@@ -382,7 +382,11 @@ func TestAgentRateLimiterRefusalRows(t *testing.T) {
 func TestAgentRateLimiterHugeWindow(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for _, seconds := range []int{10_000_000_000, 1 << 62, math.MaxInt64, int(maxLimitWindow/time.Second) + 1} {
+	for _, wide := range []int64{10_000_000_000, 1 << 62, math.MaxInt64, int64(maxLimitWindow/time.Second) + 1} {
+		if wide > math.MaxInt {
+			continue // where int is 32 bits a manifest cannot say this at all
+		}
+		seconds := int(wide)
 		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
 			t.Parallel()
 			limit := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 2, WindowSeconds: seconds}
@@ -401,6 +405,14 @@ func TestAgentRateLimiterHugeWindow(t *testing.T) {
 				}
 			}
 		})
+	}
+	// The longest delay there can be, in whole seconds, fits a 32-bit int: it
+	// is sent as Retry-After and as retry_after_seconds, and must never wrap.
+	if longest := int64(maxLimitWindow / time.Second); longest > math.MaxInt32 {
+		t.Errorf("maxLimitWindow is %d seconds, more than a 32-bit int holds", longest)
+	}
+	if e := (&rateLimitedError{retryAfter: maxLimitWindow}); e.seconds() < 1 || e.schemaError().RetryAfterSeconds != e.seconds() {
+		t.Errorf("the longest delay is sent as %d seconds (field %d)", e.seconds(), e.schemaError().RetryAfterSeconds)
 	}
 	if got := limitWindow(0); got != maxLimitWindow {
 		t.Errorf("limitWindow(0) = %v: a window that is not positive must refuse, not allow", got)

@@ -43,6 +43,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runNets(ctx, args[1:], stdout, stderr)
 	case "voice":
 		return runVoice(ctx, args[1:], stdout, stderr)
+	case "audit":
+		return runAudit(ctx, args[1:], stdout, stderr)
 	case "approvals":
 		return runApprovals(ctx, args[1:], stdout, stderr)
 	case "approve":
@@ -80,6 +82,7 @@ Usage:
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
   conch voice status [--server <url>] [--watch] <channel>
+  conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
   conch approve [flags] <id>
   conch reject [flags] <id>
@@ -104,6 +107,13 @@ Scope:
   exits 0; voice not configured or unavailable prints one line and exits
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
+
+  audit export (operators only) writes the audit trail to standard output as
+  JSON Lines, one conch.audit_event.v1 object per line in ascending id order,
+  up to the last event when the command started. --after resumes from the
+  last id you hold; --limit caps the count. Each export is itself recorded as
+  an audit_exported event (not part of that export). A refusal prints one
+  line on standard error and exits nonzero.
 
 Environment:
   CONCH_SERVER  server URL (default http://127.0.0.1:8080)

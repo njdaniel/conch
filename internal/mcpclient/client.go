@@ -89,7 +89,10 @@ type ToolError struct {
 	Method  string
 	Code    string
 	Message string
-	text    string
+	// RetryAfterSeconds is the server's retry delay when the refusal is one
+	// that waiting cures (rate_limited), 0 otherwise.
+	RetryAfterSeconds int
+	text              string
 }
 
 func (e *ToolError) Error() string {
@@ -100,7 +103,7 @@ func newToolError(method, text string) *ToolError {
 	e := &ToolError{Method: method, text: text, Message: text}
 	var parsed schema.Error
 	if json.Unmarshal([]byte(text), &parsed) == nil && parsed.Code != "" {
-		e.Code, e.Message = parsed.Code, parsed.Message
+		e.Code, e.Message, e.RetryAfterSeconds = parsed.Code, parsed.Message, parsed.RetryAfterSeconds
 	}
 	return e
 }
