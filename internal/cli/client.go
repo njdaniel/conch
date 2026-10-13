@@ -89,6 +89,21 @@ func (c *Client) dialOptions() *websocket.DialOptions {
 	return opts
 }
 
+// dial opens one of the server's WebSockets, ready to read whatever a server
+// may send on it. The library's own limit is 32 KiB a frame, well under the
+// largest message conchd accepts, and reading a frame over the limit ends the
+// connection: with that default, one long message disconnected every
+// subscriber of its channel (issue #231). Every socket this client reads is
+// opened here, so none can be left with the default.
+func (c *Client) dial(ctx context.Context, endpoint string) (*websocket.Conn, *http.Response, error) {
+	conn, resp, err := websocket.Dial(ctx, endpoint, c.dialOptions())
+	if err != nil {
+		return nil, resp, err
+	}
+	conn.SetReadLimit(schema.MaxMessageFrameBytes)
+	return conn, resp, nil
+}
+
 // ListMessages returns one forward page of v1 messages from channel.
 func (c *Client) ListMessages(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV1, error) {
 	endpoint := c.resolve("v1", "channels", channel, "messages")
@@ -224,7 +239,7 @@ func (c *Client) Subscribe(ctx context.Context, channel string, receive func(sch
 	query := endpoint.Query()
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
@@ -313,7 +328,7 @@ func (c *Client) Tail(ctx context.Context, channel string, receive func(schema.M
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
 
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
@@ -463,7 +478,7 @@ func (c *Client) SubscribeV2(ctx context.Context, channel string, receive func(s
 	query := endpoint.Query()
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
@@ -552,7 +567,7 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 	query := endpoint.Query()
 	query.Set("channel", channel)
 	endpoint.RawQuery = query.Encode()
-	conn, resp, err := websocket.Dial(ctx, endpoint.String(), c.dialOptions())
+	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
 		if resp != nil {
 			defer func() { _ = resp.Body.Close() }()
