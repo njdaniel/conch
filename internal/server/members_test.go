@@ -143,6 +143,7 @@ func TestChannelContentLeak(t *testing.T) {
 		{"v2 message list", "GET", "/v2/channels/%s/messages", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"v0 message post", "POST", "/v0/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
 		{"v1 message post", "POST", "/v1/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
+		{"v2 message search", "GET", "/v2/channels/%s/messages/search?q=hi", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"v2 message post", "POST", "/v2/channels/%s/messages", `{"body":"hi"}`, false, [4]int{created, notFound, notFound, notFound}},
 		{"v0 websocket", "GET", "/v0/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		{"v1 websocket", "GET", "/v1/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
@@ -177,7 +178,8 @@ func TestChannelContentLeak(t *testing.T) {
 	}
 	covered := make(map[string]bool, len(rows))
 	for _, row := range rows {
-		path := strings.ReplaceAll(strings.TrimSuffix(row.path, "?channel=%s"), "%s", "{channel}")
+		path, _, _ := strings.Cut(row.path, "?") // a row may carry a query, which is not part of the pattern
+		path = strings.ReplaceAll(path, "%s", "{channel}")
 		covered[row.method+" "+path] = true
 	}
 	for _, rt := range f.srv.routes {

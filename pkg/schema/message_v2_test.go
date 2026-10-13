@@ -25,6 +25,7 @@ func TestMessageV2GoldenFixtures(t *testing.T) {
 		{name: "post request whisper", file: "post-message-request-v2-whisper.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post response", file: "post-message-response-v2.json", new: func() any { return &PostMessageResponseV2{} }},
 		{name: "list response", file: "list-messages-response-v2.json", new: func() any { return &ListMessagesResponseV2{} }},
+		{name: "search response", file: "search-messages-response-v2.json", new: func() any { return &SearchMessagesResponseV2{} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,6 +55,10 @@ func assertFixtureValidates(t *testing.T, file string, new func() any) {
 	case *PostMessageResponseV2:
 		targets = append(targets, v.Message)
 	case *ListMessagesResponseV2:
+		for _, m := range v.Messages {
+			targets = append(targets, m)
+		}
+	case *SearchMessagesResponseV2:
 		for _, m := range v.Messages {
 			targets = append(targets, m)
 		}
@@ -514,5 +519,27 @@ func TestListMessagesResponseV2EmptyEncodesArray(t *testing.T) {
 	}
 	if string(got) != `{"messages":[]}` {
 		t.Fatalf("got %s", got)
+	}
+}
+
+func TestSearchMessagesResponseV2Encoding(t *testing.T) {
+	tests := []struct {
+		name string
+		in   SearchMessagesResponseV2
+		want string
+	}{
+		{"empty is an array and has no cursor", SearchMessagesResponseV2{Messages: []MessageV2{}}, `{"messages":[]}`},
+		{"cursor is named next_before", SearchMessagesResponseV2{Messages: []MessageV2{}, NextBefore: 9}, `{"messages":[],"next_before":9}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(tt.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

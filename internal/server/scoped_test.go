@@ -110,6 +110,7 @@ var scopedReadPaths = []string{
 	"GET /v0/channels/{channel}/messages",
 	"GET /v1/channels/{channel}/messages",
 	"GET /v2/channels/{channel}/messages",
+	"GET /v2/channels/{channel}/messages/search",
 	"GET /v0/ws",
 	"GET /v1/ws",
 	"GET /v2/ws",
@@ -254,6 +255,30 @@ func TestScopedMessagesExactSets(t *testing.T) {
 				}
 			})
 		}
+		// Search (issue #22) reads messages too. Every body here contains the
+		// word "secret", so a search shows exactly what the v2 list shows, newest
+		// first, and the same refusals.
+		t.Run(r.name+"/GET v2 search", func(t *testing.T) {
+			got := f.callREST(t, "GET", "/v2/channels/ops/messages/search?q=secret&limit=100", tok, "")
+			if got.status != readStatus[r.access] {
+				t.Fatalf("status = %d, want %d; body %s", got.status, readStatus[r.access], got.body)
+			}
+			if r.access != readOK {
+				return
+			}
+			want := wantFor(ri, true)
+			gotIDs, _ := listIDs(t, got.body)
+			for i, j := 0, len(want)-1; i < j; i, j = i+1, j-1 {
+				want[i], want[j] = want[j], want[i]
+			}
+			if !reflect.DeepEqual(gotIDs, want) {
+				t.Errorf("ids = %v, want %v", gotIDs, want)
+			}
+			noSecrets(t, "search", got.body, want)
+			if strings.Contains(got.body, "recipient") {
+				t.Errorf("search mentions recipients: %s", got.body)
+			}
+		})
 		t.Run(r.name+"/mcp read_channel", func(t *testing.T) {
 			status, code, got, raw := f.mcpReadChannel(t, tok, map[string]any{"channel": "ops", "limit": 100})
 			// MCP is the agent front end: humans, the disabled and the

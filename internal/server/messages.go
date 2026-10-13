@@ -205,6 +205,68 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 	})
 }
 
+// maxSearchQueryBytes bounds the q of a message search.
+const maxSearchQueryBytes = 256
+
+// handleSearchMessagesV2 serves GET /v2/channels/{channel}/messages/search
+// (issue #22): the messages of one channel that contain every word of q, that
+// the caller could list, newest first. v2 only, because only v2 can carry a
+// scoped message.
+//
+// The caller is authorised by channelForCaller exactly as for listing, so a
+// non-member gets the unknown-channel answer, and the reader is readerFor's,
+// so the search sees what the list sees. The store applies visibility in the
+// same statement as the match; nothing here counts or filters after it, so the
+// page and next_before are the same with or without a message the caller
+// cannot see.
+func (s *Server) handleSearchMessagesV2(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"), schema.CapabilityMessagesRead, schema.ChannelPermissionRead)
+	if !ok {
+		return
+	}
+	q := r.URL.Query().Get("q")
+	words := strings.Fields(q)
+	if len(words) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "q is required")
+		return
+	}
+	if len(q) > maxSearchQueryBytes {
+		writeError(w, http.StatusBadRequest, "invalid_request", "q must be at most 256 bytes")
+		return
+	}
+	before, err := nonNegativeQueryInt64(r, "before", 0)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	parsedLimit, err := nonNegativeQueryInt64(r, "limit", defaultMessageLimit)
+	if err != nil || parsedLimit == 0 || parsedLimit > maxMessageLimit {
+		writeError(w, http.StatusBadRequest, "invalid_request", "limit must be between 1 and 100")
+		return
+	}
+	limit := int(parsedLimit)
+
+	// One extra row, as for listing, so next_before is advertised only when a
+	// further match is currently available to this caller.
+	stored, err := s.store.SearchVisibleMessages(ctx, channel.ID, readerFor(r, apiV2), words, before, limit+1)
+	if err != nil {
+		slog.ErrorContext(ctx, "messages: search failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	nextBefore := int64(0)
+	if len(stored) > limit {
+		stored = stored[:limit]
+		nextBefore = stored[len(stored)-1].ID
+	}
+	messages := make([]schema.MessageV2, len(stored))
+	for i, message := range stored {
+		messages[i] = messageV2FromStore(message)
+	}
+	writeJSON(w, http.StatusOK, schema.SearchMessagesResponseV2{Messages: messages, NextBefore: nextBefore})
+}
+
 func messageV0FromStore(message store.Message) schema.MessageV0 {
 	return schema.MessageV0{
 		ID:        message.ID,

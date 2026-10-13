@@ -88,34 +88,80 @@ func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list messages: limit must be positive, got %d", limit)
 	}
-	const columns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id`
-	var rows *sql.Rows
-	var err error
-	if reader.Scoped && reader.PrincipalID > 0 {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT `+columns+` FROM messages m
-			 WHERE m.channel_id = ? AND m.id > ?
-			   AND (m.audience_kind IS NULL OR (
-			        EXISTS (SELECT 1 FROM message_recipients r
-			                WHERE r.message_id = m.id AND r.principal_id = ?)
-			    AND EXISTS (SELECT 1 FROM channel_members c
-			                WHERE c.channel_id = m.channel_id AND c.principal_id = ?)
-			    AND EXISTS (SELECT 1 FROM principals p
-			                WHERE p.id = ? AND p.disabled_at IS NULL)))
-			 ORDER BY m.id ASC LIMIT ?`,
-			channelID, afterID, reader.PrincipalID, reader.PrincipalID, reader.PrincipalID, limit)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT `+columns+` FROM messages m
-			 WHERE m.channel_id = ? AND m.id > ? AND m.audience_kind IS NULL
-			 ORDER BY m.id ASC LIMIT ?`,
-			channelID, afterID, limit)
-	}
+	scoped, predArgs := visibilityArgs(reader)
+	rows, err := s.db.QueryContext(ctx, listSQL(scoped),
+		append(append([]any{channelID, afterID}, predArgs...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
 	}
 	defer func() { _ = rows.Close() }()
 
+	msgs, err := s.scanMessages(ctx, rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
+	}
+	return msgs, nil
+}
+
+// messageColumns is the column list scanMessages reads.
+const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id`
+
+// The visibility rule for which messages a reader may see, as SQL conditions
+// over the messages table aliased m. The list and the search both embed the
+// same two constants in their own statement, so a message is filtered in the
+// statement that selects it and the two cannot disagree. See
+// ListVisibleMessages for the rule in words. The statements are built from
+// constants only (never from a caller's text), so every value is a bound
+// parameter.
+const (
+	// visibleToScopedReader takes the reader's principal id three times.
+	visibleToScopedReader = `(m.audience_kind IS NULL OR (
+			        EXISTS (SELECT 1 FROM message_recipients r
+			                WHERE r.message_id = m.id AND r.principal_id = ?)
+			    AND EXISTS (SELECT 1 FROM channel_members c
+			                WHERE c.channel_id = m.channel_id AND c.principal_id = ?)
+			    AND EXISTS (SELECT 1 FROM principals p
+			                WHERE p.id = ? AND p.disabled_at IS NULL)))`
+	visibleToAnyReader = `m.audience_kind IS NULL`
+
+	listHead = `SELECT ` + messageColumns + ` FROM messages m
+		 WHERE m.channel_id = ? AND m.id > ? AND `
+	listTail = `
+		 ORDER BY m.id ASC LIMIT ?`
+
+	searchHead = `SELECT ` + messageColumns + ` FROM messages m
+		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
+		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND `
+	searchTail = `
+		 ORDER BY m.id DESC LIMIT ?`
+)
+
+// visibilityArgs reports whether reader is a scoped reader with an identity
+// (which selects visibleToScopedReader) and the predicate's arguments.
+func visibilityArgs(reader Reader) (scoped bool, args []any) {
+	if reader.Scoped && reader.PrincipalID > 0 {
+		return true, []any{reader.PrincipalID, reader.PrincipalID, reader.PrincipalID}
+	}
+	return false, nil
+}
+
+func listSQL(scoped bool) string {
+	if scoped {
+		return listHead + visibleToScopedReader + listTail
+	}
+	return listHead + visibleToAnyReader + listTail
+}
+
+func searchSQL(scoped bool) string {
+	if scoped {
+		return searchHead + visibleToScopedReader + searchTail
+	}
+	return searchHead + visibleToAnyReader + searchTail
+}
+
+// scanMessages reads the rows of a statement selecting messageColumns, and
+// loads the audience of any whisper among them. It closes rows.
+func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, error) {
 	var msgs []Message
 	var whispers []int // indexes into msgs of principals-audience messages
 	for rows.Next() {
@@ -125,7 +171,7 @@ func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader
 		var netID sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID); err != nil {
-			return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
+			return nil, err
 		}
 		m.CreatedAt = time.UnixMilli(createdAt)
 		if payloadSchema.Valid {
@@ -146,12 +192,71 @@ func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader
 		msgs = append(msgs, m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
+		return nil, err
 	}
 	return msgs, s.fillWhisperAudiences(ctx, msgs, whispers)
+}
+
+// SearchVisibleMessages returns up to limit messages in channelID whose body
+// contains every one of words, that reader may see, newest first. Pass
+// before = 0 to start from the newest, or the last returned ID to fetch the
+// next page; only messages with a smaller ID are returned.
+//
+// It shows a reader exactly what ListVisibleMessages shows them: the match and
+// the visibility predicate are conditions of one statement, so a message the
+// reader cannot see is never selected, never counted against limit, and cannot
+// move a page boundary. Filtering after the match, in Go, would make the page
+// size and the next cursor depend on messages the reader may not know exist.
+//
+// words are plain words, never FTS5 syntax: each becomes one quoted FTS5
+// string (a quote inside it doubled) and all of them are required, so nothing
+// a caller types reaches FTS5's query language. A word the tokenizer reduces
+// to nothing (for example "*") matches nothing. With no words the result is
+// empty. Matching is case-insensitive on whole words (the unicode61 tokenizer).
+func (s *Store) SearchVisibleMessages(ctx context.Context, channelID int64, reader Reader, words []string, before int64, limit int) ([]Message, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: search messages: limit must be positive, got %d", limit)
+	}
+	match := ftsAllWords(words)
+	if match == "" {
+		return nil, nil
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	// before = 0 means "no upper bound"; the bound is written so the statement
+	// text does not change with it.
+	rows, err := s.db.QueryContext(ctx, searchSQL(scoped),
+		append(append([]any{match, channelID, before, before}, predArgs...), limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: search messages in channel %d: %w", channelID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := s.scanMessages(ctx, rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: search messages in channel %d: %w", channelID, err)
+	}
+	return msgs, nil
+}
+
+// ftsAllWords builds an FTS5 query that requires every word, each as a quoted
+// string. Inside an FTS5 string only the quote is special, and it is doubled.
+// A NUL byte would end the string early in C, so it separates words as
+// whitespace does.
+func ftsAllWords(words []string) string {
+	var b strings.Builder
+	for _, w := range words {
+		for _, part := range strings.Fields(strings.ReplaceAll(w, "\x00", " ")) {
+			if b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteByte('"')
+			b.WriteString(strings.ReplaceAll(part, `"`, `""`))
+			b.WriteByte('"')
+		}
+	}
+	return b.String()
 }
 
 // fillWhisperAudiences loads the principal list of the whispers at msgs[idx].

@@ -29,6 +29,7 @@ func (s *Server) routeTable() []route {
 		// readers that can be given a message with an audience.
 		rt("POST /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV2)),
 		rt("GET /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessagesV2)),
+		rt("GET /v2/channels/{channel}/messages/search", accessAuthenticated, hf(s.handleSearchMessagesV2)),
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),

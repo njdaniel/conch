@@ -103,7 +103,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 		case *ast.BasicLit:
 			if x.Kind == token.STRING {
 				lit := strings.ToLower(x.Value)
-				for _, table := range []string{"from messages", "join messages", "message_recipients", "into messages"} {
+				for _, table := range []string{"from messages", "join messages", "message_recipients", "into messages", "messages_fts"} {
 					if strings.Contains(lit, table) {
 						t.Errorf("%s: %s names a message table in a string", path, fset.Position(x.Pos()))
 					}
@@ -120,9 +120,11 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			// a read named, say, MessagesSince or LastMessage.
 			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
 				switch name {
-				case "ListVisibleMessages", "InsertMessage", "InsertMessageV1", "InsertScopedMessage":
+				// SearchVisibleMessages (issue #22) is the other visibility
+				// function; it is held to the same reader rule below.
+				case "ListVisibleMessages", "SearchVisibleMessages", "InsertMessage", "InsertMessageV1", "InsertScopedMessage":
 				default:
-					t.Errorf("%s: %s calls the store's %s; server code may only use ListVisibleMessages and the three inserts", path, fset.Position(x.Pos()), name)
+					t.Errorf("%s: %s calls the store's %s; server code may only use ListVisibleMessages, SearchVisibleMessages and the three inserts", path, fset.Position(x.Pos()), name)
 					return true
 				}
 			}
@@ -136,7 +138,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			if !listsMessages {
 				return true
 			}
-			if name != "ListVisibleMessages" {
+			if name != "ListVisibleMessages" && name != "SearchVisibleMessages" {
 				// The Client types in internal/cli list over HTTP; nothing under
 				// the walked roots has such a method, so any other is a store read.
 				t.Errorf("%s: %s calls %s; use ListVisibleMessages so the audience filter applies", path, fset.Position(x.Pos()), name)
