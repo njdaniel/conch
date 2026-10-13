@@ -337,3 +337,13 @@ type ListMessagesResponseV2 struct {
 	Messages  []MessageV2 `json:"messages"`
 	NextAfter int64       `json:"next_after,omitempty"`
 }
+
+// SearchMessagesResponseV2 is one page of the messages in a channel that match
+// a search and that the caller may see, newest first (issue #22). NextBefore
+// is the message ID to pass as the next request's before parameter; zero means
+// there is no known subsequent page. It is present only when there may be more,
+// and is never a function of messages the caller cannot see.
+type SearchMessagesResponseV2 struct {
+	Messages   []MessageV2 `json:"messages"`
+	NextBefore int64       `json:"next_before,omitempty"`
+}

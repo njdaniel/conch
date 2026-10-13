@@ -39,6 +39,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runSend(ctx, args[1:], stderr)
 	case "tail":
 		return runTail(ctx, args[1:], stdout, stderr)
+	case "search":
+		return runSearch(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
 	case "voice":
@@ -76,6 +78,7 @@ func Usage(w io.Writer) {
 Usage:
   conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...]] <channel> <text>
   conch tail [--server <url>] <channel>
+  conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>
   conch nets list [--server <url>] <channel>
   conch nets create [--server <url>] <channel> <name>
   conch nets archive [--server <url>] <channel> <name>
@@ -96,6 +99,12 @@ Scope:
   --to whispers to the listed principals (recorded in the audit log). Giving
   both is an error. tail marks scoped messages [net:<name>] or [whisper:<id>,<id>];
   a message body that itself starts with [ is printed as \[.
+  search prints the messages of one channel that contain every one of the
+  words (case-insensitive, whole words, any order), newest first, in tail's
+  format; it shows only what tail would show you. The words are plain text,
+  never a query language. No match prints nothing and exits 0. --limit caps
+  the count (1 to 100); when more remain, standard error names the --before
+  value that continues.
   voice status shows who is connected to a channel's voice and who is talking;
   it only reads presence and never joins. One line per participant, in
   principal id order:

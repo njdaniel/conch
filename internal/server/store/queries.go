@@ -239,35 +239,37 @@ func (s *Store) InsertMessageV1(
 	// returned value to the same precision so a POST response exactly describes
 	// what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Message{}, fmt.Errorf("store: begin insert message in channel %d: %w", channelID, err)
-	}
-	defer func() { _ = tx.Rollback() }()
 	var payloadSchema any
 	var payloadJSON any
 	if payload != nil {
 		payloadSchema = payload.Schema
 		payloadJSON = []byte(payload.Data)
 	}
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		channelID, authorID, body, now.UnixMilli(), payloadSchema, payloadJSON)
+	var id int64
+	// BEGIN IMMEDIATE, like the scoped insert: the message insert fires the
+	// full-text index trigger (migration 15), and with a deferred transaction
+	// concurrent posts failed with SQLITE_BUSY that the busy timeout does not
+	// retry. Taking the write lock first makes them queue instead.
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			channelID, authorID, body, now.UnixMilli(), payloadSchema, payloadJSON)
+		if err != nil {
+			return fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
+		}
+		if id, err = res.LastInsertId(); err != nil {
+			return fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, '', ?)`,
+			fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
+			return fmt.Errorf("store: audit inserted message %d: %w", id, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return Message{}, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Message{}, fmt.Errorf("store: insert message in channel %d: %w", channelID, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO audit_events (actor, action, subject, detail, created_at) VALUES (?, ?, ?, '', ?)`,
-		fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
-		return Message{}, fmt.Errorf("store: audit inserted message %d: %w", id, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return Message{}, fmt.Errorf("store: commit inserted message %d: %w", id, err)
+		return Message{}, err
 	}
 	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now}, nil
 }

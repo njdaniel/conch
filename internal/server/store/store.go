@@ -313,6 +313,22 @@ END`,
 )`,
 		`CREATE INDEX voice_room_holders_by_credential ON voice_room_holders (credential_id)`,
 	},
+	// 15: Message search (issue #22). messages_fts is an external-content FTS5
+	// index over messages.body (default unicode61 tokenizer: case-insensitive
+	// whole words), keyed by the message id as its rowid. It stores no text of
+	// its own. Messages are never updated or deleted, so an insert trigger is
+	// all that keeps it in step; if that ever changes, update and delete
+	// triggers are needed with it. The rebuild indexes every message that
+	// exists before this migration, scoped ones included: the index knows
+	// nothing of audiences, and visibility is applied by the one search query
+	// in audience.go, in the same statement as the match.
+	{
+		`CREATE VIRTUAL TABLE messages_fts USING fts5(body, content='messages', content_rowid='id')`,
+		`CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+	INSERT INTO messages_fts (rowid, body) VALUES (new.id, new.body);
+END`,
+		`INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

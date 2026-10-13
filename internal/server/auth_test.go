@@ -148,6 +148,7 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/channels/{channel}/messages":                             {classAuth, "/v1/channels/general/messages", "", 200},
 	"POST /v2/channels/{channel}/messages":                            {classAuth, "/v2/channels/general/messages", `{}`, 400},
 	"GET /v2/channels/{channel}/messages":                             {classAuth, "/v2/channels/general/messages", "", 200},
+	"GET /v2/channels/{channel}/messages/search":                      {classAuth, "/v2/channels/general/messages/search?q=hi", "", 200},
 	// Voice (issue #126). The fixture does not configure voice, so a member
 	// gets 503 voice_not_configured; AuthOff gets 400 and an agent 403 (both
 	// special-cased below).
