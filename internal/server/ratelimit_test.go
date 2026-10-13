@@ -265,7 +265,7 @@ func TestDenialCoalescer(t *testing.T) {
 			t.Parallel()
 			var c denialCoalescer
 			for i, s := range tt.steps {
-				write, count := c.admit(s.key, start.Add(s.at))
+				write, count := c.admit(1, s.key, start.Add(s.at))
 				if write != s.wantWrite || count != s.wantCount {
 					t.Errorf("step %d: admit(%q, +%v) = %v, %d; want %v, %d", i, s.key, s.at, write, count, s.wantWrite, s.wantCount)
 				}
@@ -282,7 +282,7 @@ func TestDenialCoalescer(t *testing.T) {
 			var c denialCoalescer
 			rows, last := 0, 0
 			for range tt.n {
-				if write, count := c.admit("a", start); write {
+				if write, count := c.admit(1, "a", start); write {
 					rows++
 					last = count
 				}
@@ -297,17 +297,50 @@ func TestDenialCoalescer(t *testing.T) {
 	})
 }
 
+// One principal's denials are counted separately for maxDenialKinds kinds a
+// window. Its kinds past that are counted together, so it cannot grow the
+// memory or the log by varying what it asks for; and none of it changes how
+// another principal's denials are written.
 func TestDenialCoalescerBounded(t *testing.T) {
 	t.Parallel()
 	var c denialCoalescer
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := range maxDenialKeys + 10 {
-		if write, _ := c.admit(string(rune('a'+i%26))+"-"+time.Duration(i).String(), at); !write {
-			t.Fatalf("first denial of kind %d was not written", i)
+	kind := func(i int) string { return "kind-" + strconv.Itoa(i) }
+	for i := range maxDenialKinds {
+		if write, count := c.admit(1, kind(i), at); !write || count != 1 {
+			t.Fatalf("first denial of kind %d: write=%v count=%d, want true, 1", i, write, count)
 		}
 	}
-	if n := len(c.entries); n > maxDenialKeys {
-		t.Errorf("remembered %d kinds, bound is %d", n, maxDenialKeys)
+	// 300 more kinds, each new: together they are one flood.
+	var written []int
+	for i := range 300 {
+		if write, count := c.admit(1, kind(maxDenialKinds+i), at); write {
+			written = append(written, count)
+		}
+	}
+	if want := []int{1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64, 128, 256}; !reflect.DeepEqual(written, want) {
+		t.Errorf("rows for 300 kinds past the bound = %v, want %v", written, want)
+	}
+	// A kind it already has an entry for is still counted on its own.
+	if write, count := c.admit(1, kind(0), at); !write || count != 2 {
+		t.Errorf("second denial of a tracked kind: write=%v count=%d, want true, 2", write, count)
+	}
+	// Another principal is not affected in any way.
+	for n := 1; n <= 3; n++ {
+		if write, count := c.admit(2, kind(maxDenialKinds+1), at); !write || count != n {
+			t.Errorf("principal 2, denial %d: write=%v count=%d, want true, %d", n, write, count, n)
+		}
+	}
+	if n := len(c.entries); n != maxDenialKinds+2 {
+		t.Errorf("entries = %d, want %d (the kinds, principal 1's overflow, principal 2's one)", n, maxDenialKinds+2)
+	}
+	// A window later everything has gone and the principal starts afresh.
+	later := at.Add(denialCoalesceWindow)
+	if write, count := c.admit(1, kind(maxDenialKinds+5), later); !write || count != 1 {
+		t.Errorf("a new kind in the next window: write=%v count=%d, want true, 1", write, count)
+	}
+	if n, k := len(c.entries), c.kinds[1]; n != 1 || k != 1 {
+		t.Errorf("after the window: %d entries and %d kinds for principal 1, want 1 and 1", n, k)
 	}
 }
 
@@ -374,5 +407,65 @@ func TestAgentRateLimiterHugeWindow(t *testing.T) {
 	}
 	if got := limitWindow(10); got != 10*time.Second {
 		t.Errorf("limitWindow(10) = %v", got)
+	}
+}
+
+// Two callers read the clock and then take the lock, so a use can arrive
+// after a later one. It must still leave the window at its own time: if the
+// later use were left in front of it, the earlier one would be counted until
+// the later one expired.
+func TestAgentRateLimiterUsesOutOfOrder(t *testing.T) {
+	t.Parallel()
+	limit := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 2, WindowSeconds: 10}
+	key := agentLimitKey{principalID: 1, capability: schema.CapabilityMessagesPost}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var l agentRateLimiter
+	for _, at := range []time.Duration{5 * time.Second, 3 * time.Second} {
+		if d := l.take(key, limit, start.Add(at)); !d.allowed {
+			t.Fatalf("use at +%v refused", at)
+		}
+	}
+	if d := l.take(key, limit, start.Add(12*time.Second)); d.allowed {
+		t.Fatal("a third use inside the window was admitted")
+	} else if d.retryAfter != time.Second {
+		t.Errorf("retryAfter = %v, want 1s: the use at +3s is the next to leave", d.retryAfter)
+	}
+	// The use made at +3s has left by +13.5s although it was recorded second.
+	if d := l.take(key, limit, start.Add(13*time.Second+500*time.Millisecond)); !d.allowed {
+		t.Error("the use at +3s was still counted after it left the window")
+	}
+	if d := l.take(key, limit, start.Add(14*time.Second)); d.allowed || d.retryAfter != time.Second {
+		t.Errorf("at +14s: allowed=%v retryAfter=%v, want refused for 1s (the use at +5s leaves at +15s)", d.allowed, d.retryAfter)
+	}
+}
+
+// When a manifest's Max is lowered under uses already counted, more than one
+// of them has to leave before the next call is admitted, and Retry-After must
+// say so: a caller who waits as told must then get in.
+func TestAgentRateLimiterRetryAfterALoweredMax(t *testing.T) {
+	t.Parallel()
+	key := agentLimitKey{principalID: 1, capability: schema.CapabilityMessagesPost}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var l agentRateLimiter
+	four := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 4, WindowSeconds: 10}
+	for i := range 4 {
+		if d := l.take(key, four, start.Add(time.Duration(i)*time.Second)); !d.allowed {
+			t.Fatalf("use %d refused", i)
+		}
+	}
+	two := schema.RateLimit{Capability: schema.CapabilityMessagesPost, Max: 2, WindowSeconds: 10}
+	d := l.take(key, two, start.Add(4*time.Second))
+	if d.allowed {
+		t.Fatal("admitted with four uses counted against a limit of two")
+	}
+	// Uses at +0s, +1s and +2s must leave: the last of them at +12s.
+	if d.retryAfter != 8*time.Second {
+		t.Fatalf("retryAfter = %v, want 8s", d.retryAfter)
+	}
+	if early := l.take(key, two, start.Add(4*time.Second+d.retryAfter-time.Second)); early.allowed {
+		t.Error("admitted a second before Retry-After was up")
+	}
+	if late := l.take(key, two, start.Add(4*time.Second+d.retryAfter)); !late.allowed {
+		t.Error("refused after waiting exactly Retry-After")
 	}
 }

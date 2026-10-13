@@ -211,7 +211,7 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 	// Repeated identical denials from one principal are thinned out, so a
 	// caller cannot grow the audit log with every refused request; the first
 	// of each kind is written at once (issue #80, denialCoalescer).
-	write, count := s.denials.admit(fmt.Sprintf("%d|%s|%s", caller.ID, subject, code), s.now())
+	write, count := s.denials.admit(caller.ID, subject+"|"+code, s.now())
 	if !write {
 		writeError(w, http.StatusForbidden, code, message)
 		return

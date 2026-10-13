@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -61,9 +62,12 @@ const (
 	// access_denied events are thinned out (issue #80, comment from the
 	// review of #89); see denialCoalescer.
 	denialCoalesceWindow = time.Minute
-	// maxDenialKeys bounds the memory of the denial coalescer. Past it a
-	// denial is audited uncoalesced: the log may grow, the memory may not.
-	maxDenialKeys = 4096
+	// maxDenialKinds is how many kinds of denial the coalescer counts
+	// separately for one principal in a window. Past it that principal's
+	// further kinds are counted together as one, so neither the memory nor
+	// the log can be grown by varying what is asked for, and nothing one
+	// principal does changes how another's denials are written.
+	maxDenialKinds = 256
 )
 
 type agentLimitKey struct {
@@ -126,10 +130,26 @@ func (l *agentRateLimiter) take(key agentLimitKey, limit schema.RateLimit, at ti
 	}
 	e.uses = append(e.uses[:0], e.uses[n:]...)
 	if len(e.uses) < limit.Max {
-		e.uses = append(e.uses, at)
+		// Callers read the clock before taking the lock, so two of them can
+		// arrive here in the other order, and a clock can step back. The use
+		// goes in at its own place: the uses stay oldest first, which the
+		// expiry above relies on.
+		i := len(e.uses)
+		for i > 0 && at.Before(e.uses[i-1]) {
+			i--
+		}
+		e.uses = slices.Insert(e.uses, i, at)
 		return limitDecision{allowed: true}
 	}
-	wait := window - at.Sub(e.uses[0])
+	// The next call is admitted once fewer than Max uses are left in the
+	// window, which is when this one leaves it: the oldest, unless the
+	// manifest's Max was lowered under uses already counted. (The schema
+	// refuses a Max that is not positive; if one got here every call is
+	// refused, for the whole window.)
+	wait := window
+	if limit.Max > 0 {
+		wait = window - at.Sub(e.uses[len(e.uses)-limit.Max])
+	}
 	retry := min(max(time.Duration(math.Ceil(wait.Seconds()))*time.Second, time.Second), window)
 	if e.refusals == 0 || at.Sub(e.refusedAt) >= agentLimitAuditWindow {
 		e.refusedAt, e.refusals = at, 0
@@ -240,8 +260,17 @@ func writeRateLimited(w http.ResponseWriter, e *rateLimitedError) {
 // which is exactly when it matters.
 type denialCoalescer struct {
 	mu      sync.Mutex
-	entries map[string]*denialEntry
-	pruned  time.Time
+	entries map[denialKey]*denialEntry
+	// kinds is how many separate kinds each principal has an entry for.
+	kinds  map[int64]int
+	pruned time.Time
+}
+
+// denialKey is one principal's denials of one kind. The empty kind is the one
+// its kinds past maxDenialKinds are counted under.
+type denialKey struct {
+	principalID int64
+	kind        string
 }
 
 type denialEntry struct {
@@ -252,27 +281,44 @@ type denialEntry struct {
 }
 
 // admit reports whether this denial is to be written, and which one it is in
-// its window (1 for the first).
-func (c *denialCoalescer) admit(key string, now time.Time) (write bool, count int) {
+// its window (1 for the first). kind says what was denied and why; it is
+// never the empty string.
+func (c *denialCoalescer) admit(principalID int64, kind string, now time.Time) (write bool, count int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[denialKey]*denialEntry)
+		c.kinds = make(map[int64]int)
+	}
 	if now.Sub(c.pruned) >= denialCoalesceWindow {
 		c.pruned = now
 		for k, e := range c.entries {
-			if now.Sub(e.start) >= denialCoalesceWindow {
-				delete(c.entries, k)
+			if now.Sub(e.start) < denialCoalesceWindow {
+				continue
+			}
+			delete(c.entries, k)
+			if k.kind != "" {
+				if c.kinds[k.principalID]--; c.kinds[k.principalID] <= 0 {
+					delete(c.kinds, k.principalID)
+				}
 			}
 		}
 	}
+	key := denialKey{principalID, kind}
 	e := c.entries[key]
-	if e == nil || now.Sub(e.start) >= denialCoalesceWindow {
-		if e == nil && len(c.entries) >= maxDenialKeys {
-			return true, 1
-		}
-		if c.entries == nil {
-			c.entries = make(map[string]*denialEntry)
+	if e == nil && c.kinds[principalID] >= maxDenialKinds {
+		key.kind = ""
+		e = c.entries[key]
+	}
+	if e == nil {
+		if key.kind != "" {
+			c.kinds[principalID]++
 		}
 		c.entries[key] = &denialEntry{start: now, count: 1}
+		return true, 1
+	}
+	if now.Sub(e.start) >= denialCoalesceWindow {
+		e.start, e.count = now, 1
 		return true, 1
 	}
 	e.count++

@@ -83,7 +83,7 @@ func (s *Server) auditAgentDenial(ctx context.Context, principalID int64, subjec
 	actx := context.WithoutCancel(ctx)
 	// Repeated identical denials from one principal are thinned out; the
 	// first of each kind is written at once (issue #80, denialCoalescer).
-	write, count := s.denials.admit(fmt.Sprintf("%d|%s|%s", principalID, subject, detail), s.now())
+	write, count := s.denials.admit(principalID, subject+"|"+detail, s.now())
 	if !write {
 		return
 	}
