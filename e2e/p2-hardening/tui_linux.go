@@ -45,6 +45,9 @@ func (h *harness) tuiChannelList(who *person, want, unwanted []string) error {
 	var stop sync.Once
 	kill := func() {
 		stop.Do(func() {
+			// It leads a session of its own (Setsid), so this reaches
+			// anything it started as well.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Process.Kill()
 			<-exited
 		})
@@ -110,7 +113,9 @@ func (h *harness) tuiChannelList(who *person, want, unwanted []string) error {
 			return err
 		}
 	}
-	// One more moment for anything it would still draw.
+	// The list comes from one response and is drawn in one frame, so a
+	// channel that is going to be shown is on the screen already. The wait
+	// is only for good measure.
 	if err := pause(300 * time.Millisecond); err != nil {
 		return err
 	}

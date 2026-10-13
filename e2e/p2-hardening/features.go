@@ -465,7 +465,7 @@ func (h *harness) auditAndHygiene() error {
 	if err != nil {
 		return fmt.Errorf("conch audit export --after %d --limit 5: %w", first[9].ID, err)
 	}
-	if len(next) != 5 || !reflect.DeepEqual(append(first, next...), viaCLI[:15]) {
+	if len(next) != 5 || len(viaCLI) < 15 || !reflect.DeepEqual(append(first, next...), viaCLI[:15]) {
 		return fmt.Errorf("conch audit export --after %d --limit 5 printed %d events that do not continue the export", first[9].ID, len(next))
 	}
 	step("the audit trail exports as JSON Lines in id order, the same through GET /v1/audit and conch audit export, resumable, and each export is recorded")

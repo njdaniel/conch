@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/njdaniel/conch/internal/mcpclient"
@@ -67,8 +70,21 @@ func (h *harness) identity() error {
 	if !strings.Contains(who, "name: nick") || !strings.Contains(who, "kind: human") || !strings.Contains(who, fmt.Sprintf("id: %d", h.nick.id)) {
 		return fmt.Errorf("conch whoami after conch login does not name nick, a human, id %d", h.nick.id)
 	}
-	if _, err := h.newConchUser("nobody", madeUpToken); err == nil {
-		return fmt.Errorf("conch login accepted a credential nobody was issued")
+	// A made-up credential: the login command itself must fail, name nobody,
+	// and store nothing.
+	nobody, err := h.cliUser("nobody")
+	if err != nil {
+		return err
+	}
+	out, _, err := nobody.runSplit(madeUpToken+"\n", "login")
+	if err == nil {
+		return fmt.Errorf("conch login exited 0 for a credential nobody was issued")
+	}
+	if strings.Contains(out, "logged in") {
+		return fmt.Errorf("conch login failed for a made-up credential and still printed a login line")
+	}
+	if _, stderr, err := nobody.runSplit("", "whoami"); err == nil || !strings.Contains(stderr, "not logged in") {
+		return fmt.Errorf("conch whoami after a refused login: failed: %v; want it to fail and say nobody is logged in", err != nil)
 	}
 	step("a person signs in with conch login and an operator-issued credential; a made-up one is refused; no identity service exists in this run")
 
@@ -259,6 +275,150 @@ func (h *harness) identity() error {
 		}
 	}
 	step("revoking a credential stops it at once and deletes nothing: it stays listed as revoked, the principal keeps working, the trail has each step")
+	return h.closeOut()
+}
+
+// closeOut shows the two ways an operator shuts a principal out entirely,
+// revoking all its credentials and disabling it: every token it held stops,
+// and the principal, what it wrote and its history are all still there.
+func (h *harness) closeOut() error {
+	id, err := h.createPrincipal(schema.PrincipalAgent, "drifter")
+	if err != nil {
+		return err
+	}
+	drifter := &person{name: "drifter", id: id}
+	_, first, err := h.issue(id, "drifter-1")
+	if err != nil {
+		return err
+	}
+	_, second, err := h.issue(id, "drifter-2")
+	if err != nil {
+		return err
+	}
+	drifter.token = first
+	if err := h.addMember("lab", drifter); err != nil {
+		return err
+	}
+	if err := h.putManifest(drifter, []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost}, nil, readPost(h.labID)); err != nil {
+		return err
+	}
+	if err := h.connect(drifter); err != nil {
+		return err
+	}
+	const left = "drifter was here"
+	if _, err := tool[schema.PostMessageResponseV2](drifter, "post_message", map[string]any{"channel": "lab", "body": left}); err != nil {
+		return err
+	}
+	// stopped checks that a token is refused on REST and on MCP.
+	stopped := func(what, token string) error {
+		if _, err := (api{baseURL: h.proc.baseURL, token: token}).refused(what+" on REST", http.MethodGet, "/v1/whoami", nil, http.StatusUnauthorized, "unauthenticated"); err != nil {
+			return err
+		}
+		return mcpUnauthorized(what+" on MCP", mcpclient.New(h.proc.baseURL, token).Initialize(runCtx, name))
+	}
+	// intact checks that the principal and what it wrote are still there.
+	intact := func(after string) error {
+		lab, err := h.allMessages(h.nick, "lab")
+		if err != nil {
+			return err
+		}
+		kept := false
+		for _, m := range lab {
+			if m.Body == left && m.AuthorID == id {
+				kept = true
+			}
+		}
+		if !kept {
+			return fmt.Errorf("after %s, the message drifter posted is gone from lab", after)
+		}
+		var own schema.GetAgentManifestResponseV1
+		if err := h.op().call(http.MethodGet, fmt.Sprintf("/v1/principals/%d/manifest", id), nil, &own); err != nil {
+			return fmt.Errorf("after %s, drifter's manifest: %w", after, err)
+		}
+		return nil
+	}
+
+	credentials := fmt.Sprintf("/v1/principals/%d/credentials", id)
+	var all schema.RevokeAllCredentialsResponseV1
+	if err := h.op().call(http.MethodPost, credentials+"/revoke-all", nil, &all); err != nil {
+		return err
+	}
+	if all.Revoked != 2 {
+		return fmt.Errorf("revoke-all revoked %d credentials, want drifter's 2", all.Revoked)
+	}
+	for i, token := range []string{first, second} {
+		if err := stopped(fmt.Sprintf("drifter's credential %d after revoke-all", i+1), token); err != nil {
+			return err
+		}
+	}
+	if err := intact("revoke-all"); err != nil {
+		return err
+	}
+	// The principal is not disabled by that: a new credential works.
+	_, third, err := h.issue(id, "drifter-3")
+	if err != nil {
+		return fmt.Errorf("a new credential after revoke-all: %w", err)
+	}
+	drifter.token = third
+	if err := h.connect(drifter); err != nil {
+		return err
+	}
+
+	// Disabled: the credential stops, none can be issued, and enabling it
+	// again brings back the principal but no old credential.
+	state := fmt.Sprintf("/v1/principals/%d/", id)
+	if err := h.op().call(http.MethodPost, state+"disable", nil, nil); err != nil {
+		return err
+	}
+	if err := stopped("a disabled principal's credential", third); err != nil {
+		return err
+	}
+	if _, err := h.op().refused("a credential for a disabled principal", http.MethodPost, credentials, schema.CreateCredentialRequestV1{Label: "too late"}, http.StatusConflict, "principal_disabled"); err != nil {
+		return err
+	}
+	if err := intact("disabling it"); err != nil {
+		return err
+	}
+	if err := h.op().call(http.MethodPost, state+"enable", nil, nil); err != nil {
+		return err
+	}
+	if err := stopped("a credential revoked by disabling, after the principal is enabled again", third); err != nil {
+		return err
+	}
+	_, fourth, err := h.issue(id, "drifter-4")
+	if err != nil {
+		return fmt.Errorf("a new credential after enabling: %w", err)
+	}
+	drifter.token = fourth
+	if err := h.connect(drifter); err != nil {
+		return err
+	}
+	if _, err := tool[schema.ListMessagesResponseV2](drifter, "read_channel", map[string]any{"channel": "lab"}); err != nil {
+		return fmt.Errorf("drifter after being enabled again: %w", err)
+	}
+
+	// The whole history is in the trail, in order.
+	events, err := h.audit()
+	if err != nil {
+		return err
+	}
+	var got []string
+	for _, e := range events {
+		if e.Subject == fmt.Sprintf("principal:%d", id) && (strings.HasPrefix(e.Action, "credential") || strings.HasPrefix(e.Action, "principal_")) {
+			got = append(got, e.Action)
+		}
+	}
+	want := []string{
+		"credential_created", "credential_created",
+		"credential_revoked", "credential_revoked", "credentials_revoked_all",
+		"credential_created",
+		"principal_disabled", "credential_revoked", "principal_enabled",
+		"credential_created",
+	}
+	if !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("the audit trail of drifter's credentials and state = %v, want %v", got, want)
+	}
+	step("revoke-all and disabling shut a principal out at once, on REST and MCP; its messages, manifest and history stay, and enabling it revives no old credential")
 	return nil
 }
 
@@ -598,17 +758,52 @@ func (h *harness) approvalChain() error {
 	if pendingCheck.State != schema.ApprovalStatePending || pendingCheck.Resolution != nil {
 		return fmt.Errorf("check_decision before anyone decided: state %s, want pending with no resolution", pendingCheck.State)
 	}
+	// await_decision waits: with nobody deciding, it comes back only when
+	// its own timeout has passed, and says the approval is still pending.
+	const shortWait = 600 * time.Millisecond
+	began := time.Now()
+	timedOut, err := tool[schema.AwaitDecisionOutput](h.leviathan, "await_decision", map[string]any{"approval_id": id, "timeout_ms": shortWait.Milliseconds()})
+	if err != nil {
+		return err
+	}
+	if waited := time.Since(began); waited < shortWait || timedOut.State != schema.ApprovalStatePending || timedOut.Resolution != nil {
+		return fmt.Errorf("await_decision with a %s timeout and nobody deciding returned after %s in state %s, want it to wait the timeout out and report pending", shortWait, waited.Round(time.Millisecond), timedOut.State)
+	}
+
+	// And it returns when someone decides. The decision is cast only once
+	// the request is known to have reached conchd, so that what comes back
+	// is the wait being woken and not a call that found the answer ready.
 	type awaited struct {
 		out schema.AwaitDecisionOutput
 		err error
 	}
 	waiting := make(chan awaited, 1)
+	sent := make(chan struct{})
+	var sentOnce sync.Once
 	go func() {
-		out, err := tool[schema.AwaitDecisionOutput](h.leviathan, "await_decision", map[string]any{"approval_id": id, "timeout_ms": 20000})
+		ctx, cancel := context.WithTimeout(runCtx, 60*time.Second)
+		defer cancel()
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) { sentOnce.Do(func() { close(sent) }) },
+		})
+		raw, err := h.leviathan.mcp.CallTool(ctx, "await_decision", map[string]any{"approval_id": id, "timeout_ms": 30000})
+		if err != nil {
+			waiting <- awaited{err: fmt.Errorf("await_decision as leviathan: %w", err)}
+			return
+		}
+		out, err := mcpclient.Decode[schema.AwaitDecisionOutput](raw)
 		waiting <- awaited{out, err}
 	}()
-	// The call must be blocked, not merely not yet sent, when the decision
-	// lands: a wait that returns early would hide behind a fast decision.
+	select {
+	case <-sent:
+	case early := <-waiting:
+		return fmt.Errorf("await_decision ended before its request was sent: %w", early.err)
+	case <-runCtx.Done():
+		return runCtx.Err()
+	case <-time.After(20 * time.Second):
+		return fmt.Errorf("the await_decision request was not sent within 20 seconds")
+	}
+	// conchd has the whole request. It must now be holding it.
 	select {
 	case early := <-waiting:
 		if early.err != nil {
@@ -659,7 +854,7 @@ func (h *harness) approvalChain() error {
 	if err := h.wantChain(id, auditApprovalCreated, auditNotifySent, auditDecisionCast, auditApprovalResolved, auditNotifySent); err != nil {
 		return err
 	}
-	step("request_approval, ntfy, conch approve, await_decision, check_decision and the REST read by id agree; the audit chain is in order")
+	step("await_decision waits out its timeout while nobody decides, and is woken by conch approve; it, check_decision and the REST read by id give one resolution; ntfy is told twice; the audit chain is in order")
 
 	// 4. The same with ntfy down: nothing waits for it, the approval is
 	// still decided, and the trail says the notifications failed.
@@ -689,12 +884,24 @@ func (h *harness) approvalChain() error {
 	if err != nil {
 		return fmt.Errorf("with ntfy down: %w", err)
 	}
+	// The two failures are two real attempts: conchd tried ntfy once for the
+	// creation and once for the resolution, got no answer, and did not keep
+	// trying. Nothing about this approval was ever delivered.
+	attempts := 0
+	for _, hit := range h.ntfy.attemptedWhileDown() {
+		if strings.Contains(hit.Title, degradedTitle) && hit.Topic == ntfyTopic {
+			attempts++
+		}
+	}
+	if attempts != 2 {
+		return fmt.Errorf("with ntfy down: conchd made %d delivery attempts about approval %d, want 2 (created, resolved)", attempts, degraded)
+	}
 	if err := h.notified(degradedTitle, 0); err != nil {
 		return fmt.Errorf("with ntfy down: %w", err)
 	}
 	h.ntfy.setDown(false)
 	h.degraded = degraded
-	step("with ntfy down the approval is raised and rejected all the same, and both failed notifications are in the audit trail")
+	step("with ntfy down the approval is raised and rejected all the same; conchd tried ntfy twice, and both failures are in the audit trail")
 	return nil
 }
 

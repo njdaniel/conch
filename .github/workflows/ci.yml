@@ -122,11 +122,11 @@ jobs:
 
   dogfood-check:
     # The P1 release canary (ROADMAP success criterion,
-    # .claude/skills/dogfood-check/): runs on every push to main (the closest
-    # proxy to "before releases" — there is no separate release workflow)
-    # and on any PR labeled approval-path, per issue #19's acceptance
-    # criteria. A release does not ship, and an approval-path PR does not
-    # merge, on a failing dogfood-check.
+    # .claude/skills/dogfood-check/): runs on every push to main and on any
+    # PR labeled approval-path, per issue #19's acceptance criteria; the
+    # release workflow (release.yml) runs it again on every tag. A release
+    # does not ship, and an approval-path PR does not merge, on a failing
+    # dogfood-check.
     if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'approval-path')
     runs-on: ubuntu-latest
     steps:

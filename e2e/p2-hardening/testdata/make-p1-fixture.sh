@@ -14,7 +14,7 @@
 #   git worktree add --detach /tmp/conch-p1 5e9932d
 #   (cd /tmp/conch-p1 && go build -o /tmp/conchd-p1 ./cmd/conchd)
 #
-# Needs curl, jq and sqlite3.
+# Needs Linux (GNU date), bash, curl, jq, python3 and sqlite3.
 set -euo pipefail
 
 conchd=${1:?usage: make-p1-fixture.sh <path to a P1 conchd>}

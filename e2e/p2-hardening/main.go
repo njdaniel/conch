@@ -42,6 +42,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -381,12 +382,6 @@ func (h *harness) startConchd(dataDir string) error {
 	h.proc = p
 	h.onCleanup(p.halt)
 
-	addr, err := freeAddr()
-	if err != nil {
-		return err
-	}
-	p.baseURL = "http://" + addr
-
 	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -406,7 +401,10 @@ func (h *harness) startConchd(dataDir string) error {
 	}
 	h.secret(p.operatorToken)
 
-	cmd := exec.CommandContext(runCtx, h.bin.conchd, "serve", "--data", dataDir, "--listen", addr, // #nosec G204 -- h.bin.conchd is a binary this program just built into a temp dir; args are local constants and this run's own addresses
+	// conchd is asked for port 0 and says which port it got. Choosing a free
+	// port here and handing it over would leave a moment in which something
+	// else could take it.
+	cmd := exec.CommandContext(runCtx, h.bin.conchd, "serve", "--data", dataDir, "--listen", "127.0.0.1:0", // #nosec G204 -- h.bin.conchd is a binary this program just built into a temp dir; args are local constants and this run's own addresses
 		"--ntfy-server", h.ntfy.url(), "--ntfy-topic", ntfyTopic, "--ntfy-urgent-topic", ntfyUrgentTopic)
 	cmd.Env = h.isolatedEnv(home)
 	cmd.Stdout = logFile
@@ -418,25 +416,34 @@ func (h *harness) startConchd(dataDir string) error {
 	return p.waitHealthy(15 * time.Second)
 }
 
-func freeAddr() (string, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().String(), nil
-}
+// listeningOn is the line conchd prints once it has its port.
+var listeningOn = regexp.MustCompile(`(?m)^conchd \S+ listening on (127\.0\.0\.1:\d+) `)
 
+// waitHealthy waits for conchd to say where it listens and to answer there.
 func (p *conchdProc) waitHealthy(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := (api{baseURL: p.baseURL}).send(http.MethodGet, "/healthz", nil)
-		if err == nil && resp.status == http.StatusOK {
-			return nil
+		if p.baseURL == "" {
+			log, err := os.ReadFile(p.logPath)
+			if err != nil {
+				return err
+			}
+			if m := listeningOn.FindSubmatch(log); m != nil {
+				p.baseURL = "http://" + string(m[1])
+			}
+		}
+		if p.baseURL != "" {
+			resp, err := (api{baseURL: p.baseURL}).send(http.MethodGet, "/healthz", nil)
+			if err == nil && resp.status == http.StatusOK {
+				return nil
+			}
 		}
 		if err := pause(50 * time.Millisecond); err != nil {
 			return err
 		}
+	}
+	if p.baseURL == "" {
+		return fmt.Errorf("conchd did not say where it listens within %s", timeout)
 	}
 	return fmt.Errorf("conchd did not become healthy within %s", timeout)
 }
@@ -495,7 +502,8 @@ type fakeNtfy struct {
 	srv      *http.Server
 	mu       sync.Mutex
 	down     bool
-	hits     []ntfyHit
+	hits     []ntfyHit // answered with 200
+	dropped  []ntfyHit // arrived while down, and got no answer
 }
 
 type ntfyHit struct {
@@ -517,14 +525,17 @@ func newFakeNtfy() (*fakeNtfy, error) {
 
 func (f *fakeNtfy) serve(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(io.Discard, r.Body)
+	hit := ntfyHit{
+		Topic:    strings.TrimPrefix(r.URL.Path, "/"),
+		Title:    r.Header.Get("Title"),
+		Priority: r.Header.Get("Priority"),
+	}
 	f.mu.Lock()
 	down := f.down
-	if !down {
-		f.hits = append(f.hits, ntfyHit{
-			Topic:    strings.TrimPrefix(r.URL.Path, "/"),
-			Title:    r.Header.Get("Title"),
-			Priority: r.Header.Get("Priority"),
-		})
+	if down {
+		f.dropped = append(f.dropped, hit)
+	} else {
+		f.hits = append(f.hits, hit)
 	}
 	f.mu.Unlock()
 	if !down {
@@ -553,6 +564,14 @@ func (f *fakeNtfy) delivered() []ntfyHit {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]ntfyHit(nil), f.hits...)
+}
+
+// attemptedWhileDown returns the deliveries that arrived while the server
+// was down and were dropped.
+func (f *fakeNtfy) attemptedWhileDown() []ntfyHit {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ntfyHit(nil), f.dropped...)
 }
 
 // ------------------------------------------------------------------ REST
@@ -683,14 +702,22 @@ type conchUser struct {
 	env  []string
 }
 
-// newConchUser makes a CLI user and signs it in with token through the real
-// `conch login`, which reads the token from standard input.
-func (h *harness) newConchUser(who, token string) (*conchUser, error) {
+// cliUser makes a CLI user with a home of its own and no login.
+func (h *harness) cliUser(who string) (*conchUser, error) {
 	home := filepath.Join(h.root, "users", who)
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
-	u := &conchUser{bin: h.bin.conch, home: home, env: h.isolatedEnv(home, "CONCH_SERVER="+h.proc.baseURL)}
+	return &conchUser{bin: h.bin.conch, home: home, env: h.isolatedEnv(home, "CONCH_SERVER="+h.proc.baseURL)}, nil
+}
+
+// newConchUser makes a CLI user and signs it in with token through the real
+// `conch login`, which reads the token from standard input.
+func (h *harness) newConchUser(who, token string) (*conchUser, error) {
+	u, err := h.cliUser(who)
+	if err != nil {
+		return nil, err
+	}
 	out, err := u.run(token+"\n", "login")
 	if err != nil {
 		return nil, fmt.Errorf("conch login as %s: %w", who, err)
