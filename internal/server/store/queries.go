@@ -266,7 +266,7 @@ func (s *Store) InsertMessageV1(
 			fmt.Sprintf("principal:%d", authorID), "message.post", fmt.Sprintf("message:%d", id), now.UnixMilli()); err != nil {
 			return fmt.Errorf("store: audit inserted message %d: %w", id, err)
 		}
-		return nil
+		return attachFilesTx(ctx, tx, channelID, authorID, id, payload, now)
 	})
 	if err != nil {
 		return Message{}, err

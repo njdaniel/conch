@@ -79,6 +79,9 @@ Flags for serve:
   --data    directory for the SQLite database (env CONCHD_DATA)
   --listen  HTTP listen address (env CONCHD_LISTEN, default :8080)
   --auth    REST/WebSocket authentication: required or off (env CONCHD_AUTH, default required)
+  --max-upload-bytes     largest file an upload may carry, in bytes; 0 disables uploads
+                         (env CONCHD_MAX_UPLOAD_BYTES, default 10485760). Files are stored
+                         under <data>/files, not in the database.
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
   --ntfy-topic           topic for new and resolved approvals (env CONCHD_NTFY_TOPIC)
@@ -107,6 +110,7 @@ type serveOptions struct {
 	ntfyTopic       string
 	ntfyUrgentTopic string
 	livekit         livekit.Config
+	maxUploadBytes  int64
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -123,11 +127,24 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
+	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
+	// The environment seeds the default; a flag given on the command line
+	// wins because the flag set parses it afterwards.
+	if raw := os.Getenv("CONCHD_MAX_UPLOAD_BYTES"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return serveOptions{}, fmt.Errorf("serve: CONCHD_MAX_UPLOAD_BYTES: %q is not a whole number of bytes", raw)
+		}
+		*maxUpload = v
+	}
 	if err := fs.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
 	if *dataDir == "" {
 		return serveOptions{}, errors.New("serve: --data (or CONCHD_DATA) is required")
+	}
+	if *maxUpload < 0 {
+		return serveOptions{}, errors.New("serve: --max-upload-bytes must not be negative (0 disables uploads)")
 	}
 	authMode, err := server.ParseAuthMode(*authFlag)
 	if err != nil {
@@ -143,7 +160,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
 	return serveOptions{
-		livekit: lk,
+		livekit: lk, maxUploadBytes: *maxUpload,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -182,6 +199,7 @@ func runServe(args []string) error {
 		MCPBearerTokens: opts.mcpTokens,
 		AuthMode:        opts.authMode,
 		LiveKit:         opts.livekit,
+		MaxUploadBytes:  opts.maxUploadBytes,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,

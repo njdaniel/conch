@@ -301,6 +301,110 @@ func (s *Store) fillWhisperAudiences(ctx context.Context, msgs []Message, idx []
 	return nil
 }
 
+// FileVisibleTo returns the file fileID if reader may fetch it, and ErrNotFound
+// otherwise. "Otherwise" is one answer for every reason: the file does not
+// exist, it is in a channel the reader is not in, it is attached to a message
+// the reader cannot see, or the reader is not the uploader of a file nobody
+// has attached. The caller must answer all of them alike.
+//
+// A file is a second way to read what a message carries, so the rule is the
+// message's, not a copy of it. The reader may fetch the file when they are,
+// now, a member of the file's channel and an enabled principal, and either
+//
+//   - they uploaded it (attached or not), or
+//   - the message it is attached to is visible to them by the same
+//     visibleToScopedReader / visibleToAnyReader constants ListVisibleMessages
+//     and SearchVisibleMessages embed: a whisper's file is readable by the
+//     whisper's readers and nobody else, a net message's file by the net's
+//     recipients, and a removed member loses every file they could reach
+//     through a message.
+//
+// Channel membership and an enabled principal are required for the uploader as
+// well: leaving the channel closes it to you, your uploads included. Operators
+// get no exemption. A reader with no verified identity is never given a file.
+func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) (File, error) {
+	if reader.PrincipalID <= 0 {
+		return File{}, ErrNotFound
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	args := append([]any{fileID, reader.PrincipalID, reader.PrincipalID, reader.PrincipalID}, predArgs...)
+	f, err := scanFile(s.db.QueryRowContext(ctx, fileSQL(scoped), args...))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return File{}, ErrNotFound
+	case err != nil:
+		return File{}, fmt.Errorf("store: read file %d: %w", fileID, err)
+	}
+	return f, nil
+}
+
+// fileHead and fileTail wrap the message visibility condition for a file. The
+// condition is spliced in as a constant (never a caller's text); every value is
+// a bound parameter, in this order: file id, reader (member), reader (enabled),
+// reader (uploader), then the predicate's own.
+const (
+	fileHead = `SELECT ` + fileColumns + ` FROM files f
+		 WHERE f.id = ?
+		   AND EXISTS (SELECT 1 FROM channel_members cm
+		               WHERE cm.channel_id = f.channel_id AND cm.principal_id = ?)
+		   AND EXISTS (SELECT 1 FROM principals up
+		               WHERE up.id = ? AND up.disabled_at IS NULL)
+		   AND (f.uploader_id = ? OR EXISTS (
+		         SELECT 1 FROM messages m
+		          WHERE m.id = f.message_id AND m.channel_id = f.channel_id AND `
+	fileTail = `))`
+)
+
+func fileSQL(scoped bool) string {
+	if scoped {
+		return fileHead + visibleToScopedReader + fileTail
+	}
+	return fileHead + visibleToAnyReader + fileTail
+}
+
+// attachFilesTx honours a message's conch.file_attachment.v1 payload inside the
+// transaction that inserts the message, whose id is messageID. A payload of any
+// other schema (or none) attaches nothing. Each file must be in channelID,
+// uploaded by authorID and not yet attached; the UPDATE matches only such a row,
+// so the database, not a check before it, decides which of two concurrent posts
+// wins a file: the transactions are IMMEDIATE and serialise, and the second one
+// finds message_id already set. Any failure is ErrFileAttachment and the caller
+// rolls the whole post back.
+func attachFilesTx(ctx context.Context, tx execer, channelID, authorID, messageID int64, payload *schema.Payload, at time.Time) error {
+	if payload == nil || payload.Schema != schema.FileAttachmentV1Name {
+		return nil
+	}
+	v, _, err := payload.Decode()
+	if err != nil {
+		return fmt.Errorf("%w: payload is malformed", ErrFileAttachment)
+	}
+	att, ok := v.(*schema.FileAttachmentV1)
+	if !ok || att.Validate() != nil {
+		return fmt.Errorf("%w: payload is malformed", ErrFileAttachment)
+	}
+	for _, id := range att.FileIDs {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE files SET message_id = ?
+			 WHERE id = ? AND channel_id = ? AND uploader_id = ? AND message_id IS NULL`,
+			messageID, id, channelID, authorID)
+		if err != nil {
+			return fmt.Errorf("store: attach file %d to message %d: %w", id, messageID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: attach file %d to message %d: %w", id, messageID, err)
+		}
+		if n != 1 {
+			return fmt.Errorf("%w: a file is not available to attach", ErrFileAttachment)
+		}
+		if err := appendAuditEventTx(ctx, tx, principalActor(authorID), AuditFileAttached, fileSubject(id),
+			fmt.Sprintf("message=%d", messageID), at); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CountMessages returns how many messages channelID holds, scoped ones
 // included. It exists for tests, which use it to assert that a refused post
 // stored nothing. It must never be served to a caller: the count reveals that
@@ -403,6 +507,9 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageScoped, subject,
 			scopedDetail(p.ChannelID, audience, recipients), now); err != nil {
+			return err
+		}
+		if err := attachFilesTx(ctx, tx, p.ChannelID, p.AuthorID, id, p.Payload, now); err != nil {
 			return err
 		}
 		msg = Message{ID: id, ChannelID: p.ChannelID, AuthorID: p.AuthorID, Body: p.Body, Payload: p.Payload,

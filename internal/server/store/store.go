@@ -329,6 +329,30 @@ END`,
 END`,
 		`INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')`,
 	},
+	// 16: File uploads (issue #23). One row per uploaded file; the bytes live
+	// on disk under a path derived from sha256 alone (internal/server/files.go),
+	// never from filename. message_id is NULL until a message attaches the
+	// file and is set by that message's own insert transaction, so "attached
+	// at most once" is decided by the database: the attaching UPDATE matches
+	// only rows whose message_id is still NULL. It is deliberately not
+	// unique, because one message may attach several files (up to 10). Who may
+	// fetch a file is asked in audience.go, with the message visibility rule,
+	// since it joins messages. Files are never deleted. Timestamps are unix
+	// milliseconds UTC. No data is backfilled.
+	{
+		`CREATE TABLE files (
+	id          INTEGER PRIMARY KEY,
+	channel_id  INTEGER NOT NULL REFERENCES channels (id),
+	uploader_id INTEGER NOT NULL REFERENCES principals (id),
+	filename    TEXT    NOT NULL,
+	media_type  TEXT    NOT NULL,
+	size        INTEGER NOT NULL CHECK (size >= 0),
+	sha256      TEXT    NOT NULL CHECK (length(sha256) = 64),
+	created_at  INTEGER NOT NULL,
+	message_id  INTEGER REFERENCES messages (id)
+)`,
+		`CREATE INDEX files_by_message ON files (message_id) WHERE message_id IS NOT NULL`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

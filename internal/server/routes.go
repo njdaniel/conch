@@ -30,6 +30,11 @@ func (s *Server) routeTable() []route {
 		rt("POST /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV2)),
 		rt("GET /v2/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessagesV2)),
 		rt("GET /v2/channels/{channel}/messages/search", accessAuthenticated, hf(s.handleSearchMessagesV2)),
+		// Files (issue #23). Humans only; an agent is refused before the
+		// handler runs. Who may fetch a file is decided by the store.
+		rt("POST /v2/channels/{channel}/files", accessAuthenticated, s.humansOnlyFiles(hf(s.handleUploadFile))),
+		rt("GET /v2/files/{id}/meta", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFileMeta))),
+		rt("GET /v2/files/{id}", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFile))),
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
