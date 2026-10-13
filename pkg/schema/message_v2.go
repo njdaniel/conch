@@ -190,6 +190,10 @@ type MessageV2 struct {
 	// Audience scopes delivery to a net or a list of principals; nil (omitted)
 	// means the whole channel.
 	Audience *Audience `json:"audience,omitempty"`
+	// ThreadRootID is the id of the message this one replies to; zero (omitted)
+	// for a message that is not a reply. A reply has its root's audience and the
+	// root is never itself a reply: threads are one level deep (issue #25).
+	ThreadRootID int64 `json:"thread_root_id,omitempty"`
 }
 
 // Validate reports whether the envelope is structurally well-formed. It
@@ -226,6 +230,10 @@ func (m MessageV2) Validate() error {
 		if err := m.Audience.validateNormalized(m.AuthorID); err != nil {
 			return err
 		}
+	}
+	// A root is posted before its replies, so it has a smaller id.
+	if m.ThreadRootID < 0 || (m.ThreadRootID > 0 && m.ThreadRootID >= m.ID) {
+		return fmt.Errorf("schema: message thread_root_id must be omitted or the id of an earlier message, got %d", m.ThreadRootID)
 	}
 	return nil
 }
@@ -287,6 +295,10 @@ type PostMessageRequestV2 struct {
 	// Audience scopes delivery to a net or a list of principals; nil (omitted)
 	// means the whole channel.
 	Audience *Audience `json:"audience,omitempty"`
+	// ThreadRootID posts the message as a reply to that message; zero (omitted)
+	// posts a top-level message. A reply takes its root's audience, so a request
+	// that names both is refused by the server (issue #25).
+	ThreadRootID int64 `json:"thread_root_id,omitempty"`
 }
 
 // Validate reports whether the request is structurally well-formed. Its
@@ -297,6 +309,9 @@ type PostMessageRequestV2 struct {
 func (r PostMessageRequestV2) Validate() error {
 	if r.AuthorID < 0 {
 		return fmt.Errorf("schema: post message author_id must not be negative, got %d", r.AuthorID)
+	}
+	if r.ThreadRootID < 0 {
+		return fmt.Errorf("schema: post message thread_root_id must not be negative, got %d", r.ThreadRootID)
 	}
 	if r.Body == "" {
 		return errors.New("schema: post message body is required")
