@@ -593,6 +593,15 @@ func (l *live) liveKitDown(ctx context.Context) error {
 		return err
 	}
 	h.say("ok   LiveKit container stopped")
+	// The container's port is free now, and conchd (this one, and the one the
+	// dogfood run below starts) is still configured to call it. Hold it, so
+	// that nobody is given the port for a listener meanwhile: dogfood's ntfy
+	// stand-in asks the system for one (issue #245).
+	releasePort, err := holdDead(strings.TrimPrefix(l.srv.settings().url, "ws://"))
+	if err != nil {
+		return err
+	}
+	defer releasePort()
 	if err := expectDown(fay, "calm"); err != nil {
 		return err
 	}
