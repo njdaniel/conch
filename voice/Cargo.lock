@@ -264,6 +264,7 @@ checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 name = "conch-voice"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "conch-voice-api",
  "conch-voice-audio",
  "conch-voice-control",
@@ -271,6 +272,8 @@ dependencies = [
  "livekit",
  "log",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
