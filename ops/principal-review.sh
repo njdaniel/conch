@@ -79,9 +79,10 @@ EXIT_NOT_POSTED=3
 #     (internal/server/messages.go). That is the JSON request, not the text.
 #   - `conch send` takes the text as one argument, and Linux passes at most
 #     MAX_ARG_STRLEN = 131072 bytes in one argument.
-#   - conch tail and the TUI read each WebSocket message with the library's
-#     default limit of 32768 bytes (internal/cli sets none), and a message
-#     over it closes their connection.
+#   - a conch built before issue #231 was fixed reads each WebSocket message
+#     with a limit of 32768 bytes, and a message over it closes its tail or
+#     TUI. Clients since then read anything a server can send, but someone
+#     may still be running an old one, and a summary has no need to be longer.
 # 30000 leaves the rest of 32768 for the envelope around the body. The first
 # two limits hold whatever the report contains: the text is never longer than
 # its encoding, and no byte encodes to more than six.
