@@ -402,6 +402,14 @@ func TestAgentRateLimiterHugeWindow(t *testing.T) {
 			}
 		})
 	}
+	// The longest delay there can be, in whole seconds, fits a 32-bit int: it
+	// is sent as Retry-After and as retry_after_seconds, and must never wrap.
+	if longest := int64(maxLimitWindow / time.Second); longest > math.MaxInt32 {
+		t.Errorf("maxLimitWindow is %d seconds, more than a 32-bit int holds", longest)
+	}
+	if e := (&rateLimitedError{retryAfter: maxLimitWindow}); e.seconds() < 1 || e.schemaError().RetryAfterSeconds != e.seconds() {
+		t.Errorf("the longest delay is sent as %d seconds (field %d)", e.seconds(), e.schemaError().RetryAfterSeconds)
+	}
 	if got := limitWindow(0); got != maxLimitWindow {
 		t.Errorf("limitWindow(0) = %v: a window that is not positive must refuse, not allow", got)
 	}

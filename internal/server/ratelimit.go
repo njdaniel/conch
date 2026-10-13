@@ -55,8 +55,10 @@ const (
 	// "never again" and short enough that no arithmetic on it can overflow.
 	// Without the clamp a window_seconds past about 9.2e9 would wrap to a
 	// negative duration, every use would count as expired, and the limit
-	// would be declared, shown and never enforced.
-	maxLimitWindow = 100 * 365 * 24 * time.Hour
+	// would be declared, shown and never enforced. Fifty years, not more, so
+	// that the delay in whole seconds also fits an int where int is 32 bits:
+	// it goes out as Retry-After and as retry_after_seconds.
+	maxLimitWindow = 50 * 365 * 24 * time.Hour
 
 	// denialCoalesceWindow is the window in which repeated identical
 	// access_denied events are thinned out (issue #80, comment from the
