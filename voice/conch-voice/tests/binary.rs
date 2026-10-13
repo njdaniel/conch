@@ -23,6 +23,10 @@ use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub, join_token, r
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
 
+/// Every `join` here names its microphone and its speakers: without them the client uses
+/// PipeWire's, and no test may need PipeWire, nor open a stream on the desktop it runs on.
+const NO_DEVICES: [&str; 4] = ["--mic", "none", "--sink", "count"];
+
 /// The binary with nothing of the real user's in its environment.
 fn conch_voice(private: &Path) -> Command {
     let mut command = Command::new(BIN);
@@ -116,6 +120,7 @@ async fn a_refused_session_stops_it_with_one_line_naming_the_reason_and_exit_1()
     let mut command = conch_voice(private.path());
     command
         .args(["join", "ops", "--server", &conchd.url()])
+        .args(NO_DEVICES)
         .env("CONCH_TOKEN", FAKE_LOGIN);
     // Standard input stays open: its end would be a `quit`, and this is about a stop.
     let (code, stdout, stderr) =
@@ -285,7 +290,14 @@ async fn with_the_real_sdk_at_trace_level_nothing_written_holds_a_token_or_a_roo
         let mut command = conch_voice(private.path());
         command
             .args(["join", "ops", "--server", &conchd.url()])
-            .args(["--mic", "tone:440", "--log-level", "trace"])
+            .args([
+                "--mic",
+                "tone:440",
+                "--sink",
+                "count",
+                "--log-level",
+                "trace",
+            ])
             .env("CONCH_TOKEN", FAKE_LOGIN);
         if json {
             command.arg("--json");
@@ -417,6 +429,7 @@ async fn joining(private: &Path, extra: &[&str]) -> (Command, Stub, NotLiveKit) 
     let mut command = conch_voice(private);
     command
         .args(["join", "ops", "--server", &conchd.url()])
+        .args(NO_DEVICES)
         .args(extra)
         .env("CONCH_TOKEN", FAKE_LOGIN);
     (command, conchd, not_livekit)
@@ -728,6 +741,7 @@ async fn on_a_terminal_the_status_is_redrawn_in_place_and_with_json_it_is_not() 
         let directory = private.path().to_owned();
         let (code, written) = tokio::task::spawn_blocking(move || {
             let mut args = vec!["join", "ops", "--server", &url];
+            args.extend(NO_DEVICES);
             if json {
                 args.push("--json");
             }
@@ -809,7 +823,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         let mut command = conch_voice(private.path());
         command
             .args(["join", "ops", "--server", &conchd.url(), "--json"])
-            .args(["--mic", "none"])
+            .args(NO_DEVICES)
             .env("CONCH_TOKEN", FAKE_LOGIN)
             // What it logs about the joins that fail is not what this is about.
             .stderr(Stdio::null());

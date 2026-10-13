@@ -1,10 +1,15 @@
-//! `conch-voice devices`, the keyboard half: which keyboards there are, whether this user
-//! can read each, and how to grant read access to one (`docs/design/conch-voice.md` §4 and
-//! §8). The audio half arrives with real devices (#184).
+//! `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
+//! configuration takes; and the keyboards, whether this user can read each, and how to grant
+//! read access to one (`docs/design/conch-voice.md` §4 and §8).
 //!
-//! Input: the entries of `/dev/input/by-id/`. Output: text on standard output. Owns
-//! nothing: each keyboard is opened read-only to see whether it can be, and closed at once;
-//! **nothing is read from any of them**.
+//! Input: PipeWire's list of devices (a `NodeTable`, which the caller reads and this module
+//! only formats), and the entries of `/dev/input/by-id/`. Output: text on standard output.
+//! Owns nothing: **no audio device is opened**, and each keyboard is opened read-only to see
+//! whether it can be, and closed at once; **nothing is read from any of them**.
+//!
+//! The audio half lists a device only under a name that can be written into the
+//! configuration file as it stands: a name with a control character, a quotation mark or a
+//! backslash is counted and not shown.
 //!
 //! What the text keeps to:
 //!
@@ -26,9 +31,156 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
+use dmn_audio::NodeTable;
 
 use crate::keydev::{self, DeviceRule, Problem};
-use crate::secrets::one_line;
+use crate::secrets::{cut, one_line};
+
+/// The longest description shown; PipeWire's descriptions are a device's marketing name.
+const DESCRIPTION_CHARS: usize = 80;
+
+/// One device of the audio half.
+struct Listed<'a> {
+    name: &'a str,
+    description: &'a str,
+    is_default: bool,
+}
+
+/// Whether a `node.name` can be written between quotes in the configuration file as it is.
+fn fit_for_the_config(name: &str) -> bool {
+    !name.is_empty() && one_line(name) == name && !name.contains(['"', '\\'])
+}
+
+/// Adds the devices of one kind, in the order PipeWire lists them, to `lines`: those whose
+/// names are fit to show, and a count of those that are not. Returns the name to use in the
+/// example: the default's if it is shown, else the first.
+fn audio_section<'a>(
+    lines: &mut Vec<String>,
+    title: &str,
+    key: &str,
+    devices: impl Iterator<Item = (&'a str, &'a str)>,
+    default: Option<&str>,
+) -> Option<String> {
+    let mut shown = Vec::new();
+    let mut unshown = 0_usize;
+    for (name, description) in devices {
+        if fit_for_the_config(name) {
+            shown.push(Listed {
+                name,
+                description,
+                is_default: default == Some(name),
+            });
+        } else {
+            unshown += 1;
+        }
+    }
+    lines.push(format!("{title} (`{key}`)"));
+    if shown.is_empty() && unshown == 0 {
+        lines.push("  none".to_owned());
+    }
+    for device in &shown {
+        let mark = if device.is_default { "  [default]" } else { "" };
+        lines.push(format!("  {}{mark}", device.name));
+        let description = one_line(device.description);
+        if !description.is_empty() && description != device.name {
+            lines.push(format!("      {}", cut(description, DESCRIPTION_CHARS)));
+        }
+    }
+    match unshown {
+        0 => {}
+        1 => lines.push("  one device whose name has characters that are not shown".to_owned()),
+        more => lines.push(format!(
+            "  {more} devices whose names have characters that are not shown"
+        )),
+    }
+    shown
+        .iter()
+        .find(|device| device.is_default)
+        .or(shown.first())
+        .map(|device| device.name.to_owned())
+}
+
+/// Writes the audio half of `conch-voice devices`: the microphones and the speakers in
+/// `table`, by the names `input` and `output` under `[audio]` take, the defaults marked.
+/// Nothing is opened.
+///
+/// # Errors
+///
+/// What the operating system said, if `out` cannot be written to.
+pub fn audio_report(table: &NodeTable, out: &mut dyn Write) -> io::Result<()> {
+    let mut lines: Vec<String> = vec![
+        "Audio devices (PipeWire)".to_owned(),
+        "  Name one under [audio] in the configuration file, or leave `input` and `output`"
+            .to_owned(),
+        "  out, or write \"default\", to follow PipeWire's default as it changes.".to_owned(),
+    ];
+    if !table.synced {
+        lines.push(
+            "  PipeWire had not finished listing its devices; this list may be incomplete."
+                .to_owned(),
+        );
+    }
+    lines.push(String::new());
+    let input = audio_section(
+        &mut lines,
+        "Microphones",
+        "input",
+        table
+            .sources()
+            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.default_source.as_deref(),
+    );
+    lines.push(String::new());
+    let output = audio_section(
+        &mut lines,
+        "Speakers",
+        "output",
+        table
+            .sinks()
+            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.default_sink.as_deref(),
+    );
+    if input.is_some() || output.is_some() {
+        lines.push(String::new());
+        lines.push("  For example, in $XDG_CONFIG_HOME/conch/voice.toml:".to_owned());
+        lines.push(String::new());
+        lines.push("    [audio]".to_owned());
+        if let Some(name) = input {
+            lines.push(format!("    input = \"{name}\""));
+        }
+        if let Some(name) = output {
+            lines.push(format!("    output = \"{name}\""));
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "  A microphone named there that is not plugged in is not replaced by the default:"
+            .to_owned(),
+    );
+    lines.push(
+        "  nothing is transmitted until it is. A speaker named there that is not plugged in"
+            .to_owned(),
+    );
+    lines.push("  is not replaced either; nothing is heard until it is.".to_owned());
+    lines.push(String::new());
+    for line in lines {
+        writeln!(out, "{}", one_line(&line))?;
+    }
+    out.flush()
+}
+
+/// Writes the audio half when PipeWire cannot be reached, so that the keyboards are still
+/// listed.
+///
+/// # Errors
+///
+/// What the operating system said, if `out` cannot be written to.
+pub fn audio_unavailable(why: &str, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out, "Audio devices (PipeWire)")?;
+    writeln!(out, "  not listed: {}", one_line(why))?;
+    writeln!(out)?;
+    out.flush()
+}
 
 /// Where udev links each input device under a name that does not change between boots.
 pub const BY_ID: &str = "/dev/input/by-id";
@@ -299,7 +451,143 @@ pub fn report(
 
 #[cfg(test)]
 mod tests {
+    use dmn_audio::RegistryEvent;
+
     use super::*;
+
+    fn node(id: u32, class: &str, name: &str, description: &str) -> RegistryEvent {
+        RegistryEvent::Added {
+            id,
+            props: vec![
+                ("media.class".to_owned(), class.to_owned()),
+                ("node.name".to_owned(), name.to_owned()),
+                ("node.description".to_owned(), description.to_owned()),
+            ],
+        }
+    }
+
+    fn table(events: Vec<RegistryEvent>) -> NodeTable {
+        let mut table = NodeTable::default();
+        for event in events {
+            table.apply(event);
+        }
+        table
+    }
+
+    fn audio_text(table: &NodeTable) -> String {
+        let mut written = Vec::new();
+        audio_report(table, &mut written).unwrap();
+        String::from_utf8(written).unwrap()
+    }
+
+    #[test]
+    fn the_audio_half_lists_microphones_and_speakers_by_name_and_marks_the_defaults() {
+        let text = audio_text(&table(vec![
+            node(1, "Audio/Source", "alsa_input.usb-headset", "Headset Mono"),
+            node(2, "Audio/Source", "alsa_input.builtin", "Built-in Audio"),
+            node(3, "Audio/Sink", "alsa_output.builtin", "Built-in Audio"),
+            node(4, "Audio/Sink", "alsa_output.usb-headset", "Headset"),
+            // Neither a microphone nor a speaker.
+            node(5, "Stream/Output/Audio", "firefox", "Firefox"),
+            RegistryEvent::DefaultSource(Some("alsa_input.builtin".to_owned())),
+            RegistryEvent::DefaultSink(Some("alsa_output.usb-headset".to_owned())),
+            RegistryEvent::Synced,
+        ]));
+        let want = "\
+Audio devices (PipeWire)
+  Name one under [audio] in the configuration file, or leave `input` and `output`
+  out, or write \"default\", to follow PipeWire's default as it changes.
+
+Microphones (`input`)
+  alsa_input.usb-headset
+      Headset Mono
+  alsa_input.builtin  [default]
+      Built-in Audio
+
+Speakers (`output`)
+  alsa_output.builtin
+      Built-in Audio
+  alsa_output.usb-headset  [default]
+      Headset
+
+  For example, in $XDG_CONFIG_HOME/conch/voice.toml:
+
+    [audio]
+    input = \"alsa_input.builtin\"
+    output = \"alsa_output.usb-headset\"
+
+  A microphone named there that is not plugged in is not replaced by the default:
+  nothing is transmitted until it is. A speaker named there that is not plugged in
+  is not replaced either; nothing is heard until it is.
+
+";
+        assert_eq!(text, want);
+    }
+
+    #[test]
+    fn a_machine_with_no_devices_and_one_still_listing_says_so() {
+        let text = audio_text(&NodeTable::default());
+        assert!(text.contains("had not finished listing"), "{text}");
+        assert!(text.contains("Microphones (`input`)\n  none\n"), "{text}");
+        assert!(text.contains("Speakers (`output`)\n  none\n"), "{text}");
+        assert!(
+            !text.contains("[audio]\n"),
+            "no example without a device: {text}"
+        );
+    }
+
+    #[test]
+    fn a_name_that_cannot_be_written_into_the_configuration_is_counted_not_shown() {
+        let text = audio_text(&table(vec![
+            node(1, "Audio/Source", "ok_mic", "Fine"),
+            node(2, "Audio/Source", "bad\"quote", "x"),
+            node(3, "Audio/Source", "bad\\slash", "x"),
+            node(4, "Audio/Source", "bad\nline\u{202E}", "x"),
+            node(5, "Audio/Sink", "", "no name"),
+            RegistryEvent::Synced,
+        ]));
+        assert!(text.contains("ok_mic"), "{text}");
+        assert!(
+            text.contains("3 devices whose names have characters that are not shown"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Speakers (`output`)\n  one device whose name has characters"),
+            "{text}"
+        );
+        for hidden in ["bad", "quote", "slash", "\u{202E}"] {
+            assert!(!text.contains(hidden), "{hidden:?} in {text}");
+        }
+    }
+
+    #[test]
+    fn a_description_is_one_line_and_cut() {
+        let long = format!("Line one\nline two {}", "x".repeat(200));
+        let text = audio_text(&table(vec![
+            node(1, "Audio/Source", "mic", &long),
+            RegistryEvent::Synced,
+        ]));
+        let shown = text
+            .lines()
+            .find(|line| line.starts_with("      Line one"))
+            .unwrap();
+        assert!(shown.starts_with("      Line one line two x"), "{shown}");
+        assert!(
+            shown.chars().count() < 6 + DESCRIPTION_CHARS + 10,
+            "{shown}"
+        );
+        assert!(shown.ends_with("[cut]"), "{shown}");
+    }
+
+    #[test]
+    fn when_pipewire_cannot_be_reached_the_audio_half_says_so_on_one_line() {
+        let mut written = Vec::new();
+        audio_unavailable("no such\nserver", &mut written).unwrap();
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            "Audio devices (PipeWire)\n  not listed: no such server\n\n"
+        );
+    }
 
     #[test]
     fn the_rule_names_one_device_and_one_user_and_grants_reading_only() {

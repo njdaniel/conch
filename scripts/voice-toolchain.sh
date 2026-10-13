@@ -5,12 +5,20 @@
 #     needs clang 21 or newer and Ubuntu 24.04 ships 18 (ADR-006).
 #   - cargo-deny at a pinned version, for `cargo deny check`.
 #   - the prebuilt libwebrtc the livekit crate links, so that it is verified
-#     before it is used (the crate's own download checks nothing).
+#     before it is used (the crate's own download checks nothing). What is
+#     linked is a copy of its archive with one member, pipewire_stubs.o,
+#     removed, kept beside the download and verified against a second pinned
+#     hash (scripts/voice-pins.sh says why).
+#
+# What this does not fetch, because the distribution has it at a version that will do, is
+# installed by apt: GLib's, PipeWire's and libclang's development headers
+# (libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config) and g++. scripts/voice-env.sh
+# checks for each and says which is missing.
 #
 # Versions and hashes are in scripts/voice-pins.sh. Each download is verified
 # against its SHA-256 before anything is unpacked. Nothing is installed
 # system-wide and no root is needed. Running it again does nothing once all
-# three are in place.
+# everything is in place.
 #
 # With the argument `deny` it fetches cargo-deny only (the advisories job in CI
 # needs nothing else).
@@ -130,4 +138,43 @@ else
     rm -rf "$webrtc_dir"
     mv "$work/webrtc" "$webrtc_dir"
     echo "voice-toolchain: libwebrtc $WEBRTC_TAG unpacked into $webrtc_dir"
+fi
+
+# What conch-voice links is that download with one member, pipewire_stubs.o,
+# removed from lib/libwebrtc.a (scripts/voice-pins.sh says why). It is made
+# beside the download, which stays as it was verified: a directory of its own,
+# named by the hash of its archive, holding that archive and pointing at the
+# download for everything else. A directory of its own because the SDK's build
+# is rerun when the directory it is given changes, and not when a file inside
+# it does: the archive is copied into the SDK's compiled library, and an
+# archive changed in place would leave the old copy in every existing build.
+# The pinned llvm-ar removes the member, which gives the same bytes every time,
+# so the result is checked against its own pinned hash.
+linked_dir="$cache/$WEBRTC_TAG-linked-${CONCH_WEBRTC_LINKED_SHA256:0:12}"
+linked_lib="$linked_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+if [ "$only" = deny ]; then
+    :
+elif [ -f "$linked_lib" ] && [ -f "$linked_dir/$WEBRTC_TRIPLE/webrtc.ninja" ] &&
+    [ "$(sha256sum "$linked_lib" | cut -d' ' -f1)" = "$CONCH_WEBRTC_LINKED_SHA256" ]; then
+    echo "voice-toolchain: libwebrtc without pipewire_stubs.o is already in $linked_dir"
+else
+    mkdir -p "$work/linked/$WEBRTC_TRIPLE/lib"
+    for entry in "$webrtc_dir/$WEBRTC_TRIPLE"/*; do
+        name=${entry##*/}
+        [ "$name" = lib ] || ln -s "../../$WEBRTC_TAG/$WEBRTC_TRIPLE/$name" "$work/linked/$WEBRTC_TRIPLE/$name"
+    done
+    for entry in "$webrtc_dir/$WEBRTC_TRIPLE/lib"/*; do
+        name=${entry##*/}
+        [ "$name" = libwebrtc.a ] || ln -s "../../../$WEBRTC_TAG/$WEBRTC_TRIPLE/lib/$name" "$work/linked/$WEBRTC_TRIPLE/lib/$name"
+    done
+    cp "$webrtc_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a" "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+    "$llvm_dir/bin/llvm-ar" d "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" pipewire_stubs.o
+    got=$(sha256sum "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" | cut -d' ' -f1)
+    if [ "$got" != "$CONCH_WEBRTC_LINKED_SHA256" ]; then
+        echo "voice-toolchain: FAIL: libwebrtc.a without pipewire_stubs.o has SHA-256 $got, expected $CONCH_WEBRTC_LINKED_SHA256; nothing was put in place. If $webrtc_dir is not as it was downloaded, remove it and run this again" >&2
+        exit 1
+    fi
+    rm -rf "$linked_dir"
+    mv "$work/linked" "$linked_dir" # the directory appears complete or not at all
+    echo "voice-toolchain: libwebrtc without pipewire_stubs.o is in $linked_dir"
 fi

@@ -21,14 +21,20 @@
 //! Owns: the connection to the channel's voice room, for as long as `join` runs; the
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
-//! ([`presence`]). It keeps no file. It keeps no token to use again: a join token goes to
+//! ([`presence`]); the connection to PipeWire and the microphone and speaker streams
+//! opened through it ([`audio`]), the microphone's from the moment a session first allows
+//! publishing until the session ends, the speakers' for the whole session. It keeps no
+//! file. It keeps no token to use again: a join token goes to
 //! the SDK for the one join it was issued for, and the only copies held here are the
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
 //!
-//! No audio hardware yet: the microphone is a tone or a WAV file and the speakers are a
-//! sink that counts. Real audio devices are issue #184.
+//! Audio is PipeWire's: the default microphone and output, or the ones `[audio]` in the
+//! configuration names. `join`'s test options replace them with a tone or a WAV file and a
+//! sink that counts, and nothing else does: a test that does not name them is a test that
+//! needs PipeWire.
 //!
+//! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
 //! - [`secrets`] and [`logger`]: what keeps tokens and room names out of the output.
@@ -43,6 +49,7 @@
 // CLAUDE.md: no unwrap/expect outside tests and main.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod audio;
 pub mod cli;
 pub mod devices;
 pub mod error;
@@ -67,10 +74,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use conch_voice_audio::{ToneSource, WavSource};
+use conch_voice_audio::{CountingSink, ToneSource, WavSource};
 use tokio::sync::mpsc;
 
-use crate::cli::{Environment, JoinArgs, MicChoice, Resolved, TONE_AMPLITUDE};
+use crate::audio::PipeWire;
+use crate::cli::{Environment, JoinArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE};
 pub use crate::error::Error;
 use crate::input::AtEnd;
 use crate::keydev::{DeviceRule, KeyTimings};
@@ -78,20 +86,53 @@ pub use crate::lines::LAST_WORDS_LIMIT;
 use crate::livekit::LiveKit;
 use crate::logger::RECORD_CHARS;
 use crate::output::Output;
+use crate::receive::BoxedSink;
 use crate::secrets::Scrubber;
-use crate::session::{Conchd, OpenMic, REPORT_TIMEOUT, REQUEST_TIMEOUT, Settings, Timings};
+use crate::session::{
+    Conchd, OpenMic, OpenSink, REPORT_TIMEOUT, REQUEST_TIMEOUT, Settings, Timings,
+};
 use crate::transmit::BoxedMic;
 
 /// What opens the microphone `--mic` chose. Nothing is opened until this is called, which
-/// is when a session first allows publishing.
-fn mic_opener(choice: MicChoice) -> OpenMic {
+/// is when a session first allows publishing: a client that may only listen never captures.
+/// `pipewire` is the connection, if the choice needs one, and `configured` the name
+/// `audio.input` gave.
+fn mic_opener(
+    choice: MicChoice,
+    pipewire: Option<PipeWire>,
+    configured: Option<String>,
+) -> OpenMic {
     Box::new(move || {
         Ok(match &choice {
+            MicChoice::PipeWire => match &pipewire {
+                Some(pipewire) => {
+                    Some(Box::new(pipewire.microphone(configured.as_deref())?) as BoxedMic)
+                }
+                None => None,
+            },
             MicChoice::None => None,
             MicChoice::Tone(hz) => {
                 Some(Box::new(ToneSource::new(*hz, TONE_AMPLITUDE)?) as BoxedMic)
             }
             MicChoice::Wav(path) => Some(Box::new(WavSource::open(path)?) as BoxedMic),
+        })
+    })
+}
+
+/// What opens the speakers `--sink` chose, when the session starts.
+fn sink_opener(
+    choice: SinkChoice,
+    pipewire: Option<PipeWire>,
+    configured: Option<String>,
+) -> OpenSink {
+    Box::new(move || {
+        Ok(match (&choice, &pipewire) {
+            (SinkChoice::Count(tones), _) => Box::new(CountingSink::new(tones)?) as BoxedSink,
+            (SinkChoice::PipeWire, Some(pipewire)) => {
+                Box::new(pipewire.speakers(configured.as_deref())?)
+            }
+            // Not reached: `join` connects whenever either choice is PipeWire.
+            (SinkChoice::PipeWire, None) => Box::new(CountingSink::new(&[])?),
         })
     })
 }
@@ -157,10 +198,29 @@ pub fn join(
     // The keyboard to read, if any. The rule for what may be opened as one is written
     // out below and is not a setting: only an event device under /dev/input.
     let key_device = cli::key_device(&resolved.config, args.stdin_keys)?;
+    // One connection to PipeWire for the microphone and the speakers, made only if one of
+    // them is PipeWire's. A machine without it fails here, before anything is joined.
+    let pipewire = if args.mic == MicChoice::PipeWire || args.sink == SinkChoice::PipeWire {
+        Some(PipeWire::connect()?)
+    } else {
+        None
+    };
     let settings = Settings {
         channel: resolved.channel,
-        open_mic: mic_opener(args.mic.clone()),
-        sink_tones: args.sink_tones.clone(),
+        open_mic: mic_opener(
+            args.mic.clone(),
+            pipewire.clone(),
+            resolved.config.audio.input.clone(),
+        ),
+        open_sink: sink_opener(
+            args.sink.clone(),
+            pipewire,
+            resolved.config.audio.output.clone(),
+        ),
+        sink_tones: match &args.sink {
+            SinkChoice::Count(tones) => tones.clone(),
+            SinkChoice::PipeWire => Vec::new(),
+        },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
         key_device: key_device
@@ -204,13 +264,24 @@ pub fn join(
     result
 }
 
-/// `conch-voice devices`: the keyboards under `/dev/input/by-id`, whether this user can
-/// read each, and the udev rule that would grant one. Nothing is read from any of them.
+/// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
+/// configuration takes, and then the keyboards under `/dev/input/by-id`, whether this user
+/// can read each, and the udev rule that would grant one. No audio device is opened and
+/// nothing is read from any keyboard. A machine PipeWire does not run on gets a line that
+/// says so, and the keyboards all the same.
 ///
 /// # Errors
 ///
 /// [`Error::Output`] if standard output cannot be written to.
 pub fn devices() -> Result<(), Error> {
+    let audio = match PipeWire::connect() {
+        Ok(pipewire) => devices::audio_report(
+            &pipewire.nodes(audio::LISTING_WAIT),
+            &mut std::io::stdout().lock(),
+        ),
+        Err(error) => devices::audio_unavailable(&error.to_string(), &mut std::io::stdout().lock()),
+    };
+    audio.map_err(Error::Output)?;
     devices::report(
         Path::new(devices::BY_ID),
         DeviceRule::EventDevice,

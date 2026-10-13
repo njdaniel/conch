@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use conch_voice::sdk::SdkEvent;
 use conch_voice::session::Input;
-use conch_voice_control::LineCommand::{Deafen, Down, Mute, Up};
+use conch_voice_control::LineCommand::{Deafen, Down, Mute, Quit, Up};
 use serde_json::json;
 
 use support::fake::Call;
@@ -47,6 +47,33 @@ async fn the_track_is_published_then_muted_and_only_then_is_the_client_connected
 
     several_frames().await;
     assert_eq!(rig.sdk.frames(), 0, "nothing is sent before a press");
+}
+
+/// The microphone stream is open while joined and closed on leaving (issue #184): a real
+/// microphone closes its stream when it is dropped, so what is checked is the drop.
+#[tokio::test]
+async fn the_microphone_is_open_while_joined_and_closed_on_leaving() {
+    let rig = Rig::start().await;
+    rig.connected(1).await;
+    rig.ready().await;
+    several_frames().await;
+    assert_eq!(
+        (rig.mic_opened(), rig.mic_closed()),
+        (1, 0),
+        "open while joined"
+    );
+
+    rig.line(Quit);
+    let (result, ended) = rig.ended().await;
+    result.unwrap();
+    // The close is the transmit task's, a moment behind the session's last words.
+    for _ in 0..200 {
+        if ended.mic_closed() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(ended.mic_closed(), 1, "closed on leaving, and once");
 }
 
 #[tokio::test]

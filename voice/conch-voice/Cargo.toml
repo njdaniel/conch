@@ -15,6 +15,9 @@ conch-voice-api = { path = "../crates/conch-voice-api" }
 conch-voice-audio = { path = "../crates/conch-voice-audio" }
 conch-voice-control = { path = "../crates/conch-voice-control" }
 livekit = { workspace = true }
+# The PipeWire microphone and speakers (ADR-006 as amended, issue #184). Its own public
+# repository, by commit; the source is allowed by exact URL in deny.toml.
+dmn-audio = { git = "https://github.com/njdaniel/dmn-audio", rev = "39e7748c0b4bf3317681f6718117152e48df63c8" }
 # The builder interface only: `derive` and `color` would each add crates to Cargo.lock.
 clap = { version = "4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 # StreamExt, to read the SDK's stream of received audio frames.

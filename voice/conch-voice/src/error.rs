@@ -44,6 +44,16 @@ pub enum Error {
     #[error(transparent)]
     Audio(#[from] conch_voice_audio::AudioError),
 
+    /// PipeWire could not be reached, or refused a stream. The detail is `dmn-audio`'s own
+    /// words and holds nothing from the server or the login.
+    #[error("cannot {doing}: {detail}")]
+    PipeWire {
+        /// What was being done.
+        doing: &'static str,
+        /// Why not.
+        detail: String,
+    },
+
     /// `conchd` issued a session with no grant for the channel's own room. V4 joins that
     /// room and no other.
     #[error("conchd issued a voice session with no grant for the channel's own room")]
