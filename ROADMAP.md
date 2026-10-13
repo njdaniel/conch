@@ -13,6 +13,10 @@ via LiveKit, never bespoke WebRTC.
 > the numbered phases — see [its section](#parallel-track--nets-and-voice-v0v6). It pulls
 > P2 auth and multi-human access forward and starts voice before P8.
 
+> **Amended 2026-10-13:** **P2 is done** (#253). Its exit gate, `go run ./e2e/p2-hardening`
+> (#81), runs on every pull request. Password login and OIDC (#24) did not ship in it and
+> move to P7; see the P2 paragraph. P3 is next among the numbered phases.
+
 **Two invariants hold the whole way:**
 
 - **Usable at every phase.** Each phase ends in a deployment you actually run, not
@@ -52,14 +56,24 @@ notifications. The demo: an agent posts a typed message via MCP, calls
 `request_approval`; Nick's phone buzzes; Nick SSHes in, approves with a reason in the
 TUI; `await_decision` resolves; the audit log shows the full chain.
 
-### P2 — Hardening 🔨 *(in progress)*
-Agent identity manifests + server-side capability enforcement, audit export, FTS5
-search, file uploads, auth (OIDC + local), threads, `principal-review` on cadence, the
-first runtime adapter (see P3).
+### P2 — Hardening ✅
+Agent identity manifests + server-side capability enforcement with per-agent rate limits,
+credentials that rotate and revoke, channel membership, audit export, FTS5 search, file
+uploads, threads, and `principal-review` on cadence. The exit: one command,
+`go run ./e2e/p2-hardening`, upgrades a database written by a P1 `conchd` and drives real
+binaries through all of it; it runs on every pull request and before every release.
 
-> **Why P2 gates everything below:** capability manifests and real auth are
+Two things this paragraph used to list did not ship here:
+
+- **Auth (OIDC + local).** P2 exits on bearer credentials issued by an operator (track
+  phase V1), which is real auth and enough for a small trusted group. Interactive
+  password login and optional OIDC (#24) move to P7, or earlier if a real user needs
+  them. *(Nick, 2026-10-13.)*
+- **The first runtime adapter** is P3's, where this paragraph already pointed.
+
+> **Why P2 gated everything below:** capability manifests and real auth are
 > prerequisites for agent sessions (P3), floor control (P4), and multi-human access. The
-> nets-and-voice track takes P2's auth and capability issues as its first phase (V1)
+> nets-and-voice track took P2's auth and capability issues as its first phase (V1)
 > rather than skipping them.
 
 *Deployment: dependency-free core, localhost, Nick + one or more agents in the TUI.*
@@ -147,7 +161,8 @@ audio's audience; TTS behind `publish:audio`), Windows/macOS clients.
 
 > **What this displaces.** V1 *is* the bulk of P2, so P2's remaining items (search,
 > uploads, threads, audit export) and P3 (agent presence) wait behind it or share
-> attention with V3–V5. That is a deliberate trade, not free.
+> attention with V3–V5. That is a deliberate trade, not free. *(2026-10-13: P2's remaining
+> items have since shipped; P3 still shares attention with V4–V6.)*
 
 *Deployment: `conchd` alone through V2; `conchd` + optional LiveKit from V3; Linux/PipeWire
 clients; a few humans plus agents.*
@@ -215,6 +230,8 @@ Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 
 is left: presence, human DMs, per-principal permissions polish — plus the full graphical
 client (web SPA over the existing API, TUI still first-class beside it). This is the GUI
 that's genuinely justified by having humans to use it, as distinct from the P3 dashboard.
+Interactive password login and optional OIDC (#24) land here too, moved from P2 on
+2026-10-13; until then people sign in with a credential an operator issues.
 
 > Reverses the "web UI possibly never" leaning. The GUI requires its own ADR; ADR-003
 > does not cover it.
@@ -252,7 +269,7 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 
 | Phase | Focus | Deployment |
 | ----- | ----- | ---------- |
-| P2 | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
+| P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
 | **P3** | **Agent presence, sessions, runs, activity, adapters** | Core, local, solo+agents (opt. dashboard GUI) |
 | **P4** | **Assemblies / floor-controlled multi-agent rooms** | Core, local, solo+agents |
 | **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
