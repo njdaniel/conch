@@ -35,6 +35,16 @@ It is *not* an open-source Slack clone. The wedge is agent-native chat ops: type
   remains the primary human interface through P6. Multi-human *access* through the
   TUI/CLI and voice client is permitted now ([ADR-003](ADR-003-multi-human-access.md)).
 
+### Pending client-scope amendment
+
+[ADR-007](ADR-007-client-interfaces.md), proposed in #259 on 2026-10-13,
+would permit a limited read/write P3 browser prototype and select the graphical
+client stack. It would extend D1/D5's client scope while preserving the Go server,
+Go TUI, Rust voice component and public-API invariant. It does not move all P7
+features or P9 media into P3. Until accepted, the non-goals above remain the
+accepted baseline; this cross-reference records the proposal without silently
+rewriting an accepted decision.
+
 ## Founding decisions (locked)
 
 These are settled. Reopening any requires a new ADR approved by Nick (use the "ADR proposal" issue template).

@@ -82,6 +82,13 @@ Two things this paragraph used to list did not ship here:
 
 ## The long arc
 
+> **Proposed client/P3 amendment (2026-10-13, #259):**
+> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the UI planning direction
+> and proposes a small read/write browser prototype alongside the TUI at P3.
+> Acceptance is pending review; the [P3 local prototype brief](docs/design/p3-local-prototype.md)
+> defines the next planning target, not functionality shipped by this document.
+> No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
+
 ### P3 — Agent presence & runs 🎯 *next*
 Make agents visible, first-class **workspace members**, not just participants that read
 and post. This is the "open Conch and see everything running" phase — the most
@@ -118,20 +125,30 @@ Ships:
   agents.
 - **Intervention capabilities**, declared per adapter: message / cancel / pause / resume.
 
-> **Shippable MVP (run it tomorrow):** register + heartbeat + status + one TUI Agents
-> view + one adapter. Richer run timelines, more adapters, and full intervention follow.
+> **First local prototype — proposed in ADR-007:** register + heartbeat + status,
+> basic runs/activity, TUI and minimal browser lobby/chat/agent views, two scripted
+> agents and one opt-in real adapter. Nick can connect from two isolated TUI clients
+> and a browser at once, then repeat with multiple sessions of one identity.
+> The [planning brief](docs/design/p3-local-prototype.md) defines deterministic tests,
+> optional VM/LAN and voice extensions, and the clean-checkout walkthrough.
+> Richer timelines, additional adapters and full intervention follow; this first
+> slice does not by itself complete all P3 objectives.
 
 > **Success criterion:** Nick opens Conch and sees Claude Code, Codex, and a local model
 > running simultaneously, sees what each is doing, opens each activity stream, and sends
 > an instruction to one — without switching terminals.
 
-*Deployment: dependency-free core, local, Nick + his agents in the TUI. No new infra.*
+*Deployment: dependency-free core, local, Nick + his agents in the TUI; proposed
+ADR-007 adds a statically served browser prototype without a required Node service.
+LiveKit remains optional for the parallel voice track.*
 
 > **Independent track — dashboard GUI.** The agent roster / run timelines / activity
 > streams are the one surface genuinely better as pixels than in a terminal. A minimal,
 > read-only dashboard GUI over the existing API may be built *whenever it earns its
 > place* — as early as alongside P3 — and is deliberately **decoupled** from the
 > Slack-style multi-human GUI in P7. The TUI stays first-class for ops and approvals.
+> **Proposed extension:** ADR-007 broadens this early GUI allowance to the bounded
+> read/write local prototype above; it supersedes the read-only limit only on acceptance.
 
 ### Parallel track — nets and voice (V0–V6)
 
@@ -226,6 +243,13 @@ media — just make the single-user-plus-agents experience excellent.
 happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 ### P7 — Small-team multi-human + Slack-style GUI ⚠️ *charter amendment*
+
+The proposed ADR-007 brings the shared React foundation and a limited browser
+lobby/chat/agent view into P3. P7 still owns the full small-team GUI and social /
+onboarding polish; an early prototype is not completion of this phase. Electron
+is the proposed desktop shell, sharing browser UI; platform release scope and
+native media/input support need their own measured implementation work.
+
 Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 adds what
 is left: presence, human DMs, per-principal permissions polish — plus the full graphical
 client (web SPA over the existing API, TUI still first-class beside it). This is the GUI
@@ -270,7 +294,7 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | Phase | Focus | Deployment |
 | ----- | ----- | ---------- |
 | P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
-| **P3** | **Agent presence, sessions, runs, activity, adapters** | Core, local, solo+agents (opt. dashboard GUI) |
+| **P3** | **Agent presence, sessions, runs, activity, adapters**; proposed local multi-client prototype | Core, local, TUI + minimal browser under proposed ADR-007 |
 | **P4** | **Assemblies / floor-controlled multi-agent rooms** | Core, local, solo+agents |
 | **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |

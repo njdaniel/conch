@@ -1,7 +1,12 @@
 # Conch interface references
 
 Original generated concept images from Nicholas's “AI Build Time Cost Estimate”
-conversation, collected on 2026-10-13 for implementation reference.
+conversation and the follow-up client-design conversation on 2026-10-13.
+Collected for implementation reference.
+
+Behavior is specified in [client experience](../client-experience.md); scope and
+stack are in [proposed ADR-007](../../adr/ADR-007-client-interfaces.md).
+The [P3 planning brief](../p3-local-prototype.md) selects the initial prototype subset.
 These are visual targets, not screenshots of working features. Accepted ADRs and
 the project roadmap remain authoritative for architecture and delivery scope.
 
@@ -27,6 +32,22 @@ Roster and room navigation on the left, text conversation in the center, optiona
 live captions on the right, and a persistent input/status area. Preserve this
 information hierarchy when adapting the layout to smaller terminals.
 
+## Graphical server lobby
+
+![Graphical lobby outside voice](server-lobby.png)
+
+Channels and voice presence on the left, chat in the center, online members on the
+right. The bottom strip says Not in voice / Microphone inactive. Joining voice is
+explicit and independent of text selection (UX-01 through UX-05).
+
+## TUI server lobby
+
+![Terminal lobby outside voice](terminal-server-lobby.png)
+
+The same outside-voice state in terminal panels, with visible focus, a composer,
+member roster and keyboard hints (UX-04, UX-08, UX-21). Shortcut labels are
+illustrative and need terminal/browser collision checks before implementation.
+
 ## Implementation guidance
 
 - Keep the current listening set, microphone state, PTT binding, and transmit
@@ -50,7 +71,8 @@ in this set.
 | State | Proposed behavior to develop |
 | --- | --- |
 | Multiple nets | Show overlapping memberships, listening versus speaking permissions, activity per net, and explicit PTT targets. A net remains a subset of a channel, consistent with ADR-005. |
-| Connected to server, outside voice | Show channels, text chat, and online presence with a clear Join voice action. Do not capture or transmit microphone audio merely because the user connected to the server. |
+| TUI multiple nets | Adapt listening membership, role and transmit-target visibility to terminal panels. |
+| One-to-one multilingual conversation | Show original/translated text and language controls; does not itself advance human DMs ahead of the roadmap. |
 
 Implement these references through the existing public APIs and project review
 process. They do not select a desktop framework, add dependencies, or amend ADRs.

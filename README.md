@@ -52,13 +52,29 @@ today; simultaneous voice listening and per-net PTT are planned.
 See the [quickstart](#quickstart), [text-net example](#7-nets-and-whispers-the-squad-layout),
 and [voice setup](#voice-optional) for the implemented surfaces.
 
+## Client design and P3 planning
+
+The [client experience specification](docs/design/client-experience.md) describes
+navigation, voice, nets, agent views and failure states, with
+[five visual references](docs/design/mockups/README.md).
+[Proposed ADR-007](docs/adr/ADR-007-client-interfaces.md) records the UI stack:
+Go/Bubble Tea/Lip Gloss TUI, React/TypeScript/Vite browser UI and an Electron desktop
+shell sharing that UI, with native Rust voice managed by the client.
+
+Next is [P3 local prototype planning](docs/design/p3-local-prototype.md): one local
+server, multiple independently configured TUI clients, a browser and AI participants,
+plus optional VM/LAN tests. These documents specify intended work; they are not
+installation instructions or claims that the browser/desktop clients already exist.
+
 ## Product direction
 
 The following describes the intended experience. It does not replace the accepted
 architecture decisions or the implementation milestones in [ROADMAP.md](ROADMAP.md).
 GUI scope, Windows audio/input support, session presets, and caption retention need
-their corresponding design decisions before implementation. The desktop framework
-has not been selected.
+their corresponding design decisions before implementation. The proposed desktop
+framework is Electron
+([ADR-007](docs/adr/ADR-007-client-interfaces.md)); formal acceptance and platform
+validation are still required.
 
 ### Presets for different groups
 
