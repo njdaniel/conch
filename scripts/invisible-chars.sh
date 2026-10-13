@@ -24,6 +24,12 @@
 # hold such a character goes in ALLOW below, with the reason.
 set -euo pipefail
 
+# The pattern below names code points, which git grep -P reads as such only in
+# a UTF-8 locale; in the C locale it refuses the pattern. Whatever the caller's
+# locale is (a hook run from an editor, a bare CI shell), the check runs in
+# this one.
+export LC_ALL=C.UTF-8
+
 cd "${1:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)}"
 
 # Paths (git pathspecs) allowed to contain forbidden characters, each with
@@ -41,7 +47,7 @@ done
 status=0
 hits=$(git grep -I -n -P "$PATTERN" -- "${pathspec[@]}") || status=$?
 if [ "$status" -gt 1 ]; then
-    echo "invisible-chars: git grep failed (does this git have PCRE support?)" >&2
+    echo "invisible-chars: git grep failed: this needs a git built with PCRE and the C.UTF-8 locale" >&2
     exit 2
 fi
 if [ -z "$hits" ]; then
@@ -51,7 +57,7 @@ fi
 
 echo "invisible-chars: forbidden characters in tracked files:" >&2
 # Name each character by code point; the line itself is not echoed raw.
-printf '%s\n' "$hits" | LC_ALL=C.UTF-8 perl -CSD -ne '
+printf '%s\n' "$hits" | perl -CSD -ne '
     my ($file, $line, $text) = /^([^:]+):(\d+):(.*)$/s or next;
     my %seen;
     while ($text =~ /([\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{2028}\x{2029}\x{0080}-\x{009F}\x00-\x08\x0B\x0C\x0E-\x1F\x7F])/g) {

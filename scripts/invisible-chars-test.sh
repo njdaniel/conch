@@ -73,4 +73,17 @@ printf '\x00\x01\x02binary\xe2\x80\xae' >"$WORK/repo/blob.bin"
 git -C "$WORK/repo" add blob.bin
 out=$("$CHECK" "$WORK/repo" 2>&1) || fail "an untracked or binary file was refused: $out"
 
+# The check does not depend on the caller's locale: in the C locale git grep
+# refuses a pattern that names code points, so the script sets its own.
+new_repo
+printf 'x := "\xe2\x80\xae"\n' >"$WORK/repo/c-locale.go"
+git -C "$WORK/repo" add c-locale.go
+status=0
+out=$(LC_ALL=C LANG=C "$CHECK" "$WORK/repo" 2>&1) || status=$?
+[ "$status" -eq 1 ] || fail "called from the C locale: exit status $status, want 1; output: $out"
+case "$out" in
+    *"U+202E"*) ;;
+    *) fail "called from the C locale: U+202E not named: $out" ;;
+esac
+
 echo "invisible-chars-test: OK"
