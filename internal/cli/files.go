@@ -249,7 +249,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return fmt.Errorf("cli: download: %w", err)
 	}
 	ok = true
-	_, err = fmt.Fprintln(stdout, shown)
+	_, err = fmt.Fprintln(stdout, safeLine(shown))
 	return err
 }
 
