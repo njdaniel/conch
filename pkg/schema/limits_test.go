@@ -14,7 +14,7 @@ import (
 // more than any real body, so the claim has room to spare.
 func TestTheLargestMessageFitsTheFrameLimit(t *testing.T) {
 	at := NewTimestamp(time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC))
-	for _, worst := range []string{"<", ">", "&", "\"", "\\", "\n", "\x01", " ", "é", "x"} {
+	for _, worst := range []string{"<", ">", "&", "\"", "\\", "\n", "\x01", string(rune(0x2028)), "é", "x"} {
 		body := strings.Repeat(worst, MaxPostRequestBytes/len(worst))
 		ids := make([]int64, 1000)
 		for i := range ids {
