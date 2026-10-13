@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"golang.org/x/term"
@@ -263,7 +264,7 @@ func scopeMarker(audience *schema.Audience, names map[int64]string) string {
 	switch audience.Kind {
 	case schema.AudienceKindNet:
 		if name, ok := names[audience.NetID]; ok {
-			return "[net:" + name + "] "
+			return "[net:" + safeLine(name) + "] "
 		}
 		return "[net:" + strconv.FormatInt(audience.NetID, 10) + "] "
 	case schema.AudienceKindPrincipals:
@@ -275,7 +276,7 @@ func scopeMarker(audience *schema.Audience, names map[int64]string) string {
 	default:
 		// An audience kind this client does not know is still scoped; never
 		// print it as if it were channel-wide.
-		return "[" + string(audience.Kind) + "] "
+		return "[" + safeLine(string(audience.Kind)) + "] "
 	}
 }
 
@@ -283,12 +284,39 @@ func scopeMarker(audience *schema.Audience, names map[int64]string) string {
 // starting with a bare "[". A body is written by its author, and without the
 // escape a channel-wide message "[whisper:3,7] ..." would read as a whisper.
 // Backslash is already the escape character here, so "\[" is unambiguous.
+//
+// A body is free text, and it is printed to a terminal: every control
+// character (C0 including tab, DEL, C1), every bidi control and the line and
+// paragraph separators is written as a visible escape instead of reaching the
+// terminal, where it could clear or retitle the screen or reorder what is
+// shown (issue #234). Nothing is dropped, and a real backslash is doubled
+// while every escape starts with one, so two different bodies never print the
+// same line. Other text, emoji and their zero-width joiners included, is as
+// it was sent.
 func tailBody(body string) string {
-	body = strings.NewReplacer("\\", "\\\\", "\r", "\\r", "\n", "\\n").Replace(body)
-	if strings.HasPrefix(body, "[") {
-		return "\\" + body
+	var b strings.Builder
+	for i := 0; i < len(body); {
+		r, size := utf8.DecodeRuneInString(body[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			// Not UTF-8 (JSON decoding never gives this); keep the byte.
+			fmt.Fprintf(&b, "\\x%02x", body[i])
+		case r == '\\':
+			b.WriteString("\\\\")
+		case unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) ||
+			unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):
+			q := strconv.QuoteToASCII(string(r))
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteString(body[i : i+size])
+		}
+		i += size
 	}
-	return body
+	out := b.String()
+	if strings.HasPrefix(out, "[") {
+		return "\\" + out
+	}
+	return out
 }
 
 func runTail(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -404,13 +432,13 @@ func runNetsSubcommand(ctx context.Context, verb string, args []string, stdout, 
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(stdout, "created net %s (id %d) in %s\n", n.Name, n.ID, channel)
+		_, err = fmt.Fprintf(stdout, "created net %s (id %d) in %s\n", safeLine(n.Name), n.ID, safeLine(channel))
 		return err
 	case "archive":
 		if err := client.ArchiveNet(ctx, channel, positional[1]); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(stdout, "archived net %s in %s\n", positional[1], channel)
+		_, err = fmt.Fprintf(stdout, "archived net %s in %s\n", safeLine(positional[1]), safeLine(channel))
 		return err
 	case "add":
 		role := schema.NetRoleMember
@@ -420,13 +448,13 @@ func runNetsSubcommand(ctx context.Context, verb string, args []string, stdout, 
 		if err := client.PutNetMember(ctx, channel, positional[1], principalID, role); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(stdout, "added %d to net %s as %s\n", principalID, positional[1], role)
+		_, err = fmt.Fprintf(stdout, "added %d to net %s as %s\n", principalID, safeLine(positional[1]), safeLine(string(role)))
 		return err
 	default: // remove
 		if err := client.RemoveNetMember(ctx, channel, positional[1], principalID); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(stdout, "removed %d from net %s\n", principalID, positional[1])
+		_, err = fmt.Fprintf(stdout, "removed %d from net %s\n", principalID, safeLine(positional[1]))
 		return err
 	}
 }
@@ -435,13 +463,13 @@ func runNetsSubcommand(ctx context.Context, verb string, args []string, stdout, 
 // the server sent them.
 func formatNet(n schema.NetV1) string {
 	if len(n.Members) == 0 {
-		return n.Name + "  (empty)"
+		return safeLine(n.Name) + "  (empty)"
 	}
 	members := make([]string, len(n.Members))
 	for i, m := range n.Members {
-		members[i] = strconv.FormatInt(m.PrincipalID, 10) + ":" + string(m.Role)
+		members[i] = strconv.FormatInt(m.PrincipalID, 10) + ":" + safeLine(string(m.Role))
 	}
-	return n.Name + "  " + strings.Join(members, " ")
+	return safeLine(n.Name) + "  " + strings.Join(members, " ")
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
@@ -497,7 +525,7 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 	_, _ = fmt.Fprintln(stdout, strings.Repeat("-", 90))
 	for _, a := range resp.Approvals {
 		deadline := a.Deadline.Time().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, a.State, deadline, a.RequesterID, a.Title)
+		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, safeLine(string(a.State)), deadline, a.RequesterID, safeLine(a.Title))
 	}
 	return nil
 }
@@ -553,9 +581,9 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 	}
 
 	if resp.Resolution != nil {
-		_, _ = fmt.Fprintf(stdout, "conch: approval %d resolved (%s)\n", approvalID, resp.State)
+		_, _ = fmt.Fprintf(stdout, "conch: approval %d resolved (%s)\n", approvalID, safeLine(string(resp.State)))
 	} else {
-		_, _ = fmt.Fprintf(stdout, "conch: approval %d decision recorded (state: %s)\n", approvalID, resp.State)
+		_, _ = fmt.Fprintf(stdout, "conch: approval %d decision recorded (state: %s)\n", approvalID, safeLine(string(resp.State)))
 	}
 
 	return nil
@@ -635,7 +663,7 @@ func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	if err := SaveToken(*server, token); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "logged in to %s as %s (%s)\n", client.Server(), who.Name, who.Role)
+	_, err = fmt.Fprintf(stdout, "logged in to %s as %s (%s)\n", safeLine(client.Server()), safeLine(who.Name), safeLine(string(who.Role)))
 	return err
 }
 
@@ -762,7 +790,7 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, who.Kind, who.Name, who.Role)
+	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, safeLine(string(who.Kind)), safeLine(who.Name), safeLine(string(who.Role)))
 	return err
 }
 
@@ -815,6 +843,12 @@ func safeLine(s string) string {
 	}
 	return b.String()
 }
+
+// ErrorLine is an error as the final line a command prints: its text on one
+// line, with anything that is not printable (a server's words reach many
+// errors, wrapped in ways no one site can foresee) written as a visible
+// escape. cmd/conch prints every error through it.
+func ErrorLine(err error) string { return safeLine(err.Error()) }
 
 // VoiceName is voiceName for other packages: a principal's name as `conch
 // voice status` shows it, "-" when unknown.
