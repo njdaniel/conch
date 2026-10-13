@@ -3,12 +3,27 @@
 
 use std::collections::BTreeMap;
 
-use crate::{AudioError, FRAME_LEN, Frame, SAMPLE_RATE};
+use crate::{AudioError, FRAME_LEN, Frame, Pacing, SAMPLE_RATE};
 
 /// The speakers: something that takes the mixed audio one frame at a time.
 pub trait SpeakerSink {
     /// Takes the next 10 ms to be heard. Never blocks.
     fn play(&mut self, frame: &Frame);
+
+    /// What paces writes. A sink with no clock (the counting sink) is given a frame every
+    /// tick of a timer: the default, [`Pacing::Timer`]. One that plays on the sound card's
+    /// clock says [`Pacing::Ring`] and is asked [`frames_wanted`](Self::frames_wanted).
+    fn pacing(&self) -> Pacing {
+        Pacing::Timer
+    }
+
+    /// How many frames to mix and [`play`](Self::play) now: for a [`Pacing::Ring`] sink, as
+    /// many as it takes to bring what is queued up to its target fill, none if it is at
+    /// it. A late look finds more owed than an early one; none is dropped for it. Not asked
+    /// of a [`Pacing::Timer`] sink, which is given one frame every tick.
+    fn frames_wanted(&mut self) -> usize {
+        1
+    }
 }
 
 /// Below this RMS a signal counts as silence (-80 dB of full scale).

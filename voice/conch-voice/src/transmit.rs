@@ -15,19 +15,27 @@
 //! The task is told what to do with [`TxCommand`]s and says what happened with
 //! [`TxEvent`]s. Commands are taken before the next frame, so a forced shut is never behind
 //! audio.
+//!
+//! What paces the task is the microphone (`pace.rs`): one with a clock of its own, the
+//! sound card's, is forwarded from as its ring fills, and a task that was late forwards
+//! every frame that built up meanwhile; one without, a tone or a file, is read every 10 ms.
+//! Either way a frame reaches the track only by way of the gate. A press first discards what
+//! the microphone captured before it and has not handed over (`discard_waiting`), the part
+//! of a frame included, so that neither catching up nor the first frame of a transmission
+//! sends audio captured while the gate was shut.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use conch_voice_audio::{
-    AudioError, FRAME_MS, ForceShut, GateConfig, GateShut, Gated, MicRead, MicSource, OpenOutcome,
-    SILENCE, ShutReason as GateShutReason, TransmitGate,
+    AudioError, ForceShut, GateConfig, GateShut, GateStatus, Gated, MicRead, MicSource,
+    OpenOutcome, Pacing, SILENCE, ShutReason as GateShutReason, TransmitGate,
 };
 use conch_voice_control::{GateCommand, ShutReason};
 use tokio::sync::mpsc;
-use tokio::time::MissedTickBehavior;
 
+use crate::pace::Pace;
 use crate::sdk::MicFeed;
 
 /// A microphone source that can be moved into the task.
@@ -112,6 +120,7 @@ pub fn spawn<F: MicFeed>(config: GateConfig) -> Result<Transmitter<F>, AudioErro
         gate,
         mic: None,
         mic_present: false,
+        pace: Pace::new(Pacing::Timer),
         feed: None,
         commands: command_rx,
         events: event_tx,
@@ -130,6 +139,9 @@ struct Task<F> {
     mic: Option<BoxedMic>,
     /// What was last reported about the microphone.
     mic_present: bool,
+    /// What wakes the task to read the microphone: the microphone's ring, or a timer for
+    /// one that has no clock.
+    pace: Pace,
     feed: Option<F>,
     commands: mpsc::UnboundedReceiver<TxCommand<F>>,
     events: mpsc::UnboundedSender<TxEvent>,
@@ -138,12 +150,10 @@ struct Task<F> {
 
 impl<F: MicFeed> Task<F> {
     async fn run(mut self) {
-        // A timer paces this loop, and a source with no frame yet answers `NotYet`. The
-        // design note's §3 has the capture ring pace it instead; the PipeWire microphone
-        // keeps what is waiting short (`audio::take_frame`) so that the two clocks cannot
-        // drift apart by more than a few frames.
-        let mut tick = tokio::time::interval(Duration::from_millis(u64::from(FRAME_MS)));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // What wakes this loop is the microphone's pace (`pace.rs`): a source with a clock of
+        // its own, the sound card's, is looked at often and a frame is forwarded whenever
+        // its ring holds one, however many have built up; one without (a tone, a file) is
+        // read once every 10 ms.
         let mut captured = SILENCE;
         loop {
             tokio::select! {
@@ -154,21 +164,41 @@ impl<F: MicFeed> Task<F> {
                     // Whoever held the commands is gone, and with it every reason to send.
                     None => return,
                 },
-                _ = tick.tick() => self.frame(&mut captured).await,
+                () = self.pace.wait() => {
+                    let found = self.frame(&mut captured).await;
+                    self.pace.found(found);
+                }
             }
+        }
+    }
+
+    /// Throws away what the microphone has captured and not yet handed over, while the gate
+    /// is shut: whole frames a stalled task let build up, and the part of a frame that is
+    /// always waiting. A press must not send what was captured before it, and the gate
+    /// judges a frame when it is passed, not when it was captured. Nothing here reaches the
+    /// track; the samples go nowhere.
+    fn discard_waiting(&mut self) {
+        if !matches!(self.gate.status(), GateStatus::Shut(_)) {
+            return;
+        }
+        if let Some(mic) = self.mic.as_mut() {
+            mic.forget_waiting();
         }
     }
 
     fn obey(&mut self, command: TxCommand<F>) {
         match command {
-            TxCommand::Gate(GateCommand::Open) => match self.gate.open() {
-                OpenOutcome::Opened | OpenOutcome::AlreadyOpen => {}
-                // The machine believes the gate open and it is not. Saying that it shut
-                // ends the machine's transmission, so the two agree again.
-                OpenOutcome::Refused(_) => self.report(TxEvent::GateShut {
-                    limit_reached: false,
-                }),
-            },
+            TxCommand::Gate(GateCommand::Open) => {
+                self.discard_waiting();
+                match self.gate.open() {
+                    OpenOutcome::Opened | OpenOutcome::AlreadyOpen => {}
+                    // The machine believes the gate open and it is not. Saying that it shut
+                    // ends the machine's transmission, so the two agree again.
+                    OpenOutcome::Refused(_) => self.report(TxEvent::GateShut {
+                        limit_reached: false,
+                    }),
+                }
+            }
             TxCommand::Gate(GateCommand::Shut) => {
                 if let Some(shut) = self.gate.shut() {
                     self.shut(shut);
@@ -181,10 +211,12 @@ impl<F: MicFeed> Task<F> {
             }
             TxCommand::Gate(GateCommand::Clear(reason)) => self.gate.clear_force(force(reason)),
             TxCommand::Microphone(mic) => {
+                self.pace = Pace::new(mic.pacing());
                 self.mic = Some(mic);
                 self.mic_present = true;
             }
             TxCommand::CloseMicrophone => {
+                self.pace = Pace::new(Pacing::Timer);
                 self.mic = None;
                 self.mic_present = false;
             }
@@ -194,14 +226,15 @@ impl<F: MicFeed> Task<F> {
     }
 
     /// Reads one captured frame, offers it to the gate, and sends it if the gate lets it
-    /// through.
-    async fn frame(&mut self, captured: &mut conch_voice_audio::Frame) {
+    /// through. Says whether there was a frame, so that a ring that may hold more is read
+    /// again at once.
+    async fn frame(&mut self, captured: &mut conch_voice_audio::Frame) -> bool {
         let Some(mic) = self.mic.as_mut() else {
-            return;
+            return false;
         };
         let present = match mic.read(captured) {
             MicRead::Ready => true,
-            MicRead::NotYet => return,
+            MicRead::NotYet => return false,
             MicRead::NoMicrophone => false,
         };
         if present != self.mic_present {
@@ -209,7 +242,7 @@ impl<F: MicFeed> Task<F> {
             self.report(TxEvent::Microphone(present));
         }
         if !present {
-            return;
+            return false;
         }
         let gated = self.gate.pass(captured);
         if let (Some(frame), Some(feed)) = (gated.frame(), self.feed.as_mut()) {
@@ -220,6 +253,7 @@ impl<F: MicFeed> Task<F> {
         if let Gated::Last(_, shut) = gated {
             self.shut(shut);
         }
+        true
     }
 
     /// Reports that the gate has shut.
@@ -233,5 +267,220 @@ impl<F: MicFeed> Task<F> {
     fn report(&self, event: TxEvent) {
         // If nobody is listening the session is over, and the gate is about to be dropped.
         let _ = self.events.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use conch_voice_audio::{FRAME_LEN, Frame, GatedFrame};
+
+    use super::*;
+
+    /// A stand-in for a capture ring: frames pushed by the test, read by the task. `part`
+    /// stands for the samples short of a frame that a real ring is always holding.
+    #[derive(Clone, Default)]
+    struct Ring {
+        frames: Arc<Mutex<VecDeque<Frame>>>,
+        part: Arc<AtomicU64>,
+    }
+
+    impl Ring {
+        /// Frame number `n` is `n` in every sample, so that a frame is told by its first.
+        fn push(&self, n: usize) {
+            self.frames.lock().unwrap().push_back([n as f32; FRAME_LEN]);
+        }
+
+        fn waiting(&self) -> usize {
+            self.frames.lock().unwrap().len()
+        }
+
+        /// Samples short of a frame that are waiting.
+        fn part(&self) -> u64 {
+            self.part.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A microphone with a clock of its own: it has a frame when the ring does.
+    struct RingMic(Ring);
+
+    impl MicSource for RingMic {
+        fn read(&mut self, frame: &mut Frame) -> MicRead {
+            match self.0.frames.lock().unwrap().pop_front() {
+                Some(next) => {
+                    *frame = next;
+                    MicRead::Ready
+                }
+                None => MicRead::NotYet,
+            }
+        }
+
+        fn pacing(&self) -> Pacing {
+            Pacing::Ring
+        }
+
+        fn forget_waiting(&mut self) {
+            self.0.frames.lock().unwrap().clear();
+            self.0.part.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// A microphone with no clock that says how often it was read.
+    struct CountedTone(Arc<AtomicU64>);
+
+    impl MicSource for CountedTone {
+        fn read(&mut self, frame: &mut Frame) -> MicRead {
+            *frame = [0.25; FRAME_LEN];
+            self.0.fetch_add(1, Ordering::Relaxed);
+            MicRead::Ready
+        }
+    }
+
+    /// A track that keeps the first sample of each frame it is given.
+    #[derive(Clone, Default)]
+    struct Record(Arc<Mutex<Vec<f32>>>);
+
+    impl Record {
+        fn heard(&self) -> Vec<f32> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl MicFeed for Record {
+        fn send(&mut self, frame: GatedFrame<'_>) -> impl std::future::Future<Output = ()> + Send {
+            self.0.lock().unwrap().push(frame.samples()[0]);
+            async {}
+        }
+    }
+
+    fn open(commands: &mpsc::UnboundedSender<TxCommand<Record>>) {
+        assert!(commands.send(TxCommand::Gate(GateCommand::Open)).is_ok());
+    }
+
+    async fn until(what: &str, within: Duration, mut met: impl FnMut() -> bool) {
+        let end = tokio::time::Instant::now() + within;
+        while !met() {
+            assert!(tokio::time::Instant::now() < end, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// The point of pacing from the ring: a late look catches up with every frame the ring
+    /// holds. A task that took one frame a 10 ms tick would need half a second for these.
+    #[tokio::test]
+    async fn a_ring_that_filled_while_the_task_was_late_is_forwarded_whole_and_in_order() {
+        let config = gate_config(0, Duration::from_secs(60));
+        let transmitter = spawn::<Record>(config).unwrap();
+        let (ring, record) = (Ring::default(), Record::default());
+        for command in [
+            TxCommand::Microphone(Box::new(RingMic(ring.clone())) as BoxedMic),
+            TxCommand::Attach(record.clone()),
+        ] {
+            assert!(transmitter.commands.send(command).is_ok());
+        }
+        open(&transmitter.commands);
+        // Let the task take the commands: audio already waiting at a press is discarded.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for n in 1..=50 {
+            ring.push(n);
+        }
+        until("fifty frames", Duration::from_millis(400), || {
+            record.heard().len() == 50
+        })
+        .await;
+        let want: Vec<f32> = (1..=50).map(|n| n as f32).collect();
+        assert_eq!(record.heard(), want, "none dropped, none out of order");
+        assert_eq!(ring.waiting(), 0);
+        assert_eq!(transmitter.frames_sent.load(Ordering::Relaxed), 50);
+
+        // And a frame that arrives alone is forwarded without waiting for a tick of 10 ms
+        // to be due: within a few looks.
+        ring.push(51);
+        until("one more frame", Duration::from_millis(400), || {
+            record.heard().len() == 51
+        })
+        .await;
+    }
+
+    /// A source with no clock is read once every 10 ms, as it always was.
+    #[tokio::test]
+    async fn a_microphone_with_no_clock_is_read_once_a_tick() {
+        let transmitter = spawn::<Record>(gate_config(0, Duration::from_secs(60))).unwrap();
+        let reads = Arc::new(AtomicU64::new(0));
+        let mic = Box::new(CountedTone(Arc::clone(&reads))) as BoxedMic;
+        assert!(
+            transmitter
+                .commands
+                .send(TxCommand::Microphone(mic))
+                .is_ok()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let n = reads.load(Ordering::Relaxed);
+        assert!((10..=25).contains(&n), "{n} reads in 200 ms");
+    }
+
+    /// The gate judges a frame when it is passed, so what a stalled task found waiting when
+    /// a press arrived was captured before the press and is not sent.
+    #[tokio::test]
+    async fn audio_captured_before_a_press_is_not_sent_after_it() {
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let mut task = Task {
+            gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::new(AtomicU64::new(0)),
+        };
+        for n in 1..=5 {
+            ring.push(n);
+        }
+        // And 120 samples short of a frame, which reading frame by frame would leave to
+        // become the start of the first frame sent.
+        ring.part.store(120, Ordering::Relaxed);
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        assert_eq!(ring.waiting(), 0, "what was waiting is gone");
+        assert_eq!(ring.part(), 0, "down to the last sample");
+        let mut captured = SILENCE;
+        assert!(!task.frame(&mut captured).await);
+        // What is captured after the press goes through.
+        ring.push(6);
+        assert!(task.frame(&mut captured).await);
+        assert_eq!(record.heard(), [6.0]);
+    }
+
+    /// While the gate is open, the same waiting audio is simply sent: nothing is discarded
+    /// from a transmission that is under way.
+    #[tokio::test]
+    async fn a_transmission_under_way_loses_nothing_to_a_second_press() {
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let mut task = Task {
+            gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::new(AtomicU64::new(0)),
+        };
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        for n in 1..=3 {
+            ring.push(n);
+        }
+        ring.part.store(120, Ordering::Relaxed);
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        assert_eq!((ring.waiting(), ring.part()), (3, 120));
+        let mut captured = SILENCE;
+        while task.frame(&mut captured).await {}
+        assert_eq!(record.heard(), [1.0, 2.0, 3.0]);
     }
 }

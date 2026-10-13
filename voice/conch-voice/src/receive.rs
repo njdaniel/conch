@@ -1,10 +1,14 @@
 //! The mix task: every remote speaker's audio, through a jitter buffer each, added into one
 //! frame per tick for the sink (`docs/design/conch-voice.md` §3).
 //!
-//! Each tick it takes what has arrived from each speaker into that speaker's jitter buffer,
-//! pops one frame from each buffer, adds them, and plays the result. The client's own audio
-//! is never among them: LiveKit does not send a participant its own track, and the session
-//! loop refuses a track under its own identity besides.
+//! Each time a frame is due it takes what has arrived from each speaker into that speaker's
+//! jitter buffer, pops one frame from each buffer, adds them, and plays the result. The
+//! client's own audio is never among them: LiveKit does not send a participant its own
+//! track, and the session loop refuses a track under its own identity besides.
+//!
+//! What makes a frame due is the sink (`pace.rs`): the PipeWire speakers say how many frames
+//! their ring is short of its target fill, so the sound card's clock sets the pace and a late
+//! look mixes several frames; a sink with no clock is given one every 10 ms.
 //!
 //! The sink is whatever the caller opened: the PipeWire speakers, or with `--sink` the
 //! [`conch_voice_audio::CountingSink`], which plays nothing and keeps no audio. It is given the mix and
@@ -16,13 +20,18 @@
 //! for every identity it was ever shown, and nothing reads them.)
 
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
 
 use conch_voice_audio::{
-    AudioError, FRAME_MS, Frame, JitterBuffer, Mixer, Popped, SILENCE, SignalMeter, SpeakerSink,
+    AudioError, Frame, JitterBuffer, Mixer, Pacing, Popped, SILENCE, SignalMeter, SpeakerSink,
 };
 use tokio::sync::mpsc;
-use tokio::time::MissedTickBehavior;
+
+use crate::pace::Pace;
+
+/// The most frames one look mixes for a sink paced by its ring. A sink asks for what its
+/// ring is short of, which is a few frames; this keeps a sink that asked for more from
+/// holding the task, and the commands behind it, for long.
+const MAX_PER_LOOK: usize = 16;
 
 /// A frame counts as audible at or above this RMS: -60 dB of full scale. What a receiver
 /// makes up when nothing arrives (comfort noise, the tail of concealment) is below it; a
@@ -201,12 +210,11 @@ pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
 
 impl Task {
     async fn run(mut self) {
-        // A timer paces the mix. The design note's §3 has the playback ring pace it, a
-        // frame being mixed whenever the ring falls below its target fill; the PipeWire
-        // speakers keep their ring from running dry or filling up (`audio::put_frame`)
-        // so that the two clocks cannot drift apart by more than a few frames.
-        let mut tick = tokio::time::interval(Duration::from_millis(u64::from(FRAME_MS)));
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // What wakes this loop is the sink's pace (`pace.rs`). A sink on the sound card's
+        // clock is looked at often and asked how many frames its ring is short of its
+        // target fill; a late look mixes that many and drops none. A sink with no clock
+        // (the counting sink) is given one frame every 10 ms.
+        let mut pace = Pace::new(self.sink.pacing());
         loop {
             tokio::select! {
                 biased;
@@ -214,8 +222,20 @@ impl Task {
                     Some(command) => self.obey(command),
                     None => return,
                 },
-                _ = tick.tick() => self.mix(),
+                () = pace.wait() => self.tick(&pace),
             }
+        }
+    }
+
+    /// One wake-up: a frame for a sink paced by a timer, and for one paced by its ring as
+    /// many as it says it wants.
+    fn tick(&mut self, pace: &Pace) {
+        let frames = match pace.pacing() {
+            Pacing::Timer => 1,
+            Pacing::Ring => self.sink.frames_wanted().min(MAX_PER_LOOK),
+        };
+        for _ in 0..frames {
+            self.mix();
         }
     }
 
@@ -322,9 +342,77 @@ impl Task {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use conch_voice_audio::CountingSink;
 
     use super::*;
+
+    /// A sink on a clock of its own: it plays what the test says it wants, and says how
+    /// many frames it was given.
+    struct WantingSink {
+        wanted: Arc<AtomicUsize>,
+        played: Arc<AtomicU64>,
+    }
+
+    impl SpeakerSink for WantingSink {
+        fn play(&mut self, _frame: &Frame) {
+            self.played.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn pacing(&self) -> Pacing {
+            Pacing::Ring
+        }
+
+        fn frames_wanted(&mut self) -> usize {
+            self.wanted.swap(0, Ordering::Relaxed)
+        }
+    }
+
+    /// A sink with no clock, which says only how many frames it was given.
+    struct TimedSink(Arc<AtomicU64>);
+
+    impl SpeakerSink for TimedSink {
+        fn play(&mut self, _frame: &Frame) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sink_on_the_cards_clock_is_given_what_it_wants_when_it_wants_it_and_no_more() {
+        let (wanted, played) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicU64::new(0)));
+        let sink = WantingSink {
+            wanted: Arc::clone(&wanted),
+            played: Arc::clone(&played),
+        };
+        let _receiver = spawn(&[440.0], Box::new(sink)).unwrap();
+        // Nothing is wanted: nothing is mixed, however long the task looks.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(played.load(Ordering::Relaxed), 0);
+
+        // A late look is owed five frames: all five, at once, well inside the 50 ms a
+        // timer of 10 ms would need.
+        wanted.store(5, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(played.load(Ordering::Relaxed), 5);
+
+        // And a sink that asks for far more gets a bounded burst from the one look that
+        // hears it ask (this sink asks once: `frames_wanted` takes what it wanted).
+        wanted.store(1_000, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(played.load(Ordering::Relaxed), 5 + MAX_PER_LOOK as u64);
+    }
+
+    #[tokio::test]
+    async fn a_sink_with_no_clock_is_given_a_frame_every_tick() {
+        let played = Arc::new(AtomicU64::new(0));
+        let _receiver = spawn(&[440.0], Box::new(TimedSink(Arc::clone(&played)))).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let n = played.load(Ordering::Relaxed);
+        assert!((10..=25).contains(&n), "{n} frames in 200 ms");
+    }
 
     fn counting(tones: &[f32]) -> BoxedSink {
         Box::new(CountingSink::new(tones).unwrap())

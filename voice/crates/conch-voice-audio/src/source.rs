@@ -13,6 +13,19 @@ pub enum MicRead {
     NoMicrophone,
 }
 
+/// What sets the pace at which a [`MicSource`] is read or a
+/// [`SpeakerSink`](crate::SpeakerSink) is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pacing {
+    /// The source or sink has no clock of its own (a tone, a file, a counter): a timer of one
+    /// frame paces it, and it is read or written once a tick.
+    Timer,
+    /// The source or sink has a clock of its own, the sound card's, and a ring that shows
+    /// where it is: the ring paces it. It is looked at often and acted on by what it
+    /// holds, so a late look catches up with several frames instead of dropping any.
+    Ring,
+}
+
 /// A microphone: something that yields captured audio one frame at a time.
 ///
 /// What it yields is captured audio and nothing more. It is not for sending until it has
@@ -21,6 +34,19 @@ pub trait MicSource {
     /// Fills `frame` with the next 10 ms of captured audio, if there is a whole frame.
     /// Never blocks.
     fn read(&mut self, frame: &mut Frame) -> MicRead;
+
+    /// What paces reads. A source that is always ready (a tone) has no clock, so the default
+    /// is [`Pacing::Timer`]; one that answers [`MicRead::NotYet`] until the sound card has
+    /// delivered a frame says [`Pacing::Ring`].
+    fn pacing(&self) -> Pacing {
+        Pacing::Timer
+    }
+
+    /// Throws away everything captured and not yet read, the part of a frame included. A
+    /// press calls it before the gate opens, so that the first frame sent holds nothing
+    /// captured before the press. A source that holds nothing between reads (a tone, a
+    /// file) has nothing to forget, which is the default.
+    fn forget_waiting(&mut self) {}
 }
 
 /// A microphone for tests: a steady sine tone, always [`MicRead::Ready`].
