@@ -148,6 +148,11 @@ type Model struct {
 	// the details pane. Only pgup/pgdn move it, and it is back to 0 whenever
 	// the selected approval changes.
 	bodyOffset int
+	// scroll is how many lines the message pane is scrolled up from the newest
+	// message of the selected channel; 0 follows the newest. It is counted from
+	// the bottom so that a message arriving while it is above 0 can move it
+	// along (addMessages) and the lines on screen stay where they are.
+	scroll int
 	// loadingChannels is true while the channel list is being fetched from the
 	// server; the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
@@ -269,6 +274,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case tea.MouseMsg:
+		return m.mouse(msg)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -327,6 +334,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup", "pgdown":
 			if m.mode == modeInbox || m.mode == modeDecision {
 				return m.scrollBody(msg.String() == "pgdown"), nil
+			}
+			if m.mode == modeChannels {
+				step := max(1, m.layout().messageRows()-1)
+				if msg.String() == "pgdown" {
+					step = -step
+				}
+				return m.scrollMessages(step), nil
 			}
 		case "enter":
 			switch m.mode {
@@ -478,7 +492,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setStatus(modeChannels, msg.err.Error())
 			}
 		} else {
-			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], msg.messages)
+			m.addMessages(msg.channel, msg.messages)
 			if stale {
 				return m, nil
 			}
@@ -496,7 +510,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
-		m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV2{msg.message})
+		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		return m, m.waitEvent()
 	case subscriptionEnded:
 		return m.subscriptionEnded(msg)
@@ -524,7 +538,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.message.ID > 0 {
 			// The same message also arrives on the subscription; ids dedupe.
-			m.messages[msg.channel] = mergeMessages(m.messages[msg.channel], []schema.MessageV2{msg.message})
+			m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		}
 		// What was sent leaves the input; anything typed after enter stays.
 		m.input = strings.TrimPrefix(m.input, msg.raw)
@@ -584,6 +598,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected = next
+	m.scroll = 0
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
 	m.pendingNet = ""
@@ -756,23 +771,12 @@ var (
 
 // View renders a compact two-pane layout that fits an 80x24 terminal.
 func (m Model) View() string {
-	width, height := m.size()
-	leftWidth, rightWidth := paneWidths(width)
-	// The voice line, when there is one, takes a row from the panes rather
-	// than adding one to the screen, and it is one row however many people
-	// are in voice, so the layout does not move as the roster changes.
+	l := m.layout()
+	width, height := l.width, l.height
+	leftWidth, rightWidth, contentHeight := l.leftW, l.rightW, l.contentH
 	voice := ""
-	if m.mode == modeChannels {
-		if line := m.voiceLine(width); line != "" {
-			voice = statusStyle.Width(width).Render(line) + "\n"
-		}
-	}
-	contentHeight := height - 4
-	if voice != "" {
-		contentHeight--
-	}
-	if contentHeight < 4 {
-		contentHeight = 4
+	if l.voice != "" {
+		voice = statusStyle.Width(width).Render(l.voice) + "\n"
 	}
 
 	var panes string
@@ -808,9 +812,10 @@ func (m Model) View() string {
 		if len(messageLines) == 0 {
 			messageLines = append(messageLines, statusStyle.Render("No messages"))
 		}
-		visible := contentHeight - 1
+		visible := l.messageRows()
 		if len(messageLines) > visible {
-			messageLines = messageLines[len(messageLines)-visible:]
+			end := len(messageLines) - min(m.scroll, len(messageLines)-visible)
+			messageLines = messageLines[end-visible : end]
 		}
 		messages := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(messageLines, "\n"))
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
@@ -884,6 +889,154 @@ func paneWidths(width int) (left, right int) {
 	return left, width - left - 1
 }
 
+// layout is where everything is on the screen. View draws from it and mouse
+// finds what was clicked with it, so the two cannot disagree. Rows and columns
+// are 0-based screen cells.
+//
+// The two panes sit side by side from row 0, each in a rounded border: the
+// border is row 0 and row contentH+1, and for the left pane column 0 and
+// leftW-1; a pane's content is inside it. Under them come the voice line, if
+// there is one, the input line and the status line.
+type layout struct {
+	width, height int
+	// leftW and rightW are the outer widths of the panes.
+	leftW, rightW int
+	// contentH is the number of content rows of each pane.
+	contentH int
+	// voice is the voice line, "" when there is none.
+	voice string
+}
+
+func (m Model) layout() layout {
+	width, height := m.size()
+	l := layout{width: width, height: height}
+	l.leftW, l.rightW = paneWidths(width)
+	// The voice line, when there is one, takes a row from the panes rather
+	// than adding one to the screen, and it is one row however many people
+	// are in voice, so the layout does not move as the roster changes.
+	if m.mode == modeChannels {
+		l.voice = m.voiceLine(width)
+	}
+	l.contentH = height - 4
+	if l.voice != "" {
+		l.contentH--
+	}
+	if l.contentH < 4 {
+		l.contentH = 4
+	}
+	return l
+}
+
+// messageRows is how many message lines the message pane shows at once.
+func (l layout) messageRows() int { return l.contentH - 1 }
+
+// leftContent is the content row of the left pane at (x, y), if it is inside it.
+func (l layout) leftContent(x, y int) (row int, ok bool) {
+	if x < 1 || x > l.leftW-2 || y < 1 || y > l.contentH {
+		return 0, false
+	}
+	return y - 1, true
+}
+
+// rightContent is the content row of the right pane at (x, y), if it is inside it.
+func (l layout) rightContent(x, y int) (row int, ok bool) {
+	if x < l.leftW+1 || x > l.leftW+l.rightW-2 || y < 1 || y > l.contentH {
+		return 0, false
+	}
+	return y - 1, true
+}
+
+// inLeft and inRight say whether (x, y) is on that pane, its border included.
+func (l layout) inLeft(x, y int) bool {
+	return x >= 0 && x < l.leftW && y >= 0 && y < l.contentH+2
+}
+
+func (l layout) inRight(x, y int) bool {
+	return x >= l.leftW && x < l.leftW+l.rightW && y >= 0 && y < l.contentH+2
+}
+
+// mouse handles one mouse event. The mouse only selects and scrolls: it never
+// sends a message, casts a decision or quits. The one command it can return is
+// the one selecting a channel starts (its history and subscription).
+func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	if m.mode != modeChannels {
+		// Below this size View shows tooSmall, with nothing to point at.
+		if width, height := m.size(); width < minApprovalWidth || height < minApprovalHeight {
+			return m, nil
+		}
+	}
+	l := m.layout()
+	switch msg.Button {
+	case tea.MouseButtonLeft:
+		return m.click(l, msg.X, msg.Y)
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		step := 1
+		if msg.Button == tea.MouseButtonWheelDown {
+			step = -1
+		}
+		switch m.mode {
+		case modeChannels:
+			if l.inRight(msg.X, msg.Y) {
+				return m.scrollMessages(step), nil
+			}
+		case modeInbox:
+			if l.inLeft(msg.X, msg.Y) {
+				m.selApproval = min(max(0, m.selApproval-step), max(0, len(m.approvals)-1))
+				m.bodyOffset = 0
+			}
+		}
+	}
+	return m, nil
+}
+
+// click selects what is at (x, y), as the arrow keys would.
+func (m Model) click(l layout, x, y int) (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case modeChannels:
+		if row, ok := l.leftContent(x, y); ok && row < len(m.channels) {
+			return m.selectChannel(row - m.selected)
+		}
+	case modeInbox:
+		if row, ok := l.leftContent(x, y); ok {
+			if i, ok := m.approvalAt(row, l.contentH); ok {
+				m.selApproval = i
+				m.bodyOffset = 0
+			}
+		}
+	case modeDecision:
+		if row, ok := l.rightContent(x, y); ok {
+			if d, ok := m.selectedDetails(); ok {
+				if i, ok := d.optionRows[row]; ok {
+					m.selOption = i
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// scrollMessages moves the message pane up by lines (down when negative),
+// stopping at the oldest and at the newest message.
+func (m Model) scrollMessages(lines int) Model {
+	top := max(0, len(m.messages[m.current()])-m.layout().messageRows())
+	m.scroll = min(max(min(m.scroll, top)+lines, 0), top)
+	return m
+}
+
+// addMessages merges incoming into channel's history. While the pane is
+// scrolled up, messages that arrive push the scroll along with them, so the
+// lines on screen do not move.
+func (m *Model) addMessages(channel string, incoming []schema.MessageV2) {
+	before := len(m.messages[channel])
+	m.messages[channel] = mergeMessages(m.messages[channel], incoming)
+	if channel == m.current() && m.scroll > 0 {
+		m.scroll += len(m.messages[channel]) - before
+	}
+}
+
 // The smallest terminal the inbox and decision views are laid out for. On a
 // smaller one they show tooSmall instead, and no decision can be cast.
 const (
@@ -910,11 +1063,7 @@ func (m Model) inboxLines(cols, rows int) []string {
 	if len(m.approvals) == 0 {
 		return []string{statusStyle.Render(fitCells("No pending approvals", cols))}
 	}
-	start, end, marks := 0, len(m.approvals), false
-	if len(m.approvals) > rows {
-		marks = true
-		start, end = window(len(m.approvals), m.selApproval, rows-2)
-	}
+	start, end, marks := m.inboxWindow(rows)
 	lines := make([]string, 0, rows)
 	if marks {
 		lines = append(lines, moreMark("↑", start, "", cols))
@@ -936,6 +1085,30 @@ func (m Model) inboxLines(cols, rows int) []string {
 		lines = append(lines, moreMark("↓", len(m.approvals)-end, "", cols))
 	}
 	return lines
+}
+
+// inboxWindow is the part [start, end) of the approvals that inboxLines shows
+// in rows lines, and whether it has a mark line above and below it.
+func (m Model) inboxWindow(rows int) (start, end int, marks bool) {
+	start, end = 0, len(m.approvals)
+	if len(m.approvals) > rows {
+		marks = true
+		start, end = window(len(m.approvals), m.selApproval, rows-2)
+	}
+	return start, end, marks
+}
+
+// approvalAt is the approval on content row of the inbox list, if there is
+// one: a mark line or an empty row is not.
+func (m Model) approvalAt(row, rows int) (int, bool) {
+	start, end, marks := m.inboxWindow(rows)
+	if marks {
+		row--
+	}
+	if row < 0 || start+row >= end {
+		return 0, false
+	}
+	return start + row, true
 }
 
 // moreMark is the line standing for n items that are not shown, or an empty
@@ -968,6 +1141,9 @@ type details struct {
 	// optionShown is true when, in decision mode, the selected option is one
 	// of the lines.
 	optionShown bool
+	// optionRows maps a line of lines to the option it shows, in decision
+	// mode; mark lines are not in it.
+	optionRows map[int]int
 }
 
 // bodyGutter starts every line of an approval's body. Nothing else in the
@@ -1058,6 +1234,12 @@ func (m Model) approvalDetails(app schema.ApprovalV1, cols, rows int) (details, 
 	}
 	for i := start; i < end; i++ {
 		label := sanitize(app.Options[i].Label)
+		if decision {
+			if d.optionRows == nil {
+				d.optionRows = make(map[int]int)
+			}
+			d.optionRows[len(d.lines)] = i
+		}
 		switch {
 		case !decision:
 			d.lines = append(d.lines, "  - "+fitCells(label, cols-4))

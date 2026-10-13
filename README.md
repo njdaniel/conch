@@ -258,6 +258,7 @@ In the TUI the prompt always says where your next message goes: `ops >` for the 
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
 - `CONCH_CHANNELS` — optional comma-separated override for which channels the TUI opens.
+- `CONCH_MOUSE` — the TUI takes mouse input (click a channel or approval to select it, wheel to scroll messages) unless this is `0`. While it does, the terminal's own text selection needs Shift held (Shift+drag); `CONCH_MOUSE=0` gives it back. Under tmux, `set -g mouse on` is needed for events to reach the TUI. The keyboard does everything the mouse does, and a click never sends, decides or quits.
 - `--author` / `CONCH_AUTHOR` are deprecated: identity comes from your login. They still work against a server running `--auth off`.
 
 ### Optional: auto-reply bot
