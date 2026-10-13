@@ -14,10 +14,18 @@
 _conch_cache="${CONCH_CACHE:-$HOME/.cache/conch}"
 _conch_llvm="$_conch_cache/llvm-$CONCH_LLVM_VERSION"
 _conch_deny="$_conch_cache/cargo-deny-$CONCH_DENY_VERSION"
-_conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG/linux-x64-release"
+# What is linked is not the download itself but the copy beside it without its PipeWire
+# stand-ins (scripts/voice-pins.sh says why), in a directory named by its archive's hash.
+_conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG-linked-$(printf %s "$CONCH_WEBRTC_LINKED_SHA256" | cut -c1-12)/linux-x64-release"
 
 if [ ! -x "$_conch_llvm/bin/clang" ] || [ ! -x "$_conch_deny/cargo-deny" ] || [ ! -f "$_conch_webrtc/webrtc.ninja" ]; then
     echo "voice: FAIL: the pinned clang $CONCH_LLVM_VERSION, cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is not in $_conch_cache; run scripts/voice-toolchain.sh" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# The archive that is linked must be the pinned one. With the download's own, conch-voice
+# builds and then dies on its first call into PipeWire.
+if [ "$(sha256sum "$_conch_webrtc/lib/libwebrtc.a" | cut -d' ' -f1)" != "$CONCH_WEBRTC_LINKED_SHA256" ]; then
+    echo "voice: FAIL: $_conch_webrtc/lib/libwebrtc.a is not the archive scripts/voice-pins.sh pins for linking; remove $(dirname "$_conch_webrtc") and run scripts/voice-toolchain.sh" >&2
     return 1 2>/dev/null || exit 1
 fi
 if ! command -v cargo >/dev/null 2>&1; then
@@ -28,6 +36,29 @@ fi
 # The livekit crate's build reads GLib's headers and finds them with pkg-config.
 if ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists glib-2.0 gobject-2.0 gio-2.0; then
     echo "voice: FAIL: GLib's development headers are not installed (Ubuntu: sudo apt install libglib2.0-dev pkg-config)" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# dmn-audio's build generates the Rust bindings to PipeWire with bindgen. That needs the
+# PipeWire headers, which pkg-config finds, and a libclang to parse them with. It is the
+# system's libclang (Ubuntu: libclang-dev), not the pinned clang above, which is only the
+# compiler of the SDK's C++ and ships no libclang.so: the two do not meet, since bindgen
+# only reads the headers and writes Rust (docs/design/conch-voice.md §13 row 7).
+if ! pkg-config --exists libpipewire-0.3 libspa-0.2; then
+    echo "voice: FAIL: PipeWire's development headers are not installed (Ubuntu: sudo apt install libpipewire-0.3-dev)" >&2
+    return 1 2>/dev/null || exit 1
+fi
+# One match in either place is enough. (Not `ls` over both patterns: it fails when either
+# one matches nothing, which is the usual case.)
+_conch_libclang=""
+for _conch_file in /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so*; do
+    if [ -e "$_conch_file" ]; then
+        _conch_libclang=$_conch_file
+        break
+    fi
+done
+if [ -z "${LIBCLANG_PATH:-}" ] && [ -z "$_conch_libclang" ]; then
+    echo "voice: FAIL: libclang is not installed, and the PipeWire bindings need it (Ubuntu: sudo apt install libclang-dev), or set LIBCLANG_PATH to the directory holding libclang.so" >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -50,8 +81,8 @@ export PATH="$_conch_llvm/bin:$_conch_deny:$PATH"
 export CC=clang CXX=clang++
 export CFLAGS="--gcc-install-dir=$_conch_gcc"
 export CXXFLAGS="$CFLAGS"
-# The livekit crate links this copy, which scripts/voice-toolchain.sh verified,
-# and does not download its own.
+# The livekit crate links this copy, which scripts/voice-toolchain.sh made from
+# the verified download and verified again, and does not download its own.
 export LK_CUSTOM_WEBRTC="$_conch_webrtc"
 # Cargo's build directory is left where cargo puts it, voice/target in this
 # checkout, and must not be shared between checkouts. Cargo names a workspace
@@ -66,4 +97,4 @@ if [ -n "${CARGO_BUILD_BUILD_DIR:-}${CARGO_TARGET_DIR:-}" ]; then
     echo "voice: note: CARGO_BUILD_BUILD_DIR or CARGO_TARGET_DIR is set; make sure no other checkout builds into the same directory" >&2
 fi
 
-unset _conch_cache _conch_llvm _conch_deny _conch_webrtc _conch_gcc _conch_dir
+unset _conch_cache _conch_llvm _conch_deny _conch_webrtc _conch_gcc _conch_dir _conch_libclang _conch_file

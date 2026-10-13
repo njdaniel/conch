@@ -95,11 +95,12 @@ jobs:
           restore-keys: |
             voice-build-${{ runner.os }}-
 
-      # The SDK's build needs GLib's headers (found through pkg-config) and
-      # nothing else from the system. scripts/voice-env.sh says so if they
-      # are missing.
+      # The SDK's build needs GLib's headers (found through pkg-config). So does
+      # dmn-audio's: the PipeWire headers (also found through pkg-config) and
+      # libclang, which generates the Rust bindings to them. Nothing else comes
+      # from the system. scripts/voice-env.sh says so if any is missing.
       - name: rust system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
@@ -230,7 +231,7 @@ jobs:
             voice-build-${{ runner.os }}-
 
       - name: rust system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh

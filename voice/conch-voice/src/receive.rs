@@ -6,21 +6,20 @@
 //! is never among them: LiveKit does not send a participant its own track, and the session
 //! loop refuses a track under its own identity besides.
 //!
-//! In this issue the sink is the [`CountingSink`], which plays nothing and keeps no audio.
-//! It is given the mix and nothing else. What `--json` reports as `stats` is counted and
+//! The sink is whatever the caller opened: the PipeWire speakers, or with `--sink` the
+//! [`conch_voice_audio::CountingSink`], which plays nothing and keeps no audio. It is given the mix and
+//! nothing else. What `--json` reports as `stats` is counted and
 //! measured by this task, per speaker and for the mix, and what this task keeps per speaker
 //! has a bound: a speaker is kept while a track of theirs is mixed, and the last
 //! [`DEPARTED_KEPT`] who left are kept until the next report, so that their last interval
 //! is still reported. (The sink could also count per speaker, but it would keep a counter
-//! for every identity it was ever shown, and nothing reads them.) Real speakers arrive with
-//! issue #184, behind the same `SpeakerSink` trait.
+//! for every identity it was ever shown, and nothing reads them.)
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 use conch_voice_audio::{
-    AudioError, CountingSink, FRAME_MS, Frame, JitterBuffer, Mixer, Popped, SILENCE, SignalMeter,
-    SpeakerSink,
+    AudioError, FRAME_MS, Frame, JitterBuffer, Mixer, Popped, SILENCE, SignalMeter, SpeakerSink,
 };
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -162,21 +161,24 @@ struct Task {
     /// than [`DEPARTED_KEPT`]: the one who left longest ago is forgotten for the next.
     departed: VecDeque<String>,
     mixer: Mixer,
-    sink: CountingSink,
+    sink: BoxedSink,
     mix_window: Window,
     /// A meter that has measured nothing, copied for each new window.
     blank: SignalMeter,
 }
 
-/// Starts the mix task with a counting sink that looks for `tones`.
+/// A speaker sink that can be moved into the task.
+pub type BoxedSink = Box<dyn SpeakerSink + Send>;
+
+/// Starts the mix task, playing to `sink`. What the reports measure is measured by the task
+/// itself, looking for `tones`.
 ///
 /// # Errors
 ///
-/// [`AudioError::InvalidSetting`] if the sink refuses the tones (see
+/// [`AudioError::InvalidSetting`] if the meter refuses the tones (see
 /// [`SignalMeter::new`]).
-pub fn spawn(tones: &[f32]) -> Result<Receiver, AudioError> {
+pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
     let blank = SignalMeter::new(tones)?;
-    let sink = CountingSink::new(tones)?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (stats_tx, stats) = mpsc::unbounded_channel();
     let task = Task {
@@ -199,9 +201,10 @@ pub fn spawn(tones: &[f32]) -> Result<Receiver, AudioError> {
 
 impl Task {
     async fn run(mut self) {
-        // In this issue the sink is not a device, so a timer paces the mix. Real speakers
-        // will pace it from their playback ring: a frame is mixed whenever the ring falls
-        // below its target fill (the design note's §3).
+        // A timer paces the mix. The design note's §3 has the playback ring pace it, a
+        // frame being mixed whenever the ring falls below its target fill; the PipeWire
+        // speakers keep their ring from running dry or filling up (`audio::put_frame`)
+        // so that the two clocks cannot drift apart by more than a few frames.
         let mut tick = tokio::time::interval(Duration::from_millis(u64::from(FRAME_MS)));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -319,7 +322,13 @@ impl Task {
 
 #[cfg(test)]
 mod tests {
+    use conch_voice_audio::CountingSink;
+
     use super::*;
+
+    fn counting(tones: &[f32]) -> BoxedSink {
+        Box::new(CountingSink::new(tones).unwrap())
+    }
 
     /// One frame that is not silence.
     fn loud() -> Frame {
@@ -354,7 +363,7 @@ mod tests {
     /// and what is kept of those who went has a bound.
     #[tokio::test]
     async fn speakers_who_came_and_went_are_forgotten_though_no_report_is_ever_asked_for() {
-        let mut receiver = spawn(&[440.0]).unwrap();
+        let mut receiver = spawn(&[440.0], counting(&[440.0])).unwrap();
         let rounds = 8;
         let each = 50;
         for round in 0..rounds {
@@ -406,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_speaker_who_left_is_reported_once_more_and_one_who_came_back_is_kept() {
-        let mut receiver = spawn(&[440.0]).unwrap();
+        let mut receiver = spawn(&[440.0], counting(&[440.0])).unwrap();
         let mut held = Vec::new();
         for (speaker, track) in [("p3", "TR_a"), ("p4", "TR_b"), ("p4", "TR_c")] {
             let (frames, received) = mpsc::channel(4);

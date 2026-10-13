@@ -40,6 +40,9 @@ pub enum TxCommand<F> {
     /// The microphone, opened because a session allowed publishing. It is read from now
     /// until the task ends, and taken to have audio until it says otherwise.
     Microphone(BoxedMic),
+    /// The session is over: the microphone is dropped, which closes its stream. Nothing is
+    /// captured after this.
+    CloseMicrophone,
     /// The audio source of a newly published track: gated frames go here from now on.
     Attach(F),
     /// The track is gone: frames go nowhere until the next `Attach`.
@@ -135,9 +138,10 @@ struct Task<F> {
 
 impl<F: MicFeed> Task<F> {
     async fn run(mut self) {
-        // In this issue the microphone is a tone or a file, with no clock of its own, so a
-        // timer paces it. A real microphone will pace this loop from its capture ring: a
-        // frame is forwarded whenever the ring holds a whole one (the design note's §3).
+        // A timer paces this loop, and a source with no frame yet answers `NotYet`. The
+        // design note's §3 has the capture ring pace it instead; the PipeWire microphone
+        // keeps what is waiting short (`audio::take_frame`) so that the two clocks cannot
+        // drift apart by more than a few frames.
         let mut tick = tokio::time::interval(Duration::from_millis(u64::from(FRAME_MS)));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut captured = SILENCE;
@@ -179,6 +183,10 @@ impl<F: MicFeed> Task<F> {
             TxCommand::Microphone(mic) => {
                 self.mic = Some(mic);
                 self.mic_present = true;
+            }
+            TxCommand::CloseMicrophone => {
+                self.mic = None;
+                self.mic_present = false;
             }
             TxCommand::Attach(feed) => self.feed = Some(feed),
             TxCommand::Detach => self.feed = None,

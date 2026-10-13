@@ -51,7 +51,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use conch_voice_api::{Client, Error as ApiError, Secret, ServerAddress, VoiceTransmitState};
-use conch_voice_audio::AudioError;
 use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
     PttOutput, TransmitReport,
@@ -63,7 +62,7 @@ use crate::error::Error;
 use crate::keydev::DeviceState;
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
 use crate::presence::{self, PresenceTimings, Roster};
-use crate::receive::{self, MixCommand, MixStats};
+use crate::receive::{self, BoxedSink, MixCommand, MixStats};
 use crate::reports::{MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
 use crate::secrets::Scrubber;
@@ -72,7 +71,11 @@ use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
 /// Opens the microphone source. Called at most once, and only when a session's grant allows
 /// publishing: a client that may only listen never opens a microphone. `Ok(None)` means
 /// there is none to open.
-pub type OpenMic = Box<dyn FnMut() -> Result<Option<BoxedMic>, AudioError> + Send>;
+pub type OpenMic = Box<dyn FnMut() -> Result<Option<BoxedMic>, Error> + Send>;
+
+/// Opens the speakers. Called once, when the session starts: the client hears the channel
+/// from the moment it is joined.
+pub type OpenSink = Box<dyn FnOnce() -> Result<BoxedSink, Error> + Send>;
 
 /// Something from outside the loop: a line on standard input, its end, a signal, or what
 /// the key device's watcher (`keydev.rs`) saw.
@@ -167,7 +170,9 @@ pub struct Settings {
     pub channel: String,
     /// How the microphone is opened.
     pub open_mic: OpenMic,
-    /// The tones the counting sink looks for.
+    /// How the speakers are opened.
+    pub open_sink: OpenSink,
+    /// The tones the mix is measured for in the reports.
     pub sink_tones: Vec<f32>,
     /// `audio.release_tail_ms`.
     pub release_tail_ms: u32,
@@ -551,6 +556,7 @@ pub async fn join<T: Transport>(
     let Settings {
         channel,
         open_mic,
+        open_sink,
         sink_tones,
         release_tail_ms,
         max_transmit,
@@ -558,7 +564,7 @@ pub async fn join<T: Transport>(
         timings,
     } = settings;
     let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
-    let receiver = receive::spawn(&sink_tones)?;
+    let receiver = receive::spawn(&sink_tones, open_sink()?)?;
     let reports = Reports::spawn(
         conchd.report_client,
         channel.clone(),
@@ -1074,6 +1080,8 @@ impl<T: Transport> Session<T> {
         ));
         let _ = self.transmitter.commands.send(shut);
         let _ = self.transmitter.commands.send(TxCommand::Detach);
+        // Leaving closes the microphone's stream: nothing is captured when not joined.
+        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
         self.with_track(MicTrack::mute);
 
         let live = self.live.take();

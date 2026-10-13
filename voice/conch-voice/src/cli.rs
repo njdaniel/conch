@@ -1,10 +1,12 @@
 //! The command line, and how it is laid over the configuration file and the environment
 //! (`docs/design/conch-voice.md` §8).
 //!
-//! `conch-voice join [channel]` joins a channel's voice. Its test options replace
-//! hardware: a tone or a WAV file as the microphone, a sink that counts instead of playing,
-//! and standard input instead of a key device. `conch-voice devices` and `conch-voice keys
-//! <device>` help set the key device up; the audio half of `devices` arrives with #184.
+//! `conch-voice join [channel]` joins a channel's voice, with the microphone and the
+//! speakers PipeWire has (or the ones `[audio]` in the configuration names). Its test
+//! options replace hardware: a tone or a WAV file as the microphone, a sink that counts
+//! instead of playing, and standard input instead of a key device. `conch-voice devices`
+//! lists the audio devices and helps set the key device up; `conch-voice keys <device>`
+//! helps with the keys.
 //!
 //! Which keyboard is read, and for which keys, comes from `[keys]` in the configuration
 //! file and from nowhere else. How a device is checked before it is read is not a setting
@@ -36,7 +38,11 @@ pub const TONE_AMPLITUDE: f32 = 0.25;
 /// What stands in for the microphone.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MicChoice {
-    /// `--mic none`, and the default until real devices arrive (#184): no microphone.
+    /// No `--mic`: the microphone PipeWire has, or the one `audio.input` names. There is no
+    /// spelling for it on the command line: it is what a user gets, and the options below
+    /// are for tests.
+    PipeWire,
+    /// `--mic none`: no microphone.
     None,
     /// `--mic tone:<hz>`: a steady tone of this frequency.
     Tone(f32),
@@ -67,6 +73,16 @@ impl FromStr for MicChoice {
         }
         Err("expected tone:<hz>, wav:<path> or none".to_owned())
     }
+}
+
+/// What stands in for the speakers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SinkChoice {
+    /// No `--sink`: the output PipeWire has, or the one `audio.output` names.
+    PipeWire,
+    /// `--sink count[:<hz>,<hz>,...]`: a sink that plays nothing and counts, looking for
+    /// these tones.
+    Count(Vec<f32>),
 }
 
 /// `--sink count[:<hz>,<hz>,...]`: the tones the counting sink looks for.
@@ -106,7 +122,7 @@ pub struct JoinArgs {
     /// `--mic`.
     pub mic: MicChoice,
     /// `--sink`.
-    pub sink_tones: Vec<f32>,
+    pub sink: SinkChoice,
     /// `--log-level`.
     pub log_level: LevelFilter,
     /// `--stdin-keys`: take commands from standard input only, and open no key device.
@@ -167,16 +183,14 @@ pub fn command() -> Command {
                 .long("mic")
                 .value_name("SOURCE")
                 .value_parser(MicChoice::from_str)
-                .default_value("none")
-                .help("Test microphone: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none"),
+                .help("Test microphone instead of PipeWire's: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none"),
         )
         .arg(
             Arg::new("sink")
                 .long("sink")
                 .value_name("SINK")
                 .value_parser(sink_tones)
-                .default_value("count")
-                .help("Test speakers: count, or count:<hz>,<hz>,... to name the tones to look for"),
+                .help("Test speakers instead of PipeWire's: count, or count:<hz>,<hz>,... to name the tones to look for"),
         )
         .arg(
             Arg::new("stdin-keys")
@@ -193,11 +207,14 @@ pub fn command() -> Command {
                 .help("off, error, warn, info, debug or trace; the SDK's own records are written at warn and error only, whatever is asked"),
         );
     let devices = Command::new("devices")
-        .about("List keyboards, whether you can read each, and the udev rule that would grant one")
+        .about("List microphones and speakers by the names the configuration takes, and keyboards")
         .long_about(
-            "Lists the keyboards under /dev/input/by-id, says for each whether you can read \
-             it, and prints a udev rule that would grant you read access to that one device. \
-             It opens each keyboard to see whether it can, and reads nothing from any of them.",
+            "Lists the microphones and the speakers PipeWire has, by the names `input` and \
+             `output` under [audio] in the configuration file take, and marks the defaults. \
+             Then lists the keyboards under /dev/input/by-id, says for each whether you can \
+             read it, and prints a udev rule that would grant you read access to that one \
+             device. It opens each keyboard to see whether it can, and reads nothing from any \
+             of them; it opens no audio device.",
         );
     let keys = Command::new("keys")
         .about("Show the code of EVERY key pressed on a keyboard until Ctrl-C, to find the key to talk with")
@@ -265,11 +282,11 @@ where
         mic: join
             .get_one::<MicChoice>("mic")
             .cloned()
-            .unwrap_or(MicChoice::None),
-        sink_tones: join
+            .unwrap_or(MicChoice::PipeWire),
+        sink: join
             .get_one::<Vec<f32>>("sink")
             .cloned()
-            .unwrap_or_default(),
+            .map_or(SinkChoice::PipeWire, SinkChoice::Count),
         log_level: join
             .get_one::<LevelFilter>("log-level")
             .copied()
@@ -461,8 +478,8 @@ mod tests {
                 channel: None,
                 server: None,
                 json: false,
-                mic: MicChoice::None,
-                sink_tones: Vec::new(),
+                mic: MicChoice::PipeWire,
+                sink: SinkChoice::PipeWire,
                 log_level: LevelFilter::Warn,
                 stdin_keys: false,
             }
@@ -488,12 +505,17 @@ mod tests {
         assert_eq!(args.server.as_deref(), Some("http://127.0.0.1:9"));
         assert!(args.json);
         assert_eq!(args.mic, MicChoice::Tone(440.0));
-        assert_eq!(args.sink_tones, vec![440.0, 880.0]);
+        assert_eq!(args.sink, SinkChoice::Count(vec![440.0, 880.0]));
         assert_eq!(args.log_level, LevelFilter::Trace);
         assert!(args.stdin_keys);
         assert_eq!(
             join(&["--mic", "wav:/tmp/a file.wav"]).mic,
             MicChoice::Wav(PathBuf::from("/tmp/a file.wav"))
+        );
+        assert_eq!(join(&["--mic", "none"]).mic, MicChoice::None);
+        assert_eq!(
+            join(&["--sink", "count"]).sink,
+            SinkChoice::Count(Vec::new())
         );
     }
 

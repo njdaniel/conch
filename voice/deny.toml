@@ -12,14 +12,13 @@ targets = ["x86_64-unknown-linux-gnu"]
 all-features = true
 
 [sources]
-# Every crate comes from crates.io. A git or other-registry source fails; the
-# one planned exception (dmn-audio, docs/design/conch-voice.md §9) is added
-# here, by exact URL (https://github.com/njdaniel/dmn-audio, ADR-006 as
-# amended), with the dependency itself in issue #184.
+# Every crate comes from crates.io, except dmn-audio (docs/design/conch-voice.md §9, ADR-006
+# as amended), which comes from its own repository, by exact URL and pinned to a commit in
+# voice/conch-voice/Cargo.toml. Any other git or other-registry source fails.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/njdaniel/dmn-audio"]
 
 [licenses]
 # This repository is AGPL-3.0. Everything linked into conch-voice must be
@@ -31,6 +30,11 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # Apache-2.0 with LLVM's exception, which only adds permissions (it waives
+    # two of Apache-2.0's conditions for compiled output). target-lexicon, a
+    # build-time dependency of the PipeWire bindings, is under it; it is not
+    # linked into conch-voice. Nick's sign-off, 2026-10-14 (issue #184).
+    "Apache-2.0 WITH LLVM-exception",
 ]
 confidence-threshold = 0.9
 

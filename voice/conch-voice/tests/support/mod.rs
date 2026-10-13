@@ -21,12 +21,13 @@ use std::time::Duration;
 use conch_voice::Error;
 use conch_voice::output::Output;
 use conch_voice::presence::PresenceTimings;
+use conch_voice::receive::BoxedSink;
 use conch_voice::reports::ReportTimings;
 use conch_voice::secrets::Scrubber;
 use conch_voice::session::{self, Conchd, Input, Settings, Timings};
 use conch_voice::transmit::BoxedMic;
 use conch_voice_api::{Secret, ServerAddress};
-use conch_voice_audio::ToneSource;
+use conch_voice_audio::{CountingSink, MicSource, ToneSource};
 use conch_voice_control::LineCommand;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -230,6 +231,8 @@ pub struct Rig {
     inputs: mpsc::UnboundedSender<Input>,
     /// How many times the microphone source was opened.
     mic_opened: Arc<AtomicU32>,
+    /// How many microphone sources have been dropped, which is what closes a real one.
+    mic_closed: Arc<AtomicU32>,
     session: JoinHandle<Result<(), Error>>,
 }
 
@@ -267,14 +270,23 @@ impl Rig {
 
         let mic_opened = Arc::new(AtomicU32::new(0));
         let opened = Arc::clone(&mic_opened);
+        let mic_closed = Arc::new(AtomicU32::new(0));
+        let closed = Arc::clone(&mic_closed);
         let settings = Settings {
             channel: CHANNEL.to_owned(),
             // A tone that is never silent and never stops: whatever does not reach the
             // fake's audio source was stopped by the gate, not by there being nothing to send.
             open_mic: Box::new(move || {
                 opened.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(Box::new(ToneSource::new(440.0, 0.25)?) as BoxedMic))
+                let tone = ToneSource::new(440.0, 0.25)?;
+                Ok(Some(
+                    Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
+                ))
             }),
+            open_sink: {
+                let tones = setup.sink_tones.clone();
+                Box::new(move || Ok(Box::new(CountingSink::new(&tones)?) as BoxedSink))
+            },
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
@@ -313,6 +325,7 @@ impl Rig {
             reader,
             inputs,
             mic_opened,
+            mic_closed,
             session,
         }
     }
@@ -334,6 +347,11 @@ impl Rig {
     /// How many times the microphone source was opened.
     pub fn mic_opened(&self) -> u32 {
         self.mic_opened.load(Ordering::SeqCst)
+    }
+
+    /// How many microphone sources have been dropped: a real one closes its stream then.
+    pub fn mic_closed(&self) -> u32 {
+        self.mic_closed.load(Ordering::SeqCst)
     }
 
     pub fn events(&self) -> Vec<Value> {
@@ -437,8 +455,24 @@ impl Rig {
             conchd: self.conchd,
             out: self.out,
             reader: self.reader,
+            mic_closed: self.mic_closed,
         };
         (result, ended)
+    }
+}
+
+/// A microphone that counts when it is dropped.
+struct Closing<M>(M, Arc<AtomicU32>);
+
+impl<M: MicSource> MicSource for Closing<M> {
+    fn read(&mut self, frame: &mut conch_voice_audio::Frame) -> conch_voice_audio::MicRead {
+        self.0.read(frame)
+    }
+}
+
+impl<M> Drop for Closing<M> {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -448,4 +482,12 @@ pub struct Ended {
     pub conchd: Stub,
     pub out: Written,
     pub reader: Reader,
+    mic_closed: Arc<AtomicU32>,
+}
+
+impl Ended {
+    /// How many microphone sources were dropped by the time the session ended or since.
+    pub fn mic_closed(&self) -> u32 {
+        self.mic_closed.load(Ordering::SeqCst)
+    }
 }
