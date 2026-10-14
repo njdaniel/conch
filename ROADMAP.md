@@ -139,16 +139,18 @@ Ships:
 > Richer timelines, additional adapters and full intervention follow; this first
 > slice does not by itself complete all P3 objectives.
 
-> **First prototype (#286), 2026-10-14:** the code is on `main` (#264–#284; the browser
-> suite #285 is PR #342). The walkthrough is in `docs/p3-walkthrough.md`, and the
-> automated suite (`go run ./e2e/p3-local`) runs in CI on every pull request. The exit is Nick's own run of the walkthrough, recorded
-> in [the exit record](docs/design/p3-exit-record.md): **first prototype exited
-> *pending*.** What remains of P3, each a filed issue: Codex and local-model adapters
-> (#343, #344); `pause` and `resume` (#345, #346); the web client embedded in the binary
-> (#347); generated TypeScript bindings (#348); richer run timelines and a Runs view
-> (#349, #350); a read-state model for unread counts (#351); composing to nets and
-> whispers in the browser (#352); the VM/LAN extension (#353); the voice extension,
-> gated on #189 (#354). The success criterion below is unchanged and not yet met.
+> **First prototype exited 2026-10-14 (#286).** The code is on `main` (#264–#285): the
+> walkthrough (`docs/p3-walkthrough.md`), the automated suite (`go run ./e2e/p3-local`)
+> and the browser suite (`make web-e2e`), both run in CI on every pull request. Every row
+> P3-01 to P3-13 passed in an agent run on Nick's machine, P3-13 with one real Claude Code
+> reply; the [exit record](docs/design/p3-exit-record.md) says so plainly and keeps a place
+> for Nick's own run. What remains of P3, each a filed issue: Codex and local-model
+> adapters (#343, #344); `pause` and `resume` (#345, #346); the web client embedded in the
+> binary (#347); generated TypeScript bindings (#348); richer run timelines and a Runs
+> view (#349, #350); a read-state model for unread counts (#351); composing to nets and
+> whispers in the browser (#352); the VM/LAN extension (#353); the voice extension, gated
+> on #189 (#354); the generic webhook/event adapter (#359). The success criterion below is
+> unchanged and not yet met.
 
 > **Success criterion:** Nick opens Conch and sees Claude Code, Codex, and a local model
 > running simultaneously, sees what each is doing, opens each activity stream, and sends
