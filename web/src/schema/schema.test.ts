@@ -112,6 +112,7 @@ describe('validators refuse', () => {
     { name: 'a fractional id', check: whoAmIResponseV1, value: { ...whoami, id: 1.5 }, want: '$.id: want an integer' },
     { name: 'a value outside a closed vocabulary', check: whoAmIResponseV1, value: { ...whoami, role: 'admin' }, want: '$.role: want one of operator, member' },
     { name: 'a key the type does not have', check: whoAmIResponseV1, value: { ...whoami, extra: true }, want: '$.extra: key is not in the TypeScript type' },
+    { name: 'an inherited name as a key', check: whoAmIResponseV1, value: JSON.parse(`{"id":1,"kind":"human","name":"nick","role":"operator","constructor":1}`) as unknown, want: '$.constructor: key is not in the TypeScript type' },
     { name: 'something that is not an object', check: whoAmIResponseV1, value: [whoami], want: '$: want an object, got an array' },
     { name: 'a malformed timestamp', check: channelV0, value: { id: 7, name: 'general', created_at: '13 July 2026' }, want: '$.created_at: want an RFC 3339 timestamp' },
     { name: 'a bad element in a list', check: listChannelsResponse, value: { channels: [{ id: 7, name: 3, created_at: '2026-07-13T12:34:56Z' }] }, want: '$.channels[0].name: want a string' },

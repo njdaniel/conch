@@ -16,6 +16,7 @@ function SessionRow({ session, runs, now, onOpen }: {
   readonly onOpen: (runId: number, sessionId: number, known: RunV1 | null) => void;
 }) {
   const runtime = [session.runtime, session.model].filter((x): x is string => x !== undefined && x !== '').join('/');
+  const current = session.current_run;
   return (
     <li className="ag-session">
       <span>#{session.id}</span> <span className="ag-status">{session.status}</span> <span>client: {session.client}</span>
@@ -23,16 +24,16 @@ function SessionRow({ session, runs, now, onOpen }: {
       {session.outcome_unknown ? <span> · outcome unknown</span> : null}
       {session.task === undefined ? null : <span> · task: {session.task}</span>}
       <span> · {ago(now, session.last_seen_at)}</span>
-      {session.current_run === undefined ? null : (
+      {current === undefined ? null : (
         <>
           {' '}
           <button
             type="button"
             onClick={() => {
-              onOpen(session.current_run ?? 0, session.id, runs.find((r) => r.id === session.current_run) ?? null);
+              onOpen(current, session.id, runs.find((r) => r.id === current) ?? null);
             }}
           >
-            Open run #{session.current_run}
+            Open run #{current}
           </button>
         </>
       )}

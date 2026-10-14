@@ -676,6 +676,27 @@ describe('a session the server ended', () => {
     expect(panel().getByText('Members unavailable')).toBeDefined();
   });
 
+  it('waits before replacing again when the server ends each new session after one roster', async () => {
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2)]);
+    socket.drop(1008, 'session ended');
+    await waitFor(() => {
+      expect(events()).toHaveLength(2);
+    });
+    lastEvents().open();
+    lastEvents().send(roster([session(101, 2)]));
+    await panel().findByRole('heading', { name: 'People' });
+    lastEvents().drop(1008, 'session ended');
+    // Not at network speed: the second replacement waits about a second.
+    expect(server.sessionCreates).toHaveLength(2);
+    await waitFor(
+      () => {
+        expect(server.sessionCreates).toHaveLength(3);
+      },
+      { timeout: 3000 },
+    );
+  });
+
   it('leaves the panel unavailable with one line when the new session cannot be made', async () => {
     const socket = await openApp();
     await showRoster(socket, [session(100, 2)]);

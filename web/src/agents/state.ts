@@ -17,6 +17,7 @@ export type Link = 'connecting' | 'live' | 'down';
 // detail holds (the oldest go first).
 export const recentRuns = 10;
 export const keptActivity = 1000;
+export const keptInterventions = 1000;
 
 export interface RunDetail {
   readonly runId: number;
@@ -88,7 +89,10 @@ function rank(state: InterventionState): number {
 export function upsertIntervention(list: readonly InterventionV1[], iv: InterventionV1): InterventionV1[] {
   const out = [...list];
   const at = out.findIndex((x) => x.id === iv.id);
-  if (at < 0) return [...out, iv].sort((a, b) => a.id - b.id);
+  if (at < 0) {
+    const added = [...out, iv].sort((a, b) => a.id - b.id);
+    return added.length > keptInterventions ? added.slice(added.length - keptInterventions) : added;
+  }
   const held = out[at];
   if (held !== undefined && rank(iv.state) >= rank(held.state)) out[at] = iv;
   return out;

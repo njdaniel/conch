@@ -124,7 +124,7 @@ export function object<T>(shape: Shape<T>): Validator<T> {
       }
     }
     for (const key of Object.keys(v)) {
-      if (!(key in shape)) {
+      if (!Object.hasOwn(shape, key)) {
         problems.push(`${path}.${key}: key is not in the TypeScript type`);
       }
     }

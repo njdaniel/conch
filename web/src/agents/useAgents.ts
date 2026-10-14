@@ -57,9 +57,17 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // Counts the sessions asked for; an answer for an older one is ended at once.
   const generation = useRef(0);
   const replaced = useRef(false);
+  // The wait before the next replacement, doubling from 1 s to 30 s, so a
+  // server that keeps ending sessions after a roster cannot drive the page at
+  // network speed. A session that lived 30 s starts it over.
+  const gap = useRef(0);
+  const born = useRef(0);
+  const timer = useRef<number | null>(null);
 
   const release = useCallback(() => {
     generation.current++;
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
     const id = held.current;
     held.current = null;
     if (id !== null) api.endSession(id);
@@ -77,6 +85,7 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
         }
         if (result.ok) {
           held.current = result.value.id;
+          born.current = Date.now();
           setSession({ phase: 'ready', id: result.value.id });
         } else if (result.failure === 'unauthorized') {
           onUnauthorized();
@@ -94,6 +103,7 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
       return;
     }
     replaced.current = false;
+    gap.current = 0;
     start('unavailable');
     const onHide = () => {
       release();
@@ -116,7 +126,19 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
     }
     replaced.current = true;
     held.current = null;
-    start('ended');
+    if (Date.now() - born.current >= maxDelay) gap.current = 0;
+    const wait = gap.current;
+    gap.current = Math.min(Math.max(gap.current * 2, firstDelay), maxDelay);
+    if (wait === 0) {
+      start('ended');
+      return;
+    }
+    const mine = ++generation.current;
+    setSession({ phase: 'starting' });
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      if (mine === generation.current) start('ended');
+    }, wait);
   }, [start]);
 
   const healthy = useCallback(() => {

@@ -3,7 +3,7 @@ import type { AgentActivityV1 } from '../schema/activity';
 import type { InterventionState, InterventionV1 } from '../schema/intervention';
 import type { RunState, RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
-import { agentsReducer, initialAgents, keptActivity, mergeActivity, recentRuns, upsertIntervention, type AgentsAction, type AgentsState } from './state';
+import { agentsReducer, initialAgents, keptActivity, keptInterventions, mergeActivity, recentRuns, upsertIntervention, type AgentsAction, type AgentsState } from './state';
 import { parseEventFrame } from './frames';
 
 const at = '2026-10-14T10:00:00Z';
@@ -129,6 +129,13 @@ describe('merging', () => {
     const list = upsertIntervention([iv(1, 'applied', { answered_at: at })], iv(1, 'requested'));
     expect(list.map((x) => x.state)).toEqual(['applied']);
     expect(upsertIntervention([iv(2, 'requested')], iv(1, 'requested')).map((x) => x.id)).toEqual([1, 2]);
+  });
+
+  it('keeps the newest interventions when frames keep adding them', () => {
+    let list: InterventionV1[] = [];
+    for (let i = 1; i <= keptInterventions + 5; i++) list = upsertIntervention(list, iv(i, 'requested'));
+    expect(list).toHaveLength(keptInterventions);
+    expect(list[0]?.id).toBe(6);
   });
 
   it('merges activity by id, oldest first, keeping the newest', () => {
