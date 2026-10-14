@@ -471,7 +471,7 @@ func (s *suite) p308Interventions() error {
 	if err := t.sendLine("p308 take note"); err != nil {
 		return err
 	}
-	if err := t.waitFor("the instruction applied", 30*time.Second, func(r []string) bool { return showing(r, "message · applied") }); err != nil {
+	if err := t.waitFor("the instruction applied", 30*time.Second, func(r []string) bool { return showing(r, "↳ #", "applied") }); err != nil {
 		return err
 	}
 	ivs, err := s.interventionsOf(partNick, run.ID)
@@ -496,7 +496,9 @@ func (s *suite) p308Interventions() error {
 		return err
 	}
 	if err := t.waitFor("the cancel applied and the run cancelled", 30*time.Second, func(r []string) bool {
-		return showing(r, "cancel · applied") && showing(r, "cancelled")
+		// The timeline has an answer line for each intervention: the message's
+		// and now the cancel's.
+		return countRows(r, "↳ #", "applied") >= 2 && showing(r, "cancelled")
 	}); err != nil {
 		return err
 	}
