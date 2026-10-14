@@ -1,0 +1,6 @@
+{
+  "channel": "ops",
+  "message_id": 1203,
+  "task": "Answer the question in #ops about the failing deploy",
+  "link": "https://github.com/njdaniel/conch/pull/262"
+}

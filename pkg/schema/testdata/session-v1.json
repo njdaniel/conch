@@ -1,0 +1,22 @@
+{
+  "schema": "conch.session.v1",
+  "id": 12,
+  "principal_id": 3,
+  "kind": "agent",
+  "name": "Leviathan",
+  "client": "conch-adapter/0.3.0",
+  "state": "online",
+  "status": "running",
+  "started_at": "2026-10-13T09:00:00.000Z",
+  "last_seen_at": "2026-10-13T09:05:30.250Z",
+  "runtime": "claude-code",
+  "model": "claude-fable-5-1",
+  "host": "nick-desktop",
+  "interventions": [
+    "message",
+    "cancel"
+  ],
+  "current_run": 41,
+  "task": "Answer the question in #ops about the failing deploy",
+  "outcome_unknown": false
+}

@@ -1,0 +1,4 @@
+{
+  "kind": "message",
+  "body": "Skip the flaky test and report what still fails"
+}

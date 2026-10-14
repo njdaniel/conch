@@ -1,0 +1,9 @@
+{
+  "schema": "conch.agent.activity.v1",
+  "id": 501,
+  "run_id": 41,
+  "principal_id": 3,
+  "kind": "run_started",
+  "summary": "Run started",
+  "at": "2026-10-13T09:01:00.000Z"
+}

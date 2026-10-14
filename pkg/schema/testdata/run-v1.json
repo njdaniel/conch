@@ -1,0 +1,12 @@
+{
+  "schema": "conch.run.v1",
+  "id": 41,
+  "session_id": 12,
+  "principal_id": 3,
+  "channel_id": 7,
+  "message_id": 1203,
+  "state": "running",
+  "task": "Answer the question in #ops about the failing deploy",
+  "link": "https://github.com/njdaniel/conch/pull/262",
+  "started_at": "2026-10-13T09:01:00.000Z"
+}
