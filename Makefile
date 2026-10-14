@@ -10,6 +10,7 @@ build:
 	$(GO) build ./...
 	$(GO) build -o bin/conchd ./cmd/conchd
 	$(GO) build -o bin/conch ./cmd/conch
+	$(GO) build -o bin/conch-adapter ./cmd/conch-adapter
 	$(GO) build -o bin/conch-bot ./cmd/conch-bot
 
 test:

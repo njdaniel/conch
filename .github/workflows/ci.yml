@@ -161,6 +161,26 @@ jobs:
       - name: nets-check
         run: go run ./e2e/nets
 
+  conch-bot-check:
+    # conch-adapter against a real conchd, answering with the fixture
+    # e2e/p3-local/fixtures/echo.sh (never a model): the reply loop in every
+    # audience, the adapter's session and one run per reply seen through the
+    # API, a clean stop that ends the session and releases the lock, and the old
+    # name conch-bot still starting with one deprecation line. It runs on every
+    # pull request and every push to main: the adapter and the session, run and
+    # intervention tools it calls move together.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: conch-bot-check
+        run: go run ./e2e/conch-bot
+
   p2-hardening-check:
     # The P2 exit gate (issue #81): a database written by a P1 conchd is
     # upgraded, and real conchd/conch binaries are driven through everything

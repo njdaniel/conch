@@ -1,6 +1,14 @@
-// Command conch-bot-check exercises conch-bot against real conchd and fake
-// claude processes. It requires loopback sockets and is intended for CI or a
-// developer machine, not restricted sandboxes.
+// Command conch-bot-check exercises conch-adapter against a real conchd. The
+// adapter runs the deterministic fixture e2e/p3-local/fixtures/echo.sh, never a
+// model. It requires loopback sockets and is intended for CI or a developer
+// machine, not restricted sandboxes.
+//
+// It checks the reply loop (a message gets one reply in its own audience, a
+// refused net reply is dropped, the backlog is skipped), and the adapter's
+// presence on the server: its session, one completed run per reply with the
+// activity of a successful reply, and a clean shutdown that ends the session
+// and releases the lock. The old name conch-bot is run once as well, to show
+// that it still starts, says so once, and honours the old CONCH_BOT_* names.
 package main
 
 import (
@@ -14,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,12 +30,6 @@ import (
 
 	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/pkg/schema"
-)
-
-const (
-	token         = "conch-bot-e2e-token"      // #nosec G101 -- test-only local bearer token
-	peerToken     = "conch-peer-e2e-token"     // #nosec G101 -- test-only local bearer token
-	outsiderToken = "conch-outsider-e2e-token" // #nosec G101 -- test-only local bearer token
 )
 
 func main() {
@@ -37,11 +40,24 @@ func main() {
 	fmt.Println("conch-bot-check: PASS")
 }
 
+// fixture is the deterministic stand-in for a model: it replies with the last
+// line of the prompt, "<author id>: <message body>".
+const fixture = "e2e/p3-local/fixtures/echo.sh"
+
 type harness struct {
-	dir, conchd, bot, data, claude, lock, addr string
-	server, botProc                            *exec.Cmd
-	botID, humanID, peerID, outsiderID, netID  int64
-	watchNetID                                 int64
+	dir, conchd, adapter, alias, data, lock, addr, fixture string
+	server, botProc                                        *exec.Cmd
+	botStderr                                              *bytes.Buffer
+	opToken, humanToken                                    string
+	peerToken, outsiderToken, botToken                     string
+	botID, humanID, peerID, outsiderID, netID              int64
+	watchNetID                                             int64
+	// lastSession is the id of the newest session the adapter has had; a
+	// session ended by a clean stop leaves the roster, so a new one is told
+	// apart by its id.
+	lastSession int64
+	// readers are the human's REST client and the operator's.
+	human, op rest
 }
 
 func run() error {
@@ -50,15 +66,18 @@ func run() error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
-	h := &harness{dir: dir, conchd: filepath.Join(dir, "conchd"), bot: filepath.Join(dir, "conch-bot"), data: filepath.Join(dir, "data"), claude: filepath.Join(dir, "fake-claude"), lock: filepath.Join(dir, "bot.lock")}
-	if err := build(h.conchd, "./cmd/conchd"); err != nil {
+	fixturePath, err := filepath.Abs(fixture)
+	if err != nil {
 		return err
 	}
-	if err := build(h.bot, "./cmd/conch-bot"); err != nil {
-		return err
-	}
-	if err := os.WriteFile(h.claude, []byte("#!/bin/sh\nprintf 'canned bot reply\\n'\n"), 0o700); err != nil { //nolint:gosec // fake Claude must be executable by this test
-		return err
+	// The adapter and its old name are two separate binaries; the old name
+	// does not depend on the other being there.
+	h := &harness{dir: dir, conchd: filepath.Join(dir, "conchd"), adapter: filepath.Join(dir, "conch-adapter"), alias: filepath.Join(dir, "conch-bot"),
+		data: filepath.Join(dir, "data"), lock: filepath.Join(dir, "adapter.lock"), fixture: fixturePath}
+	for out, pkg := range map[string]string{h.conchd: "./cmd/conchd", h.adapter: "./cmd/conch-adapter", h.alias: "./cmd/conch-bot"} {
+		if err := build(out, pkg); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(h.data, 0o700); err != nil {
 		return err
@@ -66,145 +85,313 @@ func run() error {
 	if h.addr, err = freeAddr(); err != nil {
 		return err
 	}
-	if err := h.startServer(""); err != nil {
+	// The server runs with authentication required: sessions belong to an
+	// issued credential, which a static MCP token is not.
+	if h.opToken, err = h.bootstrapOperator(); err != nil {
 		return err
 	}
-	channelID, err := createChannel(h.url(), "ops")
-	if err != nil {
-		return err
-	}
-	if h.botID, err = createPrincipal(h.url(), schema.PrincipalAgent, "reply-bot"); err != nil {
-		return err
-	}
-	// Agents are deny-by-default (issue #79): the bot needs membership of the
-	// channel and a manifest that lets it read and post there.
-	if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/members/%d", h.url(), h.botID), nil); err != nil {
-		return err
-	}
-	manifest := schema.PutAgentManifestRequestV1{
-		DisplayName:  "reply-bot",
-		Tier:         schema.AgentTierC,
-		Capabilities: []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
-		Channels: []schema.ChannelGrant{{
-			ChannelID:   channelID,
-			Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionPostNet},
-		}},
-	}
-	if err := putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", h.url(), h.botID), manifest); err != nil {
-		return err
-	}
-	if err := h.setUpNet(channelID); err != nil {
-		return err
-	}
-	if h.humanID, err = createPrincipal(h.url(), schema.PrincipalHuman, "human"); err != nil {
-		return err
-	}
-	h.stopServer()
-	if err := h.startServer(strings.Join([]string{
-		token + "=" + strconv.FormatInt(h.botID, 10),
-		peerToken + "=" + strconv.FormatInt(h.peerID, 10),
-		outsiderToken + "=" + strconv.FormatInt(h.outsiderID, 10),
-	}, ",")); err != nil {
+	if err := h.startServer(); err != nil {
 		return err
 	}
 	defer h.stopServer()
+	defer h.stopBot()
+	if err := h.setUp(); err != nil {
+		return err
+	}
 
 	// Initial backlog is seeded past without a reply.
-	if err := postHuman(h.url(), h.humanID, "initial backlog"); err != nil {
+	if err := h.postHuman("initial backlog"); err != nil {
 		return err
 	}
-	if err := h.startBot(); err != nil {
+	if err := h.startBot(h.adapter, false); err != nil {
+		return err
+	}
+	// The adapter's session is its first sign of life. It reads the backlog
+	// right after registering, so the pause below lets that finish before the
+	// next message is posted as a live one.
+	if err := h.waitNewSession(); err != nil {
 		return err
 	}
 	time.Sleep(300 * time.Millisecond)
-	if err := postHuman(h.url(), h.humanID, "first live message"); err != nil {
+	first, err := h.postHumanMessage("first live message")
+	if err != nil {
 		return err
 	}
-	if err := waitForAgentCount(h.url(), h.botID, 1, 5*time.Second); err != nil {
+	if err := h.waitForReplies(5*time.Second, h.humanReply("first live message")); err != nil {
 		return err
 	}
 	time.Sleep(250 * time.Millisecond)
-	if err := assertAgentCount(h.url(), h.botID, 1); err != nil {
+	if err := h.assertReplies(h.humanReply("first live message")); err != nil {
 		return fmt.Errorf("self-filter: %w", err)
 	}
-	h.stopBot()
+	if err := h.checkSessionAndRun(first); err != nil {
+		return err
+	}
+	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	if err := h.checkSessionEnded(); err != nil {
+		return err
+	}
 
 	// This stopped-period message must become restart backlog.
-	if err := postHuman(h.url(), h.humanID, "restart backlog"); err != nil {
+	if err := h.postHuman("restart backlog"); err != nil {
 		return err
 	}
-	if err := h.startBot(); err != nil {
+	if err := h.startBot(h.adapter, false); err != nil {
 		return err
 	}
-	defer h.stopBot()
+	if err := h.waitNewSession(); err != nil {
+		return err
+	}
 	time.Sleep(300 * time.Millisecond)
-	if err := postHuman(h.url(), h.humanID, "post-restart live message"); err != nil {
+	if err := h.postHuman("post-restart live message"); err != nil {
 		return err
 	}
-	if err := waitForAgentCount(h.url(), h.botID, 2, 5*time.Second); err != nil {
+	both := []string{h.humanReply("first live message"), h.humanReply("post-restart live message")}
+	if err := h.waitForReplies(5*time.Second, both...); err != nil {
 		return err
 	}
 	time.Sleep(250 * time.Millisecond)
-	if err := assertAgentCount(h.url(), h.botID, 2); err != nil {
+	if err := h.assertReplies(both...); err != nil {
 		return err
 	}
-	if err := h.netExchange(); err != nil {
+	if err := h.netExchange(both); err != nil {
 		return err
 	}
-	return h.refusedNetExchange()
+	if err := h.refusedNetExchange(both); err != nil {
+		return err
+	}
+	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	return h.aliasStillStarts()
 }
 
-// setUpNet creates the principals and the net for the scoped exchange: a net
-// holding the bot and a peer agent, and an outsider agent that is in the
-// channel but not on the net. Agents are deny-by-default, so each gets a
-// manifest.
-func (h *harness) setUpNet(channelID int64) error {
-	var err error
-	if h.peerID, err = createPrincipal(h.url(), schema.PrincipalAgent, "net-peer"); err != nil {
+// bootstrapOperator creates the first operator offline and returns its token.
+func (h *harness) bootstrapOperator() (string, error) {
+	cmd := exec.Command(h.conchd, "bootstrap-operator", "--data", h.data, "--name", "e2e-operator") // #nosec G204 -- test-built binary and controlled arguments
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("bootstrap-operator: %w", err)
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" || strings.ContainsAny(token, " \n") {
+		return "", fmt.Errorf("bootstrap-operator must print the token alone on stdout")
+	}
+	return token, nil
+}
+
+// setUp creates the channel, the human, the bot, the peer and the outsider
+// with credentials, membership and manifests, and the nets.
+func (h *harness) setUp() error {
+	h.op = rest{base: h.url(), token: h.opToken}
+	channelID, err := createChannel(h.op, "ops")
+	if err != nil {
 		return err
 	}
-	if h.outsiderID, err = createPrincipal(h.url(), schema.PrincipalAgent, "outsider"); err != nil {
-		return err
-	}
-	for _, id := range []int64{h.peerID, h.outsiderID} {
-		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/members/%d", h.url(), id), nil); err != nil {
-			return err
-		}
-		manifest := schema.PutAgentManifestRequestV1{
-			DisplayName:  "e2e-agent",
+	manifest := func(name string, capabilities ...schema.Capability) schema.PutAgentManifestRequestV1 {
+		return schema.PutAgentManifestRequestV1{
+			DisplayName:  name,
 			Tier:         schema.AgentTierC,
-			Capabilities: []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
+			Capabilities: capabilities,
 			Channels: []schema.ChannelGrant{{
 				ChannelID:   channelID,
 				Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionPostNet},
 			}},
 		}
-		if err := putJSON(fmt.Sprintf("%s/v1/principals/%d/manifest", h.url(), id), manifest); err != nil {
+	}
+	messaging := []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost}
+	adapter := append([]schema.Capability{schema.CapabilitySessionsManage, schema.CapabilityRunsManage}, messaging...)
+	for _, p := range []struct {
+		id    *int64
+		token *string
+		kind  schema.PrincipalKind
+		name  string
+		caps  []schema.Capability
+	}{
+		{&h.humanID, &h.humanToken, schema.PrincipalHuman, "human", nil},
+		{&h.botID, &h.botToken, schema.PrincipalAgent, "reply-bot", adapter},
+		{&h.peerID, &h.peerToken, schema.PrincipalAgent, "net-peer", messaging},
+		{&h.outsiderID, &h.outsiderToken, schema.PrincipalAgent, "outsider", messaging},
+	} {
+		if *p.id, err = createPrincipal(h.op, p.kind, p.name); err != nil {
 			return err
 		}
+		var cred schema.CreateCredentialResponseV1
+		if err := h.op.send(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", *p.id), schema.CreateCredentialRequestV1{Label: p.name}, &cred); err != nil {
+			return err
+		}
+		*p.token = cred.Token
+		if err := h.op.send(http.MethodPut, fmt.Sprintf("/v1/channels/ops/members/%d", *p.id), nil, nil); err != nil {
+			return err
+		}
+		if p.kind == schema.PrincipalAgent {
+			// Agents are deny-by-default (issue #79): a manifest lets each one
+			// read and post in the channel.
+			if err := h.op.send(http.MethodPut, fmt.Sprintf("/v1/principals/%d/manifest", *p.id), manifest(p.name, p.caps...), nil); err != nil {
+				return err
+			}
+		}
 	}
+	h.human = rest{base: h.url(), token: h.humanToken}
+	return h.setUpNets()
+}
+
+// setUpNets creates a net holding the bot and the peer, and a net the bot only
+// monitors: it reads what is said there and the server refuses its replies.
+func (h *harness) setUpNets() error {
 	var created schema.CreateNetResponseV1
-	if err := postJSON(h.url()+"/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "ops-net"}, &created); err != nil {
+	if err := h.op.send(http.MethodPost, "/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "ops-net"}, &created); err != nil {
 		return err
 	}
 	h.netID = created.Net.ID
 	for _, id := range []int64{h.botID, h.peerID} {
-		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/nets/ops-net/members/%d", h.url(), id), schema.PutNetMemberRequestV1{Role: schema.NetRoleMember}); err != nil {
+		if err := h.op.send(http.MethodPut, fmt.Sprintf("/v1/channels/ops/nets/ops-net/members/%d", id), schema.PutNetMemberRequestV1{Role: schema.NetRoleMember}, nil); err != nil {
 			return err
 		}
 	}
-	// A second net the bot only monitors: it reads what is said there and the
-	// server refuses its replies.
-	if err := postJSON(h.url()+"/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "watch-net"}, &created); err != nil {
+	if err := h.op.send(http.MethodPost, "/v1/channels/ops/nets", schema.CreateNetRequestV1{Name: "watch-net"}, &created); err != nil {
 		return err
 	}
 	h.watchNetID = created.Net.ID
 	for id, role := range map[int64]schema.NetRole{h.botID: schema.NetRoleMonitor, h.peerID: schema.NetRoleMember} {
-		if err := putJSON(fmt.Sprintf("%s/v1/channels/ops/nets/watch-net/members/%d", h.url(), id), schema.PutNetMemberRequestV1{Role: role}); err != nil {
+		if err := h.op.send(http.MethodPut, fmt.Sprintf("/v1/channels/ops/nets/watch-net/members/%d", id), schema.PutNetMemberRequestV1{Role: role}, nil); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// humanReply is what the fixture answers to the human's message: the last
+// line of the prompt, "<author id>: <body>".
+func (h *harness) humanReply(body string) string { return fmt.Sprintf("%d: %s", h.humanID, body) }
+
+// checkSessionAndRun looks at what the adapter has told the server so far,
+// through the API a client uses: one online session with what it declared,
+// and one completed run for the reply, answering the message it was asked
+// about, with the activity of a successful reply in order.
+func (h *harness) checkSessionAndRun(asked schema.MessageV1) error {
+	sessions, err := h.waitSessions(func(s []schema.SessionV1) bool { return len(s) == 1 })
+	if err != nil {
+		return err
+	}
+	session := sessions[0]
+	wantKinds := []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel}
+	if session.Client != "conch-adapter" || session.PrincipalID != h.botID || session.State != schema.SessionStateOnline ||
+		session.Runtime != "claude-code" || session.Model != "sonnet" || session.Host == "" || !reflect.DeepEqual(session.Interventions, wantKinds) {
+		return fmt.Errorf("the adapter's session = %+v", session)
+	}
+	// An online session with no open run is idle.
+	if session.Status != schema.SessionStatusIdle || session.CurrentRun != 0 {
+		return fmt.Errorf("session status %q with current run %d, want idle with none", session.Status, session.CurrentRun)
+	}
+	var runs schema.ListRunsResponseV1
+	if err := h.human.send(http.MethodGet, "/v1/runs?channel=ops", nil, &runs); err != nil {
+		return err
+	}
+	if len(runs.Runs) != 1 {
+		return fmt.Errorf("runs = %d, want one for the one reply", len(runs.Runs))
+	}
+	run := runs.Runs[0]
+	if run.SessionID != session.ID || run.State != schema.RunStateCompleted || run.Outcome != "replied" ||
+		run.MessageID != asked.ID || run.Task != "first live message" {
+		return fmt.Errorf("the run = %+v, want completed 'replied' answering message %d", run, asked.ID)
+	}
+	var activity schema.ListActivityResponseV1
+	if err := h.human.send(http.MethodGet, fmt.Sprintf("/v1/runs/%d/activity", run.ID), nil, &activity); err != nil {
+		return err
+	}
+	var kinds []schema.ActivityKind
+	for _, entry := range activity.Activity {
+		kinds = append(kinds, entry.Kind)
+		if strings.Contains(entry.Summary+entry.Outcome, "first live message") {
+			return fmt.Errorf("an activity entry quotes the message: %+v", entry)
+		}
+	}
+	want := []schema.ActivityKind{schema.ActivityKindCommandStarted, schema.ActivityKindCommandFinished, schema.ActivityKindReplyPosted}
+	if !reflect.DeepEqual(kinds, want) {
+		return fmt.Errorf("activity kinds = %v, want %v", kinds, want)
+	}
+	return nil
+}
+
+// waitNewSession waits for the adapter to have one online session that is
+// newer than any before it.
+func (h *harness) waitNewSession() error {
+	sessions, err := h.waitSessions(func(s []schema.SessionV1) bool {
+		return len(s) == 1 && s[0].ID > h.lastSession && s[0].State == schema.SessionStateOnline
+	})
+	if err != nil {
+		return err
+	}
+	h.lastSession = sessions[0].ID
+	return nil
+}
+
+// checkSessionEnded checks that after a stop the adapter's session has ended
+// (an ended session is no longer in the roster), no run is left open, and the
+// lock file is gone.
+func (h *harness) checkSessionEnded() error {
+	if _, err := h.waitSessions(func(s []schema.SessionV1) bool { return len(s) == 0 }); err != nil {
+		return fmt.Errorf("the adapter's session did not end: %w", err)
+	}
+	if _, err := os.Stat(h.lock); err == nil {
+		return fmt.Errorf("lock file %s is still there after the adapter stopped", h.lock)
+	}
+	var runs schema.ListRunsResponseV1
+	if err := h.human.send(http.MethodGet, "/v1/runs?channel=ops", nil, &runs); err != nil {
+		return err
+	}
+	for _, run := range runs.Runs {
+		if !schema.RunStateTerminal(run.State) {
+			return fmt.Errorf("run %d is still %s after the adapter stopped", run.ID, run.State)
+		}
+	}
+	return nil
+}
+
+// waitSessions polls the roster as the operator (who sees runtime and host)
+// until ok is true, and returns the adapter's sessions, oldest first.
+func (h *harness) waitSessions(ok func([]schema.SessionV1) bool) ([]schema.SessionV1, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var roster schema.SessionRosterV1
+		if err := h.op.send(http.MethodGet, "/v1/sessions?channel=ops", nil, &roster); err != nil {
+			return nil, err
+		}
+		var mine []schema.SessionV1
+		for _, s := range roster.Sessions {
+			if s.PrincipalID == h.botID {
+				mine = append(mine, s)
+			}
+		}
+		if ok(mine) {
+			return mine, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("the adapter's sessions never became what the check wants: %+v", mine)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// aliasStillStarts runs conch-bot once, with the old CONCH_BOT_* names only.
+func (h *harness) aliasStillStarts() error {
+	if err := h.startBot(h.alias, true); err != nil {
+		return err
+	}
+	if err := h.waitNewSession(); err != nil {
+		return fmt.Errorf("conch-bot did not start: %w", err)
+	}
+	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	if got := strings.Count(h.botStderr.String(), "deprecated"); got != 1 {
+		return fmt.Errorf("conch-bot said it is deprecated %d times, want once; stderr:\n%s", got, h.botStderr.String())
+	}
+	return h.checkSessionEnded()
 }
 
 // refusedNetExchange is the case the feature exists for. The peer speaks on a
@@ -212,9 +399,9 @@ func (h *harness) setUpNet(channelID int64) error {
 // refused by the real server; the bot must then post nothing anywhere, in
 // particular not in the open channel, and must carry on: the next channel-wide
 // message still gets its answer.
-func (h *harness) refusedNetExchange() error {
+func (h *harness) refusedNetExchange(before []string) error {
 	ctx := context.Background()
-	peer := mcpclient.New(h.url(), peerToken)
+	peer := mcpclient.New(h.url(), h.peerToken)
 	if err := peer.Initialize(ctx, "conch-bot-check-peer-2"); err != nil {
 		return fmt.Errorf("initialize peer: %w", err)
 	}
@@ -234,41 +421,44 @@ func (h *harness) refusedNetExchange() error {
 			return fmt.Errorf("the bot posted after a refused reply: %+v (audience %+v)", m, m.Audience)
 		}
 	}
-	if err := assertChannelWideBotReplies(h, 2); err != nil {
+	if err := h.assertReplies(before...); err != nil {
 		return fmt.Errorf("a refused net reply was sent to the open channel: %w", err)
 	}
 	// Not stuck in a retry or backoff: a channel-wide message is answered.
-	if err := postHuman(h.url(), h.humanID, "after the refusal"); err != nil {
+	if err := h.postHuman("after the refusal"); err != nil {
 		return err
 	}
-	if err := waitForAgentCount(h.url(), h.botID, 3, 5*time.Second); err != nil {
+	after := append(append([]string(nil), before...), h.humanReply("after the refusal"))
+	if err := h.waitForReplies(5*time.Second, after...); err != nil {
 		return fmt.Errorf("the bot stopped answering after a refused reply: %w", err)
 	}
 	time.Sleep(300 * time.Millisecond)
-	if err := assertChannelWideBotReplies(h, 3); err != nil {
+	if err := h.assertReplies(after...); err != nil {
 		return err
 	}
-	raw, err := httpGet(h.url() + "/v2/channels/ops/messages")
+	raw, err := httpGet(h.human, "/v2/channels/ops/messages")
 	if err != nil {
 		return err
 	}
 	if strings.Contains(raw, "WATCH-NET-PROMPT") {
 		return fmt.Errorf("the monitored net's prompt is visible in the open channel: %s", raw)
 	}
+	// The server does not let a monitor start a run on that net either, so the
+	// adapter has none for this message; the end of the program checks that no
+	// run was left open.
 	return nil
 }
 
-// netExchange has the peer post a prompt on the net over MCP (with auth off a
-// human cannot post a scoped message over REST). The bot must answer on the
-// same net. The outsider, an agent in the channel reading over MCP, must see
-// neither message: that is the check that matters. REST is also read, without
-// a credential (this server runs with authentication off), where no scoped
-// message may ever appear.
-func (h *harness) netExchange() error {
+// netExchange has the peer post a prompt on the net over MCP (a human cannot
+// post a scoped message over REST). The bot must answer on the same net. The
+// outsider, an agent in the channel reading over MCP, must see neither
+// message: that is the check that matters. REST is also read as the human, who
+// is not on the net, where no scoped message may ever appear.
+func (h *harness) netExchange(replies []string) error {
 	ctx := context.Background()
 	netAudience := &schema.Audience{Kind: schema.AudienceKindNet, NetID: h.netID}
-	peer := mcpclient.New(h.url(), peerToken)
-	outsider := mcpclient.New(h.url(), outsiderToken)
+	peer := mcpclient.New(h.url(), h.peerToken)
+	outsider := mcpclient.New(h.url(), h.outsiderToken)
 	for name, client := range map[string]*mcpclient.Client{"peer": peer, "outsider": outsider} {
 		if err := client.Initialize(ctx, "conch-bot-check-"+name); err != nil {
 			return fmt.Errorf("initialize %s: %w", name, err)
@@ -297,12 +487,13 @@ func (h *harness) netExchange() error {
 	if reply == nil {
 		return fmt.Errorf("the bot did not answer the net message")
 	}
-	if reply.Audience.Kind != schema.AudienceKindNet || reply.Audience.NetID != h.netID || reply.Body != "canned bot reply" {
-		return fmt.Errorf("net reply = %+v (audience %+v), want the canned reply on net %d", reply, reply.Audience, h.netID)
+	want := fmt.Sprintf("%d: %s", h.peerID, prompt)
+	if reply.Audience.Kind != schema.AudienceKindNet || reply.Audience.NetID != h.netID || reply.Body != want {
+		return fmt.Errorf("net reply = %+v (audience %+v), want %q on net %d", reply, reply.Audience, want, h.netID)
 	}
 	// Give a wrongly channel-wide reply time to show up before looking.
 	time.Sleep(300 * time.Millisecond)
-	if err := assertChannelWideBotReplies(h, 2); err != nil {
+	if err := h.assertReplies(replies...); err != nil {
 		return fmt.Errorf("the net reply leaked into the open channel: %w", err)
 	}
 
@@ -319,31 +510,56 @@ func (h *harness) netExchange() error {
 		}
 	}
 	for _, version := range []string{"v1", "v2"} {
-		raw, err := httpGet(fmt.Sprintf("%s/%s/channels/ops/messages", h.url(), version))
+		raw, err := httpGet(h.human, fmt.Sprintf("/%s/channels/ops/messages", version))
 		if err != nil {
 			return err
 		}
 		if strings.Contains(raw, "NET-PROMPT") || strings.Contains(raw, fmt.Sprintf(`"id":%d,`, reply.ID)) {
-			return fmt.Errorf("anonymous REST %s shows the net exchange: %s", version, raw)
+			return fmt.Errorf("REST %s shows the net exchange to someone who is not on the net: %s", version, raw)
 		}
 	}
 	return nil
 }
 
-// assertChannelWideBotReplies checks the bot has exactly want channel-wide
-// replies in the open channel.
-func assertChannelWideBotReplies(h *harness, want int) error {
-	return assertAgentCount(h.url(), h.botID, want)
+// assertReplies checks the bot's channel-wide replies, in order, are exactly
+// want.
+func (h *harness) assertReplies(want ...string) error {
+	var result schema.ListMessagesResponseV1
+	if err := h.human.send(http.MethodGet, "/v1/channels/ops/messages", nil, &result); err != nil {
+		return err
+	}
+	var got []string
+	for _, message := range result.Messages {
+		if message.AuthorID == h.botID {
+			got = append(got, message.Body)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("the bot's replies = %q, want %q", got, want)
+	}
+	return nil
 }
 
-func httpGet(url string) (string, error) {
-	response, err := http.Get(url) // #nosec G107 -- test-local server
+func (h *harness) waitForReplies(timeout time.Duration, want ...string) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := h.assertReplies(want...); err == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return h.assertReplies(want...)
+}
+
+func httpGet(r rest, path string) (string, error) {
+	status, body, err := r.do(http.MethodGet, path, nil)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = response.Body.Close() }()
-	data, err := io.ReadAll(response.Body)
-	return string(data), err
+	if status != http.StatusOK {
+		return "", fmt.Errorf("GET %s status %d", path, status)
+	}
+	return string(body), nil
 }
 
 func build(out, pkg string) error {
@@ -366,16 +582,8 @@ func freeAddr() (string, error) {
 
 func (h *harness) url() string { return "http://" + h.addr }
 
-// startServer runs conchd with authentication off. This check is about the
-// bot's reply loop, which talks to /mcp (always authenticated with its own
-// token); the harness's own REST calls play the part of an unauthenticated
-// local development setup.
-func (h *harness) startServer(mapping string) error {
-	args := []string{"serve", "--data", h.data, "--listen", h.addr, "--auth", "off"}
-	if mapping != "" {
-		args = append(args, "--mcp-token", mapping)
-	}
-	h.server = exec.Command(h.conchd, args...) // #nosec G204 -- test-built binary and controlled arguments
+func (h *harness) startServer() error {
+	h.server = exec.Command(h.conchd, "serve", "--data", h.data, "--listen", h.addr) // #nosec G204 -- test-built binary and controlled arguments
 	h.server.Stdout, h.server.Stderr = os.Stdout, os.Stderr
 	if err := h.server.Start(); err != nil {
 		return err
@@ -395,21 +603,38 @@ func (h *harness) startServer(mapping string) error {
 }
 
 func (h *harness) stopServer() { stop(&h.server) }
-func (h *harness) stopBot() {
+
+// stopBotClean sends SIGTERM and requires the adapter to exit by itself, with
+// status 0, which is what ending its session and releasing its lock takes.
+func (h *harness) stopBotClean() error {
 	if h.botProc == nil || h.botProc.Process == nil {
-		return
+		return nil
 	}
-	_ = h.botProc.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_ = h.botProc.Wait()
-		close(done)
-	}()
+	proc := h.botProc
+	h.botProc = nil
+	if err := proc.Process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- proc.Wait() }()
 	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		_ = h.botProc.Process.Kill()
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("the adapter did not exit cleanly on SIGTERM: %w", err)
+		}
+		return nil
+	case <-time.After(5 * time.Second):
+		_ = proc.Process.Kill()
 		<-done
+		return fmt.Errorf("the adapter did not exit within 5s of SIGTERM")
+	}
+}
+
+// stopBot is the deferred cleanup: kill whatever is still running.
+func (h *harness) stopBot() {
+	if h.botProc != nil && h.botProc.Process != nil {
+		_ = h.botProc.Process.Kill()
+		_ = h.botProc.Wait()
 	}
 	h.botProc = nil
 }
@@ -422,119 +647,98 @@ func stop(cmd **exec.Cmd) {
 	*cmd = nil
 }
 
-func (h *harness) startBot() error {
-	h.botProc = exec.Command(h.bot) // #nosec G204 -- test-built binary
-	h.botProc.Env = append(os.Environ(),
-		"CONCH_BOT_SERVER="+h.url(), "CONCH_BOT_TOKEN="+token,
-		"CONCH_BOT_PRINCIPAL_ID="+strconv.FormatInt(h.botID, 10), "CONCH_BOT_CHANNEL=ops",
-		"CONCH_BOT_POLL_INTERVAL=50ms", "CONCH_BOT_MAX_BACKOFF=200ms",
-		"CONCH_BOT_REPLY_TIMEOUT=2s", "CLAUDE_BIN="+h.claude, "CONCH_BOT_LOCK_FILE="+h.lock,
+// startBot starts the adapter, or with legacy its old name, configured with the
+// CONCH_ADAPTER_* names or with legacy only the old CONCH_BOT_* ones.
+func (h *harness) startBot(binary string, legacy bool) error {
+	prefix := "CONCH_ADAPTER_"
+	if legacy {
+		prefix = "CONCH_BOT_"
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CONCH_") || strings.HasPrefix(kv, "CLAUDE_BIN=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		prefix+"SERVER="+h.url(), prefix+"TOKEN="+h.botToken,
+		prefix+"PRINCIPAL_ID="+strconv.FormatInt(h.botID, 10), prefix+"CHANNEL=ops",
+		prefix+"POLL_INTERVAL=50ms", prefix+"MAX_BACKOFF=200ms",
+		prefix+"REPLY_TIMEOUT=5s", prefix+"LOCK_FILE="+h.lock,
+		// The fixture takes the prompt on standard input; CLAUDE_BIN is not set.
+		"CONCH_ADAPTER_CMD="+h.fixture, "CONCH_ADAPTER_HEARTBEAT=200ms",
 	)
-	h.botProc.Stdout, h.botProc.Stderr = os.Stdout, os.Stderr
+	h.botStderr = &bytes.Buffer{}
+	h.botProc = exec.Command(binary) // #nosec G204 -- test-built binary
+	h.botProc.Env = env
+	h.botProc.Stdout = os.Stdout
+	h.botProc.Stderr = io.MultiWriter(os.Stderr, h.botStderr)
 	return h.botProc.Start()
 }
 
-func createChannel(baseURL, name string) (int64, error) {
-	var response schema.CreateChannelResponse
-	err := postJSON(baseURL+"/v0/channels", schema.CreateChannelRequest{Name: name}, &response)
-	return response.Channel.ID, err
-}
+// rest is a REST client for one credential.
+type rest struct{ base, token string }
 
-func createPrincipal(baseURL string, kind schema.PrincipalKind, name string) (int64, error) {
-	var response schema.CreatePrincipalResponse
-	err := postJSON(baseURL+"/v0/principals", schema.CreatePrincipalRequest{Kind: kind, Name: name}, &response)
-	return response.Principal.ID, err
-}
-
-func postHuman(baseURL string, authorID int64, body string) error {
-	return postJSON(baseURL+"/v1/channels/ops/messages", schema.PostMessageRequestV1{AuthorID: authorID, Body: body}, nil)
-}
-
-// putJSON sends a PUT with a JSON body (or none when body is nil) and expects
-// a 2xx.
-func putJSON(url string, body any) error {
+func (r rest) do(method, path string, body any) (int, []byte, error) {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return 0, nil, err
 		}
 		reader = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequest(http.MethodPut, url, reader) // #nosec G107 -- test-local server
+	req, err := http.NewRequest(method, r.base+path, reader) // #nosec G107 -- test-local server
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+r.token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PUT %s status %d: %s", url, resp.StatusCode, respBody)
-	}
-	return nil
+	data, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, data, err
 }
 
-func postJSON(url string, body, out any) error {
-	encoded, err := json.Marshal(body)
+// send does a request that must answer 2xx and decodes the answer into out
+// when it is not nil. A failure names the status, never the body.
+func (r rest) send(method, path string, body, out any) error {
+	status, data, err := r.do(method, path, body)
 	if err != nil {
 		return err
 	}
-	response, err := http.Post(url, "application/json", bytes.NewReader(encoded)) // #nosec G107 -- test-local server
-	if err != nil {
-		return err
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		data, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("POST status %d: %s", response.StatusCode, data)
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("%s %s status %d", method, path, status)
 	}
 	if out != nil {
-		return json.NewDecoder(response.Body).Decode(out)
+		return json.Unmarshal(data, out)
 	}
 	return nil
 }
 
-func messages(baseURL string) (schema.ListMessagesResponseV1, error) {
-	var result schema.ListMessagesResponseV1
-	response, err := http.Get(baseURL + "/v1/channels/ops/messages") // #nosec G107 -- test-local server
-	if err != nil {
-		return result, err
-	}
-	defer func() { _ = response.Body.Close() }()
-	return result, json.NewDecoder(response.Body).Decode(&result)
+func createChannel(r rest, name string) (int64, error) {
+	var response schema.CreateChannelResponse
+	err := r.send(http.MethodPost, "/v0/channels", schema.CreateChannelRequest{Name: name}, &response)
+	return response.Channel.ID, err
 }
 
-func waitForAgentCount(baseURL string, agentID int64, want int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := assertAgentCount(baseURL, agentID, want); err == nil {
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return assertAgentCount(baseURL, agentID, want)
+func createPrincipal(r rest, kind schema.PrincipalKind, name string) (int64, error) {
+	var response schema.CreatePrincipalResponse
+	err := r.send(http.MethodPost, "/v0/principals", schema.CreatePrincipalRequest{Kind: kind, Name: name}, &response)
+	return response.Principal.ID, err
 }
 
-func assertAgentCount(baseURL string, agentID int64, want int) error {
-	result, err := messages(baseURL)
-	if err != nil {
-		return err
-	}
-	count := 0
-	for _, message := range result.Messages {
-		if message.AuthorID == agentID {
-			count++
-			if message.Body != "canned bot reply" {
-				return fmt.Errorf("reply body = %q", message.Body)
-			}
-		}
-	}
-	if count != want {
-		return fmt.Errorf("agent replies = %d, want %d", count, want)
-	}
-	return nil
+func (h *harness) postHuman(body string) error {
+	_, err := h.postHumanMessage(body)
+	return err
+}
+
+func (h *harness) postHumanMessage(body string) (schema.MessageV1, error) {
+	var posted schema.PostMessageResponseV1
+	err := h.human.send(http.MethodPost, "/v1/channels/ops/messages", schema.PostMessageRequestV1{AuthorID: h.humanID, Body: body}, &posted)
+	return posted.Message, err
 }

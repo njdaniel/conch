@@ -1,4 +1,4 @@
-package main
+package adapter
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +14,11 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// fakeMCP is the server as the adapter sees it. Every call is also recorded,
+// in order, in events, so a test can say what came before what; the heartbeat
+// and the intervention watcher call it from their own goroutines, hence mu.
 type fakeMCP struct {
+	mu    sync.Mutex
 	pages map[int64]schema.ListMessagesResponseV2
 	errAt map[int64]error
 	reads []int64
@@ -22,6 +27,22 @@ type fakeMCP struct {
 	// the audience it carried (nil is channel-wide).
 	attempts []postAttempt
 	postErr  error // returned by every post when set
+
+	events      []string // "start_run", "update_run:running", "activity:command_started", ...
+	registered  []schema.CreateSessionRequestV1
+	runs        []schema.CreateRunRequestV1
+	runStates   []string // state[:outcome] of each update_run
+	activities  []activityCall
+	acks        []ackCall
+	approvals   []schema.CreateApprovalRequestV1
+	interv      []schema.InterventionV1 // what people asked for; ack changes state
+	decisions   []schema.AwaitDecisionOutput
+	nextRunID   int64
+	beats       chan struct{} // receives one value per heartbeat, if set
+	polled      chan struct{} // receives one value per poll_interventions, if set
+	startErr    error
+	activityErr error
+	endCalls    int
 }
 
 type postAttempt struct {
@@ -29,7 +50,23 @@ type postAttempt struct {
 	audience *schema.Audience
 }
 
+type activityCall struct {
+	runID                  int64
+	kind                   schema.ActivityKind
+	summary, outcome, data string
+}
+
+type ackCall struct {
+	id     int64
+	state  schema.InterventionState
+	reason string
+}
+
+func (f *fakeMCP) record(event string) { f.events = append(f.events, event) }
+
 func (f *fakeMCP) readChannel(_ context.Context, _ string, after int64, _ int) (schema.ListMessagesResponseV2, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.reads = append(f.reads, after)
 	if err := f.errAt[after]; err != nil {
 		return schema.ListMessagesResponseV2{}, err
@@ -38,6 +75,9 @@ func (f *fakeMCP) readChannel(_ context.Context, _ string, after int64, _ int) (
 }
 
 func (f *fakeMCP) postMessage(_ context.Context, _, body string, audience *schema.Audience) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("post_message")
 	f.attempts = append(f.attempts, postAttempt{body: body, audience: audience})
 	if f.postErr != nil {
 		return f.postErr
@@ -46,14 +86,137 @@ func (f *fakeMCP) postMessage(_ context.Context, _, body string, audience *schem
 	return nil
 }
 
+func (f *fakeMCP) RegisterSession(_ context.Context, req schema.CreateSessionRequestV1) (schema.SessionV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("register_session")
+	f.registered = append(f.registered, req)
+	return schema.SessionV1{ID: 7}, nil
+}
+
+func (f *fakeMCP) Heartbeat(context.Context, int64) (schema.SessionV1, error) {
+	f.mu.Lock()
+	f.record("heartbeat")
+	beats := f.beats
+	f.mu.Unlock()
+	if beats != nil {
+		beats <- struct{}{}
+	}
+	return schema.SessionV1{ID: 7}, nil
+}
+
+func (f *fakeMCP) EndSession(context.Context, int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("end_session")
+	f.endCalls++
+	return nil
+}
+
+func (f *fakeMCP) StartRun(_ context.Context, _ int64, req schema.CreateRunRequestV1) (schema.RunV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("start_run")
+	if f.startErr != nil {
+		return schema.RunV1{}, f.startErr
+	}
+	f.runs = append(f.runs, req)
+	f.nextRunID++
+	return schema.RunV1{ID: f.nextRunID, ChannelID: 3}, nil
+}
+
+func (f *fakeMCP) UpdateRun(_ context.Context, runID int64, req schema.SetRunStateRequestV1) (schema.RunV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	state := string(req.State)
+	if req.Outcome != "" {
+		state += ":" + req.Outcome
+	}
+	f.record("update_run:" + state)
+	f.runStates = append(f.runStates, state)
+	return schema.RunV1{ID: runID}, nil
+}
+
+func (f *fakeMCP) PostActivity(_ context.Context, runID int64, req schema.AppendActivityRequestV1) (schema.AgentActivityV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("activity:" + string(req.Kind))
+	f.activities = append(f.activities, activityCall{runID: runID, kind: req.Kind, summary: req.Summary, outcome: req.Outcome, data: string(req.Data)})
+	return schema.AgentActivityV1{}, f.activityErr
+}
+
+func (f *fakeMCP) PollInterventions(_ context.Context, _ int64, state schema.InterventionState, after int64) (schema.ListInterventionsResponseV1, error) {
+	f.mu.Lock()
+	list := schema.ListInterventionsResponseV1{Interventions: []schema.InterventionV1{}}
+	for _, iv := range f.interv {
+		if iv.State == state && iv.ID > after {
+			list.Interventions = append(list.Interventions, iv)
+		}
+	}
+	polled := f.polled
+	f.mu.Unlock()
+	if polled != nil {
+		polled <- struct{}{}
+	}
+	return list, nil
+}
+
+func (f *fakeMCP) AnswerIntervention(_ context.Context, id int64, req schema.AckInterventionRequestV1) (schema.InterventionV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(fmt.Sprintf("ack:%d:%s", id, req.State))
+	f.acks = append(f.acks, ackCall{id: id, state: req.State, reason: req.Reason})
+	for i := range f.interv {
+		if f.interv[i].ID == id {
+			f.interv[i].State = req.State
+			return f.interv[i], nil
+		}
+	}
+	return schema.InterventionV1{}, errors.New("no such intervention")
+}
+
+func (f *fakeMCP) RequestApproval(_ context.Context, req schema.CreateApprovalRequestV1) (schema.RequestApprovalOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("request_approval")
+	f.approvals = append(f.approvals, req)
+	return schema.RequestApprovalOutput{ID: 41, Title: req.Title, State: schema.ApprovalStatePending}, nil
+}
+
+func (f *fakeMCP) AwaitDecision(context.Context, int64, int64) (schema.AwaitDecisionOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("await_decision")
+	if len(f.decisions) == 0 {
+		return schema.AwaitDecisionOutput{State: schema.ApprovalStateResolved, Resolution: &schema.ApprovalResolutionV1{ApprovalID: 41, Outcome: schema.OutcomeApproved}}, nil
+	}
+	next := f.decisions[0]
+	f.decisions = f.decisions[1:]
+	return next, nil
+}
+
+// eventLog is a copy of the recorded calls, for a test that is done with the
+// goroutines that made them.
+func (f *fakeMCP) eventLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+// fakeClaude stands in for the command. fn, when set, is the reply: it gets the
+// context, the prompt and the run's fixture handler.
 type fakeClaude struct {
 	reply   string
 	err     error
 	prompts []string
+	fn      func(ctx context.Context, prompt string, fx fixtureHandler) (string, error)
 }
 
-func (f *fakeClaude) Reply(_ context.Context, prompt string) (string, error) {
+func (f *fakeClaude) Reply(ctx context.Context, prompt string, fx fixtureHandler) (string, error) {
 	f.prompts = append(f.prompts, prompt)
+	if f.fn != nil {
+		return f.fn(ctx, prompt, fx)
+	}
 	return f.reply, f.err
 }
 
@@ -183,7 +346,7 @@ func TestPollOnceContextComesFromRollingBufferNotFullReplay(t *testing.T) {
 func TestBuildPromptTruncatesContextAndPreservesOrdering(t *testing.T) {
 	prompt := buildPrompt(
 		[]schema.MessageV2{message(1, 1, "first"), message(2, 2, "second"), message(3, 3, "third")},
-		[]schema.MessageV2{message(4, 4, "new one"), message(5, 5, "new two")}, 4,
+		[]schema.MessageV2{message(4, 4, "new one"), message(5, 5, "new two")}, 4, nil,
 	)
 	wantOrder := []string{"2: second", "3: third", "4: new one", "5: new two"}
 	position := -1
@@ -209,7 +372,7 @@ func TestLoadConfig(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Server != "http://127.0.0.1:8080" || cfg.PollInterval != 5*time.Second || cfg.MaxBackoff != time.Minute || cfg.ContextMessages != 20 || cfg.Model != "sonnet" || cfg.ReplyTimeout != 2*time.Minute || cfg.ClaudeBin != "claude" || cfg.LockFile == "" {
+		if cfg.Server != "http://127.0.0.1:8080" || cfg.PollInterval != 5*time.Second || cfg.MaxBackoff != time.Minute || cfg.ContextMessages != 20 || cfg.Model != "sonnet" || cfg.ReplyTimeout != 2*time.Minute || cfg.Command.args[0] != "claude" || cfg.LockFile == "" {
 			t.Fatalf("unexpected defaults: %+v", cfg)
 		}
 	})
