@@ -394,6 +394,51 @@ END`,
 		`CREATE INDEX sessions_by_credential ON sessions (credential_id)`,
 		`CREATE INDEX sessions_live_by_last_seen ON sessions (last_seen_at) WHERE ended_at IS NULL AND state <> 'offline'`,
 	},
+	// 19: Runs (issue #266, P3 epic #263, decision D8). One row per piece of
+	// work an agent session reports. A run belongs to one channel and may
+	// answer one message in it (message_id, NULL for none); that pair decides
+	// who may see it, and the rule lives in audience.go beside the message
+	// rule, which it is built on. principal_id is the session's principal,
+	// copied so a run names its agent without a join. ended_at is set exactly
+	// when the state is terminal (the CHECK says so, as RunV1.Validate does).
+	// link and outcome are '' when absent. Timestamps are unix milliseconds
+	// UTC. Rows are never deleted. No data is backfilled. The indexes serve
+	// the channel listing and the roster's look-up of a session's runs.
+	{
+		`CREATE TABLE runs (
+	id           INTEGER PRIMARY KEY,
+	session_id   INTEGER NOT NULL REFERENCES sessions (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	message_id   INTEGER REFERENCES messages (id),
+	state        TEXT    NOT NULL CHECK (state IN ('queued','starting','running','blocked','waiting','completed','failed','cancelled')),
+	task         TEXT    NOT NULL,
+	link         TEXT    NOT NULL DEFAULT '',
+	started_at   INTEGER NOT NULL,
+	ended_at     INTEGER,
+	outcome      TEXT    NOT NULL DEFAULT '',
+	CHECK ((ended_at IS NULL) = (state NOT IN ('completed','failed','cancelled')))
+)`,
+		`CREATE INDEX runs_by_channel ON runs (channel_id, id)`,
+		`CREATE INDEX runs_by_session ON runs (session_id, state)`,
+	},
+	// 20: Run activity (issue #266). One row per entry an agent appends to
+	// one of its runs. An entry has no visibility of its own: it is read only
+	// through its run, by the run's rule. data is the entry's JSON detail as
+	// the server encoded it, NULL when there is none. at is the server's
+	// clock, unix milliseconds UTC. Rows are never deleted.
+	{
+		`CREATE TABLE run_activity (
+	id      INTEGER PRIMARY KEY,
+	run_id  INTEGER NOT NULL REFERENCES runs (id),
+	kind    TEXT    NOT NULL,
+	summary TEXT    NOT NULL,
+	outcome TEXT    NOT NULL DEFAULT '',
+	data    BLOB,
+	at      INTEGER NOT NULL
+)`,
+		`CREATE INDEX run_activity_by_run ON run_activity (run_id, id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
