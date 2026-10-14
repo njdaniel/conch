@@ -14,6 +14,10 @@ import { connectionReducer } from './state/connection';
 import { draftFor, draftsReducer, initialDrafts } from './state/drafts';
 import { chatFor, chatReducer, initialChat, lastId, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
+import { MembersPanel } from './agents/MembersPanel';
+import { RunDetail } from './agents/RunDetail';
+import { useAgents } from './agents/useAgents';
+import { useNow } from './agents/useNow';
 
 export function App({ origin }: { readonly origin: string }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
@@ -127,6 +131,16 @@ export function App({ origin }: { readonly origin: string }) {
     onLost,
   });
 
+  // The browser's own session, the events socket and what the panel and run
+  // detail show from them.
+  const agents = useAgents({
+    signedIn,
+    channel: channelId === null ? null : selected,
+    channelId,
+    onUnauthorized,
+  });
+  const now = useNow(signedIn);
+
   // One POST per click. Nothing here sends a message a second time on its own.
   const post = useCallback(
     (name: string, localId: number, body: string) => {
@@ -139,11 +153,15 @@ export function App({ origin }: { readonly origin: string }) {
     [],
   );
 
+  const releaseSession = agents.release;
   const signOut = useCallback(() => {
+    // The session is ended first: the request needs the credential that
+    // signing out forgets.
+    releaseSession();
     api.signOut();
     forgetChannel();
     dispatchAuth({ type: 'signOut' });
-  }, []);
+  }, [releaseSession]);
 
   const submit = useCallback((credential: string) => {
     dispatchAuth({ type: 'submit' });
@@ -189,8 +207,12 @@ export function App({ origin }: { readonly origin: string }) {
           name={auth.principal.name}
           channels={channels}
           connection={connection}
+          panel={<MembersPanel agents={agents} now={now} />}
           conversation={
             selected === null || channelId === null ? null : (
+              <>
+                {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} />}
+                <div className="conversation-body" hidden={agents.state.detail !== null}>
               <Conversation
                 key={selected}
                 channel={selected}
@@ -223,6 +245,8 @@ export function App({ origin }: { readonly origin: string }) {
                 }}
                 onReload={live.retry}
               />
+                </div>
+              </>
             )
           }
           onOpen={(name) => {

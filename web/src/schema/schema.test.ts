@@ -9,6 +9,11 @@ import { listMessagesResponseV2, messageV2, postMessageRequestV2, postMessageRes
 import { listNetsResponseV1, netV1 } from './net';
 import { whoAmIResponseV1 } from './principal';
 import { wsTicketV1 } from './ticket';
+import { agentActivityV1, listActivityResponseV1 } from './activity';
+import { errorV0 } from './error';
+import { createInterventionRequestV1, interventionV1, listInterventionsResponseV1 } from './intervention';
+import { listRunsResponseV1, runV1 } from './run';
+import { createSessionRequestV1, sessionRosterV1, sessionV1 } from './session';
 import type { Validator } from './validate';
 
 // Read by relative path, so the test sees the fixtures of this checkout.
@@ -39,6 +44,17 @@ const families: [string, Validator<unknown>][] = [
   ['approval-option-v1', option],
   ['net-v1', netV1],
   ['list-nets-response-v1', listNetsResponseV1],
+  ['session-v1', sessionV1],
+  ['session-roster-v1', sessionRosterV1],
+  ['create-session-request-v1', createSessionRequestV1],
+  ['run-v1', runV1],
+  ['list-runs-response-v1', listRunsResponseV1],
+  ['agent-activity-v1', agentActivityV1],
+  ['list-activity-response-v1', listActivityResponseV1],
+  ['intervention-v1', interventionV1],
+  ['create-intervention-request-v1', createInterventionRequestV1],
+  ['list-interventions-response-v1', listInterventionsResponseV1],
+  ['error', errorV0],
 ];
 
 function inFamily(file: string, family: string): boolean {
@@ -75,6 +91,21 @@ describe('validators refuse', () => {
     body: 'hello',
   };
 
+  const session = {
+    schema: 'conch.session.v1',
+    id: 11,
+    principal_id: 1,
+    kind: 'human',
+    name: 'Nick',
+    client: 'browser',
+    state: 'online',
+    status: 'online',
+    started_at: '2026-10-13T08:58:12.000Z',
+    last_seen_at: '2026-10-13T09:05:00.000Z',
+    interventions: [],
+    outcome_unknown: false,
+  };
+
   const refusals: { name: string; check: Validator<unknown>; value: unknown; want: string }[] = [
     { name: 'a missing required key', check: whoAmIResponseV1, value: { id: 1, kind: 'human', name: 'nick' }, want: '$.role: required key is missing' },
     { name: 'a value of the wrong type', check: whoAmIResponseV1, value: { ...whoami, id: '1' }, want: '$.id: want an integer' },
@@ -92,6 +123,12 @@ describe('validators refuse', () => {
     { name: 'a ticket without its expiry', check: wsTicketV1, value: { ticket: 'conch_wst_x' }, want: '$.expires_at: required key is missing' },
     { name: 'an approval in a state it cannot have', check: approvalV1, value: { state: 'maybe' }, want: '$.state: want one of pending, escalated, resolved, expired' },
     { name: 'a post response without a message', check: postMessageResponseV2, value: {}, want: '$.message: required key is missing' },
+    { name: 'a session status outside the vocabulary', check: sessionV1, value: { ...session, status: 'busy' }, want: '$.status: want one of online, idle' },
+    { name: 'a session without outcome_unknown', check: sessionV1, value: { ...session, outcome_unknown: undefined }, want: '$.outcome_unknown: want a boolean' },
+    { name: 'a roster of another schema', check: sessionRosterV1, value: { schema: 'conch.session.v1', channel_id: 7, sessions: [] }, want: '$.schema: want one of conch.session_roster.v1' },
+    { name: 'a run in a state it cannot have', check: runV1, value: { schema: 'conch.run.v1', id: 1, session_id: 1, principal_id: 1, channel_id: 1, state: 'paused', task: 't', started_at: '2026-10-13T09:01:00Z' }, want: '$.state: want one of queued' },
+    { name: 'an intervention state outside the vocabulary', check: interventionV1, value: { schema: 'conch.intervention.v1', id: 1, run_id: 1, kind: 'cancel', state: 'done', requested_by: 1, requested_at: '2026-10-13T09:01:00Z' }, want: '$.state: want one of requested' },
+    { name: 'an activity kind outside the vocabulary', check: agentActivityV1, value: { schema: 'conch.agent.activity.v1', id: 1, run_id: 1, principal_id: 1, kind: 'dance', summary: 's', at: '2026-10-13T09:01:00Z' }, want: '$.kind: want one of run_started' },
     { name: 'a page with a bad message', check: listMessagesResponseV2, value: { messages: [{ ...message, id: 'x' }] }, want: '$.messages[0].id: want an integer' },
   ];
 
