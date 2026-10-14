@@ -54,11 +54,24 @@ func (stubAPI) CreateSession(context.Context, schema.CreateSessionRequestV1) (sc
 	return schema.SessionV1{}, errNoSessions
 }
 func (stubAPI) EndSession(context.Context, int64) error { return nil }
-func (stubAPI) SubscribeEvents(context.Context, string, int64, func(schema.SessionRosterV1) error) error {
+func (stubAPI) SubscribeEvents(context.Context, string, int64, cli.EventHandler) error {
 	return nil
 }
 func (stubAPI) ListRuns(context.Context, string, int64, int64, int) (schema.ListRunsResponseV1, error) {
 	return schema.ListRunsResponseV1{}, nil
+}
+
+func (stubAPI) GetRun(context.Context, int64) (schema.RunV1, error) {
+	return schema.RunV1{}, errNoSessions
+}
+func (stubAPI) ListActivity(context.Context, int64, int64, int) (schema.ListActivityResponseV1, error) {
+	return schema.ListActivityResponseV1{}, nil
+}
+func (stubAPI) CreateIntervention(context.Context, int64, schema.CreateInterventionRequestV1) (schema.InterventionV1, error) {
+	return schema.InterventionV1{}, errNoSessions
+}
+func (stubAPI) ListInterventions(context.Context, int64, int64, int) (schema.ListInterventionsResponseV1, error) {
+	return schema.ListInterventionsResponseV1{}, nil
 }
 
 var errNoSessions = errors.New("no sessions on the stub")

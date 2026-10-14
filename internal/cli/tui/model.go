@@ -41,8 +41,13 @@ type API interface {
 	// it online and carries the roster, and the runs of a channel.
 	CreateSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error)
 	EndSession(context.Context, int64) error
-	SubscribeEvents(ctx context.Context, channel string, session int64, receive func(schema.SessionRosterV1) error) error
+	SubscribeEvents(ctx context.Context, channel string, session int64, handler cli.EventHandler) error
 	ListRuns(ctx context.Context, channel string, session, after int64, limit int) (schema.ListRunsResponseV1, error)
+	// Run detail: one run, its activity and its interventions, and the ask.
+	GetRun(ctx context.Context, id int64) (schema.RunV1, error)
+	ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error)
+	CreateIntervention(ctx context.Context, run int64, request schema.CreateInterventionRequestV1) (schema.InterventionV1, error)
+	ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error)
 }
 
 type channelsLoaded struct {
@@ -142,6 +147,8 @@ const (
 	// modeAgents follows modeDecision so the modes that existed keep their
 	// values; tab reaches it from the inbox.
 	modeAgents
+	// modeRun is run detail, opened from the Agents view; esc goes back.
+	modeRun
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -258,6 +265,17 @@ type Model struct {
 	// and expanded the agents whose sessions are shown.
 	selAgent int64
 	expanded map[int64]bool
+	// selSub is the cursor under the selected agent when it is expanded: 0 is
+	// the agent's own line, then its sessions and their newest runs.
+	selSub int
+	// sessionRuns is the newest runs of each session that was unfolded, read
+	// from the server and then kept current by the run frames.
+	sessionRuns map[sessionRunKey][]schema.RunV1
+	// agentsStatus is the one line the Agents view shows in place of its name,
+	// until the next key: why run detail closed, or a failed read.
+	agentsStatus string
+	// rd is the open run of run detail; the zero value is none.
+	rd runDetail
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -276,8 +294,13 @@ func (m Model) status() string {
 	case modeChannels:
 		return m.channelStatus
 	case modeAgents:
+		if m.agentsStatus != "" {
+			return m.agentsStatus
+		}
 		// The mode is named, and so is the channel it is about.
 		return "agents: " + sanitize(m.current())
+	case modeRun:
+		return m.runStatus()
 	}
 	return m.inboxStatus
 }
@@ -303,7 +326,8 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
-		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool)}
+		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -346,6 +370,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:
+		if m.mode == modeRun {
+			return m.runKey(msg)
+		}
+		if m.mode == modeAgents {
+			// A line about the last key is read once.
+			m.agentsStatus = ""
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			if m.mode == modeDecision {
@@ -423,7 +454,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeChannels:
 				return m.submit()
 			case modeAgents:
-				return m.toggleAgent(), nil
+				return m.activateAgent()
 			case modeInbox:
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
@@ -489,6 +520,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.sessionStarted(msg)
 	case eventsRosterReceived:
 		return m.eventsRoster(msg)
+	case eventsRunReceived:
+		return m.eventsRun(msg)
+	case eventsActivityReceived:
+		return m.eventsActivity(msg)
+	case eventsInterventionReceived:
+		return m.eventsIntervention(msg)
+	case runRead:
+		return m.runRead(msg)
+	case activityRead:
+		return m.activityRead(msg)
+	case interventionsRead:
+		return m.interventionsRead(msg)
+	case interventionSent:
+		return m.interventionSent(msg)
+	case sessionRunsLoaded:
+		return m.sessionRunsLoaded(msg)
 	case eventsEnded:
 		return m.eventsEnded(msg)
 	case eventsRetryDue:
@@ -988,6 +1035,8 @@ func (m Model) View() string {
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
 	case modeAgents:
 		panes = m.agentsPanes(l)
+	case modeRun:
+		panes = borderStyle.Width(width - 2).Height(contentHeight).Render(strings.Join(m.runLines(width-2, contentHeight), "\n"))
 	default:
 		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(m.channelLines(leftWidth), "\n"))
 		messageLines := make([]string, 0, len(m.messages[m.current()]))
@@ -1015,12 +1064,17 @@ func (m Model) View() string {
 		inputStr = lipgloss.NewStyle().Width(width).Render(prompt + " " + clipTail(m.input, width-utf8.RuneCountInString(prompt)-2))
 	} else {
 		inputStr = lipgloss.NewStyle().Width(width).Render("")
+		if m.mode == modeRun {
+			inputStr = lipgloss.NewStyle().Width(width).Render(fitCells(m.runPrompt(width), width))
+		}
 	}
 
 	var statusKeys string
 	switch m.mode {
 	case modeDecision:
 		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
+	case modeRun:
+		statusKeys = "  ↑/↓ activity • esc back"
 	case modeAgents:
 		statusKeys = "  ↑/↓ agents • enter sessions • tab channels • esc quit"
 	case modeInbox:
@@ -1189,8 +1243,8 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
-	if m.mode == modeAgents {
-		// A list that is read with the keys; there is nothing to click.
+	if m.mode == modeAgents || m.mode == modeRun {
+		// Lists and a pane that are read with the keys; there is nothing to click.
 		return m, nil
 	}
 	if m.mode != modeChannels {

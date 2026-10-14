@@ -742,16 +742,29 @@ func (c *Client) ListRuns(ctx context.Context, channel string, session, after in
 	return result, nil
 }
 
-// SubscribeEvents follows channel's events socket and calls receive with each
-// session roster it sends: the whole state on connect and on every change.
-// With session set (the caller's own, not ended) the server keeps that session
-// online while the socket is open. Frames of other documents (runs, activity,
-// interventions) are not this method's and are skipped. A roster that fails
-// Validate ends the subscription with an error. There is no replay: a caller
-// that reconnects takes the next roster as the state. A server shutdown is
-// reported through websocket.StatusGoingAway, and loss of membership or of the
-// credential through websocket.StatusPolicyViolation.
-func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, receive func(schema.SessionRosterV1) error) error {
+// EventHandler is what SubscribeEvents calls for each document of the events
+// socket. A nil function means the caller does not want that document: its
+// frames are skipped without being decoded. Each is called with a document that
+// passed its own Validate.
+type EventHandler struct {
+	Roster       func(schema.SessionRosterV1) error
+	Run          func(schema.RunV1) error
+	Activity     func(schema.AgentActivityV1) error
+	Intervention func(schema.InterventionV1) error
+}
+
+// SubscribeEvents follows channel's events socket and calls the handler with
+// each document it sends: the session roster (the whole state on connect and
+// on every change), and the runs, activity entries and interventions the
+// caller may see, each whole and possibly repeated. With session set (the
+// caller's own, not ended) the server keeps that session online while the
+// socket is open. A frame of any other schema is skipped, so a newer server
+// may send more. A document that fails Validate ends the subscription with an
+// error. There is no replay: a caller that reconnects takes the next roster as
+// the state and reads runs over REST. A server shutdown is reported through
+// websocket.StatusGoingAway, and loss of membership or of the credential
+// through websocket.StatusPolicyViolation.
+func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, handler EventHandler) error {
 	endpoint := c.resolve("v1", "events", "ws")
 	if endpoint.Scheme == "http" {
 		endpoint.Scheme = "ws"
@@ -774,21 +787,157 @@ func (c *Client) SubscribeEvents(ctx context.Context, channel string, session in
 	}
 	defer func() { _ = conn.CloseNow() }()
 	for {
-		// Every frame is one pkg/schema document with a schema field. A roster
-		// decodes into its own type; any other document decodes into it too
-		// (unknown fields are ignored) and is told apart by its schema name.
-		var roster schema.SessionRosterV1
-		if err := wsjson.Read(ctx, conn, &roster); err != nil {
+		// Every frame is one pkg/schema document with a schema field; the
+		// field says which type the frame decodes into.
+		var frame json.RawMessage
+		if err := wsjson.Read(ctx, conn, &frame); err != nil {
 			return fmt.Errorf("cli: read events: %w", err)
 		}
-		if roster.Schema != schema.SessionRosterSchemaV1 {
-			continue
-		}
-		if err := roster.Validate(); err != nil {
-			return fmt.Errorf("cli: invalid session roster: %w", err)
-		}
-		if err := receive(roster); err != nil {
-			return fmt.Errorf("cli: receive events: %w", err)
+		if err := dispatchEvent(frame, handler); err != nil {
+			return err
 		}
 	}
+}
+
+// dispatchEvent decodes one frame into the type its schema names and hands it
+// to the handler that wants it.
+func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
+	var head struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(frame, &head); err != nil {
+		return fmt.Errorf("cli: read events: %w", err)
+	}
+	switch head.Schema {
+	case schema.SessionRosterSchemaV1:
+		if handler.Roster == nil {
+			return nil
+		}
+		var roster schema.SessionRosterV1
+		if err := decodeEvent(frame, &roster, "session roster"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Roster(roster))
+	case schema.RunSchemaV1:
+		if handler.Run == nil {
+			return nil
+		}
+		var run schema.RunV1
+		if err := decodeEvent(frame, &run, "run"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Run(run))
+	case schema.AgentActivitySchemaV1:
+		if handler.Activity == nil {
+			return nil
+		}
+		var entry schema.AgentActivityV1
+		if err := decodeEvent(frame, &entry, "activity"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Activity(entry))
+	case schema.InterventionSchemaV1:
+		if handler.Intervention == nil {
+			return nil
+		}
+		var iv schema.InterventionV1
+		if err := decodeEvent(frame, &iv, "intervention"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Intervention(iv))
+	}
+	return nil
+}
+
+// validator is a pkg/schema document that can check itself.
+type validator interface{ Validate() error }
+
+// decodeEvent decodes frame into doc, a pointer to a document type, and
+// validates it.
+func decodeEvent(frame json.RawMessage, doc validator, what string) error {
+	if err := json.Unmarshal(frame, doc); err != nil {
+		return fmt.Errorf("cli: read events: %w", err)
+	}
+	if err := doc.Validate(); err != nil {
+		return fmt.Errorf("cli: invalid %s: %w", what, err)
+	}
+	return nil
+}
+
+func receiveEvent(err error) error {
+	if err != nil {
+		return fmt.Errorf("cli: receive events: %w", err)
+	}
+	return nil
+}
+
+// GetRun returns run id, if the caller may see it; otherwise the server's
+// run_not_found.
+func (c *Client) GetRun(ctx context.Context, id int64) (schema.RunV1, error) {
+	endpoint := c.resolve("v1", "runs", strconv.FormatInt(id, 10))
+	var result schema.RunV1
+	if err := c.roundTrip(ctx, "get run", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.RunV1{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return schema.RunV1{}, fmt.Errorf("cli: invalid run: %w", err)
+	}
+	return result, nil
+}
+
+// ListActivity returns one forward page of run's activity, oldest first,
+// starting after the entry id after (0 for the first page).
+func (c *Client) ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error) {
+	endpoint := c.resolve("v1", "runs", strconv.FormatInt(run, 10), "activity")
+	pageQuery(endpoint, after, limit)
+	var result schema.ListActivityResponseV1
+	if err := c.roundTrip(ctx, "list activity", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListActivityResponseV1{}, err
+	}
+	for _, entry := range result.Activity {
+		if err := entry.Validate(); err != nil {
+			return schema.ListActivityResponseV1{}, fmt.Errorf("cli: invalid activity: %w", err)
+		}
+	}
+	return result, nil
+}
+
+// CreateIntervention asks run to take a message or to stop. The answer is the
+// intervention as stored, in state requested.
+func (c *Client) CreateIntervention(ctx context.Context, run int64, request schema.CreateInterventionRequestV1) (schema.InterventionV1, error) {
+	endpoint := c.resolve("v1", "runs", strconv.FormatInt(run, 10), "interventions")
+	var result schema.InterventionV1
+	if err := c.roundTrip(ctx, "create intervention", http.MethodPost, endpoint, request, &result); err != nil {
+		return schema.InterventionV1{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return schema.InterventionV1{}, fmt.Errorf("cli: invalid intervention: %w", err)
+	}
+	return result, nil
+}
+
+// ListInterventions returns one forward page of run's interventions, oldest
+// first, starting after the intervention id after. The response has no cursor:
+// a page as long as limit may have a successor.
+func (c *Client) ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error) {
+	endpoint := c.resolve("v1", "runs", strconv.FormatInt(run, 10), "interventions")
+	pageQuery(endpoint, after, limit)
+	var result schema.ListInterventionsResponseV1
+	if err := c.roundTrip(ctx, "list interventions", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListInterventionsResponseV1{}, err
+	}
+	for _, iv := range result.Interventions {
+		if err := iv.Validate(); err != nil {
+			return schema.ListInterventionsResponseV1{}, fmt.Errorf("cli: invalid intervention: %w", err)
+		}
+	}
+	return result, nil
+}
+
+// pageQuery sets the after and limit of a forward page on endpoint.
+func pageQuery(endpoint *url.URL, after int64, limit int) {
+	query := endpoint.Query()
+	query.Set("after", strconv.FormatInt(after, 10))
+	query.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = query.Encode()
 }

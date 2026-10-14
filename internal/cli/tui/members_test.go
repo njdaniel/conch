@@ -94,7 +94,7 @@ func (a *sessionAPI) EndSession(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (a *sessionAPI) SubscribeEvents(ctx context.Context, channel string, session int64, _ func(schema.SessionRosterV1) error) error {
+func (a *sessionAPI) SubscribeEvents(ctx context.Context, channel string, session int64, _ cli.EventHandler) error {
 	call := eventsCall{channel: channel, session: session, ctx: ctx}
 	a.mu.Lock()
 	a.events = append(a.events, call)
