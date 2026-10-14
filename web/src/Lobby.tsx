@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -11,13 +11,14 @@ function startsOpen(): boolean {
 }
 
 // The lobby: channels on the left, the open channel in the middle, a
-// collapsible panel on the right, a status line at the bottom. The middle and
-// the panel are empty until #281 and #282 fill them.
+// collapsible panel on the right, a status line at the bottom. The middle is
+// the conversation the caller gives it; the panel is empty until #282.
 export function Lobby({
   origin,
   name,
   channels,
   connection,
+  conversation,
   onOpen,
   onRetry,
   onSignOut,
@@ -26,6 +27,7 @@ export function Lobby({
   readonly name: string;
   readonly channels: ChannelsState;
   readonly connection: ConnectionState;
+  readonly conversation: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -61,8 +63,11 @@ export function Lobby({
             <p className="empty">Loading channels…</p>
           )}
         </nav>
-        <section aria-label="Conversation" tabIndex={0} className="conversation">
-          {channels.selected === null ? null : <h2>{channels.selected}</h2>}
+        <section aria-label="Conversation" className="conversation">
+          {channels.lost === undefined ? null : (
+            <p role="alert">You no longer have access to #{channels.lost}</p>
+          )}
+          {conversation}
         </section>
         <aside aria-label="Members panel" className="panel">
           <button

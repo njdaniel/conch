@@ -1,8 +1,9 @@
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
-import { useCallback, useEffect, useReducer, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
+import { Conversation } from './Conversation';
 import { Lobby } from './Lobby';
 import { OperatorWarning } from './OperatorWarning';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel } from './route';
@@ -10,12 +11,25 @@ import { SignIn } from './SignIn';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
 import { connectionReducer } from './state/connection';
+import { draftFor, draftsReducer, initialDrafts } from './state/drafts';
+import { chatFor, chatReducer, initialChat, lastId, type ChatAction } from './state/messages';
+import { useLiveChannel } from './useLiveChannel';
 
 export function App({ origin }: { readonly origin: string }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
   const [connection, dispatchConnection] = useReducer(connectionReducer, 'signedOut');
   const [channels, dispatchChannels] = useReducer(channelsReducer, initialChannels);
+  const [chat, dispatchRaw] = useReducer(chatReducer, initialChat);
+  const [drafts, dispatchDrafts] = useReducer(draftsReducer, initialDrafts);
   const [attempt, setAttempt] = useState(0);
+  // The newest chat state, for code that outlives a render (the socket's resume point).
+  // It is moved by the same reducer in the same call as the state, so it is
+  // never behind: the history is loaded and the socket opened in one tick.
+  const chatNow = useRef(chat);
+  const dispatchChat = useCallback((action: ChatAction) => {
+    chatNow.current = chatReducer(chatNow.current, action);
+    dispatchRaw(action);
+  }, []);
 
   // A credential left by an earlier load of this tab is checked once.
   const restoring = auth.phase === 'restoring';
@@ -65,6 +79,8 @@ export function App({ origin }: { readonly origin: string }) {
     if (auth.phase === 'signedOut') {
       dispatchConnection({ type: 'closed' });
       dispatchChannels({ type: 'reset' });
+      dispatchChat({ type: 'reset' });
+      dispatchDrafts({ type: 'reset' });
       setAttempt(0);
     }
   }, [auth.phase]);
@@ -88,6 +104,40 @@ export function App({ origin }: { readonly origin: string }) {
     const hash = hashForChannel(channels.selected);
     if (window.location.hash !== hash) window.location.hash = hash;
   }, [channels.selected]);
+
+  const onUnauthorized = useCallback(() => {
+    dispatchAuth({ type: 'unauthorized' });
+  }, []);
+  const onLost = useCallback((name: string) => {
+    dispatchChannels({ type: 'lost', name });
+  }, []);
+  const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
+
+  const principal = auth.phase === 'signedIn' ? auth.principal : null;
+  const selected = signedIn ? channels.selected : null;
+  const channelId = channels.channels.find((c) => c.name === selected)?.id ?? null;
+  const live = useLiveChannel({
+    channel: channelId === null ? null : selected,
+    channelId,
+    me: principal ?? { id: 0, name: '', kind: 'human' },
+    getAfter,
+    dispatchChat,
+    dispatchConnection,
+    onUnauthorized,
+    onLost,
+  });
+
+  // One POST per click. Nothing here sends a message a second time on its own.
+  const post = useCallback(
+    (name: string, localId: number, body: string) => {
+      void api.postMessage(name, body).then((result) => {
+        if (result.ok) dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
+        else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+        else dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+      });
+    },
+    [],
+  );
 
   const signOut = useCallback(() => {
     api.signOut();
@@ -139,6 +189,42 @@ export function App({ origin }: { readonly origin: string }) {
           name={auth.principal.name}
           channels={channels}
           connection={connection}
+          conversation={
+            selected === null || channelId === null ? null : (
+              <Conversation
+                key={selected}
+                channel={selected}
+                chat={chatFor(chat, selected)}
+                live={live.status}
+                people={live.people}
+                nets={live.nets}
+                viewer={auth.principal.id}
+                draft={draftFor(drafts, selected)}
+                onDraft={(text) => {
+                  dispatchDrafts({ type: 'edit', channel: selected, text });
+                }}
+                onSend={(body) => {
+                  const localId = chatFor(chat, selected).nextLocalId;
+                  dispatchChat({ type: 'sending', channel: selected, body, at: Date.now() });
+                  dispatchDrafts({ type: 'edit', channel: selected, text: '' });
+                  post(selected, localId, body);
+                }}
+                onRetrySend={(localId) => {
+                  const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
+                  if (send === undefined || send.status === 'sending') return;
+                  dispatchChat({ type: 'retrying', channel: selected, localId });
+                  post(selected, localId, send.body);
+                }}
+                onDismissSend={(localId) => {
+                  dispatchChat({ type: 'discard', channel: selected, localId });
+                }}
+                onShowOlder={() => {
+                  dispatchChat({ type: 'showOlder', channel: selected });
+                }}
+                onReload={live.retry}
+              />
+            )
+          }
           onOpen={(name) => {
             dispatchChannels({ type: 'select', name });
           }}

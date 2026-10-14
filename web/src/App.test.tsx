@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 
@@ -146,7 +146,7 @@ describe('lobby', () => {
     const list = screen.getByRole('navigation', { name: 'Channels' });
     expect(list.querySelectorAll('button')).toHaveLength(3);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
-    expect(screen.getByRole('region', { name: 'Conversation' }).textContent).toBe('general');
+    expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
     const status = screen.getByRole('status', { name: 'Status' });
     expect(status.textContent).toContain('ada');
     expect(status.textContent).toContain(origin);
@@ -159,7 +159,10 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     await screen.findByText('Loading channels…');
-    expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connecting');
+    // The status follows in the effect after the first render; waited for, not raced.
+    await waitFor(() => {
+      expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connecting');
+    });
   });
 
   it('opens the channel named by the hash', async () => {
@@ -215,7 +218,7 @@ describe('lobby', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'ops' }));
     // A button's Enter is a click.
     fireEvent.click(screen.getByRole('button', { name: 'ops' }));
-    expect(screen.getByRole('region', { name: 'Conversation' }).textContent).toBe('ops');
+    expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('ops');
     expect(window.location.hash).toBe('#/c/ops');
   });
 

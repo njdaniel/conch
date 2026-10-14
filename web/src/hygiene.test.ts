@@ -28,12 +28,12 @@ describe('credential handling', () => {
     expect(logging).toEqual([]);
   });
 
-  it('is read only through authed (or by signIn, for a candidate)', () => {
+  it('is read only through authed and authedPost (or by signIn, for a candidate)', () => {
     const code = sources['./api.ts'] ?? '';
     // Every readToken() call is inside authed: one call, and nothing exports
     // the token's accessors for another module to use.
-    // Its definition, authed and hasToken: no other call reads the token.
-    expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(3);
+    // Its definition, authed, authedPost and hasToken: no other call reads the token.
+    expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(4);
     expect(code).not.toMatch(/export\s+(async\s+)?function\s+(read|write|drop)Token/);
   });
 
@@ -57,6 +57,20 @@ describe('rendering hygiene', () => {
       .filter(([, code]) => forbidden.test(code))
       .map(([path]) => path);
     expect(hits).toEqual([]);
+  });
+});
+
+describe('the socket ticket', () => {
+  it('is in src/api.ts alone, and the page is never navigated by script', () => {
+    const touching = Object.entries(sources)
+      .filter(([, code]) => /new\s+WebSocket\b|ws-tickets/.test(code))
+      .map(([path]) => path);
+    expect(touching).toEqual(['./api.ts']);
+    // Only the hash names the channel; nothing else may write the address bar.
+    const navigating = Object.entries(sources)
+      .filter(([, code]) => /location\.(href|search|pathname)\s*=|location\.(assign|replace)\(|history\.(push|replace)State/.test(code))
+      .map(([path]) => path);
+    expect(navigating).toEqual([]);
   });
 });
 

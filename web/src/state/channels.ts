@@ -6,6 +6,9 @@ export interface ChannelsState {
   readonly loaded: boolean;
   // The open channel's name, or null when there is none.
   readonly selected: string | null;
+  // A channel the server has closed on this tab for good (1008) while the
+  // credential still works: it is gone from the list and this says which.
+  readonly lost?: string;
 }
 
 export type ChannelsAction =
@@ -18,6 +21,7 @@ export type ChannelsAction =
       readonly remembered: string | null;
     }
   | { readonly type: 'select'; readonly name: string }
+  | { readonly type: 'lost'; readonly name: string }
   | { readonly type: 'reset' };
 
 export const initialChannels: ChannelsState = { channels: [], loaded: false, selected: null };
@@ -35,7 +39,14 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       return { channels, loaded: true, selected };
     }
     case 'select':
-      return has(state.channels, action.name) ? { ...state, selected: action.name } : state;
+      return has(state.channels, action.name)
+        ? { channels: state.channels, loaded: state.loaded, selected: action.name }
+        : state;
+    case 'lost': {
+      const channels = state.channels.filter((c) => c.name !== action.name);
+      const selected = state.selected === action.name ? (channels[0]?.name ?? null) : state.selected;
+      return { ...state, channels, selected, lost: action.name };
+    }
     case 'reset':
       return initialChannels;
   }
