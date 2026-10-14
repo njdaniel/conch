@@ -1,0 +1,15 @@
+{
+  "schema": "conch.agent.activity.v1",
+  "id": 507,
+  "run": 41,
+  "agent": 3,
+  "kind": "command_finished",
+  "summary": "ran go test ./...",
+  "outcome": "exit 0",
+  "at": "2026-10-13T09:03:10.000Z",
+  "data": {
+    "command": "go test ./...",
+    "exit_code": 0,
+    "duration_ms": 4210
+  }
+}

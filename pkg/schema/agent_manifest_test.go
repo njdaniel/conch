@@ -25,6 +25,7 @@ func TestAgentManifestGoldenFixtures(t *testing.T) {
 		{"agent-manifest-v1.json", func() any { return new(AgentManifestV1) }},
 		{"agent-manifest-v1-deny-all.json", func() any { return new(AgentManifestV1) }},
 		{"agent-manifest-v1-nets.json", func() any { return new(AgentManifestV1) }},
+		{"agent-manifest-v1-sessions.json", func() any { return new(AgentManifestV1) }},
 		{"put-agent-manifest-request-v1.json", func() any { return new(PutAgentManifestRequestV1) }},
 		{"put-agent-manifest-response-v1.json", func() any { return new(PutAgentManifestResponseV1) }},
 		{"get-agent-manifest-response-v1.json", func() any { return new(GetAgentManifestResponseV1) }},
@@ -543,6 +544,64 @@ func TestCapabilitiesListsTheWholeVocabulary(t *testing.T) {
 			t.Errorf("tool %q maps to %q, which Capabilities() does not list", tool, c)
 		}
 	}
+}
+
+// The P3 capabilities (issue #264, decision D9) are in the vocabulary, after
+// the approval ones, and a manifest may grant them; no MCP tool maps to them
+// yet, because the tools arrive with #267 and the table is that issue's.
+func TestSessionAndRunCapabilities(t *testing.T) {
+	if CapabilitySessionsManage != "sessions.manage" || CapabilityRunsManage != "runs.manage" {
+		t.Fatalf("capabilities = %q, %q", CapabilitySessionsManage, CapabilityRunsManage)
+	}
+	want := []Capability{
+		CapabilityMessagesRead, CapabilityMessagesPost,
+		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
+		CapabilitySessionsManage, CapabilityRunsManage,
+	}
+	if got := Capabilities(); strings.Join(capabilityStrings(got), ",") != strings.Join(capabilityStrings(want), ",") {
+		t.Errorf("Capabilities() = %v, want %v", got, want)
+	}
+	for _, c := range []Capability{CapabilitySessionsManage, CapabilityRunsManage} {
+		if !c.Valid() {
+			t.Errorf("%q.Valid() = false", c)
+		}
+		for tool, mapped := range MCPToolCapabilities() {
+			if mapped == c {
+				t.Errorf("tool %q already maps to %q; that mapping belongs to #267", tool, c)
+			}
+		}
+	}
+	for _, c := range []Capability{"sessions", "sessions.*", "session.manage", "runs", "runs.*", "run.manage", "SESSIONS.MANAGE", "runs_manage"} {
+		if c.Valid() {
+			t.Errorf("capability %q should be invalid", c)
+		}
+	}
+
+	m := validAgentManifest()
+	m.Capabilities = []Capability{CapabilityMessagesRead, CapabilityMessagesPost, CapabilitySessionsManage, CapabilityRunsManage}
+	m.RateLimits = append(m.RateLimits, RateLimit{Capability: CapabilityRunsManage, Max: 30, WindowSeconds: 60})
+	if err := m.Validate(); err != nil {
+		t.Fatalf("manifest granting the P3 capabilities: Validate() = %v", err)
+	}
+	if !m.Allows(CapabilitySessionsManage) || !m.Allows(CapabilityRunsManage) {
+		t.Error("manifest listing the P3 capabilities does not Allow them")
+	}
+	// Holding them implies nothing else (no capability implies another).
+	if m.Allows(CapabilityApprovalsRequest) {
+		t.Error("runs.manage or sessions.manage implied approvals.request")
+	}
+	// And a manifest without them does not hold them.
+	if validAgentManifest().Allows(CapabilitySessionsManage) || validAgentManifest().Allows(CapabilityRunsManage) {
+		t.Error("the pre-P3 manifest allows a P3 capability it does not list")
+	}
+}
+
+func capabilityStrings(caps []Capability) []string {
+	out := make([]string, len(caps))
+	for i, c := range caps {
+		out[i] = string(c)
+	}
+	return out
 }
 
 func TestManifestVocabularyValid(t *testing.T) {
