@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -598,27 +599,21 @@ func (m Model) ask(req schema.CreateInterventionRequestV1) (tea.Model, tea.Cmd) 
 // The newest runs of a session, for the Agents view.
 
 // loadSessionRuns reads the newest runs of one session in the selected
-// channel. The list is ascending by id, so the newest are at the end of the
-// last page.
+// channel with one request, newest first from the server, and keeps them
+// ascending by id as the rest of the view does.
 func (m Model) loadSessionRuns(session int64) tea.Cmd {
 	api, ctx, channel := m.api, m.ctx, m.current()
 	return func() tea.Msg {
-		var newest []schema.RunV1
-		var after int64
-		for range maxRunPages {
-			page, err := api.ListRuns(ctx, channel, session, after, pageLimit)
-			if err != nil {
-				return sessionRunsLoaded{channel: channel, session: session, err: err}
-			}
-			newest = append(newest, page.Runs...)
-			if len(newest) > recentRuns {
-				newest = newest[len(newest)-recentRuns:]
-			}
-			if page.NextAfter == 0 || len(page.Runs) == 0 {
-				break
-			}
-			after = page.NextAfter
+		page, err := api.ListRuns(ctx, channel, session, cli.RunsPage{NewestFirst: true}, recentRuns)
+		if err != nil {
+			return sessionRunsLoaded{channel: channel, session: session, err: err}
 		}
+		newest := page.Runs
+		if len(newest) > recentRuns {
+			newest = newest[:recentRuns]
+		}
+		newest = slices.Clone(newest)
+		slices.Reverse(newest)
 		return sessionRunsLoaded{channel: channel, session: session, runs: newest}
 	}
 }
