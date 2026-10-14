@@ -455,8 +455,8 @@ func (s *Server) sweepSessions(ctx context.Context) {
 		}
 		return
 	}
-	if res.Stale > 0 || res.Offline > 0 {
-		slog.DebugContext(ctx, "sessions: swept", "stale", res.Stale, "offline", res.Offline)
+	if res.Stale > 0 || res.Offline > 0 || res.Expired > 0 {
+		slog.DebugContext(ctx, "sessions: swept", "stale", res.Stale, "offline", res.Offline, "expired", res.Expired)
 		// The result counts and does not say whose, so every roster is
 		// rebuilt; each socket sends only a roster that differs from its last.
 		s.events.notifyRosters()
