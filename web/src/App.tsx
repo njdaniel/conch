@@ -12,7 +12,7 @@ import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
 import { connectionReducer } from './state/connection';
 import { draftFor, draftsReducer, initialDrafts } from './state/drafts';
-import { chatFor, chatReducer, initialChat, lastId, type ChatAction } from './state/messages';
+import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
@@ -116,6 +116,11 @@ export function App({ origin }: { readonly origin: string }) {
     dispatchChannels({ type: 'lost', name });
   }, []);
   const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
+  // One older page at a time, and none past maxHeld.
+  const getOldest = useCallback((name: string) => {
+    const held = chatFor(chatNow.current, name);
+    return held.older === 'loading' || !canLoadOlder(held) ? null : oldestId(held);
+  }, []);
 
   const principal = auth.phase === 'signedIn' ? auth.principal : null;
   const selected = signedIn ? channels.selected : null;
@@ -125,6 +130,7 @@ export function App({ origin }: { readonly origin: string }) {
     channelId,
     me: principal ?? { id: 0, name: '', kind: 'human' },
     getAfter,
+    getOldest,
     dispatchChat,
     dispatchConnection,
     onUnauthorized,
@@ -240,9 +246,7 @@ export function App({ origin }: { readonly origin: string }) {
                 onDismissSend={(localId) => {
                   dispatchChat({ type: 'discard', channel: selected, localId });
                 }}
-                onShowOlder={() => {
-                  dispatchChat({ type: 'showOlder', channel: selected });
-                }}
+                onLoadOlder={live.loadOlder}
                 onReload={live.retry}
               />
                 </div>

@@ -24,6 +24,8 @@ export interface Live {
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly retry: () => void;
+  // Asks for the page below the oldest message held; a 401 signs out.
+  readonly loadOlder: () => void;
 }
 
 const realClock = {
@@ -38,6 +40,7 @@ export function useLiveChannel({
   channelId,
   me,
   getAfter,
+  getOldest,
   dispatchChat,
   dispatchConnection,
   onUnauthorized,
@@ -47,6 +50,8 @@ export function useLiveChannel({
   readonly channelId: number | null;
   readonly me: { readonly id: number; readonly name: string; readonly kind: PrincipalKind };
   readonly getAfter: (channel: string) => number;
+  // The id to read below, or null when no older page is to be asked for now.
+  readonly getOldest: (channel: string) => number | null;
   readonly dispatchChat: Dispatch<ChatAction>;
   readonly dispatchConnection: Dispatch<ConnectionAction>;
   readonly onUnauthorized: () => void;
@@ -141,7 +146,7 @@ export function useLiveChannel({
         setStatus('failed');
         return;
       }
-      dispatchChat({ type: 'historyLoaded', channel, messages: result.value });
+      dispatchChat({ type: 'historyLoaded', channel, messages: result.value, more: result.value.length >= api.historyLimit });
       feed = new Feed({
         channel,
         open: api.openSocket,
@@ -167,5 +172,24 @@ export function useLiveChannel({
     setAttempt((n) => n + 1);
   }, []);
 
-  return { status, people, nets, retry };
+  const loadOlder = useCallback(() => {
+    if (channel === null) return;
+    const before = getOldest(channel);
+    if (before === null) return;
+    dispatchChat({ type: 'olderLoading', channel });
+    void api.loadMessages(channel, before).then((result) => {
+      if (!result.ok) {
+        if (result.failure === 'unauthorized') {
+          onUnauthorized();
+          return;
+        }
+        if (result.failure === 'network') dispatchConnection({ type: 'lost' });
+        dispatchChat({ type: 'olderFailed', channel });
+        return;
+      }
+      dispatchChat({ type: 'olderLoaded', channel, messages: result.value, more: result.value.length >= api.historyLimit });
+    });
+  }, [channel, getOldest, dispatchChat, dispatchConnection, onUnauthorized]);
+
+  return { status, people, nets, retry, loadOlder };
 }
