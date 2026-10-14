@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -63,13 +65,23 @@ var runtimeProfiles = map[string]runtimeProfile{
 // no profile is only a label: it gets Claude Code's default command and the
 // text reader, as before profiles existed (the fixture runner's label
 // `fixture` relies on it).
-func profileFor(name string) runtimeProfile {
+func profileFor(name string) (p runtimeProfile, known bool) {
 	if p, ok := runtimeProfiles[name]; ok {
-		return p
+		return p, true
 	}
-	p := runtimeProfiles["claude-code"]
+	p = runtimeProfiles["claude-code"]
 	p.name = name
-	return p
+	return p, false
+}
+
+// profileNames lists the profiles, for the refusal of a name that is none.
+func profileNames() string {
+	names := make([]string, 0, len(runtimeProfiles))
+	for name := range runtimeProfiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 const (
@@ -79,7 +91,19 @@ const (
 	// maxCommandWordRunes bounds the one word an activity entry may say about
 	// a command.
 	maxCommandWordRunes = 64
+	// maxActivityPairs bounds the command pairs one run reports; a stream that
+	// makes more is not a reply agent at work.
+	maxActivityPairs = 256
+	// maxItemIDBytes bounds an item id kept to pair a start with its end; a
+	// longer one is treated as unkeyed.
+	maxItemIDBytes = 128
+	// maxOpenItems bounds the started items waiting for their end.
+	maxOpenItems = 64
 )
+
+// errTooMuchActivity ends a run that reported more than maxActivityPairs
+// commands. Its text is the run's outcome.
+var errTooMuchActivity = errors.New("too much activity")
 
 // errNotJSONL ends a run whose command printed too much that was not JSON. Its
 // text is the run's outcome.
@@ -140,10 +164,13 @@ func (i codexItem) outcome() string {
 	if i.ExitCode != nil {
 		return "exit " + strconv.Itoa(*i.ExitCode)
 	}
-	if i.Status == "" {
-		return "unknown"
+	// Only the states Codex documents: the status is the model's side of the
+	// stream, and nothing else of it may reach the activity.
+	switch i.Status {
+	case "completed", "failed", "declined", "in_progress":
+		return i.Status
 	}
-	return i.Status
+	return "unknown"
 }
 
 // readCodex reads the events of `codex exec --json`, one per line. A command or
@@ -161,6 +188,8 @@ func (c commandRunner) readCodex(ctx context.Context, stdout io.Reader, fx fixtu
 		reply   string
 		ignored int
 		open    = map[string]bool{}
+		order   []string // open ids, oldest first
+		pairs   int
 	)
 	reader := bufio.NewReaderSize(stdout, 64<<10)
 	for {
@@ -174,19 +203,36 @@ func (c commandRunner) readCodex(ctx context.Context, stdout io.Reader, fx fixtu
 				}
 			case event.Item != nil:
 				item := event.Item
+				if len(item.ID) > maxItemIDBytes {
+					item.ID = "" // unkeyed: a start is then never matched to its end
+				}
 				switch {
 				case event.Type == "item.completed" && item.Type == "agent_message":
 					reply = item.Text
 				case item.Type == "command_execution" || item.Type == "mcp_tool_call":
-					if event.Type == "item.started" && !open[item.ID] {
-						open[item.ID] = true
+					if event.Type == "item.started" && (item.ID == "" || !open[item.ID]) {
+						if pairs++; pairs > maxActivityPairs {
+							return "", errTooMuchActivity
+						}
+						if item.ID != "" {
+							if len(order) >= maxOpenItems {
+								delete(open, order[0])
+								order = order[1:]
+							}
+							open[item.ID], order = true, append(order, item.ID)
+						}
 						emit(schema.ActivityKindCommandStarted, "started "+item.word(), "")
 					}
 					if event.Type == "item.completed" {
-						if !open[item.ID] {
+						if item.ID == "" || !open[item.ID] {
+							if pairs++; pairs > maxActivityPairs {
+								return "", errTooMuchActivity
+							}
 							emit(schema.ActivityKindCommandStarted, "started "+item.word(), "")
+						} else {
+							delete(open, item.ID)
+							order = slices.DeleteFunc(order, func(id string) bool { return id == item.ID })
 						}
-						delete(open, item.ID)
 						emit(schema.ActivityKindCommandFinished, "command finished", item.outcome())
 					}
 				}

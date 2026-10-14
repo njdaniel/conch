@@ -147,7 +147,7 @@ func loadConfig(lookup envLookup) (config, error) {
 	}
 	cfg.ContextMessages = contextMessages
 	cfg.Runtime = get("CONCH_ADAPTER_RUNTIME", "", "claude-code")
-	profile := profileFor(cfg.Runtime)
+	profile, knownProfile := profileFor(cfg.Runtime)
 	cfg.Reader, cfg.StreamsActivity = profile.reader, profile.streamsActivity()
 	if cfg.Model = get("CONCH_ADAPTER_MODEL", "CONCH_BOT_MODEL", profile.model); cfg.Model == "" {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL (or CONCH_BOT_MODEL) is required when CONCH_ADAPTER_RUNTIME is %s", profile.name)
@@ -170,7 +170,15 @@ func loadConfig(lookup envLookup) (config, error) {
 	line, binary := get("CONCH_ADAPTER_CMD", "", ""), ""
 	isDefault := line == ""
 	if isDefault {
+		if !knownProfile {
+			return config{}, fmt.Errorf("CONCH_ADAPTER_RUNTIME %q is no runtime profile (%s); set CONCH_ADAPTER_CMD to use it as a label", cfg.Runtime, profileNames())
+		}
 		line, binary = profile.command, get(profile.binEnv, "", "")
+		if binary != "" && strings.ContainsRune(binary, filepath.Separator) && !filepath.IsAbs(binary) {
+			// A relative path would be read against the workdir, not the
+			// directory it was written for.
+			return config{}, fmt.Errorf("%s must be a bare program name or an absolute path", profile.binEnv)
+		}
 	}
 	if cfg.Command, err = parseCommand(line, binary); err != nil {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CMD: %w", err)

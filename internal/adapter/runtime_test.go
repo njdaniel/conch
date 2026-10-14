@@ -54,7 +54,6 @@ func TestRuntimeProfileSelection(t *testing.T) {
 		{"codex ignores CLAUDE_BIN", map[string]string{"CONCH_ADAPTER_RUNTIME": "codex", "CONCH_ADAPTER_MODEL": "m1", "CLAUDE_BIN": "/x/claude"}, "codex", "m1", readerCodexJSONL, true, codexDefault, ""},
 		// A command someone configured is run as written, and read as the profile reads.
 		{"codex with a command", map[string]string{"CONCH_ADAPTER_RUNTIME": "codex", "CONCH_ADAPTER_MODEL": "m1", "CONCH_ADAPTER_CMD": "/x/stub.sh --flag", "CODEX_BIN": "/x/codex"}, "codex", "m1", readerCodexJSONL, true, []string{"/x/stub.sh", "--flag"}, ""},
-		{"unknown label", map[string]string{"CONCH_ADAPTER_RUNTIME": "fixture"}, "fixture", "sonnet", readerText, false, strings.Fields(defaultCommand), ""},
 		{"unknown label with a command", map[string]string{"CONCH_ADAPTER_RUNTIME": "fixture", "CONCH_ADAPTER_CMD": "/x/echo.sh", "CONCH_ADAPTER_FIXTURE": "1"}, "fixture", "sonnet", readerText, false, []string{"/x/echo.sh"}, ""},
 	}
 	for _, tt := range tests {
@@ -382,4 +381,94 @@ func TestCodexCancelKillsTheProcessGroup(t *testing.T) {
 	if got := mcp.runStates[len(mcp.runStates)-1]; got != "cancelled:cancelled by request" {
 		t.Fatalf("run states = %q", mcp.runStates)
 	}
+}
+
+// A runtime name that is no profile is a label only when the command is given:
+// a typo must not run Claude with its permissions skipped.
+func TestUnknownRuntimeNeedsACommand(t *testing.T) {
+	for _, name := range []string{"Codex", "codex-cli", "openai", "fixture"} {
+		_, err := loadConfig(withEnv(map[string]string{"CONCH_ADAPTER_RUNTIME": name}))
+		if err == nil || !strings.Contains(err.Error(), "claude-code, codex") || strings.Contains(err.Error(), "\n") {
+			t.Errorf("%s: error = %v, want one line listing the profiles", name, err)
+		}
+	}
+}
+
+func TestBinaryVariablesMustNotBeRelativePaths(t *testing.T) {
+	tests := []struct {
+		env string
+		val string
+		ok  bool
+	}{
+		{"CODEX_BIN", "codex", true}, {"CODEX_BIN", "/opt/codex", true}, {"CODEX_BIN", "bin/codex", false}, {"CODEX_BIN", "./codex", false},
+		{"CLAUDE_BIN", "/opt/claude", true}, {"CLAUDE_BIN", "../claude", false},
+	}
+	for _, tt := range tests {
+		env := map[string]string{tt.env: tt.val, "CONCH_ADAPTER_MODEL": "m"}
+		if tt.env == "CODEX_BIN" {
+			env["CONCH_ADAPTER_RUNTIME"] = "codex"
+		}
+		_, err := loadConfig(withEnv(env))
+		if (err == nil) != tt.ok || (err != nil && !strings.Contains(err.Error(), tt.env)) {
+			t.Errorf("%s=%s: error = %v, want ok %v", tt.env, tt.val, err, tt.ok)
+		}
+	}
+}
+
+func TestCodexOutcomeIsAllowlisted(t *testing.T) {
+	hostile := strings.Repeat("secret\nline ", 40)
+	for _, status := range []string{"completed", "failed", "declined", "in_progress"} {
+		_, entries, _ := readCodexLines(t, `{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls","status":"`+status+`"}}`, false)
+		if entries[1] != "command_finished|command finished|"+status {
+			t.Errorf("%s: %q", status, entries)
+		}
+	}
+	_, entries, _ := readCodexLines(t, `{"type":"item.completed","item":{"id":"1","type":"command_execution","command":"ls","status":"`+strings.ReplaceAll(hostile, "\n", `\n`)+`"}}`, false)
+	if entries[1] != "command_finished|command finished|unknown" {
+		t.Errorf("a hostile status reached the activity: %q", entries)
+	}
+}
+
+func TestCodexReaderBounds(t *testing.T) {
+	started := func(id string) string {
+		return `{"type":"item.started","item":{"id":"` + id + `","type":"command_execution","command":"ls"}}` + "\n"
+	}
+	t.Run("pairs per run", func(t *testing.T) {
+		var in strings.Builder
+		for i := 0; i < maxActivityPairs; i++ {
+			in.WriteString(started(strconv.Itoa(i)))
+		}
+		if _, entries, err := readCodexLines(t, in.String(), false); err != nil || len(entries) != maxActivityPairs {
+			t.Fatalf("at the cap: %d entries, %v", len(entries), err)
+		}
+		in.WriteString(started("over"))
+		if _, entries, err := readCodexLines(t, in.String(), false); !errors.Is(err, errTooMuchActivity) || len(entries) != maxActivityPairs {
+			t.Fatalf("over the cap: %d entries, %v", len(entries), err)
+		}
+	})
+	t.Run("a long id is unkeyed", func(t *testing.T) {
+		long := strings.Repeat("x", maxItemIDBytes+1)
+		_, entries, _ := readCodexLines(t, started(long)+`{"type":"item.completed","item":{"id":"`+long+`","type":"command_execution","command":"ls","exit_code":0}}`, false)
+		if len(entries) != 3 { // start, then an unmatched end gets its own start
+			t.Fatalf("entries = %q", entries)
+		}
+	})
+	t.Run("open items are bounded, oldest dropped", func(t *testing.T) {
+		var in strings.Builder
+		for i := 0; i <= maxOpenItems; i++ { // one more than fit: id 0 is dropped
+			in.WriteString(started(strconv.Itoa(i)))
+		}
+		before := maxOpenItems + 1
+		end := func(id string) string {
+			return `{"type":"item.completed","item":{"id":"` + id + `","type":"command_execution","command":"ls","exit_code":0}}` + "\n"
+		}
+		_, entries, _ := readCodexLines(t, in.String()+end("1"), false)
+		if len(entries) != before+1 {
+			t.Fatalf("a kept id was not matched: %d entries", len(entries))
+		}
+		_, entries, _ = readCodexLines(t, in.String()+end("0"), false)
+		if len(entries) != before+2 {
+			t.Fatalf("the dropped id was matched: %d entries", len(entries))
+		}
+	})
 }

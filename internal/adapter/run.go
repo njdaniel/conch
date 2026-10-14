@@ -240,6 +240,9 @@ func (b *botLoop) finishFailedCommand(ctx context.Context, run *activeRun, err e
 	case errors.Is(err, errNotJSONL):
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command output not understood", "error", nil)
 		b.setState(ctx, run, schema.RunStateFailed, err.Error())
+	case errors.Is(err, errTooMuchActivity):
+		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command stopped", "error", nil)
+		b.setState(ctx, run, schema.RunStateFailed, err.Error())
 	case errors.Is(err, errReplyTimeout):
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command timed out", "timeout", nil)
 		b.setState(ctx, run, schema.RunStateFailed, "timeout")
