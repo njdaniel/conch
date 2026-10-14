@@ -169,6 +169,10 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int
 			credentialDetail(c.id, c.label)+" reason=revoked at bootstrap", now); err != nil {
 			return 0, err
 		}
+		// Its sessions end with it, as on every other revocation (issue #265).
+		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now); err != nil {
+			return 0, err
+		}
 	}
 	return len(found), nil
 }

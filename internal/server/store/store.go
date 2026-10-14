@@ -364,6 +364,36 @@ END`,
 		`ALTER TABLE messages ADD COLUMN thread_root_id INTEGER REFERENCES messages (id)`,
 		`CREATE INDEX messages_by_thread ON messages (thread_root_id, id)`,
 	},
+	// 18: Sessions (issue #265, P3 epic #263, decision D1). One row per live
+	// client or runtime of a principal, human or agent. A session belongs to
+	// the credential that created it (credential_id), which is how ownership
+	// is decided; revoking or disabling ends it in the same transaction.
+	// Rows are never deleted: ended_at is set when a session ends and state
+	// then stays 'offline' (the CHECK says so, as SessionV1.Validate does).
+	// The server flips state to 'stale' and 'offline' on heartbeat
+	// thresholds. interventions is a JSON list, '[]' when none. Timestamps
+	// are unix milliseconds UTC. No data is backfilled. The partial index is
+	// for the sweeper, which looks only at sessions that can still change.
+	{
+		`CREATE TABLE sessions (
+	id            INTEGER PRIMARY KEY,
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	credential_id INTEGER NOT NULL REFERENCES credentials (id),
+	client        TEXT    NOT NULL,
+	runtime       TEXT    NOT NULL DEFAULT '',
+	model         TEXT    NOT NULL DEFAULT '',
+	host          TEXT    NOT NULL DEFAULT '',
+	interventions TEXT    NOT NULL DEFAULT '[]',
+	started_at    INTEGER NOT NULL,
+	last_seen_at  INTEGER NOT NULL,
+	ended_at      INTEGER,
+	state         TEXT    NOT NULL CHECK (state IN ('online','stale','offline')),
+	CHECK (ended_at IS NULL OR state = 'offline')
+)`,
+		`CREATE INDEX sessions_by_principal ON sessions (principal_id, ended_at)`,
+		`CREATE INDEX sessions_by_credential ON sessions (credential_id)`,
+		`CREATE INDEX sessions_live_by_last_seen ON sessions (last_seen_at) WHERE ended_at IS NULL AND state <> 'offline'`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
