@@ -118,7 +118,6 @@ func (s *Server) ownSessionCaller(w http.ResponseWriter, r *http.Request) (store
 // credential decide who the session belongs to; the body says only what the
 // client is.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.ownSessionCaller(w, r)
 	if !ok {
 		return
@@ -133,19 +132,31 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
 		return
 	}
-	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	call := restCall(r, caller, credentialID)
+	doc, cerr := s.createSession(r.Context(), call, req)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
+	}
+	writeJSON(w, http.StatusCreated, doc)
+}
+
+// createSession stores a session for the call's credential, as the client
+// described itself in req, and returns it as its owner sees it. The REST
+// route and the MCP tool register_session both call it, after the agent gate
+// (sessions.manage) and the body.
+func (s *Server) createSession(ctx context.Context, call sessionCall, req schema.CreateSessionRequestV1) (schema.SessionV1, *callError) {
+	if err := req.Validate(); err != nil {
+		return schema.SessionV1{}, refuse(http.StatusBadRequest, "invalid_request", err.Error())
 	}
 	// SessionV1.Validate refuses these fields on a human session, so storing
 	// them would make every roster that holds the session invalid.
-	if caller.Kind == store.PrincipalHuman && (req.Runtime != "" || req.Model != "" || req.Host != "" || len(req.Interventions) > 0) {
-		writeError(w, http.StatusBadRequest, "invalid_request", "a human session carries no runtime, model, host or interventions")
-		return
+	if call.caller.Kind == store.PrincipalHuman && (req.Runtime != "" || req.Model != "" || req.Host != "" || len(req.Interventions) > 0) {
+		return schema.SessionV1{}, refuse(http.StatusBadRequest, "invalid_request", "a human session carries no runtime, model, host or interventions")
 	}
-	sess, err := s.store.CreateSession(ctx, auditActor(ctx), store.SessionParams{
-		PrincipalID:   caller.ID,
-		CredentialID:  credentialID,
+	sess, err := s.store.CreateSession(ctx, call.actor, store.SessionParams{
+		PrincipalID:   call.caller.ID,
+		CredentialID:  call.credentialID,
 		Client:        req.Client,
 		Runtime:       req.Runtime,
 		Model:         req.Model,
@@ -155,23 +166,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrCredentialInvalid):
 		// Revoked, expired or disabled between authentication and now.
-		writeUnauthenticated(w)
-		return
+		return schema.SessionV1{}, callUnauthenticated
 	case errors.Is(err, store.ErrTooManySessions):
-		writeError(w, http.StatusTooManyRequests, schema.ErrorCodeTooManySessions, "this credential already has the most sessions it may have; end one first")
-		return
+		return schema.SessionV1{}, callTooManySess
 	case err != nil:
-		slog.ErrorContext(ctx, "sessions: create failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "sessions: create failed", "principal", call.caller.ID, "error", err)
+		return schema.SessionV1{}, callInternal
 	}
-	s.writeSession(w, r, http.StatusCreated, sess, caller)
+	return s.ownSessionDoc(ctx, call, sess)
 }
 
 // handleSessionHeartbeat serves POST /v1/sessions/{id}/heartbeat. Only the
 // credential that created the session may send one.
 func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.ownSessionCaller(w, r)
 	if !ok {
 		return
@@ -180,26 +187,34 @@ func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	sess, err := s.store.HeartbeatSession(ctx, id, credentialID, s.now())
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		writeSessionNotFound(w)
-		return
-	case errors.Is(err, store.ErrTooManySessions):
-		writeError(w, http.StatusTooManyRequests, schema.ErrorCodeTooManySessions, "this credential already has the most sessions it may have; end one first")
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "sessions: heartbeat failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
+	doc, cerr := s.heartbeatSession(r.Context(), restCall(r, caller, credentialID), id)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
-	s.writeSession(w, r, http.StatusOK, sess, caller)
+	writeJSON(w, http.StatusOK, doc)
+}
+
+// heartbeatSession keeps session id of the call's credential alive, reviving
+// it if it went stale or offline, and returns it as its owner sees it. The
+// REST route and the MCP tool heartbeat both call it, after the agent gate.
+func (s *Server) heartbeatSession(ctx context.Context, call sessionCall, id int64) (schema.SessionV1, *callError) {
+	sess, err := s.store.HeartbeatSession(ctx, id, call.credentialID, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return schema.SessionV1{}, callSessionMissing
+	case errors.Is(err, store.ErrTooManySessions):
+		return schema.SessionV1{}, callTooManySess
+	case err != nil:
+		slog.ErrorContext(ctx, "sessions: heartbeat failed", "principal", call.caller.ID, "error", err)
+		return schema.SessionV1{}, callInternal
+	}
+	return s.ownSessionDoc(ctx, call, sess)
 }
 
 // handleEndSession serves DELETE /v1/sessions/{id}. Only the credential that
 // created the session may end it; ending one that has ended is the same 404.
 func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.ownSessionCaller(w, r)
 	if !ok {
 		return
@@ -208,17 +223,25 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.EndSession(ctx, auditActor(ctx), id, credentialID, s.now())
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		writeSessionNotFound(w)
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "sessions: end failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
+	if cerr := s.endSession(r.Context(), restCall(r, caller, credentialID), id); cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// endSession ends session id of the call's credential. The REST route and the
+// MCP tool end_session both call it, after the agent gate.
+func (s *Server) endSession(ctx context.Context, call sessionCall, id int64) *callError {
+	err := s.store.EndSession(ctx, call.actor, id, call.credentialID, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return callSessionMissing
+	case err != nil:
+		slog.ErrorContext(ctx, "sessions: end failed", "principal", call.caller.ID, "error", err)
+		return callInternal
+	}
+	return nil
 }
 
 // sessionIDFromPath parses {id}. An id that is not a positive integer names no
@@ -290,22 +313,21 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, roster)
 }
 
-// writeSession sends one session to its owner, with its runs as the owner may
-// see them: an agent that has left a run's channel is not shown that run.
-func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, status int, sess store.Session, viewer store.Principal) {
-	runs, err := s.store.SessionRunViews(r.Context(), []int64{sess.ID}, readerFor(r, apiV2))
+// ownSessionDoc is one session as its owner sees it, with its runs as the
+// owner may see them: an agent that has left a run's channel is not shown that
+// run. It is checked to be a valid document.
+func (s *Server) ownSessionDoc(ctx context.Context, call sessionCall, sess store.Session) (schema.SessionV1, *callError) {
+	runs, err := s.store.SessionRunViews(ctx, []int64{sess.ID}, call.reader)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "sessions: read runs failed", "session", sess.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "sessions: read runs failed", "session", sess.ID, "error", err)
+		return schema.SessionV1{}, callInternal
 	}
-	doc := sessionDoc(sess, viewer, runs[sess.ID])
+	doc := sessionDoc(sess, call.caller, runs[sess.ID])
 	if err := doc.Validate(); err != nil {
-		slog.ErrorContext(r.Context(), "sessions: built an invalid session document", "session", sess.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "sessions: built an invalid session document", "session", sess.ID, "error", err)
+		return schema.SessionV1{}, callInternal
 	}
-	writeJSON(w, status, doc)
+	return doc, nil
 }
 
 // sessionDoc is the wire form of sess as viewer may see it, given its runs as

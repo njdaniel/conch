@@ -348,6 +348,18 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		"request_approval": "approvals carry no channel messages",
 		"check_decision":   "approvals carry no channel messages",
 		"await_decision":   "approvals carry no channel messages",
+		// The session and run tools (#267) act on the caller's own sessions
+		// and runs. A run names the message it answers by id only, and is
+		// shown only under the run rule (store.RunVisible), which is the
+		// message's own audience.
+		"register_session":   "returns the caller's own session",
+		"heartbeat":          "returns the caller's own session",
+		"end_session":        "returns nothing",
+		"start_run":          "returns the caller's own run, which carries a message id and no message content",
+		"update_run":         "returns the caller's own run, which carries a message id and no message content",
+		"post_activity":      "returns the activity entry the caller just stored",
+		"poll_interventions": "returns interventions on the caller's own runs; a person's instruction to the run, not a channel message",
+		"ack_intervention":   "returns an intervention on the caller's own run",
 	}
 	for tool := range schema.MCPToolCapabilities() {
 		if tool == "read_channel" {
