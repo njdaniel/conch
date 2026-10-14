@@ -56,6 +56,12 @@ type harness struct {
 	// session ended by a clean stop leaves the roster, so a new one is told
 	// apart by its id.
 	lastSession int64
+	// opID is the operator's principal id, who decides the fixture approval.
+	opID int64
+	// command and fixtureOn are what the next startBot gives the adapter.
+	command   string
+	fixtureOn bool
+	approval  string // path of the fixture that raises an approval
 	// readers are the human's REST client and the operator's.
 	human, op rest
 }
@@ -73,7 +79,8 @@ func run() error {
 	// The adapter and its old name are two separate binaries; the old name
 	// does not depend on the other being there.
 	h := &harness{dir: dir, conchd: filepath.Join(dir, "conchd"), adapter: filepath.Join(dir, "conch-adapter"), alias: filepath.Join(dir, "conch-bot"),
-		data: filepath.Join(dir, "data"), lock: filepath.Join(dir, "adapter.lock"), fixture: fixturePath}
+		data: filepath.Join(dir, "data"), lock: filepath.Join(dir, "adapter.lock"), fixture: fixturePath, command: fixturePath,
+		approval: filepath.Join(filepath.Dir(fixturePath), "approval.sh")}
 	for out, pkg := range map[string]string{h.conchd: "./cmd/conchd", h.adapter: "./cmd/conch-adapter", h.alias: "./cmd/conch-bot"} {
 		if err := build(out, pkg); err != nil {
 			return err
@@ -117,15 +124,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := h.waitForReplies(5*time.Second, h.humanReply("first live message")); err != nil {
+	if err := h.waitForReplies(h.humanReply("first live message")); err != nil {
 		return err
 	}
-	time.Sleep(250 * time.Millisecond)
-	if err := h.assertReplies(h.humanReply("first live message")); err != nil {
-		return fmt.Errorf("self-filter: %w", err)
-	}
+	// Waits for the run to be over and the session idle, so what follows is not
+	// a race with the adapter finishing its report.
 	if err := h.checkSessionAndRun(first); err != nil {
 		return err
+	}
+	if err := h.assertReplies(h.humanReply("first live message")); err != nil {
+		return fmt.Errorf("self-filter: %w", err)
 	}
 	if err := h.stopBotClean(); err != nil {
 		return err
@@ -149,7 +157,7 @@ func run() error {
 		return err
 	}
 	both := []string{h.humanReply("first live message"), h.humanReply("post-restart live message")}
-	if err := h.waitForReplies(5*time.Second, both...); err != nil {
+	if err := h.waitForReplies(both...); err != nil {
 		return err
 	}
 	time.Sleep(250 * time.Millisecond)
@@ -163,6 +171,9 @@ func run() error {
 		return err
 	}
 	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	if err := h.fixtureApproval(); err != nil {
 		return err
 	}
 	return h.aliasStillStarts()
@@ -187,6 +198,11 @@ func (h *harness) bootstrapOperator() (string, error) {
 // with credentials, membership and manifests, and the nets.
 func (h *harness) setUp() error {
 	h.op = rest{base: h.url(), token: h.opToken}
+	var me schema.WhoAmIResponseV1
+	if err := h.op.send(http.MethodGet, "/v1/whoami", nil, &me); err != nil {
+		return err
+	}
+	h.opID = me.ID
 	channelID, err := createChannel(h.op, "ops")
 	if err != nil {
 		return err
@@ -203,7 +219,9 @@ func (h *harness) setUp() error {
 		}
 	}
 	messaging := []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost}
-	adapter := append([]schema.Capability{schema.CapabilitySessionsManage, schema.CapabilityRunsManage}, messaging...)
+	// approvals.request and approvals.await are for the fixture that raises an
+	// approval (approval.sh); echo.sh never uses them.
+	adapter := append([]schema.Capability{schema.CapabilitySessionsManage, schema.CapabilityRunsManage, schema.CapabilityApprovalsRequest, schema.CapabilityApprovalsAwait}, messaging...)
 	for _, p := range []struct {
 		id    *int64
 		token *string
@@ -273,7 +291,11 @@ func (h *harness) humanReply(body string) string { return fmt.Sprintf("%d: %s", 
 // and one completed run for the reply, answering the message it was asked
 // about, with the activity of a successful reply in order.
 func (h *harness) checkSessionAndRun(asked schema.MessageV1) error {
-	sessions, err := h.waitSessions(func(s []schema.SessionV1) bool { return len(s) == 1 })
+	// The terminal condition is part of the wait: the session is idle with no
+	// run open, and the run for the message is completed.
+	sessions, err := h.waitSessions(func(s []schema.SessionV1) bool {
+		return len(s) == 1 && s[0].Status == schema.SessionStatusIdle && s[0].CurrentRun == 0
+	})
 	if err != nil {
 		return err
 	}
@@ -283,38 +305,135 @@ func (h *harness) checkSessionAndRun(asked schema.MessageV1) error {
 		session.Runtime != "claude-code" || session.Model != "sonnet" || session.Host == "" || !reflect.DeepEqual(session.Interventions, wantKinds) {
 		return fmt.Errorf("the adapter's session = %+v", session)
 	}
-	// An online session with no open run is idle.
-	if session.Status != schema.SessionStatusIdle || session.CurrentRun != 0 {
-		return fmt.Errorf("session status %q with current run %d, want idle with none", session.Status, session.CurrentRun)
-	}
-	var runs schema.ListRunsResponseV1
-	if err := h.human.send(http.MethodGet, "/v1/runs?channel=ops", nil, &runs); err != nil {
+	run, err := h.waitRun(asked.ID, func(r schema.RunV1) bool { return r.State == schema.RunStateCompleted })
+	if err != nil {
 		return err
 	}
-	if len(runs.Runs) != 1 {
-		return fmt.Errorf("runs = %d, want one for the one reply", len(runs.Runs))
-	}
-	run := runs.Runs[0]
-	if run.SessionID != session.ID || run.State != schema.RunStateCompleted || run.Outcome != "replied" ||
-		run.MessageID != asked.ID || run.Task != "first live message" {
+	if run.SessionID != session.ID || run.Outcome != "replied" || run.Task != "first live message" {
 		return fmt.Errorf("the run = %+v, want completed 'replied' answering message %d", run, asked.ID)
 	}
-	var activity schema.ListActivityResponseV1
-	if err := h.human.send(http.MethodGet, fmt.Sprintf("/v1/runs/%d/activity", run.ID), nil, &activity); err != nil {
+	kinds, err := h.activityKinds(run.ID, "first live message")
+	if err != nil {
 		return err
-	}
-	var kinds []schema.ActivityKind
-	for _, entry := range activity.Activity {
-		kinds = append(kinds, entry.Kind)
-		if strings.Contains(entry.Summary+entry.Outcome, "first live message") {
-			return fmt.Errorf("an activity entry quotes the message: %+v", entry)
-		}
 	}
 	want := []schema.ActivityKind{schema.ActivityKindCommandStarted, schema.ActivityKindCommandFinished, schema.ActivityKindReplyPosted}
 	if !reflect.DeepEqual(kinds, want) {
 		return fmt.Errorf("activity kinds = %v, want %v", kinds, want)
 	}
 	return nil
+}
+
+// waitRun polls for the run that answers a message until ok is true of it.
+func (h *harness) waitRun(messageID int64, ok func(schema.RunV1) bool) (schema.RunV1, error) {
+	deadline := time.Now().Add(5 * time.Second)
+	var last *schema.RunV1
+	for {
+		var runs schema.ListRunsResponseV1
+		if err := h.human.send(http.MethodGet, "/v1/runs?channel=ops&limit=100", nil, &runs); err != nil {
+			return schema.RunV1{}, err
+		}
+		for i, r := range runs.Runs {
+			if r.MessageID == messageID {
+				last = &runs.Runs[i]
+				if ok(r) {
+					return r, nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return schema.RunV1{}, fmt.Errorf("the run answering message %d never became what the check wants: %+v", messageID, last)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// activityKinds is the kinds of a run's activity in order. quoted is text no
+// entry may contain.
+func (h *harness) activityKinds(runID int64, quoted string) ([]schema.ActivityKind, error) {
+	var activity schema.ListActivityResponseV1
+	if err := h.human.send(http.MethodGet, fmt.Sprintf("/v1/runs/%d/activity", runID), nil, &activity); err != nil {
+		return nil, err
+	}
+	var kinds []schema.ActivityKind
+	for _, entry := range activity.Activity {
+		kinds = append(kinds, entry.Kind)
+		if strings.Contains(entry.Summary+entry.Outcome, quoted) {
+			return nil, fmt.Errorf("an activity entry quotes the message: %+v", entry)
+		}
+	}
+	return kinds, nil
+}
+
+// fixtureApproval runs the adapter on approval.sh with the fixture markers on:
+// the run goes to waiting while a person decides the approval it raised,
+// through the API, and then completes. No model is involved.
+func (h *harness) fixtureApproval() error {
+	h.command, h.fixtureOn = h.approval, true
+	defer func() { h.command, h.fixtureOn = h.fixture, false }()
+	if err := h.startBot(h.adapter, false); err != nil {
+		return err
+	}
+	if err := h.waitNewSession(); err != nil {
+		return err
+	}
+	time.Sleep(300 * time.Millisecond)
+	asked, err := h.postHumanMessage("please approve this")
+	if err != nil {
+		return err
+	}
+	run, err := h.waitRun(asked.ID, func(r schema.RunV1) bool { return r.State == schema.RunStateWaiting })
+	if err != nil {
+		return fmt.Errorf("the run never went to waiting: %w", err)
+	}
+	// The approval it raised is open, and nobody has decided it.
+	var open schema.ListApprovalsResponseV1
+	deadline := time.Now().Add(5 * time.Second)
+	for len(open.Approvals) == 0 {
+		if err := h.op.send(http.MethodGet, "/v1/approvals", nil, &open); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no approval was raised")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	approval := open.Approvals[0]
+	if approval.Title != "Approve the fixture action" || approval.RequesterID != h.botID {
+		return fmt.Errorf("the approval = %+v", approval)
+	}
+	if err := h.op.send(http.MethodPost, fmt.Sprintf("/v1/approvals/%d/decisions", approval.ID),
+		schema.CastDecisionRequestV1{PrincipalID: h.opID, OptionID: "approve", Reason: "e2e fixture"}, nil); err != nil {
+		return fmt.Errorf("decide the approval: %w", err)
+	}
+	run, err = h.waitRun(asked.ID, func(r schema.RunV1) bool { return r.State == schema.RunStateCompleted })
+	if err != nil {
+		return fmt.Errorf("the run did not complete after the approval: %w", err)
+	}
+	kinds, err := h.activityKinds(run.ID, "please approve this")
+	if err != nil {
+		return err
+	}
+	want := []schema.ActivityKind{
+		schema.ActivityKindCommandStarted, schema.ActivityKindApprovalRequested, schema.ActivityKindApprovalResolved,
+		schema.ActivityKindCommandFinished, schema.ActivityKindReplyPosted,
+	}
+	if !reflect.DeepEqual(kinds, want) {
+		return fmt.Errorf("activity kinds = %v, want %v", kinds, want)
+	}
+	if err := h.waitForReplies(append(h.botRepliesSoFar(), h.humanReply("please approve this"))...); err != nil {
+		return err
+	}
+	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	return h.checkSessionEnded()
+}
+
+// botRepliesSoFar is the channel-wide replies the earlier steps expect.
+func (h *harness) botRepliesSoFar() []string {
+	return []string{
+		h.humanReply("first live message"), h.humanReply("post-restart live message"), h.humanReply("after the refusal"),
+	}
 }
 
 // waitNewSession waits for the adapter to have one online session that is
@@ -429,7 +548,7 @@ func (h *harness) refusedNetExchange(before []string) error {
 		return err
 	}
 	after := append(append([]string(nil), before...), h.humanReply("after the refusal"))
-	if err := h.waitForReplies(5*time.Second, after...); err != nil {
+	if err := h.waitForReplies(after...); err != nil {
 		return fmt.Errorf("the bot stopped answering after a refused reply: %w", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -540,8 +659,8 @@ func (h *harness) assertReplies(want ...string) error {
 	return nil
 }
 
-func (h *harness) waitForReplies(timeout time.Duration, want ...string) error {
-	deadline := time.Now().Add(timeout)
+func (h *harness) waitForReplies(want ...string) error {
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := h.assertReplies(want...); err == nil {
 			return nil
@@ -667,8 +786,11 @@ func (h *harness) startBot(binary string, legacy bool) error {
 		prefix+"POLL_INTERVAL=50ms", prefix+"MAX_BACKOFF=200ms",
 		prefix+"REPLY_TIMEOUT=5s", prefix+"LOCK_FILE="+h.lock,
 		// The fixture takes the prompt on standard input; CLAUDE_BIN is not set.
-		"CONCH_ADAPTER_CMD="+h.fixture, "CONCH_ADAPTER_HEARTBEAT=200ms",
+		"CONCH_ADAPTER_CMD="+h.command, "CONCH_ADAPTER_HEARTBEAT=200ms",
 	)
+	if h.fixtureOn {
+		env = append(env, "CONCH_ADAPTER_FIXTURE=1")
+	}
 	h.botStderr = &bytes.Buffer{}
 	h.botProc = exec.Command(binary) // #nosec G204 -- test-built binary
 	h.botProc.Env = env

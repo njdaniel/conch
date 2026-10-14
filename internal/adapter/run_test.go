@@ -648,13 +648,13 @@ func (c *chatMCP) postMessage(_ context.Context, _, body string, _ *schema.Audie
 // Two adapters that answer each other's every message would never stop; the
 // replies-per-minute cap does stop them.
 func TestReplyLimitStopsAnEchoLoop(t *testing.T) {
-	const cap = 4
+	const perMinute = 4
 	channel := &sharedChannel{messages: []schema.MessageV2{message(1, 100, "hello")}}
 	clk := newFakeClock()
 	var loops []*botLoop
 	for _, id := range []int64{1, 2} {
 		cfg := testConfig()
-		cfg.PrincipalID, cfg.MaxRepliesPerMinute = id, cap
+		cfg.PrincipalID, cfg.MaxRepliesPerMinute = id, perMinute
 		loops = append(loops, &botLoop{
 			cfg: cfg, clk: clk, sessionID: 7,
 			mcp:    &chatMCP{fakeMCP: &fakeMCP{}, channel: channel, self: id},
@@ -668,7 +668,7 @@ func TestReplyLimitStopsAnEchoLoop(t *testing.T) {
 			}
 		}
 	}
-	if got, max := len(channel.messages)-1, 2*cap; got > max {
+	if got, max := len(channel.messages)-1, 2*perMinute; got > max {
 		t.Fatalf("%d replies in a minute, want at most %d", got, max)
 	}
 	before := len(channel.messages)
@@ -768,5 +768,39 @@ func TestRunTaskFitsTheSchema(t *testing.T) {
 		if err := req.Validate(); err != nil {
 			t.Errorf("runTask(%q) = %q: %v", body, req.Task, err)
 		}
+	}
+}
+
+// The server refusing a run for an audience the agent may only read (a net it
+// monitors) is expected: the reply goes on without a run, and it is logged at
+// debug, once for each audience, never as a warning.
+func TestStartRunRefusedForAnAudienceIsQuiet(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	mcp := &fakeMCP{startErr: &mcpclient.ToolError{Method: "tools/call", Code: "channel_not_found"}}
+	loop := loopWithSession(mcp, &fakeClaude{reply: "an answer"}, newFakeClock())
+	if err := answer(t, loop, scoped(1, 2, "q", testNet), scoped(2, 2, "q2", testNet), message(3, 2, "open")); err != nil {
+		t.Fatal(err)
+	}
+	if len(mcp.posts) != 2 {
+		t.Fatalf("posts = %q, want both replies", mcp.posts)
+	}
+	out := logs.String()
+	if strings.Contains(out, "level=WARN") {
+		t.Errorf("a warning was logged: %s", out)
+	}
+	if got := strings.Count(out, "replying without one"); got != 2 {
+		t.Errorf("debug lines = %d, want one for each of the two audiences:\n%s", got, out)
+	}
+	// Another message on the same net adds nothing.
+	mcp.pages = pagesFor(nil, []schema.MessageV2{scoped(1, 2, "q", testNet), scoped(2, 2, "q2", testNet), message(3, 2, "open")}, []schema.MessageV2{scoped(4, 2, "again", testNet)})
+	if err := loop.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(logs.String(), "replying without one"); got != 2 {
+		t.Errorf("debug lines after another message = %d, want still 2", got)
 	}
 }

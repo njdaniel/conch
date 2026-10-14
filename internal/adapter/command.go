@@ -39,6 +39,15 @@ type exitError struct{ code int }
 
 func (e *exitError) Error() string { return "command exited with status " + strconv.Itoa(e.code) }
 
+// outcome is how a run reports the exit: the status, or "signal" for a command
+// a signal the adapter did not send ended (the status is then -1).
+func (e *exitError) outcome() string {
+	if e.code < 0 {
+		return "signal"
+	}
+	return "exit " + strconv.Itoa(e.code)
+}
+
 // splitCommand splits a command line into arguments the way a POSIX shell
 // would read words, and does nothing else: no variable, command or glob
 // expansion, no operators. A quote or a backslash only groups or escapes, so
@@ -212,6 +221,13 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start command: %w", err)
 	}
+	// When the reply context ends, the group is killed (cmd.Cancel); close the
+	// read end as well. A process that escaped the group and kept the pipe open
+	// would otherwise hold the scan below for as long as it lives.
+	go func() {
+		<-replyCtx.Done()
+		_ = stdout.Close()
+	}()
 	reply, readErr := c.readReply(replyCtx, stdout, fx)
 	if readErr != nil {
 		// Stop the command now, whatever stopped the reading: a marker's wait

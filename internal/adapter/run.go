@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -95,7 +94,7 @@ func reportContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // beginRun starts the run for a reply and moves it to running. Telling the
 // server about a run is not what the adapter is for: if that fails, the reply
 // is made without one.
-func (b *botLoop) beginRun(ctx context.Context, stopCommand context.CancelFunc, human []schema.MessageV2) *activeRun {
+func (b *botLoop) beginRun(ctx context.Context, stopCommand context.CancelFunc, g *audienceGroup, human []schema.MessageV2) *activeRun {
 	newest := human[len(human)-1]
 	rctx, cancel := reportContext(ctx)
 	defer cancel()
@@ -105,6 +104,19 @@ func (b *botLoop) beginRun(ctx context.Context, stopCommand context.CancelFunc, 
 		Task:      runTask(newest.Body),
 	})
 	if err != nil {
+		var toolErr *mcpclient.ToolError
+		if errors.As(err, &toolErr) && toolErr.Code == "channel_not_found" {
+			// Expected: the agent may read this audience (a net it only
+			// monitors) but not start a run in it. Say so once, quietly.
+			if !b.noRunAudiences[g.key] {
+				if b.noRunAudiences == nil {
+					b.noRunAudiences = map[string]bool{}
+				}
+				b.noRunAudiences[g.key] = true
+				slog.Debug("conch-adapter: the server does not allow a run for this audience; replying without one", "audience", g.key)
+			}
+			return nil
+		}
 		logReportError("start_run", err)
 		return nil
 	}
@@ -153,7 +165,7 @@ func (b *botLoop) runReply(ctx context.Context, g *audienceGroup, human []schema
 	cmdCtx, stopCommand := context.WithCancel(ctx)
 	defer stopCommand()
 
-	run := b.beginRun(ctx, stopCommand, human)
+	run := b.beginRun(ctx, stopCommand, g, human)
 	var (
 		fx        fixtureHandler
 		stopWatch = func() {}
@@ -225,7 +237,7 @@ func (b *botLoop) finishFailedCommand(ctx context.Context, run *activeRun, err e
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command timed out", "timeout", nil)
 		b.setState(ctx, run, schema.RunStateFailed, "timeout")
 	case errors.As(err, &exit):
-		outcome := "exit " + strconv.Itoa(exit.code)
+		outcome := exit.outcome()
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command failed", outcome, nil)
 		b.setState(ctx, run, schema.RunStateFailed, outcome)
 	default:

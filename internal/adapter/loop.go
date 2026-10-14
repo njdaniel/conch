@@ -71,6 +71,9 @@ type botLoop struct {
 	// replies holds when the replies of the last minute began, for the
 	// replies-per-minute cap.
 	replies []time.Time
+	// noRunAudiences are the audiences the server would not start a run in,
+	// so that is said once for each.
+	noRunAudiences map[string]bool
 
 	// mu guards recent and clock, which the intervention watcher reaches
 	// while a reply is being made.
@@ -350,7 +353,7 @@ func (b *botLoop) run(ctx context.Context) error {
 		b.sleep = sleepContext
 	}
 	if err := b.register(ctx); err != nil {
-		return fmt.Errorf("register session: %w", err)
+		return fmt.Errorf("could not register a session; the adapter needs an issued credential (not a static --mcp-token) and the capabilities sessions.manage and runs.manage in its agent's manifest: %w", err)
 	}
 	// The heartbeat has a goroutine of its own, so a long reply does not
 	// starve it. On the way out it stops before the session ends, so no

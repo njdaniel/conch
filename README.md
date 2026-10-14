@@ -402,7 +402,12 @@ command's first word only, never the prompt), `command_finished`, and
 one: create it with `POST /v1/principals/{id}/credentials`. A static
 `--mcp-token` cannot register a session. The agent's manifest needs the
 capabilities `sessions.manage` and `runs.manage` besides `messages.read` and
-`messages.post`.
+`messages.post`. Registering the session is part of starting: **an existing
+`conch-bot` setup needs an issued credential and those two capabilities before
+the adapter will start**, and it says so and exits if they are missing. If the
+manifest has a rate limit on `runs.manage`, it must allow about seven calls per
+reply (`start_run`, three state changes, three activity entries) plus one
+`poll_interventions` every 2 seconds while a run is open.
 
 **Interventions.** While a run is open the adapter checks every 2 seconds for
 interventions. A `message` is answered `applied` and its text goes into the
@@ -444,7 +449,9 @@ the adapter read the command's output line by line and act on two markers,
 removing them from the reply: `@approval <title>` raises an approval through
 `request_approval`, puts the run in `waiting` until it is decided, and goes on;
 `@sleep <seconds>` waits. Without that variable these lines are ordinary reply
-text and no output can raise an approval. **Never set it for a real model**:
+text and no output can raise an approval. For `approval.sh` the agent's
+manifest also needs `approvals.request` and `approvals.await`. **Never set it
+for a real model**:
 with it on, anything the model prints that starts with `@approval ` asks a
 person for a decision in the agent's name.
 

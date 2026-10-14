@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -327,4 +329,47 @@ func processAlive(pid int) bool {
 	// "pid (comm) S ...": the state follows the last closing parenthesis.
 	rest := stat[strings.LastIndexByte(string(stat), ')')+2:]
 	return len(rest) > 0 && rest[0] != 'Z'
+}
+
+// A process that left the command's group and kept the output pipe open must
+// not hold Reply past the timeout: Reply stops reading when the reply context
+// ends, whatever is still holding the pipe.
+func TestCommandRunnerReturnsWhileAnEscapedChildHoldsThePipe(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is not installed")
+	}
+	pidFile := filepath.Join(t.TempDir(), "escaped.pid")
+	runner, _ := scriptRunner(t, `sh -c 'setsid sleep 30 & echo $! > `+pidFile+`; echo hi' sh`, false)
+	runner.timeout = 300 * time.Millisecond
+	t.Cleanup(func() { // the escaped sleep is in no group of ours: stop it here
+		if raw, err := os.ReadFile(pidFile); err == nil { //nolint:gosec // a file this test made in its own temp directory
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := runner.Reply(context.Background(), "p", nil); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errReplyTimeout) {
+			t.Fatalf("error = %v, want errReplyTimeout", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Reply did not return while an escaped child held the output pipe")
+	}
+}
+
+func TestExitErrorOutcome(t *testing.T) {
+	for code, want := range map[int]string{0: "exit 0", 3: "exit 3", -1: "signal"} {
+		if got := (&exitError{code: code}).outcome(); got != want {
+			t.Errorf("outcome(%d) = %q, want %q", code, got, want)
+		}
+	}
+	runner, _ := scriptRunner(t, `sh -c 'kill -TERM $$' sh`, false)
+	_, err := runner.Reply(context.Background(), "p", nil)
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.outcome() != "signal" {
+		t.Fatalf("error = %v, want a command ended by a signal", err)
+	}
 }
