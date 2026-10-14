@@ -98,7 +98,11 @@ func TestBoundedRetries(t *testing.T) {
 		wantErr  bool
 	}{
 		{"doubling delays", at(0, 900, 2900), 4 * time.Second, false},
-		{"no retry at all", at(0), 4 * time.Second, true},
+		{"no retry at all", at(0), 12 * time.Second, true},
+		{"no retry at all, many connections in the first wave", at(0, 10, 20), 30 * time.Second, true},
+		{"a window too short to see a second wave", at(0), 4 * time.Second, false},
+		{"a window too short, nothing at all", nil, 2 * time.Second, false},
+		{"a late second wave on a starved machine", at(0, 2500, 7500), 9 * time.Second, false},
 		{"a retry every half second", at(0, 600, 1200, 1800, 2400, 3000, 3600, 4200, 4800, 5400, 6000), 6 * time.Second, true},
 		{"delays that shrink", at(0, 2000, 3000, 3600), 6 * time.Second, true},
 		{"too many at once", at(many...), 4 * time.Second, true},
@@ -106,6 +110,24 @@ func TestBoundedRetries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := boundedRetries(tc.attempts, tc.down); (err != nil) != tc.wantErr {
 				t.Errorf("error = %v, want one: %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestChannelsLoaded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []string
+		want bool
+	}{
+		{"still loading", []string{"╭────────╮╭──────╮", "│ loading… ││      │", "╰────────╯╰──────╯"}, false},
+		{"nothing", nil, false},
+		{"loaded", []string{"│› general ││ msg │", "│  nets-demo ││     │"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := channelsLoaded(tc.rows); got != tc.want {
+				t.Errorf("channelsLoaded = %v, want %v", got, tc.want)
 			}
 		})
 	}
