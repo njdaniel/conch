@@ -309,7 +309,7 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
 			}
-			if msg.ID <= replayed {
+			if replay != nil && msg.ID <= replayed {
 				continue
 			}
 			if err := writeWSMessageV2(ctx, conn, msg); err != nil {
@@ -340,15 +340,21 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 		size = wsReplayPageSize
 	}
 	cursor := replay.after
-	for page := 0; ; page++ {
-		// The stream loop is not running yet, so a long replay must still give
-		// the credential its periodic check.
+	// The stream loop is not running yet, so the replay gives the credential
+	// its periodic check itself, before every frame: a page is up to a
+	// hundred frames, and a reader who takes each one slowly must not go on
+	// receiving history for minutes after the credential was revoked.
+	credentialOK := func() bool {
 		select {
 		case <-recheck:
-			if !s.credentialStillValid(ctx, conn, credID) {
-				return last, false
-			}
+			return s.credentialStillValid(ctx, conn, credID)
 		default:
+			return true
+		}
+	}
+	for page := 0; ; page++ {
+		if !credentialOK() {
+			return last, false
 		}
 		if ctx.Err() != nil {
 			_ = conn.Close(websocket.StatusNormalClosure, "")
@@ -363,6 +369,12 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				_ = conn.Close(websocket.StatusNormalClosure, "")
 				return last, false
 			}
+			// A read that failed because the server is stopping is a
+			// shutdown, not a fault.
+			if s.hub.Closed() {
+				s.closeDropped(ctx, conn, channelID, principalID, credID)
+				return last, false
+			}
 			slog.ErrorContext(ctx, "ws: replay failed", "error", err)
 			_ = conn.Close(websocket.StatusInternalError, "replay failed")
 			return last, false
@@ -371,6 +383,9 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 			hook(page)
 		}
 		for _, m := range msgs {
+			if !credentialOK() {
+				return last, false
+			}
 			// Dropped by the hub (overflow, removal from the channel, a
 			// disabled principal, shutdown): send nothing more and say why.
 			if !sub.Live() {

@@ -70,6 +70,52 @@ func closeOf(t *testing.T, conn *websocket.Conn) websocket.CloseError {
 	}
 }
 
+// A credential revoked on its own (not a disabled principal, not revoke-all)
+// does not drop the subscription: only the periodic re-check ends the stream.
+// During a replay that check runs before every frame, so a revocation that
+// lands after a page was read stops the page from being sent.
+func TestWSReplayStopsAtTheNextFrameWhenTheCredentialIsRevoked(t *testing.T) {
+	const recheck = 20 * time.Millisecond
+	// Built by hand, not with newReplayFixture, so that the re-check interval
+	// is set, like the hooks, before the listener starts.
+	f := &replayFixture{scopedFixture: newScopedFixture(t)}
+	f.srv.credRecheckInterval = recheck
+	f.srv.replayHooks = wsReplayHooks{afterPage: func(page int) {
+		if page != 0 {
+			return
+		}
+		creds, err := f.srv.store.ListCredentials(context.Background(), f.p("olga").ID)
+		if err != nil || len(creds) != 1 {
+			t.Errorf("olga's credentials = %v, %v", creds, err)
+			return
+		}
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", creds[0].ID); err != nil {
+			t.Errorf("revoke: %v", err)
+		}
+		// Let the re-check interval pass, so the tick is waiting when the
+		// replay looks before its first frame.
+		time.Sleep(4 * recheck)
+	}}
+	f.wsBase = wsTestServer(t, f.srv)
+	for i := 0; i < 5; i++ {
+		f.mustPost(t, "ann", `{"body":"history"}`)
+	}
+	sock := openSocket(t, f.wsBase, "/v2/ws?channel=ops&after=0", f.p("olga").token)
+	if sock.status != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade = %d %s", sock.status, sock.body)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, data, err := sock.conn.Read(ctx)
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) {
+		t.Fatalf("first read = %q, %v; want a close and no frame of the page read before the revocation", data, err)
+	}
+	if ce.Code != websocket.StatusPolicyViolation || ce.Reason != reasonCredentialInvalid {
+		t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusPolicyViolation, reasonCredentialInvalid)
+	}
+}
+
 // TestWSReplayDeliversEachMessageOnce is the ordering contract: whatever
 // moment a message is committed relative to the replay (before it reads a
 // page, after it read one, during the last page, after the replay is over), the
