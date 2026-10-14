@@ -9,6 +9,11 @@
 # (scripts/voice-env.sh).
 /voice/target/
 
+# Web client (web/). npm ci installs node_modules from package-lock.json, which
+# is committed; dist is what `make web-build` produces for conchd --web-dir.
+/web/node_modules/
+/web/dist/
+
 # Go
 *.test
 *.out

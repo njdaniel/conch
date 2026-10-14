@@ -22,7 +22,7 @@ jobs:
 
       - name: gofmt
         run: |
-          out=$(gofmt -l .)
+          out=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
 
       # No tracked text file may hold a bidi control, a line or paragraph
@@ -108,6 +108,18 @@ jobs:
       - name: rust check
         run: make rust-check
 
+      # The web client under web/ (ADR-007). setup-node installs exactly the
+      # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
+      # web-check installs with npm ci only, and downloads no browser.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web check
+        run: make web-check
+
   rust-advisories:
     # Known advisories against the crates conch-voice links (RustSec). A job of
     # its own and not part of check: it reads a database on the network, and a
@@ -120,6 +132,25 @@ jobs:
 
       - name: advisories
         run: ./scripts/voice-advisories.sh
+
+  web-advisories:
+    # Known advisories (high or critical) against the packages web/dist ships:
+    # the runtime dependencies, so development tools are left out. A job of
+    # its own and not part of check, as rust-advisories is: it reads the npm
+    # registry's database, and a new advisory turns it red with no change
+    # here. Red means look at it, and update the package or say why not.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+
+      - name: advisories
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
 
   dogfood-check:
     # The P1 release canary (ROADMAP success criterion,
