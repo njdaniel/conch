@@ -25,7 +25,9 @@ func (stubAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListM
 func (stubAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
 	return schema.MessageV2{}, nil
 }
-func (stubAPI) SubscribeV2(context.Context, string, func(schema.MessageV2) error) error { return nil }
+func (stubAPI) SubscribeV2After(context.Context, string, int64, func(), func(schema.MessageV2) error) error {
+	return nil
+}
 func (stubAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1, error) {
 	return schema.ListNetsResponseV1{}, nil
 }
@@ -45,6 +47,21 @@ func (stubAPI) CastDecision(context.Context, int64, schema.CastDecisionRequestV1
 func (stubAPI) WhoAmI(context.Context) (schema.WhoAmIResponseV1, error) {
 	return schema.WhoAmIResponseV1{}, nil
 }
+
+// The stub has no sessions: creating one fails, so a model on it reads its
+// roster as unavailable and nothing here depends on one.
+func (stubAPI) CreateSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error) {
+	return schema.SessionV1{}, errNoSessions
+}
+func (stubAPI) EndSession(context.Context, int64) error { return nil }
+func (stubAPI) SubscribeEvents(context.Context, string, int64, func(schema.SessionRosterV1) error) error {
+	return nil
+}
+func (stubAPI) ListRuns(context.Context, string, int64, int64, int) (schema.ListRunsResponseV1, error) {
+	return schema.ListRunsResponseV1{}, nil
+}
+
+var errNoSessions = errors.New("no sessions on the stub")
 
 func TestModelUpdate(t *testing.T) {
 	errBoom := errors.New("boom")
@@ -102,7 +119,12 @@ func TestModelUpdate(t *testing.T) {
 				t.Errorf("expected modeInbox, got %d", got.mode)
 			}
 		}},
-		{name: "switch back to channels", msg: tea.KeyMsg{Type: tea.KeyTab}, prep: func(m *Model) { m.mode = modeInbox }, want: func(t *testing.T, got Model) {
+		{name: "switch from inbox to agents", msg: tea.KeyMsg{Type: tea.KeyTab}, prep: func(m *Model) { m.mode = modeInbox }, want: func(t *testing.T, got Model) {
+			if got.mode != modeAgents {
+				t.Errorf("expected modeAgents, got %d", got.mode)
+			}
+		}},
+		{name: "switch back to channels", msg: tea.KeyMsg{Type: tea.KeyTab}, prep: func(m *Model) { m.mode = modeAgents }, want: func(t *testing.T, got Model) {
 			if got.mode != modeChannels {
 				t.Errorf("expected modeChannels, got %d", got.mode)
 			}
@@ -205,7 +227,7 @@ func (a *listAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ i
 	return schema.ListMessagesResponseV2{}, nil
 }
 
-func (a *listAPI) SubscribeV2(_ context.Context, channel string, _ func(schema.MessageV2) error) error {
+func (a *listAPI) SubscribeV2After(_ context.Context, channel string, _ int64, _ func(), _ func(schema.MessageV2) error) error {
 	a.subscribe <- channel
 	return nil
 }
@@ -598,7 +620,7 @@ func (a *resubAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ 
 	return schema.ListMessagesResponseV2{}, nil
 }
 
-func (a *resubAPI) SubscribeV2(ctx context.Context, channel string, _ func(schema.MessageV2) error) error {
+func (a *resubAPI) SubscribeV2After(ctx context.Context, channel string, _ int64, _ func(), _ func(schema.MessageV2) error) error {
 	a.mu.Lock()
 	a.subscribes[channel]++
 	a.mu.Unlock()
@@ -905,6 +927,8 @@ func TestStatusBelongsToMode(t *testing.T) {
 	// toDecision enters the inbox and opens a decision prompt.
 	toDecision := []tea.Msg{key(tea.KeyTab), apps, key(tea.KeyEnter)}
 	tab := []tea.Msg{key(tea.KeyTab)}
+	// The way back to channels is through the Agents view: inbox, agents, channels.
+	toChannels := []tea.Msg{key(tea.KeyTab), key(tea.KeyTab)}
 
 	tests := []struct {
 		name  string
@@ -916,28 +940,28 @@ func TestStatusBelongsToMode(t *testing.T) {
 		want  string    // status after the user returns to the mode (case 3: re-enters the inbox)
 	}{
 		{"1 messagesLoaded in inbox", opsSelected, tab,
-			messagesLoaded{channel: "ops"}, "loading approvals…", tab, "connected"},
+			messagesLoaded{channel: "ops"}, "loading approvals…", toChannels, "connected"},
 		{"1 messagesLoaded error in inbox", opsSelected, tab,
-			messagesLoaded{channel: "ops", err: errors.New("boom")}, "loading approvals…", tab, "boom"},
+			messagesLoaded{channel: "ops", err: errors.New("boom")}, "loading approvals…", toChannels, "boom"},
 		{"1 messagesLoaded in decision", opsSelected, toDecision,
-			messagesLoaded{channel: "ops"}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab)}, "connected"},
+			messagesLoaded{channel: "ops"}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab), key(tea.KeyTab)}, "connected"},
 		{"2 subscriptionEnded in inbox", opsSelected, tab,
-			subscriptionEnded{channel: "ops", err: eof}, "loading approvals…", tab, statusReconnecting},
+			subscriptionEnded{channel: "ops", err: eof}, "loading approvals…", toChannels, statusReconnecting},
 		{"2 subscriptionEnded in decision", opsSelected, toDecision,
-			subscriptionEnded{channel: "ops", err: eof}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab)}, statusReconnecting},
+			subscriptionEnded{channel: "ops", err: eof}, "type reason to decide", []tea.Msg{key(tea.KeyEsc), key(tea.KeyTab), key(tea.KeyTab)}, statusReconnecting},
 		{"2 backfill during an outage keeps reconnecting", opsSelected,
 			[]tea.Msg{subscriptionEnded{channel: "ops", err: eof}, key(tea.KeyTab)},
-			messagesLoaded{channel: "ops"}, "loading approvals…", tab, statusReconnecting},
+			messagesLoaded{channel: "ops"}, "loading approvals…", toChannels, statusReconnecting},
 		{"3 approvalsLoaded after returning to channels", opsSelected,
-			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab)},
+			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab), key(tea.KeyTab)},
 			apps, "loading…", tab, "loading approvals…"},
 		{"3 approvalsLoaded error after returning to channels", opsSelected,
-			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab)},
+			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab), key(tea.KeyTab)},
 			approvalsLoaded{err: errors.New("boom")}, "loading…", tab, "loading approvals…"},
 		{"4 channelsLoaded error in inbox", noChannels, tab,
-			channelsLoaded{err: errors.New("boom")}, "loading approvals…", tab, "channel list: boom"},
+			channelsLoaded{err: errors.New("boom")}, "loading approvals…", toChannels, "channel list: boom"},
 		{"4 channelsLoaded empty in inbox", noChannels, tab,
-			channelsLoaded{channels: []schema.ChannelV0{}}, "loading approvals…", tab, "no channels on server"},
+			channelsLoaded{channels: []schema.ChannelV0{}}, "loading approvals…", toChannels, "no channels on server"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1063,8 +1087,8 @@ func (a *scopeAPI) ListMessagesV2(context.Context, string, int64, int) (schema.L
 	return schema.ListMessagesResponseV2{}, nil
 }
 
-func (a *scopeAPI) SubscribeV2(context.Context, string, func(schema.MessageV2) error) error {
-	a.record("SubscribeV2")
+func (a *scopeAPI) SubscribeV2After(context.Context, string, int64, func(), func(schema.MessageV2) error) error {
+	a.record("SubscribeV2After")
 	return nil
 }
 
@@ -1505,13 +1529,13 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 	api := &scopeAPI{roster: scopeRoster()}
 	m := scopeModel(api, true)
 	run(m.loadCurrent())
-	run(m.startSubscription())
+	run(m.startSubscription(m.current()))
 	deadline := time.Now().Add(2 * time.Second)
-	for api.count("SubscribeV2") == 0 && time.Now().Before(deadline) {
+	for api.count("SubscribeV2After") == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	enter(m, "hi")
-	for _, name := range []string{"ListMessagesV2", "SubscribeV2", "PostMessageV2"} {
+	for _, name := range []string{"ListMessagesV2", "SubscribeV2After", "PostMessageV2"} {
 		if api.count(name) != 1 {
 			t.Errorf("%s calls = %d, want 1", name, api.count(name))
 		}
@@ -1520,7 +1544,7 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 	// TUI cannot call them; the compile-time check above ties API to the
 	// real client.
 	for _, c := range api.callNames() {
-		if !strings.HasSuffix(c, "V2") && c != "ListNets" {
+		if !strings.HasSuffix(c, "V2") && c != "SubscribeV2After" && c != "ListNets" {
 			t.Errorf("unexpected call %s", c)
 		}
 	}

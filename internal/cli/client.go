@@ -469,6 +469,20 @@ func (c *Client) ListMessagesV2(ctx context.Context, channel string, after int64
 // message the caller may see, scoped ones included. A server shutdown is
 // reported through websocket.StatusGoingAway.
 func (c *Client) SubscribeV2(ctx context.Context, channel string, receive func(schema.MessageV2) error) error {
+	return c.subscribeV2(ctx, channel, nil, nil, receive)
+}
+
+// SubscribeV2After is SubscribeV2 that first sends every visible message with
+// an id greater than after, then carries on live, so a reader that holds
+// messages up to after misses none (after=0 sends the whole channel). opened,
+// if not nil, is called once the server has accepted the socket: a resumed
+// stream may have nothing to send for a long time, and this is how the caller
+// learns it is back.
+func (c *Client) SubscribeV2After(ctx context.Context, channel string, after int64, opened func(), receive func(schema.MessageV2) error) error {
+	return c.subscribeV2(ctx, channel, &after, opened, receive)
+}
+
+func (c *Client) subscribeV2(ctx context.Context, channel string, after *int64, opened func(), receive func(schema.MessageV2) error) error {
 	endpoint := c.resolve("v2", "ws")
 	if endpoint.Scheme == "http" {
 		endpoint.Scheme = "ws"
@@ -477,6 +491,9 @@ func (c *Client) SubscribeV2(ctx context.Context, channel string, receive func(s
 	}
 	query := endpoint.Query()
 	query.Set("channel", channel)
+	if after != nil {
+		query.Set("after", strconv.FormatInt(*after, 10))
+	}
 	endpoint.RawQuery = query.Encode()
 	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
@@ -487,6 +504,9 @@ func (c *Client) SubscribeV2(ctx context.Context, channel string, receive func(s
 		return fmt.Errorf("cli: connect v2 subscription: %w", err)
 	}
 	defer func() { _ = conn.CloseNow() }()
+	if opened != nil {
+		opened()
+	}
 	for {
 		var message schema.MessageV2
 		if err := wsjson.Read(ctx, conn, &message); err != nil {
@@ -682,4 +702,93 @@ func (c *Client) GetManifest(ctx context.Context, principalID int64) (schema.Age
 		return schema.AgentManifestV1{}, err
 	}
 	return result.Manifest, nil
+}
+
+// CreateSession opens a session for the caller's credential. A session that
+// fails its own Validate is an error: it is shown to be believed.
+func (c *Client) CreateSession(ctx context.Context, request schema.CreateSessionRequestV1) (schema.SessionV1, error) {
+	var result schema.SessionV1
+	if err := c.roundTrip(ctx, "create session", http.MethodPost, c.resolve("v1", "sessions"), request, &result); err != nil {
+		return schema.SessionV1{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return schema.SessionV1{}, fmt.Errorf("cli: invalid session: %w", err)
+	}
+	return result, nil
+}
+
+// EndSession ends the caller's own session id.
+func (c *Client) EndSession(ctx context.Context, id int64) error {
+	endpoint := c.resolve("v1", "sessions", strconv.FormatInt(id, 10))
+	return c.roundTrip(ctx, "end session", http.MethodDelete, endpoint, nil, nil)
+}
+
+// ListRuns returns one forward page of the runs of channel that the caller may
+// see, ordered by id, optionally only those of session (0 for all).
+func (c *Client) ListRuns(ctx context.Context, channel string, session, after int64, limit int) (schema.ListRunsResponseV1, error) {
+	endpoint := c.resolve("v1", "runs")
+	query := endpoint.Query()
+	query.Set("channel", channel)
+	if session > 0 {
+		query.Set("session", strconv.FormatInt(session, 10))
+	}
+	query.Set("after", strconv.FormatInt(after, 10))
+	query.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = query.Encode()
+	var result schema.ListRunsResponseV1
+	if err := c.roundTrip(ctx, "list runs", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListRunsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// SubscribeEvents follows channel's events socket and calls receive with each
+// session roster it sends: the whole state on connect and on every change.
+// With session set (the caller's own, not ended) the server keeps that session
+// online while the socket is open. Frames of other documents (runs, activity,
+// interventions) are not this method's and are skipped. A roster that fails
+// Validate ends the subscription with an error. There is no replay: a caller
+// that reconnects takes the next roster as the state. A server shutdown is
+// reported through websocket.StatusGoingAway, and loss of membership or of the
+// credential through websocket.StatusPolicyViolation.
+func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, receive func(schema.SessionRosterV1) error) error {
+	endpoint := c.resolve("v1", "events", "ws")
+	if endpoint.Scheme == "http" {
+		endpoint.Scheme = "ws"
+	} else {
+		endpoint.Scheme = "wss"
+	}
+	query := endpoint.Query()
+	query.Set("channel", channel)
+	if session > 0 {
+		query.Set("session", strconv.FormatInt(session, 10))
+	}
+	endpoint.RawQuery = query.Encode()
+	conn, resp, err := c.dial(ctx, endpoint.String())
+	if err != nil {
+		if resp != nil {
+			defer func() { _ = resp.Body.Close() }()
+			return c.decodeError(resp)
+		}
+		return fmt.Errorf("cli: connect events: %w", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	for {
+		// Every frame is one pkg/schema document with a schema field. A roster
+		// decodes into its own type; any other document decodes into it too
+		// (unknown fields are ignored) and is told apart by its schema name.
+		var roster schema.SessionRosterV1
+		if err := wsjson.Read(ctx, conn, &roster); err != nil {
+			return fmt.Errorf("cli: read events: %w", err)
+		}
+		if roster.Schema != schema.SessionRosterSchemaV1 {
+			continue
+		}
+		if err := roster.Validate(); err != nil {
+			return fmt.Errorf("cli: invalid session roster: %w", err)
+		}
+		if err := receive(roster); err != nil {
+			return fmt.Errorf("cli: receive events: %w", err)
+		}
+	}
 }
