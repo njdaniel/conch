@@ -23,13 +23,33 @@ pub enum Error {
     NoChannel,
 
     /// The configuration file exists and could not be read.
-    #[error("{path}: cannot read the configuration: {source}", path = .path.display())]
+    #[error("{path:?}: cannot read the configuration: {source}")]
     ConfigRead {
         /// The file.
         path: PathBuf,
         /// What the operating system said.
         #[source]
         source: std::io::Error,
+    },
+
+    /// The configuration file is not a regular file (a FIFO, a device, a directory). It is
+    /// refused before it is opened, so that a FIFO cannot make the program wait.
+    #[error("{path:?}: the configuration must be a regular file")]
+    ConfigNotRegular {
+        /// The file.
+        path: PathBuf,
+    },
+
+    /// Others could change the configuration file, and its `server` decides where the login
+    /// token is sent.
+    #[error(
+        "{path:?}: the configuration is writable by other users (mode {mode:04o}); run 'chmod go-w {path:?}'"
+    )]
+    ConfigWritable {
+        /// The file.
+        path: PathBuf,
+        /// Its permission bits.
+        mode: u32,
     },
 
     /// The configuration file, or a value laid over it, was refused.

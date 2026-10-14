@@ -176,11 +176,23 @@ pub enum Error {
         server: String,
     },
 
+    /// `CONCH_CONFIG_DIR` is set to a path that is not absolute. The value is not echoed.
+    #[error("CONCH_CONFIG_DIR must be an absolute path")]
+    ConfigDirNotAbsolute,
+
+    /// The credentials path is a symbolic link, a FIFO, a device, a directory or anything
+    /// else that is not a regular file. Refused before it is opened, so that a FIFO cannot
+    /// make the program wait.
+    #[error("credentials file {path:?} is not a regular file: remove it and run 'conch login'")]
+    CredentialsNotRegular {
+        /// The path.
+        path: PathBuf,
+    },
+
     /// The credentials file can be read or written by other users. Refused, as `conch`
     /// refuses it.
     #[error(
-        "credentials file {path} is accessible by other users (mode {mode:04o}); run 'chmod 600 {path}'",
-        path = .path.display()
+        "credentials file {path:?} is accessible by other users (mode {mode:04o}); run 'chmod 600 {path:?}'"
     )]
     CredentialsExposed {
         /// The file.
@@ -190,7 +202,7 @@ pub enum Error {
     },
 
     /// The credentials file exists and could not be read.
-    #[error("credentials file {path} could not be read: {source}", path = .path.display())]
+    #[error("credentials file {path:?} could not be read: {source}")]
     CredentialsUnreadable {
         /// The file.
         path: PathBuf,
@@ -201,7 +213,7 @@ pub enum Error {
 
     /// The credentials file is not the JSON `conch login` writes. Only a position is
     /// given: the text around it may be a token.
-    #[error("credentials file {path} is not valid: {detail}", path = .path.display())]
+    #[error("credentials file {path:?} is not valid: {detail}")]
     CredentialsInvalid {
         /// The file.
         path: PathBuf,
@@ -581,8 +593,8 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "credentials file /tmp/x/conch/credentials.json is accessible by other users \
-             (mode 0644); run 'chmod 600 /tmp/x/conch/credentials.json'"
+            "credentials file \"/tmp/x/conch/credentials.json\" is accessible by other users \
+             (mode 0644); run 'chmod 600 \"/tmp/x/conch/credentials.json\"'"
         );
     }
 }

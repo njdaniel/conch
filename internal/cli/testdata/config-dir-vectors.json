@@ -1,0 +1,19 @@
+[
+  {"note": "nothing set: no directory, and that is not an error", "conch_config_dir": "", "xdg_config_home": "", "home": "", "want": "", "want_error": false},
+  {"note": "HOME only", "conch_config_dir": "", "xdg_config_home": "", "home": "/home/alice", "want": "/home/alice/.config/conch", "want_error": false},
+  {"note": "XDG_CONFIG_HOME wins over HOME", "conch_config_dir": "", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "/xdg/conch", "want_error": false},
+  {"note": "XDG_CONFIG_HOME alone", "conch_config_dir": "", "xdg_config_home": "/xdg", "home": "", "want": "/xdg/conch", "want_error": false},
+  {"note": "a relative XDG_CONFIG_HOME is ignored by os.UserConfigDir's rule: no directory, no HOME fallback", "conch_config_dir": "", "xdg_config_home": "xdg", "home": "/home/alice", "want": "", "want_error": false},
+  {"note": "CONCH_CONFIG_DIR is used as given, no conch/ appended", "conch_config_dir": "/work/alice", "xdg_config_home": "", "home": "", "want": "/work/alice", "want_error": false},
+  {"note": "CONCH_CONFIG_DIR wins over XDG_CONFIG_HOME and HOME", "conch_config_dir": "/work/alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "/work/alice", "want_error": false},
+  {"note": "a directory already named conch is not doubled", "conch_config_dir": "/work/conch", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "/work/conch", "want_error": false},
+  {"note": "white space only is unset: falls back to XDG_CONFIG_HOME", "conch_config_dir": "   ", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "/xdg/conch", "want_error": false},
+  {"note": "white space only is unset: falls back to HOME", "conch_config_dir": " \t\n", "xdg_config_home": "", "home": "/home/alice", "want": "/home/alice/.config/conch", "want_error": false},
+  {"note": "white space only is unset, and then nothing is set", "conch_config_dir": " ", "xdg_config_home": "", "home": "", "want": "", "want_error": false},
+  {"note": "a relative path is an error", "conch_config_dir": "alice", "xdg_config_home": "", "home": "", "want": "", "want_error": true},
+  {"note": "a relative path is an error even when XDG_CONFIG_HOME and HOME would do", "conch_config_dir": "alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "", "want_error": true},
+  {"note": "dot-relative is an error", "conch_config_dir": "./alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "", "want_error": true},
+  {"note": "parent-relative is an error", "conch_config_dir": "../alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "", "want_error": true},
+  {"note": "a tilde is not expanded, so it is relative and an error", "conch_config_dir": "~/alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "", "want_error": true},
+  {"note": "leading white space makes the value relative; it is not trimmed", "conch_config_dir": " /work/alice", "xdg_config_home": "/xdg", "home": "/home/alice", "want": "", "want_error": true}
+]

@@ -1,13 +1,17 @@
 //! The stored login: the token `conch login` wrote, read as `conch` reads it.
 //!
 //! The reference is `internal/cli/credentials.go`. The file is
-//! `<configuration directory>/conch/credentials.json`, a JSON object from a server's key
+//! `<configuration directory>/credentials.json`, where the directory is `CONCH_CONFIG_DIR`
+//! as given or else `<user configuration directory>/conch` ([`default_config_dir`]; the
+//! shared vectors in `internal/cli/testdata/config-dir-vectors.json` hold the two programs
+//! to one rule), a JSON object from a server's key
 //! ([`ServerAddress::key`]) to `{"token": "..."}`; on unix a file that group or others can
 //! touch is refused; and `CONCH_TOKEN`, when it is set to more than white space, wins over
 //! the file.
 //!
 //! This module never writes that file and never reads the environment: the caller hands
-//! in the value of `CONCH_TOKEN` and the directory, so a test can never reach the real
+//! in the value of `CONCH_TOKEN` and the directory (and `default_config_dir` the values of
+//! the variables that name it), so a test can never reach the real
 //! user's files. The functions are synchronous; they read one small file and are meant to
 //! be called before the runtime starts.
 
@@ -26,31 +30,57 @@ use crate::types::{Secret, wire_object};
 /// `explicit`. It is how scripts and CI sign in.
 pub const TOKEN_ENV: &str = "CONCH_TOKEN";
 
-const CREDENTIALS_DIR: &str = "conch";
+/// The directory under the user's configuration directory, when `CONCH_CONFIG_DIR` is not set.
+const CONFIG_DIR_NAME: &str = "conch";
 const CREDENTIALS_FILE: &str = "credentials.json";
 
 /// More than any credentials file holds; a larger one is not read into memory.
 const MAX_CREDENTIALS_BYTES: u64 = 1 << 20;
 
-/// The user's configuration directory, from the values of `XDG_CONFIG_HOME` and `HOME`,
-/// by the rule of Go's `os.UserConfigDir` on Linux: `XDG_CONFIG_HOME` if it is set and
-/// absolute, otherwise `$HOME/.config`. `None` means there is none (a relative
-/// `XDG_CONFIG_HOME`, or neither variable set), and then there is no stored login.
+/// The directory that holds `credentials.json` (and `conch-voice`'s `voice.toml`), from the
+/// values of `CONCH_CONFIG_DIR`, `XDG_CONFIG_HOME` and `HOME`, by the rule of `configDir` in
+/// `internal/cli/credentials.go`:
+///
+/// 1. `CONCH_CONFIG_DIR`, if it holds more than white space, is the directory exactly as
+///    given (not trimmed, no `conch` appended). It must be absolute: a relative one is
+///    [`Error::ConfigDirNotAbsolute`], not resolved against the working directory.
+/// 2. Otherwise the user's configuration directory plus `conch`, by the rule of Go's
+///    `os.UserConfigDir` on Linux: `XDG_CONFIG_HOME` if it is set and absolute, otherwise
+///    `$HOME/.config`.
+///
+/// `Ok(None)` means there is none (a relative `XDG_CONFIG_HOME`, or neither variable set),
+/// and then there is no stored login.
+///
+/// # Errors
+///
+/// [`Error::ConfigDirNotAbsolute`] for a relative `CONCH_CONFIG_DIR`.
 pub fn default_config_dir(
+    conch_config_dir: Option<&OsStr>,
     xdg_config_home: Option<&OsStr>,
     home: Option<&OsStr>,
-) -> Option<PathBuf> {
-    match xdg_config_home.filter(|dir| !dir.is_empty()) {
+) -> Result<Option<PathBuf>, Error> {
+    // A value that is not UTF-8 is not white space.
+    let given = conch_config_dir.filter(|dir| dir.to_str().is_none_or(|s| !s.trim().is_empty()));
+    if let Some(dir) = given {
+        return if Path::new(dir).is_absolute() {
+            Ok(Some(PathBuf::from(dir)))
+        } else {
+            Err(Error::ConfigDirNotAbsolute)
+        };
+    }
+    let base = match xdg_config_home.filter(|dir| !dir.is_empty()) {
         Some(dir) => Path::new(dir).is_absolute().then(|| PathBuf::from(dir)),
         None => home
             .filter(|dir| !dir.is_empty())
             .map(|dir| Path::new(dir).join(".config")),
-    }
+    };
+    Ok(base.map(|base| base.join(CONFIG_DIR_NAME)))
 }
 
-/// Where the credentials file is, under a configuration directory.
+/// Where the credentials file is, in the configuration directory [`default_config_dir`]
+/// returns.
 pub fn credentials_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(CREDENTIALS_DIR).join(CREDENTIALS_FILE)
+    config_dir.join(CREDENTIALS_FILE)
 }
 
 /// The bearer token for `server`: `explicit` (the value of `CONCH_TOKEN`) when it holds
@@ -94,6 +124,18 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
         path: path.to_owned(),
         source,
     };
+    // Looked at before it is opened: opening a FIFO waits for a writer. A link is refused
+    // too, as `conch` refuses one, so both programs read the same file or none.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(Error::CredentialsNotRegular {
+                path: path.to_owned(),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable(e)),
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -229,7 +271,6 @@ mod tests {
     fn a_missing_file_or_directory_is_not_signed_in_and_names_no_path() {
         let empty = tempfile::tempdir().unwrap();
         let no_file = tempfile::tempdir().unwrap();
-        fs::create_dir(no_file.path().join("conch")).unwrap();
         let gone = empty.path().join("does-not-exist");
 
         let results = [
@@ -353,8 +394,8 @@ mod tests {
             assert_eq!(
                 shown,
                 format!(
-                    "credentials file {0} is accessible by other users (mode {mode:04o}); run 'chmod 600 {0}'",
-                    path.display()
+                    "credentials file {0:?} is accessible by other users (mode {mode:04o}); run 'chmod 600 {0:?}'",
+                    path
                 )
             );
             assert!(!shown.contains("FAKE"), "{shown}");
@@ -430,16 +471,17 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_cannot_be_read_is_an_error_that_names_it() {
-        // credentials.json is a directory: it opens, and reading it fails.
+    fn something_that_is_not_a_file_is_an_error_that_names_it() {
+        // credentials.json is a directory: refused before it is opened (this case used to
+        // open and fail on the read as CredentialsUnreadable).
         let dir = tempfile::tempdir().unwrap();
         let path = credentials_path(dir.path());
         fs::create_dir_all(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let error = resolve(None, "http://a:1", &dir).unwrap_err();
         match &error {
-            Error::CredentialsUnreadable { path: p, .. } => assert_eq!(p, &path),
-            other => panic!("expected CredentialsUnreadable, got {other:?}"),
+            Error::CredentialsNotRegular { path: p } => assert_eq!(p, &path),
+            other => panic!("expected CredentialsNotRegular, got {other:?}"),
         }
         assert!(error.to_string().contains("credentials.json"));
     }
@@ -467,10 +509,15 @@ mod tests {
 
         // The same for a directory on the way to the file that may not be entered.
         let dir = config_with(&as_go_writes_it(), 0o600);
-        let conch = dir.path().join("conch");
-        fs::set_permissions(&conch, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = resolve(None, "http://a:1", &dir);
-        fs::set_permissions(&conch, fs::Permissions::from_mode(0o700)).unwrap();
+        // The configuration directory itself, which now holds the file directly.
+        let sub = tempfile::tempdir_in(dir.path()).unwrap();
+        let path = sub.path().join("config");
+        fs::create_dir(&path).unwrap();
+        fs::write(credentials_path(&path), as_go_writes_it()).unwrap();
+        fs::set_permissions(credentials_path(&path), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = resolve_token(None, &server("http://a:1"), Some(&path));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(
             matches!(result, Err(Error::CredentialsUnreadable { .. })),
             "{result:?}"
@@ -505,35 +552,142 @@ mod tests {
         assert_eq!(entries, [OsStr::new("credentials.json")]);
     }
 
+    #[derive(serde::Deserialize)]
+    struct ConfigDirVector {
+        note: String,
+        conch_config_dir: String,
+        xdg_config_home: String,
+        home: String,
+        want: String,
+        want_error: bool,
+    }
+
     #[test]
-    fn the_default_directory_follows_gos_user_config_dir() {
-        let os = |s: &'static str| Some(OsStr::new(s));
-        // (XDG_CONFIG_HOME, HOME, the directory). Made-up values: the environment of the
-        // process running this test is never read.
-        let table = [
-            (
-                os("/made/up/xdg"),
-                os("/made/up/home"),
-                Some("/made/up/xdg"),
-            ),
-            (os("/made/up/xdg"), None, Some("/made/up/xdg")),
-            (None, os("/made/up/home"), Some("/made/up/home/.config")),
-            (os(""), os("/made/up/home"), Some("/made/up/home/.config")),
-            (os("relative/xdg"), os("/made/up/home"), None),
-            (None, None, None),
-            (None, os(""), None),
-            (os(""), os(""), None),
-        ];
-        for (xdg, home, want) in table {
-            assert_eq!(
-                default_config_dir(xdg, home),
-                want.map(PathBuf::from),
-                "XDG_CONFIG_HOME={xdg:?} HOME={home:?}"
-            );
+    fn the_directory_matches_go_for_every_shared_vector() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../internal/cli/testdata/config-dir-vectors.json");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let vectors: Vec<ConfigDirVector> = serde_json::from_str(&text).unwrap();
+        assert!(vectors.len() >= 10, "only {} vectors", vectors.len());
+        // "" in a vector means the variable is unset.
+        fn var(value: &str) -> Option<&OsStr> {
+            (!value.is_empty()).then(|| OsStr::new(value))
         }
+        for v in &vectors {
+            let got = default_config_dir(
+                var(&v.conch_config_dir),
+                var(&v.xdg_config_home),
+                var(&v.home),
+            );
+            if v.want_error {
+                let error = got.unwrap_err();
+                assert!(matches!(error, Error::ConfigDirNotAbsolute), "{}", v.note);
+                continue;
+            }
+            let want = (!v.want.is_empty()).then(|| PathBuf::from(&v.want));
+            assert_eq!(got.unwrap(), want, "{}", v.note);
+        }
+    }
+
+    #[test]
+    fn a_relative_config_dir_is_one_line_naming_the_variable_and_not_the_value() {
+        let error = default_config_dir(
+            Some(OsStr::new("relative/FAKE_secret_dir")),
+            Some(OsStr::new("/made/up/xdg")),
+            None,
+        )
+        .unwrap_err();
+        let shown = format!("{error} {error:?}");
         assert_eq!(
-            credentials_path(Path::new("/made/up/xdg")),
-            PathBuf::from("/made/up/xdg/conch/credentials.json")
+            error.to_string(),
+            "CONCH_CONFIG_DIR must be an absolute path"
+        );
+        assert!(!shown.contains("FAKE"), "{shown}");
+    }
+
+    #[test]
+    fn the_credentials_file_sits_directly_in_the_directory() {
+        assert_eq!(
+            credentials_path(Path::new("/made/up/alice")),
+            PathBuf::from("/made/up/alice/credentials.json")
+        );
+    }
+
+    /// A FIFO at `dir/credentials.json`, or None (with a message) without `mkfifo`.
+    fn fifo_in(dir: &Path) -> Option<PathBuf> {
+        let path = credentials_path(dir);
+        match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => Some(path),
+            _ => {
+                eprintln!("skipped: mkfifo is not available");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn a_fifo_is_refused_at_once_and_does_not_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        if fifo_in(dir.path()).is_none() {
+            return;
+        }
+        let path = dir.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve_token(None, &server("http://a:1"), Some(&path)));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve_token waited on the FIFO");
+        match result {
+            Err(error @ Error::CredentialsNotRegular { .. }) => {
+                assert!(error.to_string().contains("not a regular file"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_symlink_at_the_leaf_is_refused_even_to_a_good_file() {
+        let real = config_with(&as_go_writes_it(), 0o600);
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(credentials_path(real.path()), credentials_path(dir.path()))
+            .unwrap();
+        let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
+        assert!(
+            matches!(result, Err(Error::CredentialsNotRegular { .. })),
+            "{result:?}"
+        );
+        // A directory in its place is refused the same way.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(credentials_path(dir.path())).unwrap();
+        let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
+        assert!(matches!(result, Err(Error::CredentialsNotRegular { .. })));
+    }
+
+    #[test]
+    fn an_error_is_one_line_even_if_the_directory_name_has_a_newline() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("evil\nname");
+        fs::create_dir(&dir).unwrap();
+        fs::write(credentials_path(&dir), as_go_writes_it()).unwrap();
+        fs::set_permissions(credentials_path(&dir), fs::Permissions::from_mode(0o644)).unwrap();
+        let error = resolve_token(None, &server("http://a:1"), Some(&dir)).unwrap_err();
+        assert!(matches!(error, Error::CredentialsExposed { .. }));
+        assert!(!error.to_string().contains('\n'), "{error}");
+    }
+
+    #[test]
+    fn two_directories_never_see_each_others_login() {
+        let a = config_with(&as_go_writes_it(), 0o600);
+        let b = tempfile::tempdir().unwrap();
+        let from_a = resolve_token(None, &server("http://a:1"), Some(a.path())).unwrap();
+        assert_eq!(from_a.expose(), FAKE_A);
+        let from_b = resolve_token(None, &server("http://a:1"), Some(b.path()));
+        assert!(
+            matches!(from_b, Err(Error::NotSignedIn { .. })),
+            "{from_b:?}"
         );
     }
 }
