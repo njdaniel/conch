@@ -146,7 +146,8 @@ jobs:
         run: make build-web-embedded
 
       - name: version says embedded
-        run: bin/conchd version | tee /dev/stderr | grep -qx 'web: embedded'
+        run: |
+          bin/conchd version | tee /dev/stderr | grep -qx 'web: embedded'
 
       - name: serve /app/ from the binary
         run: |
