@@ -436,6 +436,23 @@ impl Rig {
         .await;
     }
 
+    /// How many `stopped` transmit reports the fake conchd has been sent.
+    pub fn stopped(&self) -> usize {
+        self.conchd
+            .reported()
+            .iter()
+            .filter(|state| *state == "stopped")
+            .count()
+    }
+
+    /// Waits until there are more than `before` `stopped` reports: the gate has said
+    /// it shut. Since a forced shut is shown as not transmitting before the gate's
+    /// word (#293), a test that counts frames after one waits for this first.
+    pub async fn stopped_beyond(&self, before: usize) {
+        self.until("a stopped report", |rig| rig.stopped() > before)
+            .await;
+    }
+
     /// Waits until the fake's audio source has been handed more than `before` frames.
     pub async fn frames_beyond(&self, before: u64) {
         self.until("frames at the audio source", |rig| {
