@@ -335,6 +335,20 @@ async fn rig_with_keyboard() -> (Rig, Pipe, std::fs::File) {
     (rig, pipe, keyboard)
 }
 
+/// No status line the client ever wrote says that the key device is lost and that it is
+/// transmitting: the two change in one step.
+fn never_lost_and_transmitting(rig: &Rig, context: &str) {
+    for own in rig.events_named("self") {
+        let lost = own["blocked"]
+            .as_array()
+            .is_some_and(|blocked| blocked.contains(&json!("key_device_lost")));
+        assert!(
+            !(lost && own["transmitting"] == true),
+            "{context}: a status said lost and transmitting: {own}"
+        );
+    }
+}
+
 fn key_device_states(rig: &Rig) -> Vec<String> {
     rig.events_named("key_device")
         .iter()
@@ -400,6 +414,10 @@ async fn the_device_vanishing_while_the_talk_key_is_held_shuts_the_gate() {
             })
         })
         .await;
+        // The status is shown as soon as the gate is told; the stopped report follows the
+        // gate's own word that it has shut, so frames are counted only after it.
+        rig.reported(2).await;
+        never_lost_and_transmitting(&rig, way);
         let sent = rig.sdk.frames();
         several_frames().await;
         assert_eq!(
@@ -409,7 +427,6 @@ async fn the_device_vanishing_while_the_talk_key_is_held_shuts_the_gate() {
         );
         assert_eq!(rig.sdk.frames_while_muted(), 0, "{way}");
         assert!(rig.sdk.is_muted(), "{way}");
-        rig.reported(2).await;
         assert_eq!(rig.conchd.reported(), ["started", "stopped"], "{way}");
         assert_eq!(
             key_device_states(&rig)[..2],
@@ -463,11 +480,12 @@ async fn every_reason_the_watcher_gives_for_a_lost_device_shuts_the_gate() {
             rig.own()["blocked"] == json!(["key_device_lost"]) && rig.own()["transmitting"] == false
         })
         .await;
+        rig.reported(2).await;
+        never_lost_and_transmitting(&rig, &problem.to_string());
         let sent = rig.sdk.frames();
         several_frames().await;
         assert_eq!(rig.sdk.frames(), sent, "{problem}");
         assert!(rig.sdk.is_muted(), "{problem}");
-        rig.reported(2).await;
         assert_eq!(rig.conchd.reported(), ["started", "stopped"], "{problem}");
         let said = rig.events_named("key_device").pop().unwrap();
         assert_eq!(said["reason"], problem.code());

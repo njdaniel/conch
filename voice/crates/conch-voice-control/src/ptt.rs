@@ -237,7 +237,10 @@ pub enum TransmitReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PttStatus {
     /// A transmission is in progress: from the press until the gate has shut, release tail
-    /// included.
+    /// included. Never true while any reason in `blocked` stands: a reason shuts the gate
+    /// with no tail, so the moment it starts nothing more is sent, and both fields change in
+    /// the one status. It stays false after the reason ends, until the next press. (The machine itself goes on waiting for the gate to say it has shut,
+    /// to report the end; see [`Ptt::transmission_under_way`].)
     pub transmitting: bool,
     /// Everything that currently keeps the gate shut. Empty means a press would transmit.
     pub blocked: ShutReasons,
@@ -301,6 +304,10 @@ enum Stage {
 pub struct Ptt {
     max_transmit: Duration,
     transmission: Transmission,
+    /// A reason shut the gate during the transmission, with no tail: nothing more is sent,
+    /// although the gate has not yet said so. Cleared when the transmission ends or a new
+    /// one opens. It outlasts the reason itself if that ends first.
+    cut: bool,
     reasons: ShutReasons,
     key_device_present: bool,
     stage: Stage,
@@ -333,6 +340,7 @@ impl Ptt {
         let ptt = Self {
             max_transmit,
             transmission: Transmission::Idle,
+            cut: false,
             reasons,
             key_device_present: false,
             stage: Stage::Running,
@@ -419,9 +427,21 @@ impl Ptt {
     #[must_use]
     pub fn status(&self) -> PttStatus {
         PttStatus {
-            transmitting: self.transmission != Transmission::Idle,
+            // A reason shuts the gate, tail and all, even if the gate has not yet said so:
+            // showing "transmitting" beside it, or after it if the reason ends first, would
+            // be wrong for as long as the gate's word takes.
+            transmitting: self.transmission_under_way() && !self.cut,
             blocked: self.reasons,
         }
+    }
+
+    /// Whether the machine still counts a transmission as under way: from the press until
+    /// the gate has said it shut. This outlasts [`PttStatus::transmitting`] by the time the
+    /// gate takes to say so after a forced shut, and is what the caller waits on before it
+    /// leaves.
+    #[must_use]
+    pub fn transmission_under_way(&self) -> bool {
+        self.transmission != Transmission::Idle
     }
 
     fn press(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
@@ -492,6 +512,7 @@ impl Ptt {
             Transmission::Shutting { press_pending } => press_pending,
         };
         self.transmission = Transmission::Idle;
+        self.cut = false;
         out.push(PttOutput::Report(TransmitReport::Stopped));
         if press_pending && self.stage == Stage::Running && self.reasons.is_empty() {
             self.open(now, out);
@@ -509,6 +530,7 @@ impl Ptt {
 
     fn open(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
         self.transmission = Transmission::Open { since: now };
+        self.cut = false;
         out.push(PttOutput::Gate(GateCommand::Open));
         out.push(PttOutput::Report(TransmitReport::Started));
     }
@@ -536,6 +558,7 @@ impl Ptt {
         }
         out.push(PttOutput::Gate(GateCommand::ForceShut(reason)));
         if self.transmission != Transmission::Idle {
+            self.cut = true;
             self.shutting();
         }
     }
@@ -736,6 +759,11 @@ mod tests {
                     PttOutput::Status(shown) => {
                         statuses += 1;
                         assert_eq!(shown, self.ptt.status());
+                        assert!(
+                            !shown.transmitting || shown.blocked.is_empty(),
+                            "a status that says transmitting beside {:?}",
+                            shown.blocked
+                        );
                     }
                     Quit => {
                         assert_eq!(i, outputs.len() - 1, "Quit is the last output");
@@ -753,7 +781,7 @@ mod tests {
             // A machine that believes nothing is being transmitted has not left the gate
             // open (it may still be running out its release tail).
             assert!(
-                self.ptt.status().transmitting || self.gate != FakeGate::Open,
+                self.ptt.transmission_under_way() || self.gate != FakeGate::Open,
                 "the gate is open and the machine is idle"
             );
             // The property users rely on: with any reason standing, the gate is shut.
@@ -780,7 +808,7 @@ mod tests {
                 Some(Started),
                 "a started report was never stopped"
             );
-            assert!(!self.ptt.status().transmitting);
+            assert!(!self.ptt.transmission_under_way());
             assert_eq!(self.ptt.deadline(), None);
             self.opens
         }
@@ -827,9 +855,8 @@ mod tests {
             cause(&mut harness, reason),
             [
                 Gate(ForceShut(reason)),
-                status(true, &[reason]),
-                Report(Stopped),
                 status(false, &[reason]),
+                Report(Stopped),
             ]
         );
         assert_eq!(harness.gate, FakeGate::Shut);
@@ -1036,9 +1063,8 @@ mod tests {
             harness.send(PttInput::Connected(false)),
             [
                 Gate(ForceShut(ShutReason::NotConnected)),
-                status(true, &[ShutReason::NotConnected]),
-                Report(Stopped),
                 status(false, &[ShutReason::NotConnected]),
+                Report(Stopped),
             ]
         );
 
@@ -1083,9 +1109,8 @@ mod tests {
             harness.send(PttInput::Tick),
             [
                 Gate(ForceShut(ShutReason::MaxTransmit)),
-                status(true, &[ShutReason::MaxTransmit]),
-                Report(Stopped),
                 status(false, &[ShutReason::MaxTransmit]),
+                Report(Stopped),
             ]
         );
         assert_eq!(harness.ptt.deadline(), None);
@@ -1118,9 +1143,8 @@ mod tests {
             [
                 Gate(ForceShut(ShutReason::MaxTransmit)),
                 Gate(ForceShut(ShutReason::Muted)),
-                status(true, &[ShutReason::Muted, ShutReason::MaxTransmit]),
-                Report(Stopped),
                 status(false, &[ShutReason::Muted, ShutReason::MaxTransmit]),
+                Report(Stopped),
             ]
         );
         assert_eq!(harness.finish(), 1);
@@ -1135,8 +1159,8 @@ mod tests {
             [
                 Gate(ForceShut(ShutReason::MaxTransmit)),
                 Gate(Clear(ShutReason::MaxTransmit)),
-                Report(Stopped),
                 status(false, &[]),
+                Report(Stopped),
             ]
         );
         assert_eq!(harness.finish(), 1);
@@ -1320,9 +1344,8 @@ mod tests {
                 cause(&mut harness, reason),
                 [
                     Gate(ForceShut(reason)),
-                    status(true, &[reason]),
-                    Report(Stopped),
                     status(false, &[reason]),
+                    Report(Stopped),
                 ],
                 "{reason:?}"
             );
@@ -1344,9 +1367,8 @@ mod tests {
             harness.send(PttInput::Connected(false)),
             [
                 Gate(ForceShut(ShutReason::NotConnected)),
-                status(true, &[ShutReason::NotConnected]),
-                Report(Stopped),
                 status(false, &[ShutReason::NotConnected]),
+                Report(Stopped),
             ]
         );
         // A gate that also reported the end of its tail would be telling us twice.
@@ -1361,9 +1383,8 @@ mod tests {
             harness.send(PttInput::Connected(false)),
             [
                 Gate(ForceShut(ShutReason::NotConnected)),
-                status(true, &[ShutReason::NotConnected]),
-                Report(Stopped),
                 status(false, &[ShutReason::NotConnected]),
+                Report(Stopped),
             ]
         );
         assert_eq!(
@@ -1414,6 +1435,43 @@ mod tests {
             [Gate(Clear(ShutReason::KeyDeviceLost)), status(false, &[])]
         );
         assert_eq!(harness.finish(), 1);
+    }
+
+    /// The status is one snapshot: the moment the device is lost it says so and says that
+    /// nothing is transmitted, although the machine goes on waiting for the gate to say it
+    /// has shut. There is no status that says both "lost" and "transmitting".
+    #[test]
+    fn a_lost_key_device_is_never_shown_beside_transmitting() {
+        let mut ptt = Ptt::new(MAX).0;
+        let at = Duration::ZERO;
+        for input in [
+            PttInput::Connected(true),
+            PttInput::PublishGrant(true),
+            PttInput::Microphone(true),
+            PttInput::KeyDevice(true),
+            key(Key::Talk, KeyAction::Press),
+        ] {
+            ptt.handle(at, input);
+        }
+        assert!(ptt.status().transmitting);
+        assert_eq!(
+            ptt.handle(at, PttInput::KeyDevice(false)),
+            [
+                Gate(ForceShut(ShutReason::KeyDeviceLost)),
+                status(false, &[ShutReason::KeyDeviceLost]),
+            ]
+        );
+        // The gate has not said it shut: the machine still waits for it, and says so to
+        // whoever asks, but shows nothing different.
+        assert!(ptt.transmission_under_way());
+        assert!(!ptt.status().transmitting);
+        // The device comes back before the gate's word does: still not transmitting.
+        assert_eq!(
+            ptt.handle(at, PttInput::KeyDevice(true)),
+            [Gate(Clear(ShutReason::KeyDeviceLost)), status(false, &[])]
+        );
+        assert_eq!(ptt.handle(at, PttInput::GateShut), [Report(Stopped)]);
+        assert!(!ptt.transmission_under_way());
     }
 
     #[test]
@@ -1587,9 +1645,8 @@ mod tests {
             harness.send(PttInput::Connected(false)),
             [
                 Gate(ForceShut(ShutReason::NotConnected)),
-                status(true, &[ShutReason::NotConnected]),
-                Report(Stopped),
                 status(false, &[ShutReason::NotConnected]),
+                Report(Stopped),
                 Quit,
             ]
         );

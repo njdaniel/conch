@@ -455,6 +455,51 @@ mod tests {
         assert_eq!(record.heard(), [6.0]);
     }
 
+    /// The bound between a lost key device and the gate shutting: the task takes a command
+    /// before it reads another frame, so once a forced shut has been sent, the frame being
+    /// forwarded when it arrived is the last. Every frame counted passed the gate while it
+    /// was open, and none passes after the shut however many wait in the ring.
+    #[tokio::test]
+    async fn a_forced_shut_lets_through_no_frame_that_comes_after_it() {
+        let (events, mut said) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let counted = Arc::new(AtomicU64::new(0));
+        let mut task = Task {
+            gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::clone(&counted),
+        };
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        for n in 1..=4 {
+            ring.push(n);
+        }
+        let mut captured = SILENCE;
+        for _ in 0..4 {
+            assert!(task.frame(&mut captured).await);
+        }
+        for n in 5..=9 {
+            ring.push(n);
+        }
+        task.obey(TxCommand::Gate(GateCommand::ForceShut(
+            ShutReason::KeyDeviceLost,
+        )));
+        assert!(matches!(
+            said.try_recv(),
+            Ok(TxEvent::GateShut {
+                limit_reached: false
+            })
+        ));
+        while task.frame(&mut captured).await {}
+        assert_eq!(record.heard(), [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(counted.load(Ordering::Relaxed), 4);
+    }
+
     /// While the gate is open, the same waiting audio is simply sent: nothing is discarded
     /// from a transmission that is under way.
     #[tokio::test]
