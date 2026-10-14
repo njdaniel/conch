@@ -392,6 +392,12 @@ goes straight to that subprocess. Run the adapter as a user, in a directory and
 on a host where that is acceptable, and give its agent a manifest for the one
 channel it serves.
 
+The subprocess does not receive the agent's Conch credentials: the adapter
+removes every `CONCH_ADAPTER_*` and `CONCH_BOT_*` variable and `CONCH_TOKEN` from
+its environment, and passes everything else (`HOME`, `PATH`, the runtime's own
+login) unchanged. A model asked to print its environment cannot reveal the
+token.
+
 It skips messages already present when it starts and ignores its own replies.
 It replies in kind: an answer to a net message goes to that net, an answer to
 a whisper goes to the same principals, and an answer to a channel-wide message
