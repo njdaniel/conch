@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,5 +221,32 @@ func TestRoutesTableIsReadable(t *testing.T) {
 		if bad := unlisted(routes, []string{call}); len(bad) != 0 {
 			t.Errorf("%s is a public route and the check does not find it", call)
 		}
+	}
+}
+
+func TestRealAdapterPlanFor(t *testing.T) {
+	found := func(string) (string, error) { return "/usr/bin/x", nil }
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	for _, tc := range []struct {
+		name     string
+		flag     bool
+		program  string
+		model    string
+		lookPath func(string) (string, error)
+		wantRun  bool
+		wantWhy  string
+	}{
+		{"codex, not asked for", false, "codex", "m", found, false, "real Codex command"},
+		{"codex missing", true, "codex", "m", missing, false, "the codex program is not on PATH"},
+		{"codex without a model", true, "codex", "", found, false, "CONCH_ADAPTER_MODEL"},
+		{"codex there with a model", true, "codex", "m", found, true, ""},
+		{"claude needs no model of its own", true, "claude", "sonnet", found, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run, why := realAdapterPlanFor(tc.flag, tc.program, tc.model, tc.lookPath)
+			if run != tc.wantRun || !strings.Contains(why, tc.wantWhy) {
+				t.Errorf("run = %v, why = %q; want %v, %q", run, why, tc.wantRun, tc.wantWhy)
+			}
+		})
 	}
 }

@@ -173,7 +173,9 @@ func (b *botLoop) runReply(ctx context.Context, g *audienceGroup, human []schema
 	if run != nil {
 		fx = &runFixture{b: b, run: run}
 		stopWatch = b.watchInterventions(ctx, run, g)
-		b.activity(ctx, run, schema.ActivityKindCommandStarted, "started "+b.cfg.Command.name(), "", nil)
+		if !b.cfg.StreamsActivity {
+			b.activity(ctx, run, schema.ActivityKindCommandStarted, "started "+b.cfg.Command.name(), "", nil)
+		}
 	}
 	reply, err := b.claude.Reply(cmdCtx, prompt, fx)
 	// No intervention is taken once the command is over.
@@ -188,7 +190,9 @@ func (b *botLoop) finishReply(ctx context.Context, g *audienceGroup, run *active
 	if err != nil {
 		return b.finishFailedCommand(ctx, run, err)
 	}
-	b.activity(ctx, run, schema.ActivityKindCommandFinished, "command finished", "exit 0", nil)
+	if !b.cfg.StreamsActivity {
+		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command finished", "exit 0", nil)
+	}
 	b.answerLateCancels(ctx, run, "the run had finished")
 
 	reply = strings.TrimSpace(reply)
@@ -233,6 +237,12 @@ func (b *botLoop) finishFailedCommand(ctx context.Context, run *activeRun, err e
 		b.setState(ctx, run, schema.RunStateCancelled, "adapter stopped")
 		b.answerLateCancels(ctx, run, "the adapter stopped")
 		return nil //nolint:nilerr // stopping the command is what shutdown asked for, not a failure to back off on
+	case errors.Is(err, errNotJSONL):
+		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command output not understood", "error", nil)
+		b.setState(ctx, run, schema.RunStateFailed, err.Error())
+	case errors.Is(err, errTooMuchActivity):
+		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command stopped", "error", nil)
+		b.setState(ctx, run, schema.RunStateFailed, err.Error())
 	case errors.Is(err, errReplyTimeout):
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command timed out", "timeout", nil)
 		b.setState(ctx, run, schema.RunStateFailed, "timeout")
@@ -320,10 +330,16 @@ func (b *botLoop) handleIntervention(ctx context.Context, run *activeRun, g *aud
 	}
 }
 
-// runFixture is what the fixture markers ask of a run.
+// runFixture is what the fixture markers ask of a run. It is also where the
+// reader of a streaming profile reports the command's steps.
 type runFixture struct {
 	b   *botLoop
 	run *activeRun
+}
+
+// activity adds an entry the command's output told of.
+func (f *runFixture) activity(ctx context.Context, kind schema.ActivityKind, summary, outcome string) {
+	f.b.activity(ctx, f.run, kind, summary, outcome, nil)
 }
 
 // approval raises an approval, parks the run in waiting until it is decided,

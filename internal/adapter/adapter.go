@@ -37,6 +37,13 @@ type config struct {
 	// Fixture turns on the fixture markers in the command's output. Never set
 	// it for a real model.
 	Fixture bool
+	// Reader is how the command's output is read, from the runtime's profile.
+	Reader readerKind
+	// StreamsActivity is set when that reader reports the command's own steps
+	// as activity, so the run does not add one pair for the process.
+	StreamsActivity bool
+	// WorkDir is the command's working directory; empty means the adapter's.
+	WorkDir string
 }
 
 // Main is the program: cmd/conch-adapter, and cmd/conch-bot under its old
@@ -66,7 +73,7 @@ func run() error {
 	if err := client.Initialize(ctx, "conch-adapter"); err != nil {
 		return fmt.Errorf("initialize MCP: %w", err)
 	}
-	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext}
+	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir}
 	loop := &botLoop{cfg: cfg, mcp: mcpAdapter{client}, claude: runner}
 	return loop.run(ctx)
 }
@@ -139,23 +146,46 @@ func loadConfig(lookup envLookup) (config, error) {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CONTEXT_MESSAGES must be a non-negative integer")
 	}
 	cfg.ContextMessages = contextMessages
-	cfg.Model = get("CONCH_ADAPTER_MODEL", "CONCH_BOT_MODEL", "sonnet")
+	cfg.Runtime = get("CONCH_ADAPTER_RUNTIME", "", "claude-code")
+	profile, knownProfile := profileFor(cfg.Runtime)
+	cfg.Reader, cfg.StreamsActivity = profile.reader, profile.streamsActivity()
+	if cfg.Model = get("CONCH_ADAPTER_MODEL", "CONCH_BOT_MODEL", profile.model); cfg.Model == "" {
+		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL (or CONCH_BOT_MODEL) is required when CONCH_ADAPTER_RUNTIME is %s", profile.name)
+	}
 	if cfg.ReplyTimeout, err = parseDuration(get("CONCH_ADAPTER_REPLY_TIMEOUT", "CONCH_BOT_REPLY_TIMEOUT", "120s"), "CONCH_ADAPTER_REPLY_TIMEOUT"); err != nil {
 		return config{}, err
 	}
 	cfg.LockFile = get("CONCH_ADAPTER_LOCK_FILE", "CONCH_BOT_LOCK_FILE", filepath.Join(os.TempDir(), "conch-adapter.lock"))
-	// CLAUDE_BIN replaces the first word of the default command only. A command
-	// someone configured is run as written: otherwise a CLAUDE_BIN left over from
-	// conch-bot would turn a fixture script into the real model, with the
-	// fixture markers on (security review of #275).
+	if dir := get("CONCH_ADAPTER_WORKDIR", "", ""); dir != "" {
+		// Absolute, so that it means the same to the adapter and to the command.
+		if cfg.WorkDir, err = filepath.Abs(dir); err != nil {
+			return config{}, fmt.Errorf("CONCH_ADAPTER_WORKDIR: %w", err)
+		}
+	}
+	// The profile's binary variable (CLAUDE_BIN, CODEX_BIN) replaces the first
+	// word of the default command only. A command someone configured is run as
+	// written: otherwise a CLAUDE_BIN left over from conch-bot would turn a
+	// fixture script into the real model, with the fixture markers on (security
+	// review of #275). The reader stays the profile's either way.
 	line, binary := get("CONCH_ADAPTER_CMD", "", ""), ""
-	if line == "" {
-		line, binary = defaultCommand, get("CLAUDE_BIN", "", "")
+	isDefault := line == ""
+	if isDefault {
+		if !knownProfile {
+			return config{}, fmt.Errorf("CONCH_ADAPTER_RUNTIME %q is no runtime profile (%s); set CONCH_ADAPTER_CMD to use it as a label", cfg.Runtime, profileNames())
+		}
+		line, binary = profile.command, get(profile.binEnv, "", "")
+		if binary != "" && strings.ContainsRune(binary, filepath.Separator) && !filepath.IsAbs(binary) {
+			// A relative path would be read against the workdir, not the
+			// directory it was written for.
+			return config{}, fmt.Errorf("%s must be a bare program name or an absolute path", profile.binEnv)
+		}
 	}
 	if cfg.Command, err = parseCommand(line, binary); err != nil {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CMD: %w", err)
 	}
-	cfg.Runtime = get("CONCH_ADAPTER_RUNTIME", "", "claude-code")
+	if isDefault && cfg.WorkDir != "" && profile.workdirFlag != "" {
+		cfg.Command.args = append(cfg.Command.args, profile.workdirFlag, cfg.WorkDir)
+	}
 	if cfg.Heartbeat, err = parseDuration(get("CONCH_ADAPTER_HEARTBEAT", "", "10s"), "CONCH_ADAPTER_HEARTBEAT"); err != nil {
 		return config{}, err
 	}
