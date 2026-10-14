@@ -1025,3 +1025,51 @@ func TestFixtureManifests(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestRealAdapterCodex checks --runtime codex: agent-a.env names the codex
+// runtime and no fixture, the warning is the Codex one, and the flag is only
+// accepted with --real-adapter and a known name. Nothing is started.
+func TestRealAdapterCodex(t *testing.T) {
+	s := newScratch(t)
+	for _, args := range [][]string{{"--runtime", "codex"}, {"--keep", "--real-adapter", "--runtime", "gemini"}} {
+		if _, _, err := s.run(args...); err == nil {
+			t.Errorf("p3-local %v succeeded", args)
+		}
+	}
+
+	cmd := s.command("--keep", "--real-adapter", "--runtime", "codex")
+	cmd.Env = append(s.env(), "CONCH_ADAPTER_MODEL=a-model")
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("p3-local --keep --real-adapter --runtime codex: %v\n%s\n%s", err, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "WARNING: --real-adapter --runtime codex") || !strings.Contains(errb.String(), "read-only") {
+		t.Errorf("the Codex warning is missing from standard error:\n%s", errb.String())
+	}
+	if !strings.Contains(out.String(), "agent-a is the real Codex command") || strings.Contains(out.String(), "fixtures/approval.sh") {
+		t.Errorf("the printed commands:\n%s", out.String())
+	}
+	a, err := os.ReadFile(filepath.Join(s.root, "agent-a.env")) // #nosec G304 -- a path in this test's scratch
+	must(t, err)
+	for _, present := range []string{"CONCH_ADAPTER_RUNTIME=codex", "CONCH_ADAPTER_MODEL=a-model"} {
+		if !strings.Contains(string(a), present) {
+			t.Errorf("agent-a.env lacks %s:\n%s", present, a)
+		}
+	}
+	for _, absent := range []string{"CONCH_ADAPTER_CMD", "CONCH_ADAPTER_FIXTURE"} {
+		if strings.Contains(string(a), absent) {
+			t.Errorf("agent-a.env sets %s; the real adapter runs its default", absent)
+		}
+	}
+	s.mustRun("--reset")
+
+	// Without a model in the caller's environment none is written: the adapter
+	// then refuses to start and says which variable is missing.
+	s.mustRun("--keep", "--real-adapter", "--runtime", "codex")
+	a, err = os.ReadFile(filepath.Join(s.root, "agent-a.env")) // #nosec G304 -- a path in this test's scratch
+	must(t, err)
+	if strings.Contains(string(a), "CONCH_ADAPTER_MODEL") || !strings.Contains(string(a), "CONCH_ADAPTER_RUNTIME=codex") {
+		t.Errorf("agent-a.env:\n%s", a)
+	}
+}

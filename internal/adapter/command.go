@@ -200,6 +200,10 @@ type commandRunner struct {
 	// text: no output of a model can raise an approval.
 	fixture bool
 	sleep   func(context.Context, time.Duration) error
+	// reader says how the output is read; the zero value is plain text.
+	reader readerKind
+	// dir is the command's working directory; empty means the adapter's own.
+	dir string
 }
 
 func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandler) (string, error) {
@@ -208,6 +212,7 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 	argv := c.spec.argv(prompt, c.model)
 	cmd := exec.CommandContext(replyCtx, argv[0], argv[1:]...) // #nosec G204 -- the operator explicitly configures the command; it is split without a shell
 	ownProcessGroup(cmd)
+	cmd.Dir = c.dir
 	// A grandchild that kept the output pipe open must not hold Wait after the
 	// group has been killed.
 	cmd.WaitDelay = 2 * time.Second
@@ -258,9 +263,17 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 	return reply, nil
 }
 
-// readReply reads the command's output line by line. With the fixture on, a
-// line that is a marker is acted on and left out of the reply.
+// readReply reads the command's output the way its profile says.
 func (c commandRunner) readReply(ctx context.Context, stdout io.Reader, fx fixtureHandler) (string, error) {
+	if c.reader == readerCodexJSONL {
+		return c.readCodex(ctx, stdout, fx)
+	}
+	return c.readText(ctx, stdout, fx)
+}
+
+// readText reads the command's output line by line. With the fixture on, a
+// line that is a marker is acted on and left out of the reply.
+func (c commandRunner) readText(ctx context.Context, stdout io.Reader, fx fixtureHandler) (string, error) {
 	var (
 		lines []string
 		size  int

@@ -98,7 +98,8 @@ func (r *runner) writeParticipantFiles() error {
 
 // adapterVars are the settings of a scripted agent. In fixture mode the command
 // is a script from the root and the fixture markers are on; with --real-adapter
-// agent-a gets neither, so conch-adapter runs its default command.
+// agent-a gets neither, so conch-adapter runs its default command (with
+// --runtime codex it names the codex runtime, whose default command is Codex's).
 func (r *runner) adapterVars(part string, c credential) []string {
 	vars := []string{
 		"CONCH_ADAPTER_SERVER", r.baseURL(),
@@ -109,6 +110,14 @@ func (r *runner) adapterVars(part string, c credential) []string {
 		"CONCH_ADAPTER_LOCK_FILE", r.path(part + ".lock"),
 	}
 	if part == "agent-a" && r.realAdapter {
+		if r.runtime == "codex" {
+			// The profile's default command is Codex's; the model has no default
+			// there, so it is the caller's own if they set one.
+			vars = append(vars, "CONCH_ADAPTER_RUNTIME", "codex")
+			if model := os.Getenv("CONCH_ADAPTER_MODEL"); model != "" {
+				vars = append(vars, "CONCH_ADAPTER_MODEL", model)
+			}
+		}
 		return vars
 	}
 	return append(vars,
@@ -228,7 +237,7 @@ func (r *runner) printCommands() error {
 	say("cat %s", shq(r.path("browser.txt")))
 	say("")
 	if r.realAdapter {
-		say("# agent-a is the real Claude Code command (--real-adapter): see the warning above.")
+		say("# agent-a is the real %s command (--real-adapter): see the warning above.", r.realProgramName())
 	} else {
 		say("# The next three replace agent-a's script. Stop the running agent-a first (ctrl-c).")
 		for _, s := range []struct{ file, what string }{
@@ -467,7 +476,7 @@ func (r *runner) stopAgent(part string, c *child) error {
 
 func (r *runner) checkAgentA() error {
 	if r.realAdapter {
-		fmt.Println("NOT RUN  agent-a: --real-adapter would start the real Claude Code command, and this check never does")
+		fmt.Printf("NOT RUN  agent-a: --real-adapter would start the real %s command, and this check never does\n", r.realProgramName())
 		return nil
 	}
 	c, err := r.startAgent("agent-a")
@@ -535,4 +544,12 @@ func (r *runner) checkAgentB() error {
 	}
 	step("observer-test is refused when it posts, as its manifest says")
 	return r.stopAgent("agent-b", c)
+}
+
+// realProgramName is how --real-adapter's command is called to a person.
+func (r *runner) realProgramName() string {
+	if r.runtime == "codex" {
+		return "Codex"
+	}
+	return "Claude Code"
 }
