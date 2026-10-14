@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 echo "pre-commit: gofmt"
-unformatted=$(gofmt -l .)
+unformatted=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
 if [ -n "$unformatted" ]; then
     echo "gofmt needed on:"
     echo "$unformatted"

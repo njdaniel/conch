@@ -1,0 +1,6 @@
+/* A stylesheet file, never inline styles: conchd serves the page with
+   style-src 'self'. */
+body {
+  margin: 2rem;
+  font-family: system-ui, sans-serif;
+}
