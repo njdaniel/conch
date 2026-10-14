@@ -38,13 +38,14 @@ const (
 	SessionEndedPrincipalDisabled = "principal_disabled"
 )
 
-// MaxLiveSessionsPerCredential bounds the sessions that have not ended per
-// credential. The bound is per credential, not per principal: one person on
+// MaxLiveSessionsPerCredential bounds the sessions per credential that are
+// online or stale; offline and ended ones do not count. The bound is per credential, not per principal: one person on
 // two devices is two credentials with a budget each.
 const MaxLiveSessionsPerCredential = 16
 
-// ErrTooManySessions is returned by CreateSession when the credential already
-// holds MaxLiveSessionsPerCredential sessions that have not ended.
+// ErrTooManySessions is returned by CreateSession, and by HeartbeatSession for
+// a heartbeat that would revive an offline session, when the credential
+// already holds MaxLiveSessionsPerCredential sessions that are online or stale.
 var ErrTooManySessions = errors.New("store: too many live sessions for this credential")
 
 // Session is one row of the sessions table with the owning principal's kind
@@ -142,7 +143,7 @@ func sessionByIDTx(ctx context.Context, tx execer, id int64) (Session, error) {
 // behind a dead credential. Such a request gets ErrCredentialInvalid.
 //
 // It returns ErrTooManySessions, writing nothing, when the credential already
-// holds MaxLiveSessionsPerCredential sessions that have not ended.
+// holds MaxLiveSessionsPerCredential sessions that are online or stale.
 func (s *Store) CreateSession(ctx context.Context, actor string, p SessionParams, now time.Time) (Session, error) {
 	now = now.Truncate(time.Millisecond)
 	interventions := p.Interventions
@@ -177,9 +178,8 @@ func (s *Store) CreateSession(ctx context.Context, actor string, p SessionParams
 		if err := tx.QueryRowContext(ctx,
 			// An offline session does not count. A client that crashes and
 			// starts a new session each time must not be locked out by the ones
-			// it left behind, which go offline and are never deleted. The bound
-			// is a guard against a runaway client, not an exact cap: reviving an
-			// offline session by heartbeat is not refused even past it.
+			// it left behind, which go offline and are never deleted. Reviving
+			// one is held to the same bound, in HeartbeatSession.
 			"SELECT COUNT(*) FROM sessions WHERE credential_id = ? AND ended_at IS NULL AND state <> 'offline'", p.CredentialID,
 		).Scan(&live); err != nil {
 			return fmt.Errorf("store: create session: count live sessions: %w", err)
@@ -215,11 +215,34 @@ func (s *Store) CreateSession(ctx context.Context, actor string, p SessionParams
 // was online, stale or offline before (the same row and the same id). It
 // returns the session as it is after, and ErrNotFound for a session that does
 // not exist, belongs to another credential, or has ended: the three are not
-// told apart. Nothing is audited.
+// told apart. Reviving an offline session is refused with ErrTooManySessions,
+// changing nothing, when the credential already holds
+// MaxLiveSessionsPerCredential sessions that are online or stale. Nothing is
+// audited.
 func (s *Store) HeartbeatSession(ctx context.Context, id, credentialID int64, now time.Time) (Session, error) {
 	now = now.Truncate(time.Millisecond)
 	var out Session
 	err := s.withImmediateTx(ctx, func(tx execer) error {
+		// A revival counts against the bound as a new session would;
+		// otherwise a credential could hold any number online by letting
+		// sessions go offline, creating more, then reviving the old ones.
+		var offline int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM sessions WHERE id = ? AND credential_id = ? AND ended_at IS NULL AND state = 'offline'",
+			id, credentialID).Scan(&offline); err != nil {
+			return fmt.Errorf("store: heartbeat session: %w", err)
+		}
+		if offline == 1 {
+			var live int
+			if err := tx.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM sessions WHERE credential_id = ? AND ended_at IS NULL AND state <> 'offline'",
+				credentialID).Scan(&live); err != nil {
+				return fmt.Errorf("store: heartbeat session: count live sessions: %w", err)
+			}
+			if live >= MaxLiveSessionsPerCredential {
+				return ErrTooManySessions
+			}
+		}
 		// max(): a clock that stepped back must not put last_seen_at before
 		// started_at, which SessionV1.Validate refuses.
 		res, err := tx.ExecContext(ctx,
@@ -380,7 +403,11 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 		}
 		out.Offline = len(found)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE sessions SET state = 'stale' WHERE ended_at IS NULL AND state = 'online' AND last_seen_at < ?",
+			// state <> 'offline' is implied by state = 'online', but SQLite
+			// only uses the partial index sessions_live_by_last_seen when the
+			// query repeats its predicate; without it this is a full scan of a
+			// table that never shrinks, under the write lock, every sweep.
+			"UPDATE sessions SET state = 'stale' WHERE ended_at IS NULL AND state <> 'offline' AND state = 'online' AND last_seen_at < ?",
 			now.Add(-stale).UnixMilli())
 		if err != nil {
 			return fmt.Errorf("store: sweep sessions: stale: %w", err)

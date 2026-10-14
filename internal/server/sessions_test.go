@@ -415,7 +415,7 @@ func TestSessionAgentRateLimit(t *testing.T) {
 	}
 }
 
-// At most 16 sessions that have not ended per credential. The bound is the
+// At most 16 sessions that are online or stale per credential. The bound is the
 // credential's: its principal's other credentials have their own.
 func TestSessionLimit(t *testing.T) {
 	f := newSessionFixture(t)

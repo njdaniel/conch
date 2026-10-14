@@ -255,12 +255,24 @@ func TestSessionBound(t *testing.T) {
 	if _, err := w.s.SweepSessions(ctx, sessionT0.Add(time.Hour), 30*time.Second, 90*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	w.create(t, w.ann, w.annCred, sessionT0.Add(time.Hour))
-	// An ended one does not.
-	if err := w.s.EndSession(ctx, "system", ids[0], w.annCred, sessionT0); err != nil {
+	fresh := w.create(t, w.ann, w.annCred, sessionT0.Add(time.Hour))
+	// Reviving an old one is held to the same bound: with 16 online, a
+	// heartbeat on an offline session is refused and changes nothing.
+	for range MaxLiveSessionsPerCredential - 1 {
+		w.create(t, w.ann, w.annCred, sessionT0.Add(time.Hour))
+	}
+	if _, err := w.s.HeartbeatSession(ctx, ids[1], w.annCred, sessionT0.Add(time.Hour)); !errors.Is(err, ErrTooManySessions) {
+		t.Errorf("reviving past the bound: err = %v, want ErrTooManySessions", err)
+	}
+	// A heartbeat on one that is already online is never refused.
+	if _, err := w.s.HeartbeatSession(ctx, fresh.ID, w.annCred, sessionT0.Add(time.Hour)); err != nil {
+		t.Errorf("heartbeat on an online session at the bound: %v", err)
+	}
+	// Ending one of the sixteen online frees a place.
+	if err := w.s.EndSession(ctx, "system", fresh.ID, w.annCred, sessionT0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	w.create(t, w.ann, w.annCred, sessionT0)
+	w.create(t, w.ann, w.annCred, sessionT0.Add(time.Hour))
 	// And the bound is the credential's.
 	w.create(t, w.ann, w.annCred2, sessionT0)
 }

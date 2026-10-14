@@ -185,6 +185,9 @@ func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) 
 	case errors.Is(err, store.ErrNotFound):
 		writeSessionNotFound(w)
 		return
+	case errors.Is(err, store.ErrTooManySessions):
+		writeError(w, http.StatusTooManyRequests, schema.ErrorCodeTooManySessions, "this credential already has the most sessions it may have; end one first")
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "sessions: heartbeat failed", "principal", caller.ID, "error", err)
 		writeInternalError(w)
