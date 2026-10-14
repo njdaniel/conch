@@ -92,7 +92,6 @@ func decodeRunBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 // The store checks the session, the membership and the message again inside
 // the transaction that stores the run.
 func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.sessionCaller(w, r)
 	if !ok {
 		return
@@ -105,93 +104,103 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	switch _, err := s.store.OwnedSession(ctx, sessionID, credentialID); {
-	case errors.Is(err, store.ErrNotFound):
-		writeSessionNotFound(w)
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "runs: find session failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
+	call := restCall(r, caller, credentialID)
+	if cerr := s.runSession(r.Context(), call, sessionID); cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	var req schema.CreateRunRequestV1
 	if !decodeRunBody(w, r, &req) {
 		return
 	}
-	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	doc, cerr := s.createRun(r.Context(), call, sessionID, req)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
+	writeJSON(w, http.StatusCreated, doc)
+}
 
+// runSession is step 3 of starting a run: sessionID must be a session of the
+// call's own credential that has not ended. The REST route and the MCP tool
+// start_run both call it before they look at the request.
+func (s *Server) runSession(ctx context.Context, call sessionCall, sessionID int64) *callError {
+	switch _, err := s.store.OwnedSession(ctx, sessionID, call.credentialID); {
+	case errors.Is(err, store.ErrNotFound):
+		return callSessionMissing
+	case err != nil:
+		slog.ErrorContext(ctx, "runs: find session failed", "principal", call.caller.ID, "error", err)
+		return callInternal
+	}
+	return nil
+}
+
+// createRun is steps 4 and 5 of starting a run, and the run itself, for a
+// session runSession has allowed. The REST route and the MCP tool start_run
+// both call it.
+func (s *Server) createRun(ctx context.Context, call sessionCall, sessionID int64, req schema.CreateRunRequestV1) (schema.RunV1, *callError) {
+	if err := req.Validate(); err != nil {
+		return schema.RunV1{}, refuse(http.StatusBadRequest, "invalid_request", err.Error())
+	}
 	channel, err := s.store.ChannelByName(ctx, req.Channel)
 	if errors.Is(err, store.ErrNotFound) {
-		writeChannelNotFound(w)
-		return
+		return schema.RunV1{}, callChannelMissing
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "runs: find channel failed", "error", err)
-		writeInternalError(w)
-		return
+		return schema.RunV1{}, callInternal
 	}
-	member, err := s.store.IsChannelMember(ctx, channel.ID, caller.ID)
+	member, err := s.store.IsChannelMember(ctx, channel.ID, call.caller.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "runs: check membership failed", "error", err)
-		writeInternalError(w)
-		return
+		return schema.RunV1{}, callInternal
 	}
 	if !member {
-		s.auditAgentNonMember(r, schema.CapabilityRunsManage, channel.ID)
-		writeChannelNotFound(w)
-		return
+		if call.caller.Kind == store.PrincipalAgent {
+			s.auditAgentDenial(ctx, call.caller.ID, call.subject, schema.CapabilityRunsManage, channel.ID, denyNotMember)
+		}
+		return schema.RunV1{}, callChannelMissing
 	}
 	var audience *schema.Audience
 	if req.MessageID > 0 {
-		audience, err = s.store.RunAnchorAudience(ctx, channel.ID, req.MessageID, readerFor(r, apiV2))
+		audience, err = s.store.RunAnchorAudience(ctx, channel.ID, req.MessageID, call.reader)
 		if errors.Is(err, store.ErrRunAnchorNotFound) {
-			writeChannelNotFound(w)
-			return
+			return schema.RunV1{}, callChannelMissing
 		}
 		if err != nil {
 			slog.ErrorContext(ctx, "runs: find the message a run answers failed", "error", err)
-			writeInternalError(w)
-			return
+			return schema.RunV1{}, callInternal
 		}
 	}
-	allowed, limited, err := s.runGate(ctx, caller, agentSubjectFor(r, caller), channel.ID, audience)
+	allowed, limited, err := s.runGate(ctx, call.caller, call.subject, channel.ID, audience)
 	switch {
 	case err != nil:
-		slog.ErrorContext(ctx, "runs: authorize failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "runs: authorize failed", "principal", call.caller.ID, "error", err)
+		return schema.RunV1{}, callInternal
 	case limited != nil:
-		writeRateLimited(w, limited)
-		return
+		return schema.RunV1{}, &callError{limited: limited}
 	case !allowed:
-		writeChannelNotFound(w)
-		return
+		return schema.RunV1{}, callChannelMissing
 	}
 
-	run, err := s.store.CreateRun(ctx, auditActor(ctx), store.RunParams{
-		SessionID: sessionID, CredentialID: credentialID, ChannelID: channel.ID, MessageID: req.MessageID,
+	run, err := s.store.CreateRun(ctx, call.actor, store.RunParams{
+		SessionID: sessionID, CredentialID: call.credentialID, ChannelID: channel.ID, MessageID: req.MessageID,
 		Task: req.Task, Link: req.Link,
-	}, readerFor(r, apiV2), s.now())
+	}, call.reader, s.now())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		// The session ended, or the credential went, since the check above.
-		writeSessionNotFound(w)
-		return
+		return schema.RunV1{}, callSessionMissing
 	case errors.Is(err, store.ErrNotChannelMember), errors.Is(err, store.ErrRunAnchorNotFound):
 		// Removed from the channel, or lost sight of the message, since the
 		// checks above.
-		writeChannelNotFound(w)
-		return
+		return schema.RunV1{}, callChannelMissing
 	case err != nil:
-		slog.ErrorContext(ctx, "runs: create failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "runs: create failed", "principal", call.caller.ID, "error", err)
+		return schema.RunV1{}, callInternal
 	}
 	s.events.notifyRun(run.ChannelID, run.ID)
-	s.writeRun(w, r, http.StatusCreated, run)
+	return checkedRunDoc(ctx, run)
 }
 
 // runGate is the channel gate for reporting on a run (D9): the agent's
@@ -269,60 +278,65 @@ func (s *Server) runPermissions(ctx context.Context, caller store.Principal, cha
 // with, after the verified caller: the run must be one the caller's credential
 // owns and the caller may see (run_not_found otherwise, whoever asks and
 // whatever they hold), and the channel gate must still allow the caller to
-// report on it. It writes the response and returns false when the call must
-// stop. A refusal by the manifest is 403: the caller owns the run, so the
-// answer tells it nothing it does not know.
+// report on it (reportableRunFor). It writes the response and returns false
+// when the call must stop.
 func (s *Server) reportableRun(w http.ResponseWriter, r *http.Request, caller store.Principal, credentialID int64) (store.Run, bool) {
-	ctx := r.Context()
 	runID, ok := runIDFromPath(w, r)
 	if !ok {
 		return store.Run{}, false
 	}
-	run, err := s.store.OwnedRun(ctx, runID, credentialID, readerFor(r, apiV2))
-	if errors.Is(err, store.ErrRunNotFound) {
-		writeRunNotFound(w)
-		return store.Run{}, false
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "runs: find run failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return store.Run{}, false
-	}
-	var audience *schema.Audience
-	if run.MessageID > 0 {
-		audience, err = s.store.RunAnchorAudience(ctx, run.ChannelID, run.MessageID, readerFor(r, apiV2))
-		if errors.Is(err, store.ErrRunAnchorNotFound) {
-			// The run was visible a moment ago and its message is not now.
-			writeRunNotFound(w)
-			return store.Run{}, false
-		}
-		if err != nil {
-			slog.ErrorContext(ctx, "runs: find the message a run answers failed", "error", err)
-			writeInternalError(w)
-			return store.Run{}, false
-		}
-	}
-	allowed, limited, err := s.runGate(ctx, caller, agentSubjectFor(r, caller), run.ChannelID, audience)
-	switch {
-	case err != nil:
-		slog.ErrorContext(ctx, "runs: authorize failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return store.Run{}, false
-	case limited != nil:
-		writeRateLimited(w, limited)
-		return store.Run{}, false
-	case !allowed:
-		writeError(w, http.StatusForbidden, errForbidden.Code, errForbidden.Message)
+	run, cerr := s.reportableRunFor(r.Context(), restCall(r, caller, credentialID), runID, callRunMissing)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return store.Run{}, false
 	}
 	return run, true
+}
+
+// reportableRunFor is the check before any report on run runID, on either
+// front: the run must be one the call's credential owns and its caller may
+// see, and the channel gate must still allow the caller to report on it, which
+// spends runs.manage. A run that fails the first is notFound, the answer a
+// missing one gets on that route. A refusal by the manifest is 403: the caller
+// owns the run, so the answer tells it nothing it does not know.
+func (s *Server) reportableRunFor(ctx context.Context, call sessionCall, runID int64, notFound *callError) (store.Run, *callError) {
+	run, err := s.store.OwnedRun(ctx, runID, call.credentialID, call.reader)
+	if errors.Is(err, store.ErrRunNotFound) {
+		return store.Run{}, notFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "runs: find run failed", "principal", call.caller.ID, "error", err)
+		return store.Run{}, callInternal
+	}
+	var audience *schema.Audience
+	if run.MessageID > 0 {
+		audience, err = s.store.RunAnchorAudience(ctx, run.ChannelID, run.MessageID, call.reader)
+		if errors.Is(err, store.ErrRunAnchorNotFound) {
+			// The run was visible a moment ago and its message is not now.
+			return store.Run{}, notFound
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "runs: find the message a run answers failed", "error", err)
+			return store.Run{}, callInternal
+		}
+	}
+	allowed, limited, err := s.runGate(ctx, call.caller, call.subject, run.ChannelID, audience)
+	switch {
+	case err != nil:
+		slog.ErrorContext(ctx, "runs: authorize failed", "principal", call.caller.ID, "error", err)
+		return store.Run{}, callInternal
+	case limited != nil:
+		return store.Run{}, &callError{limited: limited}
+	case !allowed:
+		return store.Run{}, callForbidden
+	}
+	return run, nil
 }
 
 // handleSetRunState serves POST /v1/runs/{id}/state: the owner moves its run
 // along the lifecycle. An illegal transition is 409 invalid_transition and
 // changes nothing.
 func (s *Server) handleSetRunState(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.sessionCaller(w, r)
 	if !ok {
 		return
@@ -335,32 +349,38 @@ func (s *Server) handleSetRunState(w http.ResponseWriter, r *http.Request) {
 	if !decodeRunBody(w, r, &req) {
 		return
 	}
-	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	doc, cerr := s.setRunState(r.Context(), restCall(r, caller, credentialID), run, req)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
-	updated, err := s.store.SetRunState(ctx, auditActor(ctx), run.ID, credentialID, readerFor(r, apiV2), req.State, req.Outcome, s.now())
+	writeJSON(w, http.StatusOK, doc)
+}
+
+// setRunState moves run, which reportableRunFor has allowed, to req.State.
+// The REST route and the MCP tool update_run both call it.
+func (s *Server) setRunState(ctx context.Context, call sessionCall, run store.Run, req schema.SetRunStateRequestV1) (schema.RunV1, *callError) {
+	if err := req.Validate(); err != nil {
+		return schema.RunV1{}, refuse(http.StatusBadRequest, "invalid_request", err.Error())
+	}
+	updated, err := s.store.SetRunState(ctx, call.actor, run.ID, call.credentialID, call.reader, req.State, req.Outcome, s.now())
 	switch {
 	case errors.Is(err, store.ErrRunNotFound):
-		writeRunNotFound(w)
-		return
+		return schema.RunV1{}, callRunMissing
 	case errors.Is(err, store.ErrInvalidTransition):
-		writeError(w, http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run cannot move from its current state to that one")
-		return
+		return schema.RunV1{}, refuse(http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run cannot move from its current state to that one")
 	case err != nil:
-		slog.ErrorContext(ctx, "runs: set state failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "runs: set state failed", "principal", call.caller.ID, "error", err)
+		return schema.RunV1{}, callInternal
 	}
 	s.events.notifyRun(updated.ChannelID, updated.ID)
-	s.writeRun(w, r, http.StatusOK, updated)
+	return checkedRunDoc(ctx, updated)
 }
 
 // handleAppendRunActivity serves POST /v1/runs/{id}/activity: the owner adds
 // one entry to its run's stream. A run that has ended takes no more (409
 // invalid_transition). The time is the server's.
 func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.sessionCaller(w, r)
 	if !ok {
 		return
@@ -373,6 +393,17 @@ func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request)
 	if !decodeRunBody(w, r, &req) {
 		return
 	}
+	doc, cerr := s.appendRunActivity(r.Context(), restCall(r, caller, credentialID), run, req)
+	if cerr != nil {
+		writeCallError(w, cerr)
+		return
+	}
+	writeJSON(w, http.StatusCreated, doc)
+}
+
+// appendRunActivity adds req to run, which reportableRunFor has allowed. The
+// REST route and the MCP tool post_activity both call it.
+func (s *Server) appendRunActivity(ctx context.Context, call sessionCall, run store.Run, req schema.AppendActivityRequestV1) (schema.AgentActivityV1, *callError) {
 	// "data": null is no data. Decoding keeps the literal null in a
 	// RawMessage, which would be stored and sent back as "data":null on every
 	// read of an entry that has none.
@@ -380,8 +411,7 @@ func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request)
 		req.Data = nil
 	}
 	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
+		return schema.AgentActivityV1{}, refuse(http.StatusBadRequest, "invalid_request", err.Error())
 	}
 	var data json.RawMessage
 	if len(req.Data) > 0 {
@@ -389,34 +419,29 @@ func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request)
 		// the schema bounds, so what is stored is what is sent on.
 		encoded, err := json.Marshal(req.Data)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request", "data must be valid JSON")
-			return
+			return schema.AgentActivityV1{}, refuse(http.StatusBadRequest, "invalid_request", "data must be valid JSON")
 		}
 		data = encoded
 	}
-	entry, err := s.store.AppendRunActivity(ctx, run.ID, credentialID, readerFor(r, apiV2), store.ActivityParams{
+	entry, err := s.store.AppendRunActivity(ctx, run.ID, call.credentialID, call.reader, store.ActivityParams{
 		Kind: req.Kind, Summary: req.Summary, Outcome: req.Outcome, Data: data,
 	}, s.now())
 	switch {
 	case errors.Is(err, store.ErrRunNotFound):
-		writeRunNotFound(w)
-		return
+		return schema.AgentActivityV1{}, callRunMissing
 	case errors.Is(err, store.ErrInvalidTransition):
-		writeError(w, http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run has ended and takes no more activity")
-		return
+		return schema.AgentActivityV1{}, refuse(http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run has ended and takes no more activity")
 	case err != nil:
-		slog.ErrorContext(ctx, "runs: append activity failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "runs: append activity failed", "principal", call.caller.ID, "error", err)
+		return schema.AgentActivityV1{}, callInternal
 	}
 	s.events.notifyActivity(run.ChannelID, run.ID, entry.ID)
 	doc := activityDoc(entry)
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(ctx, "runs: built an invalid activity entry", "run", run.ID, "error", err)
-		writeInternalError(w)
-		return
+		return schema.AgentActivityV1{}, callInternal
 	}
-	writeJSON(w, http.StatusCreated, doc)
+	return doc, nil
 }
 
 // handleGetRun serves GET /v1/runs/{id} to a reader who may see the run. An
@@ -634,13 +659,22 @@ func (s *Server) handleListRunActivity(w http.ResponseWriter, r *http.Request) {
 
 // writeRun sends one run, after checking it is a valid document.
 func (s *Server) writeRun(w http.ResponseWriter, r *http.Request, status int, run store.Run) {
-	doc := runDoc(run)
-	if err := doc.Validate(); err != nil {
-		slog.ErrorContext(r.Context(), "runs: built an invalid run", "run", run.ID, "error", err)
-		writeInternalError(w)
+	doc, cerr := checkedRunDoc(r.Context(), run)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	writeJSON(w, status, doc)
+}
+
+// checkedRunDoc is the wire form of run, checked to be a valid document.
+func checkedRunDoc(ctx context.Context, run store.Run) (schema.RunV1, *callError) {
+	doc := runDoc(run)
+	if err := doc.Validate(); err != nil {
+		slog.ErrorContext(ctx, "runs: built an invalid run", "run", run.ID, "error", err)
+		return schema.RunV1{}, callInternal
+	}
+	return doc, nil
 }
 
 // runDoc is the wire form of a run.

@@ -255,11 +255,13 @@ async fn no_frame_is_sent_in_any_state_where_the_gate_must_be_shut() {
     // Muting during a press ends it at once, with no release tail.
     rig.line(Down);
     rig.frames_beyond(sent + 3).await;
+    let stops = rig.stopped();
     rig.line(Mute);
     rig.until("muted", |rig| {
         rig.own()["muted"] == true && rig.own()["transmitting"] == false
     })
     .await;
+    rig.stopped_beyond(stops).await;
     let sent = rig.sdk.frames();
     several_frames().await;
     assert_eq!(rig.sdk.frames(), sent, "muted during a press");
@@ -283,6 +285,8 @@ async fn a_press_longer_than_the_transmit_limit_is_cut_off_with_the_key_still_do
         rig.own()["blocked"] == json!(["max_transmit"]) && rig.own()["transmitting"] == false
     })
     .await;
+    // The status says not transmitting before the gate's word (#293): count after it.
+    rig.reported(2).await;
     let sent = rig.sdk.frames();
     // The gate's own count allows ten frames of 10 ms and not one more, whichever of the
     // gate and the machine's timer acted first.
@@ -441,6 +445,8 @@ async fn reconnecting_forces_the_gate_shut_and_a_held_key_does_not_resume() {
     .await;
     assert_eq!(rig.connection_states().last().unwrap(), "reconnecting");
     assert!(rig.sdk.is_muted());
+    // The status says not transmitting before the gate's word (#293): count after it.
+    rig.reported(2).await;
     let sent = rig.sdk.frames();
     several_frames().await;
     assert_eq!(rig.sdk.frames(), sent, "nothing is sent while reconnecting");

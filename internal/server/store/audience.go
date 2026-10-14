@@ -222,7 +222,7 @@ func (s *Store) SearchVisibleMessages(ctx context.Context, channelID int64, read
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: search messages: limit must be positive, got %d", limit)
 	}
-	match := ftsAllWords(words)
+	match := ftsInChannel(channelID, words)
 	if match == "" {
 		return nil, nil
 	}
@@ -240,6 +240,19 @@ func (s *Store) SearchVisibleMessages(ctx context.Context, channelID int64, read
 		return nil, fmt.Errorf("store: search messages in channel %d: %w", channelID, err)
 	}
 	return msgs, nil
+}
+
+// ftsInChannel builds the FTS5 query of a search: the channel's token, and
+// every word, each confined to its own column. The channel clause is written
+// from an integer; the words are ftsAllWords's. The words are confined to the
+// body column so that a word a caller types can never match the channel token.
+// It is empty when there is nothing to search for.
+func ftsInChannel(channelID int64, words []string) string {
+	all := ftsAllWords(words)
+	if all == "" {
+		return ""
+	}
+	return fmt.Sprintf(`fts_channel : "c%d" AND body : (%s)`, channelID, all)
 }
 
 // ftsAllWords builds an FTS5 query that requires every word, each as a quoted
