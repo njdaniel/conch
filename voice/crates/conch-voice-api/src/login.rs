@@ -124,6 +124,18 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
         path: path.to_owned(),
         source,
     };
+    // Looked at before it is opened: opening a FIFO waits for a writer. A link is refused
+    // too, as `conch` refuses one, so both programs read the same file or none.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(Error::CredentialsNotRegular {
+                path: path.to_owned(),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable(e)),
+    }
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -382,8 +394,8 @@ mod tests {
             assert_eq!(
                 shown,
                 format!(
-                    "credentials file {0} is accessible by other users (mode {mode:04o}); run 'chmod 600 {0}'",
-                    path.display()
+                    "credentials file {0:?} is accessible by other users (mode {mode:04o}); run 'chmod 600 {0:?}'",
+                    path
                 )
             );
             assert!(!shown.contains("FAKE"), "{shown}");
@@ -459,16 +471,17 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_cannot_be_read_is_an_error_that_names_it() {
-        // credentials.json is a directory: it opens, and reading it fails.
+    fn something_that_is_not_a_file_is_an_error_that_names_it() {
+        // credentials.json is a directory: refused before it is opened (this case used to
+        // open and fail on the read as CredentialsUnreadable).
         let dir = tempfile::tempdir().unwrap();
         let path = credentials_path(dir.path());
         fs::create_dir_all(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let error = resolve(None, "http://a:1", &dir).unwrap_err();
         match &error {
-            Error::CredentialsUnreadable { path: p, .. } => assert_eq!(p, &path),
-            other => panic!("expected CredentialsUnreadable, got {other:?}"),
+            Error::CredentialsNotRegular { path: p } => assert_eq!(p, &path),
+            other => panic!("expected CredentialsNotRegular, got {other:?}"),
         }
         assert!(error.to_string().contains("credentials.json"));
     }
@@ -599,6 +612,70 @@ mod tests {
             credentials_path(Path::new("/made/up/alice")),
             PathBuf::from("/made/up/alice/credentials.json")
         );
+    }
+
+    /// A FIFO at `dir/credentials.json`, or None (with a message) without `mkfifo`.
+    fn fifo_in(dir: &Path) -> Option<PathBuf> {
+        let path = credentials_path(dir);
+        match std::process::Command::new("mkfifo").arg(&path).status() {
+            Ok(status) if status.success() => Some(path),
+            _ => {
+                eprintln!("skipped: mkfifo is not available");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn a_fifo_is_refused_at_once_and_does_not_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        if fifo_in(dir.path()).is_none() {
+            return;
+        }
+        let path = dir.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve_token(None, &server("http://a:1"), Some(&path)));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve_token waited on the FIFO");
+        match result {
+            Err(error @ Error::CredentialsNotRegular { .. }) => {
+                assert!(error.to_string().contains("not a regular file"), "{error}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_symlink_at_the_leaf_is_refused_even_to_a_good_file() {
+        let real = config_with(&as_go_writes_it(), 0o600);
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(credentials_path(real.path()), credentials_path(dir.path()))
+            .unwrap();
+        let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
+        assert!(
+            matches!(result, Err(Error::CredentialsNotRegular { .. })),
+            "{result:?}"
+        );
+        // A directory in its place is refused the same way.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(credentials_path(dir.path())).unwrap();
+        let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
+        assert!(matches!(result, Err(Error::CredentialsNotRegular { .. })));
+    }
+
+    #[test]
+    fn an_error_is_one_line_even_if_the_directory_name_has_a_newline() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("evil\nname");
+        fs::create_dir(&dir).unwrap();
+        fs::write(credentials_path(&dir), as_go_writes_it()).unwrap();
+        fs::set_permissions(credentials_path(&dir), fs::Permissions::from_mode(0o644)).unwrap();
+        let error = resolve_token(None, &server("http://a:1"), Some(&dir)).unwrap_err();
+        assert!(matches!(error, Error::CredentialsExposed { .. }));
+        assert!(!error.to_string().contains('\n'), "{error}");
     }
 
     #[test]

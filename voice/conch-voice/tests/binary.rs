@@ -40,6 +40,14 @@ fn conch_voice(private: &Path) -> Command {
     command
 }
 
+/// Writes a `voice.toml` the way a user would keep one: not writable by others, whatever
+/// the umask of whoever runs the tests.
+fn write_voice_toml(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 /// Runs the binary to its end with nothing on standard input.
 fn run(command: &mut Command) -> (Option<i32>, String, String) {
     let output = command.stdin(Stdio::null()).output().unwrap();
@@ -105,7 +113,7 @@ fn a_configuration_file_with_a_typo_is_refused_by_name() {
     let private = tempfile::tempdir().unwrap();
     let directory = private.path().join("config").join("conch");
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("voice.toml"), "chanel = \"ops\"\n").unwrap();
+    write_voice_toml(&directory.join("voice.toml"), "chanel = \"ops\"\n");
     let mut command = conch_voice(private.path());
     let (code, _, stderr) = run(command.args(["join", "ops"]).env("CONCH_TOKEN", FAKE_LOGIN));
     assert_eq!(code, Some(1));
@@ -118,7 +126,7 @@ fn conch_config_dir_moves_voice_toml_and_a_relative_one_is_refused_by_name() {
     let alice = private.path().join("alice");
     std::fs::create_dir_all(&alice).unwrap();
     // Not under a `conch` directory: the variable's value is the directory itself.
-    std::fs::write(alice.join("voice.toml"), "chanel = \"ops\"\n").unwrap();
+    write_voice_toml(&alice.join("voice.toml"), "chanel = \"ops\"\n");
     let mut command = conch_voice(private.path());
     let (code, _, stderr) = run(command
         .args(["join", "ops"])
@@ -430,14 +438,13 @@ const NO_SUCH_KEYBOARD: &str = "/dev/input/by-id/conch-voice-test-no-such-keyboa
 fn configure_keys(private: &Path, device: &Path) {
     let directory = private.join("config").join("conch");
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(
-        directory.join("voice.toml"),
-        format!(
+    write_voice_toml(
+        &directory.join("voice.toml"),
+        &format!(
             "[keys]\ndevice = \"{}\"\ntalk = \"KEY_F13\"\n",
             device.display()
         ),
-    )
-    .unwrap();
+    );
 }
 
 /// The lines that are about the key device, in either mode.

@@ -18,6 +18,7 @@
 //! server; this program never writes that file.
 
 use std::ffi::OsString;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -351,6 +352,45 @@ pub struct Resolved {
     pub config: Config,
 }
 
+/// Reads `voice.toml`: a missing file is the default configuration. The file's `server`
+/// decides where the login token is sent, so a file that is not a regular file or that
+/// group or others can write is refused. Looked at before it is opened, because opening a
+/// FIFO waits for a writer. A symbolic link is followed: what counts is the file it names.
+fn read_config(path: &std::path::Path) -> Result<Config, Error> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Config::default());
+        }
+        Err(source) => {
+            return Err(Error::ConfigRead {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if !meta.is_file() {
+        return Err(Error::ConfigNotRegular {
+            path: path.to_owned(),
+        });
+    }
+    let mode = meta.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(Error::ConfigWritable {
+            path: path.to_owned(),
+            mode,
+        });
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(source) => Err(Error::ConfigRead {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
 /// Lays the command line over the environment over the configuration file, and finds the
 /// login.
 ///
@@ -367,11 +407,7 @@ pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, E
     let mut config = match &config_dir {
         Some(dir) => {
             let path = dir.join("voice.toml");
-            match std::fs::read_to_string(&path) {
-                Ok(text) => Config::parse(&text, &path.display().to_string())?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-                Err(source) => return Err(Error::ConfigRead { path, source }),
-            }
+            read_config(&path)?
         }
         None => Config::default(),
     };
@@ -481,7 +517,76 @@ mod tests {
     }
 
     fn write_config(dir: &std::path::Path, text: &str) {
-        std::fs::write(dir.join("voice.toml"), text).unwrap();
+        let path = dir.join("voice.toml");
+        std::fs::write(&path, text).unwrap();
+        // Not left to the umask of whoever runs the tests.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn a_configuration_others_can_write_is_refused_and_a_fifo_is_not_waited_on() {
+        for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
+            let dir = tempfile::tempdir().unwrap();
+            write_config(dir.path(), "server = \"http://evil.example\"\n");
+            let path = dir.path().join("voice.toml");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = resolve(&join(&["general"]), &environment(dir.path())).unwrap_err();
+            assert!(
+                matches!(error, Error::ConfigWritable { .. }),
+                "{mode:o}: {error}"
+            );
+            let shown = error.to_string();
+            assert!(
+                shown.contains("chmod go-w") && !shown.contains('\n'),
+                "{shown}"
+            );
+        }
+        // Read-only for others is fine.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "channel = \"ops\"\n");
+        let path = dir.path().join("voice.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(resolve(&join(&[]), &environment(dir.path())).is_ok());
+
+        // A FIFO: refused at once.
+        let dir = tempfile::tempdir().unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("voice.toml"))
+            .status();
+        if !matches!(made, Ok(status) if status.success()) {
+            eprintln!("skipped: mkfifo is not available");
+            return;
+        }
+        let path = dir.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve(&join(&["general"]), &environment(&path)).map(|_| ()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve waited on the FIFO");
+        assert!(
+            matches!(result, Err(Error::ConfigNotRegular { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_configuration_error_is_one_line_even_if_the_directory_name_has_a_newline() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("evil\nname");
+        std::fs::create_dir(&dir).unwrap();
+        write_config(&dir, "chanel = \"typo\"\n");
+        let error = resolve(&join(&["general"]), &environment(&dir)).unwrap_err();
+        assert!(error.to_string().contains("unknown key"), "{error}");
+        assert!(!error.to_string().contains('\n'), "{error}");
+        std::fs::set_permissions(
+            dir.join("voice.toml"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        let error = resolve(&join(&["general"]), &environment(&dir)).unwrap_err();
+        assert!(!error.to_string().contains('\n'), "{error}");
     }
 
     #[test]
@@ -489,11 +594,7 @@ mod tests {
         let xdg = tempfile::tempdir().unwrap();
         let alice = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(xdg.path().join("conch")).unwrap();
-        std::fs::write(
-            xdg.path().join("conch").join("voice.toml"),
-            "channel = \"xdg\"\n",
-        )
-        .unwrap();
+        write_config(&xdg.path().join("conch"), "channel = \"xdg\"\n");
         write_config(alice.path(), "channel = \"alice\"\n");
 
         let args = join(&[]);
