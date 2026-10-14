@@ -124,7 +124,7 @@ func TestInterventionV1Validate(t *testing.T) {
 		{name: "valid, message requested", mutate: func(*InterventionV1) {}},
 		{name: "valid, cancel failed with reason", mutate: func(i *InterventionV1) { *i = fixtureAnsweredIntervention() }},
 		{name: "valid, cancel requested without body", mutate: func(i *InterventionV1) { i.Kind, i.Body = InterventionKindCancel, "" }},
-		{name: "valid, pause requested with a body", mutate: func(i *InterventionV1) { i.Kind = InterventionKindPause }},
+		{name: "valid, pause requested", mutate: func(i *InterventionV1) { i.Kind, i.Body = InterventionKindPause, "" }},
 		{name: "valid, resume requested", mutate: func(i *InterventionV1) { i.Kind, i.Body = InterventionKindResume, "" }},
 		{name: "valid, acknowledged", mutate: func(i *InterventionV1) { i.State, i.AnsweredAt = InterventionStateAcknowledged, &later }},
 		{name: "valid, applied without reason", mutate: func(i *InterventionV1) { i.State, i.AnsweredAt = InterventionStateApplied, &later }},
@@ -153,6 +153,10 @@ func TestInterventionV1Validate(t *testing.T) {
 		{name: "activity kind is not an intervention kind", mutate: func(i *InterventionV1) { i.Kind = "run_ended" }, wantErr: `intervention kind "run_ended" is not one of`},
 		{name: "message without body", mutate: func(i *InterventionV1) { i.Body = "" }, wantErr: "message intervention body is required"},
 		{name: "message with blank body", mutate: func(i *InterventionV1) { i.Body = " \n " }, wantErr: "message intervention body is required"},
+		// Only a message carries text (#287); the other kinds take none.
+		{name: "cancel with body", mutate: func(i *InterventionV1) { i.Kind = InterventionKindCancel }, wantErr: "cancel intervention must not carry body"},
+		{name: "pause with body", mutate: func(i *InterventionV1) { i.Kind = InterventionKindPause }, wantErr: "pause intervention must not carry body"},
+		{name: "resume with body", mutate: func(i *InterventionV1) { i.Kind, i.Body = InterventionKindResume, "carry on" }, wantErr: "resume intervention must not carry body"},
 		{name: "body one over the limit", mutate: func(i *InterventionV1) { i.Body = strings.Repeat("b", MaxInterventionBodyLength+1) }, wantErr: "intervention body must be at most 4000 characters, got 4001"},
 		{name: "body not UTF-8", mutate: func(i *InterventionV1) { i.Body = "bad \xff" }, wantErr: "intervention body must be valid UTF-8"},
 		{name: "empty state", mutate: func(i *InterventionV1) { i.State = "" }, wantErr: `intervention state "" is not one of requested, acknowledged, applied, failed`},
@@ -192,13 +196,18 @@ func TestCreateInterventionRequestV1Validate(t *testing.T) {
 		{name: "valid message", req: fixtureCreateInterventionRequest()},
 		{name: "valid cancel", req: CreateInterventionRequestV1{Kind: InterventionKindCancel}},
 		{name: "valid pause", req: CreateInterventionRequestV1{Kind: InterventionKindPause}},
-		{name: "valid resume with a note", req: CreateInterventionRequestV1{Kind: InterventionKindResume, Body: "carry on"}},
+		{name: "valid resume", req: CreateInterventionRequestV1{Kind: InterventionKindResume}},
 		{name: "valid body at the limit", req: CreateInterventionRequestV1{Kind: InterventionKindMessage, Body: strings.Repeat("b", MaxInterventionBodyLength)}},
+		{name: "valid body with newlines", req: CreateInterventionRequestV1{Kind: InterventionKindMessage, Body: "first\n\nsecond"}},
 
 		{name: "empty", req: CreateInterventionRequestV1{}, wantErr: `intervention kind "" is not one of message, cancel, pause, resume`},
 		{name: "unknown kind", req: CreateInterventionRequestV1{Kind: "kill"}, wantErr: `intervention kind "kill" is not one of message, cancel, pause, resume`},
 		{name: "wrong-case kind", req: CreateInterventionRequestV1{Kind: "Cancel"}, wantErr: `intervention kind "Cancel" is not one of`},
 		{name: "message without body", req: CreateInterventionRequestV1{Kind: InterventionKindMessage}, wantErr: "message intervention body is required"},
+		// Only a message carries text (#287).
+		{name: "cancel with body", req: CreateInterventionRequestV1{Kind: InterventionKindCancel, Body: "stop now"}, wantErr: "cancel intervention must not carry body"},
+		{name: "pause with body", req: CreateInterventionRequestV1{Kind: InterventionKindPause, Body: "wait"}, wantErr: "pause intervention must not carry body"},
+		{name: "resume with body", req: CreateInterventionRequestV1{Kind: InterventionKindResume, Body: "carry on"}, wantErr: "resume intervention must not carry body"},
 		{name: "body one over the limit", req: CreateInterventionRequestV1{Kind: InterventionKindMessage, Body: strings.Repeat("b", MaxInterventionBodyLength+1)}, wantErr: "intervention body must be at most 4000 characters, got 4001"},
 	}
 	for _, tt := range tests {

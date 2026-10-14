@@ -266,13 +266,13 @@ func TestSessionV1Validate(t *testing.T) {
 		},
 		{name: "valid agent, offline and ended", mutate: func(s *SessionV1) { *s = fixtureOfflineSession() }},
 		{name: "valid agent, no labels", mutate: func(s *SessionV1) { s.Runtime, s.Model, s.Host = "", "", "" }},
-		{name: "valid agent, declares no interventions", mutate: func(s *SessionV1) { s.Interventions = nil }},
+		{name: "valid agent, declares no interventions", mutate: func(s *SessionV1) { s.Interventions = []InterventionKind{} }},
 		{name: "valid agent, declares every intervention", mutate: func(s *SessionV1) {
 			s.Interventions = []InterventionKind{InterventionKindMessage, InterventionKindCancel, InterventionKindPause, InterventionKindResume}
 		}},
 		{name: "valid agent, last_seen_at equals started_at", mutate: func(s *SessionV1) { s.LastSeenAt = s.StartedAt }},
 		{name: "valid human", mutate: func(s *SessionV1) { *s = fixtureHumanSession() }},
-		{name: "valid human, nil interventions", mutate: func(s *SessionV1) { *s = fixtureHumanSession(); s.Interventions = nil }},
+		{name: "valid human, empty interventions", mutate: func(s *SessionV1) { *s = fixtureHumanSession(); s.Interventions = []InterventionKind{} }},
 		{name: "valid human, stale", mutate: func(s *SessionV1) {
 			*s = fixtureHumanSession()
 			s.State, s.Status = SessionStateStale, SessionStatusStale
@@ -287,7 +287,13 @@ func TestSessionV1Validate(t *testing.T) {
 		{name: "valid host at the limit", mutate: func(s *SessionV1) { s.Host = strings.Repeat("h", MaxSessionLabelLength) }},
 		{name: "valid host at the limit in multibyte characters", mutate: func(s *SessionV1) { s.Host = strings.Repeat("é", MaxSessionLabelLength) }},
 		{name: "valid task at the limit", mutate: func(s *SessionV1) { s.Task = strings.Repeat("t", MaxRunTaskLength) }},
-		{name: "valid task with newlines", mutate: func(s *SessionV1) { s.Task = "first line\nsecond line" }},
+		{name: "valid name at the limit", mutate: func(s *SessionV1) { s.Name = strings.Repeat("n", MaxPrincipalNameLength) }},
+		{
+			// The name is the principal's as stored; names from before the
+			// display-name rule are returned as they are.
+			name:   "valid name that the display-name rule would refuse",
+			mutate: func(s *SessionV1) { s.Name = " padded\tname " },
+		},
 
 		{name: "empty schema", mutate: func(s *SessionV1) { s.Schema = "" }, wantErr: `session schema must be "conch.session.v1", got ""`},
 		{name: "roster schema", mutate: func(s *SessionV1) { s.Schema = SessionRosterSchemaV1 }, wantErr: `got "conch.session_roster.v1"`},
@@ -300,6 +306,7 @@ func TestSessionV1Validate(t *testing.T) {
 		{name: "upper-case kind", mutate: func(s *SessionV1) { s.Kind = "Agent" }, wantErr: `session kind "Agent" is not one of human, agent`},
 		{name: "empty name", mutate: func(s *SessionV1) { s.Name = "" }, wantErr: "session name is required"},
 		{name: "blank name", mutate: func(s *SessionV1) { s.Name = " \t" }, wantErr: "session name is required"},
+		{name: "name one over the limit", mutate: func(s *SessionV1) { s.Name = strings.Repeat("n", MaxPrincipalNameLength+1) }, wantErr: "session name must be at most 100 characters, got 101"},
 		{name: "empty client", mutate: func(s *SessionV1) { s.Client = "" }, wantErr: "session client is required"},
 		{name: "blank client", mutate: func(s *SessionV1) { s.Client = "  " }, wantErr: "session client is required"},
 		{name: "client one over the limit", mutate: func(s *SessionV1) { s.Client = strings.Repeat("c", MaxSessionClientLength+1) }, wantErr: "session client must be at most 64 characters, got 65"},
@@ -337,6 +344,9 @@ func TestSessionV1Validate(t *testing.T) {
 		{name: "ended but online", mutate: func(s *SessionV1) { s.EndedAt = &later }, wantErr: `session with ended_at must be offline, got state "online"`},
 		{name: "ended but stale", mutate: func(s *SessionV1) { s.State, s.Status, s.EndedAt = SessionStateStale, SessionStatusStale, &later }, wantErr: `session with ended_at must be offline, got state "stale"`},
 
+		// The list is always a list: null is not an empty declaration.
+		{name: "nil interventions", mutate: func(s *SessionV1) { s.Interventions = nil }, wantErr: "session interventions must be a list"},
+		{name: "human with nil interventions", mutate: func(s *SessionV1) { *s = fixtureHumanSession(); s.Interventions = nil }, wantErr: "session interventions must be a list"},
 		{name: "unknown intervention kind", mutate: func(s *SessionV1) { s.Interventions = []InterventionKind{"restart"} }, wantErr: `intervention kind "restart" is not one of message, cancel, pause, resume`},
 		{name: "empty intervention kind", mutate: func(s *SessionV1) { s.Interventions = []InterventionKind{""} }, wantErr: `intervention kind "" is not one of message, cancel, pause, resume`},
 		{name: "duplicate intervention kind", mutate: func(s *SessionV1) {
@@ -348,6 +358,10 @@ func TestSessionV1Validate(t *testing.T) {
 		{name: "current_run without task", mutate: func(s *SessionV1) { s.Task = "" }, wantErr: "session current_run and task must be present together or omitted together"},
 		{name: "task one over the limit", mutate: func(s *SessionV1) { s.Task = strings.Repeat("t", MaxRunTaskLength+1) }, wantErr: "session task must be at most 512 characters, got 513"},
 		{name: "task not UTF-8", mutate: func(s *SessionV1) { s.Task = "bad \xff byte" }, wantErr: "session task must be valid UTF-8"},
+		// A task is one row of a roster.
+		{name: "task with newline", mutate: func(s *SessionV1) { s.Task = "first line\nsecond line" }, wantErr: "session task must be one line with no control characters"},
+		{name: "task with tab", mutate: func(s *SessionV1) { s.Task = "first\tsecond" }, wantErr: "session task must be one line with no control characters"},
+		{name: "task with escape", mutate: func(s *SessionV1) { s.Task = "red \x1b[31mtask" }, wantErr: "session task must be one line with no control characters"},
 
 		// Agent-only fields on a human session (acceptance criterion).
 		{name: "human with runtime", mutate: func(s *SessionV1) { *s = fixtureHumanSession(); s.Runtime = "claude-code" }, wantErr: "human session must not carry runtime, model or host"},
@@ -384,7 +398,6 @@ func TestSessionRosterV1Validate(t *testing.T) {
 		wantErr string
 	}{
 		{name: "valid, a human and an agent", mutate: func(*SessionRosterV1) {}},
-		{name: "valid, nil sessions", mutate: func(r *SessionRosterV1) { r.Sessions = nil }},
 		{name: "valid, empty sessions", mutate: func(r *SessionRosterV1) { r.Sessions = []SessionV1{} }},
 		{
 			// One principal on two clients is two sessions.
@@ -400,6 +413,8 @@ func TestSessionRosterV1Validate(t *testing.T) {
 		{name: "session schema", mutate: func(r *SessionRosterV1) { r.Schema = SessionSchemaV1 }, wantErr: `got "conch.session.v1"`},
 		{name: "zero channel_id", mutate: func(r *SessionRosterV1) { r.ChannelID = 0 }, wantErr: "session roster channel_id must be positive, got 0"},
 		{name: "negative channel_id", mutate: func(r *SessionRosterV1) { r.ChannelID = -7 }, wantErr: "session roster channel_id must be positive, got -7"},
+		// The list is always a list: a roster with nobody in it is [].
+		{name: "nil sessions", mutate: func(r *SessionRosterV1) { r.Sessions = nil }, wantErr: "session roster sessions must be a list"},
 		{name: "entry without schema", mutate: func(r *SessionRosterV1) { r.Sessions[0].Schema = "" }, wantErr: `session schema must be "conch.session.v1", got ""`},
 		{name: "entry with unknown state", mutate: func(r *SessionRosterV1) { r.Sessions[1].State = "ended" }, wantErr: `session state "ended" is not one of`},
 		{name: "human entry with runtime", mutate: func(r *SessionRosterV1) { r.Sessions[0].Runtime = "x" }, wantErr: "human session must not carry runtime, model or host"},
@@ -486,5 +501,34 @@ func TestSessionEncoding(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"sessions":[]`) {
 		t.Errorf("empty roster = %s, want sessions:[]", raw)
+	}
+	// An agent that declared nothing has an empty list, not null, and the
+	// value Validate accepts is the one that encodes that way.
+	agent := fixtureAgentSession()
+	agent.Interventions = []InterventionKind{}
+	if err := agent.Validate(); err != nil {
+		t.Fatalf("agent with empty interventions: Validate() = %v", err)
+	}
+	raw, err = json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"interventions":[]`) || strings.Contains(string(raw), `"interventions":null`) {
+		t.Errorf("agent with no declared interventions = %s, want interventions:[]", raw)
+	}
+	// A list decoded from [] is a list; one decoded from null is not.
+	var fromNull SessionRosterV1
+	if err := json.Unmarshal([]byte(`{"schema":"conch.session_roster.v1","channel_id":7,"sessions":null}`), &fromNull); err != nil {
+		t.Fatal(err)
+	}
+	if err := fromNull.Validate(); err == nil || !strings.Contains(err.Error(), "must be a list") {
+		t.Errorf("roster decoded from sessions:null: Validate() = %v, want a must-be-a-list error", err)
+	}
+	var fromEmpty SessionRosterV1
+	if err := json.Unmarshal([]byte(`{"schema":"conch.session_roster.v1","channel_id":7,"sessions":[]}`), &fromEmpty); err != nil {
+		t.Fatal(err)
+	}
+	if err := fromEmpty.Validate(); err != nil {
+		t.Errorf("roster decoded from sessions:[]: Validate() = %v, want nil", err)
 	}
 }

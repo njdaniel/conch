@@ -111,8 +111,9 @@ func interventionStateNames() string {
 //
 // AnsweredAt and Reason belong to the adapter's answer: AnsweredAt is present
 // exactly when the state is no longer requested, and a Reason is only ever
-// part of an answer. Body is required for a message intervention, which is
-// nothing without one, and optional on the others.
+// part of an answer. Body belongs to a message intervention, which is nothing
+// without one; cancel, pause and resume take none (#287), so a body on them
+// is refused rather than carried where nothing reads it.
 type InterventionV1 struct {
 	// Schema is the document discriminator; always InterventionSchemaV1.
 	Schema string `json:"schema"`
@@ -122,7 +123,8 @@ type InterventionV1 struct {
 	RunID int64 `json:"run_id"`
 	// Kind is what the person asked the run to do.
 	Kind InterventionKind `json:"kind"`
-	// Body is the text of a message intervention; omitted when there is none.
+	// Body is the text of a message intervention; omitted on every other
+	// kind.
 	Body string `json:"body,omitempty"`
 	// State is where the intervention is between request and answer.
 	State InterventionState `json:"state"`
@@ -139,7 +141,8 @@ type InterventionV1 struct {
 
 // Validate reports whether the intervention is structurally well-formed: the
 // v1 schema name, positive ids, a known kind and state, a body that is
-// present for a message and within its limit, requested_at set, answered_at
+// present for a message, absent for every other kind and within its limit,
+// requested_at set, answered_at
 // present exactly when the state is not requested and not before
 // requested_at, and a reason only on an answer and within its limit. It
 // cannot check that the run exists, that the requester may see it, or that
@@ -194,13 +197,17 @@ func validateInterventionReason(state InterventionState, reason string) error {
 
 // validateInterventionAsk checks the person's side of an intervention, shared
 // by InterventionV1 and CreateInterventionRequestV1: a known kind, and a body
-// that a message intervention has and that is within its limit.
+// that a message intervention has, that no other kind has, and that is within
+// its limit.
 func validateInterventionAsk(kind InterventionKind, body string) error {
 	if !kind.Valid() {
 		return fmt.Errorf("schema: intervention kind %q is not one of %s", kind, interventionKindNames())
 	}
 	if kind == InterventionKindMessage && strings.TrimSpace(body) == "" {
 		return errors.New("schema: message intervention body is required")
+	}
+	if kind != InterventionKindMessage && body != "" {
+		return fmt.Errorf("schema: %s intervention must not carry body", kind)
 	}
 	return validateText("intervention body", body, MaxInterventionBodyLength)
 }
@@ -213,7 +220,7 @@ func validateInterventionAsk(kind InterventionKind, body string) error {
 type CreateInterventionRequestV1 struct {
 	// Kind is what the person asks the run to do.
 	Kind InterventionKind `json:"kind"`
-	// Body is the text of a message intervention; omitted for the others.
+	// Body is the text of a message intervention; refused on the others.
 	Body string `json:"body,omitempty"`
 }
 
@@ -250,7 +257,8 @@ func (r AckInterventionRequestV1) Validate() error {
 // ListInterventionsResponseV1 is the body of GET /v1/runs/{id}/interventions
 // and of GET /v1/sessions/{id}/interventions?state=: the matching
 // interventions the caller may see, ordered by id. Interventions is always a
-// JSON array; none matching is an empty array.
+// JSON array; none matching is an empty array. The type has no Validate, so
+// that is the server's promise: it always sends an array, never null.
 type ListInterventionsResponseV1 struct {
 	Interventions []InterventionV1 `json:"interventions"`
 }

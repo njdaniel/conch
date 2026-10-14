@@ -155,7 +155,7 @@ type RunV1 struct {
 	MessageID int64 `json:"message_id,omitempty"`
 	// State is where the run is in its lifecycle.
 	State RunState `json:"state"`
-	// Task is the one-line statement of the work.
+	// Task is the one-line statement of the work: no control characters.
 	Task string `json:"task"`
 	// Link is an optional https URL to the work (a pull request, a log).
 	Link string `json:"link,omitempty"`
@@ -168,8 +168,8 @@ type RunV1 struct {
 }
 
 // Validate reports whether the run is structurally well-formed: the v1 schema
-// name, positive ids including channel_id, a known state, a task within its
-// limit, a link that is an https URL when present, started_at set, and
+// name, positive ids including channel_id, a known state, a one-line task
+// within its limit, a link that is an https URL when present, started_at set, and
 // ended_at present exactly when the state is terminal and not before
 // started_at. It cannot check that the session, channel or message exist or
 // that the message is in the channel; those are the server's.
@@ -220,19 +220,23 @@ func validateRunWork(messageID int64, task, link string) error {
 	if strings.TrimSpace(task) == "" {
 		return errors.New("schema: run task is required")
 	}
-	if err := validateText("run task", task, MaxRunTaskLength); err != nil {
+	if err := validateLine("run task", task, MaxRunTaskLength); err != nil {
 		return err
 	}
 	return validateRunLink(link)
 }
 
-// validateRunLink checks an optional link: within its length, one token with
-// no whitespace or control characters, and an absolute https URL with a host
-// (the scheme is case-insensitive, as in RFC 3986). Nothing else is accepted,
-// because a client renders the link as something to open and a reader should
-// not be handed an http, file or javascript URL by an agent. The whitespace
-// rule is explicit because net/url is lenient about a space in a path. The
-// error never echoes the link.
+// validateRunLink checks an optional link: within its length; one token with
+// no whitespace, control character, bidi control or other invisible
+// formatting character (the classes ValidateDisplayName refuses, with no
+// exceptions, since a URL has no use for a joiner or a directional mark); and
+// an absolute https URL with a host and no userinfo (the scheme is
+// case-insensitive, as in RFC 3986). Nothing else is accepted, because a
+// client renders the link as something to open and a reader should not be
+// handed an http, file or javascript URL by an agent, nor one whose
+// "user@" part reads as the host ("https://github.com@evil.example/"). The
+// whitespace rule is explicit because net/url is lenient about a space in a
+// path. The error never echoes the link.
 func validateRunLink(link string) error {
 	if link == "" {
 		return nil
@@ -246,9 +250,15 @@ func validateRunLink(link string) error {
 	if strings.ContainsFunc(link, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 		return errors.New("schema: run link must not contain whitespace or control characters")
 	}
+	if strings.ContainsFunc(link, func(r rune) bool { return isStrongBidiControl(r) || unicode.Is(unicode.Cf, r) }) {
+		return errors.New("schema: run link must not contain bidi controls or invisible formatting characters")
+	}
 	u, err := url.Parse(link)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return errors.New("schema: run link must be an https URL")
+	}
+	if u.User != nil {
+		return errors.New("schema: run link must not carry userinfo")
 	}
 	return nil
 }
@@ -312,7 +322,9 @@ func (r SetRunStateRequestV1) Validate() error {
 // (GET /v1/runs?channel=&session=&after=&limit=), ordered by id. NextAfter is
 // the run id to pass as the next request's after parameter; zero (omitted)
 // means there is no known subsequent page, as on a message page. Runs is
-// always a JSON array; a channel with no runs is an empty array.
+// always a JSON array; a channel with no runs is an empty array. The type has
+// no Validate, so that is the server's promise: it always sends an array,
+// never null.
 type ListRunsResponseV1 struct {
 	Runs      []RunV1 `json:"runs"`
 	NextAfter int64   `json:"next_after,omitempty"`

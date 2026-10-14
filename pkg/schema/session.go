@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -179,7 +180,8 @@ type SessionV1 struct {
 	// CurrentRun is the id of the open run; zero (omitted) when there is
 	// none or the reader may not see it.
 	CurrentRun int64 `json:"current_run,omitempty"`
-	// Task is the current run's task; present exactly when CurrentRun is.
+	// Task is the current run's task, one line; present exactly when
+	// CurrentRun is.
 	Task string `json:"task,omitempty"`
 	// OutcomeUnknown is whether the session is stale or offline with a run
 	// open; always false while online.
@@ -188,9 +190,11 @@ type SessionV1 struct {
 
 // Validate reports whether the session is structurally well-formed: the v1
 // schema name, positive ids, a known kind, state and status, a non-blank name
-// and client within their limits, timestamps in order, and the cross-field
-// rules below. It cannot check that the principal exists or that Status is
-// the right derivation for the session's runs; those are the server's.
+// and client within their limits, an interventions list that is a list (empty
+// is fine, null is not), a one-line task, timestamps in order, and the
+// cross-field rules below. It cannot check that the principal exists or that
+// Status is the right derivation for the session's runs; those are the
+// server's.
 //
 // A stale or offline state shows as that status and nothing else, and an
 // online session shows as neither; this much of the status derivation never
@@ -215,6 +219,12 @@ func (s SessionV1) Validate() error {
 	}
 	if strings.TrimSpace(s.Name) == "" {
 		return errors.New("schema: session name is required")
+	}
+	// Length only, not ValidateDisplayName: the name is the principal's, and
+	// names stored before the character rule existed are returned as they
+	// are. Nothing stored is longer than the limit, which has always held.
+	if n := utf8.RuneCountInString(s.Name); n > MaxPrincipalNameLength {
+		return fmt.Errorf("schema: session name must be at most %d characters, got %d", MaxPrincipalNameLength, n)
 	}
 	if err := validateSessionLabels(s.Client, s.Runtime, s.Model, s.Host); err != nil {
 		return err
@@ -251,6 +261,9 @@ func (s SessionV1) Validate() error {
 			return fmt.Errorf("schema: session with ended_at must be offline, got state %q", s.State)
 		}
 	}
+	if s.Interventions == nil {
+		return errors.New("schema: session interventions must be a list")
+	}
 	if err := validateInterventionKinds(s.Interventions); err != nil {
 		return err
 	}
@@ -260,7 +273,7 @@ func (s SessionV1) Validate() error {
 	if (s.CurrentRun > 0) != (s.Task != "") {
 		return errors.New("schema: session current_run and task must be present together or omitted together")
 	}
-	if err := validateText("session task", s.Task, MaxRunTaskLength); err != nil {
+	if err := validateLine("session task", s.Task, MaxRunTaskLength); err != nil {
 		return err
 	}
 	if s.Kind == PrincipalHuman {
@@ -360,14 +373,30 @@ func validateInterventionKinds(kinds []InterventionKind) error {
 
 // validateText checks a free-text field that may be empty: valid UTF-8 and at
 // most max characters. Unlike ValidateDisplayName it allows newlines and
-// interior formatting, because a task, a summary or an intervention body is
-// prose, not a label. The error names the field and never echoes the text.
+// interior formatting, because an outcome, an intervention body or a reason
+// is prose, not a label. The error names the field and never echoes the text.
 func validateText(field, s string, max int) error {
 	if !utf8.ValidString(s) {
 		return fmt.Errorf("schema: %s must be valid UTF-8", field)
 	}
 	if n := utf8.RuneCountInString(s); n > max {
 		return fmt.Errorf("schema: %s must be at most %d characters, got %d", field, max, n)
+	}
+	return nil
+}
+
+// validateLine is validateText for a field that is one line: a run's task or
+// an activity summary, which rosters and timelines show on a single row. A
+// control character (newline, carriage return, tab, escape, NUL) would break
+// the row or, in a terminal, rewrite it, so none is allowed. Everything else
+// ValidateDisplayName refuses is allowed here: a task may need interior
+// punctuation and spacing a label does not.
+func validateLine(field, s string, max int) error {
+	if err := validateText(field, s, max); err != nil {
+		return err
+	}
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return fmt.Errorf("schema: %s must be one line with no control characters", field)
 	}
 	return nil
 }
@@ -392,14 +421,18 @@ type SessionRosterV1 struct {
 }
 
 // Validate reports whether the roster is structurally well-formed: the v1
-// schema name, a positive channel_id, every session well-formed and no
-// session id listed twice. Order is not checked.
+// schema name, a positive channel_id, a sessions list that is a list (empty
+// is fine, null is not), every session well-formed and no session id listed
+// twice. Order is not checked.
 func (r SessionRosterV1) Validate() error {
 	if r.Schema != SessionRosterSchemaV1 {
 		return fmt.Errorf("schema: session roster schema must be %q, got %q", SessionRosterSchemaV1, r.Schema)
 	}
 	if r.ChannelID <= 0 {
 		return fmt.Errorf("schema: session roster channel_id must be positive, got %d", r.ChannelID)
+	}
+	if r.Sessions == nil {
+		return errors.New("schema: session roster sessions must be a list")
 	}
 	seen := make(map[int64]struct{}, len(r.Sessions))
 	for _, s := range r.Sessions {

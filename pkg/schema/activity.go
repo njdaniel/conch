@@ -10,12 +10,14 @@ import (
 // Agent activity wire shapes (issue #264; P3 epic #263). Activity is the
 // timestamped stream of what a run did: each entry is one event of a closed
 // kind with a one-line summary, and optionally a machine-readable Data body
-// that is preserved byte for byte, as a message payload is, so an entry whose
-// data this build does not understand survives a round trip unchanged.
+// that is carried opaquely, as a message payload is. What survives a round
+// trip is the JSON value, in compact form with the HTML-sensitive characters
+// escaped as encoding/json writes them; the schema never decodes it into a
+// type, so an entry whose data this build does not understand loses nothing.
 //
 // Activity inherits the visibility of its run (D8). An entry names the run
-// and the agent so a client can file it without a second lookup, and nothing
-// else: the channel is the run's.
+// and the agent principal so a client can file it without a second lookup,
+// and nothing else: the channel is the run's.
 
 // AgentActivitySchemaV1 is the versioned name identifying the v1 activity
 // entry on the wire. Every AgentActivityV1 carries it, so the events socket's
@@ -28,8 +30,14 @@ const (
 	MaxActivitySummaryLength = 512
 	// MaxActivityOutcomeLength bounds Outcome, in characters.
 	MaxActivityOutcomeLength = 512
-	// MaxActivityDataBytes bounds Data, in bytes of its JSON encoding. It is
-	// a size for a detail record, not a transport for files or transcripts.
+	// MaxActivityDataBytes bounds Data, in bytes of the encoding the server
+	// writes: compact JSON with "<", ">" and "&" escaped as six-byte \u
+	// sequences, which is what encoding/json emits for a RawMessage. The
+	// bound is on that form rather than on the bytes as received, so a value
+	// that passes here still passes after it has been stored and sent on; raw
+	// whitespace does not count against it and HTML-sensitive characters
+	// count six each. It is a size for a detail record, not a transport for
+	// files or transcripts.
 	MaxActivityDataBytes = 8 << 10
 )
 
@@ -78,36 +86,38 @@ func activityKindNames() string {
 // AgentActivityV1 is the v1 wire representation of one activity entry: an
 // entry of an activity page and one kind of frame on the events socket.
 //
-// Data is the optional machine-readable detail, preserved verbatim. The
-// schema checks that it is JSON and within MaxActivityDataBytes, never what
-// it contains; its shape is the adapter's, and a client shows it as data.
+// Data is the optional machine-readable detail, carried as an opaque JSON
+// value. The schema checks that it is JSON and within MaxActivityDataBytes
+// once encoded, never what it contains; its shape is the adapter's, and a
+// client shows it as data.
 type AgentActivityV1 struct {
 	// Schema is the document discriminator; always AgentActivitySchemaV1.
 	Schema string `json:"schema"`
 	// ID is the server-assigned entry id, increasing within a run.
 	ID int64 `json:"id"`
-	// Run references the run the entry belongs to.
-	Run int64 `json:"run"`
-	// Agent references the agent principal whose run it is.
-	Agent int64 `json:"agent"`
+	// RunID references the run the entry belongs to.
+	RunID int64 `json:"run_id"`
+	// PrincipalID references the agent principal whose run it is.
+	PrincipalID int64 `json:"principal_id"`
 	// Kind is what kind of event the entry records.
 	Kind ActivityKind `json:"kind"`
 	// Summary is the one-line human-readable form of the event; always
-	// present.
+	// present, and one line: no control characters.
 	Summary string `json:"summary"`
 	// Outcome is a short result of the event, where the kind has one (a
 	// command's exit, an approval's decision); omitted otherwise.
 	Outcome string `json:"outcome,omitempty"`
 	// At is when the server recorded the entry (UTC, ms precision).
 	At Timestamp `json:"at"`
-	// Data is the optional machine-readable detail, preserved opaquely.
+	// Data is the optional machine-readable detail, carried opaquely.
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
 // Validate reports whether the entry is structurally well-formed: the v1
-// schema name, positive ids, a known kind, a non-blank summary and an outcome
-// within their limits, at set, and data that is JSON within its size when
-// present. It cannot check that the run exists or belongs to the agent.
+// schema name, positive ids, a known kind, a one-line non-blank summary and
+// an outcome within their limits, at set, and data that is JSON within its
+// encoded size when present. It cannot check that the run exists or belongs
+// to the principal.
 func (a AgentActivityV1) Validate() error {
 	if a.Schema != AgentActivitySchemaV1 {
 		return fmt.Errorf("schema: agent activity schema must be %q, got %q", AgentActivitySchemaV1, a.Schema)
@@ -115,11 +125,11 @@ func (a AgentActivityV1) Validate() error {
 	if a.ID <= 0 {
 		return fmt.Errorf("schema: agent activity id must be positive, got %d", a.ID)
 	}
-	if a.Run <= 0 {
-		return fmt.Errorf("schema: agent activity run must be positive, got %d", a.Run)
+	if a.RunID <= 0 {
+		return fmt.Errorf("schema: agent activity run_id must be positive, got %d", a.RunID)
 	}
-	if a.Agent <= 0 {
-		return fmt.Errorf("schema: agent activity agent must be positive, got %d", a.Agent)
+	if a.PrincipalID <= 0 {
+		return fmt.Errorf("schema: agent activity principal_id must be positive, got %d", a.PrincipalID)
 	}
 	if err := validateActivityBody(a.Kind, a.Summary, a.Outcome, a.Data); err != nil {
 		return err
@@ -140,20 +150,31 @@ func validateActivityBody(kind ActivityKind, summary, outcome string, data json.
 	if strings.TrimSpace(summary) == "" {
 		return errors.New("schema: agent activity summary is required")
 	}
-	if err := validateText("agent activity summary", summary, MaxActivitySummaryLength); err != nil {
+	if err := validateLine("agent activity summary", summary, MaxActivitySummaryLength); err != nil {
 		return err
 	}
 	if err := validateText("agent activity outcome", outcome, MaxActivityOutcomeLength); err != nil {
 		return err
 	}
+	return validateActivityData(data)
+}
+
+// validateActivityData checks an optional data value: absent, or valid JSON
+// whose encoded form is within MaxActivityDataBytes. The size is measured on
+// what encoding/json will write for it (compact, HTML-escaped), not on the
+// bytes as received: the two differ when the input has whitespace or "<",
+// ">" or "&", and a bound on the received bytes would let a value pass here
+// and fail once stored and sent on.
+func validateActivityData(data json.RawMessage) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if len(data) > MaxActivityDataBytes {
-		return fmt.Errorf("schema: agent activity data must be at most %d bytes, got %d", MaxActivityDataBytes, len(data))
-	}
-	if !json.Valid(data) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
 		return errors.New("schema: agent activity data is not valid JSON")
+	}
+	if len(encoded) > MaxActivityDataBytes {
+		return fmt.Errorf("schema: agent activity data must be at most %d bytes encoded, got %d", MaxActivityDataBytes, len(encoded))
 	}
 	return nil
 }
@@ -170,7 +191,7 @@ type AppendActivityRequestV1 struct {
 	Summary string `json:"summary"`
 	// Outcome is a short result of the event; omitted when there is none.
 	Outcome string `json:"outcome,omitempty"`
-	// Data is the optional machine-readable detail, preserved opaquely.
+	// Data is the optional machine-readable detail, carried opaquely.
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
@@ -184,7 +205,9 @@ func (r AppendActivityRequestV1) Validate() error {
 // (GET /v1/runs/{id}/activity?after=&limit=), oldest first. NextAfter is the
 // entry id to pass as the next request's after parameter; zero (omitted)
 // means there is no known subsequent page, as on a message page. Activity is
-// always a JSON array; a run with no entries yet is an empty array.
+// always a JSON array; a run with no entries yet is an empty array. The type
+// has no Validate, so that is the server's promise: it always sends an array,
+// never null.
 type ListActivityResponseV1 struct {
 	Activity  []AgentActivityV1 `json:"activity"`
 	NextAfter int64             `json:"next_after,omitempty"`

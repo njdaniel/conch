@@ -237,6 +237,12 @@ func TestRunV1Validate(t *testing.T) {
 		{name: "blank task", mutate: func(r *RunV1) { r.Task = "\n" }, wantErr: "run task is required"},
 		{name: "task one over the limit", mutate: func(r *RunV1) { r.Task = strings.Repeat("t", MaxRunTaskLength+1) }, wantErr: "run task must be at most 512 characters, got 513"},
 		{name: "task not UTF-8", mutate: func(r *RunV1) { r.Task = "bad \xff byte" }, wantErr: "run task must be valid UTF-8"},
+		// A task is one row of a roster.
+		{name: "task with newline", mutate: func(r *RunV1) { r.Task = "first\nsecond" }, wantErr: "run task must be one line with no control characters"},
+		{name: "task with carriage return", mutate: func(r *RunV1) { r.Task = "first\rsecond" }, wantErr: "run task must be one line with no control characters"},
+		{name: "task with tab", mutate: func(r *RunV1) { r.Task = "first\tsecond" }, wantErr: "run task must be one line with no control characters"},
+		{name: "task with escape", mutate: func(r *RunV1) { r.Task = "red \x1b[31mtask" }, wantErr: "run task must be one line with no control characters"},
+		{name: "task with NUL", mutate: func(r *RunV1) { r.Task = "first\x00second" }, wantErr: "run task must be one line with no control characters"},
 
 		{name: "link one over the limit", mutate: func(r *RunV1) { r.Link = linkOfLength(MaxRunLinkLength + 1) }, wantErr: "run link must be at most 512 characters, got 513"},
 		{name: "link http", mutate: func(r *RunV1) { r.Link = "http://example.com/run" }, wantErr: "run link must be an https URL"},
@@ -250,6 +256,18 @@ func TestRunV1Validate(t *testing.T) {
 		{name: "link with a tab", mutate: func(r *RunV1) { r.Link = "https://example.com/a\tb" }, wantErr: "run link must not contain whitespace or control characters"},
 		{name: "link with a newline", mutate: func(r *RunV1) { r.Link = "https://example.com/a\nb" }, wantErr: "run link must not contain whitespace or control characters"},
 		{name: "link not UTF-8", mutate: func(r *RunV1) { r.Link = "https://example.com/\xff" }, wantErr: "run link must be valid UTF-8"},
+		// Invisible characters: a link that reads one way and opens another.
+		{name: "link with bidi override", mutate: func(r *RunV1) { r.Link = "https://example.com/" + string(rune(0x202e)) + "x" }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with bidi isolate", mutate: func(r *RunV1) { r.Link = "https://example.com/" + string(rune(0x2066)) + "x" }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with zero-width space", mutate: func(r *RunV1) { r.Link = "https://exam" + string(rune(0x200b)) + "ple.com/x" }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with zero-width joiner", mutate: func(r *RunV1) { r.Link = "https://example.com/" + string(rune(0x200d)) }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with word joiner", mutate: func(r *RunV1) { r.Link = "https://example.com/" + string(rune(0x2060)) }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with soft hyphen", mutate: func(r *RunV1) { r.Link = "https://exam" + string(rune(0xad)) + "ple.com/" }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
+		{name: "link with line separator", mutate: func(r *RunV1) { r.Link = "https://example.com/" + string(rune(0x2028)) }, wantErr: "run link must not contain whitespace or control characters"},
+		// userinfo: what reads as the host is not where the link goes.
+		{name: "link with userinfo host", mutate: func(r *RunV1) { r.Link = "https://github.com@evil.example/x" }, wantErr: "run link must not carry userinfo"},
+		{name: "link with user and password", mutate: func(r *RunV1) { r.Link = "https://user:secret@example.com/x" }, wantErr: "run link must not carry userinfo"},
+		{name: "link with empty userinfo", mutate: func(r *RunV1) { r.Link = "https://@example.com/x" }, wantErr: "run link must not carry userinfo"},
 
 		{name: "empty state", mutate: func(r *RunV1) { r.State = "" }, wantErr: `run state "" is not one of queued, starting, running, blocked, waiting, completed, failed, cancelled`},
 		{name: "unknown state", mutate: func(r *RunV1) { r.State = "done" }, wantErr: `run state "done" is not one of`},
@@ -288,6 +306,9 @@ func TestCreateRunRequestV1Validate(t *testing.T) {
 		{name: "negative message_id", mutate: func(r *CreateRunRequestV1) { r.MessageID = -5 }, wantErr: "run message_id must be omitted or positive, got -5"},
 		{name: "empty task", mutate: func(r *CreateRunRequestV1) { r.Task = "" }, wantErr: "run task is required"},
 		{name: "task one over the limit", mutate: func(r *CreateRunRequestV1) { r.Task = strings.Repeat("t", MaxRunTaskLength+1) }, wantErr: "run task must be at most 512 characters, got 513"},
+		{name: "task with newline", mutate: func(r *CreateRunRequestV1) { r.Task = "first\nsecond" }, wantErr: "run task must be one line with no control characters"},
+		{name: "link with userinfo host", mutate: func(r *CreateRunRequestV1) { r.Link = "https://github.com@evil.example/x" }, wantErr: "run link must not carry userinfo"},
+		{name: "link with bidi override", mutate: func(r *CreateRunRequestV1) { r.Link = "https://example.com/" + string(rune(0x202e)) }, wantErr: "run link must not contain bidi controls or invisible formatting characters"},
 		{name: "link one over the limit", mutate: func(r *CreateRunRequestV1) { r.Link = linkOfLength(MaxRunLinkLength + 1) }, wantErr: "run link must be at most 512 characters, got 513"},
 		{name: "link http", mutate: func(r *CreateRunRequestV1) { r.Link = "http://example.com/" }, wantErr: "run link must be an https URL"},
 	}

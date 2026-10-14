@@ -3,8 +3,8 @@
     {
       "schema": "conch.agent.activity.v1",
       "id": 501,
-      "run": 41,
-      "agent": 3,
+      "run_id": 41,
+      "principal_id": 3,
       "kind": "run_started",
       "summary": "Run started",
       "at": "2026-10-13T09:01:00.000Z"
@@ -12,8 +12,8 @@
     {
       "schema": "conch.agent.activity.v1",
       "id": 507,
-      "run": 41,
-      "agent": 3,
+      "run_id": 41,
+      "principal_id": 3,
       "kind": "command_finished",
       "summary": "ran go test ./...",
       "outcome": "exit 0",
