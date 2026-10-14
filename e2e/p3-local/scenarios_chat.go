@@ -580,13 +580,14 @@ func (s *suite) p309Restart() error {
 		return errors.New("the TUI dropped the history it had while the server was down")
 	}
 
-	// Held down until the TUI has been seen to retry twice, which it does one
-	// second and then two seconds after each other, or until retryDeadline,
+	// Held down until the TUI's first three retry waves have come (one, three
+	// and seven seconds after the drop: the delays double from a second), so
+	// that two gaps can be compared, or until retryDeadline,
 	// when what was seen is judged as it is. A fixed window was too short on a
 	// starved machine, where the TUI's timers run late. The attempts are read
 	// and the stand-in is closed before the line is typed, so that the send's
 	// own connection is not counted as a retry.
-	if err := s.until("the TUI to retry the server twice", retryDeadline+5*time.Second, func() (bool, error) {
+	if err := s.until("three retry waves from the TUI", retryDeadline+5*time.Second, func() (bool, error) {
 		if time.Since(cut) >= retryDeadline {
 			return true, nil // judged as it is, with what was seen
 		}
@@ -706,6 +707,13 @@ func boundedRetries(attempts []time.Time, down time.Duration) error {
 		gap := waves[i][0].Sub(waves[i-1][0])
 		if i > 1 && gap+300*time.Millisecond < prev {
 			return fmt.Errorf("the TUI's retries came closer together (%s, then %s) instead of further apart", prev.Round(100*time.Millisecond), gap.Round(100*time.Millisecond))
+		}
+		// The scenario stops at three waves, so the count above cannot catch
+		// a TUI that retries at a flat interval; the growth can. The TUI's
+		// delays double from a second, so each gap is about twice the last,
+		// late timers and all, and half a second is far inside that.
+		if i > 1 && gap < prev+500*time.Millisecond {
+			return fmt.Errorf("the TUI's retries did not back off (%s, then %s)", prev.Round(100*time.Millisecond), gap.Round(100*time.Millisecond))
 		}
 		prev = gap
 	}

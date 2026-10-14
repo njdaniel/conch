@@ -147,8 +147,8 @@ func channelList(rows []string) (names []string, marked int) {
 // channelsLoaded says the left pane lists channels and marks one, which it
 // does not while it still shows "loading…".
 func channelsLoaded(rows []string) bool {
-	_, marked := channelList(rows)
-	return marked >= 0
+	names, marked := channelList(rows)
+	return len(names) > 0 && marked >= 0
 }
 
 // selectedChannel is the channel the left pane marks, "" when none shows.

@@ -105,6 +105,9 @@ func TestBoundedRetries(t *testing.T) {
 		{"a late second wave on a starved machine", at(0, 2500, 7500), 9 * time.Second, false},
 		{"a retry every half second", at(0, 600, 1200, 1800, 2400, 3000, 3600, 4200, 4800, 5400, 6000), 6 * time.Second, true},
 		{"delays that shrink", at(0, 2000, 3000, 3600), 6 * time.Second, true},
+		{"a retry every second, flat", at(0, 1000, 2000), 3600 * time.Millisecond, true},
+		{"a retry every two seconds, flat", at(0, 2000, 4000), 5 * time.Second, true},
+		{"no retry, exactly at the grace", at(0), retryGrace, true},
 		{"too many at once", at(many...), 4 * time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
