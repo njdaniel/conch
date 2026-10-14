@@ -1,0 +1,10 @@
+{
+  "client": "conch-adapter/0.3.0",
+  "runtime": "claude-code",
+  "model": "claude-fable-5-1",
+  "host": "nick-desktop",
+  "interventions": [
+    "message",
+    "cancel"
+  ]
+}

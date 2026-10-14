@@ -1,0 +1,10 @@
+{
+  "schema": "conch.intervention.v1",
+  "id": 7,
+  "run_id": 41,
+  "kind": "message",
+  "body": "Skip the flaky test and report what still fails",
+  "state": "requested",
+  "requested_by": 1,
+  "requested_at": "2026-10-13T09:04:00.000Z"
+}

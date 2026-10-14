@@ -1,0 +1,11 @@
+{
+  "schema": "conch.intervention.v1",
+  "id": 8,
+  "run_id": 41,
+  "kind": "cancel",
+  "state": "failed",
+  "requested_by": 1,
+  "requested_at": "2026-10-13T09:04:30.000Z",
+  "answered_at": "2026-10-13T09:04:31.200Z",
+  "reason": "run had already completed"
+}

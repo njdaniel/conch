@@ -41,8 +41,10 @@ Type `Capability`, a closed string enum. Names describe the permission (`<resour
 | `approvals.request` | `CapabilityApprovalsRequest` | Raising an approval. |
 | `approvals.await` | `CapabilityApprovalsAwait` | Blocking on an approval's resolution. |
 | `approvals.check` | `CapabilityApprovalsCheck` | Polling an approval's current state. |
+| `sessions.manage` | `CapabilitySessionsManage` | Registering, heartbeating and ending the agent's own sessions (P3, #264). Checked without a channel, because a session belongs to no channel (#263, D9). |
+| `runs.manage` | `CapabilityRunsManage` | Reporting runs and activity, and reading and answering interventions on the agent's own runs (P3, #264). Reporting on a run also needs the channel permission that posting to the run's audience needs; reading the interventions on its own runs is checked without a channel, like a session call. |
 
-Message and approval capabilities are independent, and each approval operation is its own grant (#79): an agent that may post cannot thereby raise approvals, and one that may raise them cannot thereby observe them.
+Message and approval capabilities are independent, and each approval operation is its own grant (#79): an agent that may post cannot thereby raise approvals, and one that may raise them cannot thereby observe them. The two P3 capabilities are independent of those and of each other in the same way. No MCP tool uses them yet: their tools arrive with #267, which adds them to the mapping below.
 
 ### Tool to capability mapping
 
