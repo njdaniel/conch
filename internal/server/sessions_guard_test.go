@@ -248,7 +248,10 @@ func TestOwnSessionRoutesAreTheListedHandlers(t *testing.T) {
 		}
 	}
 	sort.Strings(sessionRoutes)
-	wantRoutes := []string{"DELETE /v1/sessions/{id}", "GET /v1/sessions", "POST /v1/sessions", "POST /v1/sessions/{id}/heartbeat"}
+	// Starting a run (issue #266) is under a session's path but is not an
+	// own-session call: it is gated by the channel gate with runs.manage
+	// (runGate), not by agentSelfCheck.
+	wantRoutes := []string{"DELETE /v1/sessions/{id}", "GET /v1/sessions", "POST /v1/sessions", "POST /v1/sessions/{id}/heartbeat", "POST /v1/sessions/{id}/runs"}
 	if strings.Join(sessionRoutes, "|") != strings.Join(wantRoutes, "|") {
 		t.Errorf("session routes = %v, want %v", sessionRoutes, wantRoutes)
 	}

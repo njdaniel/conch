@@ -261,13 +261,26 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	ids := make([]int64, len(sessions))
+	for i, sess := range sessions {
+		ids[i] = sess.ID
+	}
+	// The runs as this reader may see them: every reader is shown each
+	// session's status, and only a reader who may see its open run is shown
+	// which run it is and its task (D8).
+	runs, err := s.store.SessionRunViews(ctx, ids, readerFor(r, apiV2))
+	if err != nil {
+		slog.ErrorContext(ctx, "sessions: read runs failed", "channel", channel.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
 	roster := schema.SessionRosterV1{
 		Schema:    schema.SessionRosterSchemaV1,
 		ChannelID: channel.ID,
 		Sessions:  make([]schema.SessionV1, 0, len(sessions)),
 	}
 	for _, sess := range sessions {
-		roster.Sessions = append(roster.Sessions, sessionDoc(sess, caller))
+		roster.Sessions = append(roster.Sessions, sessionDoc(sess, caller, runs[sess.ID]))
 	}
 	if err := roster.Validate(); err != nil {
 		slog.ErrorContext(ctx, "sessions: built an invalid roster", "channel", channel.ID, "error", err)
@@ -277,9 +290,16 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, roster)
 }
 
-// writeSession sends one session to its owner.
+// writeSession sends one session to its owner, with its runs as the owner may
+// see them: an agent that has left a run's channel is not shown that run.
 func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, status int, sess store.Session, viewer store.Principal) {
-	doc := sessionDoc(sess, viewer)
+	runs, err := s.store.SessionRunViews(r.Context(), []int64{sess.ID}, readerFor(r, apiV2))
+	if err != nil {
+		slog.ErrorContext(r.Context(), "sessions: read runs failed", "session", sess.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	doc := sessionDoc(sess, viewer, runs[sess.ID])
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(r.Context(), "sessions: built an invalid session document", "session", sess.ID, "error", err)
 		writeInternalError(w)
@@ -288,11 +308,12 @@ func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, status int
 	writeJSON(w, status, doc)
 }
 
-// sessionDoc is the wire form of sess as viewer may see it. Runtime and host
-// say where an agent runs, so they are shown only to an operator and to the
+// sessionDoc is the wire form of sess as viewer may see it, given its runs as
+// the same viewer may see them (store.SessionRunViews). Runtime and host say
+// where an agent runs, so they are shown only to an operator and to the
 // session's own principal; the model is shown to everyone who sees the
 // session. Interventions are always a list.
-func sessionDoc(sess store.Session, viewer store.Principal) schema.SessionV1 {
+func sessionDoc(sess store.Session, viewer store.Principal, runs store.SessionRuns) schema.SessionV1 {
 	doc := schema.SessionV1{
 		Schema:        schema.SessionSchemaV1,
 		ID:            sess.ID,
@@ -301,7 +322,7 @@ func sessionDoc(sess store.Session, viewer store.Principal) schema.SessionV1 {
 		Name:          sess.Name,
 		Client:        sess.Client,
 		State:         sess.State,
-		Status:        deriveSessionStatus(sess),
+		Status:        deriveSessionStatus(sess, runs),
 		StartedAt:     schema.NewTimestamp(sess.StartedAt),
 		LastSeenAt:    schema.NewTimestamp(sess.LastSeenAt),
 		Model:         sess.Model,
@@ -315,28 +336,50 @@ func sessionDoc(sess store.Session, viewer store.Principal) schema.SessionV1 {
 		doc.Runtime = sess.Runtime
 		doc.Host = sess.Host
 	}
+	if sess.Kind == store.PrincipalAgent {
+		// Filled only when the viewer may see the open run; the store leaves
+		// both empty otherwise.
+		doc.CurrentRun, doc.Task = runs.CurrentRun, runs.Task
+		// A run still open on a session nobody is hearing from: its state is
+		// whatever was last reported, and the reader is told not to trust it
+		// (P3-07). Nothing changes the run.
+		quiet := sess.State == schema.SessionStateStale || sess.State == schema.SessionStateOffline
+		doc.OutcomeUnknown = quiet && runs.OpenState != ""
+	}
 	return doc
 }
 
-// deriveSessionStatus is what a roster shows for sess, computed on read.
-// Liveness wins: a stale or offline session shows as that and nothing else.
-// A live human is online. A live agent is idle here.
+// deriveSessionStatus is what a roster shows for sess, computed on read from
+// its liveness and its runs. Liveness wins: a stale or offline session shows
+// as that and nothing else. A live human is online. A live agent shows its
+// most recent open run's state: running while it is queued, starting or
+// running, blocked or waiting as it says; with no run open, failed when its
+// most recent run failed, and idle otherwise.
 //
-// This is the one place the run-dependent part of the status goes. Until runs
-// exist (A3, issue #266) an agent has none, so it is idle, and current_run,
-// task and outcome_unknown are never set; #266 replaces the agent branch with
-// the status of the agent's open or last run, and fills those three.
-func deriveSessionStatus(sess store.Session) schema.SessionStatus {
+// This is the one place the status is derived. It is shown to every reader of
+// the roster, whether or not they may see the run it comes from.
+func deriveSessionStatus(sess store.Session, runs store.SessionRuns) schema.SessionStatus {
 	switch sess.State {
 	case schema.SessionStateStale:
 		return schema.SessionStatusStale
 	case schema.SessionStateOffline:
 		return schema.SessionStatusOffline
 	}
-	if sess.Kind == store.PrincipalAgent {
-		return schema.SessionStatusIdle
+	if sess.Kind != store.PrincipalAgent {
+		return schema.SessionStatusOnline
 	}
-	return schema.SessionStatusOnline
+	switch runs.OpenState {
+	case schema.RunStateQueued, schema.RunStateStarting, schema.RunStateRunning:
+		return schema.SessionStatusRunning
+	case schema.RunStateBlocked:
+		return schema.SessionStatusBlocked
+	case schema.RunStateWaiting:
+		return schema.SessionStatusWaiting
+	}
+	if runs.LastState == schema.RunStateFailed {
+		return schema.SessionStatusFailed
+	}
+	return schema.SessionStatusIdle
 }
 
 // sweepSessions applies the heartbeat thresholds once, at the server's clock.

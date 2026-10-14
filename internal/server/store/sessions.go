@@ -134,6 +134,24 @@ func sessionByIDTx(ctx context.Context, tx execer, id int64) (Session, error) {
 	return sess, nil
 }
 
+// OwnedSession returns session id if it belongs to credentialID and has not
+// ended, and ErrNotFound for a session that does not exist, belongs to another
+// credential, or has ended: the three are not told apart, as for every session
+// route. It changes nothing; a session that is stale or offline is returned as
+// it is.
+func (s *Store) OwnedSession(ctx context.Context, id, credentialID int64) (Session, error) {
+	sess, err := scanSession(s.db.QueryRowContext(ctx,
+		`SELECT `+sessionColumns+` FROM sessions s JOIN principals p ON p.id = s.principal_id
+		 WHERE s.id = ? AND s.credential_id = ? AND s.ended_at IS NULL`, id, credentialID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("store: read session %d: %w", id, err)
+	}
+	return sess, nil
+}
+
 // CreateSession starts a session for the credential p.CredentialID and
 // appends session_started in the same transaction. The credential is checked
 // again inside it: it must belong to p.PrincipalID, not be revoked or
