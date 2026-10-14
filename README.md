@@ -241,6 +241,22 @@ bin/conch login --server http://127.0.0.1:8080 < alice.token
 bin/conch whoami
 ```
 
+By default the login lives in `$XDG_CONFIG_HOME/conch/credentials.json` (else `~/.config/conch/credentials.json`). `CONCH_CONFIG_DIR` moves it: set it to an absolute directory and that directory, used as it is (no `conch/` is added), holds `credentials.json` and, for `conch-voice`, `voice.toml`. A relative path is refused with one line naming the variable; a value of only white space counts as unset. `conch-voice` reads the same variable, so the two programs always agree on where the login is. To be two people on one machine, give each terminal its own directory. Two TUIs side by side, each signed in as someone else: `conch login` creates a missing directory private (0700); it never changes one that exists, and refuses one that others may read or enter.
+
+```sh
+# terminal 1
+export CONCH_CONFIG_DIR=$HOME/.config/conch-alice
+bin/conch login --server http://127.0.0.1:8080 < alice.token
+bin/conch
+
+# terminal 2
+export CONCH_CONFIG_DIR=$HOME/.config/conch-bob
+bin/conch login --server http://127.0.0.1:8080 < bob.token
+bin/conch
+```
+
+Neither process reads or writes the other's file. `CONCH_TOKEN` still wins over the file in whichever directory is in use.
+
 Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
 
 ```sh

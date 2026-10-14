@@ -1,7 +1,8 @@
 //! `conch-voice`: the Conch voice client (ADR-006). This library is the whole of the
 //! binary but its `main`, so that all of it can be tested.
 //!
-//! Input: the command line; the configuration file `$XDG_CONFIG_HOME/conch/voice.toml`;
+//! Input: the command line; the configuration file `voice.toml` in the configuration directory (`$CONCH_CONFIG_DIR`, else
+//! `$XDG_CONFIG_HOME/conch`);
 //! `CONCH_SERVER` and `CONCH_TOKEN`, or the login `conch login` stored; `conchd`'s answers
 //! (voice sessions, the presence socket); the audio and events of the channel's LiveKit
 //! room; the microphone PipeWire has, or the one `audio.input` names, captured only while a
@@ -335,7 +336,8 @@ mod tests {
     fn signing_in_registers_the_login_token_with_the_scrubber() {
         let private = tempfile::tempdir().unwrap();
         let environment = Environment {
-            xdg_config_home: Some(private.path().as_os_str().to_owned()),
+            conch_config_dir: Some(private.path().as_os_str().to_owned()),
+            xdg_config_home: None,
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
