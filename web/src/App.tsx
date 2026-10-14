@@ -1,12 +1,266 @@
-// The shell page (ADR-007): it says what it is and which server it came from.
-// Nothing calls the API yet; sign-in and the lobby come with #280.
+// The browser client's top level: sign-in, the operator warning, then the
+// lobby. The auth, connection and channels reducers hold the state; src/api.ts
+// does every call and is the only code that sees the credential.
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import * as api from './api';
+import { Conversation } from './Conversation';
+import { Lobby } from './Lobby';
+import { OperatorWarning } from './OperatorWarning';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel } from './route';
+import { SignIn } from './SignIn';
+import { authReducer, initialAuth } from './state/auth';
+import { channelsReducer, initialChannels } from './state/channels';
+import { connectionReducer } from './state/connection';
+import { draftFor, draftsReducer, initialDrafts } from './state/drafts';
+import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, type ChatAction } from './state/messages';
+import { useLiveChannel } from './useLiveChannel';
+import { MembersPanel } from './agents/MembersPanel';
+import { RunDetail } from './agents/RunDetail';
+import { useAgents } from './agents/useAgents';
+import { useNow } from './agents/useNow';
+
 export function App({ origin }: { readonly origin: string }) {
-  return (
-    <main>
-      <h1>Conch</h1>
-      <p>
-        Server: <code>{origin}</code>
-      </p>
-    </main>
+  const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
+  const [connection, dispatchConnection] = useReducer(connectionReducer, 'signedOut');
+  const [channels, dispatchChannels] = useReducer(channelsReducer, initialChannels);
+  const [chat, dispatchRaw] = useReducer(chatReducer, initialChat);
+  const [drafts, dispatchDrafts] = useReducer(draftsReducer, initialDrafts);
+  const [attempt, setAttempt] = useState(0);
+  // The newest chat state, for code that outlives a render (the socket's resume point).
+  // It is moved by the same reducer in the same call as the state, so it is
+  // never behind: the history is loaded and the socket opened in one tick.
+  const chatNow = useRef(chat);
+  const dispatchChat = useCallback((action: ChatAction) => {
+    chatNow.current = chatReducer(chatNow.current, action);
+    dispatchRaw(action);
+  }, []);
+
+  // A credential left by an earlier load of this tab is checked once.
+  const restoring = auth.phase === 'restoring';
+  useEffect(() => {
+    if (!restoring) return;
+    let live = true;
+    void api.restore().then((result) => {
+      if (!live) return;
+      if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
+      else dispatchAuth({ type: 'failed', failure: result.failure });
+    });
+    return () => {
+      live = false;
+    };
+  }, [restoring]);
+
+  const signedIn = auth.phase === 'signedIn';
+
+  // The lobby loads the caller's channels. A 401 here, or anywhere later,
+  // sends the page back to sign-in.
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    if (attempt === 0) dispatchConnection({ type: 'started' });
+    void api.listChannels().then((result) => {
+      if (!live) return;
+      if (result.ok) {
+        dispatchConnection({ type: 'reached' });
+        dispatchChannels({
+          type: 'loaded',
+          channels: result.value,
+          preferred: channelFromHash(window.location.hash),
+          remembered: rememberedChannel(),
+        });
+      } else if (result.failure === 'unauthorized') {
+        dispatchAuth({ type: 'unauthorized' });
+      } else {
+        dispatchConnection({ type: 'lost' });
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [signedIn, attempt]);
+
+  useEffect(() => {
+    if (auth.phase === 'signedOut') {
+      dispatchConnection({ type: 'closed' });
+      dispatchChannels({ type: 'reset' });
+      dispatchChat({ type: 'reset' });
+      dispatchDrafts({ type: 'reset' });
+      setAttempt(0);
+    }
+  }, [auth.phase]);
+
+  // The hash names the open channel, so back, forward and a pasted link work.
+  useEffect(() => {
+    if (!signedIn) return;
+    function onHash() {
+      const name = channelFromHash(window.location.hash);
+      if (name !== null) dispatchChannels({ type: 'select', name });
+    }
+    window.addEventListener('hashchange', onHash);
+    return () => {
+      window.removeEventListener('hashchange', onHash);
+    };
+  }, [signedIn]);
+
+  useEffect(() => {
+    if (channels.selected === null) return;
+    rememberChannel(channels.selected);
+    const hash = hashForChannel(channels.selected);
+    if (window.location.hash !== hash) window.location.hash = hash;
+  }, [channels.selected]);
+
+  const onUnauthorized = useCallback(() => {
+    dispatchAuth({ type: 'unauthorized' });
+  }, []);
+  const onLost = useCallback((name: string) => {
+    dispatchChannels({ type: 'lost', name });
+  }, []);
+  const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
+  // One older page at a time, and none past maxHeld.
+  const getOldest = useCallback((name: string) => {
+    const held = chatFor(chatNow.current, name);
+    return held.older === 'loading' || !canLoadOlder(held) ? null : oldestId(held);
+  }, []);
+
+  const principal = auth.phase === 'signedIn' ? auth.principal : null;
+  const selected = signedIn ? channels.selected : null;
+  const channelId = channels.channels.find((c) => c.name === selected)?.id ?? null;
+  const live = useLiveChannel({
+    channel: channelId === null ? null : selected,
+    channelId,
+    me: principal ?? { id: 0, name: '', kind: 'human' },
+    getAfter,
+    getOldest,
+    dispatchChat,
+    dispatchConnection,
+    onUnauthorized,
+    onLost,
+  });
+
+  // The browser's own session, the events socket and what the panel and run
+  // detail show from them.
+  const agents = useAgents({
+    signedIn,
+    channel: channelId === null ? null : selected,
+    channelId,
+    onUnauthorized,
+  });
+  const now = useNow(signedIn);
+
+  // One POST per click. Nothing here sends a message a second time on its own.
+  const post = useCallback(
+    (name: string, localId: number, body: string) => {
+      void api.postMessage(name, body).then((result) => {
+        if (result.ok) dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
+        else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+        else dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+      });
+    },
+    [],
   );
+
+  const releaseSession = agents.release;
+  const signOut = useCallback(() => {
+    // The session is ended first: the request needs the credential that
+    // signing out forgets.
+    releaseSession();
+    api.signOut();
+    forgetChannel();
+    dispatchAuth({ type: 'signOut' });
+  }, [releaseSession]);
+
+  const submit = useCallback((credential: string) => {
+    dispatchAuth({ type: 'submit' });
+    void api.signIn(credential).then((result) => {
+      if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
+      else dispatchAuth({ type: 'failed', failure: result.failure });
+    });
+  }, []);
+
+  switch (auth.phase) {
+    case 'restoring':
+      return (
+        <main className="signin">
+          <h1>Conch</h1>
+          <p role="status">Checking your sign-in…</p>
+        </main>
+      );
+    case 'signedOut':
+    case 'checking':
+      return (
+        <SignIn
+          origin={origin}
+          notice={auth.phase === 'signedOut' ? auth.notice : null}
+          checking={auth.phase === 'checking'}
+          onSubmit={submit}
+        />
+      );
+    case 'operatorWarning':
+      return (
+        <OperatorWarning
+          name={auth.principal.name}
+          onContinue={() => {
+            if (api.continueAsOperator()) dispatchAuth({ type: 'continue' });
+            else dispatchAuth({ type: 'failed', failure: 'invalid' });
+          }}
+          onSignOut={signOut}
+        />
+      );
+    case 'signedIn':
+      return (
+        <Lobby
+          origin={origin}
+          name={auth.principal.name}
+          channels={channels}
+          connection={connection}
+          panel={<MembersPanel agents={agents} now={now} />}
+          conversation={
+            selected === null || channelId === null ? null : (
+              <>
+                {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} />}
+                <div className="conversation-body" hidden={agents.state.detail !== null}>
+              <Conversation
+                key={selected}
+                channel={selected}
+                chat={chatFor(chat, selected)}
+                live={live.status}
+                people={live.people}
+                nets={live.nets}
+                viewer={auth.principal.id}
+                draft={draftFor(drafts, selected)}
+                onDraft={(text) => {
+                  dispatchDrafts({ type: 'edit', channel: selected, text });
+                }}
+                onSend={(body) => {
+                  const localId = chatFor(chat, selected).nextLocalId;
+                  dispatchChat({ type: 'sending', channel: selected, body, at: Date.now() });
+                  dispatchDrafts({ type: 'edit', channel: selected, text: '' });
+                  post(selected, localId, body);
+                }}
+                onRetrySend={(localId) => {
+                  const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
+                  if (send === undefined || send.status === 'sending') return;
+                  dispatchChat({ type: 'retrying', channel: selected, localId });
+                  post(selected, localId, send.body);
+                }}
+                onDismissSend={(localId) => {
+                  dispatchChat({ type: 'discard', channel: selected, localId });
+                }}
+                onLoadOlder={live.loadOlder}
+                onReload={live.retry}
+              />
+                </div>
+              </>
+            )
+          }
+          onOpen={(name) => {
+            dispatchChannels({ type: 'select', name });
+          }}
+          onRetry={() => {
+            setAttempt((n) => n + 1);
+          }}
+          onSignOut={signOut}
+        />
+      );
+  }
 }

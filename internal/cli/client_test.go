@@ -548,6 +548,24 @@ func TestClientV2AndNetsMethods(t *testing.T) {
 			want: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
 		},
 		{
+			name: "list newest messages", status: http.StatusOK,
+			response: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+			call: func(c *Client) (any, error) {
+				return c.ListMessagesV2Page(context.Background(), "general", MessagesPage{NewestFirst: true}, 50)
+			},
+			wantMethod: http.MethodGet, wantPath: "/v2/channels/general/messages", wantQuery: "limit=50&order=desc",
+			want: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+		},
+		{
+			name: "list messages back from an id", status: http.StatusOK,
+			response: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+			call: func(c *Client) (any, error) {
+				return c.ListMessagesV2Page(context.Background(), "general", MessagesPage{NewestFirst: true, Before: 9}, 50)
+			},
+			wantMethod: http.MethodGet, wantPath: "/v2/channels/general/messages", wantQuery: "before=9&limit=50&order=desc",
+			want: schema.ListMessagesResponseV2{Messages: []schema.MessageV2{scoped}},
+		},
+		{
 			name: "list nets", status: http.StatusOK,
 			response:   schema.ListNetsResponseV1{Nets: []schema.NetV1{netV1}},
 			call:       func(c *Client) (any, error) { return c.ListNets(context.Background(), "general") },
@@ -614,8 +632,11 @@ func TestClientV2AndNetsMethods(t *testing.T) {
 
 func TestClientV2AndNetsErrorMapping(t *testing.T) {
 	calls := map[string]func(*Client) error{
-		"post":    func(c *Client) error { _, err := c.PostMessageV2(context.Background(), "g", 1, "x", nil); return err },
-		"list":    func(c *Client) error { _, err := c.ListMessagesV2(context.Background(), "g", 0, 10); return err },
+		"post": func(c *Client) error { _, err := c.PostMessageV2(context.Background(), "g", 1, "x", nil); return err },
+		"list": func(c *Client) error {
+			_, err := c.ListMessagesV2(context.Background(), "g", 0, 10)
+			return err
+		},
 		"nets":    func(c *Client) error { _, err := c.ListNets(context.Background(), "g"); return err },
 		"create":  func(c *Client) error { _, err := c.CreateNet(context.Background(), "g", "a"); return err },
 		"archive": func(c *Client) error { return c.ArchiveNet(context.Background(), "g", "a") },

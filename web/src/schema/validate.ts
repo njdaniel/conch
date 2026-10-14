@@ -61,6 +61,10 @@ export const int: Validator<number> = validator((v, path) =>
     : [`${path}: want an integer, got ${typeof v === 'number' ? String(v) : describe(v)}`],
 );
 
+export const bool: Validator<boolean> = validator((v, path) =>
+  typeof v === 'boolean' ? [] : [`${path}: want a boolean, got ${describe(v)}`],
+);
+
 // RFC 3339 in UTC or with an offset, as Go's time.Time and schema.Timestamp
 // write it.
 const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
@@ -120,7 +124,7 @@ export function object<T>(shape: Shape<T>): Validator<T> {
       }
     }
     for (const key of Object.keys(v)) {
-      if (!(key in shape)) {
+      if (!Object.hasOwn(shape, key)) {
         problems.push(`${path}.${key}: key is not in the TypeScript type`);
       }
     }

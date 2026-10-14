@@ -66,3 +66,43 @@ export const messageV2 = object<MessageV2>({
   audience: optional(audience),
   thread_root_id: optional(int),
 });
+
+// PostMessageRequestV2 is the body of POST /v2/channels/{channel}/messages.
+// The server binds the author to the caller and assigns the id, channel, time
+// and envelope schema, so none of those is sent.
+export interface PostMessageRequestV2 {
+  author_id?: number;
+  body: string;
+  payload?: Payload;
+  audience?: Audience;
+  thread_root_id?: number;
+}
+
+export const postMessageRequestV2 = object<PostMessageRequestV2>({
+  author_id: optional(int),
+  body: str,
+  payload: optional(payload),
+  audience: optional(audience),
+  thread_root_id: optional(int),
+});
+
+// PostMessageResponseV2 is the body of the 201 reply to a post.
+export interface PostMessageResponseV2 {
+  message: MessageV2;
+}
+
+export const postMessageResponseV2 = object<PostMessageResponseV2>({
+  message: messageV2,
+});
+
+// ListMessagesResponseV2 is one forward page of messages. next_after is absent
+// when there is no known later page.
+export interface ListMessagesResponseV2 {
+  messages: MessageV2[];
+  next_after?: number;
+}
+
+export const listMessagesResponseV2 = object<ListMessagesResponseV2>({
+  messages: array(messageV2),
+  next_after: optional(int),
+});
