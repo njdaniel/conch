@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build web-node web-check web-build hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build web-node web-check web-build p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -72,6 +72,17 @@ web-check: web-node
 	cd web && npm run typecheck
 	cd web && npm run lint
 	cd web && npm test
+
+# The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
+# the binaries and the web client, starts a disposable conchd, creates the test
+# community and prints one command per participant, leaving it running;
+# p3-reset stops it and removes everything it made. Neither touches
+# ~/.config/conch.
+p3-local:
+	$(GO) run ./e2e/p3-local --keep
+
+p3-reset:
+	$(GO) run ./e2e/p3-local --reset
 
 # Builds web/dist, which `conchd serve --web-dir web/dist` serves at /app/.
 # Not part of `build`: conchd and conch need no Node.

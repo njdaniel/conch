@@ -234,6 +234,35 @@ jobs:
       - name: p2-hardening-check
         run: go run ./e2e/p2-hardening
 
+  p3-local-check:
+    # The P3 local prototype's runner (issue #283): builds conchd, conch and
+    # conch-adapter and the web client, starts a disposable conchd, creates
+    # the test community, reads it back through the API and compares, then
+    # checks that each participant (two terminal clients, the browser's
+    # credential, both scripted agents) can connect and send, and tears
+    # everything down. Without --keep, so nothing outlives the job. It runs on
+    # every pull request and every push to main: the community it makes is
+    # what docs/p3-walkthrough.md is written against. Its own tests (reset,
+    # interrupts, the HOME sentinel, the walkthrough's commands) run in the
+    # check job's go test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: p3-local
+        run: go run ./e2e/p3-local
+
   voice-check:
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
     # CLI and a real LiveKit server in Docker, plus the proof that the core is
