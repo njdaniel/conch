@@ -565,7 +565,7 @@ func TestEventsTicketAndBearer(t *testing.T) {
 // session on the keep-alive ticks, through the heartbeat's own store call, so
 // it stays online past the stale threshold while another session of the same
 // roster goes stale; a revived session is revived the same way; an ended one
-// is not.
+// is not, and ending it closes the socket.
 func TestEventsKeepsTheSessionAlive(t *testing.T) {
 	f := newSessionFixture(t)
 	ctx := context.Background()
@@ -633,30 +633,77 @@ func TestEventsKeepsTheSessionAlive(t *testing.T) {
 		t.Errorf("last_seen_at = %v, want the clock's %v", got.LastSeenAt, want)
 	}
 
-	// Ended while the socket is open: the keep-alive stops and does not bring
-	// it back, and the socket carries on.
+	// Ended while the socket is open: the next keep-alive finds it gone, does
+	// not bring it back, and closes the socket with 1008 "session ended". (This
+	// replaces the old assertion that the socket carried on.) The last tick()
+	// left one heartbeat in flight, which may have run after the DELETE and
+	// closed the socket already; either way the close is what is read, so the
+	// extra tick is offered with a bound and not waited for.
 	if rec := f.do(t, "DELETE", sessionPath(mine.ID, ""), f.aliceTok, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("end session = %d %s", rec.Code, rec.Body)
 	}
-	c.until("the ended session gone", isRoster(rosterLacks(f.alice.ID)))
-	// One more tick, which the socket either takes, finds the session gone
-	// and stops asking, or never takes because it has stopped already: the
-	// last tick() left one heartbeat in flight, and it may have run after the
-	// DELETE. Which of the two is not the point and cannot be told apart from
-	// here; the wait below only gives the first its chance, and costs time,
-	// never a result. What matters is checked after it: the session stays
-	// ended, and the socket carries on.
 	select {
 	case ticks <- f.clock.Now():
 	case <-time.After(time.Second):
 	}
-	f.create(t, f.bobTok, humanBody) // a second session of bob's: the marker
-	for _, fr := range c.until("the marker roster", isRoster(func(r schema.SessionRosterV1) bool { return len(r.Sessions) == 2 })) {
-		if fr.schema == schema.SessionRosterSchemaV1 && !rosterLacks(f.alice.ID)(fr.roster) {
-			t.Errorf("an ended session is back: %+v", fr.roster)
-		}
+	if ce := c.closed(); ce.Code != websocket.StatusPolicyViolation || ce.Reason != "session ended" {
+		t.Errorf("close after the session ended = %d %q, want 1008 %q", ce.Code, ce.Reason, "session ended")
 	}
 	if _, err := f.srv.store.OwnedSession(ctx, mine.ID, f.credentialID(t, f.aliceTok)); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("OwnedSession of the ended session = %v, want ErrNotFound", err)
 	}
+}
+
+// TestEventsClosesWhenTheSessionEnds: ending the session a socket keeps alive
+// closes that socket with 1008 "session ended" on the next keep-alive tick and
+// refuses its reconnect with 404 session_not_found; a socket on the same
+// channel without &session= is not closed by it.
+func TestEventsClosesWhenTheSessionEnds(t *testing.T) {
+	f := newSessionFixture(t)
+	ticks := make(chan time.Time)
+	f.srv.keepAliveTicks = func() (<-chan time.Time, func()) { return ticks, func() {} }
+	base := wsTestServer(t, f.srv)
+
+	mine := f.create(t, f.aliceTok, humanBody)
+	kept := dialEvents(t, base, fmt.Sprintf("/v1/events/ws?channel=general&session=%d", mine.ID), f.aliceTok)
+	kept.next()
+	plain := dialEvents(t, base, "/v1/events/ws?channel=general", f.aliceTok)
+	plain.next()
+
+	if rec := f.do(t, "DELETE", sessionPath(mine.ID, ""), f.aliceTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("end session = %d %s", rec.Code, rec.Body)
+	}
+	select {
+	case ticks <- f.clock.Now():
+	case <-time.After(eventsReadTimeout):
+		t.Fatal("the socket took no keep-alive tick")
+	}
+	if ce := kept.closed(); ce.Code != websocket.StatusPolicyViolation || ce.Reason != "session ended" {
+		t.Errorf("close = %d %q, want 1008 %q", ce.Code, ce.Reason, "session ended")
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want int
+	}{
+		{"reconnect with the ended session", fmt.Sprintf("/v1/events/ws?channel=general&session=%d", mine.ID), http.StatusNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := callWS(t, base, tc.path, f.aliceTok)
+			if got.status != tc.want || !strings.Contains(got.body, "session_not_found") {
+				t.Errorf("= %d %s, want %d session_not_found", got.status, got.body, tc.want)
+			}
+		})
+	}
+
+	// The plain socket is still open: it is sent the roster without the ended
+	// session, and a later session shows up on it.
+	plain.until("the ended session gone", isRoster(rosterLacks(f.alice.ID)))
+	f.create(t, f.bobTok, humanBody)
+	plain.until("a later session", isRoster(func(r schema.SessionRosterV1) bool {
+		_, ok := rosterSession(r, f.bob.ID)
+		return ok
+	}))
 }
