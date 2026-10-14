@@ -50,6 +50,13 @@ type Config struct {
 	// disables uploads (fetching existing files still works). conchd defaults
 	// it to DefaultMaxUploadBytes; the zero value here is off.
 	MaxUploadBytes int64
+	// WebDir, when set, is a built web client served at /app/ (see
+	// static.go). Empty means no /app/ routes exist.
+	WebDir string
+	// AllowedOrigins are extra origins the WebSocket upgrade accepts besides
+	// the server's own, so a dev server on another port can connect. Empty
+	// keeps the same-origin check. See ParseAllowedOrigins.
+	AllowedOrigins []string
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -138,7 +145,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now, renameFile: os.Rename}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
-	s.routes = s.routeTable()
+	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
