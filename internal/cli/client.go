@@ -450,12 +450,36 @@ func (c *Client) PostMessageV2(ctx context.Context, channel string, authorID int
 	return result.Message, nil
 }
 
+// MessagesPage says which page of messages ListMessagesV2 asks for. The zero
+// value is the first page, ascending. After is the largest id held (ascending
+// reads); NewestFirst asks for the newest messages first and Before, the
+// smallest id held, pages back from there (zero is from the newest). The server
+// refuses After with NewestFirst and Before without it.
+type MessagesPage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
 // ListMessagesV2 returns one forward page of the v2 messages in channel that
 // the caller may see.
 func (c *Client) ListMessagesV2(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
+	return c.ListMessagesV2Page(ctx, channel, MessagesPage{After: after}, limit)
+}
+
+// ListMessagesV2Page returns one page of the v2 messages in channel that the
+// caller may see: ascending by id from page.After, or newest first below
+// page.Before.
+func (c *Client) ListMessagesV2Page(ctx context.Context, channel string, page MessagesPage, limit int) (schema.ListMessagesResponseV2, error) {
 	endpoint := c.resolve("v2", "channels", channel, "messages")
 	query := endpoint.Query()
-	query.Set("after", strconv.FormatInt(after, 10))
+	if page.NewestFirst {
+		query.Set("order", "desc")
+		if page.Before > 0 {
+			query.Set("before", strconv.FormatInt(page.Before, 10))
+		}
+	} else {
+		query.Set("after", strconv.FormatInt(page.After, 10))
+	}
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
 	var result schema.ListMessagesResponseV2
