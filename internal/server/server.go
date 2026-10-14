@@ -104,6 +104,9 @@ type Server struct {
 	limits  agentRateLimiter
 	denials denialCoalescer
 	now     func() time.Time
+	// tickets holds the unspent WebSocket tickets (issue #270), in memory
+	// only; its clock is now.
+	tickets wsTicketStore
 	// renameFile moves a finished upload into place. It is os.Rename; tests
 	// replace it to fail the step between the temporary file and the final
 	// name.
