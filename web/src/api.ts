@@ -199,30 +199,20 @@ export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
 // A channel name goes in the path as one segment.
 const channelPath = (channel: string) => `/v1/channels/${encodeURIComponent(channel)}`;
 
-// A page of history is the most the server returns for one call.
-const historyLimit = 100;
+// A page of history is the most the server returns for one call, and the
+// size the client asks for. A page that comes back shorter is the last one.
+export const historyLimit = 100;
 
-// At most this many pages are walked (2,000 messages). The socket, opened after
-// the newest id read, replays the rest.
-export const maxHistoryPages = 20;
-
-// loadMessages reads a channel's messages in id order. The server lists
-// forwards only (`after`, no `before`; #334), so this walks its pages from the
-// start, up to the cap, and the page draws the newest of them.
-export async function loadMessages(channel: string): Promise<ApiResult<MessageV2[]>> {
-  const all: MessageV2[] = [];
-  let after = 0;
-  for (let page = 0; page < maxHistoryPages; page++) {
-    const path = `/v2/channels/${encodeURIComponent(channel)}/messages?after=${String(after)}&limit=${String(historyLimit)}`;
-    const result = await authed(path, listMessagesResponseV2);
-    if (!result.ok) return result;
-    all.push(...result.value.messages);
-    const next = result.value.next_after ?? 0;
-    // A page that does not move forward would loop for ever.
-    if (next <= after) return { ok: true, value: all };
-    after = next;
-  }
-  return { ok: true, value: all };
+// loadMessages reads one page of a channel's history: the newest page, or with
+// `before` the page just below that id. The server answers newest first
+// (`order=desc`; #334) and this hands it back in id order, so opening a channel
+// is one request however long its history is.
+export async function loadMessages(channel: string, before?: number): Promise<ApiResult<MessageV2[]>> {
+  const cursor = before === undefined ? '' : `&before=${String(before)}`;
+  const path = `/v2/channels/${encodeURIComponent(channel)}/messages?order=desc&limit=${String(historyLimit)}${cursor}`;
+  const result = await authed(path, listMessagesResponseV2);
+  if (!result.ok) return result;
+  return { ok: true, value: [...result.value.messages].reverse() };
 }
 
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {
