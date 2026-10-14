@@ -587,9 +587,16 @@ func (s *suite) startSweepProbe() error {
 		return err
 	}
 	s.sweepReady = make(chan struct{})
+	stop := make(chan struct{})
+	s.cleanup(func() { close(stop) })
 	go func() {
 		defer close(s.sweepReady)
 		for runCtx.Err() == nil {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			roster, err := s.roster(partNick, chGeneral)
 			if err == nil {
 				if got, ok := sessionOf(roster, sess.ID); ok && got.State != schema.SessionStateOnline {
@@ -611,7 +618,7 @@ func (s *suite) startSweepProbe() error {
 // session's last heartbeat is between 3 and 4 seconds old, which is stale
 // and not yet offline.
 func (s *suite) nextFreeze(now time.Time) (time.Time, error) {
-	if s.sweepReady == nil { // P3-05 did not run: learn it now
+	if s.sweepReady == nil { // P3-06 has not started it (rows were filtered): learn it now
 		if err := s.startSweepProbe(); err != nil {
 			return time.Time{}, err
 		}

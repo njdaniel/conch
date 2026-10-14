@@ -124,7 +124,7 @@ func (r *runner) adapterCmd(script string) string {
 	return shq(r.path("fixtures", script))
 }
 
-var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh"}
+var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh", "hang.sh"}
 
 func (r *runner) copyFixtureScripts() error {
 	for _, n := range fixtureNames {

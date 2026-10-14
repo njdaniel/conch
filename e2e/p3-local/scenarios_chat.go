@@ -324,7 +324,12 @@ func (s *suite) p304TwoSessions() error {
 	}); err != nil {
 		return err
 	}
-	first, other := mine[0], mine[1] // the older one is the first terminal's
+	// The first terminal's session is the one that was there before the second
+	// started; the roster is not promised to be in any order.
+	first, other := mine[0], mine[1]
+	if first.StartedAt.Time().After(other.StartedAt.Time()) {
+		first, other = other, first
+	}
 	if first.ID == other.ID || first.Client != "tui" || other.Client != "tui" {
 		return fmt.Errorf("nick-test's sessions are %d (%s) and %d (%s), want two TUI sessions", first.ID, first.Client, other.ID, other.Client)
 	}
@@ -555,6 +560,7 @@ func (s *suite) p309Restart() error {
 	// The cut: the server stops, and something that only refuses stands in
 	// its place.
 	s.r.server.stop()
+	cut := time.Now()
 	standIn, err := refuseAt(s.r.addr)
 	if err != nil {
 		return fmt.Errorf("hold the server's address: %w", err)
@@ -574,17 +580,10 @@ func (s *suite) p309Restart() error {
 		return errors.New("the TUI dropped the history it had while the server was down")
 	}
 
-	// A line typed now cannot be sent. It stays in the prompt, the TUI says it
-	// was not sent, and nothing sends it later.
-	if err := t.sendLine("p309interrupted"); err != nil {
-		return err
-	}
-	if err := t.waitFor("the failure of the send", 20*time.Second, func(r []string) bool { return showing(r, "cli:") }); err != nil {
-		return err
-	}
 	// Held down long enough for two retries, which come one second and then
-	// two seconds after each other.
-	cut := time.Now()
+	// two seconds after each other. The attempts are read and the stand-in is
+	// closed before the line is typed, so that the send's own connection is not
+	// counted as a retry.
 	if err := s.until("the server to have been down for 4s", 30*time.Second, func() (bool, error) {
 		return time.Since(cut) >= 4*time.Second, nil
 	}); err != nil {
@@ -598,6 +597,15 @@ func (s *suite) p309Restart() error {
 		offsets = append(offsets, fmt.Sprintf("%dx at +%.1fs", len(w), w[0].Sub(cut).Seconds()))
 	}
 	fmt.Printf("    the TUI connected %s while the server was down\n", strings.Join(offsets, ", "))
+
+	// A line typed now cannot be sent: the connection is refused. It stays in
+	// the prompt, the TUI says the post failed, and nothing sends it later.
+	if err := t.sendLine("p309interrupted"); err != nil {
+		return err
+	}
+	if err := t.waitFor("the failure of the send", 20*time.Second, func(r []string) bool { return showing(r, "post v2") }); err != nil {
+		return err
+	}
 
 	if err := s.r.restartServer(); err != nil {
 		return err

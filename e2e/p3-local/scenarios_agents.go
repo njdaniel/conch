@@ -1,11 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -52,7 +52,7 @@ func (s *suite) closeAgentsView(t *tui) error {
 // agent is unfolded until the session is listed, and then folded and unfolded
 // once more, when the TUI certainly has it.
 func (s *suite) refold(t *tui, session int64) error {
-	listed := func(r []string) bool { return showing(r, "▾ [agent]") && showing(r, "#"+id(session)+" ") }
+	listed := func(r []string) bool { return showing(r, "▾ [agent]") && showing(r, " #"+id(session)+" ") }
 	toggle := func(unfolded bool) error {
 		if err := t.press(keyEnter); err != nil {
 			return err
@@ -103,7 +103,7 @@ func (s *suite) agree(t *tui, session int64, status schema.SessionStatus, run in
 			apiOK = apiOK && r.State == state
 		}
 		rows := t.rows()
-		tuiOK := showing(rows, "#"+id(session)+" "+string(status))
+		tuiOK := showing(rows, " #"+id(session)+" "+string(status))
 		if run != 0 {
 			tuiOK = tuiOK && showing(rows, "run #"+id(run)+" "+string(state))
 		}
@@ -284,7 +284,7 @@ func (s *suite) p307Freeze() error {
 	}
 	var err error
 	// Long enough to span this row and the next.
-	if s.worker, err = s.launchAgent(agentSpec{part: partWorker, script: "slow.sh", env: []string{"FIXTURE_SLEEP=90"}}); err != nil {
+	if s.worker, err = s.launchAgent(agentSpec{part: partWorker, script: "hang.sh", env: []string{"FIXTURE_SLEEP=90"}}); err != nil {
 		return err
 	}
 	session := s.worker.session
@@ -456,6 +456,11 @@ func (s *suite) p308Interventions() error {
 		return err
 	}
 
+	// The command is alive: hang.sh keeps a process of its own.
+	if kids := childrenOf(s.worker.c.pid()); len(kids) == 0 {
+		return errors.New("the adapter has no command running during the run, so a cancel has nothing to kill")
+	}
+
 	// An instruction.
 	if err := t.press("m"); err != nil {
 		return err
@@ -512,12 +517,15 @@ func (s *suite) p308Interventions() error {
 	if cancel.AnsweredAt.Time().Before(ended.EndedAt.Time()) {
 		return fmt.Errorf("the cancel was answered at %s, before the run ended at %s", cancel.AnsweredAt.Time(), ended.EndedAt.Time())
 	}
-	// The command is gone.
+	// The command is gone, with whatever it started.
 	if kids := childrenOf(s.worker.c.pid()); len(kids) != 0 {
 		return fmt.Errorf("the adapter still has child processes after the cancel: %v", kids)
 	}
-	if left := processesRunning(filepath.Join(s.r.root, "fixtures")); len(left) != 0 {
+	if left := s.r.processesOfRun(s.r.path("fixtures")); len(left) != 0 {
 		return fmt.Errorf("a fixture script is still running after the cancel: %v", left)
+	}
+	if left := s.r.processesOfRun("sleep 90"); len(left) != 0 {
+		return fmt.Errorf("the command's sleep is still running after the cancel: %v", left)
 	}
 	// The key line of a run that ended has no keys, and the session is idle.
 	if err := t.waitFor("the run has ended", 10*time.Second, func(r []string) bool { return showing(r, "the run has ended") }); err != nil {
@@ -536,16 +544,23 @@ func (s *suite) p308Interventions() error {
 	return s.privateRunIsOffLimits()
 }
 
-// processesRunning lists the live processes whose command line mentions dir.
-func processesRunning(dir string) []string {
+// processesOfRun lists the live processes of this run (the ones whose
+// environment carries its run id) whose command line mentions needle.
+func (r *runner) processesOfRun(needle string) []string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
+	mark := "CONCH_P3_RUN_ID=" + r.runID
 	var out []string
 	for _, e := range entries {
-		cmdline := strings.Join(argv(atoi(e.Name())), " ")
-		if cmdline != "" && strings.Contains(cmdline, dir) && processRunning(atoi(e.Name())) {
+		pid := atoi(e.Name())
+		cmdline := strings.Join(argv(pid), " ")
+		if pid == 0 || !strings.Contains(cmdline, needle) || !processRunning(pid) {
+			continue
+		}
+		env, err := os.ReadFile("/proc/" + e.Name() + "/environ") // #nosec G304 -- a /proc path built from a number
+		if err == nil && strings.Contains("\x00"+string(env), "\x00"+mark+"\x00") {
 			out = append(out, cmdline)
 		}
 	}
