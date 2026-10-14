@@ -57,7 +57,7 @@ func (stubAPI) EndSession(context.Context, int64) error { return nil }
 func (stubAPI) SubscribeEvents(context.Context, string, int64, cli.EventHandler) error {
 	return nil
 }
-func (stubAPI) ListRuns(context.Context, string, int64, int64, int) (schema.ListRunsResponseV1, error) {
+func (stubAPI) ListRuns(context.Context, string, int64, cli.RunsPage, int) (schema.ListRunsResponseV1, error) {
 	return schema.ListRunsResponseV1{}, nil
 }
 

@@ -106,11 +106,14 @@ func TestClientListRuns(t *testing.T) {
 	tests := []struct {
 		name          string
 		session       int64
+		page          RunsPage
 		wantQuery     string
 		wantNextAfter int64
 	}{
-		{"all runs", 0, "after=7&channel=ops&limit=50", 12},
-		{"one session's", 4, "after=7&channel=ops&limit=50&session=4", 12},
+		{"all runs", 0, RunsPage{After: 7}, "after=7&channel=ops&limit=50", 12},
+		{"one session's", 4, RunsPage{After: 7}, "after=7&channel=ops&limit=50&session=4", 12},
+		{"the newest", 4, RunsPage{NewestFirst: true}, "channel=ops&limit=50&order=desc&session=4", 12},
+		{"back from a run", 0, RunsPage{NewestFirst: true, Before: 6}, "before=6&channel=ops&limit=50&order=desc", 12},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,7 +125,7 @@ func TestClientListRuns(t *testing.T) {
 			}))
 			defer server.Close()
 			client, _ := NewClient(server.URL, server.Client())
-			got, err := client.ListRuns(context.Background(), "ops", tt.session, 7, 50)
+			got, err := client.ListRuns(context.Background(), "ops", tt.session, tt.page, 50)
 			if err != nil || got.NextAfter != tt.wantNextAfter {
 				t.Errorf("ListRuns = %+v, %v", got, err)
 			}

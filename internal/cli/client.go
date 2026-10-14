@@ -723,16 +723,34 @@ func (c *Client) EndSession(ctx context.Context, id int64) error {
 	return c.roundTrip(ctx, "end session", http.MethodDelete, endpoint, nil, nil)
 }
 
-// ListRuns returns one forward page of the runs of channel that the caller may
-// see, ordered by id, optionally only those of session (0 for all).
-func (c *Client) ListRuns(ctx context.Context, channel string, session, after int64, limit int) (schema.ListRunsResponseV1, error) {
+// RunsPage says which page of runs ListRuns asks for. The zero value is the
+// first page, ascending. After is the largest id held (ascending reads);
+// NewestFirst asks for the newest runs first and Before, the smallest id held,
+// pages back from there (zero is from the newest). The server refuses After
+// with NewestFirst and Before without it.
+type RunsPage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
+// ListRuns returns one page of the runs of channel that the caller may see:
+// ascending by id from page.After, or newest first below page.Before.
+// Optionally only those of session (0 for all).
+func (c *Client) ListRuns(ctx context.Context, channel string, session int64, page RunsPage, limit int) (schema.ListRunsResponseV1, error) {
 	endpoint := c.resolve("v1", "runs")
 	query := endpoint.Query()
 	query.Set("channel", channel)
 	if session > 0 {
 		query.Set("session", strconv.FormatInt(session, 10))
 	}
-	query.Set("after", strconv.FormatInt(after, 10))
+	if page.NewestFirst {
+		query.Set("order", "desc")
+		if page.Before > 0 {
+			query.Set("before", strconv.FormatInt(page.Before, 10))
+		}
+	} else {
+		query.Set("after", strconv.FormatInt(page.After, 10))
+	}
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
 	var result schema.ListRunsResponseV1
