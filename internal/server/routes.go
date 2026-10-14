@@ -55,6 +55,13 @@ func (s *Server) routeTable() []route {
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		rt("GET /v1/voice/ws", accessAuthenticated, hf(s.handleVoiceWS)),
+		// Sessions (issue #265). Any caller with a credential; the session
+		// routes act on the caller's own sessions (by credential) and the
+		// list is a membership-gated read. Checked in the handlers.
+		rt("POST /v1/sessions", accessAuthenticated, hf(s.handleCreateSession)),
+		rt("POST /v1/sessions/{id}/heartbeat", accessAuthenticated, hf(s.handleSessionHeartbeat)),
+		rt("DELETE /v1/sessions/{id}", accessAuthenticated, hf(s.handleEndSession)),
+		rt("GET /v1/sessions", accessAuthenticated, hf(s.handleListSessions)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),

@@ -167,8 +167,17 @@ var routeExpectations = map[string]routeExpectation{
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
 	// caller who passes authentication gets 400 before anything else.
-	"GET /v1/channels/{channel}/voice":            {classAuth, "/v1/channels/general/voice", "", 200},
-	"GET /v1/voice/ws":                            {classAuth, "/v1/voice/ws", "", 400},
+	"GET /v1/channels/{channel}/voice": {classAuth, "/v1/channels/general/voice", "", 200},
+	"GET /v1/voice/ws":                 {classAuth, "/v1/voice/ws", "", 400},
+	// Sessions (issue #265). Chosen to change and audit nothing: an empty
+	// create is a 400 (a client is required), the session routes use an id
+	// that does not exist, and the list reads a channel every fixture caller
+	// is in. AuthOff gets 400 sessions_require_auth on all four (special-cased
+	// below).
+	"POST /v1/sessions":                           {classAuth, "/v1/sessions", `{}`, 400},
+	"POST /v1/sessions/{id}/heartbeat":            {classAuth, "/v1/sessions/9999/heartbeat", "", 404},
+	"DELETE /v1/sessions/{id}":                    {classAuth, "/v1/sessions/9999", "", 404},
+	"GET /v1/sessions":                            {classAuth, "/v1/sessions?channel=general", "", 200},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
@@ -342,6 +351,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isFileRoute(rt.pattern) {
 					want = http.StatusBadRequest // files_require_auth: files are never anonymous
+				}
+				if strings.Contains(rt.pattern, "/v1/sessions") {
+					want = http.StatusBadRequest // sessions_require_auth: a session is bound to a credential
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
