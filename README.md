@@ -117,7 +117,7 @@ executing tool or runtime actually checks and enforces those decisions.
 ## Architecture at a glance
 
 - **Core:** Go server `conchd`, Go CLI/TUI `conch`, and the optional reference adapter
-  `conch-bot`.
+  `conch-adapter` (formerly `conch-bot`).
 - **Dependency-free core:** embedded SQLite in WAL mode; messaging, approvals, and
   audit do not require a separate database, broker, or media service.
 - **Optional media:** LiveKit runs as a separate service. `conchd` handles access and
@@ -291,6 +291,8 @@ bin/conch logout
 
 `conch search <channel> <words…>` finds messages in one channel (the REST route is `GET /v2/channels/{channel}/messages/search?q=<words>&before=<id>&limit=<n>`). A message matches when it contains every word, in any order, ignoring case and accents; words are whole words, never a query language (`*`, `-`, `OR`, quotes and the like are just text). Results are newest first, in the format `tail` prints, and page back with `before` (`next_before` in the response; the CLI prints the `--before` value to use on stderr). You are shown exactly what listing the channel shows you: a net message or whisper you cannot see is not found, and nothing in the response tells you one exists. No match prints nothing and exits 0. `q` is required and at most 256 bytes; `limit` is as for listing.
 
+`GET /v2/channels/{channel}/messages` (and `/v1`) is ascending by id by default (`order=asc`, paged with `after`, `next_after` in the response). `order=desc` lists the newest first: with no `before` it is the newest page, and a client pages back by passing `before=<id>` the smallest id it holds, so opening a channel is one request, `?order=desc&limit=100`. A newest-first page has no `next_after`. `after` goes only with `asc` and `before` only with `desc`; any other mix, both together included, an unknown `order`, and `order=desc` with `thread`, is `400 invalid_request`, and an empty value is no value. The audience rule applies before the limit in both directions, so a message you cannot see neither fills a page nor moves the cursor. `/v0` has no `order`.
+
 #### Threads
 
 `conch send --reply-to <id> <channel> <text>` replies to message `<id>` (REST: `POST /v2/channels/{channel}/messages` with `"thread_root_id": <id>`). Threads are one level: a reply to a reply is refused. **A reply has its root's audience and cannot choose its own**: it reaches only people who can see the message it answers, so a reply to a whisper is a whisper to the same people (whoever of them replies; the author of the whisper sees it), a reply on a net goes to those of the root's recipients who are still on the net (someone added to the net later does not get replies to a message they cannot see, and someone taken off it gets no more of its talk through an old thread), and `--reply-to` cannot be combined with `--net` or `--to` (the API refuses `thread_root_id` together with `audience`: `400 thread_audience_conflict`). A message you cannot see, one that does not exist, one in another channel and a reply all give the same `404 thread_not_found`, byte for byte, so a reply cannot be used to find out that a scoped message exists. `GET /v2/channels/{channel}/messages?thread=<id>` (the CLI's `conch thread <channel> <id>`) returns the root and then its replies, in order, with the usual `after` and `limit`, showing you exactly what the channel listing shows you; a non-numeric or zero `thread` is a `400`. The channel listing and the v2 WebSocket still deliver replies in id order like any message, each with `thread_root_id` set, and `conch tail` marks one `[reply:<id>]`. v0 and v1 clients see a reply to a channel-wide message as an ordinary message and never see a scoped one. Threads are not yet available through MCP, and the TUI does not draw them.
@@ -365,31 +367,104 @@ const ws = new WebSocket(`wss://conch.example/v2/ws?channel=ops&ticket=${ticket}
 - A credential may hold at most 8 unspent tickets; the next request is `429 too_many_tickets`. Tickets live in memory, so a restart forgets them. With `--auth off` there is no credential to bind one to and the route answers `400 tickets_require_auth`.
 - A ticket is a secret for its 30 seconds. `conchd` does not log request URLs, and a ticket is never logged or audited. A reverse proxy in front of it may log the URL: that is tolerable for a value that is dead after one use, and is exactly why the bearer must not be there.
 
-### Optional: auto-reply bot
+### Optional: the reference adapter (`conch-adapter`)
 
-`conch-bot` watches one channel and replies to new human messages using the
-local `claude -p` command. Give it its agent's token and principal ID:
+`conch-adapter` is Conch's reference runtime adapter, a generic subprocess
+adapter. It watches one channel and answers each new human message by running a
+command: by default the local Claude Code CLI, `claude -p`. It also tells the
+server it is there. Give it its agent's token and principal ID:
 
 ```sh
-CONCH_BOT_TOKEN=<the agent's token> \
-CONCH_BOT_PRINCIPAL_ID=3 \
-CONCH_BOT_CHANNEL=ops \
-bin/conch-bot
+CONCH_ADAPTER_TOKEN=<the agent's token> \
+CONCH_ADAPTER_PRINCIPAL_ID=3 \
+CONCH_ADAPTER_CHANNEL=ops \
+bin/conch-adapter
 ```
+
+**Run with permissions skipped.** The default command is
+`claude -p {prompt} --model {model} --dangerously-skip-permissions --output-format text`.
+The Claude Code subprocess runs with permissions skipped: it can read and write
+files and run commands as the user who started the adapter, on the strength of
+whatever is in its prompt. That prompt holds the messages it is answering, and
+any `message` intervention a person sent to the run (below). Only people who can
+see a run can send it an intervention (the server's rule), and the text still
+goes straight to that subprocess. Run the adapter as a user, in a directory and
+on a host where that is acceptable, and give its agent a manifest for the one
+channel it serves.
 
 It skips messages already present when it starts and ignores its own replies.
 It replies in kind: an answer to a net message goes to that net, an answer to
 a whisper goes to the same principals, and an answer to a channel-wide message
 is channel-wide. To reply on a net or to a whisper its manifest needs
 `post_net` or `whisper` (plus `whisper_agent` for a whisper that includes
-another agent). If the server refuses a scoped reply, the bot logs one line and
-posts nothing; it never falls back to a wider audience. It does not start
+another agent). If the server refuses a scoped reply, the adapter logs one line
+and posts nothing; it never falls back to a wider audience. It does not start
 scoped conversations.
-Optional settings include `CONCH_BOT_SERVER`, `CONCH_BOT_POLL_INTERVAL`,
-`CONCH_BOT_MAX_BACKOFF`, `CONCH_BOT_CONTEXT_MESSAGES`, `CONCH_BOT_MODEL`,
-`CONCH_BOT_REPLY_TIMEOUT`, `CLAUDE_BIN`, and `CONCH_BOT_LOCK_FILE`. Like any
-agent it needs channel membership and a manifest (next section) allowing
-`messages.read` and `messages.post`.
+
+**Presence.** On start it registers a session (client `conch-adapter`, its
+runtime, model and host, and the interventions `message` and `cancel`) and
+sends a heartbeat every 10 seconds from a goroutine of its own, so a long reply
+does not make it look offline. Each reply is one run, in the channel and
+answering the newest message it is replying to: `starting`, `running`, then
+`completed`, or `failed` with the exit status or `timeout` as the outcome (and
+nothing posted). The run's activity is `command_started` (it names the
+command's first word only, never the prompt), `command_finished`, and
+`reply_posted`. Sessions belong to an issued credential, so the adapter needs
+one: create it with `POST /v1/principals/{id}/credentials`. A static
+`--mcp-token` cannot register a session. The agent's manifest needs the
+capabilities `sessions.manage` and `runs.manage` besides `messages.read` and
+`messages.post`. Registering the session is part of starting: **an existing
+`conch-bot` setup needs an issued credential and those two capabilities before
+the adapter will start**, and it says so and exits if they are missing. If the
+manifest has a rate limit on `runs.manage`, it must allow about seven calls per
+reply (`start_run`, three state changes, three activity entries) plus one
+`poll_interventions` every 2 seconds while a run is open.
+
+**Interventions.** While a run is open the adapter checks every 2 seconds for
+interventions. A `message` is answered `applied` and its text goes into the
+prompt of the next replies to the same audience, and only that audience (the
+last five are kept). A `cancel` kills the command and everything it started,
+reports the run `cancelled` once they are gone, and then answers `applied`.
+Anything else is answered `failed`. On SIGTERM or SIGINT it stops the
+command, reports an open run `cancelled` with the outcome `adapter stopped`,
+ends its session and releases the lock file.
+
+**Settings.** Each `CONCH_ADAPTER_*` name falls back to the `CONCH_BOT_*` name
+`conch-bot` used (`SERVER`, `TOKEN`, `PRINCIPAL_ID`, `CHANNEL`, `POLL_INTERVAL`,
+`MAX_BACKOFF`, `CONTEXT_MESSAGES`, `MODEL`, `REPLY_TIMEOUT`, `LOCK_FILE`), and the
+new name wins when both are set. Also:
+
+- `CONCH_ADAPTER_CMD`: the command, split into arguments once as a shell
+  would read words, and run without a shell (so `$(...)`, `;` and backticks are
+  just characters). An argument that is exactly `{prompt}` or `{model}` is
+  replaced by the prompt or the model name, as that one argument. If `{prompt}`
+  does not appear, the prompt is written to the command's standard input.
+  `CLAUDE_BIN`, if set, replaces the first word of the default command; a `CONCH_ADAPTER_CMD` you set is run as written.
+- `CONCH_ADAPTER_RUNTIME` (default `claude-code`), the label shown for the runtime.
+- `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
+- `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
+  dropped with a log line. It is what stops two adapters from answering each
+  other for ever.
+- `CONCH_ADAPTER_FIXTURE=1`: see below.
+
+Two adapters on one host need different `CONCH_ADAPTER_LOCK_FILE` values and
+nothing else. `conch-bot` is the old name of the program; it still works for
+one more release and prints one deprecation line to stderr. It is the same
+program compiled into the `conch-bot` binary; it never runs another binary.
+
+**Fixture mode.** For tests and demos the same binary runs a script instead of
+a model: `CONCH_ADAPTER_CMD=e2e/p3-local/fixtures/echo.sh` replies with the last
+line of the prompt, `slow.sh` waits first, `fail.sh` exits 3, and
+`approval.sh` raises an approval first. Only with `CONCH_ADAPTER_FIXTURE=1` does
+the adapter read the command's output line by line and act on two markers,
+removing them from the reply: `@approval <title>` raises an approval through
+`request_approval`, puts the run in `waiting` until it is decided, and goes on;
+`@sleep <seconds>` waits. Without that variable these lines are ordinary reply
+text and no output can raise an approval. For `approval.sh` the agent's
+manifest also needs `approvals.request` and `approvals.await`. **Never set it
+for a real model**:
+with it on, anything the model prints that starts with `@approval ` asks a
+person for a decision in the agent's name.
 
 ### 5. Agent side: MCP
 

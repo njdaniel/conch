@@ -1,4 +1,4 @@
-package main
+package adapter
 
 import (
 	"context"
@@ -7,22 +7,32 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
 const promptPreamble = `Write one concise reply to the new Conch channel messages below. Output only the reply body text. Do not use markdown fences and do not add an introductory phrase.`
 
+// botMCPClient is the adapter's view of the server: the channel, and the
+// session, run and intervention tools. *mcpclient.Client has the exported
+// methods; mcpAdapter adds the two channel ones.
 type botMCPClient interface {
 	readChannel(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
 	// postMessage posts body with the given audience; nil means channel-wide.
 	postMessage(context.Context, string, string, *schema.Audience) error
-}
 
-type ClaudeRunner interface {
-	Reply(context.Context, string) (string, error)
+	RegisterSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error)
+	Heartbeat(context.Context, int64) (schema.SessionV1, error)
+	EndSession(context.Context, int64) error
+	StartRun(context.Context, int64, schema.CreateRunRequestV1) (schema.RunV1, error)
+	UpdateRun(context.Context, int64, schema.SetRunStateRequestV1) (schema.RunV1, error)
+	PostActivity(context.Context, int64, schema.AppendActivityRequestV1) (schema.AgentActivityV1, error)
+	PollInterventions(context.Context, int64, schema.InterventionState, int64) (schema.ListInterventionsResponseV1, error)
+	AnswerIntervention(context.Context, int64, schema.AckInterventionRequestV1) (schema.InterventionV1, error)
+	RequestApproval(context.Context, schema.CreateApprovalRequestV1) (schema.RequestApprovalOutput, error)
+	AwaitDecision(context.Context, int64, int64) (schema.AwaitDecisionOutput, error)
 }
 
 // maxAudienceWindows bounds how many per-audience context windows the bot
@@ -38,8 +48,12 @@ var refusalCodes = map[string]bool{"forbidden": true, "net_not_found": true, "in
 
 type contextWindow struct {
 	messages []schema.MessageV2 // oldest first, at most cfg.ContextMessages
+	notes    []string           // bodies of message interventions, oldest first, at most maxNotes
 	touched  int64              // logical clock of the last write, for eviction
 }
+
+// maxNotes bounds the intervention messages kept for one audience.
+const maxNotes = 5
 
 type botLoop struct {
 	cfg      config
@@ -47,9 +61,27 @@ type botLoop struct {
 	claude   ClaudeRunner
 	lastSeen int64
 	sleep    func(context.Context, time.Duration) error
+	// clk is the source of time and tickers; nil means the real one.
+	clk timeSource
+	// sessionID is this adapter's session, from register_session.
+	sessionID int64
+	// ivAfter is the id of the last intervention seen. Only the intervention
+	// watcher of the open run touches it, and runs do not overlap.
+	ivAfter int64
+	// replies holds when the replies of the last minute began, for the
+	// replies-per-minute cap.
+	replies []time.Time
+	// noRunAudiences are the audiences the server would not start a run in,
+	// so that is said once for each.
+	noRunAudiences map[string]bool
+
+	// mu guards recent and clock, which the intervention watcher reaches
+	// while a reply is being made.
+	mu sync.Mutex
 	// recent holds a rolling window of the last cfg.ContextMessages messages
-	// seen (any author) per audience, keyed by audienceKey. A prompt only ever
-	// reads the window of the audience it answers, so no scoped body can reach
+	// seen (any author) per audience, keyed by audienceKey, and the
+	// intervention messages given to that audience. A prompt only ever reads
+	// the window of the audience it answers, so no scoped body can reach
 	// another audience's prompt.
 	recent map[string]*contextWindow
 	clock  int64
@@ -152,9 +184,9 @@ func (b *botLoop) pollOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// replyTo answers one audience's new messages in that same audience. A refusal
-// of a scoped reply is logged and dropped; there is no second attempt with a
-// wider or missing audience.
+// replyTo answers one audience's new messages in that same audience, as one
+// run. A refusal of a scoped reply is logged and dropped; there is no second
+// attempt with a wider or missing audience.
 func (b *botLoop) replyTo(ctx context.Context, g *audienceGroup, history []schema.MessageV2) error {
 	human := make([]schema.MessageV2, 0, len(g.messages))
 	for _, message := range g.messages {
@@ -165,24 +197,12 @@ func (b *botLoop) replyTo(ctx context.Context, g *audienceGroup, history []schem
 	if len(human) == 0 {
 		return nil
 	}
-	prompt := buildPrompt(history, human, b.cfg.ContextMessages)
-	reply, err := b.claude.Reply(ctx, prompt)
-	if err != nil {
-		return fmt.Errorf("generate reply: %w", err)
-	}
-	reply = strings.TrimSpace(reply)
-	if reply == "" {
+	if !b.allowReply() {
+		slog.Warn("conch-adapter: reply limit reached; not replying", "per_minute", b.cfg.MaxRepliesPerMinute)
 		return nil
 	}
-	if err := b.mcp.postMessage(ctx, b.cfg.Channel, reply, g.audience); err != nil {
-		var toolErr *mcpclient.ToolError
-		if g.audience != nil && errors.As(err, &toolErr) && refusalCodes[toolErr.Code] {
-			slog.Warn("conch-bot: scoped reply refused; nothing was posted", "code", toolErr.Code, "audience_kind", string(g.audience.Kind))
-			return nil
-		}
-		return fmt.Errorf("post reply: %w", err)
-	}
-	return nil
+	prompt := buildPrompt(history, human, b.cfg.ContextMessages, b.notesFor(g.key))
+	return b.runReply(ctx, g, human, prompt)
 }
 
 func (b *botLoop) drain(ctx context.Context, after int64) ([]schema.MessageV2, error) {
@@ -223,6 +243,19 @@ func (b *botLoop) remember(key string, messages []schema.MessageV2) {
 	if b.cfg.ContextMessages == 0 || len(messages) == 0 {
 		return
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.windowLocked(key)
+	w.messages = append(w.messages, messages...)
+	if len(w.messages) > b.cfg.ContextMessages {
+		w.messages = append([]schema.MessageV2(nil), w.messages[len(w.messages)-b.cfg.ContextMessages:]...)
+	}
+}
+
+// windowLocked returns the window of an audience, creating it (and dropping
+// the least recently touched one if there are too many) and marking it
+// touched. b.mu must be held.
+func (b *botLoop) windowLocked(key string) *contextWindow {
 	if b.recent == nil {
 		b.recent = map[string]*contextWindow{}
 	}
@@ -236,12 +269,31 @@ func (b *botLoop) remember(key string, messages []schema.MessageV2) {
 		b.recent[key] = w
 	}
 	w.touched = b.clock
-	w.messages = append(w.messages, messages...)
-	if len(w.messages) > b.cfg.ContextMessages {
-		w.messages = append([]schema.MessageV2(nil), w.messages[len(w.messages)-b.cfg.ContextMessages:]...)
+	return w
+}
+
+// addNote keeps the body of a message intervention for the audience it was
+// made in, to go in that audience's next prompts.
+func (b *botLoop) addNote(key, body string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.windowLocked(key)
+	w.notes = append(w.notes, body)
+	if len(w.notes) > maxNotes {
+		w.notes = append([]string(nil), w.notes[len(w.notes)-maxNotes:]...)
 	}
 }
 
+func (b *botLoop) notesFor(key string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w := b.recent[key]; w != nil {
+		return append([]string(nil), w.notes...)
+	}
+	return nil
+}
+
+// evictOldest drops the least recently touched window. b.mu must be held.
 func (b *botLoop) evictOldest() {
 	oldestKey, oldest, found := "", int64(0), false
 	for key, w := range b.recent {
@@ -253,6 +305,8 @@ func (b *botLoop) evictOldest() {
 }
 
 func (b *botLoop) recentSnapshot(key string) []schema.MessageV2 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	w := b.recent[key]
 	if w == nil || len(w.messages) == 0 {
 		return nil
@@ -260,7 +314,10 @@ func (b *botLoop) recentSnapshot(key string) []schema.MessageV2 {
 	return append([]schema.MessageV2(nil), w.messages...)
 }
 
-func buildPrompt(history, messages []schema.MessageV2, contextLimit int) string {
+// buildPrompt is the prompt for one audience: the recent context, the
+// instructions people gave the run in that audience (notes) and the new
+// messages.
+func buildPrompt(history, messages []schema.MessageV2, contextLimit int, notes []string) string {
 	historyLimit := contextLimit - len(messages)
 	if historyLimit < 0 {
 		historyLimit = 0
@@ -273,6 +330,12 @@ func buildPrompt(history, messages []schema.MessageV2, contextLimit int) string 
 	if len(history) > 0 {
 		out.WriteString("\n\nRecent context:\n")
 		writeMessages(&out, history)
+	}
+	if len(notes) > 0 {
+		out.WriteString("\n\nInstructions from people following this conversation:\n")
+		for _, note := range notes {
+			fmt.Fprintf(&out, "- %s\n", note)
+		}
 	}
 	out.WriteString("\n\nNew messages to reply to:\n")
 	writeMessages(&out, messages)
@@ -289,14 +352,33 @@ func (b *botLoop) run(ctx context.Context) error {
 	if b.sleep == nil {
 		b.sleep = sleepContext
 	}
+	if err := b.register(ctx); err != nil {
+		return fmt.Errorf("could not register a session; the adapter needs an issued credential (not a static --mcp-token) and the capabilities sessions.manage and runs.manage in its agent's manifest: %w", err)
+	}
+	// The heartbeat has a goroutine of its own, so a long reply does not
+	// starve it. On the way out it stops before the session ends, so no
+	// heartbeat reaches an ended session.
+	beatCtx, stopBeat := context.WithCancel(ctx)
+	beatDone := make(chan struct{})
+	go b.beat(beatCtx, beatDone)
+	defer func() {
+		stopBeat()
+		<-beatDone
+		b.endSession(ctx)
+	}()
+
 	if err := b.seed(ctx); err != nil {
 		return fmt.Errorf("seed cursor: %w", err)
 	}
 	delay := b.cfg.PollInterval
 	for {
 		err := b.pollOnce(ctx)
+		if err != nil && ctx.Err() != nil {
+			// Stopping interrupted the poll; that is not a failure to report.
+			return nil
+		}
 		if err != nil {
-			slog.Error("conch-bot iteration failed", "error", err)
+			slog.Error("conch-adapter iteration failed", "error", err)
 			delay = nextBackoff(delay, b.cfg.PollInterval, b.cfg.MaxBackoff)
 		} else {
 			delay = b.cfg.PollInterval
