@@ -1,0 +1,631 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
+)
+
+// The events socket (issue #269, P3 epic #263, decision D4).
+//
+// GET /v1/events/ws?channel=<name>[&session=<id>] sends, as JSON text frames,
+// the documents a client needs to follow a channel's agents live: the roster
+// of its members' sessions on connect and whenever it changes, and the runs,
+// activity and interventions of runs in the channel that the reader may see.
+// Each frame is one pkg/schema document, told apart by its schema field.
+//
+// This file holds no visibility rule and no SQL. A change commits, and the
+// handler that made it enqueues a reference ("the roster changed", "run 41
+// changed", "activity 7 of run 41") for every subscriber of the channel. The
+// subscriber's own goroutine turns each reference into a document, at the
+// moment it sends, with the reader of the request that opened the socket and
+// the functions the REST routes use: channelRoster for the roster,
+// RunVisible, ListVisibleActivity and InterventionVisible for the rest. A
+// document the reader could not fetch over REST then is not sent. A writer
+// never reads on a subscriber's behalf and never waits for one.
+//
+// Like /v2/ws, an agent's manifest is asked once, at the upgrade (messages.read
+// with read in the channel, which is what each of these reads asks), and it
+// spends its budget once, not per frame. A manifest written later closes the
+// socket through the same drop that closes /v2/ws, and the interval re-check
+// asks again without spending.
+
+const (
+	// eventsQueueMax bounds the references waiting for one subscriber. A
+	// subscriber that falls this far behind is closed (the slow-consumer
+	// reason) rather than allowed to hold memory or slow a writer; it
+	// reconnects and gets a fresh roster.
+	eventsQueueMax = 256
+	// eventsKeepAliveInterval is how often an events socket opened with
+	// &session= refreshes that session, well inside the default stale
+	// threshold.
+	eventsKeepAliveInterval = 10 * time.Second
+)
+
+type eventKind uint8
+
+const (
+	eventRun eventKind = iota + 1
+	eventActivity
+	eventIntervention
+)
+
+// eventRef names a document that changed. It carries no content.
+type eventRef struct {
+	kind  eventKind
+	runID int64 // the run an activity entry belongs to
+	id    int64 // the run, activity entry or intervention
+}
+
+// eventsHub is the registry of events sockets.
+type eventsHub struct {
+	mu     sync.Mutex
+	subs   map[*eventsSub]struct{}
+	closed bool
+}
+
+func newEventsHub() *eventsHub {
+	return &eventsHub{subs: make(map[*eventsSub]struct{})}
+}
+
+// eventsSub is one socket's subscription. Everything but the channels is
+// guarded by hub.mu.
+type eventsSub struct {
+	hub         *eventsHub
+	channelID   int64
+	principalID int64
+	// wake has room for one signal: the writer only ever does a non-blocking
+	// send, and the subscriber takes everything queued when it wakes.
+	wake    chan struct{}
+	dropped chan struct{}
+
+	roster bool // a roster is owed: one is enough, it is the whole state
+	refs   []eventRef
+	gone   bool
+}
+
+// subscribe registers a subscriber. After closeAll it returns one that is
+// already dropped.
+func (h *eventsHub) subscribe(channelID, principalID int64) *eventsSub {
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{})}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		sub.gone = true
+		close(sub.dropped)
+		return sub
+	}
+	h.subs[sub] = struct{}{}
+	return sub
+}
+
+func (sub *eventsSub) cancel() {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	delete(sub.hub.subs, sub)
+}
+
+// take returns what is waiting and empties it, or live=false when the
+// subscription was dropped.
+func (sub *eventsSub) take() (roster bool, refs []eventRef, live bool) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	if sub.gone {
+		return false, nil, false
+	}
+	roster, refs = sub.roster, sub.refs
+	sub.roster, sub.refs = false, nil
+	return roster, refs, true
+}
+
+func (sub *eventsSub) signal() {
+	select {
+	case sub.wake <- struct{}{}:
+	default: // one signal is already queued
+	}
+}
+
+// push queues ref, unless the same document is already waiting (a run or an
+// intervention is read whole, so one pending reference says it all). A full
+// queue drops the subscriber. h.mu must be held.
+func (sub *eventsSub) push(ref eventRef) {
+	if ref.kind != eventActivity {
+		for _, queued := range sub.refs {
+			if queued == ref {
+				sub.signal()
+				return
+			}
+		}
+	}
+	if len(sub.refs) >= eventsQueueMax {
+		sub.hub.dropLocked(sub)
+		return
+	}
+	sub.refs = append(sub.refs, ref)
+	sub.signal()
+}
+
+func (h *eventsHub) dropLocked(sub *eventsSub) {
+	delete(h.subs, sub)
+	if !sub.gone {
+		sub.gone = true
+		sub.refs = nil
+		close(sub.dropped)
+	}
+}
+
+// notifyRosters tells every subscriber that rosters changed, for changes that
+// do not say which channels they touch (a session's life, a run's status, a
+// revocation). A subscriber rebuilds its roster and sends it only if it
+// differs from the last it sent, so a channel the change did not touch hears
+// nothing.
+func (h *eventsHub) notifyRosters() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		sub.roster = true
+		sub.signal()
+	}
+}
+
+// notifyChannelRoster is notifyRosters for a change that touches one channel:
+// its membership.
+func (h *eventsHub) notifyChannelRoster(channelID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.channelID == channelID {
+			sub.roster = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyRun is for a run created or changed in channelID: its subscribers are
+// owed the run, and every roster may show a different status for its agent.
+func (h *eventsHub) notifyRun(channelID, runID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		sub.roster = true
+		if sub.channelID == channelID {
+			sub.push(eventRef{kind: eventRun, id: runID})
+		} else {
+			sub.signal()
+		}
+	}
+}
+
+// notifyActivity is for activity entry id appended to runID in channelID.
+func (h *eventsHub) notifyActivity(channelID, runID, id int64) {
+	h.notifyChannel(channelID, eventRef{kind: eventActivity, runID: runID, id: id})
+}
+
+// notifyIntervention is for intervention id created or answered in channelID.
+func (h *eventsHub) notifyIntervention(channelID, id int64) {
+	h.notifyChannel(channelID, eventRef{kind: eventIntervention, id: id})
+}
+
+func (h *eventsHub) notifyChannel(channelID int64, ref eventRef) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.channelID == channelID {
+			sub.push(ref)
+		}
+	}
+}
+
+// dropPrincipal closes principalID's events sockets on channelID. A zero
+// principal matches nothing.
+func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
+	if principalID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.principalID == principalID && sub.channelID == channelID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
+// dropPrincipalAll closes principalID's events sockets on every channel.
+func (h *eventsHub) dropPrincipalAll(principalID int64) {
+	if principalID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.principalID == principalID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
+// closeAll drops every subscription and refuses new ones: shutdown.
+func (h *eventsHub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for sub := range h.subs {
+		h.dropLocked(sub)
+	}
+}
+
+func (h *eventsHub) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
+// handleEventsWS serves GET /v1/events/ws?channel=<name>[&session=<id>]. The
+// checks before the upgrade are the roster route's (a verified caller, the
+// channel gate: a missing channel and one the caller is not a member of are
+// the same 404, an agent needs messages.read with read in it), and with
+// &session= the own-session check: the session must be the caller
+// credential's and not ended, otherwise 404 session_not_found. Nothing is
+// upgraded for a refusal.
+//
+// It follows ws.go: the subscription is registered before the last checks, so
+// a removal that commits in between closes it.
+func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, credID, ok := s.sessionCaller(w, r)
+	if !ok {
+		return
+	}
+	name := r.URL.Query().Get("channel")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "channel query parameter is required")
+		return
+	}
+	channel, ok := s.channelForCaller(w, r, name, schema.CapabilityMessagesRead, schema.ChannelPermissionRead)
+	if !ok {
+		return
+	}
+	var sessionID int64
+	if raw := r.URL.Query().Get("session"); raw != "" {
+		// An id that is not a positive integer names no session, so it is
+		// the not-found answer, as on the session routes.
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			writeSessionNotFound(w)
+			return
+		}
+		// The same check as the session routes: an agent needs sessions.manage
+		// (and spends it, once, here; the keep-alive does not spend).
+		if _, _, ok := s.ownSessionCaller(w, r); !ok {
+			return
+		}
+		switch _, err := s.store.OwnedSession(ctx, id, credID); {
+		case errors.Is(err, store.ErrNotFound):
+			writeSessionNotFound(w)
+			return
+		case err != nil:
+			slog.ErrorContext(ctx, "events ws: find session failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		sessionID = id
+	}
+
+	// Subscribe before the last checks: DropPrincipal-style drops close only
+	// what is registered, so a removal or a disable that committed after the
+	// checks above has either been seen below or closes this subscription.
+	sub := s.events.subscribe(channel.ID, caller.ID)
+	defer sub.cancel()
+	live, err := s.store.CredentialLive(ctx, credID)
+	if err != nil {
+		slog.ErrorContext(ctx, "events ws: check credential failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	if !live {
+		writeUnauthenticated(w)
+		return
+	}
+	member, err := s.store.IsChannelMember(ctx, channel.ID, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "events ws: check membership failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	if !member {
+		writeChannelNotFound(w)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, s.acceptOptions())
+	if err != nil {
+		slog.DebugContext(ctx, "events ws: accept failed", "error", err)
+		return
+	}
+	ticker := time.NewTicker(s.credRecheckInterval)
+	defer ticker.Stop()
+	es := &eventsStream{s: s, r: r, conn: conn, sub: sub, channel: channel, principalID: caller.ID, credID: credID, sessionID: sessionID}
+	es.run(ctx, ticker.C)
+}
+
+// eventsStream is one open events socket.
+type eventsStream struct {
+	s           *Server
+	r           *http.Request // the request that opened the socket; its reader is the subscriber's
+	conn        *websocket.Conn
+	sub         *eventsSub
+	channel     store.Channel
+	principalID int64
+	credID      int64
+	sessionID   int64  // the session to keep alive; 0 for none
+	lastRoster  []byte // the roster frame last sent
+}
+
+// run sends frames until the peer leaves, the subscription is dropped, or the
+// credential or membership lapses.
+func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
+	ctx = e.conn.CloseRead(ctx)
+	var keepAlive <-chan time.Time
+	if e.sessionID != 0 {
+		ticks, stop := e.s.sessionKeepAliveTicks()
+		defer stop()
+		keepAlive = ticks
+	}
+	// The subscription is already registered, so a change between here and
+	// the first read is queued and sent after it (possibly twice; a roster is
+	// the whole state).
+	if !e.sendRoster(ctx) {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			_ = e.conn.Close(websocket.StatusNormalClosure, "")
+			return
+		case <-recheck:
+			if !e.stillAllowed(ctx) {
+				return
+			}
+		case <-keepAlive:
+			if !e.s.keepSessionAlive(ctx, e.sessionID, e.credID) {
+				// The session ended, or never was this credential's: it is
+				// not revived, and the socket carries on without it.
+				keepAlive = nil
+			}
+		case <-e.sub.wake:
+			if !e.flush(ctx) {
+				return
+			}
+		case <-e.sub.dropped:
+			e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+			return
+		}
+	}
+}
+
+// sessionKeepAliveTicks starts the keep-alive ticker.
+func (s *Server) sessionKeepAliveTicks() (<-chan time.Time, func()) {
+	if s.keepAliveTicks != nil {
+		return s.keepAliveTicks()
+	}
+	t := time.NewTicker(eventsKeepAliveInterval)
+	return t.C, t.Stop
+}
+
+// keepSessionAlive refreshes session id through the heartbeat's own store call,
+// so a stale or offline session is revived the same way and held to the same
+// bound. It reports false once the session is gone (ended, or not the
+// credential's): the store does not revive an ended session. The refresh is a
+// heartbeat the socket sends for its client, not a call by the agent, so it
+// does not spend the manifest's budget again.
+func (s *Server) keepSessionAlive(ctx context.Context, id, credID int64) bool {
+	_, err := s.heartbeatSession(ctx, id, credID)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, store.ErrNotFound):
+		return false
+	case errors.Is(err, store.ErrTooManySessions):
+		// Offline, and the credential holds as many live sessions as it may.
+		// It stays offline; the next tick tries again.
+		return true
+	case ctx.Err() == nil:
+		slog.ErrorContext(ctx, "events ws: keep session alive failed", "session", id, "error", err)
+	}
+	return true
+}
+
+// stillAllowed is the interval re-check: the credential is live, the
+// subscriber is still a member and, for an agent, the manifest still lets it
+// read the channel. It has closed the socket when it reports false.
+func (e *eventsStream) stillAllowed(ctx context.Context) bool {
+	if !e.s.credentialStillValid(ctx, e.conn, e.credID) {
+		return false
+	}
+	return e.stillMember(ctx)
+}
+
+// stillMember is the membership and manifest check made before every batch of
+// frames and on the interval: a socket sends nothing to someone who could not
+// fetch the channel over REST now. It closes the socket and reports false when
+// they could not, failing closed on a store error.
+func (e *eventsStream) stillMember(ctx context.Context) bool {
+	cctx, cancel := context.WithTimeout(ctx, wsRecheckTimeout)
+	defer cancel()
+	member, err := e.s.store.IsChannelMember(cctx, e.channel.ID, e.principalID)
+	switch {
+	case err != nil:
+		if ctx.Err() == nil {
+			slog.ErrorContext(ctx, "events ws: recheck membership failed", "error", err)
+		}
+		_ = e.conn.Close(websocket.StatusInternalError, "membership check failed")
+		return false
+	case !member:
+		_ = e.conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+		return false
+	case e.s.agentMayNoLongerRead(cctx, e.principalID, e.channel.ID):
+		_ = e.conn.Close(websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
+		return false
+	}
+	return true
+}
+
+// flush sends what is waiting. It reports false when the socket is closed.
+func (e *eventsStream) flush(ctx context.Context) bool {
+	roster, refs, live := e.sub.take()
+	if !live {
+		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+		return false
+	}
+	if !e.stillMember(ctx) {
+		return false
+	}
+	if roster && !e.sendRoster(ctx) {
+		return false
+	}
+	for _, ref := range refs {
+		if !e.sendRef(ctx, ref) {
+			return false
+		}
+	}
+	return true
+}
+
+// sendRoster builds the roster for this reader now and sends it unless it is
+// the one last sent.
+func (e *eventsStream) sendRoster(ctx context.Context) bool {
+	viewer, err := e.s.store.PrincipalByID(ctx, e.principalID)
+	if err != nil {
+		return e.failed(ctx, "read the viewer", err)
+	}
+	roster, err := e.s.channelRoster(ctx, e.r, e.channel, viewer)
+	if err != nil {
+		return e.failed(ctx, "build a roster", err)
+	}
+	raw, ok := e.encode(ctx, roster)
+	if !ok {
+		return false
+	}
+	if bytes.Equal(raw, e.lastRoster) {
+		return true
+	}
+	if !e.write(ctx, raw) {
+		return false
+	}
+	e.lastRoster = raw
+	return true
+}
+
+// sendRef reads the document ref names with this reader's gates and sends it,
+// or sends nothing when they do not let the reader see it.
+func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
+	s := e.s
+	switch ref.kind {
+	case eventRun:
+		run, err := s.store.RunVisible(ctx, ref.id, readerFor(e.r, apiV2))
+		if errors.Is(err, store.ErrRunNotFound) || (err == nil && run.ChannelID != e.channel.ID) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read a run", err)
+		}
+		return e.sendDoc(ctx, runDoc(run))
+	case eventActivity:
+		// The entry is read as a page of one that starts just before it, by
+		// the listing REST uses; it is sent only if that page is the entry.
+		entries, err := s.store.ListVisibleActivity(ctx, ref.runID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if errors.Is(err, store.ErrRunNotFound) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read activity", err)
+		}
+		if len(entries) == 0 || entries[0].ID != ref.id {
+			return true
+		}
+		return e.sendDoc(ctx, activityDoc(entries[0]))
+	case eventIntervention:
+		iv, err := s.store.InterventionVisible(ctx, ref.id, readerFor(e.r, apiV2))
+		if errors.Is(err, store.ErrInterventionNotFound) || (err == nil && iv.ChannelID != e.channel.ID) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read an intervention", err)
+		}
+		return e.sendDoc(ctx, interventionDoc(iv))
+	}
+	return true
+}
+
+// validated is a pkg/schema document: every frame is checked before it goes.
+type validated interface{ Validate() error }
+
+func (e *eventsStream) sendDoc(ctx context.Context, doc validated) bool {
+	raw, ok := e.encode(ctx, doc)
+	return ok && e.write(ctx, raw)
+}
+
+func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool) {
+	if err := doc.Validate(); err != nil {
+		slog.ErrorContext(ctx, "events ws: built an invalid document", "channel", e.channel.ID, "error", err)
+		_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+		return nil, false
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		slog.ErrorContext(ctx, "events ws: encode failed", "channel", e.channel.ID, "error", err)
+		_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+		return nil, false
+	}
+	return raw, true
+}
+
+func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
+	if hook := e.s.eventsBeforeWrite; hook != nil {
+		hook()
+	}
+	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+	defer cancel()
+	if err := e.conn.Write(wctx, websocket.MessageText, raw); err != nil {
+		_ = e.conn.Close(websocket.StatusInternalError, "write failed")
+		_ = e.conn.CloseNow()
+		return false
+	}
+	return true
+}
+
+// failed closes the socket after a read that failed, and reports false. A
+// read cut short by the peer leaving or by shutdown is not a fault.
+func (e *eventsStream) failed(ctx context.Context, what string, err error) bool {
+	if ctx.Err() != nil {
+		_ = e.conn.Close(websocket.StatusNormalClosure, "")
+		return false
+	}
+	slog.ErrorContext(ctx, "events ws: could not "+what, "channel", e.channel.ID, "error", err)
+	_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+	return false
+}
+
+// closeEventsDropped closes conn after its subscription was dropped, saying
+// why: shutdown, a revoked credential or disabled principal, removal from the
+// channel, a manifest that no longer lets an agent read it, or, otherwise, a
+// queue that filled (closeDropped's reason for that).
+func (s *Server) closeEventsDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
+	if s.events.isClosed() {
+		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
+	s.closeDropped(ctx, conn, channelID, principalID, credID)
+}

@@ -164,6 +164,8 @@ func TestChannelContentLeak(t *testing.T) {
 		// (200, configured false); everyone else gets the unknown-channel 404.
 		{"voice presence", "GET", "/v1/channels/%s/voice", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"voice presence websocket", "GET", "/v1/voice/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
+		// The events socket (issue #269) is gated like the roster: a non-member is told nothing.
+		{"events websocket", "GET", "/v1/events/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.

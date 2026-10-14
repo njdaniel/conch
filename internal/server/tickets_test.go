@@ -402,8 +402,8 @@ func TestWSTicketOnlyOnOptedInRoutes(t *testing.T) {
 			optedIn = append(optedIn, rt.pattern)
 		}
 	}
-	if len(optedIn) != 1 || optedIn[0] != "GET /v2/ws" {
-		t.Errorf("routes that accept a ticket = %v, want only GET /v2/ws", optedIn)
+	if len(optedIn) != 2 || optedIn[0] != "GET /v2/ws" || optedIn[1] != "GET /v1/events/ws" {
+		t.Errorf("routes that accept a ticket = %v, want only GET /v2/ws and GET /v1/events/ws", optedIn)
 	}
 
 	tk := f.ticketFor(t, f.aliceTok)

@@ -105,8 +105,11 @@ var guardedCallers = map[string][]string{
 	// session and reaches nothing of anyone else's, which is all the check is
 	// for; the store's statement narrows the rows to the caller's credential.
 	"agentSelfAllowed": {"ownSessionCaller", "handleListSessionInterventions"},
-	// The routes that act on the caller's own session, and nothing else.
-	"ownSessionCaller": {"handleCreateSession", "handleSessionHeartbeat", "handleEndSession"},
+	// The routes that act on the caller's own session, and nothing else. The
+	// events socket is one only when it is opened with &session=: it then
+	// keeps that session alive, which is a heartbeat the socket sends for the
+	// client (issue #269).
+	"ownSessionCaller": {"handleCreateSession", "handleSessionHeartbeat", "handleEndSession", "handleEventsWS"},
 }
 
 // referrers returns, for each guarded name, the functions of files that refer
@@ -237,7 +240,9 @@ func agentSelfAllowed() { agentSelfCheck() }
 // session, and the session routes are the four of the issue: the list and the
 // route table cannot drift apart unnoticed.
 func TestOwnSessionRoutesAreTheListedHandlers(t *testing.T) {
-	want := map[string]bool{"handleCreateSession": true, "handleSessionHeartbeat": true, "handleEndSession": true}
+	// handleEventsWS is the fourth: with &session= the events socket (issue
+	// #269) keeps that session alive, a heartbeat sent for the client.
+	want := map[string]bool{"handleCreateSession": true, "handleSessionHeartbeat": true, "handleEndSession": true, "handleEventsWS": true}
 	for _, h := range guardedCallers["ownSessionCaller"] {
 		if !want[h] {
 			t.Errorf("%s is on the list but is not an own-session handler", h)

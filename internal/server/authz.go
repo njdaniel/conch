@@ -652,11 +652,13 @@ func (s *Server) dropAgentSubscriptionsRevokedBy(ctx context.Context, agentID in
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: list agent channels failed; closing all its subscriptions", "principal", agentID, "error", err)
 		s.hub.DropPrincipalAll(agentID)
+		s.events.dropPrincipalAll(agentID)
 		return
 	}
 	for _, c := range channels {
 		if !agentReadAllowed(m, c.ID) {
 			s.hub.DropPrincipal(c.ID, agentID)
+			s.events.dropPrincipal(c.ID, agentID)
 		}
 	}
 }

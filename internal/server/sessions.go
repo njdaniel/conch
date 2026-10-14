@@ -165,6 +165,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyRosters()
 	s.writeSession(w, r, http.StatusCreated, sess, caller)
 }
 
@@ -180,7 +181,7 @@ func (s *Server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	sess, err := s.store.HeartbeatSession(ctx, id, credentialID, s.now())
+	sess, err := s.heartbeatSession(ctx, id, credentialID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeSessionNotFound(w)
@@ -218,7 +219,31 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyRosters()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// heartbeatSession records a heartbeat for session id of credentialID at the
+// server's clock, and tells the events sockets when it changed the session's
+// state (a stale or offline session coming back). An ordinary heartbeat
+// changes nothing a roster shows beyond last_seen_at and sends nothing. It
+// returns what store.HeartbeatSession does. The state is read just before the
+// write, not inside it, so a sweep landing between the two can leave that one
+// revival unannounced until the next change; the store would have to say what
+// it replaced to close that.
+func (s *Server) heartbeatSession(ctx context.Context, id, credentialID int64) (store.Session, error) {
+	before, err := s.store.OwnedSession(ctx, id, credentialID)
+	if err != nil {
+		return store.Session{}, err
+	}
+	sess, err := s.store.HeartbeatSession(ctx, id, credentialID, s.now())
+	if err != nil {
+		return store.Session{}, err
+	}
+	if before.State != sess.State {
+		s.events.notifyRosters()
+	}
+	return sess, nil
 }
 
 // sessionIDFromPath parses {id}. An id that is not a positive integer names no
@@ -255,11 +280,25 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	roster, err := s.channelRoster(ctx, r, channel, caller)
+	if err != nil {
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, roster)
+}
+
+// channelRoster is the roster of channel as the reader of r sees it. It is the
+// one function that builds one: GET /v1/sessions serves it, and so does every
+// roster frame of the events socket (events_ws.go), for the request that
+// opened the socket. It does not decide whether the reader may see the
+// channel; its callers have (channelForCaller). A failure is logged here and
+// returned for the caller to answer.
+func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel store.Channel, viewer store.Principal) (schema.SessionRosterV1, error) {
 	sessions, err := s.store.ListChannelSessions(ctx, channel.ID, s.now(), sessionRosterWindow)
 	if err != nil {
 		slog.ErrorContext(ctx, "sessions: list failed", "channel", channel.ID, "error", err)
-		writeInternalError(w)
-		return
+		return schema.SessionRosterV1{}, err
 	}
 	ids := make([]int64, len(sessions))
 	for i, sess := range sessions {
@@ -271,8 +310,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.store.SessionRunViews(ctx, ids, readerFor(r, apiV2))
 	if err != nil {
 		slog.ErrorContext(ctx, "sessions: read runs failed", "channel", channel.ID, "error", err)
-		writeInternalError(w)
-		return
+		return schema.SessionRosterV1{}, err
 	}
 	roster := schema.SessionRosterV1{
 		Schema:    schema.SessionRosterSchemaV1,
@@ -280,14 +318,13 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		Sessions:  make([]schema.SessionV1, 0, len(sessions)),
 	}
 	for _, sess := range sessions {
-		roster.Sessions = append(roster.Sessions, sessionDoc(sess, caller, runs[sess.ID]))
+		roster.Sessions = append(roster.Sessions, sessionDoc(sess, viewer, runs[sess.ID]))
 	}
 	if err := roster.Validate(); err != nil {
 		slog.ErrorContext(ctx, "sessions: built an invalid roster", "channel", channel.ID, "error", err)
-		writeInternalError(w)
-		return
+		return schema.SessionRosterV1{}, err
 	}
-	writeJSON(w, http.StatusOK, roster)
+	return roster, nil
 }
 
 // writeSession sends one session to its owner, with its runs as the owner may
@@ -397,6 +434,9 @@ func (s *Server) sweepSessions(ctx context.Context) {
 	}
 	if res.Stale > 0 || res.Offline > 0 {
 		slog.DebugContext(ctx, "sessions: swept", "stale", res.Stale, "offline", res.Offline)
+		// The result counts and does not say whose, so every roster is
+		// rebuilt; each socket sends only a roster that differs from its last.
+		s.events.notifyRosters()
 	}
 }
 
