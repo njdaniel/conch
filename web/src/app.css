@@ -158,3 +158,76 @@ body {
 .jump {
   align-self: flex-start;
 }
+
+/* Members panel and run detail. */
+.conversation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.conversation-body[hidden] {
+  display: none;
+}
+
+.ag-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ag-panel li {
+  padding: 0.15rem 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-sessions,
+.ag-runs {
+  padding-left: 1rem;
+}
+
+.ag-badge {
+  border: 1px solid #888;
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  font-size: 0.8rem;
+}
+
+.ag-status,
+.ag-kind {
+  color: #555;
+}
+
+.ag-run {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-run dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0;
+}
+
+.ag-run dd {
+  margin: 0;
+}
+
+.ag-activity,
+.ag-interventions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+/* Bodies, reasons and outcomes are shown as written, line breaks included. */
+.ag-prose {
+  white-space: pre-wrap;
+}

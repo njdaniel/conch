@@ -12,13 +12,14 @@ function startsOpen(): boolean {
 
 // The lobby: channels on the left, the open channel in the middle, a
 // collapsible panel on the right, a status line at the bottom. The middle is
-// the conversation the caller gives it; the panel is empty until #282.
+// the conversation the caller gives it; the panel is the caller's too (who is here and what is running).
 export function Lobby({
   origin,
   name,
   channels,
   connection,
   conversation,
+  panel,
   onOpen,
   onRetry,
   onSignOut,
@@ -28,6 +29,7 @@ export function Lobby({
   readonly channels: ChannelsState;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
+  readonly panel: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -80,7 +82,9 @@ export function Lobby({
           >
             Members
           </button>
-          <div id="members-body" hidden={!panelOpen} tabIndex={panelOpen ? 0 : undefined} aria-label="Members list" role="region" />
+          <div id="members-body" hidden={!panelOpen} tabIndex={panelOpen ? 0 : undefined} aria-label="Members list" role="region">
+            {panel}
+          </div>
         </aside>
       </div>
       <footer role="status" aria-label="Status" className="status">

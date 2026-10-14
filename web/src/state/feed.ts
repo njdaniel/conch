@@ -15,7 +15,8 @@ export const maxDelay = 30_000;
 export interface SocketEvents {
   readonly onOpen: () => void;
   readonly onFrame: (data: unknown) => void;
-  readonly onClose: (code: number) => void;
+  // reason is the close frame's text; conchd says why in it ("session ended").
+  readonly onClose: (code: number, reason?: string) => void;
 }
 
 export interface FeedSocket {
