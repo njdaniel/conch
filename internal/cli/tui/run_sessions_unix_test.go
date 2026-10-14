@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -29,11 +30,11 @@ func (a rosterAPI) ListChannelMembers(context.Context, string) (schema.ListChann
 	}}, nil
 }
 
-func (a rosterAPI) SubscribeEvents(ctx context.Context, channel string, session int64, receive func(schema.SessionRosterV1) error) error {
+func (a rosterAPI) SubscribeEvents(ctx context.Context, channel string, session int64, handler cli.EventHandler) error {
 	a.mu.Lock()
 	a.events = append(a.events, eventsCall{channel: channel, session: session, ctx: ctx})
 	a.mu.Unlock()
-	if err := receive(a.roster); err != nil {
+	if err := handler.Roster(a.roster); err != nil {
 		return err
 	}
 	<-ctx.Done()

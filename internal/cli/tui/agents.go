@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -208,7 +210,7 @@ func (m Model) agentLines(cols int) (lines []string, selLine int) {
 	sel := m.selectedAgent(rows)
 	for i, row := range rows {
 		prefix := "  "
-		if i == sel {
+		if i == sel && m.selectedSub(row) == 0 {
 			prefix = activeStyle.Render("› ")
 			selLine = len(lines)
 		}
@@ -245,12 +247,23 @@ func (m Model) agentLines(cols int) (lines []string, selLine int) {
 		if len(row.sessions) == 0 {
 			lines = append(lines, "    "+statusStyle.Render(fitCells("no sessions", cols-4)))
 		}
-		for _, s := range row.sessions {
+		sub := m.selectedSub(row)
+		for k, item := range m.agentItems(row) {
+			marker := "  "
+			if i == sel && sub == k+1 {
+				marker = activeStyle.Render("› ")
+				selLine = len(lines)
+			}
+			if item.isRun {
+				lines = append(lines, "  "+marker+"  "+m.runItemText(item.run, cols-6))
+				continue
+			}
+			s := item.session
 			text := "#" + strconv.FormatInt(s.ID, 10) + " " + statusWord(s.Status)
 			if d := m.sessionDetails(s, true); len(d) > 0 {
 				text += " · " + strings.Join(d, " · ")
 			}
-			lines = append(lines, "    "+fitCells(text, cols-4))
+			lines = append(lines, "  "+marker+fitCells(text, cols-4))
 		}
 	}
 	return lines, selLine
@@ -283,31 +296,104 @@ func (m Model) selectedAgent(rows []agentRow) int {
 	return 0
 }
 
-// moveAgent moves the selection by delta agents, stopping at the ends.
+// agentItem is one selectable line under an expanded agent: a session, or one
+// of the newest runs of the session above it.
+type agentItem struct {
+	session schema.SessionV1
+	run     schema.RunV1
+	isRun   bool
+}
+
+// agentItems are the selectable lines under row, in the order they are drawn:
+// each session, then its newest runs, newest first. A folded agent has none,
+// and a session whose runs are not read yet shows none.
+func (m Model) agentItems(row agentRow) []agentItem {
+	if !m.expanded[row.id] {
+		return nil
+	}
+	var items []agentItem
+	for _, s := range row.sessions {
+		items = append(items, agentItem{session: s})
+		runs := m.sessionRuns[sessionRunKey{m.current(), s.ID}]
+		for i := len(runs) - 1; i >= 0; i-- {
+			items = append(items, agentItem{session: s, run: runs[i], isRun: true})
+		}
+	}
+	return items
+}
+
+// selectedSub is where the cursor is under row: 0 for the agent's own line,
+// otherwise the number of the item, from 1. It is kept inside what is there.
+func (m Model) selectedSub(row agentRow) int {
+	return min(max(m.selSub, 0), len(m.agentItems(row)))
+}
+
+// runItemText is a run of a session's list in at most cols cells.
+func (m Model) runItemText(r schema.RunV1, cols int) string {
+	text := "run #" + strconv.FormatInt(r.ID, 10) + " " + sanitize(string(r.State))
+	text += " · task: " + sanitize(r.Task)
+	if !r.StartedAt.IsZero() {
+		text += " · " + ago(m.nowTime(), r.StartedAt.Time())
+	}
+	return fitCells(text, cols)
+}
+
+// moveAgent moves the cursor by delta lines through the agents and, under an
+// expanded one, its sessions and runs, stopping at the ends.
 func (m Model) moveAgent(delta int) Model {
 	rows := m.agentRows()
 	if len(rows) == 0 {
 		return m
 	}
-	next := min(max(m.selectedAgent(rows)+delta, 0), len(rows)-1)
-	m.selAgent = rows[next].id
+	type spot struct{ row, sub int }
+	var spots []spot
+	cur := 0
+	selected := m.selectedAgent(rows)
+	for i, row := range rows {
+		for sub := 0; sub <= len(m.agentItems(row)); sub++ {
+			if i == selected && sub == m.selectedSub(row) {
+				cur = len(spots)
+			}
+			spots = append(spots, spot{i, sub})
+		}
+	}
+	next := spots[min(max(cur+delta, 0), len(spots)-1)]
+	m.selAgent, m.selSub = rows[next.row].id, next.sub
 	return m
 }
 
-// toggleAgent expands or folds the selected agent's sessions.
-func (m Model) toggleAgent() Model {
+// activateAgent is enter. On the agent's own line it unfolds or folds its
+// sessions, and unfolding reads the newest runs of each. On a session it opens
+// the run it is in, and on a run it opens that run.
+func (m Model) activateAgent() (Model, tea.Cmd) {
 	rows := m.agentRows()
 	if len(rows) == 0 {
-		return m
+		return m, nil
 	}
-	id := rows[m.selectedAgent(rows)].id
-	// The map is the model's own: a copy of the model shares it, which is
-	// fine for a value only this view reads.
-	if m.expanded[id] {
-		delete(m.expanded, id)
-	} else {
-		m.expanded[id] = true
+	row := rows[m.selectedAgent(rows)]
+	m.selAgent = row.id
+	sub := m.selectedSub(row)
+	if sub == 0 {
+		// The map is the model's own: a copy of the model shares it, which is
+		// fine for a value only this view reads.
+		if m.expanded[row.id] {
+			delete(m.expanded, row.id)
+			return m, nil
+		}
+		m.expanded[row.id] = true
+		cmds := make([]tea.Cmd, 0, len(row.sessions))
+		for _, s := range row.sessions {
+			cmds = append(cmds, m.loadSessionRuns(s.ID))
+		}
+		return m, tea.Batch(cmds...)
 	}
-	m.selAgent = id
-	return m
+	item := m.agentItems(row)[sub-1]
+	switch {
+	case item.isRun:
+		return m.openRun(item.run.ID, item.session.ID, item.run)
+	case item.session.CurrentRun > 0:
+		return m.openRun(item.session.CurrentRun, item.session.ID, schema.RunV1{})
+	}
+	m.agentsStatus = "session #" + strconv.FormatInt(item.session.ID, 10) + " has no run open"
+	return m, nil
 }

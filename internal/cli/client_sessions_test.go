@@ -218,10 +218,10 @@ func TestClientSubscribeEvents(t *testing.T) {
 			client, _ := NewClient(server.URL, server.Client())
 			client.WithToken("tok")
 			var got []schema.SessionRosterV1
-			err := client.SubscribeEvents(context.Background(), "general", tt.session, func(r schema.SessionRosterV1) error {
+			err := client.SubscribeEvents(context.Background(), "general", tt.session, EventHandler{Roster: func(r schema.SessionRosterV1) error {
 				got = append(got, r)
 				return nil
-			})
+			}})
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("err = %v, want it to mention %q", err, tt.wantErr)
@@ -242,7 +242,7 @@ func TestClientSubscribeEvents(t *testing.T) {
 		}))
 		defer server.Close()
 		client, _ := NewClient(server.URL, server.Client())
-		err := client.SubscribeEvents(context.Background(), "general", 9, func(schema.SessionRosterV1) error { return nil })
+		err := client.SubscribeEvents(context.Background(), "general", 9, EventHandler{Roster: func(schema.SessionRosterV1) error { return nil }})
 		var se *ServerError
 		if !errors.As(err, &se) || se.Status != http.StatusNotFound || se.Code != schema.ErrorCodeSessionNotFound {
 			t.Errorf("err = %v, want the 404 session_not_found", err)

@@ -191,13 +191,27 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 	return func() tea.Msg {
 		go func() {
 			started := time.Now()
-			err := api.SubscribeEvents(ctx, channel, session, func(roster schema.SessionRosterV1) error {
+			// Every frame goes to the model's one reader of events; the model
+			// tells the sockets apart by gen and what a frame is by its type.
+			push := func(msg tea.Msg) error {
 				select {
-				case events <- eventsRosterReceived{gen: gen, roster: roster}:
+				case events <- msg:
 					return nil
 				case <-ctx.Done():
 					return ctx.Err()
 				}
+			}
+			err := api.SubscribeEvents(ctx, channel, session, cli.EventHandler{
+				Roster: func(roster schema.SessionRosterV1) error {
+					return push(eventsRosterReceived{gen: gen, roster: roster})
+				},
+				Run: func(run schema.RunV1) error { return push(eventsRunReceived{gen: gen, run: run}) },
+				Activity: func(entry schema.AgentActivityV1) error {
+					return push(eventsActivityReceived{gen: gen, entry: entry})
+				},
+				Intervention: func(iv schema.InterventionV1) error {
+					return push(eventsInterventionReceived{gen: gen, intervention: iv})
+				},
 			})
 			select {
 			case events <- eventsEnded{gen: gen, err: err, lived: time.Since(started)}:
@@ -225,18 +239,33 @@ func (m Model) sessionStarted(msg sessionStarted) (tea.Model, tea.Cmd) {
 }
 
 // eventsRoster takes a roster frame. It touches the roster and nothing else:
-// not the draft, not the selected channel, not a status line.
+// not the draft, not the selected channel, not a status line. The one thing it
+// starts is the reads that a new socket needs, because nothing is replayed: the
+// open run's, and the run lists of the agents that are unfolded.
 func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	wait := m.waitEvent()
 	if msg.gen != m.ev.gen {
 		return m, wait
 	}
+	wasLive := m.ev.state == eventsLive
 	// A frame is data flowing: the socket is healthy.
 	m.ev.backoff = 0
 	m.ev.roster = msg.roster
 	m.ev.state = eventsLive
 	m.ev.settled = true
-	return m, wait
+	cmds := []tea.Cmd{wait}
+	if !wasLive {
+		for _, row := range m.agentRows() {
+			if !m.expanded[row.id] {
+				continue
+			}
+			for _, s := range row.sessions {
+				cmds = append(cmds, m.loadSessionRuns(s.ID))
+			}
+		}
+	}
+	m, resync := m.resyncRun()
+	return m, tea.Batch(append(cmds, resync)...)
 }
 
 // eventsEnded decides what the end of an events socket means. The roster is
@@ -252,6 +281,12 @@ func (m Model) eventsEnded(msg eventsEnded) (tea.Model, tea.Cmd) {
 	e.state = eventsDown
 	e.settled = true
 	e.roster = schema.SessionRosterV1{}
+	// A run open in run detail is read once more: that read is how the pane
+	// learns it can no longer see the run (membership removed), and otherwise
+	// it brings the run up to date until the socket is back.
+	if m.rd.open() {
+		wait = tea.Batch(wait, m.checkRun())
+	}
 	var serverErr *cli.ServerError
 	switch {
 	case errors.Is(msg.err, cli.ErrUnauthenticated):
