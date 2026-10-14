@@ -113,6 +113,12 @@ if out=$(depgate); then
 fi
 grep -q 'node_modules/react in .* comes from "https://example.com' <<<"$out" || fail "the dependency gate failed another host for another reason: $out"
 restore
+edit "$tmp/web/package-lock.json" '.packages["node_modules/react"].resolved = "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"'
+if out=$(depgate); then
+    fail "the dependency gate passed another registry package installed under an allowed name"
+fi
+grep -q "node_modules/react in .* resolves to .*evil-pkg.*, not the registry's tarball for react" <<<"$out" || fail "the dependency gate failed a renamed package for another reason: $out"
+restore
 edit "$tmp/web/package-lock.json" 'del(.packages["node_modules/vite"].integrity)'
 if out=$(depgate); then
     fail "the dependency gate passed a package with no integrity hash"

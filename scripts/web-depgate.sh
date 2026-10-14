@@ -52,6 +52,9 @@ done < <(jq -r '
 if jq -e 'has("overrides")' "$MANIFEST" >/dev/null; then
     fail "$MANIFEST has \"overrides\", which swaps a package for another copy under the same name"
 fi
+if jq -e 'has("workspaces")' "$MANIFEST" >/dev/null; then
+    fail "$MANIFEST has \"workspaces\", which brings in dependencies from outside this file"
+fi
 
 want_node=$(tr -d '[:space:]' <"$WEB/.nvmrc")
 have_node=$(jq -r '.engines.node // ""' "$MANIFEST")
@@ -59,17 +62,26 @@ if [ "$have_node" != "${want_node#v}" ]; then
     fail "engines.node in $MANIFEST is \"$have_node\", but $WEB/.nvmrc pins ${want_node#v}"
 fi
 
-# Every installed package: from the registry, with a hash npm ci checks.
-while IFS=$'\t' read -r path resolved integrity; do
+# Every installed package: the registry's own tarball for exactly the name it
+# is installed under and its version, with a hash npm ci checks. npm ci does
+# not compare a tarball's name with the lockfile entry, so without the name
+# check an edited lockfile could install any registry package as "react".
+# Fields are split on the ASCII unit separator: with a tab, read would merge
+# the empty field of a missing hash into its neighbour.
+while IFS=$'\x1f' read -r path resolved integrity version; do
+    name=${path##*node_modules/}
+    want="$REGISTRY$name/-/${name##*/}-$version.tgz"
     if [[ "$resolved" != "$REGISTRY"* ]]; then
         fail "$path in $LOCKFILE comes from \"$resolved\", not $REGISTRY"
+    elif [ "$resolved" != "$want" ]; then
+        fail "$path in $LOCKFILE resolves to \"$resolved\", not the registry's tarball for $name $version ($want)"
     fi
     if [ -z "$integrity" ]; then
         fail "$path in $LOCKFILE has no integrity hash"
     fi
 done < <(jq -r '
     .packages | to_entries[] | select(.key != "")
-    | "\(.key)\t\(.value.resolved // "")\t\(.value.integrity // "")"' "$LOCKFILE")
+    | "\(.key)\u001f\(.value.resolved // "")\u001f\(.value.integrity // "")\u001f\(.value.version // "")"' "$LOCKFILE")
 
 if [ "$violations" -ne 0 ]; then
     exit 1

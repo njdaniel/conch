@@ -27,6 +27,10 @@ export default defineConfig(
           selector: "Property[key.name='dangerouslySetInnerHTML']",
           message: 'dangerouslySetInnerHTML is not allowed (CLAUDE.md): render text, which React escapes.',
         },
+        {
+          selector: "Property[key.value='dangerouslySetInnerHTML']",
+          message: 'dangerouslySetInnerHTML is not allowed (CLAUDE.md): render text, which React escapes.',
+        },
       ],
     },
   },
