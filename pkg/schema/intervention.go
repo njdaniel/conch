@@ -198,7 +198,7 @@ func validateInterventionReason(state InterventionState, reason string) error {
 	if state == InterventionStateFailed && strings.TrimSpace(reason) == "" {
 		return errors.New("schema: failed intervention must carry reason")
 	}
-	return validateText("intervention reason", reason, MaxInterventionReasonLength)
+	return validateProse("intervention reason", reason, MaxInterventionReasonLength)
 }
 
 // validateInterventionAsk checks the person's side of an intervention, shared
@@ -215,7 +215,7 @@ func validateInterventionAsk(kind InterventionKind, body string) error {
 	if kind != InterventionKindMessage && body != "" {
 		return fmt.Errorf("schema: %s intervention must not carry body", kind)
 	}
-	return validateText("intervention body", body, MaxInterventionBodyLength)
+	return validateProse("intervention body", body, MaxInterventionBodyLength)
 }
 
 // CreateInterventionRequestV1 is the request body of

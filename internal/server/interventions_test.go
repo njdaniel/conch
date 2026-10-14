@@ -473,6 +473,7 @@ func TestInterventionRequestValidation(t *testing.T) {
 		{"a message with no body", `{"kind":"message"}`, 400},
 		{"a message with a blank body", `{"kind":"message","body":"   "}`, 400},
 		{"a message over the limit", askBody(schema.InterventionKindMessage, strings.Repeat("x", schema.MaxInterventionBodyLength+1)), 400},
+		{"a message with an escape sequence", askBody(schema.InterventionKindMessage, "\x1b[2Jlooks fine"), 400},
 		{"a cancel with a body", `{"kind":"cancel","body":"now"}`, 400},
 		{"a pause with a body", `{"kind":"pause","body":"now"}`, 400},
 		{"an unknown kind", `{"kind":"reboot"}`, 400},
@@ -634,7 +635,7 @@ func TestInterventionBound(t *testing.T) {
 	f.mustAck(t, ids[0], schema.InterventionStateAcknowledged, "")
 	f.mustAsk(t, f.aliceTok, f.run.ID, schema.InterventionKindCancel)
 	assertErrorBody(t, f.ask(t, f.aliceTok, f.run.ID, schema.InterventionKindCancel, ""), http.StatusTooManyRequests, schema.ErrorCodeTooManyInterventions)
-	// Another person is held to the same bound on the same run.
+	// The bound counts every kind: a message is held to it too.
 	assertErrorBody(t, f.ask(t, f.aliceTok, f.run.ID, schema.InterventionKindMessage, "hello"), http.StatusTooManyRequests, schema.ErrorCodeTooManyInterventions)
 	// The bound belongs to the run.
 	f.mustAsk(t, f.aliceTok, f.newRun(t).ID, schema.InterventionKindCancel)
@@ -707,6 +708,7 @@ func TestAckInterventionMovesOverTheRoute(t *testing.T) {
 		{"acknowledged with no reason", schema.InterventionStateAcknowledged, "", 200},
 		{"a reason at the limit", schema.InterventionStateFailed, strings.Repeat("r", schema.MaxInterventionReasonLength), 200},
 		{"a reason over the limit", schema.InterventionStateFailed, strings.Repeat("r", schema.MaxInterventionReasonLength+1), 400},
+		{"a reason with a carriage return", schema.InterventionStateFailed, "busy\rapplied", 400},
 	}
 	for _, tt := range reasons {
 		t.Run(tt.name, func(t *testing.T) {

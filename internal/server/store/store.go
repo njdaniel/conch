@@ -463,7 +463,8 @@ END`,
 	reason       TEXT    NOT NULL DEFAULT '',
 	CHECK ((answered_at IS NULL) = (state = 'requested')),
 	CHECK ((kind = 'message') = (body <> '')),
-	CHECK (state <> 'requested' OR reason = '')
+	CHECK (state <> 'requested' OR reason = ''),
+	CHECK (state <> 'failed' OR reason <> '')
 )`,
 		`CREATE INDEX interventions_by_run ON interventions (run_id, id)`,
 	},

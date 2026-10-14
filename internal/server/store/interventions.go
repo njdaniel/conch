@@ -107,11 +107,11 @@ func InterventionMoveAllowed(from, to schema.InterventionState) bool {
 //   - the requester must be an enabled human principal (ErrNotHuman);
 //   - the run must be one reader may see (ErrRunNotFound otherwise, the answer
 //     a missing run gets), whoever reader is: operators get no exemption;
+//   - the run, and its session, must not have ended (ErrInvalidTransition);
 //   - the run's session must have declared the kind. If it did not, nothing is
 //     stored, intervention_unsupported is audited with the requester (a
 //     refusal that rolled back would leave no trace) and the error is
 //     ErrInterventionUnsupported;
-//   - the run must not have ended (ErrInvalidTransition);
 //   - fewer than MaxRequestedInterventions may be requested (ErrTooManyInterventions).
 //
 // A refused request stores no intervention.
@@ -141,15 +141,17 @@ func (s *Store) CreateIntervention(ctx context.Context, actor string, p Interven
 		if err != nil {
 			return fmt.Errorf("store: create intervention: run %d: %w", run.ID, err)
 		}
+		// A run that has ended, or whose session has, takes no more: nothing
+		// would ever poll for the request, and it would wait for good. This is
+		// decided before the kind, so asking an ended run for what it never
+		// declared writes nothing, not even the refusal's audit row.
+		if schema.RunStateTerminal(run.State) || sess.EndedAt != nil {
+			return ErrInvalidTransition
+		}
 		detail := fmt.Sprintf("run=%d kind=%s requested_by=%d", run.ID, p.Kind, reader.PrincipalID)
 		if !slices.Contains(sess.Interventions, p.Kind) {
 			refused = ErrInterventionUnsupported
 			return appendAuditEventTx(ctx, tx, actor, AuditInterventionUnsupported, runSubject(run.ID), detail, now)
-		}
-		// A run that has ended, or whose session has, takes no more: nothing
-		// would ever poll for the request, and it would wait for good.
-		if schema.RunStateTerminal(run.State) || sess.EndedAt != nil {
-			return ErrInvalidTransition
 		}
 		open, err := requestedInterventionsTx(ctx, tx, run.ID)
 		if err != nil {

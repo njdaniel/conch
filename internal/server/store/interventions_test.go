@@ -298,7 +298,7 @@ func TestCreateInterventionRefusals(t *testing.T) {
 		{"resume is not declared", w.rWide, w.alice, schema.InterventionKindResume, "", ErrInterventionUnsupported, 1},
 		{"a session that declared nothing", w.runWide, w.alice, schema.InterventionKindCancel, "", ErrInterventionUnsupported, 1},
 		{"an ended run", finished, w.alice, schema.InterventionKindCancel, "", ErrInvalidTransition, 0},
-		{"an ended run, an undeclared kind", finished, w.alice, schema.InterventionKindPause, "", ErrInterventionUnsupported, 1},
+		{"an ended run, an undeclared kind", finished, w.alice, schema.InterventionKindPause, "", ErrInvalidTransition, 0},
 		{"a full run", full, w.alice, schema.InterventionKindCancel, "", ErrTooManyInterventions, 0},
 		{"a run whose session has ended", orphan, w.alice, schema.InterventionKindCancel, "", ErrInvalidTransition, 0},
 		{"a run that is not there", 99999, w.alice, schema.InterventionKindCancel, "", ErrRunNotFound, 0},
@@ -658,6 +658,7 @@ func TestInterventionsMigrationFromSchema20(t *testing.T) {
 		`INSERT INTO interventions (run_id, kind, body, state, requested_by, requested_at) VALUES (1, 'cancel', 'stop it', 'requested', 1, 9)`,
 		`INSERT INTO interventions (run_id, kind, state, requested_by, requested_at) VALUES (1, 'message', 'requested', 1, 9)`,
 		`INSERT INTO interventions (run_id, kind, state, requested_by, requested_at, reason) VALUES (1, 'cancel', 'requested', 1, 9, 'why')`,
+		`INSERT INTO interventions (run_id, kind, state, requested_by, requested_at, answered_at) VALUES (1, 'cancel', 'failed', 1, 9, 10)`,
 	} {
 		if _, err := s.db.Exec(stmt); err == nil {
 			t.Errorf("the interventions table accepted %q", stmt)

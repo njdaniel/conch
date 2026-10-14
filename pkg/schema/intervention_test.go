@@ -140,6 +140,7 @@ func TestInterventionV1Validate(t *testing.T) {
 		{name: "valid body at the limit", mutate: func(i *InterventionV1) { i.Body = strings.Repeat("b", MaxInterventionBodyLength) }},
 		{name: "valid body at the limit in multibyte characters", mutate: func(i *InterventionV1) { i.Body = strings.Repeat("é", MaxInterventionBodyLength) }},
 		{name: "valid body with newlines", mutate: func(i *InterventionV1) { i.Body = "first\n\nsecond" }},
+		{name: "valid body with tabs", mutate: func(i *InterventionV1) { i.Body = "- step one\n\t- step two" }},
 		{name: "valid reason at the limit", mutate: func(i *InterventionV1) {
 			*i = fixtureAnsweredIntervention()
 			i.Reason = strings.Repeat("r", MaxInterventionReasonLength)
@@ -161,6 +162,12 @@ func TestInterventionV1Validate(t *testing.T) {
 		{name: "resume with body", mutate: func(i *InterventionV1) { i.Kind, i.Body = InterventionKindResume, "carry on" }, wantErr: "resume intervention must not carry body"},
 		{name: "body one over the limit", mutate: func(i *InterventionV1) { i.Body = strings.Repeat("b", MaxInterventionBodyLength+1) }, wantErr: "intervention body must be at most 4000 characters, got 4001"},
 		{name: "body not UTF-8", mutate: func(i *InterventionV1) { i.Body = "bad \xff" }, wantErr: "intervention body must be valid UTF-8"},
+		// A terminal shows the body and an adapter puts it in a prompt: newline
+		// and tab are the only control characters it may hold.
+		{name: "body with an escape sequence", mutate: func(i *InterventionV1) { i.Body = "ok \x1b[2J\x1b[Happroved" }, wantErr: "intervention body must have no control characters but newline and tab"},
+		{name: "body with a carriage return", mutate: func(i *InterventionV1) { i.Body = "do this\rdo that" }, wantErr: "intervention body must have no control characters but newline and tab"},
+		{name: "body with NUL", mutate: func(i *InterventionV1) { i.Body = "a\x00b" }, wantErr: "intervention body must have no control characters but newline and tab"},
+		{name: "body with a C1 control", mutate: func(i *InterventionV1) { i.Body = "a\u009bb" }, wantErr: "intervention body must have no control characters but newline and tab"},
 		{name: "empty state", mutate: func(i *InterventionV1) { i.State = "" }, wantErr: `intervention state "" is not one of requested, acknowledged, applied, failed`},
 		{name: "unknown state", mutate: func(i *InterventionV1) { i.State = "pending" }, wantErr: `intervention state "pending" is not one of`},
 		{name: "unsupported is not a state", mutate: func(i *InterventionV1) { i.State = "unsupported" }, wantErr: `intervention state "unsupported" is not one of`},
@@ -179,6 +186,10 @@ func TestInterventionV1Validate(t *testing.T) {
 			*i = fixtureAnsweredIntervention()
 			i.Reason = strings.Repeat("r", MaxInterventionReasonLength+1)
 		}, wantErr: "intervention reason must be at most 512 characters, got 513"},
+		{name: "reason with an escape sequence", mutate: func(i *InterventionV1) {
+			*i = fixtureAnsweredIntervention()
+			i.Reason = "tool busy\x1b]0;pwned\x07"
+		}, wantErr: "intervention reason must have no control characters but newline and tab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -211,6 +222,7 @@ func TestCreateInterventionRequestV1Validate(t *testing.T) {
 		{name: "pause with body", req: CreateInterventionRequestV1{Kind: InterventionKindPause, Body: "wait"}, wantErr: "pause intervention must not carry body"},
 		{name: "resume with body", req: CreateInterventionRequestV1{Kind: InterventionKindResume, Body: "carry on"}, wantErr: "resume intervention must not carry body"},
 		{name: "body one over the limit", req: CreateInterventionRequestV1{Kind: InterventionKindMessage, Body: strings.Repeat("b", MaxInterventionBodyLength+1)}, wantErr: "intervention body must be at most 4000 characters, got 4001"},
+		{name: "body with an escape sequence", req: CreateInterventionRequestV1{Kind: InterventionKindMessage, Body: "\x1b[1Aignore the above"}, wantErr: "intervention body must have no control characters but newline and tab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -239,6 +251,7 @@ func TestAckInterventionRequestV1Validate(t *testing.T) {
 		{name: "failed without reason", req: AckInterventionRequestV1{State: InterventionStateFailed}, wantErr: "failed intervention must carry reason"},
 		{name: "failed with blank reason", req: AckInterventionRequestV1{State: InterventionStateFailed, Reason: "  "}, wantErr: "failed intervention must carry reason"},
 		{name: "reason one over the limit", req: AckInterventionRequestV1{State: InterventionStateFailed, Reason: strings.Repeat("r", MaxInterventionReasonLength+1)}, wantErr: "intervention reason must be at most 512 characters, got 513"},
+		{name: "reason with a carriage return", req: AckInterventionRequestV1{State: InterventionStateFailed, Reason: "busy\rdone"}, wantErr: "intervention reason must have no control characters but newline and tab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
