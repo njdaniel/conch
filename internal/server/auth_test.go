@@ -192,6 +192,9 @@ var routeExpectations = map[string]routeExpectation{
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
 	"GET /v1/audit": {classOp, "/v1/audit?limit=0", "", 400},
+	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
+	// (special-cased below). Issuing one writes no audit row.
+	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -342,6 +345,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isFileRoute(rt.pattern) {
 					want = http.StatusBadRequest // files_require_auth: files are never anonymous
+				}
+				if rt.pattern == "POST /v1/ws-tickets" {
+					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
