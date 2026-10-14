@@ -64,6 +64,12 @@ func (c *socketCounter) count(credentialID int64) int {
 // 404 for a non-member is never turned into a 429 and no refusal has a count
 // to give back.
 //
+// Being last also means a refusal at the cap comes after what the earlier
+// gates spend: an agent's manifest budget, sessions.manage for &session=, a
+// ticket redeemed by the middleware. That is the caller's own, and moving the
+// count earlier would skip the manifest's audited refusal for an agent at
+// the cap, which is worse (security review of #315).
+//
 // At the cap it has written 429 too_many_sockets and the handler must return.
 // A request with no credential (authentication off) is not counted and gets a
 // release that does nothing.
