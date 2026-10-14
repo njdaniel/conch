@@ -5,7 +5,7 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 import * as api from './api';
 import { Lobby } from './Lobby';
 import { OperatorWarning } from './OperatorWarning';
-import { channelFromHash, hashForChannel, rememberChannel, rememberedChannel } from './route';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel } from './route';
 import { SignIn } from './SignIn';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
@@ -91,6 +91,7 @@ export function App({ origin }: { readonly origin: string }) {
 
   const signOut = useCallback(() => {
     api.signOut();
+    forgetChannel();
     dispatchAuth({ type: 'signOut' });
   }, []);
 

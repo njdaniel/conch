@@ -69,6 +69,18 @@ async function get<T>(path: string, token: string, check: Validator<T>): Promise
   return { ok: true, value: body as T };
 }
 
+// authed is every call made with the stored credential: it reads the token,
+// makes the request and, on a 401, drops the token, so "a 401 anywhere signs
+// out" holds for every call added here without each one remembering it.
+// signIn is the one call that does not use it: it checks a candidate.
+async function authed<T>(path: string, check: Validator<T>): Promise<ApiResult<T>> {
+  const token = readToken();
+  if (token === null) return { ok: false, failure: 'unauthorized' };
+  const result = await get(path, token, check);
+  if (!result.ok && result.failure === 'unauthorized') dropToken();
+  return result;
+}
+
 // hasToken says whether this tab holds a credential from an earlier load.
 export function hasToken(): boolean {
   return readToken() !== null;
@@ -101,11 +113,7 @@ export function continueAsOperator(): boolean {
 // restore checks the credential left by an earlier load of this tab. A 401
 // drops it.
 export async function restore(): Promise<ApiResult<WhoAmIResponseV1>> {
-  const token = readToken();
-  if (token === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get('/v1/whoami', token, whoAmIResponseV1);
-  if (!result.ok && result.failure === 'unauthorized') dropToken();
-  return result;
+  return authed('/v1/whoami', whoAmIResponseV1);
 }
 
 // signOut forgets the credential in this tab. It revokes nothing on the server.
@@ -117,12 +125,7 @@ export function signOut(): void {
 // listChannels reads the channels the caller can use. A 401 drops the
 // credential, so the caller only has to go back to sign-in.
 export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
-  const token = readToken();
-  if (token === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get('/v1/channels', token, listChannelsResponse);
-  if (!result.ok) {
-    if (result.failure === 'unauthorized') dropToken();
-    return result;
-  }
+  const result = await authed('/v1/channels', listChannelsResponse);
+  if (!result.ok) return result;
   return { ok: true, value: result.value.channels };
 }

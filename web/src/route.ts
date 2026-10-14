@@ -26,6 +26,16 @@ export function rememberedChannel(): string | null {
   }
 }
 
+// forgetChannel drops the remembered channel, at sign-out: the next person to
+// sign in on this tab is not steered to the last one's channel.
+export function forgetChannel(): void {
+  try {
+    window.sessionStorage.removeItem(lastKey);
+  } catch {
+    // Nothing stored that could be removed.
+  }
+}
+
 export function rememberChannel(name: string): void {
   try {
     window.sessionStorage.setItem(lastKey, name);
