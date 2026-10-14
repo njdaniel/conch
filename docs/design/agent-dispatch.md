@@ -25,6 +25,7 @@ is in [the P0 spike report](../reports/p0-spike-report.md) ("Pain points").
 | Worker | Runtime | Best at | Hard limits | Cost |
 |---|---|---|---|---|
 | principal session | this session | judgment calls, verdicts, approval-path, cross-cutting work, all review | attention is the scarce resource | high |
+| technical-planner | Claude agent, opus | issue grooming, acceptance criteria, tests, dependencies and proposed parallel groups | uses issue-writer; no architecture approval, implementation or dispatch authority | medium |
 | protocol-designer | Claude agent, **fable** | wire shapes, MCP tool definitions, schema freezes (#9) | output requires Nick's D8 sign-off | high |
 | **codex** | `codex exec --full-auto` | mechanical implementation against a crisp spec (#5, #6) | no network, **no loopback sockets** — cannot run socket tests, `gh`, or e2e, so its "tests pass" excludes them; full-auto requires the user's explicit authorization each session; wire-level judgment errors observed in both P0 dispatches | medium |
 | server-engineer / cli-engineer | Claude agent, sonnet | scoped implementation inside their directory | narrower context than the principal | medium |
@@ -37,6 +38,7 @@ is in [the P0 spike report](../reports/p0-spike-report.md) ("Pain points").
 
 | The issue is… | Dispatch to |
 |---|---|
+| rough ideas or issues that need scope, acceptance criteria, tests or dependency refinement | technical-planner, using issue-writer; principal resolves design decisions |
 | a wire shape, schema version, or MCP tool definition | protocol-designer (fable) |
 | implementation with crisp acceptance criteria and no open design questions | codex |
 | implementation with design ambiguity | server-/cli-engineer; principal if cross-cutting |
@@ -48,6 +50,15 @@ is in [the P0 spike report](../reports/p0-spike-report.md) ("Pain points").
 Parallel dispatch is allowed only when file areas are disjoint (e.g. #6 in
 `internal/cli` alongside #8 in `pkg/schema/testdata` probes). One worker per
 file area at a time.
+
+## Backlog refinement handoff
+
+The [technical-planner](../../.claude/agents/technical-planner.md) prepares issues
+under the principal's direction using the existing issue-writer skill. It normally
+returns drafts; explicit delegation may include creating or refining issues via
+`gh`. It does not grant implementation readiness, apply runner approval labels,
+launch workers, or accept architectural decisions. The principal checks its
+proposed sequence and parallel groups before dispatching implementation.
 
 ## The brief
 
