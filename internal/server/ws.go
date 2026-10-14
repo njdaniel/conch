@@ -140,7 +140,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	conn, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		// Accept has already written the HTTP error response.
 		slog.DebugContext(ctx, "ws: accept failed", "error", err)

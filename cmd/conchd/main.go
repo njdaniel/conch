@@ -61,6 +61,7 @@ func usage(w *os.File) {
 Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
                      [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
+                     [--web-dir <dir>] [--allowed-origins <origin,...>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -91,6 +92,13 @@ Flags for serve:
   --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
   --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
                          default: --livekit-url with ws->http, wss->https)
+  --web-dir              a built web client (a directory holding index.html) to serve at /app/ on
+                         the API's own origin; / then redirects to /app/ (env CONCHD_WEB_DIR).
+                         Unset, there is no /app/. serve refuses to start if the directory is unusable.
+  --allowed-origins      comma-separated extra Origins the WebSocket upgrade accepts, such as
+                         http://localhost:5173 (env CONCHD_ALLOWED_ORIGINS). It exists only so a
+                         Vite dev server on another port can connect; unset keeps the same-origin
+                         check. Each entry is one exact origin; wildcards are refused.
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -111,6 +119,8 @@ type serveOptions struct {
 	ntfyUrgentTopic string
 	livekit         livekit.Config
 	maxUploadBytes  int64
+	webDir          string
+	allowedOrigins  []string
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -127,6 +137,8 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
+	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
+	originsRaw := fs.String("allowed-origins", os.Getenv("CONCHD_ALLOWED_ORIGINS"), "extra Origins the WebSocket upgrade accepts (Vite dev server only)")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -159,7 +171,17 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
+	origins, err := server.ParseAllowedOrigins(*originsRaw)
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --allowed-origins: %w", err)
+	}
+	if *webDir != "" {
+		if err := server.CheckWebDir(*webDir); err != nil {
+			return serveOptions{}, fmt.Errorf("serve: --web-dir: %w", err)
+		}
+	}
 	return serveOptions{
+		webDir: *webDir, allowedOrigins: origins,
 		livekit: lk, maxUploadBytes: *maxUpload,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
@@ -200,6 +222,8 @@ func runServe(args []string) error {
 		AuthMode:        opts.authMode,
 		LiveKit:         opts.livekit,
 		MaxUploadBytes:  opts.maxUploadBytes,
+		WebDir:          opts.webDir,
+		AllowedOrigins:  opts.allowedOrigins,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
