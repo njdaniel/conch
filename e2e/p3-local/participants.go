@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -519,9 +521,17 @@ func (r *runner) checkAgentB() error {
 		c.kill()
 		return err
 	}
-	if _, err := oc.PostMessageV2(runCtx, chGeneral, 0, "check: the observer must not be able to post", nil); err == nil {
+	_, err = oc.PostMessageV2(runCtx, chGeneral, 0, "check: the observer must not be able to post", nil)
+	var refused *cli.ServerError
+	switch {
+	case err == nil:
 		c.kill()
 		return fmt.Errorf("observer-test posted a message, and its manifest does not allow it")
+	case !errors.As(err, &refused) || refused.Status != http.StatusForbidden:
+		// Only the manifest's refusal counts: a network error or a 500 is not
+		// the observer being kept from posting.
+		c.kill()
+		return fmt.Errorf("observer-test's post failed, but not with the manifest's 403: %v", r.redact(err.Error()))
 	}
 	step("observer-test is refused when it posts, as its manifest says")
 	return r.stopAgent("agent-b", c)

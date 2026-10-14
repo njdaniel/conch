@@ -110,7 +110,9 @@ func main() {
 	}()
 	err = r.run(*keep)
 	close(finished)
-	interrupted := ctx.Err() != nil
+	// An interrupt that lands after a successful --keep run has returned is
+	// not an interrupted run: the kept server is meant to be running.
+	interrupted := ctx.Err() != nil && err != nil
 	stop()
 	if interrupted {
 		fmt.Fprintln(os.Stderr, name+": interrupted; nothing is left running")
@@ -367,6 +369,13 @@ func (r *runner) reset() error {
 		return nil
 	case err != nil:
 		return err
+	}
+	// The run resolved symlinks when it made the root, so its processes carry
+	// the real path; compare against that, or a root reached through a
+	// symlinked parent would match nothing and orphan its server.
+	// checkRootOwned has already refused a symlink at the root itself.
+	if resolved, err := filepath.EvalSymlinks(r.root); err == nil {
+		r.root = resolved
 	}
 	if err := stopRootProcesses(r.root, 3*time.Second); err != nil {
 		return err

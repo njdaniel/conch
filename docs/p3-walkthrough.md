@@ -379,6 +379,10 @@ prints first. Reset, then start with the flag:
 
 `go run ./e2e/p3-local --reset` then `go run ./e2e/p3-local --keep --real-adapter`
 
+(These two are the only commands in this document that the runner does not
+print, which is why they are not in a fenced block: the test that checks every
+fenced command against the runner's output would refuse them.)
+
 `agent-a.env` then holds no fixture command and no fixture mode, so
 `conch-adapter` runs its default command (`claude -p ... --dangerously-skip-permissions`
 with the model `sonnet`), which needs the `claude` CLI installed and signed in.
