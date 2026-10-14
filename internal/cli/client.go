@@ -589,3 +589,97 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 		}
 	}
 }
+
+// The methods below are the operator's setup calls behind `conch admin`. Each
+// is one request to a public route; the caller's ordinary credential decides
+// whether the server allows it.
+
+// CreateChannel creates a channel. The caller becomes its only member.
+func (c *Client) CreateChannel(ctx context.Context, name string) (schema.ChannelV0, error) {
+	var result schema.CreateChannelResponse
+	if err := c.roundTrip(ctx, "create channel", http.MethodPost, c.resolve("v0", "channels"), schema.CreateChannelRequest{Name: name}, &result); err != nil {
+		return schema.ChannelV0{}, err
+	}
+	return result.Channel, nil
+}
+
+// CreatePrincipal creates a principal of the given kind. It has no role: the
+// route takes a kind and a name only.
+func (c *Client) CreatePrincipal(ctx context.Context, kind schema.PrincipalKind, name string) (schema.PrincipalV0, error) {
+	var result schema.CreatePrincipalResponse
+	if err := c.roundTrip(ctx, "create principal", http.MethodPost, c.resolve("v0", "principals"), schema.CreatePrincipalRequest{Kind: kind, Name: name}, &result); err != nil {
+		return schema.PrincipalV0{}, err
+	}
+	return result.Principal, nil
+}
+
+// DisablePrincipal switches a principal off and revokes its credentials.
+func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")
+	return c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, nil)
+}
+
+// EnablePrincipal switches a principal back on. It revives no credential.
+func (c *Client) EnablePrincipal(ctx context.Context, id int64) error {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "enable")
+	return c.roundTrip(ctx, "enable principal", http.MethodPost, endpoint, nil, nil)
+}
+
+// CreateCredential issues a credential for a principal. The response carries
+// the plaintext token, which the server shows only once.
+func (c *Client) CreateCredential(ctx context.Context, principalID int64, request schema.CreateCredentialRequestV1) (schema.CreateCredentialResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "credentials")
+	var result schema.CreateCredentialResponseV1
+	if err := c.roundTrip(ctx, "create credential", http.MethodPost, endpoint, request, &result); err != nil {
+		return schema.CreateCredentialResponseV1{}, err
+	}
+	return result, nil
+}
+
+// ListCredentials returns a principal's credentials, newest first.
+func (c *Client) ListCredentials(ctx context.Context, principalID int64) (schema.ListCredentialsResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "credentials")
+	var result schema.ListCredentialsResponseV1
+	if err := c.roundTrip(ctx, "list credentials", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListCredentialsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// RevokeCredential revokes one credential.
+func (c *Client) RevokeCredential(ctx context.Context, credentialID int64) error {
+	endpoint := c.resolve("v1", "credentials", strconv.FormatInt(credentialID, 10))
+	return c.roundTrip(ctx, "revoke credential", http.MethodDelete, endpoint, nil, nil)
+}
+
+// PutChannelMember adds principalID to channel. It is idempotent.
+func (c *Client) PutChannelMember(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "add channel member", http.MethodPut, endpoint, nil, nil)
+}
+
+// RemoveChannelMember takes principalID off channel. It is idempotent.
+func (c *Client) RemoveChannelMember(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "remove channel member", http.MethodDelete, endpoint, nil, nil)
+}
+
+// PutManifest creates or replaces an agent's manifest.
+func (c *Client) PutManifest(ctx context.Context, principalID int64, request schema.PutAgentManifestRequestV1) (schema.AgentManifestV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "manifest")
+	var result schema.PutAgentManifestResponseV1
+	if err := c.roundTrip(ctx, "put manifest", http.MethodPut, endpoint, request, &result); err != nil {
+		return schema.AgentManifestV1{}, err
+	}
+	return result.Manifest, nil
+}
+
+// GetManifest returns an agent's manifest.
+func (c *Client) GetManifest(ctx context.Context, principalID int64) (schema.AgentManifestV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "manifest")
+	var result schema.GetAgentManifestResponseV1
+	if err := c.roundTrip(ctx, "get manifest", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.AgentManifestV1{}, err
+	}
+	return result.Manifest, nil
+}
