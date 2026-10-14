@@ -101,6 +101,11 @@ type Server struct {
 	// replace it to fail the step between the temporary file and the final
 	// name.
 	renameFile func(oldpath, newpath string) error
+	// replayPageSize is how many messages one page of a /v2/ws ?after= replay
+	// reads; zero means the default. replayHooks lets a test act at a chosen
+	// point of a replay. Both are unexported and set by tests before serving.
+	replayPageSize int
+	replayHooks    wsReplayHooks
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
