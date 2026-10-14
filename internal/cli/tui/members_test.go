@@ -528,6 +528,10 @@ func TestMessageStreamResumesAfterLastID(t *testing.T) {
 	if m.status() != statusReconnecting {
 		t.Fatalf("status after the drop = %q, want %q", m.status(), statusReconnecting)
 	}
+	// While the socket is down the user sends, and the reply carries id 10:
+	// others may have posted 5 to 9 meanwhile, so the retry must still resume
+	// after 4, the last id the stream gave, not after the user's own 10.
+	m, _ = update(m, messageSent{channel: "general", message: schema.MessageV2{ID: 10, Body: "mine"}})
 	m, cmd := update(m, (*timers)[0].msg)
 	run(cmd)
 	// The socket opening again ends "reconnecting", though it has nothing to
@@ -537,8 +541,9 @@ func TestMessageStreamResumesAfterLastID(t *testing.T) {
 		_, delivered = msg.(messageReceived)
 		m, _ = update(m, msg)
 	}
-	if m.status() != "connected" {
-		t.Errorf("status after the socket opened again = %q, want connected", m.status())
+	// ("sent" from the send above is fine; "reconnecting" is not.)
+	if m.status() == statusReconnecting {
+		t.Errorf("status after the socket opened again = %q, want it cleared", m.status())
 	}
 	api.mu.Lock()
 	afters, pages := append([]int64(nil), api.afters...), api.pages
@@ -553,7 +558,7 @@ func TestMessageStreamResumesAfterLastID(t *testing.T) {
 	for _, message := range m.messages["general"] {
 		ids = append(ids, message.ID)
 	}
-	if want := []int64{1, 2, 3, 4, 5}; len(ids) != len(want) {
+	if want := []int64{1, 2, 3, 4, 5, 10}; len(ids) != len(want) {
 		t.Errorf("messages = %v, want %v with no gap and no duplicate", ids, want)
 	} else {
 		for i := range want {

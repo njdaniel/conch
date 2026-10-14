@@ -94,7 +94,10 @@ func (m Model) startSession() tea.Cmd {
 			return sessionStarted{err: err}
 		}
 		if !own.set(doc.ID) {
-			// The program quit while the session was being created.
+			// The program quit while the session was being created. This
+			// runs on the command's goroutine, which cmd/conch does not wait
+			// for: the process may exit first, and then the server's
+			// staleness ends the session instead.
 			endSession(api, doc.ID)
 			return sessionStarted{err: context.Canceled}
 		}
@@ -209,7 +212,9 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 // that keeps it online. A failure leaves everything else as it is.
 func (m Model) sessionStarted(msg sessionStarted) (tea.Model, tea.Cmd) {
 	if errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
-		return m, m.waitEvent()
+		// A command's own result, not an event: no waitEvent, which would add
+		// a second reader of the events channel.
+		return m, nil
 	}
 	if msg.err != nil {
 		m.sessionFailed = true

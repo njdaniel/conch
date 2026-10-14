@@ -245,8 +245,15 @@ type Model struct {
 	// frames change nothing but this: not the draft, not the selection.
 	ev eventsModel
 	// loaded marks channels whose first page of history has arrived: from then
-	// on the message socket is opened from the last id held, with no reload.
+	// on the message socket is opened after the stream mark, with no reload.
 	loaded map[string]bool
+	// streamed is, per channel, the highest message id that came from the
+	// server's stream of the channel: a loaded page or a subscription frame.
+	// A dropped subscription resumes after it. A message this client sent
+	// is not counted: its reply can carry a higher id than messages others
+	// posted while the socket was down, and resuming after it would skip
+	// them.
+	streamed map[string]int64
 	// selAgent is the principal id of the selected agent in the Agents view,
 	// and expanded the agents whose sessions are shown.
 	selAgent int64
@@ -296,7 +303,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
-		own: &ownSession{}, loaded: make(map[string]bool), expanded: make(map[int64]bool)}
+		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -594,6 +601,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loaded[msg.channel] = true
 		m.addMessages(msg.channel, msg.messages)
+		m.markStreamed(msg.channel, msg.messages...)
 		if stale {
 			return m, nil
 		}
@@ -612,6 +620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
+		m.markStreamed(msg.channel, msg.message)
 		return m, m.waitEvent()
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
@@ -823,13 +832,19 @@ func (m Model) loadAndFollow() tea.Cmd {
 	}
 }
 
-// lastID is the id of the newest message held for channel, 0 for none.
+// lastID is where a dropped subscription of channel resumes: the highest id
+// the server streamed for it (streamed), 0 for none.
 func (m Model) lastID(channel string) int64 {
-	held := m.messages[channel]
-	if len(held) == 0 {
-		return 0
+	return m.streamed[channel]
+}
+
+// markStreamed raises channel's stream mark to the highest id in messages.
+func (m *Model) markStreamed(channel string, messages ...schema.MessageV2) {
+	for _, message := range messages {
+		if message.ID > m.streamed[channel] {
+			m.streamed[channel] = message.ID
+		}
 	}
-	return held[len(held)-1].ID
 }
 
 // startSubscription follows channel from the last message held. A socket that
