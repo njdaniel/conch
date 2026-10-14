@@ -1,6 +1,8 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { Composer } from './Composer';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { Audience, MessageV2 } from './schema/message';
+import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
 import { canLoadOlder, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
@@ -102,11 +104,15 @@ function Message({
 function Pending({
   send,
   me,
+  nets,
+  viewer,
   onRetry,
   onDismiss,
 }: {
   readonly send: PendingSend;
   readonly me: Person;
+  readonly nets: ReadonlyMap<number, string>;
+  readonly viewer: number;
   readonly onRetry: (localId: number) => void;
   readonly onDismiss: (localId: number) => void;
 }) {
@@ -116,7 +122,7 @@ function Pending({
     : 'Not confirmed: check the conversation before retrying';
   return (
     <li className="message pending">
-      <Line time={clock(send.at)} author={me.name} kind={me.kind} badge={null} tag={tag}>
+      <Line time={clock(send.at)} author={me.name} kind={me.kind} badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)} tag={tag}>
         {send.body}
       </Line>
       {send.status === 'sending' ? null : (
@@ -156,7 +162,10 @@ export function Conversation({
   nets,
   viewer,
   draft,
+  target,
+  monitored,
   onDraft,
+  onTarget,
   onSend,
   onRetrySend,
   onDismissSend,
@@ -170,8 +179,11 @@ export function Conversation({
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
   readonly draft: string;
+  readonly target: Target;
+  readonly monitored: ReadonlySet<number>;
   readonly onDraft: (text: string) => void;
-  readonly onSend: (body: string) => void;
+  readonly onTarget: (action: TargetAction) => void;
+  readonly onSend: (body: string, audience: Audience | undefined) => void;
   readonly onRetrySend: (localId: number) => void;
   readonly onDismissSend: (localId: number) => void;
   readonly onLoadOlder: () => void;
@@ -225,20 +237,6 @@ export function Conversation({
     setUnseen(false);
   }
 
-  function submit() {
-    if (draft.trim() === '' || live !== 'open') return;
-    atBottom.current = true;
-    onSend(draft);
-  }
-
-  function key(event: KeyboardEvent) {
-    // Enter sends, Shift+Enter adds a line; Enter while composing (an input
-    // method choosing a character) is not a send.
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    submit();
-  }
-
   return (
     <>
       <h2>{channel}</h2>
@@ -276,7 +274,7 @@ export function Conversation({
             <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} sent={chat.sentIds.has(message.id)} />
           ))}
           {chat.pending.map((send) => (
-            <Pending key={`local-${String(send.localId)}`} send={send} me={me} onRetry={onRetrySend} onDismiss={onDismissSend} />
+            <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
           ))}
         </ol>
       </div>
@@ -290,28 +288,22 @@ export function Conversation({
           {String(chat.dropped)} unreadable {chat.dropped === 1 ? 'message was' : 'messages were'} ignored
         </p>
       ) : null}
-      <form
-        className="composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit();
+      <Composer
+        channel={channel}
+        target={target}
+        nets={nets}
+        monitored={monitored}
+        people={people}
+        viewer={viewer}
+        draft={draft}
+        enabled={live === 'open'}
+        onDraft={onDraft}
+        onTarget={onTarget}
+        onSend={onSend}
+        atBottom={() => {
+          atBottom.current = true;
         }}
-      >
-        <label htmlFor="composer-text">Message #{channel}</label>
-        <textarea
-          id="composer-text"
-          rows={2}
-          value={draft}
-          disabled={live !== 'open'}
-          onChange={(event) => {
-            onDraft(event.target.value);
-          }}
-          onKeyDown={key}
-        />
-        <button type="submit" disabled={live !== 'open' || draft.trim() === ''}>
-          Send
-        </button>
-      </form>
+      />
     </>
   );
 }

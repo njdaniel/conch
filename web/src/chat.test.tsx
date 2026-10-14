@@ -71,7 +71,8 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 interface Server {
   history: Record<string, unknown[]>;
-  posts: { channel: string; body: string }[];
+  posts: { channel: string; body: string; audience?: unknown }[];
+  nets: unknown;
   post: (channel: string, body: string) => Response | Promise<Response>;
   whoami: () => Response;
   ticketCalls: number;
@@ -87,6 +88,7 @@ function install() {
   server = {
     history: { general: [], ops: [] },
     posts: [],
+    nets,
     post: (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201),
     whoami: () => json(member),
     ticketCalls: 0,
@@ -115,10 +117,11 @@ function install() {
       if (m?.[1] === undefined) return Promise.resolve(json({}, 404));
       const channel = decodeURIComponent(m[1]);
       if (m[2] === 'members') return Promise.resolve(json(members));
-      if (m[2] === 'nets') return Promise.resolve(json(nets));
+      if (m[2] === 'nets') return Promise.resolve(json(server.nets));
       if (init?.method === 'POST') {
-        const body = (JSON.parse(init.body as string) as { body: string }).body;
-        server.posts.push({ channel, body });
+        const sent = JSON.parse(init.body as string) as { body: string; audience?: unknown };
+        const body = sent.body;
+        server.posts.push(sent.audience === undefined ? { channel, body } : { channel, body, audience: sent.audience });
         return Promise.resolve(server.post(channel, body));
       }
       // The server's read: ids below `before`, newest first, at most `limit`.
@@ -381,6 +384,209 @@ describe('sending', () => {
     type('x');
     enter();
     await screen.findByText('Signed out: the credential is no longer valid');
+  });
+});
+
+describe('composing to a net or a whisper', () => {
+  // The nets of general as the server lists them for ada (principal 2).
+  const netsOf = (...list: { id: number; name: string; role?: string }[]) => ({
+    nets: list.map((n) => ({
+      id: n.id,
+      channel_id: 7,
+      name: n.name,
+      members: [{ principal_id: 2, role: n.role ?? 'member' }],
+      created_at: at,
+    })),
+  });
+  const to = () => screen.getByLabelText<HTMLSelectElement>('To:');
+  const optionsOf = () => Array.from(to().options).map((o) => o.textContent);
+  const choose = (value: string) => {
+    fireEvent.change(to(), { target: { value } });
+  };
+  const type = (text: string, label = 'Message #general') => {
+    fireEvent.change(screen.getByLabelText(label), { target: { value: text } });
+  };
+  const send = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  };
+  const sendButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Send' });
+  async function ready() {
+    server.nets = netsOf({ id: 5, name: 'alpha' }, { id: 6, name: 'watch', role: 'monitor' });
+    await connect(await openChat());
+    await screen.findByRole('option', { name: 'net alpha' });
+  }
+
+  it('lists the channel, the nets the viewer can transmit to, and Whisper to…', async () => {
+    await ready();
+    // A net the viewer only monitors is not offered, as in the TUI.
+    expect(optionsOf()).toEqual(['#general', 'net alpha', 'Whisper to…']);
+    expect(to().value).toBe('channel');
+  });
+
+  it('lists only the channel and the whisper for a channel without nets', async () => {
+    server.nets = { nets: [] };
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(optionsOf()).toEqual(['#general', 'Whisper to…']);
+    });
+  });
+
+  it('names the audience in the composer label', async () => {
+    await ready();
+    choose('net:5');
+    expect(screen.getByLabelText('Message net alpha')).toBeDefined();
+    choose('whisper');
+    expect(screen.getByLabelText('Whisper to…')).toBeDefined();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    expect(screen.getByLabelText('Whisper to bot, <b>mallory</b>')).toBeDefined();
+  });
+
+  it('keeps Send disabled in a whisper until someone other than the viewer is chosen', async () => {
+    await ready();
+    choose('whisper');
+    // The viewer is not on the list.
+    expect(screen.queryByRole('checkbox', { name: 'ada' })).toBeNull();
+    type('psst', 'Whisper to…');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    expect(sendButton().disabled).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    expect(sendButton().disabled).toBe(true);
+  });
+
+  it('closes the picker on Escape and keeps the draft', async () => {
+    await ready();
+    choose('whisper');
+    type('half a thought', 'Whisper to…');
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.queryByRole('group', { name: 'Whisper to' })).toBeNull();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('half a thought');
+    expect(to().value).toBe('channel');
+  });
+
+  it('sends a whisper once, returns to the channel, and shows the audit notice only for the first', async () => {
+    await ready();
+    const notice = 'note: whispers are recorded in the audit log';
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    type('first', 'Whisper to <b>mallory</b>');
+    send();
+    await screen.findByText(notice);
+    expect(server.posts).toEqual([{ channel: 'general', body: 'first', audience: { kind: 'principals', principal_ids: [4] } }]);
+    expect(to().value).toBe('channel');
+    expect(screen.getByLabelText('Message #general')).toBeDefined();
+    // A message now goes to the whole channel.
+    type('hello all');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(2);
+    });
+    expect(server.posts[1]).toEqual({ channel: 'general', body: 'hello all' });
+    expect(screen.queryByText(notice)).toBeNull();
+    // A second whisper in the same tab does not repeat it.
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('second', 'Whisper to bot');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(3);
+    });
+    await waitFor(() => {
+      expect(to().value).toBe('channel');
+    });
+    expect(screen.queryByText(notice)).toBeNull();
+  });
+
+  it('keeps a net after a post, and restores it with the draft after switching channels', async () => {
+    await ready();
+    choose('net:5');
+    type('to alpha', 'Message net alpha');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toEqual([{ channel: 'general', body: 'to alpha', audience: { kind: 'net', net_id: 5 } }]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Sending')).toBeNull();
+    });
+    expect(to().value).toBe('net:5');
+    type('unsent', 'Message net alpha');
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByLabelText('Message #ops');
+    expect(to().value).toBe('channel');
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    const box = await screen.findByLabelText<HTMLTextAreaElement>('Message net alpha');
+    expect(box.value).toBe('unsent');
+    expect(to().value).toBe('net:5');
+  });
+
+  it('shows the audience badge on the pending message, and keeps it on a retry', async () => {
+    await ready();
+    server.post = () => Promise.reject(new TypeError('connection dropped'));
+    choose('net:5');
+    type('badge me', 'Message net alpha');
+    send();
+    await screen.findByText(/^Not confirmed/);
+    const line = () => within(screen.getByRole('log', { name: 'Messages' })).getAllByRole('listitem')[0]?.textContent;
+    expect(line()).toContain('→ net alpha');
+    server.post = (_c, body) => json({ message: message(nextId++, body, { author_id: 2, audience: { kind: 'net', net_id: 5 } }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts[1]).toEqual({ channel: 'general', body: 'badge me', audience: { kind: 'net', net_id: 5 } });
+    expect(line()).toContain('→ net alpha');
+  });
+
+  it('badges a pending whisper with how many hear it', async () => {
+    await ready();
+    server.post = () => new Promise<Response>(() => undefined);
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    type('quietly', 'Whisper to bot, <b>mallory</b>');
+    send();
+    await screen.findByText('Sending');
+    expect(lines()[0]).toContain('→ whisper to 2');
+  });
+
+  it('shows the whole refusal line beside the composer, keeps the draft and the audience, and posts nothing more', async () => {
+    await ready();
+    server.post = () => json({ code: 'net_not_found', message: 'net alpha is not a net you can post to' }, 404);
+    choose('net:5');
+    type('not allowed', 'Message net alpha');
+    send();
+    expect((await screen.findByRole('alert')).textContent).toBe('net alpha is not a net you can post to');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(server.posts).toHaveLength(1);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('not allowed');
+    expect(lines()).toEqual([]);
+    expect(to().value).toBe('net:5');
+  });
+
+  it('keeps a whisper chosen after it is refused', async () => {
+    await ready();
+    server.post = () => json({ code: 'forbidden', message: 'whispers are not allowed here' }, 403);
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('nope', 'Whisper to bot');
+    send();
+    await screen.findByText('whispers are not allowed here');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('nope');
+    expect(screen.queryByText('note: whispers are recorded in the audit log')).toBeNull();
+  });
+
+  it('does not widen a net post to the channel while the nets are not known', async () => {
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await connect(await openChat());
+    await screen.findByRole('option', { name: 'net alpha' });
+    choose('net:5');
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByLabelText('Message #ops');
+    server.nets = new Promise(() => undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByLabelText('Message net #5');
+    expect(to().value).toBe('net:5');
   });
 });
 

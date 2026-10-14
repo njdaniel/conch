@@ -9,7 +9,7 @@ import { interventionV1, listInterventionsResponseV1, type CreateInterventionReq
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import { listChannelMembersResponseV1, listChannelsResponse, type ChannelMemberV1, type ChannelV0 } from './schema/channel';
-import { listMessagesResponseV2, postMessageResponseV2, type MessageV2, type PostMessageRequestV2 } from './schema/message';
+import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import { whoAmIResponseV1, type WhoAmIResponseV1 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
@@ -230,19 +230,38 @@ export async function listNets(channel: string): Promise<ApiResult<NetV1[]>> {
 // message may or may not be there.
 export type PostResult =
   | { readonly ok: true; readonly message: MessageV2 }
-  | { readonly ok: false; readonly outcome: 'unauthorized' | 'refused' | 'unconfirmed' };
+  | { readonly ok: false; readonly outcome: 'unauthorized' | 'unconfirmed' }
+  // reason is the server's own line for the refusal, one line, or a plain
+  // one of ours when the answer carried none.
+  | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string };
 
-// postMessage sends one message to the whole channel. It is never repeated
-// here: sending again is the caller's, on a click.
-export async function postMessage(channel: string, body: string): Promise<PostResult> {
-  const request: PostMessageRequestV2 = { body };
+// refusalLine is the message of the error document a refusal carries, on one
+// line, or a fallback.
+async function refusalLine(res: Response): Promise<string> {
+  try {
+    const body: unknown = await res.json();
+    if (errorV0(body).length === 0) {
+      const line = (body as { message: string }).message.replace(/\s+/g, ' ').trim();
+      if (line !== '') return line;
+    }
+  } catch {
+    // No document, or not one.
+  }
+  return 'The server refused the message';
+}
+
+// postMessage sends one message, to the whole channel or, with an audience, to
+// a net or a list of principals. It is never repeated here: sending again is
+// the caller's, on a click.
+export async function postMessage(channel: string, body: string, audience?: Audience): Promise<PostResult> {
+  const request: PostMessageRequestV2 = audience === undefined ? { body } : { body, audience };
   const reply = await authedPost(`/v2/channels/${encodeURIComponent(channel)}/messages`, request);
   if (reply.kind === 'none') return { ok: false, outcome: 'unconfirmed' };
   if (reply.kind === 'unauthorized') return { ok: false, outcome: 'unauthorized' };
   const res = reply.res;
   // A 5xx may come from something in front of conchd after it stored the message.
   if (res.status >= 500) return { ok: false, outcome: 'unconfirmed' };
-  if (!res.ok) return { ok: false, outcome: 'refused' };
+  if (!res.ok) return { ok: false, outcome: 'refused', reason: await refusalLine(res) };
   try {
     const parsed: unknown = await res.json();
     if (postMessageResponseV2(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
