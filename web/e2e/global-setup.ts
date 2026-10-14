@@ -4,7 +4,7 @@
 // writes the credentials; world.ts reads them from there. The web client is
 // built here first and handed to the runner, so that the runner never runs
 // `npm ci` under the Playwright that is running.
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -44,8 +44,14 @@ export default function globalSetup(): void {
     must('go run ./e2e/p3-local --keep', spawnSync('go', ['run', './e2e/p3-local', '--keep'], { cwd: repoRoot, env: runnerEnv(root), encoding: 'utf8', timeout: 600_000 }));
     loadWorld();
   } catch (err) {
-    // Playwright does not run the teardown of a setup that threw.
-    resetRoot(root);
+    // Playwright does not run the teardown of a setup that threw, so this
+    // removes what it made: the root through the runner, then the parent. If
+    // the reset fails the parent stays, as in the teardown, and the error says so.
+    const reset = resetRoot(root);
+    if (!reset.ok) {
+      throw new Error(`${String(err)}\n\np3-local --reset also failed; ${parent} is left for inspection:\n${reset.output}`);
+    }
+    rmSync(parent, { recursive: true, force: true });
     throw err;
   }
 }

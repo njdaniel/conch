@@ -2,6 +2,7 @@
 // instruction a person can give it.
 import { interventions, post, roster, run, runsIn } from './api';
 import { expect, signIn, test } from './fixtures';
+import { errorV0, type ErrorV0 } from '../src/schema/error';
 import { launchWorker } from './agents';
 import { call } from './world';
 
@@ -50,7 +51,10 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
 
     // Pause is not something a person is given here, and the server refuses it.
     await expect(detail.getByRole('button', { name: 'Pause' })).toHaveCount(0);
-    expect((await call(world, world.tokens.nick, 'POST', `/v1/runs/${String(started.id)}/interventions`, { kind: 'pause' })).status).toBe(409);
+    const pause = await call(world, world.tokens.nick, 'POST', `/v1/runs/${String(started.id)}/interventions`, { kind: 'pause' });
+    expect(pause.status).toBe(409);
+    expect(errorV0(pause.body)).toEqual([]);
+    expect((pause.body as ErrorV0).code).toBe('intervention_unsupported');
 
     // From here every change the page makes to the run's state or to its
     // history of asks is reported to the test as it happens, and the test

@@ -15,7 +15,19 @@ export const repoRoot = resolve(import.meta.dirname, '..', '..');
 // nothing it starts can find one.
 export function safePath(): string {
   const dirs = (process.env['PATH'] ?? '').split(':').filter((dir) => dir !== '');
-  return dirs.filter((dir) => !existsSync(join(dir, 'claude'))).join(':');
+  const kept = dirs.filter((dir) => !existsSync(join(dir, 'claude')));
+  const dropped = dirs.filter((dir) => !kept.includes(dir));
+  // A directory that holds claude is dropped whole. If that took go or node
+  // with it, say so rather than let the runner fail with "go: not found".
+  for (const program of ['go', 'node']) {
+    if (!kept.some((dir) => existsSync(join(dir, program)))) {
+      throw new Error(
+        `${program} is not on PATH once the directories that hold claude are dropped (${dropped.join(', ') || 'none dropped'}); ` +
+          `the suite never lets claude be found, so put ${program} in a directory of its own`,
+      );
+    }
+  }
+  return kept.join(':');
 }
 
 export interface World {

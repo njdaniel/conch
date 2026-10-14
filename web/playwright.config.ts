@@ -19,6 +19,11 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: [['list']],
   outputDir: 'test-results',
+  // A trace of a failed test holds this run's fixture credentials (the Bearer
+  // headers in its network log, the value filled into the sign-in field), and
+  // Playwright cannot redact them. They are throwaway: they die with the
+  // server and the root in the global teardown, which runs before anyone can
+  // open a trace.
   use: { trace: 'retain-on-failure' },
   // Chromium only (issue #285): no Firefox, no WebKit, no phone sizes.
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],

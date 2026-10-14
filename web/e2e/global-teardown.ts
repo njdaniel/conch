@@ -26,10 +26,12 @@ export default async function globalTeardown(): Promise<void> {
   }
   const reset = resetRoot(root);
   if (!reset.ok) throw new Error(`p3-local --reset failed; ${root} is left for inspection:\n${reset.output}`);
-  rmSync(parent, { recursive: true, force: true });
-
+  // The runner removes the root itself; whatever it left is checked for before
+  // the parent goes, and the parent is checked after.
   const left: string[] = [];
-  if (existsSync(root) || existsSync(parent)) left.push(`${parent} is still there`);
+  if (existsSync(root)) left.push(`${root} is still there after the reset`);
+  rmSync(parent, { recursive: true, force: true });
+  if (existsSync(parent)) left.push(`${parent} could not be removed`);
   if (address !== undefined && (await answers(address))) left.push(`something still answers on ${address}`);
   if (left.length > 0) throw new Error(`the run left something behind: ${left.join('; ')}`);
 }

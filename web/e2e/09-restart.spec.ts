@@ -75,6 +75,9 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   await post(world, world.tokens.nick, 'general', after);
   await expect(messages(page).getByText(after)).toHaveCount(1);
   await expect(page.getByLabel('Message #general')).toHaveValue(typed);
+  // The replay after the reconnect has landed by now (the new message came
+  // through the same socket): the history is still once each.
+  for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
   const stored = await history(world, world.tokens.browser, 'general');
   for (const body of [...before, after]) expect(stored.filter((m) => m.body === body)).toHaveLength(1);
   expect(stored.filter((m) => m.body === typed)).toHaveLength(0);

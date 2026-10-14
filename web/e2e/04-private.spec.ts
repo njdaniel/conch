@@ -42,7 +42,11 @@ test('P3-05 browser-test cannot open test-private and nothing about a run there 
     const panel = page.getByRole('region', { name: 'Members list' });
     const agent = panel.getByRole('listitem').filter({ has: page.getByRole('button', { name: /worker-test/ }) });
     await expect(agent).toContainText('running');
+    // The runs of an unfolded agent's sessions are read when it is opened;
+    // wait for that read to finish so that the negative checks follow it.
+    const runsRead = page.waitForResponse((r) => r.url().includes('/v1/runs?') && r.request().method() === 'GET');
     await agent.getByRole('button', { name: /worker-test/ }).click();
+    await runsRead;
     await expect(panel.getByRole('list', { name: 'Sessions of worker-test' })).toBeVisible();
     await expect(panel).not.toContainText('task:');
     await expect(panel).not.toContainText(task);

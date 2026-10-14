@@ -305,6 +305,10 @@ jobs:
       - name: web-e2e
         run: make web-e2e
 
+      # The traces hold this run's fixture credentials (Bearer headers, the
+      # filled sign-in value). They are throwaway: `make web-e2e` runs the
+      # global teardown, which stops the server and removes the root, before
+      # this step, so by the time anyone downloads a trace they open nothing.
       - name: traces of the failed tests
         if: failure()
         uses: actions/upload-artifact@v4
