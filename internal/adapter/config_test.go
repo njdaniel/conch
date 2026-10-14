@@ -61,7 +61,9 @@ func TestLoadConfigNamesAndFallbacks(t *testing.T) {
 		{"fixture is only on for 1", merge(required, map[string]string{"CONCH_ADAPTER_FIXTURE": "true"}), func(c config) bool { return !c.Fixture }},
 		{"CLAUDE_BIN replaces the first word of the default", merge(required, map[string]string{"CLAUDE_BIN": "/x/claude"}),
 			func(c config) bool { return c.Command.args[0] == "/x/claude" && c.Command.args[1] == "-p" }},
-		{"CLAUDE_BIN replaces the first word of CONCH_ADAPTER_CMD", merge(required, map[string]string{"CLAUDE_BIN": "/x/fixture.sh", "CONCH_ADAPTER_CMD": "other --flag"}),
+		// A configured command is run as written: a CLAUDE_BIN left over from
+		// conch-bot must not turn a fixture script into the real model.
+		{"CLAUDE_BIN leaves CONCH_ADAPTER_CMD alone", merge(required, map[string]string{"CLAUDE_BIN": "/x/claude", "CONCH_ADAPTER_CMD": "/x/fixture.sh --flag", "CONCH_ADAPTER_FIXTURE": "1"}),
 			func(c config) bool { return reflect.DeepEqual(c.Command.args, []string{"/x/fixture.sh", "--flag"}) }},
 	}
 	for _, tt := range tests {

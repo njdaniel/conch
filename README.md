@@ -423,7 +423,7 @@ new name wins when both are set. Also:
   just characters). An argument that is exactly `{prompt}` or `{model}` is
   replaced by the prompt or the model name, as that one argument. If `{prompt}`
   does not appear, the prompt is written to the command's standard input.
-  `CLAUDE_BIN`, if set, replaces the command's first word.
+  `CLAUDE_BIN`, if set, replaces the first word of the default command; a `CONCH_ADAPTER_CMD` you set is run as written.
 - `CONCH_ADAPTER_RUNTIME` (default `claude-code`), the label shown for the runtime.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is

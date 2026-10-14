@@ -144,7 +144,15 @@ func loadConfig(lookup envLookup) (config, error) {
 		return config{}, err
 	}
 	cfg.LockFile = get("CONCH_ADAPTER_LOCK_FILE", "CONCH_BOT_LOCK_FILE", filepath.Join(os.TempDir(), "conch-adapter.lock"))
-	if cfg.Command, err = parseCommand(get("CONCH_ADAPTER_CMD", "", defaultCommand), get("CLAUDE_BIN", "", "")); err != nil {
+	// CLAUDE_BIN replaces the first word of the default command only. A command
+	// someone configured is run as written: otherwise a CLAUDE_BIN left over from
+	// conch-bot would turn a fixture script into the real model, with the
+	// fixture markers on (security review of #275).
+	line, binary := get("CONCH_ADAPTER_CMD", "", ""), ""
+	if line == "" {
+		line, binary = defaultCommand, get("CLAUDE_BIN", "", "")
+	}
+	if cfg.Command, err = parseCommand(line, binary); err != nil {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CMD: %w", err)
 	}
 	cfg.Runtime = get("CONCH_ADAPTER_RUNTIME", "", "claude-code")
