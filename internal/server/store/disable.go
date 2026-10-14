@@ -38,10 +38,11 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 // principalID, writing one credential_revoked event each with the given
 // reason, and returns how many it revoked. Expired credentials are revoked
 // too: an expired-but-unrevoked row would resolve again if the clock were set
-// back, and "enable revives nothing" must hold regardless. The caller must
-// hold the write lock (withImmediateTx) so the set it reads is the set it
+// back, and "enable revives nothing" must hold regardless. Each credential's
+// sessions end with it (issue #265), with the given session cause. The caller
+// must hold the write lock (withImmediateTx) so the set it reads is the set it
 // revokes.
-func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason string, now time.Time) (int, error) {
+func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason, sessionCause string, now time.Time) (int, error) {
 	type live struct {
 		id    int64
 		label string
@@ -81,6 +82,9 @@ func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, 
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, "credential_revoked", principalActor(principalID),
 			credentialDetail(c.id, c.label)+" reason="+reason, now); err != nil {
+			return 0, err
+		}
+		if err := endCredentialSessionsTx(ctx, tx, actor, c.id, sessionCause, now); err != nil {
 			return 0, err
 		}
 	}
@@ -148,7 +152,13 @@ func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID 
 		if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
 			return err
 		}
-		if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "principal disabled", now); err != nil {
+		// Every session of the principal ends first, whatever credential it
+		// was made with, so each is recorded as ended by the disabling and not
+		// by the revocations that follow (issue #265).
+		if err := endPrincipalSessionsTx(ctx, tx, actor, principalID, SessionEndedPrincipalDisabled, now); err != nil {
+			return err
+		}
+		if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "principal disabled", SessionEndedPrincipalDisabled, now); err != nil {
 			return err
 		}
 		changed = true
@@ -219,7 +229,7 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 				return ErrLastOperator
 			}
 		}
-		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", now); err != nil {
+		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now); err != nil {
 			return err
 		}
 		return appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now)

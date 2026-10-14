@@ -167,8 +167,43 @@ var routeExpectations = map[string]routeExpectation{
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
 	// caller who passes authentication gets 400 before anything else.
-	"GET /v1/channels/{channel}/voice":            {classAuth, "/v1/channels/general/voice", "", 200},
-	"GET /v1/voice/ws":                            {classAuth, "/v1/voice/ws", "", 400},
+	"GET /v1/channels/{channel}/voice": {classAuth, "/v1/channels/general/voice", "", 200},
+	"GET /v1/voice/ws":                 {classAuth, "/v1/voice/ws", "", 400},
+	// The events socket (issue #269) needs a channel parameter too, so every
+	// caller who passes authentication gets 400 (AuthOff: sessions_require_auth).
+	"GET /v1/events/ws": {classAuth, "/v1/events/ws", "", 400},
+	// Sessions (issue #265). Chosen to change and audit nothing: an empty
+	// create is a 400 (a client is required), the session routes use an id
+	// that does not exist, and the list reads a channel every fixture caller
+	// is in. AuthOff gets 400 sessions_require_auth on all four (special-cased
+	// below).
+	"POST /v1/sessions":                {classAuth, "/v1/sessions", `{}`, 400},
+	"POST /v1/sessions/{id}/heartbeat": {classAuth, "/v1/sessions/9999/heartbeat", "", 404},
+	"DELETE /v1/sessions/{id}":         {classAuth, "/v1/sessions/9999", "", 404},
+	"GET /v1/sessions":                 {classAuth, "/v1/sessions?channel=general", "", 200},
+	// Runs (issue #266). Chosen to change and audit nothing: every route that
+	// names a run or a session uses an id that does not exist, and the list
+	// reads a channel every fixture caller is in. Starting a run is for agents
+	// only, so a human (the member and the operator) gets 403 agent_required
+	// and the fixture agent 404 session_not_found (special-cased below).
+	// AuthOff gets 400 sessions_require_auth on all six (special-cased below).
+	"POST /v1/sessions/{id}/runs": {classAuth, "/v1/sessions/9999/runs", `{}`, 403},
+	"POST /v1/runs/{id}/state":    {classAuth, "/v1/runs/9999/state", `{}`, 404},
+	"POST /v1/runs/{id}/activity": {classAuth, "/v1/runs/9999/activity", `{}`, 404},
+	"GET /v1/runs/{id}":           {classAuth, "/v1/runs/9999", "", 404},
+	"GET /v1/runs":                {classAuth, "/v1/runs?channel=general", "", 200},
+	"GET /v1/runs/{id}/activity":  {classAuth, "/v1/runs/9999/activity", "", 404},
+	// Interventions (issue #287). Chosen to change and audit nothing: every
+	// route names a run, an intervention or a session that does not exist.
+	// Asking is for humans, so an agent gets 403 human_required (special-cased
+	// below); the poll is an own-session call, so a human and the fixture
+	// agent both get 404 session_not_found. AuthOff gets 400
+	// sessions_require_auth on all five (special-cased below).
+	"POST /v1/runs/{id}/interventions":            {classAuth, "/v1/runs/9999/interventions", `{"kind":"cancel"}`, 404},
+	"GET /v1/runs/{id}/interventions":             {classAuth, "/v1/runs/9999/interventions", "", 404},
+	"GET /v1/interventions/{id}":                  {classAuth, "/v1/interventions/9999", "", 404},
+	"GET /v1/sessions/{id}/interventions":         {classAuth, "/v1/sessions/9999/interventions?state=requested", "", 404},
+	"POST /v1/interventions/{id}/ack":             {classAuth, "/v1/interventions/9999/ack", `{"state":"applied"}`, 404},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
@@ -307,6 +342,17 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
+			// Runs are started by agents only (issue #266): the humans get the
+			// 403 above, the agent gets as far as the session, which does not
+			// exist.
+			if rt.pattern == "POST /v1/sessions/{id}/runs" {
+				agentWant = http.StatusNotFound
+			}
+			// Interventions are requested by humans only (issue #287): an
+			// agent is refused before any run is looked at.
+			if rt.pattern == "POST /v1/runs/{id}/interventions" {
+				agentWant = http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -345,6 +391,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isFileRoute(rt.pattern) {
 					want = http.StatusBadRequest // files_require_auth: files are never anonymous
+				}
+				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
+					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential

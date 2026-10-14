@@ -277,7 +277,12 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		out = c
 		detail := credentialDetail(c.ID, c.Label) + fmt.Sprintf(" replaces=%d", credentialID)
-		return appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID), detail, now)
+		if err := appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID), detail, now); err != nil {
+			return err
+		}
+		// The old credential is dead as of this transaction, and so are its
+		// sessions; they are not carried over to the new one.
+		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now)
 	})
 	if err != nil {
 		return schema.CredentialV1{}, "", err
@@ -335,7 +340,11 @@ func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID
 		} else if n != 1 {
 			return nil
 		}
-		return appendAuditEventTx(ctx, tx, actor, "credential_revoked",
-			principalActor(principalID), credentialDetail(credentialID, label), now)
+		if err := appendAuditEventTx(ctx, tx, actor, "credential_revoked",
+			principalActor(principalID), credentialDetail(credentialID, label), now); err != nil {
+			return err
+		}
+		// Its sessions end with it, in this transaction (issue #265).
+		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now)
 	})
 }

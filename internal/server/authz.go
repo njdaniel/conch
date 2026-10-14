@@ -141,6 +141,65 @@ func (s *Server) agentManifestCheck(ctx context.Context, principalID int64, subj
 	return m, true, nil
 }
 
+// agentSelfCheck is the manifest gate for a call about the agent's own
+// session: does the manifest grant capability? It checks the capability and
+// nothing else. No channel is involved, so it must not be mistaken for a
+// weaker agentManifestCheck: that one refuses a call that names no channel, on
+// purpose, and still does (issue #265, decision D9).
+//
+// Because it asks so little, it may be called only for calls that act on the
+// caller's own session and reach nothing of anyone else's; that is pinned by
+// TestAgentSelfCheckCallers, which fails if any function but the named ones
+// calls it. Denials are audited under subject like agentManifestCheck's, and a
+// store failure is an error, not an allow. It returns the manifest it decided
+// on, and its caller must go on to spend the capability's budget with
+// spendAgentBudget, as every other check's caller does.
+func (s *Server) agentSelfCheck(ctx context.Context, principalID int64, subject string, capability schema.Capability) (schema.AgentManifestV1, bool, error) {
+	m, reason, err := s.agentManifest(ctx, principalID)
+	if err != nil {
+		return schema.AgentManifestV1{}, false, err
+	}
+	if reason == "" && !m.Allows(capability) {
+		reason = denyCapability
+	}
+	if reason != "" {
+		s.auditAgentDenial(ctx, principalID, subject, capability, 0, reason)
+		return schema.AgentManifestV1{}, false, nil
+	}
+	return m, true, nil
+}
+
+// agentSelfAllowed applies agentSelfCheck and the rate limit to a REST request
+// made with an agent's credential, for the session routes. It reports true for
+// callers that are not agents. When it reports false it has written the
+// response.
+func (s *Server) agentSelfAllowed(w http.ResponseWriter, r *http.Request, capability schema.Capability) bool {
+	caller, ok := callerFrom(r.Context())
+	if !ok || caller.Kind != store.PrincipalAgent {
+		return true
+	}
+	subject := r.Pattern
+	if subject == "" {
+		subject = "<unmatched>"
+	}
+	m, allowed, err := s.agentSelfCheck(r.Context(), caller.ID, subject, capability)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "authz: load manifest failed", "principal", caller.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, errInternal.Code, errInternal.Message)
+		return false
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, errForbidden.Code, errForbidden.Message)
+		return false
+	}
+	// Last, so only a call the gate allowed uses budget (issue #80).
+	if limited := s.spendAgentBudget(r.Context(), caller.ID, subject, m, capability); limited != nil {
+		writeRateLimited(w, limited)
+		return false
+	}
+	return true
+}
+
 // isAudiencePermission reports whether permission grants an audience for a
 // scoped post rather than access to the channel as a whole.
 func isAudiencePermission(permission schema.ChannelPermission) bool {
@@ -593,11 +652,13 @@ func (s *Server) dropAgentSubscriptionsRevokedBy(ctx context.Context, agentID in
 	if err != nil {
 		slog.ErrorContext(ctx, "authz: list agent channels failed; closing all its subscriptions", "principal", agentID, "error", err)
 		s.hub.DropPrincipalAll(agentID)
+		s.events.dropPrincipalAll(agentID)
 		return
 	}
 	for _, c := range channels {
 		if !agentReadAllowed(m, c.ID) {
 			s.hub.DropPrincipal(c.ID, agentID)
+			s.events.dropPrincipal(c.ID, agentID)
 		}
 	}
 }

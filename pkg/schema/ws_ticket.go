@@ -37,6 +37,12 @@ const (
 	// MaxWSTicketsPerCredential unspent tickets (HTTP 429). A ticket is spent
 	// or expires within WSTicketLifetimeSeconds, so the caller retries then.
 	ErrorCodeTooManyTickets = "too_many_tickets"
+	// ErrorCodeTooManySockets: the caller's credential already holds the most
+	// WebSockets the server allows it (32, across /v0/ws, /v1/ws, /v2/ws,
+	// /v1/events/ws and /v1/voice/ws together; HTTP 429, before any upgrade).
+	// The caller retries when it has closed one. Additive: a new value in
+	// this vocabulary, no shape change.
+	ErrorCodeTooManySockets = "too_many_sockets"
 )
 
 // WSTicketV1 is the body of the 201 response to POST /v1/ws-tickets (the

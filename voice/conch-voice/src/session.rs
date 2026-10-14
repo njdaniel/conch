@@ -852,7 +852,7 @@ impl<T: Transport> Session<T> {
                     .live
                     .as_ref()
                     .is_some_and(|live| live.reconnecting_since.is_some());
-                if !reconnecting && self.ptt.status().transmitting {
+                if !reconnecting && self.ptt.transmission_under_way() {
                     self.tell(PttInput::Connected(false));
                     self.tell(PttInput::Connected(true));
                 }
@@ -1062,7 +1062,7 @@ impl<T: Transport> Session<T> {
         // shut, and produces `stopped` when the gate says it has.
         self.tell(PttInput::Line(LineCommand::Quit));
         let limit = Instant::now() + self.release_tail + self.timings.gate_shut_grace;
-        while self.ptt.status().transmitting {
+        while self.ptt.transmission_under_way() {
             match tokio::time::timeout_at(limit, self.transmitter.events.recv()).await {
                 Ok(Some(event)) => self.on_transmit(event),
                 Ok(None) | Err(_) => {

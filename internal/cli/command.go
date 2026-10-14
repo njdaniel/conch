@@ -177,9 +177,15 @@ Scope:
   line on standard error and exits nonzero.
 
 Environment:
-  CONCH_SERVER  server URL (default http://127.0.0.1:8080)
-  CONCH_TOKEN   bearer token; overrides the stored login
-  CONCH_AUTHOR  author ID (deprecated; with a login the server decides who you are)
+  CONCH_SERVER      server URL (default http://127.0.0.1:8080)
+  CONCH_TOKEN       bearer token; overrides the stored login
+  CONCH_CONFIG_DIR  directory that holds the stored login (credentials.json), used
+                    as given; must be an absolute path. conch login creates it
+                    private if it is missing and refuses one that others may read.
+                    Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch.
+                    conch-voice reads it too. Give two terminals two directories
+                    to be two people on one machine.
+  CONCH_AUTHOR      author ID (deprecated; with a login the server decides who you are)
   CONCH_CHANNELS optional comma-separated TUI channel override (default: all channels from the server)
   CONCH_MOUSE   set to 0 to turn off TUI mouse support (click, wheel) and keep the terminal's own text selection
 `)

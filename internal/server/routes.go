@@ -16,8 +16,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
 		rt("GET /v1/ws", accessAuthenticated, hf(s.handleWSV1)),
-		// The only socket that takes ?ticket= (issue #270); see tickets.go.
+		// Takes ?ticket= (issue #270); see tickets.go.
 		{pattern: "GET /v2/ws", access: accessAuthenticated, handler: hf(s.handleWSV2), acceptsTicket: true},
+		// The events socket (issue #269) takes a ticket too: it is the one a
+		// browser opens.
+		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
@@ -57,6 +60,31 @@ func (s *Server) routeTable() []route {
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		rt("GET /v1/voice/ws", accessAuthenticated, hf(s.handleVoiceWS)),
+		// Sessions (issue #265). Any caller with a credential; the session
+		// routes act on the caller's own sessions (by credential) and the
+		// list is a membership-gated read. Checked in the handlers.
+		rt("POST /v1/sessions", accessAuthenticated, hf(s.handleCreateSession)),
+		rt("POST /v1/sessions/{id}/heartbeat", accessAuthenticated, hf(s.handleSessionHeartbeat)),
+		rt("DELETE /v1/sessions/{id}", accessAuthenticated, hf(s.handleEndSession)),
+		rt("GET /v1/sessions", accessAuthenticated, hf(s.handleListSessions)),
+		// Runs (issue #266). Any caller with a credential: starting a run is
+		// for agents, on a session of their own credential; reporting is for
+		// the credential that owns the run's session; reads are for the
+		// readers who may see the run. Checked in the handlers.
+		rt("POST /v1/sessions/{id}/runs", accessAuthenticated, hf(s.handleCreateRun)),
+		rt("POST /v1/runs/{id}/state", accessAuthenticated, hf(s.handleSetRunState)),
+		rt("POST /v1/runs/{id}/activity", accessAuthenticated, hf(s.handleAppendRunActivity)),
+		rt("GET /v1/runs/{id}", accessAuthenticated, hf(s.handleGetRun)),
+		rt("GET /v1/runs", accessAuthenticated, hf(s.handleListRuns)),
+		rt("GET /v1/runs/{id}/activity", accessAuthenticated, hf(s.handleListRunActivity)),
+		// Interventions (issue #287). A human who can see the run asks; the
+		// readers who can see the run read; the credential that owns the
+		// run's session polls and answers. Checked in the handlers.
+		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleCreateIntervention)),
+		rt("GET /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleListRunInterventions)),
+		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
+		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
+		rt("POST /v1/interventions/{id}/ack", accessAuthenticated, hf(s.handleAckIntervention)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),

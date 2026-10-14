@@ -13,11 +13,12 @@
 //! at all (`keydev::DeviceRule`).
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
-//! (`CONCH_SERVER`), the configuration file (`$XDG_CONFIG_HOME/conch/voice.toml`), the
+//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`), the
 //! default. The login token is `CONCH_TOKEN`, or else what `conch login` stored for the
 //! server; this program never writes that file.
 
 use std::ffi::OsString;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -31,6 +32,9 @@ use crate::error::Error;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
+
+/// The environment variable that moves the configuration directory, as for `conch`.
+pub const CONFIG_DIR_ENV: &str = "CONCH_CONFIG_DIR";
 
 /// The peak level of `--mic tone:<hz>`: a quarter of full scale.
 pub const TONE_AMPLITUDE: f32 = 0.25;
@@ -234,6 +238,15 @@ pub fn command() -> Command {
         );
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
+        .after_help(
+            "Environment:\n  \
+             CONCH_CONFIG_DIR  The directory that holds voice.toml and the credentials.json \
+             `conch login` wrote, used exactly as given (no `conch` is added); it must be an \
+             absolute path. Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. \
+             Use it to run two logins on one machine; `conch` reads the same variable.\n  \
+             CONCH_SERVER      The address of conchd.\n  \
+             CONCH_TOKEN       A login token, used instead of the stored one.",
+        )
         .version(version)
         .subcommand_required(true)
         .arg_required_else_help(true)
@@ -299,6 +312,8 @@ where
 /// so that nothing else reads the environment and a test can supply its own.
 #[derive(Debug, Clone, Default)]
 pub struct Environment {
+    /// `CONCH_CONFIG_DIR`.
+    pub conch_config_dir: Option<OsString>,
     /// `XDG_CONFIG_HOME`.
     pub xdg_config_home: Option<OsString>,
     /// `HOME`.
@@ -315,6 +330,7 @@ impl Environment {
     pub fn from_process() -> Self {
         let text = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         Self {
+            conch_config_dir: std::env::var_os(CONFIG_DIR_ENV),
             xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
             home: std::env::var_os("HOME"),
             server: text(SERVER_ENV),
@@ -336,6 +352,45 @@ pub struct Resolved {
     pub config: Config,
 }
 
+/// Reads `voice.toml`: a missing file is the default configuration. The file's `server`
+/// decides where the login token is sent, so a file that is not a regular file or that
+/// group or others can write is refused. Looked at before it is opened, because opening a
+/// FIFO waits for a writer. A symbolic link is followed: what counts is the file it names.
+fn read_config(path: &std::path::Path) -> Result<Config, Error> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Config::default());
+        }
+        Err(source) => {
+            return Err(Error::ConfigRead {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if !meta.is_file() {
+        return Err(Error::ConfigNotRegular {
+            path: path.to_owned(),
+        });
+    }
+    let mode = meta.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(Error::ConfigWritable {
+            path: path.to_owned(),
+            mode,
+        });
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(source) => Err(Error::ConfigRead {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
 /// Lays the command line over the environment over the configuration file, and finds the
 /// login.
 ///
@@ -345,17 +400,14 @@ pub struct Resolved {
 /// address that cannot be used, or no login for that server.
 pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, Error> {
     let config_dir = default_config_dir(
+        environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
-    );
+    )?;
     let mut config = match &config_dir {
         Some(dir) => {
-            let path = dir.join("conch").join("voice.toml");
-            match std::fs::read_to_string(&path) {
-                Ok(text) => Config::parse(&text, &path.display().to_string())?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
-                Err(source) => return Err(Error::ConfigRead { path, source }),
-            }
+            let path = dir.join("voice.toml");
+            read_config(&path)?
         }
         None => Config::default(),
     };
@@ -446,16 +498,129 @@ mod tests {
 
     fn environment(dir: &std::path::Path) -> Environment {
         Environment {
-            xdg_config_home: Some(dir.as_os_str().to_owned()),
+            conch_config_dir: Some(dir.as_os_str().to_owned()),
+            xdg_config_home: None,
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
         }
     }
 
+    /// A private configuration directory chosen by XDG_CONFIG_HOME alone, so the `conch`
+    /// directory under it is the one used.
+    fn xdg_environment(dir: &std::path::Path) -> Environment {
+        Environment {
+            conch_config_dir: None,
+            xdg_config_home: Some(dir.as_os_str().to_owned()),
+            ..environment(dir)
+        }
+    }
+
     fn write_config(dir: &std::path::Path, text: &str) {
-        std::fs::create_dir_all(dir.join("conch")).unwrap();
-        std::fs::write(dir.join("conch").join("voice.toml"), text).unwrap();
+        let path = dir.join("voice.toml");
+        std::fs::write(&path, text).unwrap();
+        // Not left to the umask of whoever runs the tests.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn a_configuration_others_can_write_is_refused_and_a_fifo_is_not_waited_on() {
+        for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
+            let dir = tempfile::tempdir().unwrap();
+            write_config(dir.path(), "server = \"http://evil.example\"\n");
+            let path = dir.path().join("voice.toml");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = resolve(&join(&["general"]), &environment(dir.path())).unwrap_err();
+            assert!(
+                matches!(error, Error::ConfigWritable { .. }),
+                "{mode:o}: {error}"
+            );
+            let shown = error.to_string();
+            assert!(
+                shown.contains("chmod go-w") && !shown.contains('\n'),
+                "{shown}"
+            );
+        }
+        // Read-only for others is fine.
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), "channel = \"ops\"\n");
+        let path = dir.path().join("voice.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(resolve(&join(&[]), &environment(dir.path())).is_ok());
+
+        // A FIFO: refused at once.
+        let dir = tempfile::tempdir().unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.path().join("voice.toml"))
+            .status();
+        if !matches!(made, Ok(status) if status.success()) {
+            eprintln!("skipped: mkfifo is not available");
+            return;
+        }
+        let path = dir.path().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolve(&join(&["general"]), &environment(&path)).map(|_| ()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("resolve waited on the FIFO");
+        assert!(
+            matches!(result, Err(Error::ConfigNotRegular { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_configuration_error_is_one_line_even_if_the_directory_name_has_a_newline() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("evil\nname");
+        std::fs::create_dir(&dir).unwrap();
+        write_config(&dir, "chanel = \"typo\"\n");
+        let error = resolve(&join(&["general"]), &environment(&dir)).unwrap_err();
+        assert!(error.to_string().contains("unknown key"), "{error}");
+        assert!(!error.to_string().contains('\n'), "{error}");
+        std::fs::set_permissions(
+            dir.join("voice.toml"),
+            std::fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        let error = resolve(&join(&["general"]), &environment(&dir)).unwrap_err();
+        assert!(!error.to_string().contains('\n'), "{error}");
+    }
+
+    #[test]
+    fn voice_toml_and_the_login_move_with_the_configuration_directory() {
+        let xdg = tempfile::tempdir().unwrap();
+        let alice = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(xdg.path().join("conch")).unwrap();
+        write_config(&xdg.path().join("conch"), "channel = \"xdg\"\n");
+        write_config(alice.path(), "channel = \"alice\"\n");
+
+        let args = join(&[]);
+        let by_xdg = resolve(&args, &xdg_environment(xdg.path())).unwrap();
+        assert_eq!(by_xdg.channel, "xdg");
+        // CONCH_CONFIG_DIR wins over XDG_CONFIG_HOME and is used without `conch` added.
+        let mut both = environment(alice.path());
+        both.xdg_config_home = Some(xdg.path().as_os_str().to_owned());
+        assert_eq!(resolve(&args, &both).unwrap().channel, "alice");
+    }
+
+    #[test]
+    fn a_relative_config_dir_is_refused_naming_the_variable() {
+        let mut environment = environment(std::path::Path::new("/made/up"));
+        environment.conch_config_dir = Some(OsString::from("relative/FAKE_dir"));
+        let error = resolve(&join(&["general"]), &environment).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "CONCH_CONFIG_DIR must be an absolute path"
+        );
+    }
+
+    #[test]
+    fn the_help_documents_the_config_dir_variable() {
+        let help = command().render_help().to_string();
+        assert!(help.contains("CONCH_CONFIG_DIR"), "{help}");
     }
 
     #[test]
@@ -664,8 +829,7 @@ mod tests {
     #[test]
     fn the_stored_login_is_used_when_the_environment_has_no_token() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("conch")).unwrap();
-        let credentials = dir.path().join("conch").join("credentials.json");
+        let credentials = dir.path().join("credentials.json");
         std::fs::write(
             &credentials,
             format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}"),

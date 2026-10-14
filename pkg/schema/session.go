@@ -385,6 +385,21 @@ func validateText(field, s string, max int) error {
 	return nil
 }
 
+// validateProse is validateText for prose that a person writes to an agent or
+// an agent writes back: an intervention's body and its reason. A terminal shows
+// it and an adapter puts it in a model's prompt, so it may break lines and
+// indent (newline, tab) and nothing more: a carriage return, an escape or NUL
+// could rewrite what a reader sees or what the model is given.
+func validateProse(field, s string, max int) error {
+	if err := validateText(field, s, max); err != nil {
+		return err
+	}
+	if strings.ContainsFunc(s, func(c rune) bool { return unicode.IsControl(c) && c != '\n' && c != '\t' }) {
+		return fmt.Errorf("schema: %s must have no control characters but newline and tab", field)
+	}
+	return nil
+}
+
 // validateLine is validateText for a field that is one line: a run's task or
 // an activity summary, which rosters and timelines show on a single row. A
 // control character (newline, carriage return, tab, escape, NUL) would break

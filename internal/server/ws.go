@@ -188,6 +188,12 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 		return
 	}
 
+	release, ok := s.admitSocket(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+
 	conn, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		// Accept has already written the HTTP error response.
