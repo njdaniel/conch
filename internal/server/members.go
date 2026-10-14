@@ -121,6 +121,8 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 			PrincipalID: m.PrincipalID,
 			AddedBy:     m.AddedBy,
 			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
+			Name:        m.Name,
+			Kind:        schema.PrincipalKind(m.Kind),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
