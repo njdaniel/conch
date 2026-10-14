@@ -2430,6 +2430,12 @@ func TestMessageLineAuthorsAndTimes(t *testing.T) {
 		{PrincipalID: 16, Name: "no-kind"},
 		{PrincipalID: 18, Name: "\u200b\u202e \x1b", Kind: schema.PrincipalAgent},
 		{PrincipalID: 17, Name: "a-very-long-display-name-that-goes-on-and-on", Kind: schema.PrincipalHuman},
+		{PrincipalID: 19, Name: "deployment-notifier", Kind: schema.PrincipalAgent},
+		{PrincipalID: 20, Name: "abcdefghijklmnopqrstuvwx", Kind: schema.PrincipalAgent},
+		// Built from runes: the invisible-character gate refuses the raw characters.
+		{PrincipalID: 21, Name: "ali" + string(rune(0xad)) + "ce", Kind: schema.PrincipalHuman},
+		{PrincipalID: 22, Name: "bo" + string(rune(0xe0041)) + string(rune(0x2062)) + "b", Kind: schema.PrincipalHuman},
+		{PrincipalID: 23, Name: string(rune(0x301)) + string(rune(0x302)), Kind: schema.PrincipalHuman},
 	}
 	today := at(13, 12, 5)  // 14:05 at UTC+2
 	early := at(12, 22, 40) // 00:40 on the 13th at UTC+2: today
@@ -2469,6 +2475,12 @@ func TestMessageLineAuthorsAndTimes(t *testing.T) {
 		{"newlines in a name stay on one line", schema.MessageV2{AuthorID: 14, Body: "hi", CreatedAt: today}, 100, members, "14:05 line ↵ break ↵ here [agent]: hi"},
 		{"a name left with only a stray bracket is escaped", schema.MessageV2{AuthorID: 15, Body: "hi", CreatedAt: today}, 100, members, "14:05 \\[31m: hi"},
 		{"a name of nothing visible shows the number", schema.MessageV2{AuthorID: 18, Body: "hi", CreatedAt: today}, 100, members, "14:05 #18: hi"},
+		{"soft hyphen is not part of the name", schema.MessageV2{AuthorID: 21, Body: "hi", CreatedAt: today}, 100, members, "14:05 alice: hi"},
+		{"tag and invisible-operator characters are dropped", schema.MessageV2{AuthorID: 22, Body: "hi", CreatedAt: today}, 100, members, "14:05 bob: hi"},
+		{"a name of only combining marks shows the number", schema.MessageV2{AuthorID: 23, Body: "hi", CreatedAt: today}, 100, members, "14:05 #23: hi"},
+		{"long agent name, other day, 60 columns", schema.MessageV2{AuthorID: 19, Body: "hi", CreatedAt: other}, 60, members, "07-11 11:00 deployment-notif… [agent]: "},
+		{"24-cell agent name, other day, payload, 80 columns", schema.MessageV2{AuthorID: 20, Body: "hi", CreatedAt: other, Payload: &schema.Payload{Schema: "whisper.to.nick.and.rex.v1"}}, 80, members, "07-11 11:00 abcdefghijklm… [agent] [whisper.to.nick.and…]: "},
+		{"wide scope badge keeps the line in the pane", schema.MessageV2{AuthorID: 9, Body: "hi", CreatedAt: other, Audience: &schema.Audience{Kind: "未来のカインドです長い名前"}}, 80, members, "[未来のカインドです…] 07-11 11:00 rex [agent]: hi"},
 		{"long name is cut", schema.MessageV2{AuthorID: 17, Body: "hi", CreatedAt: today}, 100, members, "14:05 a-very-long-display-nam…: hi"},
 		{"body starting with [ is escaped", schema.MessageV2{AuthorID: 7, Body: "[net:alpha] hi", CreatedAt: today}, 100, members, "14:05 nick: \\[net:alpha] hi"},
 		{"payload badge follows the agent badge", schema.MessageV2{AuthorID: 9, Body: "x", CreatedAt: today, Payload: &schema.Payload{Schema: "acme.alert.v1"}}, 100, members, "14:05 rex [agent] [acme.alert.v1]: x"},
@@ -2650,7 +2662,9 @@ func TestMembersAskedAfterChannelListLoads(t *testing.T) {
 	}
 }
 
-// Showing names must not change how messages are merged or deduplicated.
+// Showing names must not change how messages are merged or deduplicated. This is
+// a tripwire, not coverage: nothing in merging reads the members map, so it only
+// fails if someone makes it.
 func TestMembersDoNotChangeMessageMerging(t *testing.T) {
 	m := authorModel(stubAPI{}, schema.ChannelMemberV1{PrincipalID: 7, Name: "nick"})
 	m, _ = update(m, messagesLoaded{channel: "ops", messages: []schema.MessageV2{{ID: 2, AuthorID: 7, Body: "b"}, {ID: 1, AuthorID: 7, Body: "a"}}})

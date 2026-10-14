@@ -1770,37 +1770,76 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 //     a badge, least of all as the "[agent]" badge that follows a name.
 func (m Model) messageLine(channel string, message schema.MessageV2, width int) string {
 	inner := width - 2 // the pane's border
-	var prefix strings.Builder
-	used := 0
-	if scope := m.scopeText(channel, message.Audience); scope != "" {
-		text := "[" + clip(scope, width/3) + "]"
-		used += utf8.RuneCountInString(text) + 1
-		prefix.WriteString(badgeStyle.Render(text) + " ")
-	}
-	if when := m.messageTime(message); when != "" {
-		used += len(when) + 1
-		prefix.WriteString(when + " ")
-	}
-	name, agent := m.authorName(channel, message.AuthorID)
-	name = fitCells(name, max(4, min(24, inner/2)))
-	used += cellWidth(name)
-	prefix.WriteString(name)
-	if agent {
-		used += len(" [agent]")
-		prefix.WriteString(" " + badgeStyle.Render("[agent]"))
+	var scope, payload string
+	if text := m.scopeText(channel, message.Audience); text != "" {
+		scope = "[" + fitCells(text, width/3) + "]"
 	}
 	if message.Payload != nil {
-		text := "[" + clip(sanitize(message.Payload.Schema), width/3) + "]"
-		used += utf8.RuneCountInString(text) + 1
-		prefix.WriteString(" " + badgeStyle.Render(text))
+		payload = "[" + fitCells(sanitize(message.Payload.Schema), width/3) + "]"
 	}
-	prefix.WriteString(": ")
-	used += 2
+	when := m.messageTime(message)
+	name, agent := m.authorName(channel, message.AuthorID)
+	agentBadge := ""
+	if agent {
+		agentBadge = "[agent]"
+	}
+	// fixed is what the line spends on everything but the name and the body:
+	// the badges, the time, the separators and ": ".
+	fixed := func(when string) int {
+		n := 2
+		for _, part := range []string{scope, when, agentBadge, payload} {
+			if part != "" {
+				n += cellWidth(part) + 1
+			}
+		}
+		return n
+	}
+	// The name gets what the rest leaves, at most 24 cells. When that is under
+	// 4 the time goes first: the name is what says who is speaking.
+	nameCells := min(24, inner-fixed(when))
+	if nameCells < 4 && when != "" {
+		when = ""
+		nameCells = min(24, inner-fixed(when))
+	}
+	name = fitCells(name, nameCells)
+
 	body := sanitize(message.Body)
 	if strings.HasPrefix(body, "[") {
 		body = "\\" + body
 	}
-	return prefix.String() + fitCells(body, inner-used)
+	plain := strings.Join(nonEmpty(scope, when, name, agentBadge, payload), " ")
+	if cellWidth(plain)+2 > inner {
+		// Not even the prefix fits (a very narrow pane): keep as much of it as
+		// does, unstyled, and no body, so the line is still one row.
+		return fitCells(plain+": ", inner)
+	}
+	var out strings.Builder
+	for _, part := range []struct {
+		text  string
+		badge bool
+	}{{scope, true}, {when, false}, {name, false}, {agentBadge, true}, {payload, true}} {
+		switch {
+		case part.text == "":
+		case part.badge:
+			out.WriteString(badgeStyle.Render(part.text) + " ")
+		default:
+			out.WriteString(part.text + " ")
+		}
+	}
+	// The space after the last part is the one before ": " in the format, and
+	// ": " itself follows the name or badge directly.
+	line := strings.TrimSuffix(out.String(), " ") + ": "
+	return line + fitCells(body, inner-cellWidth(plain)-2)
+}
+
+func nonEmpty(parts ...string) []string {
+	out := parts[:0:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // narrowWidth is the terminal width below which messages carry no time.
@@ -1845,17 +1884,25 @@ func (m Model) authorName(channel string, id int64) (name string, agent bool) {
 
 // safeName makes a principal's name fit to print. Names stored before the
 // server's display-name rule existed can hold anything, so it goes through
-// sanitize like a body, loses the zero-width characters that would let two
-// different names look alike, and has "[" escaped so it cannot pose as a badge.
+// sanitize like a body, loses every Unicode format character (Cf: zero-width
+// and soft-hyphen characters, tag characters and the like, which would let two
+// different names look alike) and has "[" escaped so it cannot pose as a badge.
+// ZWJ and ZWNJ are format characters too and go with them: a terminal does not
+// shape the scripts that need them, so removing them is the conservative
+// choice. A name of nothing but combining marks would draw on the space before
+// it, so it counts as empty.
 func safeName(name string) string {
 	name = strings.Map(func(r rune) rune {
-		switch r {
-		case 0x200b, 0x200c, 0x200d, 0x2060, 0xfeff: // zero-width space, non-joiner, joiner, word joiner, BOM
+		if unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
 	}, sanitize(name))
-	return strings.TrimSpace(strings.ReplaceAll(name, "[", "\\["))
+	name = strings.TrimSpace(name)
+	if strings.IndexFunc(name, func(r rune) bool { return !unicode.Is(unicode.Mn, r) }) < 0 {
+		return ""
+	}
+	return strings.ReplaceAll(name, "[", "\\[")
 }
 
 // promptWithin is prompt fitted to max cells. Only the channel name is ever
