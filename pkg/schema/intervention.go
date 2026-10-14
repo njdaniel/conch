@@ -30,6 +30,12 @@ const (
 	// ErrorCodeInterventionUnsupported: the run's session did not declare
 	// the requested kind, so nothing would act on it (HTTP 409).
 	ErrorCodeInterventionUnsupported = "intervention_unsupported"
+	// ErrorCodeTooManyInterventions: the run already has as many
+	// interventions waiting for an answer as the server allows (HTTP 429).
+	ErrorCodeTooManyInterventions = "too_many_interventions"
+	// ErrorCodeHumanRequired: only a person may do this, and an agent asked
+	// (HTTP 403). The approval routes have answered with this code since P1.
+	ErrorCodeHumanRequired = "human_required"
 )
 
 // Length limits on the free-text fields of an intervention, in characters.
@@ -192,7 +198,7 @@ func validateInterventionReason(state InterventionState, reason string) error {
 	if state == InterventionStateFailed && strings.TrimSpace(reason) == "" {
 		return errors.New("schema: failed intervention must carry reason")
 	}
-	return validateText("intervention reason", reason, MaxInterventionReasonLength)
+	return validateProse("intervention reason", reason, MaxInterventionReasonLength)
 }
 
 // validateInterventionAsk checks the person's side of an intervention, shared
@@ -209,7 +215,7 @@ func validateInterventionAsk(kind InterventionKind, body string) error {
 	if kind != InterventionKindMessage && body != "" {
 		return fmt.Errorf("schema: %s intervention must not carry body", kind)
 	}
-	return validateText("intervention body", body, MaxInterventionBodyLength)
+	return validateProse("intervention body", body, MaxInterventionBodyLength)
 }
 
 // CreateInterventionRequestV1 is the request body of

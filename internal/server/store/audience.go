@@ -893,8 +893,8 @@ func withAuthor(ids []int64, authorID int64) []int64 {
 // that answers no message to the channel's members. Activity has no rule of
 // its own: it is read only through its run.
 //
-// This file is the only place that reads rows of runs and run_activity
-// (TestOnlyAudienceGoReadsRunRows): the reads below, the roster's look-up of a
+// This file is the only place that reads rows of runs, run_activity and
+// interventions (TestOnlyAudienceGoReadsRunRows): the reads below, the roster's look-up of a
 // session's runs, and the reads the writes in runs.go make inside their
 // transactions all embed the one condition, runVisibility, in the statement
 // that selects the row, as the message reads embed visibleToScopedReader.
@@ -1024,11 +1024,18 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 // RunVisible returns run runID if reader may see it, and ErrRunNotFound
 // otherwise, whatever the reason.
 func (s *Store) RunVisible(ctx context.Context, runID int64, reader Reader) (Run, error) {
+	return runVisibleTx(ctx, s.db, runID, reader)
+}
+
+// runVisibleTx is RunVisible inside a transaction, for the write in
+// interventions.go that must decide on the run in the transaction that stores
+// its row.
+func runVisibleTx(ctx context.Context, tx execer, runID int64, reader Reader) (Run, error) {
 	scoped, args, ok := runVisibility(reader)
 	if !ok {
 		return Run{}, ErrRunNotFound
 	}
-	run, err := scanRun(s.db.QueryRowContext(ctx, runByIDSQL(scoped), append([]any{runID}, args...)...))
+	run, err := scanRun(tx.QueryRowContext(ctx, runByIDSQL(scoped), append([]any{runID}, args...)...))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Run{}, ErrRunNotFound
@@ -1306,4 +1313,190 @@ func (s *Store) SessionRunViews(ctx context.Context, sessionIDs []int64, reader 
 		return nil, fmt.Errorf("store: session runs: %w", err)
 	}
 	return out, nil
+}
+
+// Interventions (issue #287, decision D10). An intervention is a person's
+// request of a run, so it has no visibility of its own: it is visible to
+// exactly the readers who can see its run (the run rule above), and its body,
+// which is the person speaking to the run, reaches no one else. Every
+// statement below that selects an intervention for a reader embeds the one
+// run condition, runCond, over the run it joins, with the caller as reader.
+// Operators get no exemption, and an intervention the reader cannot see and
+// one that does not exist are the same answer, ErrInterventionNotFound.
+//
+// The table is read nowhere else (TestOnlyAudienceGoReadsRunRows). The one
+// read that serves no reader, the count of open requests behind the 16-open
+// bound, is here for that reason and is asked only inside the transaction
+// that has just seen the run by the rule.
+
+// interventionColumns is the column list scanIntervention reads, over
+// interventions aliased iv and runs aliased ru (for the run's channel).
+const interventionColumns = `iv.id, iv.run_id, ru.channel_id, iv.kind, iv.body, iv.state, iv.requested_by, iv.requested_at, iv.answered_at, iv.reason`
+
+// The statements that read interventions, each with the run condition spliced
+// in by the function below it. Their parameters are listed in order at each
+// call.
+const (
+	interventionByIDHead = `SELECT ` + interventionColumns + ` FROM interventions iv JOIN runs ru ON ru.id = iv.run_id
+		 WHERE iv.id = ? AND `
+	ownedInterventionHead = `SELECT ` + interventionColumns + ` FROM interventions iv JOIN runs ru ON ru.id = iv.run_id
+		 JOIN sessions so ON so.id = ru.session_id
+		 WHERE iv.id = ? AND so.credential_id = ? AND ru.principal_id = ? AND `
+	runInterventionsHead = `SELECT ` + interventionColumns + ` FROM interventions iv JOIN runs ru ON ru.id = iv.run_id
+		 WHERE iv.run_id = ? AND iv.id > ? AND `
+	sessionInterventionsHead = `SELECT ` + interventionColumns + ` FROM interventions iv JOIN runs ru ON ru.id = iv.run_id
+		 JOIN sessions so ON so.id = ru.session_id
+		 WHERE ru.session_id = ? AND so.credential_id = ? AND ru.principal_id = ? AND iv.id > ? AND (? = '' OR iv.state = ?) AND `
+	interventionListTail = ` ORDER BY iv.id ASC LIMIT ?`
+)
+
+func interventionByIDSQL(scoped bool) string { return interventionByIDHead + runCond(scoped) }
+func ownedInterventionSQL(scoped bool) string {
+	return ownedInterventionHead + runCond(scoped)
+}
+func runInterventionsSQL(scoped bool) string {
+	return runInterventionsHead + runCond(scoped) + interventionListTail
+}
+func sessionInterventionsSQL(scoped bool) string {
+	return sessionInterventionsHead + runCond(scoped) + interventionListTail
+}
+
+func scanIntervention(row interface{ Scan(...any) error }) (Intervention, error) {
+	var (
+		iv          Intervention
+		kind, state string
+		requested   int64
+		answered    sql.NullInt64
+	)
+	if err := row.Scan(&iv.ID, &iv.RunID, &iv.ChannelID, &kind, &iv.Body, &state, &iv.RequestedBy, &requested,
+		&answered, &iv.Reason); err != nil {
+		return Intervention{}, err
+	}
+	iv.Kind, iv.State = schema.InterventionKind(kind), schema.InterventionState(state)
+	if !iv.Kind.Valid() || !iv.State.Valid() {
+		// The CHECK constraints make this impossible; never guess.
+		return Intervention{}, fmt.Errorf("store: intervention %d has an unreadable kind %q or state %q", iv.ID, kind, state)
+	}
+	iv.RequestedAt = time.UnixMilli(requested)
+	if answered.Valid {
+		t := time.UnixMilli(answered.Int64)
+		iv.AnsweredAt = &t
+	}
+	return iv, nil
+}
+
+// InterventionVisible returns intervention id if reader may see its run, and
+// ErrInterventionNotFound otherwise, whatever the reason.
+func (s *Store) InterventionVisible(ctx context.Context, id int64, reader Reader) (Intervention, error) {
+	scoped, args, ok := runVisibility(reader)
+	if !ok {
+		return Intervention{}, ErrInterventionNotFound
+	}
+	iv, err := scanIntervention(s.db.QueryRowContext(ctx, interventionByIDSQL(scoped), append([]any{id}, args...)...))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Intervention{}, ErrInterventionNotFound
+	case err != nil:
+		return Intervention{}, fmt.Errorf("store: read intervention %d: %w", id, err)
+	}
+	return iv, nil
+}
+
+// OwnedIntervention is InterventionVisible narrowed to the interventions on
+// runs of credentialID's sessions, and of reader's own principal: the ones
+// the caller may answer. Every other case is ErrInterventionNotFound, so an
+// intervention on another credential's run, of the same principal or not,
+// cannot be told from one that does not exist.
+func (s *Store) OwnedIntervention(ctx context.Context, id, credentialID int64, reader Reader) (Intervention, error) {
+	return ownedInterventionTx(ctx, s.db, id, credentialID, reader)
+}
+
+// ownedInterventionTx is OwnedIntervention inside a transaction, for the write
+// in interventions.go.
+func ownedInterventionTx(ctx context.Context, tx execer, id, credentialID int64, reader Reader) (Intervention, error) {
+	scoped, args, ok := runVisibility(reader)
+	if !ok || credentialID <= 0 {
+		return Intervention{}, ErrInterventionNotFound
+	}
+	iv, err := scanIntervention(tx.QueryRowContext(ctx, ownedInterventionSQL(scoped),
+		append([]any{id, credentialID, reader.PrincipalID}, args...)...))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Intervention{}, ErrInterventionNotFound
+	case err != nil:
+		return Intervention{}, fmt.Errorf("store: read intervention %d: %w", id, err)
+	}
+	return iv, nil
+}
+
+// ListVisibleInterventions returns up to limit interventions on run runID with
+// id greater than afterID, oldest first, if reader may see the run, and
+// ErrRunNotFound otherwise. The run condition is also in the statement that
+// selects the rows, so a reader who loses sight of the run between the two
+// gets nothing. The result is never nil.
+func (s *Store) ListVisibleInterventions(ctx context.Context, runID int64, reader Reader, afterID int64, limit int) ([]Intervention, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list interventions: limit must be positive, got %d", limit)
+	}
+	if _, err := s.RunVisible(ctx, runID, reader); err != nil {
+		return nil, err
+	}
+	scoped, args, ok := runVisibility(reader)
+	if !ok {
+		return nil, ErrRunNotFound
+	}
+	return s.queryInterventions(ctx, runInterventionsSQL(scoped),
+		append(append([]any{runID, afterID}, args...), limit)...)
+}
+
+// ListSessionInterventions returns up to limit interventions with id greater
+// than afterID, oldest first, on the runs of session sessionID, narrowed to
+// state when it is not empty: what the session's adapter polls for. The
+// session must be credentialID's and the runs the reader's own, both in the
+// statement, and the runs must be ones reader may still see, so an agent that
+// has left a run's channel is not handed what people say to that run. The
+// result is never nil.
+func (s *Store) ListSessionInterventions(ctx context.Context, sessionID, credentialID int64, reader Reader, state schema.InterventionState, afterID int64, limit int) ([]Intervention, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list session interventions: limit must be positive, got %d", limit)
+	}
+	scoped, args, ok := runVisibility(reader)
+	if !ok || credentialID <= 0 {
+		return []Intervention{}, nil
+	}
+	return s.queryInterventions(ctx, sessionInterventionsSQL(scoped),
+		append(append([]any{sessionID, credentialID, reader.PrincipalID, afterID, string(state), string(state)}, args...), limit)...)
+}
+
+func (s *Store) queryInterventions(ctx context.Context, query string, args ...any) ([]Intervention, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list interventions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []Intervention{}
+	for rows.Next() {
+		iv, err := scanIntervention(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list interventions: %w", err)
+		}
+		out = append(out, iv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list interventions: %w", err)
+	}
+	return out, nil
+}
+
+// requestedInterventionsTx counts the interventions on run runID still in
+// state requested, for the bound on how many a run may hold open. It serves
+// no reader; the caller has just seen the run by the run rule in the same
+// transaction.
+func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT count(*) FROM interventions WHERE run_id = ? AND state = 'requested'", runID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count requested interventions of run %d: %w", runID, err)
+	}
+	return n, nil
 }

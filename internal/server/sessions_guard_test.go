@@ -97,8 +97,14 @@ func TestAgentSelfCheck(t *testing.T) {
 // to it. A reference that is not a call (passing it as a value) counts: it
 // would be a way round the list.
 var guardedCallers = map[string][]string{
-	"agentSelfCheck":   {"agentSelfAllowed"},
-	"agentSelfAllowed": {"ownSessionCaller"},
+	"agentSelfCheck": {"agentSelfAllowed"},
+	// ownSessionCaller asks for sessions.manage; the adapter's poll for the
+	// interventions on its own session's runs asks for runs.manage, the
+	// capability that governs runs, and so calls agentSelfAllowed itself
+	// (issue #287, decision D9). It names no channel, acts on the caller's own
+	// session and reaches nothing of anyone else's, which is all the check is
+	// for; the store's statement narrows the rows to the caller's credential.
+	"agentSelfAllowed": {"ownSessionCaller", "handleListSessionInterventions"},
 	// The routes that act on the caller's own session, and nothing else.
 	"ownSessionCaller": {"handleCreateSession", "handleSessionHeartbeat", "handleEndSession"},
 }
@@ -251,7 +257,10 @@ func TestOwnSessionRoutesAreTheListedHandlers(t *testing.T) {
 	// Starting a run (issue #266) is under a session's path but is not an
 	// own-session call: it is gated by the channel gate with runs.manage
 	// (runGate), not by agentSelfCheck.
-	wantRoutes := []string{"DELETE /v1/sessions/{id}", "GET /v1/sessions", "POST /v1/sessions", "POST /v1/sessions/{id}/heartbeat", "POST /v1/sessions/{id}/runs"}
+	// Likewise polling a session's interventions (issue #287): it is under the
+	// session's path and acts on the caller's own session, but it asks for
+	// runs.manage and so is listed for agentSelfAllowed, not ownSessionCaller.
+	wantRoutes := []string{"DELETE /v1/sessions/{id}", "GET /v1/sessions", "GET /v1/sessions/{id}/interventions", "POST /v1/sessions", "POST /v1/sessions/{id}/heartbeat", "POST /v1/sessions/{id}/runs"}
 	if strings.Join(sessionRoutes, "|") != strings.Join(wantRoutes, "|") {
 		t.Errorf("session routes = %v, want %v", sessionRoutes, wantRoutes)
 	}
