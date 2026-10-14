@@ -129,6 +129,7 @@ func (s *Server) handleCreateIntervention(w http.ResponseWriter, r *http.Request
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyIntervention(iv.ChannelID, iv.ID)
 	s.writeIntervention(w, r, http.StatusCreated, iv)
 }
 
@@ -315,6 +316,7 @@ func (s *Server) ackIntervention(ctx context.Context, call sessionCall, iv store
 		slog.ErrorContext(ctx, "interventions: answer failed", "principal", call.caller.ID, "intervention", iv.ID, "error", err)
 		return schema.InterventionV1{}, callInternal
 	}
+	s.events.notifyIntervention(updated.ChannelID, updated.ID)
 	return checkedInterventionDoc(ctx, updated)
 }
 

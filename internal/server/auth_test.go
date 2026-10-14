@@ -169,6 +169,9 @@ var routeExpectations = map[string]routeExpectation{
 	// caller who passes authentication gets 400 before anything else.
 	"GET /v1/channels/{channel}/voice": {classAuth, "/v1/channels/general/voice", "", 200},
 	"GET /v1/voice/ws":                 {classAuth, "/v1/voice/ws", "", 400},
+	// The events socket (issue #269) needs a channel parameter too, so every
+	// caller who passes authentication gets 400 (AuthOff: sessions_require_auth).
+	"GET /v1/events/ws": {classAuth, "/v1/events/ws", "", 400},
 	// Sessions (issue #265). Chosen to change and audit nothing: an empty
 	// create is a 400 (a client is required), the session routes use an id
 	// that does not exist, and the list reads a channel every fixture caller

@@ -199,6 +199,7 @@ func (s *Server) createRun(ctx context.Context, call sessionCall, sessionID int6
 		slog.ErrorContext(ctx, "runs: create failed", "principal", call.caller.ID, "error", err)
 		return schema.RunV1{}, callInternal
 	}
+	s.events.notifyRun(run.ChannelID, run.ID)
 	return checkedRunDoc(ctx, run)
 }
 
@@ -372,6 +373,7 @@ func (s *Server) setRunState(ctx context.Context, call sessionCall, run store.Ru
 		slog.ErrorContext(ctx, "runs: set state failed", "principal", call.caller.ID, "error", err)
 		return schema.RunV1{}, callInternal
 	}
+	s.events.notifyRun(updated.ChannelID, updated.ID)
 	return checkedRunDoc(ctx, updated)
 }
 
@@ -433,6 +435,7 @@ func (s *Server) appendRunActivity(ctx context.Context, call sessionCall, run st
 		slog.ErrorContext(ctx, "runs: append activity failed", "principal", call.caller.ID, "error", err)
 		return schema.AgentActivityV1{}, callInternal
 	}
+	s.events.notifyActivity(run.ChannelID, run.ID, entry.ID)
 	doc := activityDoc(entry)
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(ctx, "runs: built an invalid activity entry", "run", run.ID, "error", err)

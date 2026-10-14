@@ -481,3 +481,44 @@ func TestMCPPostActivityDataIsReencoded(t *testing.T) {
 		t.Errorf("MCP stored %s, want %s (keys sorted, through float64)", over.Data, want)
 	}
 }
+
+// What an agent changes over MCP reaches the events socket (issue #269) as
+// what it changes over REST does: the notify calls are in the functions both
+// fronts call, not in the REST handlers.
+func TestMCPChangesReachTheEventsSocket(t *testing.T) {
+	f := newInterventionFixture(t)
+	base := wsTestServer(t, f.srv)
+	c := dialEvents(t, base, "/v1/events/ws?channel=general", f.aliceTok)
+	c.next() // the roster on connect
+
+	sess := mustTool[schema.SessionV1](t, f, f.botTok, "register_session", map[string]any{"client": "adapter", "interventions": []string{"cancel"}})
+	hasSession := func(id int64) func(schema.SessionRosterV1) bool {
+		return func(r schema.SessionRosterV1) bool {
+			for _, s := range r.Sessions {
+				if s.ID == id {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	c.until("the registered session in a roster", isRoster(hasSession(sess.ID)))
+
+	run := mustTool[schema.RunV1](t, f, f.botTok, "start_run", map[string]any{"session_id": sess.ID, "channel": "general", "message_id": f.whisper, "task": "over mcp"})
+	c.until("the started run", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateQueued }))
+	mustTool[schema.RunV1](t, f, f.botTok, "update_run", map[string]any{"run_id": run.ID, "state": "running"})
+	c.until("the run running", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateRunning }))
+	entry := mustTool[schema.AgentActivityV1](t, f, f.botTok, "post_activity", map[string]any{"run_id": run.ID, "kind": "command_started", "summary": "over mcp"})
+	c.until("the activity entry", func(fr eventFrame) bool {
+		return fr.schema == schema.AgentActivitySchemaV1 && fr.activity.ID == entry.ID
+	})
+	iv := f.mustAsk(t, f.aliceTok, run.ID, schema.InterventionKindCancel)
+	mustTool[schema.InterventionV1](t, f, f.botTok, "ack_intervention", map[string]any{"intervention_id": iv.ID, "state": "applied"})
+	c.until("the answered intervention", func(fr eventFrame) bool {
+		return fr.schema == schema.InterventionSchemaV1 && fr.intervention.ID == iv.ID && fr.intervention.State == schema.InterventionStateApplied
+	})
+	if res := f.tool(t, f.botTok, "end_session", map[string]any{"session_id": sess.ID}); res.code != "ok" {
+		t.Fatalf("end_session = %s", res.code)
+	}
+	c.until("a roster without the ended session", isRoster(func(r schema.SessionRosterV1) bool { return !hasSession(sess.ID)(r) }))
+}
