@@ -395,6 +395,8 @@ func TestAdminManifestRefusedLocally(t *testing.T) {
 		{"not json", `tier: A`, "not a valid manifest request"},
 		{"empty", ``, "not a valid manifest request"},
 		{"trailing data", testManifest + ` {}`, "data after the JSON document"},
+		{"a stray closing brace", testManifest + `}`, "data after the JSON document"},
+		{"a stray closing bracket", testManifest + ` ]`, "data after the JSON document"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

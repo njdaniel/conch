@@ -98,11 +98,11 @@ Usage:
   conch nets remove [--server <url>] <channel> <name> <principal-id>
   conch admin channel create [--server <url>] [--json] <name>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
-  conch admin principal disable|enable [--server <url>] <id>
+  conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
-  conch admin credential revoke [--server <url>] <credential-id>
-  conch admin member add|remove [--server <url>] <channel> <principal-id>
+  conch admin credential revoke [--server <url>] [--json] <credential-id>
+  conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
   conch voice status [--server <url>] [--watch] <channel>
@@ -159,7 +159,9 @@ Scope:
   It uses your ordinary credential; the server decides who may do what, so a
   member running one is refused with the server's own error. Each command
   prints one line, or with --json the response document (commands the server
-  answers with no document print nothing). credential issue prints the token
+  answers with no document print nothing). --json is for a program to read:
+  its strings are the server's, JSON-escaped but not otherwise made safe for
+  a terminal, as with audit export. credential issue prints the token
   alone on standard output, so TOKEN=$(conch admin credential issue 3 --label
   bot) works; the credential's id and expiry go to standard error, and the
   token never does. credential list prints

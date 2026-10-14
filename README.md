@@ -336,7 +336,7 @@ Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <tok
 **Agents are deny-by-default.** A token only says who the agent is. To do anything in a channel an agent needs both **membership** of the channel (step 3) and a **manifest** granting the capability and the permission there:
 
 ```sh
-bin/conch admin manifest put 3 <<'EOF'      # as the operator; --file <path> reads a file; checked locally before it is sent
+CONCH_TOKEN=$(cat /tmp/conch-data/operator.token) bin/conch admin manifest put 3 <<'EOF'   # the operator's token for this one command; --file <path> reads a file
 {
   "display_name": "deploy-bot", "tier": "A",
   "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],

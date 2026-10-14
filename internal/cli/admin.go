@@ -371,7 +371,9 @@ func adminManifestPut(ctx context.Context, r *adminRun) error {
 	if err := dec.Decode(&req); err != nil {
 		return fmt.Errorf("cli: admin manifest put: manifest is not a valid manifest request: %w", err)
 	}
-	if dec.More() {
+	// More reports false for a stray closing bracket, so ask for the next
+	// token: only the end of the input is acceptable after the document.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("cli: admin manifest put: manifest has data after the JSON document")
 	}
 	if err := req.Validate(); err != nil {
