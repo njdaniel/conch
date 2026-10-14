@@ -518,8 +518,9 @@ func TestOnlyAudienceGoReadsMessageRows(t *testing.T) {
 	}
 }
 
-// runRowRead matches SQL that reads rows of runs or run_activity, in any case
-// and with any spacing:
+// runRowRead matches SQL that reads rows of runs, run_activity or
+// interventions (issue #287: an intervention is read by its run's rule), in
+// any case and with any spacing:
 //
 //   - the table right after FROM or JOIN;
 //   - the table later in a FROM list, after a comma (an implicit join, "FROM
@@ -532,9 +533,9 @@ func TestOnlyAudienceGoReadsMessageRows(t *testing.T) {
 // forms stop at a quote, a backquote or a semicolon, so they look within one
 // statement and not across a file.
 var runRowRead = regexp.MustCompile("(?i)" +
-	`\b(from|join)\s+(runs|run_activity)\b` +
-	"|\\bfrom\\b[^;\"`]*?,\\s*(runs|run_activity)\\b" +
-	"|\\b(insert(\\s+or\\s+\\w+)?\\s+into|replace\\s+into|update(\\s+or\\s+\\w+)?)\\s+(runs|run_activity)\\b[^;\"`]*\\breturning\\b")
+	`\b(from|join)\s+(runs|run_activity|interventions)\b` +
+	"|\\bfrom\\b[^;\"`]*?,\\s*(runs|run_activity|interventions)\\b" +
+	"|\\b(insert(\\s+or\\s+\\w+)?\\s+into|replace\\s+into|update(\\s+or\\s+\\w+)?)\\s+(runs|run_activity|interventions)\\b[^;\"`]*\\breturning\\b")
 
 // The structural half of the run rule (D8), as TestOnlyAudienceGoReadsMessageRows
 // is for messages: only audience.go reads rows of runs and run_activity, so
@@ -600,6 +601,17 @@ func TestRunRowReadPattern(t *testing.T) {
 		{"update or ignore run_activity set kind = ? returning summary", true},
 		{"INSERT INTO runs (session_id) VALUES (?) RETURNING id, task", true},
 		{"INSERT INTO run_activity (run_id) VALUES (?)\n\t RETURNING *", true},
+		{"SELECT body FROM interventions WHERE id = ?", true},
+		{"SELECT 1 FROM interventions iv JOIN runs ru ON ru.id = iv.run_id", true},
+		{"select count(*)\n\tfrom\n\tinterventions", true},
+		{"SELECT x FROM principals p, interventions iv WHERE iv.requested_by = p.id", true},
+		{"UPDATE interventions SET state = ? RETURNING body", true},
+		{"INSERT INTO interventions (run_id) VALUES (?)", false},
+		{"UPDATE interventions SET state = ? WHERE id = ? AND state = ?", false},
+		{"CREATE TABLE interventions (", false},
+		{"CREATE INDEX interventions_by_run ON interventions (run_id, id)", false},
+		{"INSERT INTO sessions (principal_id, interventions, started_at) VALUES (?, ?, ?)", false},
+		{"SELECT s.interventions, s.started_at FROM sessions s", false},
 		{"SELECT id, name FROM principals WHERE id = ?", false},
 		{"UPDATE sessions SET state = ? RETURNING id", false},
 	} {

@@ -30,6 +30,12 @@ const (
 	// ErrorCodeInterventionUnsupported: the run's session did not declare
 	// the requested kind, so nothing would act on it (HTTP 409).
 	ErrorCodeInterventionUnsupported = "intervention_unsupported"
+	// ErrorCodeTooManyInterventions: the run already has as many
+	// interventions waiting for an answer as the server allows (HTTP 429).
+	ErrorCodeTooManyInterventions = "too_many_interventions"
+	// ErrorCodeHumanRequired: only a person may do this, and an agent asked
+	// (HTTP 403). The approval routes have answered with this code since P1.
+	ErrorCodeHumanRequired = "human_required"
 )
 
 // Length limits on the free-text fields of an intervention, in characters.

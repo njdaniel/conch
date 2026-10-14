@@ -26,6 +26,10 @@ var runStoreMethods = map[string]bool{
 	"RunVisible": true, "OwnedRun": true, "ListVisibleRuns": true, "ListVisibleActivity": true,
 	"RunAnchorAudience": true, "SessionRunViews": true,
 	"CreateRun": true, "SetRunState": true, "AppendRunActivity": true,
+	// Interventions inherit their run's visibility (issue #287), so they are
+	// held to the same rule: the request's reader, always.
+	"InterventionVisible": true, "OwnedIntervention": true, "ListVisibleInterventions": true,
+	"ListSessionInterventions": true, "CreateIntervention": true, "AckIntervention": true,
 }
 
 // runTableInString matches a string that names a run table: run_activity
@@ -34,7 +38,7 @@ var runStoreMethods = map[string]bool{
 // in an UPDATE ... RETURNING.
 var (
 	runActivityInString = regexp.MustCompile(`(?i)run_activity`)
-	runsInString        = regexp.MustCompile(`(?i)\bruns\b`)
+	runsInString        = regexp.MustCompile(`(?i)\b(runs|interventions)\b`)
 	sqlInString         = regexp.MustCompile(`(?i)\b(select|update|insert|delete|replace|from|join|returning)\b`)
 )
 
@@ -73,7 +77,7 @@ func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
 			if recv == "store" || !strings.HasSuffix(recv, ".store") {
 				return true
 			}
-			if strings.Contains(name, "Run") || strings.Contains(name, "Activity") || strings.Contains(name, "Activities") {
+			if strings.Contains(name, "Run") || strings.Contains(name, "Activity") || strings.Contains(name, "Activities") || strings.Contains(name, "Intervention") {
 				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls the store's "+name+", which is not a known run method")
 			}
 		}
@@ -136,6 +140,9 @@ func c(s *Server) { s.store.ListVisibleActivity(ctx, 1, store.ChannelWideOnly, 0
 func d(s *Server) { st := s.store; st.RunVisible(ctx, 1, store.ChannelWideOnly) }
 const q3 = "SELECT ru.task FROM sessions s, runs ru"
 const q4 = "UPDATE runs SET state = ? RETURNING task"
+const q5 = "SELECT body FROM interventions WHERE id = ?"
+func e(s *Server) { s.store.InterventionsSince(ctx, 1) }
+func f(s *Server) { s.store.InterventionVisible(ctx, 1, store.ChannelWideOnly) }
 func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, apiV2)); _ = store.RunParams{} }
 `
 	fset := token.NewFileSet()
@@ -145,16 +152,18 @@ func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, ap
 	}
 	bad := strings.Join(checkRunReads(fset, "x.go", f), "\n")
 	for _, want := range []string{
-		"x.go:2:", "x.go:3:", "x.go:4:", "x.go:5:", "x.go:6:", "x.go:7:", "x.go:8:", "x.go:9:",
+		"x.go:2:", "x.go:3:", "x.go:4:", "x.go:5:", "x.go:6:", "x.go:7:", "x.go:8:", "x.go:9:", "x.go:10:", "x.go:11:", "x.go:12:",
 		"calls the store's RunsSince",
 		"calls RunVisible without readerFor",
 		"calls ListVisibleActivity without readerFor",
+		"calls the store's InterventionsSince",
+		"calls InterventionVisible without readerFor",
 	} {
 		if !strings.Contains(bad, want) {
 			t.Errorf("the guard missed %q; it reported:\n%s", want, bad)
 		}
 	}
-	if strings.Contains(bad, "x.go:10:") {
+	if strings.Contains(bad, "x.go:13:") {
 		t.Errorf("the guard refused the allowed call:\n%s", bad)
 	}
 }

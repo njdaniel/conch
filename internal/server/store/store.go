@@ -439,6 +439,34 @@ END`,
 )`,
 		`CREATE INDEX run_activity_by_run ON run_activity (run_id, id)`,
 	},
+	// 21: Interventions (issue #287, P3 epic #263, decision D10). One row per
+	// request a person makes of a run: take a message, cancel, pause or
+	// resume. A row has no visibility of its own: it is read only through its
+	// run, by the run's rule (audience.go). Only the server's side of the
+	// story is kept: requested_by and requested_at are the person's request;
+	// state, answered_at and reason are what the run's adapter reported, and
+	// answered_at is set exactly when the state is no longer 'requested'. A
+	// message has a body and no other kind has one (the CHECKs say so, as
+	// InterventionV1.Validate does). Timestamps are unix milliseconds UTC.
+	// Rows are never deleted, and nothing in this table changes a run. No data
+	// is backfilled. The index serves the per-run list and the 16-open bound.
+	{
+		`CREATE TABLE interventions (
+	id           INTEGER PRIMARY KEY,
+	run_id       INTEGER NOT NULL REFERENCES runs (id),
+	kind         TEXT    NOT NULL CHECK (kind IN ('message','cancel','pause','resume')),
+	body         TEXT    NOT NULL DEFAULT '',
+	state        TEXT    NOT NULL CHECK (state IN ('requested','acknowledged','applied','failed')),
+	requested_by INTEGER NOT NULL REFERENCES principals (id),
+	requested_at INTEGER NOT NULL,
+	answered_at  INTEGER,
+	reason       TEXT    NOT NULL DEFAULT '',
+	CHECK ((answered_at IS NULL) = (state = 'requested')),
+	CHECK ((kind = 'message') = (body <> '')),
+	CHECK (state <> 'requested' OR reason = '')
+)`,
+		`CREATE INDEX interventions_by_run ON interventions (run_id, id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

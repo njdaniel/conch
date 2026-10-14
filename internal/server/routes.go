@@ -74,6 +74,14 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/runs/{id}", accessAuthenticated, hf(s.handleGetRun)),
 		rt("GET /v1/runs", accessAuthenticated, hf(s.handleListRuns)),
 		rt("GET /v1/runs/{id}/activity", accessAuthenticated, hf(s.handleListRunActivity)),
+		// Interventions (issue #287). A human who can see the run asks; the
+		// readers who can see the run read; the credential that owns the
+		// run's session polls and answers. Checked in the handlers.
+		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleCreateIntervention)),
+		rt("GET /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleListRunInterventions)),
+		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
+		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
+		rt("POST /v1/interventions/{id}/ack", accessAuthenticated, hf(s.handleAckIntervention)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),

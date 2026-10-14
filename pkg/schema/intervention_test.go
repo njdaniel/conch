@@ -37,6 +37,8 @@ func TestInterventionErrorCodes(t *testing.T) {
 	assertErrorCodes(t, map[string]string{
 		ErrorCodeInterventionNotFound:    "intervention_not_found",
 		ErrorCodeInterventionUnsupported: "intervention_unsupported",
+		ErrorCodeTooManyInterventions:    "too_many_interventions",
+		ErrorCodeHumanRequired:           "human_required",
 	})
 }
 
