@@ -268,6 +268,52 @@ jobs:
       - name: p3-local
         run: go run ./e2e/p3-local
 
+  web-e2e:
+    # The browser suite (issue #285, D7): the web client in Chromium, against
+    # the fixture community of e2e/p3-local (started with --keep and a
+    # temporary root by the suite's own global setup, removed by its teardown,
+    # which runs when a test fails too). Playwright is pinned in
+    # web/package.json and installs the Chromium that version needs. A job of
+    # its own and not part of check, which needs no browser. It runs on every
+    # pull request and every push to main. Scripted agents only: the claude
+    # program is neither on this runner nor ever run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        working-directory: web
+        run: npm ci --no-audit
+
+      # --with-deps installs the system libraries Chromium needs, with sudo,
+      # which the runner has. Locally, `npx playwright install chromium` alone.
+      - name: browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: web-e2e
+        run: make web-e2e
+
+      - name: traces of the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-test-results
+          path: web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
   voice-check:
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
     # CLI and a real LiveKit server in Docker, plus the proof that the core is

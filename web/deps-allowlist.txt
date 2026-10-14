@@ -29,3 +29,7 @@ typescript-eslint
 # React's types: React ships none of its own.
 @types/react
 @types/react-dom
+
+# The browser suite (issue #285, D7): drives the client in Chromium. Run by
+# `make web-e2e` and its own CI job, never by `make check`.
+@playwright/test

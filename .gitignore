@@ -32,3 +32,7 @@ coverage.*
 .idea/
 .vscode/
 *.swp
+
+# Browser suite output (web/e2e, issue #285).
+/web/test-results/
+/web/playwright-report/
