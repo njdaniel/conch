@@ -455,11 +455,19 @@ func TestAgentManifestV1RateLimitFor(t *testing.T) {
 // pkg/schema must not depend on the server. Registering a new tool means
 // adding it here and to the mapping in the same change.
 var currentMCPTools = []string{
+	"ack_intervention",
 	"await_decision",
 	"check_decision",
+	"end_session",
+	"heartbeat",
+	"poll_interventions",
+	"post_activity",
 	"post_message",
 	"read_channel",
+	"register_session",
 	"request_approval",
+	"start_run",
+	"update_run",
 }
 
 func TestMCPToolCapabilitiesCoverExactlyTheCurrentTools(t *testing.T) {
@@ -507,11 +515,17 @@ func TestMCPToolCapability(t *testing.T) {
 	}
 }
 
-// Each tool needs its own capability so every approval operation is
-// independently grantable (#79); two tools sharing one would couple them.
+// Each message and approval tool needs its own capability so every approval
+// operation is independently grantable (#79); two tools sharing one would
+// couple them. The session and run tools (#267) are the exception, on
+// purpose: decision D9 gives an agent's own sessions one capability and its
+// runs another, and TestSessionAndRunCapabilities pins which tools have them.
 func TestMCPToolCapabilitiesAreDistinct(t *testing.T) {
 	seen := map[Capability]string{}
 	for tool, c := range MCPToolCapabilities() {
+		if c == CapabilitySessionsManage || c == CapabilityRunsManage {
+			continue
+		}
 		if other, dup := seen[c]; dup {
 			t.Errorf("tools %q and %q share capability %q", tool, other, c)
 		}
@@ -547,8 +561,9 @@ func TestCapabilitiesListsTheWholeVocabulary(t *testing.T) {
 }
 
 // The P3 capabilities (issue #264, decision D9) are in the vocabulary, after
-// the approval ones, and a manifest may grant them; no MCP tool maps to them
-// yet, because the tools arrive with #267 and the table is that issue's.
+// the approval ones, and a manifest may grant them. The tools that need them
+// (#267) are exactly the three about the agent's own sessions and the five
+// about its runs.
 func TestSessionAndRunCapabilities(t *testing.T) {
 	if CapabilitySessionsManage != "sessions.manage" || CapabilityRunsManage != "runs.manage" {
 		t.Fatalf("capabilities = %q, %q", CapabilitySessionsManage, CapabilityRunsManage)
@@ -565,10 +580,21 @@ func TestSessionAndRunCapabilities(t *testing.T) {
 		if !c.Valid() {
 			t.Errorf("%q.Valid() = false", c)
 		}
+	}
+	wantTools := map[Capability][]string{
+		CapabilitySessionsManage: {"end_session", "heartbeat", "register_session"},
+		CapabilityRunsManage:     {"ack_intervention", "poll_interventions", "post_activity", "start_run", "update_run"},
+	}
+	for c, want := range wantTools {
+		var got []string
 		for tool, mapped := range MCPToolCapabilities() {
 			if mapped == c {
-				t.Errorf("tool %q already maps to %q; that mapping belongs to #267", tool, c)
+				got = append(got, tool)
 			}
+		}
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("tools needing %q = %v, want %v", c, got, want)
 		}
 	}
 	for _, c := range []Capability{"sessions", "sessions.*", "session.manage", "runs", "runs.*", "run.manage", "SESSIONS.MANAGE", "runs_manage"} {

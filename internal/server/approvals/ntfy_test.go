@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"context"
+	"errors"
 	"io"
 	"mime"
 	"net"
@@ -330,6 +331,19 @@ func TestNotificationBodyCut(t *testing.T) {
 // path is the topic: on a public ntfy server, what lets someone read the
 // notifications. The notifier's errors are written to the audit log and the
 // server log, so they say what went wrong and not where.
+// noDNSTransport is an HTTP transport whose name lookups fail at once, as a
+// lookup of a .invalid name does, without asking the machine's resolver. A
+// real resolver may answer that lookup with a timeout instead (issue #322),
+// which would be classified as "timeout" and fail the case for a reason that
+// has nothing to do with what it tests. Every other case dials an address, so
+// this changes nothing for them.
+func noDNSTransport() *http.Transport {
+	resolver := &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("no name server in this test")
+	}}
+	return &http.Transport{DialContext: (&net.Dialer{Resolver: resolver}).DialContext}
+}
+
 func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 	const topic = "tpc-SECRET-grep-me"
 	refused, err := net.Listen("tcp", "127.0.0.1:0")
@@ -409,6 +423,7 @@ func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			n.client.Transport = noDNSTransport()
 			err = n.ApprovalCreated(context.Background(), store.Approval{ID: 1, Title: "x", Body: "b", Deadline: time.Now()})
 			if err == nil {
 				t.Fatal("no error")

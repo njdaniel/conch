@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -200,6 +201,7 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("approval %d is %s", in.ApprovalID, out.State)}}}, projected, nil
 		})
+	s.addSessionTools(server, identity)
 	return server
 }
 
@@ -450,4 +452,249 @@ func (s *Server) pollDecision(ctx, waitCtx context.Context, scope *agentScope, a
 		case <-ticker.C:
 		}
 	}
+}
+
+// MCP tools for sessions, runs and interventions (issue #267, P3 epic #263).
+// An adapter or an agent's own runtime registers a session, reports its runs
+// and answers interventions with these, as it could over REST. Each tool is a
+// thin front on the function its REST route calls (calls.go), so the two are
+// allowed and refused alike: nothing here decides anything the REST handler
+// does not, and no tool body reaches the store but through its scope.
+//
+// Each tool's capability is checked by addAgentTool before its body runs. The
+// four that act on the caller's own session (register_session, heartbeat,
+// end_session, poll_interventions) then spend that capability's budget, as the
+// REST routes' own-session check does; the four that report on a run
+// (start_run, update_run, post_activity, ack_intervention) spend runs.manage
+// in the run's channel gate (runGate), as their REST routes do.
+//
+// What a tool returns is the pkg/schema document its REST route returns, as
+// the structured content, with no output schema declared: the SDK would infer
+// one from the Go type, and a Timestamp or a raw JSON value is not what it
+// would infer.
+
+// mcpSessionIDInput names one of the agent's own sessions.
+type mcpSessionIDInput struct {
+	SessionID int64 `json:"session_id" jsonschema:"the session's id, as register_session returned it"`
+}
+
+type mcpStartRunInput struct {
+	SessionID int64 `json:"session_id" jsonschema:"the session the run belongs to"`
+	schema.CreateRunRequestV1
+}
+
+type mcpUpdateRunInput struct {
+	RunID int64 `json:"run_id" jsonschema:"the run's id, as start_run returned it"`
+	schema.SetRunStateRequestV1
+}
+
+// mcpPostActivityInput is schema.AppendActivityRequestV1 with its data as any
+// JSON value: the SDK infers a json.RawMessage as an array of bytes. A raw
+// field would not keep the agent's bytes anyway: the SDK decodes every call's
+// arguments into a map and encodes them again before the tool sees them
+// (applySchema), so an integer above 2^53 loses precision and object keys come
+// out sorted, over MCP whatever the field's type. REST stores the bytes sent.
+type mcpPostActivityInput struct {
+	RunID   int64               `json:"run_id" jsonschema:"the run's id, as start_run returned it"`
+	Kind    schema.ActivityKind `json:"kind" jsonschema:"what happened: run_started, command_started, command_finished, reply_posted, approval_requested, approval_resolved, intervention_received or run_ended"`
+	Summary string              `json:"summary" jsonschema:"one line saying what happened"`
+	Outcome string              `json:"outcome,omitempty" jsonschema:"how it went, if it is over"`
+	Data    any                 `json:"data,omitempty" jsonschema:"optional structured detail, any JSON value. Numbers pass through float64 and object keys are sorted, as for every MCP argument"`
+}
+
+type mcpPollInterventionsInput struct {
+	SessionID int64                    `json:"session_id" jsonschema:"the session whose runs to look at"`
+	State     schema.InterventionState `json:"state,omitempty" jsonschema:"only interventions in this state; requested is what is waiting for an answer. Omit for every state"`
+	After     int64                    `json:"after,omitempty" jsonschema:"only interventions with an id greater than this; the last id seen"`
+	Limit     *int64                   `json:"limit,omitempty" jsonschema:"page size, default 50, max 100"`
+}
+
+type mcpAckInterventionInput struct {
+	InterventionID int64 `json:"intervention_id" jsonschema:"the intervention's id, as poll_interventions returned it"`
+	schema.AckInterventionRequestV1
+}
+
+// mcpText is a tool result's human-readable line; the document is the
+// structured content.
+func mcpText(format string, args ...any) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(format, args...)}}}
+}
+
+// mcpCallError is a refusal from calls.go as a tool's error.
+func mcpCallError(e *callError) *mcp.CallToolResult { return mcpToolError(e.schemaError()) }
+
+// ownSessionCall is the start of the four tools that act on the caller's own
+// session: the call must have a credential, and it spends the capability the
+// tool was allowed by, as the REST routes' own-session check does
+// (agentSelfAllowed), before anything is read.
+func (a *agentScope) ownSessionCall(ctx context.Context) (sessionCall, *schema.Error) {
+	call, serr := a.sessionCall(ctx)
+	if serr != nil {
+		return sessionCall{}, serr
+	}
+	if serr := a.spend(ctx); serr != nil {
+		return sessionCall{}, serr
+	}
+	return call, nil
+}
+
+// addSessionTools registers the eight tools.
+func (s *Server) addSessionTools(server *mcp.Server, identity mcpIdentity) {
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "register_session", Description: "Register a session: this live runtime of the authenticated agent, so the people in its channels see it is here. Keep it alive with heartbeat and end it with end_session. Say what the runtime is (client, and optionally runtime, model and host; runtime and host are shown only to operators and to the agent itself). List in interventions what the runtime acts on (message, cancel, pause, resume); people can ask for nothing else. Returns a conch.session.v1 document."},
+		func(ctx context.Context, scope *agentScope, in schema.CreateSessionRequestV1) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.ownSessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			doc, cerr := s.createSession(ctx, call, in)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("registered session %d", doc.ID), doc, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "heartbeat", Description: "Keep one of the agent's own sessions alive; without one a session shows as stale and then offline. A stale or offline session is revived. Returns a conch.session.v1 document."},
+		func(ctx context.Context, scope *agentScope, in mcpSessionIDInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.ownSessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.SessionID <= 0 {
+				return mcpCallError(callSessionMissing), nil, nil
+			}
+			doc, cerr := s.heartbeatSession(ctx, call, in.SessionID)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("session %d is %s", doc.ID, doc.State), doc, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "end_session", Description: "End one of the agent's own sessions. An ended session takes no more heartbeats or runs."},
+		func(ctx context.Context, scope *agentScope, in mcpSessionIDInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.ownSessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.SessionID <= 0 {
+				return mcpCallError(callSessionMissing), nil, nil
+			}
+			if cerr := s.endSession(ctx, call, in.SessionID); cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("ended session %d", in.SessionID), nil, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "start_run", Description: "Start a run: one piece of work in a channel, on one of the agent's own sessions, optionally answering one message there (message_id), with a one-line task and optionally a link (an https URL) to where the work can be followed. The people who can see that message, or the whole channel if there is none, see the run. Returns a conch.run.v1 document, in state queued."},
+		func(ctx context.Context, scope *agentScope, in mcpStartRunInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.sessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.SessionID <= 0 {
+				return mcpCallError(callSessionMissing), nil, nil
+			}
+			if cerr := s.runSession(ctx, call, in.SessionID); cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			doc, cerr := s.createRun(ctx, call, in.SessionID, in.CreateRunRequestV1)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("started run %d", doc.ID), doc, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "update_run", Description: "Move one of the agent's own runs to another state (starting, running, blocked, waiting, completed, failed, cancelled), optionally with an outcome saying how it went. A run that has ended moves no further. The server records what the agent reports and never moves a run by itself. Returns a conch.run.v1 document."},
+		func(ctx context.Context, scope *agentScope, in mcpUpdateRunInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.sessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.RunID <= 0 {
+				return mcpCallError(callRunMissing), nil, nil
+			}
+			run, cerr := s.reportableRunFor(ctx, call, in.RunID, callRunMissing)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			doc, cerr := s.setRunState(ctx, call, run, in.SetRunStateRequestV1)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("run %d is %s", doc.ID, doc.State), doc, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_activity", Description: "Add one entry to the activity stream of one of the agent's own runs, of one kind, with a one-line summary and optionally an outcome and structured data. A run that has ended takes no more. Returns a conch.agent_activity.v1 document."},
+		func(ctx context.Context, scope *agentScope, in mcpPostActivityInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.sessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.RunID <= 0 {
+				return mcpCallError(callRunMissing), nil, nil
+			}
+			run, cerr := s.reportableRunFor(ctx, call, in.RunID, callRunMissing)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			req := schema.AppendActivityRequestV1{Kind: in.Kind, Summary: in.Summary, Outcome: in.Outcome}
+			if in.Data != nil {
+				data, err := json.Marshal(in.Data)
+				if err != nil {
+					return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "data must be valid JSON")), nil, nil //nolint:nilerr // a refusal is the tool's result, as for every other refusal here
+				}
+				req.Data = data
+			}
+			doc, cerr := s.appendRunActivity(ctx, call, run, req)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("added activity %d to run %d", doc.ID, doc.RunID), doc, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "poll_interventions", Description: "Read the interventions people have made on the runs of one of the agent's own sessions, oldest first: pass state requested for what is waiting for an answer, and after the last id seen. Answer each with ack_intervention. A page shorter than the limit is the end. Returns a list of conch.intervention.v1 documents."},
+		func(ctx context.Context, scope *agentScope, in mcpPollInterventionsInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.ownSessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.SessionID <= 0 {
+				return mcpCallError(callSessionMissing), nil, nil
+			}
+			// The same checks, in the same order, as the REST route's query.
+			if in.State != "" && !in.State.Valid() {
+				return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "state must be one of requested, acknowledged, applied, failed")), nil, nil
+			}
+			if in.After < 0 {
+				return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "after must be a non-negative integer")), nil, nil
+			}
+			limit := int64(defaultRunLimit)
+			if in.Limit != nil {
+				if *in.Limit <= 0 || *in.Limit > maxRunLimit {
+					return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "limit must be between 1 and 100")), nil, nil
+				}
+				limit = *in.Limit
+			}
+			list, cerr := s.sessionInterventions(ctx, call, in.SessionID, in.State, in.After, int(limit))
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			resp, cerr := checkedInterventionList(ctx, list)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("%d interventions", len(resp.Interventions)), resp, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "ack_intervention", Description: "Answer an intervention on one of the agent's own runs: acknowledged (seen, not yet done), applied (done) or failed (could not, with a reason). Answering never changes the run: after applying a cancel, also move the run to cancelled with update_run. Returns a conch.intervention.v1 document."},
+		func(ctx context.Context, scope *agentScope, in mcpAckInterventionInput) (*mcp.CallToolResult, any, error) {
+			call, serr := scope.sessionCall(ctx)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if in.InterventionID <= 0 {
+				return mcpCallError(callInterventionMissing), nil, nil
+			}
+			iv, cerr := s.answerableIntervention(ctx, call, in.InterventionID)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			doc, cerr := s.ackIntervention(ctx, call, iv, in.AckInterventionRequestV1)
+			if cerr != nil {
+				return mcpCallError(cerr), nil, nil
+			}
+			return mcpText("intervention %d is %s", doc.ID, doc.State), doc, nil
+		})
 }
