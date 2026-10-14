@@ -416,6 +416,20 @@ func (r *runner) startAgent(part string) (*child, error) {
 	return nil, fmt.Errorf("%s did not open a session within 20s; its log is %s", part, c.log)
 }
 
+// logTailLines is how much of a child's log a failure prints.
+const logTailLines = 40
+
+// logTail is the end of the log at path, redacted, for a failure message: the
+// log of a CI run is gone by the time anyone looks. It is empty when the log
+// cannot be read.
+func (r *runner) logTail(path string) string {
+	data, err := os.ReadFile(path) // #nosec G304 -- a log this run's child wrote
+	if err != nil {
+		return ""
+	}
+	return "\n" + r.redact(tailLines(strings.TrimRight(string(data), "\n"), logTailLines))
+}
+
 // sessions is the roster of channel as the holder of token sees it.
 func (r *runner) sessions(token, channel string) ([]schema.SessionV1, error) {
 	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, r.baseURL()+"/v1/sessions?channel="+url.QueryEscape(channel), nil)

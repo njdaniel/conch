@@ -352,6 +352,12 @@ func (b *botLoop) run(ctx context.Context) error {
 	if b.sleep == nil {
 		b.sleep = sleepContext
 	}
+	// The cursor is seeded before the session opens: an online session tells a
+	// person (or a check) the adapter will answer what it is sent next. Seeding
+	// after registering would swallow a message sent in between as history.
+	if err := b.seed(ctx); err != nil {
+		return fmt.Errorf("seed cursor: %w", err)
+	}
 	if err := b.register(ctx); err != nil {
 		return fmt.Errorf("could not register a session; the adapter needs an issued credential (not a static --mcp-token) and the capabilities sessions.manage and runs.manage in its agent's manifest: %w", err)
 	}
@@ -367,9 +373,6 @@ func (b *botLoop) run(ctx context.Context) error {
 		b.endSession(ctx)
 	}()
 
-	if err := b.seed(ctx); err != nil {
-		return fmt.Errorf("seed cursor: %w", err)
-	}
 	delay := b.cfg.PollInterval
 	for {
 		err := b.pollOnce(ctx)
