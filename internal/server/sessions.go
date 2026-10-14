@@ -293,11 +293,15 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // roster frame of the events socket (events_ws.go), for the request that
 // opened the socket. It does not decide whether the reader may see the
 // channel; its callers have (channelForCaller). A failure is logged here and
-// returned for the caller to answer.
+// returned for the caller to answer, except a read cut short because ctx is
+// done: that is the client leaving (an events socket closed mid-roster, a
+// request hung up), not a fault (issue #313).
 func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel store.Channel, viewer store.Principal) (schema.SessionRosterV1, error) {
 	sessions, err := s.store.ListChannelSessions(ctx, channel.ID, s.now(), sessionRosterWindow)
 	if err != nil {
-		slog.ErrorContext(ctx, "sessions: list failed", "channel", channel.ID, "error", err)
+		if ctx.Err() == nil {
+			slog.ErrorContext(ctx, "sessions: list failed", "channel", channel.ID, "error", err)
+		}
 		return schema.SessionRosterV1{}, err
 	}
 	ids := make([]int64, len(sessions))
@@ -309,7 +313,9 @@ func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel sto
 	// which run it is and its task (D8).
 	runs, err := s.store.SessionRunViews(ctx, ids, readerFor(r, apiV2))
 	if err != nil {
-		slog.ErrorContext(ctx, "sessions: read runs failed", "channel", channel.ID, "error", err)
+		if ctx.Err() == nil {
+			slog.ErrorContext(ctx, "sessions: read runs failed", "channel", channel.ID, "error", err)
+		}
 		return schema.SessionRosterV1{}, err
 	}
 	roster := schema.SessionRosterV1{
