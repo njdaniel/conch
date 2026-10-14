@@ -437,12 +437,19 @@ func commandFor(t *testing.T, lines []string, envFile, programSuffix string) str
 // down and leaves nothing. A root with a space in its path makes the printed
 // and sourced quoting do real work.
 func TestRunWithoutKeep(t *testing.T) {
+	all := []string{"P3-01", "P3-02", "P3-03", "P3-04", "P3-05", "P3-06", "P3-07", "P3-08", "P3-09", "P3-10", "P3-11"}
 	for _, tc := range []struct {
 		name string
 		root func(*scratch) string
+		// rows limits the scenarios (CONCH_P3_ROWS); "" runs them all. The
+		// root with a space in it only needs to show that every command the
+		// suite builds is quoted, which P3-01 does by starting a terminal
+		// client and two agents with them.
+		rows string
+		done []string
 	}{
-		{"the default root", func(s *scratch) string { return "" }},
-		{"a root with a space in it", func(s *scratch) string { return filepath.Join(s.dir, "a b", "it's here") }},
+		{"the default root", func(s *scratch) string { return "" }, "", all},
+		{"a root with a space in it", func(s *scratch) string { return filepath.Join(s.dir, "a b", "it's here") }, "P3-01", []string{"P3-01"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newScratch(t)
@@ -451,12 +458,15 @@ func TestRunWithoutKeep(t *testing.T) {
 				cmd.Env = append(cmd.Env, "CONCH_P3_ROOT="+root)
 				s.root = root
 			}
+			if tc.rows != "" {
+				cmd.Env = append(cmd.Env, "CONCH_P3_ROWS="+tc.rows)
+			}
 			var out, errb bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &errb
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("p3-local: %v\n%s\n%s", err, out.String(), errb.String())
 			}
-			for _, want := range []string{
+			wants := []string{
 				"read back through the API",
 				"tui-a signed in as nick-test and sent a message",
 				"tui-a2 signed in as nick-test and sent a message",
@@ -466,7 +476,14 @@ func TestRunWithoutKeep(t *testing.T) {
 				"observer-test is refused when it posts",
 				"nothing left behind",
 				"p3-local: PASS",
-			} {
+			}
+			for _, id := range tc.done {
+				wants = append(wants, "ok  "+id+" ")
+			}
+			if tc.rows == "" {
+				wants = append(wants, "NOT RUN  P3-13: it runs the real Claude Code command as you; pass --real-adapter to run it")
+			}
+			for _, want := range wants {
 				if !strings.Contains(out.String(), want) {
 					t.Errorf("the output lacks %q:\n%s", want, out.String())
 				}
@@ -650,8 +667,9 @@ func waitLine(t *testing.T, lines <-chan string, substr string) {
 
 // TestRealAdapter checks what --real-adapter does and, as important, what it
 // does not: the warning is printed, agent-a.env has the default command and no
-// fixture mode, agent-b stays a fixture, and no claude is ever started: a
-// stand-in that records its use sits first on PATH.
+// fixture mode, agent-b stays a fixture, and the program is started only by
+// P3-13, only with the flag, and only when it is on PATH. A stand-in that
+// records its use sits first on PATH; the real one is never run.
 func TestRealAdapter(t *testing.T) {
 	s := newScratch(t)
 	bin := filepath.Join(s.dir, "fakebin")
@@ -693,14 +711,72 @@ func TestRealAdapter(t *testing.T) {
 	}
 	s.mustRun("--reset")
 
-	// Without --keep the check must skip agent-a, and says so.
-	out, errOut = run("--real-adapter")
+	// Without --keep the setup check skips agent-a and says so, and the suite
+	// runs P3-13: one reply of the adapter's default command, which here is
+	// the stand-in. It is started by that row and by nothing else.
+	rows := func(env string, args ...string) (string, string) {
+		cmd := s.command(args...)
+		cmd.Env = append(s.env(), "PATH="+bin+":"+os.Getenv("PATH"), env)
+		var out, errb bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &errb
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("p3-local %v: %v\n%s\n%s", args, err, out.String(), errb.String())
+		}
+		return out.String(), errb.String()
+	}
+
+	// Without the flag the row is not run, with the program on PATH.
+	out, errOut = rows("CONCH_P3_ROWS=P3-13")
+	if !strings.Contains(out, "NOT RUN  P3-13") || !strings.Contains(out, "--real-adapter") || !strings.Contains(out, "p3-local: PASS") {
+		t.Errorf("the suite without --real-adapter:\n%s\n%s", out, errOut)
+	}
+	if _, err := os.Stat(used); err == nil {
+		t.Fatal("the real claude command was started without --real-adapter")
+	}
+
+	// With the flag it is: the stand-in fails, which the row reports as the
+	// run's outcome, and nothing falls back to anything else.
+	out, errOut = rows("CONCH_P3_ROWS=P3-13", "--real-adapter")
 	if !strings.Contains(out, "NOT RUN  agent-a") || !strings.Contains(out, "p3-local: PASS") {
 		t.Errorf("the check with --real-adapter:\n%s\n%s", out, errOut)
 	}
-	if _, err := os.Stat(used); err == nil {
-		t.Fatal("the real claude command was started")
+	if !strings.Contains(out, `P3-13 runtime=claude-code model=sonnet outcome="exit 1" state=failed`) {
+		t.Errorf("the row does not report what ran and how it ended:\n%s\n%s", out, errOut)
 	}
+	if _, err := os.Stat(used); err != nil {
+		t.Errorf("the real adapter's command was not started by P3-13: %v", err)
+	}
+	_ = os.Remove(used)
+
+	// With the flag and no program on PATH the row is skipped and the suite
+	// passes.
+	empty := filepath.Join(s.dir, "emptybin")
+	must(t, os.MkdirAll(empty, 0o750))
+	cmd := s.command("--real-adapter")
+	cmd.Env = append(s.env(), "PATH="+empty+":"+pathWithout("claude"), "CONCH_P3_ROWS=P3-13")
+	var cout, cerr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &cout, &cerr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("p3-local --real-adapter without claude: %v\n%s\n%s", err, cout.String(), cerr.String())
+	}
+	if !strings.Contains(cout.String(), "NOT RUN  P3-13: the claude program is not on PATH") || !strings.Contains(cout.String(), "p3-local: PASS") {
+		t.Errorf("without the program on PATH:\n%s\n%s", cout.String(), cerr.String())
+	}
+	if _, err := os.Stat(used); err == nil {
+		t.Fatal("the stand-in ran although it was not on PATH")
+	}
+}
+
+// pathWithout is PATH without any directory that holds a program called name.
+func pathWithout(name string) string {
+	var keep []string
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil { // #nosec G703 -- a directory of this process's own PATH
+			continue
+		}
+		keep = append(keep, dir)
+	}
+	return strings.Join(keep, string(os.PathListSeparator))
 }
 
 // ---------------------------------------------------------- the document
@@ -906,7 +982,8 @@ func TestFixtureManifests(t *testing.T) {
 		t.Errorf("worker-test manifest: %v %v", w.Capabilities, w.Channels)
 	}
 	for _, g := range w.Channels {
-		if len(g.Permissions) != 2 {
+		// read, post, and whisper, which answering a whisper takes.
+		if len(g.Permissions) != 3 {
 			t.Errorf("worker-test grant %v", g)
 		}
 	}

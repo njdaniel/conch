@@ -421,7 +421,7 @@ func (r *runner) sessions(token, channel string) ([]schema.SessionV1, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req) // #nosec G107 -- this run's own loopback conchd
+	resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: newLoggingTransport()}).Do(req) // #nosec G107 -- this run's own loopback conchd
 	if err != nil {
 		return nil, err
 	}

@@ -235,16 +235,21 @@ jobs:
         run: go run ./e2e/p2-hardening
 
   p3-local-check:
-    # The P3 local prototype's runner (issue #283): builds conchd, conch and
-    # conch-adapter and the web client, starts a disposable conchd, creates
-    # the test community, reads it back through the API and compares, then
-    # checks that each participant (two terminal clients, the browser's
-    # credential, both scripted agents) can connect and send, and tears
-    # everything down. Without --keep, so nothing outlives the job. It runs on
-    # every pull request and every push to main: the community it makes is
-    # what docs/p3-walkthrough.md is written against. Its own tests (reset,
-    # interrupts, the HOME sentinel, the walkthrough's commands) run in the
-    # check job's go test.
+    # The automated P3 suite (issues #283 and #284): builds conchd, conch and
+    # conch-adapter and the web client, starts a disposable conchd with
+    # --session-stale 2s --session-offline 5s, creates the test community and
+    # reads it back through the API, checks that each participant can connect
+    # and send, and then runs the thirteen rows of the brief's test table
+    # (P3-01 to P3-13): two terminal clients on pseudo-terminals, the
+    # scripted agents as real conch-adapter processes, and the API only to
+    # look and to see the requests no client makes refused. It tears
+    # everything down and fails if anything is left behind. Without --keep,
+    # so nothing outlives the job; P3-13 runs only with --real-adapter and the
+    # claude program on PATH, which this job has neither of, and is reported
+    # as not run. It runs on every pull request and every push to main, and
+    # release.yml runs it before it builds. Its own tests (reset, interrupts,
+    # the HOME sentinel, the walkthrough's commands, the screen the terminal
+    # driver reads) run in the check job's go test.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

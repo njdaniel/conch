@@ -10,9 +10,14 @@
 // `conch admin` and `conch nets`, reads it back through the API and compares,
 // and writes one environment file per participant. With --keep it prints the
 // command for each participant and returns, leaving the server running.
-// Without it, it checks that each participant can connect and send, and tears
-// everything down. --reset stops what an earlier run started and removes its
-// root. docs/p3-walkthrough.md is what to do with the result.
+// Without it, it starts the server with short session thresholds, checks that
+// each participant can connect and send, runs the automated P3 suite (issue
+// #284: the thirteen rows of the brief's test table, with terminal clients on
+// pseudo-terminals, the scripted agents as conch-adapter processes, and the API
+// to look at what the server shows), and tears everything down. --reset stops
+// what an earlier run started and removes its root. docs/p3-walkthrough.md is
+// what to do with a kept community. CONCH_P3_ROWS=P3-06,P3-07 limits the suite
+// to those rows (and P3-01, which starts everyone) while working on them.
 //
 // The root is $CONCH_P3_ROOT, else $XDG_STATE_HOME/conch-p3, else
 // ~/.local/state/conch-p3. This program never reads or writes the user's own
@@ -131,6 +136,11 @@ type runner struct {
 	// that is not repo/web/dist, and then nothing is built for it.
 	webDir    string
 	ownWebDir bool
+
+	// suite is set for a run without --keep: the server then gets the short
+	// session thresholds the scenarios need (P3-07). A kept community is the
+	// walkthrough's, and runs with the defaults it describes.
+	suite bool
 
 	bin    binaries
 	addr   string // host:port conchd listens on
@@ -260,6 +270,7 @@ func (r *runner) run(keep bool) (err error) {
 		return fmt.Errorf("build: %w", err)
 	}
 
+	r.suite = !keep
 	stage("server")
 	if err := r.startServer(); err != nil {
 		return fmt.Errorf("server: %w", err)
@@ -293,6 +304,10 @@ func (r *runner) run(keep bool) (err error) {
 	}
 	if err := r.checkParticipants(); err != nil {
 		return fmt.Errorf("check: %w", err)
+	}
+	stage("scenarios")
+	if err := r.runSuite(); err != nil {
+		return err
 	}
 	r.teardown()
 	armed = false
@@ -424,7 +439,7 @@ func (r *runner) leftovers() error {
 			return fmt.Errorf("something still listens on %s after teardown", r.addr)
 		}
 	}
-	step("nothing left behind: the root is gone, every process has exited and the port is closed")
+	step("P3-12 nothing left behind: the root is gone, every process has exited and the port is closed")
 	return nil
 }
 
@@ -683,8 +698,7 @@ func (r *runner) startServer() error {
 	r.secret(token)
 	r.fx = newFixtures(token)
 
-	c, err := r.spawn("conchd", r.bin.conchd,
-		[]string{"serve", "--listen", "127.0.0.1:0", "--web-dir", r.webDir, "--data", data}, r.isolatedEnv())
+	c, err := r.spawn("conchd", r.bin.conchd, r.serveArgs("127.0.0.1:0"), r.isolatedEnv())
 	if err != nil {
 		return err
 	}
@@ -716,6 +730,22 @@ func (r *runner) startServer() error {
 		}
 	}
 	return errors.New("conchd did not become healthy within 20s")
+}
+
+// The heartbeat thresholds of a server the suite runs against. Passed to
+// conchd as flags, as an operator would; nothing is built into a test binary.
+const (
+	suiteSessionStale   = "2s"
+	suiteSessionOffline = "5s"
+)
+
+// serveArgs are the arguments of conchd serve, listening on listen.
+func (r *runner) serveArgs(listen string) []string {
+	args := []string{"serve", "--listen", listen, "--web-dir", r.webDir, "--data", filepath.Join(r.root, "data")}
+	if r.suite {
+		args = append(args, "--session-stale", suiteSessionStale, "--session-offline", suiteSessionOffline)
+	}
+	return args
 }
 
 // pause waits for d, or returns the reason the run was interrupted.
