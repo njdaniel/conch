@@ -10,8 +10,9 @@ import (
 )
 
 // matchRows counts the rows FTS5 itself returns for a match, before the outer
-// statement keeps the channel or the visibility rule: the rows a search has to
-// visit.
+// statement keeps the channel or the visibility rule: the rows the outer
+// statement sees. It shows what the index hands on, not what FTS5 walked
+// inside to find them, which SQLite does not report.
 func matchRows(t *testing.T, s *Store, match string) int {
 	t.Helper()
 	var n int
@@ -109,9 +110,9 @@ func TestSearchMigrationFromSchema21(t *testing.T) {
 		}
 	}
 	for _, stmt := range []string{
-		`INSERT INTO principals (id, kind, name, role, created_at) VALUES (1, 'human', 'nick', 'operator', 1), (2, 'human', 'sam', 'member', 2)`,
+		`INSERT INTO principals (id, kind, name, role, created_at) VALUES (1, 'human', 'nick', 'operator', 1), (2, 'human', 'sam', 'member', 2), (3, 'human', 'ola', 'member', 3)`,
 		`INSERT INTO channels (id, name, created_at) VALUES (1, 'general', 3), (2, 'ops', 3)`,
-		`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (1, 1, NULL, 4), (1, 2, NULL, 4), (2, 1, NULL, 4), (2, 2, NULL, 4)`,
+		`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (1, 1, NULL, 4), (1, 2, NULL, 4), (1, 3, NULL, 4), (2, 1, NULL, 4), (2, 2, NULL, 4)`,
 		`INSERT INTO messages (id, channel_id, author_id, body, created_at) VALUES (1, 1, 1, 'old needle', 5), (2, 2, 1, 'old needle elsewhere', 6), (3, 2, 1, 'only ops', 7)`,
 		`INSERT INTO messages (id, channel_id, author_id, body, created_at, audience_kind) VALUES (4, 1, 1, 'old needle whisper', 8, 'principals')`,
 		`INSERT INTO message_recipients (message_id, principal_id) VALUES (4, 1), (4, 2)`,
@@ -143,6 +144,11 @@ func TestSearchMigrationFromSchema21(t *testing.T) {
 		if got := searchIDs(t, s, tt.channel, r, tt.words, 0, 50); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%s: after migration got %v, want %v", tt.name, got, tt.want)
 		}
+	}
+	// The rebuild indexed the whisper, and the rule still keeps it from a
+	// member who is not one of its recipients.
+	if got := searchIDs(t, s, 1, Reader{3, true}, []string{"needle"}, 0, 50); !reflect.DeepEqual(got, []int64{1}) {
+		t.Errorf("a member outside the whisper found %v after migration, want [1]", got)
 	}
 	if got := matchRows(t, s, ftsInChannel(2, []string{"needle"})); got != 1 {
 		t.Errorf("index rows for the second channel = %d, want 1", got)

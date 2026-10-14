@@ -479,7 +479,9 @@ END`,
 	// column of that name: nothing is stored twice and the two cannot differ.
 	// The old table and trigger are dropped and the index is rebuilt, so every
 	// message that exists is indexed again, scoped ones included, as before.
-	// Messages are never updated or deleted, as in migration 15.
+	// Messages are never updated or deleted, as in migration 15. The generated
+	// column appears in SELECT * on messages: a later migration that rebuilds
+	// the table must name its columns, never copy it with a bare SELECT *.
 	{
 		`ALTER TABLE messages ADD COLUMN fts_channel TEXT GENERATED ALWAYS AS ('c' || channel_id) VIRTUAL`,
 		`DROP TRIGGER messages_fts_insert`,
