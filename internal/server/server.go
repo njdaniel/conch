@@ -125,6 +125,11 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// eventsRosterFloor is the least time between two roster rebuilds for one
+	// events socket (defaultEventsRosterFloor). It is measured on the
+	// monotonic clock, not now: it paces work, it is not a time anyone reads.
+	// Tests set it to zero to see each roster as it is owed.
+	eventsRosterFloor time.Duration
 	// tickets holds the unspent WebSocket tickets (issue #270), in memory
 	// only; its clock is now.
 	tickets wsTicketStore
@@ -170,6 +175,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()

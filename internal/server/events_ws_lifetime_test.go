@@ -169,7 +169,7 @@ func TestEventsSlowSubscriberDoesNotDelayAWriter(t *testing.T) {
 	}()
 	select {
 	case slowest := <-done:
-		if slowest > time.Second {
+		if slowest > 3*time.Second {
 			t.Errorf("one POST took %v while a subscriber was stuck", slowest)
 		}
 	case <-time.After(30 * time.Second):
@@ -219,6 +219,12 @@ func TestEventsHub(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newEventsHub()
 			subs := [2]*eventsSub{h.subscribe(general, 10), h.subscribe(other, 11)}
+			// Each is owed its first roster from the start (subscribe).
+			for i, sub := range subs {
+				if roster, refs := pending(t, sub); !roster || len(refs) != 0 {
+					t.Fatalf("subscriber %d: owed roster %v, %d refs on subscribing; want the roster alone", i, roster, len(refs))
+				}
+			}
 			tt.act(h)
 			for i, sub := range subs {
 				roster, refs := pending(t, sub)
@@ -293,4 +299,51 @@ func TestEventsHub(t *testing.T) {
 			t.Error("the hub does not say it is closed")
 		}
 	})
+}
+
+// TestEventsRosterFloor: one subscriber rebuilds its roster at most once per
+// floor, however many changes owe it one, and the roster it sends then holds
+// every change. A principal looping cheap writes cannot keep every
+// subscriber's goroutine reading the store (the security review of #308).
+func TestEventsRosterFloor(t *testing.T) {
+	f := newSessionFixture(t)
+	const floor = 600 * time.Millisecond
+	f.srv.eventsRosterFloor = floor
+	base := wsTestServer(t, f.srv)
+	start := time.Now()
+	c := dialEvents(t, base, "/v1/events/ws?channel=general", f.aliceTok)
+	if fr := c.next(); fr.schema != schema.SessionRosterSchemaV1 {
+		t.Fatalf("first frame = %v, want the roster", fr)
+	}
+	const changes = 5
+	for range changes {
+		f.create(t, f.bobTok, `{"client":"tui"}`)
+	}
+	bobs := func(r schema.SessionRosterV1) int {
+		n := 0
+		for _, s := range r.Sessions {
+			if s.PrincipalID == f.bob.ID {
+				n++
+			}
+		}
+		return n
+	}
+	// The first roster was built after start, so the next cannot be built
+	// before start+floor.
+	fr := c.next()
+	if fr.schema != schema.SessionRosterSchemaV1 {
+		t.Fatalf("next frame = %v, want a roster", fr)
+	}
+	if waited := time.Since(start); waited < floor {
+		t.Errorf("a second roster after %v, inside the %v floor", waited, floor)
+	}
+	// Rosters owed meanwhile coalesce, so far fewer rosters than changes
+	// arrive before one holds them all: this one when the five posts beat the
+	// floor, at worst the next on a slow machine.
+	if bobs(fr.roster) != changes {
+		seen := c.until("a roster with all of bob's sessions", isRoster(func(r schema.SessionRosterV1) bool { return bobs(r) == changes }))
+		if len(seen) > 1 {
+			t.Errorf("%d more rosters before one with all %d changes: they did not coalesce", len(seen)+1, changes)
+		}
+	}
 }

@@ -35,11 +35,11 @@ import (
 // document the reader could not fetch over REST then is not sent. A writer
 // never reads on a subscriber's behalf and never waits for one.
 //
-// Like /v2/ws, an agent's manifest is asked once, at the upgrade (messages.read
-// with read in the channel, which is what each of these reads asks), and it
-// spends its budget once, not per frame. A manifest written later closes the
-// socket through the same drop that closes /v2/ws, and the interval re-check
-// asks again without spending.
+// Like /v2/ws, an agent's budget is spent once, at the upgrade (messages.read
+// with read in the channel, which is what each of these reads asks), not per
+// frame. The manifest is asked again, without spending, before every batch of
+// frames and on the interval re-check, and a manifest written later also
+// closes the socket at once through the same drop that closes /v2/ws.
 
 const (
 	// eventsQueueMax bounds the references waiting for one subscriber. A
@@ -51,6 +51,13 @@ const (
 	// &session= refreshes that session, well inside the default stale
 	// threshold.
 	eventsKeepAliveInterval = 10 * time.Second
+	// defaultEventsRosterFloor is the least time between two roster rebuilds
+	// for one subscriber (Server.eventsRosterFloor). A roster is owed after any session or run change anywhere
+	// (notifyRosters, notifyRun), and each rebuild reads the store, so without
+	// a floor a principal could loop cheap writes and keep every subscriber's
+	// goroutine reading. Owed rosters coalesce: one is sent when the floor
+	// has passed, and it is the whole state then.
+	defaultEventsRosterFloor = 250 * time.Millisecond
 )
 
 type eventKind uint8
@@ -95,10 +102,13 @@ type eventsSub struct {
 	gone   bool
 }
 
-// subscribe registers a subscriber. After closeAll it returns one that is
-// already dropped.
+// subscribe registers a subscriber, owed its first roster: that roster goes
+// out through flush like every other, so it is sent only after a drop that
+// committed meanwhile has been seen and membership and the manifest have been
+// asked again. After closeAll it returns one that is already dropped.
 func (h *eventsHub) subscribe(channelID, principalID int64) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{})}
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
+	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -371,6 +381,11 @@ type eventsStream struct {
 	credID      int64
 	sessionID   int64  // the session to keep alive; 0 for none
 	lastRoster  []byte // the roster frame last sent
+	// rosterBuilt is when a roster was last built, for the roster floor;
+	// rosterLater fires when one owed meanwhile may be built, and is nil
+	// while none is owed.
+	rosterBuilt time.Time
+	rosterLater <-chan time.Time
 }
 
 // run sends frames until the peer leaves, the subscription is dropped, or the
@@ -383,12 +398,8 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 		defer stop()
 		keepAlive = ticks
 	}
-	// The subscription is already registered, so a change between here and
-	// the first read is queued and sent after it (possibly twice; a roster is
-	// the whole state).
-	if !e.sendRoster(ctx) {
-		return
-	}
+	// The first roster is owed by subscribe and goes out on the first wake,
+	// through flush. A change after the subscription is queued behind it.
 	for {
 		select {
 		case <-ctx.Done():
@@ -406,6 +417,11 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			}
 		case <-e.sub.wake:
 			if !e.flush(ctx) {
+				return
+			}
+		case <-e.rosterLater:
+			e.rosterLater = nil
+			if !e.stillMember(ctx) || !e.sendRoster(ctx) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -492,7 +508,7 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	if !e.stillMember(ctx) {
 		return false
 	}
-	if roster && !e.sendRoster(ctx) {
+	if roster && !e.rosterNowOrLater(ctx) {
 		return false
 	}
 	for _, ref := range refs {
@@ -503,9 +519,24 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	return true
 }
 
+// rosterNowOrLater sends the owed roster now, or, when one was built less
+// than the server's roster floor ago, arms rosterLater to send it once the floor has
+// passed. Rosters owed meanwhile are the same roster.
+func (e *eventsStream) rosterNowOrLater(ctx context.Context) bool {
+	if e.rosterLater != nil {
+		return true
+	}
+	if wait := e.s.eventsRosterFloor - time.Since(e.rosterBuilt); !e.rosterBuilt.IsZero() && wait > 0 {
+		e.rosterLater = time.After(wait)
+		return true
+	}
+	return e.sendRoster(ctx)
+}
+
 // sendRoster builds the roster for this reader now and sends it unless it is
 // the one last sent.
 func (e *eventsStream) sendRoster(ctx context.Context) bool {
+	e.rosterBuilt = time.Now()
 	viewer, err := e.s.store.PrincipalByID(ctx, e.principalID)
 	if err != nil {
 		return e.failed(ctx, "read the viewer", err)

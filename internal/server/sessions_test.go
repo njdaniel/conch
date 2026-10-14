@@ -40,6 +40,9 @@ func newSessionFixture(t *testing.T) *sessionFixture {
 	ctx := context.Background()
 	f := &sessionFixture{authFixture: newAuthFixture(t, AuthRequired), clock: newManualClock()}
 	f.srv.now = f.clock.Now
+	// Every roster an events socket owes is sent at once (issue #269);
+	// TestEventsRosterFloor tests the floor itself.
+	f.srv.eventsRosterFloor = 0
 	var err error
 	if f.general, err = f.srv.store.ChannelByName(ctx, "general"); err != nil {
 		t.Fatal(err)

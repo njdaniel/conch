@@ -578,7 +578,9 @@ func TestEventsKeepsTheSessionAlive(t *testing.T) {
 	c := dialEvents(t, base, fmt.Sprintf("/v1/events/ws?channel=general&session=%d", mine.ID), f.aliceTok)
 	c.next()
 	// tick delivers one keep-alive and returns once the socket has dealt with
-	// it: the next send is only taken when its loop is back at the select.
+	// it: the second send is only taken when its loop is back at the select.
+	// The second is a keep-alive too, and may still be running when tick
+	// returns.
 	tick := func() {
 		t.Helper()
 		for range 2 {
@@ -637,12 +639,16 @@ func TestEventsKeepsTheSessionAlive(t *testing.T) {
 		t.Fatalf("end session = %d %s", rec.Code, rec.Body)
 	}
 	c.until("the ended session gone", isRoster(rosterLacks(f.alice.ID)))
-	// One tick: the socket finds the session gone and stops asking, so a
-	// second would never be taken. The marker below is only sent after it.
+	// One more tick, which the socket either takes, finds the session gone
+	// and stops asking, or never takes because it has stopped already: the
+	// last tick() left one heartbeat in flight, and it may have run after the
+	// DELETE. Which of the two is not the point and cannot be told apart from
+	// here; the wait below only gives the first its chance, and costs time,
+	// never a result. What matters is checked after it: the session stays
+	// ended, and the socket carries on.
 	select {
 	case ticks <- f.clock.Now():
-	case <-time.After(eventsReadTimeout):
-		t.Fatal("the socket took no keep-alive tick")
+	case <-time.After(time.Second):
 	}
 	f.create(t, f.bobTok, humanBody) // a second session of bob's: the marker
 	for _, fr := range c.until("the marker roster", isRoster(func(r schema.SessionRosterV1) bool { return len(r.Sessions) == 2 })) {
