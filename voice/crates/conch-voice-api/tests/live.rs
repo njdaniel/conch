@@ -3,7 +3,7 @@
 //!
 //! ```sh
 //! CONCH_VOICE_LIVE_SERVER=http://127.0.0.1:8080 \
-//! CONCH_VOICE_LIVE_CONFIG_DIR=/path/holding/conch/credentials.json \
+//! CONCH_VOICE_LIVE_CONFIG_DIR=/path/holding/credentials.json \
 //! CONCH_VOICE_LIVE_CHANNEL=ops \
 //! CONCH_VOICE_LIVE_EXPECT=voice \
 //!     cargo test --locked -p conch-voice-api --test live -- --ignored

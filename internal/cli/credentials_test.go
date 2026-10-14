@@ -22,6 +22,7 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_CONFIG_HOME", dir)
 	userConfigDir = func() (string, error) { return dir, nil }
 	_ = os.Unsetenv("CONCH_TOKEN")
+	_ = os.Unsetenv(configDirEnv)
 	_ = os.Unsetenv("CONCH_AUTHOR")
 	_ = os.Unsetenv("CONCH_SERVER")
 	code := m.Run()
@@ -35,6 +36,7 @@ func isolateConfig(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("CONCH_TOKEN", "")
+	t.Setenv(configDirEnv, "")
 	old := userConfigDir
 	userConfigDir = func() (string, error) { return dir, nil }
 	t.Cleanup(func() { userConfigDir = old })
@@ -404,5 +406,165 @@ func TestCredentialsRefusedHosts(t *testing.T) {
 				t.Errorf("error %q leaks server", err.Error())
 			}
 		})
+	}
+}
+
+// TestConfigDirSharedVectors runs testdata/config-dir-vectors.json through the
+// real resolution (CONCH_CONFIG_DIR, then os.UserConfigDir's XDG_CONFIG_HOME and
+// HOME). The same file drives a test of the Rust voice client
+// (voice/crates/conch-voice-api/src/login.rs), which reads the credentials this
+// package writes: both must look in the same directory from the same
+// environment (docs/design/conch-voice.md §8).
+func TestConfigDirSharedVectors(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the vectors are Linux paths: os.UserConfigDir reads other variables elsewhere")
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "config-dir-vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct {
+		ConchConfigDir string `json:"conch_config_dir"`
+		XDGConfigHome  string `json:"xdg_config_home"`
+		Home           string `json:"home"`
+		Want           string `json:"want"`
+		WantError      bool   `json:"want_error"`
+		Note           string `json:"note"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&vectors); err != nil {
+		t.Fatalf("config-dir-vectors.json: %v", err)
+	}
+	if len(vectors) < 15 {
+		t.Fatalf("config-dir-vectors.json has %d vectors; the file was cut short", len(vectors))
+	}
+	old := userConfigDir
+	userConfigDir = os.UserConfigDir
+	t.Cleanup(func() { userConfigDir = old })
+	for _, v := range vectors {
+		t.Run(v.Note, func(t *testing.T) {
+			t.Setenv(configDirEnv, v.ConchConfigDir)
+			t.Setenv("XDG_CONFIG_HOME", v.XDGConfigHome)
+			t.Setenv("HOME", v.Home)
+			got, err := configDir()
+			if v.WantError {
+				if err == nil || got != "" || !strings.Contains(err.Error(), configDirEnv) {
+					t.Fatalf("configDir() = %q, %v; want an error naming %s", got, err, configDirEnv)
+				}
+				return
+			}
+			if err != nil || got != v.Want {
+				t.Fatalf("configDir() = %q, %v; want %q", got, err, v.Want)
+			}
+		})
+	}
+}
+
+// TestCredentialsRelativeConfigDirRefused: a relative CONCH_CONFIG_DIR fails
+// every operation with one line naming the variable, and writes nothing.
+func TestCredentialsRelativeConfigDirRefused(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv(configDirEnv, "relative/dir")
+	wd := t.TempDir()
+	t.Chdir(wd)
+
+	ops := map[string]func() error{
+		"load":   func() error { _, err := LoadToken("http://a:1"); return err },
+		"save":   func() error { return SaveToken("http://a:1", "tok") },
+		"delete": func() error { return DeleteToken("http://a:1") },
+	}
+	for name, op := range ops {
+		err := op()
+		if err == nil || !strings.Contains(err.Error(), configDirEnv) || strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "relative/dir") {
+			t.Errorf("%s: err = %v, want one line naming %s", name, err, configDirEnv)
+		}
+	}
+	if entries, _ := os.ReadDir(wd); len(entries) != 0 {
+		t.Errorf("a refused save wrote %d entries into the working directory", len(entries))
+	}
+}
+
+// TestLoginTwoConfigDirs: two logins with two CONCH_CONFIG_DIR values never read
+// or write each other's file, and the directory is used as given.
+func TestLoginTwoConfigDirs(t *testing.T) {
+	isolateConfig(t)
+	home := t.TempDir()
+	dirs := map[string]string{"alice": filepath.Join(home, "alice"), "bob": filepath.Join(home, "bob")}
+	servers := map[string]*authFake{"alice": newAuthFake(t, true), "bob": newAuthFake(t, true)}
+
+	for who, dir := range dirs {
+		t.Setenv(configDirEnv, dir)
+		if _, _, err := runCLI(t, fakeToken+"\n", "login", "--server", servers[who].URL); err != nil {
+			t.Fatalf("login %s: %v", who, err)
+		}
+	}
+	for who, dir := range dirs {
+		t.Setenv(configDirEnv, dir)
+		other := "bob"
+		if who == "bob" {
+			other = "alice"
+		}
+		if tok, err := LoadToken(servers[who].URL); err != nil || tok != fakeToken {
+			t.Errorf("%s: LoadToken(own server) = %q, %v", who, tok, err)
+		}
+		if tok, err := LoadToken(servers[other].URL); err != nil || tok != "" {
+			t.Errorf("%s: LoadToken(%s's server) = %q, %v; want nothing", who, other, tok, err)
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, credentialsFileName)) //nolint:gosec // test-local path
+		if err != nil {
+			t.Fatalf("%s: credentials file is not directly under CONCH_CONFIG_DIR: %v", who, err)
+		}
+		var stored map[string]storedCredential
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			t.Fatal(err)
+		}
+		key, err := NormalizeServer(servers[who].URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := stored[key]; !ok || len(stored) != 1 {
+			t.Errorf("%s: file holds %v, want only its own entry %q", who, stored, key)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "conch")); !os.IsNotExist(err) {
+			t.Errorf("%s: a conch/ directory was appended under CONCH_CONFIG_DIR (%v)", who, err)
+		}
+	}
+}
+
+// TestCredentialsConfigDirIsNeverChanged: a directory named by CONCH_CONFIG_DIR
+// is the user's. A missing one is created private; an existing private one is
+// used as it is; one that others may read is refused and left exactly as it
+// was, so CONCH_CONFIG_DIR=$HOME cannot lock down a home directory.
+func TestCredentialsConfigDirIsNeverChanged(t *testing.T) {
+	isolateConfig(t)
+	base := t.TempDir()
+
+	missing := filepath.Join(base, "missing")
+	t.Setenv(configDirEnv, missing)
+	if err := SaveToken("http://a:1", "tok"); err != nil {
+		t.Fatalf("save into a missing directory: %v", err)
+	}
+	if fi, err := os.Stat(missing); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("created directory: %v, %v; want mode 0700", fi, err)
+	}
+
+	open := filepath.Join(base, "open")
+	if err := os.Mkdir(open, 0o755); err != nil { // #nosec G301 -- the test needs a directory others may read
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o755); err != nil { // #nosec G302 -- the test needs a directory others may read
+		t.Fatal(err)
+	}
+	t.Setenv(configDirEnv, open)
+	err := SaveToken("http://a:1", "tok")
+	if err == nil || !strings.Contains(err.Error(), configDirEnv) || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("save into a 0755 directory: err = %v, want one line naming %s", err, configDirEnv)
+	}
+	if fi, err := os.Stat(open); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("the refused directory changed: %v, %v; want 0755 still", fi, err)
+	}
+	if entries, _ := os.ReadDir(open); len(entries) != 0 {
+		t.Errorf("the refused directory holds %d entries, want none", len(entries))
 	}
 }
