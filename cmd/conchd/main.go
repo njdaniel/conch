@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,10 +22,15 @@ import (
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/internal/web"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
 var version = "v0.0.0-dev"
+
+// embeddedWeb is the web client built into this binary; a variable so a test
+// can stand in for a binary built with -tags conchweb.
+var embeddedWeb = web.Files
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -45,6 +51,7 @@ func run(args []string) error {
 		return runBootstrapOperator(args[1:], os.Stdout, os.Stderr)
 	case "version":
 		fmt.Println(version)
+		fmt.Println("web: " + embeddedWebName())
 		return nil
 	case "-h", "--help", "help":
 		usage(os.Stdout)
@@ -61,7 +68,7 @@ func usage(w *os.File) {
 Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
                      [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
-                     [--web-dir <dir>] [--allowed-origins <origin,...>]
+                     [--web-dir <dir> | --no-web] [--allowed-origins <origin,...>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -99,7 +106,11 @@ Flags for serve:
                          default: --livekit-url with ws->http, wss->https)
   --web-dir              a built web client (a directory holding index.html) to serve at /app/ on
                          the API's own origin; / then redirects to /app/ (env CONCHD_WEB_DIR).
-                         Unset, there is no /app/. serve refuses to start if the directory is unusable.
+                         Unset, the web client built into this binary is served instead, if there
+                         is one (conchd version says "web: embedded" or "web: none"); with neither
+                         there is no /app/. serve refuses to start if the directory is unusable.
+  --no-web               do not serve /app/ at all, even when a client is built in
+                         (env CONCHD_NO_WEB=1). Not valid together with --web-dir.
   --allowed-origins      comma-separated extra Origins the WebSocket upgrade accepts, such as
                          http://localhost:5173 (env CONCHD_ALLOWED_ORIGINS). It exists only so a
                          Vite dev server on another port can connect; unset keeps the same-origin
@@ -125,6 +136,8 @@ type serveOptions struct {
 	livekit         livekit.Config
 	maxUploadBytes  int64
 	webDir          string
+	webFS           fs.FS  // the embedded client, when it is the one served
+	webSource       string // what the start-up line names: dir <path>, embedded or none
 	allowedOrigins  []string
 	sessionStale    time.Duration
 	sessionOffline  time.Duration
@@ -145,6 +158,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
 	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
+	noWeb := fs.Bool("no-web", os.Getenv("CONCHD_NO_WEB") == "1", "do not serve /app/, even when a web client is built in")
 	originsRaw := fs.String("allowed-origins", os.Getenv("CONCHD_ALLOWED_ORIGINS"), "extra Origins the WebSocket upgrade accepts (Vite dev server only)")
 	// The environment seeds the default of each; a flag given on the command
 	// line wins because the flag set parses it afterwards.
@@ -197,18 +211,50 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --allowed-origins: %w", err)
 	}
-	if *webDir != "" {
-		if err := server.CheckWebDir(*webDir); err != nil {
-			return serveOptions{}, fmt.Errorf("serve: --web-dir: %w", err)
-		}
+	webFS, webSource, err := resolveWeb(*webDir, *noWeb)
+	if err != nil {
+		return serveOptions{}, err
 	}
 	return serveOptions{
-		webDir: *webDir, allowedOrigins: origins,
+		webDir: *webDir, webFS: webFS, webSource: webSource, allowedOrigins: origins,
 		livekit: lk, maxUploadBytes: *maxUpload,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
+}
+
+// resolveWeb decides which web client /app/ serves. A --web-dir wins and is
+// checked here, as always; with none, the client built into the binary, if
+// any; --no-web turns all of it off. Naming both a directory and --no-web
+// contradicts itself and is refused rather than guessed at.
+func resolveWeb(webDir string, noWeb bool) (fsys fs.FS, source string, err error) {
+	switch {
+	case webDir != "" && noWeb:
+		return nil, "", errors.New("serve: --web-dir and --no-web contradict each other")
+	case noWeb:
+		return nil, "none (--no-web)", nil
+	case webDir != "":
+		if err := server.CheckWebDir(webDir); err != nil {
+			return nil, "", fmt.Errorf("serve: --web-dir: %w", err)
+		}
+		return nil, "dir " + webDir, nil
+	}
+	if fsys, ok := embeddedWeb(); ok {
+		if err := server.CheckWebFS(fsys); err != nil {
+			return nil, "", fmt.Errorf("serve: %w", err)
+		}
+		return fsys, "embedded", nil
+	}
+	return nil, "none", nil
+}
+
+// embeddedWebName is what `conchd version` says about the build.
+func embeddedWebName() string {
+	if _, ok := embeddedWeb(); ok {
+		return "embedded"
+	}
+	return "none"
 }
 
 func runServe(args []string) error {
@@ -246,6 +292,7 @@ func runServe(args []string) error {
 		LiveKit:         opts.livekit,
 		MaxUploadBytes:  opts.maxUploadBytes,
 		WebDir:          opts.webDir,
+		WebFS:           opts.webFS,
 		AllowedOrigins:  opts.allowedOrigins,
 		SessionStale:    opts.sessionStale,
 		SessionOffline:  opts.sessionOffline,
@@ -261,6 +308,7 @@ func runServe(args []string) error {
 	}
 
 	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), opts.dataDir)
+	fmt.Printf("conchd web: %s\n", opts.webSource)
 	return srv.Serve(ctx)
 }
 
