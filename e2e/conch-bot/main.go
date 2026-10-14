@@ -9,6 +9,11 @@
 // activity of a successful reply, and a clean shutdown that ends the session
 // and releases the lock. The old name conch-bot is run once as well, to show
 // that it still starts, says so once, and honours the old CONCH_BOT_* names.
+//
+// The adapter is run a second time as the codex runtime, with CODEX_BIN naming
+// testdata/codex-stub.sh in place of Codex: the default Codex command, the
+// events of one recorded run read from its output, and the run's activity and
+// the reply as the server shows them. Codex itself is never started.
 package main
 
 import (
@@ -44,6 +49,9 @@ func main() {
 // line of the prompt, "<author id>: <message body>".
 const fixture = "e2e/p3-local/fixtures/echo.sh"
 
+// codexStub replays the events of one recorded `codex exec --json` run.
+const codexStub = "e2e/conch-bot/testdata/codex-stub.sh"
+
 type harness struct {
 	dir, conchd, adapter, alias, data, lock, addr, fixture string
 	server, botProc                                        *exec.Cmd
@@ -61,6 +69,10 @@ type harness struct {
 	// command and fixtureOn are what the next startBot gives the adapter.
 	command   string
 	fixtureOn bool
+	// codex runs the adapter as the codex runtime on its default command, with
+	// codexStub as the program, instead of command.
+	codex     bool
+	codexStub string
 	approval  string // path of the fixture that raises an approval
 	// readers are the human's REST client and the operator's.
 	human, op rest
@@ -87,6 +99,9 @@ func run() error {
 		}
 	}
 	if err := os.MkdirAll(h.data, 0o700); err != nil {
+		return err
+	}
+	if h.codexStub, err = filepath.Abs(codexStub); err != nil {
 		return err
 	}
 	if h.addr, err = freeAddr(); err != nil {
@@ -174,6 +189,9 @@ func run() error {
 		return err
 	}
 	if err := h.fixtureApproval(); err != nil {
+		return err
+	}
+	if err := h.codexProfile(); err != nil {
 		return err
 	}
 	return h.aliasStillStarts()
@@ -428,6 +446,67 @@ func (h *harness) fixtureApproval() error {
 	}
 	return h.checkSessionEnded()
 }
+
+// codexProfile runs the adapter as the codex runtime on its default command,
+// with the stub for Codex: the session says codex and the model it was given,
+// the run's activity is the one command of the recorded run, and the reply is
+// the recorded run's last agent message. No prompt text reaches the activity.
+func (h *harness) codexProfile() error {
+	h.codex = true
+	defer func() { h.codex = false }()
+	if err := h.startBot(h.adapter, false); err != nil {
+		return err
+	}
+	if err := h.waitNewSession(); err != nil {
+		return err
+	}
+	time.Sleep(300 * time.Millisecond)
+	asked, err := h.postHumanMessage("codex live message")
+	if err != nil {
+		return err
+	}
+	want := append(h.botRepliesSoFar(), h.humanReply("please approve this"), "done")
+	if err := h.waitForReplies(want...); err != nil {
+		return err
+	}
+	sessions, err := h.waitSessions(func(s []schema.SessionV1) bool {
+		return len(s) == 1 && s[0].Status == schema.SessionStatusIdle && s[0].CurrentRun == 0
+	})
+	if err != nil {
+		return err
+	}
+	if s := sessions[0]; s.Runtime != "codex" || s.Model != codexModel {
+		return fmt.Errorf("the adapter's session = %+v, want runtime codex and model %s", s, codexModel)
+	}
+	run, err := h.waitRun(asked.ID, func(r schema.RunV1) bool { return r.State == schema.RunStateCompleted })
+	if err != nil {
+		return err
+	}
+	var activity schema.ListActivityResponseV1
+	if err := h.human.send(http.MethodGet, fmt.Sprintf("/v1/runs/%d/activity", run.ID), nil, &activity); err != nil {
+		return err
+	}
+	var got []string
+	for _, entry := range activity.Activity {
+		got = append(got, string(entry.Kind)+"|"+entry.Summary+"|"+entry.Outcome)
+	}
+	wantActivity := []string{"command_started|started bash|", "command_finished|command finished|exit 0", "reply_posted|posted the reply|"}
+	if run.Outcome != "replied" || !reflect.DeepEqual(got, wantActivity) {
+		return fmt.Errorf("the codex run = %+v with activity %q, want 'replied' and %q", run, got, wantActivity)
+	}
+	for _, entry := range activity.Activity {
+		if strings.Contains(entry.Summary+entry.Outcome+string(entry.Data), "codex live message") {
+			return fmt.Errorf("an activity entry quotes the message: %+v", entry)
+		}
+	}
+	if err := h.stopBotClean(); err != nil {
+		return err
+	}
+	return h.checkSessionEnded()
+}
+
+// codexModel is the model the check gives the codex runtime (required there).
+const codexModel = "codex-stub"
 
 // botRepliesSoFar is the channel-wide replies the earlier steps expect.
 func (h *harness) botRepliesSoFar() []string {
@@ -775,7 +854,7 @@ func (h *harness) startBot(binary string, legacy bool) error {
 	}
 	var env []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CONCH_") || strings.HasPrefix(kv, "CLAUDE_BIN=") {
+		if strings.HasPrefix(kv, "CONCH_") || strings.HasPrefix(kv, "CLAUDE_BIN=") || strings.HasPrefix(kv, "CODEX_BIN=") {
 			continue
 		}
 		env = append(env, kv)
@@ -785,9 +864,15 @@ func (h *harness) startBot(binary string, legacy bool) error {
 		prefix+"PRINCIPAL_ID="+strconv.FormatInt(h.botID, 10), prefix+"CHANNEL=ops",
 		prefix+"POLL_INTERVAL=50ms", prefix+"MAX_BACKOFF=200ms",
 		prefix+"REPLY_TIMEOUT=5s", prefix+"LOCK_FILE="+h.lock,
-		// The fixture takes the prompt on standard input; CLAUDE_BIN is not set.
-		"CONCH_ADAPTER_CMD="+h.command, "CONCH_ADAPTER_HEARTBEAT=200ms",
+		"CONCH_ADAPTER_HEARTBEAT=200ms",
 	)
+	if h.codex {
+		// The default Codex command, with the stub in place of codex.
+		env = append(env, "CONCH_ADAPTER_RUNTIME=codex", "CONCH_ADAPTER_MODEL="+codexModel, "CODEX_BIN="+h.codexStub)
+	} else {
+		// The fixture takes the prompt on standard input; CLAUDE_BIN is not set.
+		env = append(env, "CONCH_ADAPTER_CMD="+h.command)
+	}
 	if h.fixtureOn {
 		env = append(env, "CONCH_ADAPTER_FIXTURE=1")
 	}
