@@ -159,7 +159,10 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     await screen.findByText('Loading channels…');
-    expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connecting');
+    // The status follows in the effect after the first render; waited for, not raced.
+    await waitFor(() => {
+      expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connecting');
+    });
   });
 
   it('opens the channel named by the hash', async () => {
