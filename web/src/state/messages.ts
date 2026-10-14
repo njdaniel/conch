@@ -3,13 +3,14 @@
 // reducer; src/api.ts and the socket feed it through App.
 import { messageV2, type MessageV2 } from '../schema/message';
 
-// How many of the newest messages are drawn, and how many more each step back
-// through older history draws.
-export const pageSize = 100;
-
-// The most messages held per channel: the newest. Older ones are dropped (a
-// pending send of our own is kept apart and never dropped).
+// The most messages held per channel. Messages arriving live push the oldest
+// out (a pending send of our own is kept apart and never dropped). Loading
+// older history never does: it stops instead, once another page would not fit
+// (canLoadOlder), so the newest are never the ones lost.
 export const maxHeld = 2000;
+
+// The size of a page of history; see api.historyLimit.
+const pageSize = 100;
 
 // The state of one message this tab is sending. A message becomes `Sent` by
 // leaving this list: the server's copy is in `byId` and its id in `sentIds`.
@@ -26,6 +27,9 @@ export interface PendingSend {
 
 export type HistoryStatus = 'idle' | 'loading' | 'ready' | 'error';
 
+// The state of a request for the page below the oldest message held.
+export type OlderStatus = 'idle' | 'loading' | 'error';
+
 export interface ChannelChat {
   // The id is the identity of a message: one that arrives twice is one.
   readonly byId: ReadonlyMap<number, MessageV2>;
@@ -33,8 +37,10 @@ export interface ChannelChat {
   // Messages this tab sent and the POST confirmed, shown as `Sent`.
   readonly sentIds: ReadonlySet<number>;
   readonly history: HistoryStatus;
-  // How many of the newest messages are drawn.
-  readonly shown: number;
+  readonly older: OlderStatus;
+  // Whether the server has nothing below the oldest message read: a page came
+  // back shorter than asked for.
+  readonly exhausted: boolean;
   // Whether older messages were dropped to stay within maxHeld.
   readonly trimmed: boolean;
   // Frames that failed the schema and were not shown.
@@ -53,7 +59,8 @@ const emptyChannel: ChannelChat = {
   pending: [],
   sentIds: new Set(),
   history: 'idle',
-  shown: pageSize,
+  older: 'idle',
+  exhausted: false,
   trimmed: false,
   dropped: 0,
   nextLocalId: 1,
@@ -61,7 +68,8 @@ const emptyChannel: ChannelChat = {
 
 export type ChatAction =
   | { readonly type: 'historyLoading'; readonly channel: string }
-  | { readonly type: 'historyLoaded'; readonly channel: string; readonly messages: readonly MessageV2[] }
+  // `more` is whether the page was full, so there may be older history.
+  | { readonly type: 'historyLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   | { readonly type: 'historyFailed'; readonly channel: string }
   // A message from the socket (already validated).
   | { readonly type: 'received'; readonly channel: string; readonly message: MessageV2 }
@@ -74,7 +82,9 @@ export type ChatAction =
   // A click on Retry: the same text goes out again, in the same place.
   | { readonly type: 'retrying'; readonly channel: string; readonly localId: number }
   | { readonly type: 'discard'; readonly channel: string; readonly localId: number }
-  | { readonly type: 'showOlder'; readonly channel: string }
+  | { readonly type: 'olderLoading'; readonly channel: string }
+  | { readonly type: 'olderLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
+  | { readonly type: 'olderFailed'; readonly channel: string }
   | { readonly type: 'reset' };
 
 // mergeMessages is the TUI's: a map by id, so a message held already is
@@ -111,7 +121,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'historyLoading':
       return update(state, action.channel, (c) => ({ ...c, history: 'loading' }));
     case 'historyLoaded':
-      return update(state, action.channel, (c) => ({ ...hold(c, action.messages), history: 'ready' }));
+      // The page replaces what was held: held messages from an earlier open may
+      // be far below it, and keeping them would hide a gap. Older history is
+      // reached again with Load older. Pending sends and sentIds stay.
+      return update(state, action.channel, (c) => ({
+        ...hold({ ...c, byId: new Map() }, action.messages),
+        history: 'ready',
+        older: 'idle',
+        trimmed: false,
+        exhausted: !action.more,
+      }));
     case 'historyFailed':
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':
@@ -150,8 +169,18 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...c,
         pending: c.pending.filter((p) => p.localId !== action.localId),
       }));
-    case 'showOlder':
-      return known(state, action.channel, (c) => ({ ...c, shown: c.shown + pageSize }));
+    case 'olderLoading':
+      return known(state, action.channel, (c) => ({ ...c, older: 'loading' }));
+    case 'olderLoaded':
+      // Merged without hold's trim: canLoadOlder kept this page within maxHeld.
+      return known(state, action.channel, (c) => ({
+        ...c,
+        byId: merge(c.byId, action.messages),
+        older: 'idle',
+        exhausted: !action.more,
+      }));
+    case 'olderFailed':
+      return known(state, action.channel, (c) => ({ ...c, older: 'error' }));
     case 'reset':
       return initialChat;
   }
@@ -164,6 +193,18 @@ export function chatFor(state: ChatState, channel: string | null): ChannelChat {
 // ordered is every message held, in id order.
 export function ordered(chat: ChannelChat): MessageV2[] {
   return [...chat.byId.values()].sort((a, b) => a.id - b.id);
+}
+
+// oldestId is the smallest id held, 0 for none: where the next older page ends.
+export function oldestId(chat: ChannelChat): number {
+  let oldest = 0;
+  for (const id of chat.byId.keys()) if (oldest === 0 || id < oldest) oldest = id;
+  return oldest;
+}
+
+// canLoadOlder says whether another page of older history fits within maxHeld.
+export function canLoadOlder(chat: ChannelChat): boolean {
+  return !chat.exhausted && chat.byId.size > 0 && chat.byId.size + pageSize <= maxHeld;
 }
 
 // lastId is the newest id held, 0 for none: where the socket resumes from.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageV2 } from '../schema/message';
-import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, pageSize, parseFrame, type ChatAction, type ChatState } from './messages';
+import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
 
 const msg = (id: number, body = `m${String(id)}`): MessageV2 => ({
   schema: 'conch.message.v2',
@@ -19,7 +19,7 @@ const ids = (state: ChatState) => ordered(chatFor(state, 'ops')).map((m) => m.id
 describe('the message store', () => {
   it('keeps messages in id order whatever order they arrive in', () => {
     const state = run(
-      { type: 'historyLoaded', channel: 'ops', messages: [msg(5), msg(2)] },
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(5), msg(2)], more: false },
       { type: 'received', channel: 'ops', message: msg(9) },
       { type: 'received', channel: 'ops', message: msg(3) },
     );
@@ -29,7 +29,7 @@ describe('the message store', () => {
 
   it('shows a message that arrives twice once: in history and again on the socket', () => {
     const state = run(
-      { type: 'historyLoaded', channel: 'ops', messages: [msg(1), msg(2)] },
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1), msg(2)], more: false },
       { type: 'received', channel: 'ops', message: msg(2) },
       { type: 'received', channel: 'ops', message: msg(2) },
     );
@@ -92,9 +92,11 @@ describe('the message store', () => {
     expect(chatFor(state, 'ops').pending.map((p) => p.localId)).toEqual([1, 2]);
   });
 
-  it('draws the newest page and reveals older ones a page at a time', () => {
-    const state = run({ type: 'historyLoaded', channel: 'ops', messages: [] }, { type: 'showOlder', channel: 'ops' });
-    expect(chatFor(state, 'ops').shown).toBe(2 * pageSize);
+  it('merges an older page by id and ends when the server has no more', () => {
+    const state = run({ type: 'historyLoaded', channel: 'ops', messages: [msg(5), msg(6)], more: true }, { type: 'olderLoaded', channel: 'ops', messages: [msg(3), msg(4), msg(5)], more: false });
+    expect(ids(state)).toEqual([3, 4, 5, 6]);
+    expect(oldestId(chatFor(state, 'ops'))).toBe(3);
+    expect(canLoadOlder(chatFor(state, 'ops'))).toBe(false);
   });
 
   it('counts a dropped frame', () => {
@@ -105,7 +107,7 @@ describe('the message store', () => {
 describe('the held messages are bounded', () => {
   it('keeps the newest maxHeld, says it dropped some, and never touches a pending send', () => {
     const many = Array.from({ length: maxHeld + 5 }, (_, i) => msg(i + 1));
-    let state = run({ type: 'sending', channel: 'ops', body: 'mine', at: 1 }, { type: 'historyLoaded', channel: 'ops', messages: many });
+    let state = run({ type: 'sending', channel: 'ops', body: 'mine', at: 1 }, { type: 'historyLoaded', channel: 'ops', messages: many, more: false });
     state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(maxHeld + 6) });
     const held = ids(state);
     expect(held).toHaveLength(maxHeld);

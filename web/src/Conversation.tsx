@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode }
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { Audience, MessageV2 } from './schema/message';
 import type { ChannelChat, PendingSend } from './state/messages';
-import { lastId, ordered } from './state/messages';
+import { canLoadOlder, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
 
 // HH:MM in the reader's own time zone.
@@ -160,7 +160,7 @@ export function Conversation({
   onSend,
   onRetrySend,
   onDismissSend,
-  onShowOlder,
+  onLoadOlder,
   onReload,
 }: {
   readonly channel: string;
@@ -174,20 +174,22 @@ export function Conversation({
   readonly onSend: (body: string) => void;
   readonly onRetrySend: (localId: number) => void;
   readonly onDismissSend: (localId: number) => void;
-  readonly onShowOlder: () => void;
+  readonly onLoadOlder: () => void;
   readonly onReload: () => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
-  // Where the reader was before older messages were drawn above them.
-  const anchor = useRef<{ readonly height: number; readonly top: number } | null>(null);
+  // Where the reader was before older messages were drawn above them, and the
+  // oldest id then: the anchor is spent when the oldest changes, not on the
+  // renders in between (the request starting).
+  const anchor = useRef<{ readonly height: number; readonly top: number; readonly oldest: number } | null>(null);
   const seen = useRef('');
   const [unseen, setUnseen] = useState(false);
 
-  const all = ordered(chat);
-  const shown = all.slice(Math.max(0, all.length - chat.shown));
-  const hasOlder = all.length > shown.length;
+  const shown = ordered(chat);
+  const hasOlder = canLoadOlder(chat);
+  const loadingOlder = chat.older === 'loading';
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const newest = `${String(lastId(chat))}/${String(chat.pending.length)}`;
 
@@ -198,7 +200,8 @@ export function Conversation({
     const el = log.current;
     if (el === null) return;
     const held = anchor.current;
-    if (held !== null) {
+    if (held !== null && chat.older === 'error') anchor.current = null;
+    else if (held !== null && oldestId(chat) !== held.oldest) {
       anchor.current = null;
       el.scrollTop = held.top + (el.scrollHeight - held.height);
       return;
@@ -211,8 +214,8 @@ export function Conversation({
 
   function showOlder() {
     const el = log.current;
-    if (el !== null) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
-    onShowOlder();
+    if (el !== null) anchor.current = { height: el.scrollHeight, top: el.scrollTop, oldest: oldestId(chat) };
+    onLoadOlder();
   }
 
   function jump() {
@@ -258,12 +261,13 @@ export function Conversation({
           const el = event.currentTarget;
           atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
           if (atBottom.current) setUnseen(false);
-          if (el.scrollTop === 0 && hasOlder) showOlder();
+          if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
       >
-        {chat.trimmed ? <p className="hint">older history is not loaded</p> : null}
+        {chat.trimmed || (!chat.exhausted && !hasOlder && shown.length > 0) ? <p className="hint">older history is not loaded</p> : null}
+        {chat.older === 'error' ? <p role="alert">Cannot load older messages</p> : null}
         {hasOlder ? (
-          <button type="button" onClick={showOlder}>
+          <button type="button" disabled={loadingOlder} onClick={showOlder}>
             Load older messages
           </button>
         ) : null}
