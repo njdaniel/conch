@@ -54,6 +54,10 @@ rust-build:
 # Node web/.nvmrc pins; without it this fails and names that version, it does
 # not skip. It downloads no browser.
 WEB_NODE = $(shell cat web/.nvmrc)
+# When nvm has the pinned Node, the web targets use it, whatever node a shell
+# profile puts first on PATH; otherwise the node on PATH, checked below.
+WEB_NODE_BIN = $(HOME)/.nvm/versions/node/v$(WEB_NODE)/bin
+web-node web-check web-build: export PATH := $(if $(wildcard $(WEB_NODE_BIN)/node),$(WEB_NODE_BIN):)$(PATH)
 
 web-node:
 	@v=$$(node --version 2>/dev/null) || { echo "web: FAIL: Node.js is not installed; install Node $(WEB_NODE) (web/.nvmrc)"; exit 1; }; \

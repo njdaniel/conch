@@ -176,7 +176,7 @@ make rust-check              # fmt, clippy, tests, dependency gate, licences and
 
 Without that toolchain `make check` fails and names the script; it does not skip the Rust leg. `make build` is unaffected: it builds only the Go binaries. If you fetched the toolchain before `conch-voice` used PipeWire, run the script once more: what is linked is now a copy of libwebrtc's archive with one member left out, made beside the download and pinned by its own hash (`scripts/voice-pins.sh` says why).
 
-`make check` also checks the browser client under `web/` ([ADR-007](docs/adr/ADR-007-client-interfaces.md)), React and TypeScript built with Vite. So far it is one page that names the server it came from; it does not call the API yet. That leg needs exactly the Node version in `web/.nvmrc` (24.18.0, with the npm it bundles; `nvm install` in `web/` picks it up) and `jq`. Packages come only from `web/package-lock.json`, through `npm ci`; no browser is downloaded.
+`make check` also checks the browser client under `web/` ([ADR-007](docs/adr/ADR-007-client-interfaces.md)), React and TypeScript built with Vite. So far it is one page that names the server it came from; it does not call the API yet. That leg needs exactly the Node version in `web/.nvmrc` (24.21.0, with the npm it bundles; `nvm install` in `web/` picks it up) and `jq`. Packages come only from `web/package-lock.json`, through `npm ci`; no browser is downloaded.
 
 ```sh
 make web-check   # gates (direct dependencies, exact versions, licences), typecheck, lint, unit tests; part of make check
