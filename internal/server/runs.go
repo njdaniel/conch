@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -370,6 +371,12 @@ func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request)
 	if !decodeRunBody(w, r, &req) {
 		return
 	}
+	// "data": null is no data. Decoding keeps the literal null in a
+	// RawMessage, which would be stored and sent back as "data":null on every
+	// read of an entry that has none.
+	if bytes.Equal(bytes.TrimSpace(req.Data), []byte("null")) {
+		req.Data = nil
+	}
 	if err := req.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -471,9 +478,11 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel is required")
 		return
 	}
+	// An empty session= is no filter, as an empty after= or limit= is the
+	// default.
 	sessionID := int64(0)
-	if query.Has("session") {
-		id, err := strconv.ParseInt(query.Get("session"), 10, 64)
+	if raw := query.Get("session"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || id <= 0 {
 			writeError(w, http.StatusBadRequest, "invalid_request", "session must be a positive integer")
 			return

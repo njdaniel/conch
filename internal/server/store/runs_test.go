@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -323,6 +324,22 @@ func TestCreateRunRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A net agt only monitors: it receives the message, and may not speak.
+	watchNet := f.mustNet(t, "watch")
+	f.put(t, "watch", f.erin, schema.NetRoleMember)
+	f.put(t, "watch", f.agt, schema.NetRoleMonitor)
+	monitored, rec := f.toNet(t, f.erin, watchNet, "agt only listens here")
+	if !reflect.DeepEqual(rec, []int64{f.erin.ID, f.agt.ID}) && !reflect.DeepEqual(rec, []int64{f.agt.ID, f.erin.ID}) {
+		t.Fatalf("the monitored message reached %v; agt must be a recipient for the case to mean anything", rec)
+	}
+	// A net agt was a member of, archived since.
+	goneNet := f.mustNet(t, "gone")
+	f.put(t, "gone", f.erin, schema.NetRoleMember)
+	f.put(t, "gone", f.agt, schema.NetRoleMember)
+	onArchived, _ := f.toNet(t, f.erin, goneNet, "said before the net was archived")
+	if _, err := f.s.ArchiveNet(ctx, "system", f.ch.ID, "gone"); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name    string
@@ -335,6 +352,9 @@ func TestCreateRunRules(t *testing.T) {
 	}{
 		{"a channel-wide run", f.sess.ID, f.agtCred, f.ch.ID, 0, f.agtReader(), nil},
 		{"answering a visible whisper", f.sess.ID, f.agtCred, f.ch.ID, f.whisperMsg, f.agtReader(), nil},
+		{"answering a message on a net the agent is a member of", f.sess.ID, f.agtCred, f.ch.ID, f.netMsg, f.agtReader(), nil},
+		{"a message on a net the agent only monitors", f.sess.ID, f.agtCred, f.ch.ID, monitored, f.agtReader(), ErrRunAnchorNotFound},
+		{"a message on a net archived since", f.sess.ID, f.agtCred, f.ch.ID, onArchived, f.agtReader(), ErrRunAnchorNotFound},
 		{"another credential's session", f.sess.ID, f.agtCred2, f.ch.ID, 0, f.agtReader(), ErrNotFound},
 		{"an ended session", ended.ID, f.agtCred, f.ch.ID, 0, f.agtReader(), ErrNotFound},
 		{"an unknown session", 9999, f.agtCred, f.ch.ID, 0, f.agtReader(), ErrNotFound},
@@ -447,6 +467,127 @@ func TestSetRunStateTransitionTable(t *testing.T) {
 					t.Errorf("audit rows %d -> %d, want %d", audit, f.count(t, "audit_events"), wantAudit)
 				}
 			})
+		}
+	}
+}
+
+// A report reaches the run's audience as starting the run did, so the rule a
+// run is started under is applied again to every state change and activity
+// entry, in their transactions. An agent that was a member of the net when it
+// started a run there, and has since been demoted to monitor, taken off the
+// net, or seen the net archived, gets ErrRunNotFound and changes nothing. Its
+// run on a whisper, which none of that touches, stays reportable.
+func TestReportsReapplyTheAnchorRule(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name   string
+		change func(t *testing.T, f *runFixture)
+	}{
+		{"demoted to monitor", func(t *testing.T, f *runFixture) { f.put(t, "n1", f.agt, schema.NetRoleMonitor) }},
+		{"taken off the net", func(t *testing.T, f *runFixture) {
+			if _, err := f.s.RemoveNetMember(ctx, "system", f.ch.ID, "n1", f.agt.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"the net archived", func(t *testing.T, f *runFixture) {
+			if _, err := f.s.ArchiveNet(ctx, "system", f.ch.ID, "n1"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRunFixture(t)
+			// runNet was started as a member of n1, and is reportable then.
+			if _, err := f.s.SetRunState(ctx, "system", f.runNet, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); err != nil {
+				t.Fatalf("before the change: %v", err)
+			}
+			tt.change(t, f)
+			runs, activity, audit := f.count(t, "runs"), f.count(t, "run_activity"), f.count(t, "audit_events")
+			if _, err := f.s.SetRunState(ctx, "system", f.runNet, f.agtCred, f.agtReader(), schema.RunStateCompleted, "done", runT0); !errors.Is(err, ErrRunNotFound) {
+				t.Errorf("SetRunState = %v, want ErrRunNotFound", err)
+			}
+			if _, err := f.s.AppendRunActivity(ctx, f.runNet, f.agtCred, f.agtReader(), ActivityParams{Kind: schema.ActivityKindReplyPosted, Summary: "still talking"}, runT0); !errors.Is(err, ErrRunNotFound) {
+				t.Errorf("AppendRunActivity = %v, want ErrRunNotFound", err)
+			}
+			r, err := f.s.RunVisible(ctx, f.runNet, Reader{f.alice.ID, true})
+			if err != nil || r.State != schema.RunStateRunning || r.Outcome != "" || r.EndedAt != nil {
+				t.Errorf("run after the refused reports = %+v, %v; want running and untouched", r, err)
+			}
+			if f.count(t, "runs") != runs || f.count(t, "run_activity") != activity || f.count(t, "audit_events") != audit {
+				t.Error("a refused report wrote something")
+			}
+			// The agent's run on a whisper is untouched by any of this.
+			if _, err := f.s.SetRunState(ctx, "system", f.runWhisper, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); err != nil {
+				t.Errorf("the whisper run = %v, want reportable", err)
+			}
+		})
+	}
+}
+
+// Two changes raced on one running run, to two different terminal states:
+// exactly one wins, the other is ErrInvalidTransition (the run had already
+// ended when its transaction read it), the run carries the winner's state, and
+// there is exactly one run_ended. Repeated so an interleaving that lets both
+// through has many chances to show.
+func TestConcurrentTerminalTransitionsExactlyOneWins(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	for round := 0; round < 20; round++ {
+		id := f.mustRun(t, f.ch.ID, 0, "raced")
+		if _, err := f.s.SetRunState(ctx, "system", id, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); err != nil {
+			t.Fatal(err)
+		}
+		targets := []schema.RunState{schema.RunStateCompleted, schema.RunStateFailed}
+		var wg sync.WaitGroup
+		wins := make(chan schema.RunState, len(targets))
+		errs := make(chan error, len(targets))
+		start := make(chan struct{})
+		for _, to := range targets {
+			wg.Add(1)
+			go func(to schema.RunState) {
+				defer wg.Done()
+				<-start
+				if _, err := f.s.SetRunState(ctx, "system", id, f.agtCred, f.agtReader(), to, "", runT0); err != nil {
+					errs <- err
+					return
+				}
+				wins <- to
+			}(to)
+		}
+		close(start)
+		wg.Wait()
+		close(wins)
+		close(errs)
+
+		var won []schema.RunState
+		for to := range wins {
+			won = append(won, to)
+		}
+		if len(won) != 1 {
+			t.Fatalf("round %d: %d changes won (%v), want exactly 1", round, len(won), won)
+		}
+		for err := range errs {
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Errorf("round %d: the losing change = %v, want ErrInvalidTransition", round, err)
+			}
+		}
+		r, err := f.s.RunVisible(ctx, id, f.agtReader())
+		if err != nil || r.State != won[0] || r.EndedAt == nil {
+			t.Errorf("round %d: run = %+v, %v; want %s and ended", round, r, err, won[0])
+		}
+		events, err := f.s.ListAuditEvents(ctx, 0, 100000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ended := 0
+		for _, e := range events {
+			if e.Action == AuditRunEnded && e.Subject == fmt.Sprintf("run:%d", id) {
+				ended++
+			}
+		}
+		if ended != 1 {
+			t.Errorf("round %d: run_ended rows = %d, want 1", round, ended)
 		}
 	}
 }

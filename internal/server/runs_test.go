@@ -446,6 +446,35 @@ func TestCreateRunRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Two nets in general, each with a message from alice: bot is a member of
+	// "speak" and only a monitor of "watch". bot holds post_net in general,
+	// so only the net's roster can refuse it.
+	onNet := map[string]int64{}
+	for _, n := range []struct {
+		name string
+		role schema.NetRole
+	}{{"speak", schema.NetRoleMember}, {"watch", schema.NetRoleMonitor}} {
+		net, err := f.srv.store.CreateNet(ctx, "system", f.general.ID, n.name, f.root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, seat := range []struct {
+			id   int64
+			role schema.NetRole
+		}{{f.alice.ID, schema.NetRoleMember}, {f.bot.ID, n.role}} {
+			if _, err := f.srv.store.PutNetMember(ctx, "system", f.general.ID, n.name, seat.id, seat.role, f.root.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		m, rec, err := f.srv.store.InsertScopedMessage(ctx, store.ScopedPost{
+			ChannelID: f.general.ID, AuthorID: f.alice.ID, Body: "on " + n.name,
+			Audience: schema.Audience{Kind: schema.AudienceKindNet, NetID: net.ID},
+		})
+		if err != nil || len(rec) != 2 {
+			t.Fatalf("post to %s = %v, recipients %v", n.name, err, rec)
+		}
+		onNet[n.name] = m.ID
+	}
 
 	tests := []struct {
 		name  string
@@ -459,6 +488,8 @@ func TestCreateRunRules(t *testing.T) {
 		{"answering a channel-wide message", f.botTok, botSess, runBody("general", wideMsg.ID, "t"), 201, ""},
 		{"answering a whisper to the agent", f.botTok, botSess, runBody("general", f.whisper, "t"), 201, ""},
 		{"in another channel the agent may post in", f.botTok, botSess, runBody("test-private", f.privateMsg, "t"), 201, ""},
+		{"answering a message on a net the agent is a member of", f.botTok, botSess, runBody("general", onNet["speak"], "t"), 201, ""},
+		{"a message on a net the agent only monitors", f.botTok, botSess, runBody("general", onNet["watch"], "t"), 404, "channel_not_found"},
 		{"a human", f.aliceTok, botSess, runBody("general", 0, "t"), 403, schema.ErrorCodeAgentRequired},
 		{"an operator", f.rootTok, botSess, runBody("general", 0, "t"), 403, schema.ErrorCodeAgentRequired},
 		{"another agent's session", f.botTok, rivalSess, runBody("general", 0, "t"), 404, schema.ErrorCodeSessionNotFound},
@@ -563,6 +594,60 @@ func TestRunOwnership(t *testing.T) {
 		if page := validActivityList(t, f.do(t, "GET", runPath(id, "/activity"), f.botTok, "")); len(page.Activity) != 0 {
 			t.Errorf("run %d has activity after the attempts: %+v", id, page)
 		}
+	}
+}
+
+// An agent that started a run on a net message as a member of the net, and is
+// then demoted to monitor, may no longer report on the run: that would go on
+// speaking to the net. Its state change and its activity get the answer a
+// stranger gets, and the run is left as it was.
+func TestDemotedNetMemberCannotReport(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	net, err := f.srv.store.CreateNet(ctx, "system", f.general.ID, "speak", f.root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{f.alice.ID, f.bot.ID} {
+		if _, err := f.srv.store.PutNetMember(ctx, "system", f.general.ID, "speak", id, schema.NetRoleMember, f.root.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, _, err := f.srv.store.InsertScopedMessage(ctx, store.ScopedPost{
+		ChannelID: f.general.ID, AuthorID: f.alice.ID, Body: "net question",
+		Audience: schema.Audience{Kind: schema.AudienceKindNet, NetID: net.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := f.session(t, f.botTok)
+	run := f.start(t, f.botTok, sess, "general", m.ID, "answer the net")
+	f.mustState(t, f.botTok, run.ID, schema.RunStateRunning)
+
+	if _, err := f.srv.store.PutNetMember(ctx, "system", f.general.ID, "speak", f.bot.ID, schema.NetRoleMonitor, f.root.ID); err != nil {
+		t.Fatal(err)
+	}
+	ended := len(f.auditRows(t, store.AuditRunEnded))
+	for _, r := range []struct{ suffix, body string }{
+		{"/state", `{"state":"completed","outcome":"done"}`},
+		{"/activity", activityBody},
+	} {
+		got := f.do(t, "POST", runPath(run.ID, r.suffix), f.botTok, r.body)
+		missing := f.do(t, "POST", runPath(999999, r.suffix), f.botTok, r.body)
+		assertErrorBody(t, got, http.StatusNotFound, schema.ErrorCodeRunNotFound)
+		if got.Body.String() != missing.Body.String() {
+			t.Errorf("POST %s = %s, a missing run %s", r.suffix, got.Body, missing.Body)
+		}
+	}
+	after := validRun(t, f.do(t, "GET", runPath(run.ID, ""), f.aliceTok, ""))
+	if after.State != schema.RunStateRunning || after.Outcome != "" || after.EndedAt != nil {
+		t.Errorf("run after the refused reports = %+v, want running and untouched", after)
+	}
+	if page := validActivityList(t, f.do(t, "GET", runPath(run.ID, "/activity"), f.aliceTok, "")); len(page.Activity) != 0 {
+		t.Errorf("activity after the refused append = %+v", page)
+	}
+	if len(f.auditRows(t, store.AuditRunEnded)) != ended {
+		t.Error("a refused state change wrote run_ended")
 	}
 }
 
@@ -781,6 +866,11 @@ func TestListRuns(t *testing.T) {
 			assertErrorBody(t, f.do(t, "GET", "/v1/runs?"+c.query, f.bobTok, ""), c.want, c.code)
 		})
 	}
+	// An empty session= is no filter, as an empty after= or limit= is the
+	// default.
+	if page := validRunList(t, f.do(t, "GET", "/v1/runs?channel=general&session=&after=&limit=", f.bobTok, "")); len(page.Runs) != len(bobs) {
+		t.Errorf("empty parameters listed %d runs, want all %d bob may see", len(page.Runs), len(bobs))
+	}
 	if a, b := f.do(t, "GET", "/v1/runs?channel=test-private", f.bobTok, ""), f.do(t, "GET", "/v1/runs?channel=nosuch", f.bobTok, ""); a.Body.String() != b.Body.String() {
 		t.Errorf("a channel bob is not in answers %s, an unknown one %s", a.Body, b.Body)
 	}
@@ -844,6 +934,27 @@ func TestRunActivity(t *testing.T) {
 		t.Errorf("entries = %d, want %d", len(page.Activity), len(ids))
 	}
 	assertErrorBody(t, f.do(t, "GET", runPath(run.ID, "/activity?limit=101"), f.botTok, ""), http.StatusBadRequest, "invalid_request")
+
+	// No data and "data": null are the same entry: no data key, on the
+	// response and on every read.
+	t.Run("no data and null data", func(t *testing.T) {
+		other := f.start(t, f.botTok, sess, "general", 0, "no data")
+		for _, body := range []string{
+			`{"kind":"reply_posted","summary":"no data"}`,
+			`{"kind":"reply_posted","summary":"null data","data":null}`,
+			`{"kind":"reply_posted","summary":"spaced null","data": null }`,
+		} {
+			rec := f.do(t, "POST", runPath(other.ID, "/activity"), f.botTok, body)
+			if rec.Code != http.StatusCreated || strings.Contains(rec.Body.String(), `"data"`) {
+				t.Errorf("append %s = %d %s; want 201 with no data key", body, rec.Code, rec.Body)
+			}
+			validActivity(t, rec)
+		}
+		rec := f.do(t, "GET", runPath(other.ID, "/activity"), f.aliceTok, "")
+		if page := validActivityList(t, rec); len(page.Activity) != 3 || strings.Contains(rec.Body.String(), `"data"`) {
+			t.Errorf("read back %s; want three entries and no data key", rec.Body)
+		}
+	})
 	assertErrorBody(t, f.do(t, "GET", "/v1/runs/x/activity", f.botTok, ""), http.StatusNotFound, schema.ErrorCodeRunNotFound)
 }
 

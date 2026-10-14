@@ -1186,20 +1186,53 @@ func anchorSQL(columns string, scoped bool) string {
 	return `SELECT ` + columns + anchorFrom + visibleToAnyReader
 }
 
-// runAnchorVisibleTx is RunAnchorAudience's check inside CreateRun's
-// transaction: the message must be in the channel and visible to reader now.
+// runAnchorVisibleTx is CreateRun's check of the message a run answers, inside
+// its transaction: the message must be in the channel and visible to reader
+// now, and reader must be allowed to speak to the message's audience.
+//
+// Seeing is not enough for a net message. A run's task and activity reach the
+// net, so starting one is speaking on it, and a monitor, who has a recipient
+// row for every message on the net, may only listen. So for a net message the
+// reader must be on the net, which must be live and in this channel, as a
+// member: the rule resolveNetRecipientsTx applies to a post. Anything else is
+// ErrRunAnchorNotFound, the same answer as a message that is not there, so a
+// monitor learns nothing a refusal of any other kind would not tell it. A
+// whisper needs nothing more: every recipient of a whisper may reply to it.
 func runAnchorVisibleTx(ctx context.Context, tx execer, channelID, messageID int64, reader Reader) error {
 	if reader.PrincipalID <= 0 {
 		return ErrRunAnchorNotFound
 	}
 	scoped, predArgs := visibilityArgs(reader)
-	var id int64
-	switch err := tx.QueryRowContext(ctx, anchorSQL("m.id", scoped),
-		append([]any{messageID, channelID}, predArgs...)...).Scan(&id); {
+	var (
+		kind  sql.NullString
+		netID sql.NullInt64
+	)
+	switch err := tx.QueryRowContext(ctx, anchorSQL("m.audience_kind, m.net_id", scoped),
+		append([]any{messageID, channelID}, predArgs...)...).Scan(&kind, &netID); {
 	case errors.Is(err, sql.ErrNoRows):
 		return ErrRunAnchorNotFound
 	case err != nil:
 		return fmt.Errorf("store: check run message %d: %w", messageID, err)
+	}
+	if !kind.Valid || schema.AudienceKind(kind.String) != schema.AudienceKindNet {
+		return nil
+	}
+	if !netID.Valid {
+		// Never read a net message without a net as something wider.
+		return ErrRunAnchorNotFound
+	}
+	var role string
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		netID.Int64, channelID, reader.PrincipalID).Scan(&role); {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrRunAnchorNotFound
+	case err != nil:
+		return fmt.Errorf("store: check seat on net %d: %w", netID.Int64, err)
+	}
+	if schema.NetRole(role) != schema.NetRoleMember {
+		return ErrRunAnchorNotFound
 	}
 	return nil
 }

@@ -518,11 +518,23 @@ func TestOnlyAudienceGoReadsMessageRows(t *testing.T) {
 	}
 }
 
-// runRowRead matches SQL that reads rows of runs or run_activity: the table
-// after FROM or JOIN, in any case and with any spacing. Writes (INSERT INTO,
-// UPDATE) and the schema (CREATE TABLE, REFERENCES, CREATE INDEX ... ON) do
-// not match.
-var runRowRead = regexp.MustCompile(`(?i)\b(from|join)\s+(runs|run_activity)\b`)
+// runRowRead matches SQL that reads rows of runs or run_activity, in any case
+// and with any spacing:
+//
+//   - the table right after FROM or JOIN;
+//   - the table later in a FROM list, after a comma (an implicit join, "FROM
+//     sessions s, runs r"), within one string literal;
+//   - an INSERT, REPLACE or UPDATE of the table with RETURNING, which hands
+//     back the rows it wrote.
+//
+// Plain writes (INSERT INTO, UPDATE) and the schema (CREATE TABLE,
+// REFERENCES, CREATE INDEX ... ON) do not match. The comma and RETURNING
+// forms stop at a quote, a backquote or a semicolon, so they look within one
+// statement and not across a file.
+var runRowRead = regexp.MustCompile("(?i)" +
+	`\b(from|join)\s+(runs|run_activity)\b` +
+	"|\\bfrom\\b[^;\"`]*?,\\s*(runs|run_activity)\\b" +
+	"|\\b(insert(\\s+or\\s+\\w+)?\\s+into|replace\\s+into|update(\\s+or\\s+\\w+)?)\\s+(runs|run_activity)\\b[^;\"`]*\\breturning\\b")
 
 // The structural half of the run rule (D8), as TestOnlyAudienceGoReadsMessageRows
 // is for messages: only audience.go reads rows of runs and run_activity, so
@@ -581,6 +593,15 @@ func TestRunRowReadPattern(t *testing.T) {
 		{"run_id INTEGER NOT NULL REFERENCES runs (id)", false},
 		{"CREATE INDEX runs_by_channel ON runs (channel_id, id)", false},
 		{"SELECT * FROM runs_archive", false},
+		{"SELECT ru.task FROM sessions s, runs ru WHERE ru.session_id = s.id", true},
+		{"select a.summary from runs r ,\n\t run_activity a where a.run_id = r.id", true},
+		{"SELECT 1 FROM channels c, principals p, runs", true},
+		{"UPDATE runs SET state = ? WHERE id = ? RETURNING task", true},
+		{"update or ignore run_activity set kind = ? returning summary", true},
+		{"INSERT INTO runs (session_id) VALUES (?) RETURNING id, task", true},
+		{"INSERT INTO run_activity (run_id) VALUES (?)\n\t RETURNING *", true},
+		{"SELECT id, name FROM principals WHERE id = ?", false},
+		{"UPDATE sessions SET state = ? RETURNING id", false},
 	} {
 		if got := runRowRead.MatchString(c.sql); got != c.read {
 			t.Errorf("%q: read = %v, want %v", c.sql, got, c.read)

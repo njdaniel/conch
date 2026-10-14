@@ -176,15 +176,16 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 // with the latest change). Entering a terminal state sets ended_at and
 // appends run_ended, naming the final state, in the same transaction.
 //
-// The run must be one credentialID owns (through its session) and reader may
-// see, decided inside the transaction (ErrRunNotFound otherwise), and the
-// change must be in the lifecycle (ErrInvalidTransition otherwise, writing
+// The run must be one credentialID owns (through its session), that reader may
+// see and whose message reader may still speak to (reportableRunTx), decided
+// inside the transaction (ErrRunNotFound otherwise), and the change must be in
+// the lifecycle (ErrInvalidTransition otherwise, writing
 // nothing). It returns the run as it is after.
 func (s *Store) SetRunState(ctx context.Context, actor string, runID, credentialID int64, reader Reader, to schema.RunState, outcome string, now time.Time) (Run, error) {
 	now = storedTime(now)
 	var out Run
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		run, err := ownedRunTx(ctx, tx, runID, credentialID, reader)
+		run, err := reportableRunTx(ctx, tx, runID, credentialID, reader)
 		if err != nil {
 			return err
 		}
@@ -239,14 +240,15 @@ type ActivityParams struct {
 }
 
 // AppendRunActivity appends one entry to run runID at now. The run must be
-// one credentialID owns and reader may see, decided inside the transaction
+// one credentialID owns, that reader may see and whose message reader may
+// still speak to (reportableRunTx), decided inside the transaction
 // (ErrRunNotFound otherwise), and must not have ended (ErrInvalidTransition).
 // Nothing is audited: the entry is the record.
 func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64, reader Reader, p ActivityParams, now time.Time) (Activity, error) {
 	now = storedTime(now)
 	var out Activity
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		run, err := ownedRunTx(ctx, tx, runID, credentialID, reader)
+		run, err := reportableRunTx(ctx, tx, runID, credentialID, reader)
 		if err != nil {
 			return err
 		}
@@ -275,6 +277,30 @@ func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64
 		return Activity{}, err
 	}
 	return out, nil
+}
+
+// reportableRunTx is the run a report (a state change or an activity entry)
+// may change, read inside the report's transaction: one credentialID owns and
+// reader may see (ownedRunTx), and whose message, when it answers one, reader
+// may still speak to by the rule a run is started under (runAnchorVisibleTx).
+// A report reaches the run's audience as the start did, so an agent taken off
+// the net since, demoted to monitor on it, or whose net has been archived may
+// not report on a run it started there. Every failure is ErrRunNotFound, the
+// answer a stranger gets.
+func reportableRunTx(ctx context.Context, tx execer, runID, credentialID int64, reader Reader) (Run, error) {
+	run, err := ownedRunTx(ctx, tx, runID, credentialID, reader)
+	if err != nil {
+		return Run{}, err
+	}
+	if run.MessageID > 0 {
+		switch err := runAnchorVisibleTx(ctx, tx, run.ChannelID, run.MessageID, reader); {
+		case errors.Is(err, ErrRunAnchorNotFound):
+			return Run{}, ErrRunNotFound
+		case err != nil:
+			return Run{}, err
+		}
+	}
+	return run, nil
 }
 
 // principalUsableInChannelTx reports whether principalID is, now, a member of

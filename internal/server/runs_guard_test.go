@@ -28,7 +28,19 @@ var runStoreMethods = map[string]bool{
 	"CreateRun": true, "SetRunState": true, "AppendRunActivity": true,
 }
 
-var runTableInString = regexp.MustCompile(`(?i)\b(from|join)\s+runs\b|run_activity`)
+// runTableInString matches a string that names a run table: run_activity
+// anywhere, or runs in a string that is SQL (it holds a statement keyword),
+// whatever the shape of the statement: after FROM or JOIN, in a comma join,
+// in an UPDATE ... RETURNING.
+var (
+	runActivityInString = regexp.MustCompile(`(?i)run_activity`)
+	runsInString        = regexp.MustCompile(`(?i)\bruns\b`)
+	sqlInString         = regexp.MustCompile(`(?i)\b(select|update|insert|delete|replace|from|join|returning)\b`)
+)
+
+func namesRunTable(lit string) bool {
+	return runActivityInString.MatchString(lit) || (runsInString.MatchString(lit) && sqlInString.MatchString(lit))
+}
 
 // checkRunReads returns what file does that the rule forbids.
 func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
@@ -36,7 +48,7 @@ func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.BasicLit:
-			if x.Kind == token.STRING && runTableInString.MatchString(x.Value) {
+			if x.Kind == token.STRING && namesRunTable(x.Value) {
 				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" names a run table in a string")
 			}
 		case *ast.CallExpr:
@@ -45,27 +57,25 @@ func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
 				return true
 			}
 			recv, name := types.ExprString(sel.X), sel.Sel.Name
-			if recv != "store" && !strings.HasSuffix(recv, ".store") {
-				return true
-			}
-			if !strings.Contains(name, "Run") && !strings.Contains(name, "Activity") && !strings.Contains(name, "Activities") {
+			if runStoreMethods[name] {
+				// Whatever the receiver: a copy of the store under another
+				// name (st := s.store) is still the store.
+				for _, arg := range x.Args {
+					if strings.HasPrefix(types.ExprString(arg), "readerFor(") {
+						return true
+					}
+				}
+				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls "+name+" without readerFor(...) as its reader")
 				return true
 			}
 			// store.RunParams{} and the like are types, not calls; only a
 			// method of the store value is a read.
-			if recv == "store" {
+			if recv == "store" || !strings.HasSuffix(recv, ".store") {
 				return true
 			}
-			if !runStoreMethods[name] {
+			if strings.Contains(name, "Run") || strings.Contains(name, "Activity") || strings.Contains(name, "Activities") {
 				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls the store's "+name+", which is not a known run method")
-				return true
 			}
-			for _, arg := range x.Args {
-				if strings.HasPrefix(types.ExprString(arg), "readerFor(") {
-					return true
-				}
-			}
-			bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls "+name+" without readerFor(...) as its reader")
 		}
 		return true
 	})
@@ -123,6 +133,9 @@ const q2 = "select * from run_activity"
 func a(s *Server) { s.store.RunsSince(ctx, 1) }
 func b(s *Server) { s.store.RunVisible(ctx, 1, store.Reader{PrincipalID: 9, Scoped: true}) }
 func c(s *Server) { s.store.ListVisibleActivity(ctx, 1, store.ChannelWideOnly, 0, 10) }
+func d(s *Server) { st := s.store; st.RunVisible(ctx, 1, store.ChannelWideOnly) }
+const q3 = "SELECT ru.task FROM sessions s, runs ru"
+const q4 = "UPDATE runs SET state = ? RETURNING task"
 func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, apiV2)); _ = store.RunParams{} }
 `
 	fset := token.NewFileSet()
@@ -132,7 +145,7 @@ func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, ap
 	}
 	bad := strings.Join(checkRunReads(fset, "x.go", f), "\n")
 	for _, want := range []string{
-		"x.go:2:", "x.go:3:", "x.go:4:", "x.go:5:", "x.go:6:",
+		"x.go:2:", "x.go:3:", "x.go:4:", "x.go:5:", "x.go:6:", "x.go:7:", "x.go:8:", "x.go:9:",
 		"calls the store's RunsSince",
 		"calls RunVisible without readerFor",
 		"calls ListVisibleActivity without readerFor",
@@ -141,7 +154,7 @@ func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, ap
 			t.Errorf("the guard missed %q; it reported:\n%s", want, bad)
 		}
 	}
-	if strings.Contains(bad, "x.go:7:") {
+	if strings.Contains(bad, "x.go:10:") {
 		t.Errorf("the guard refused the allowed call:\n%s", bad)
 	}
 }
