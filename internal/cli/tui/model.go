@@ -28,6 +28,7 @@ type API interface {
 	PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error)
 	SubscribeV2(context.Context, string, func(schema.MessageV2) error) error
 	ListNets(context.Context, string) (schema.ListNetsResponseV1, error)
+	ListChannelMembers(context.Context, string) (schema.ListChannelMembersResponseV1, error)
 	ListChannels(context.Context) (schema.ListChannelsResponse, error)
 	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
 	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
@@ -56,6 +57,14 @@ type netsLoaded struct {
 	err     error
 	resolve bool
 	want    string
+}
+
+// membersLoaded carries a channel's member list, which names the authors of its
+// messages.
+type membersLoaded struct {
+	channel string
+	members []schema.ChannelMemberV1
+	err     error
 }
 
 // netTarget is where plain messages go instead of the whole channel.
@@ -169,6 +178,15 @@ type Model struct {
 	// nets is each channel's net roster as last loaded; it resolves "/net
 	// <name>" and the names shown in scope badges.
 	nets map[string][]schema.NetV1
+	// members is each channel's member names as last loaded, by principal id.
+	// A channel whose list never loaded has no entry, and its authors show as
+	// numbers.
+	members map[string]map[int64]schema.ChannelMemberV1
+	// now and loc give the clock and the time zone message times are shown in.
+	// Injectable so tests do not depend on the machine or on today's date; a nil
+	// loc means the local zone.
+	now func() time.Time
+	loc *time.Location
 	// target is the net plain messages are sent to; nil means the channel.
 	// It is never carried across channels, and nothing ever falls back from a
 	// scoped send to a channel-wide one.
@@ -232,7 +250,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{}}
 	if v, ok := api.(VoiceAPI); ok {
@@ -266,7 +284,7 @@ func (m Model) Init() tea.Cmd {
 	if m.loadingChannels {
 		return tea.Batch(who, m.loadChannels(), m.waitEvent())
 	}
-	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.kickVoice(), m.waitEvent())
+	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.loadMembers(), m.startSubscription(), m.kickVoice(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -473,9 +491,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = nil
 		m.pendingNet = ""
 		m.subscribed[names[0]] = true
-		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.beginVoice())
+		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.loadMembers(), m.startSubscription(), m.beginVoice())
 	case netsLoaded:
 		return m.netsLoaded(msg)
+	case membersLoaded:
+		// A failure changes nothing: names already known stay, and without any
+		// the authors show as numbers. The next open or reconnect asks again.
+		if msg.err == nil {
+			names := make(map[int64]schema.ChannelMemberV1, len(msg.members))
+			for _, member := range msg.members {
+				names[member.PrincipalID] = member
+			}
+			m.members[msg.channel] = names
+		}
 	case messagesLoaded:
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
@@ -526,7 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.subscribed[msg.channel] = true
 		// Backfill the gap; mergeMessages de-duplicates by id.
-		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
+		return m, tea.Batch(m.loadCurrent(), m.loadMembers(), m.startSubscription())
 	case messageSent:
 		m.sending = false
 		if msg.err != nil {
@@ -603,7 +631,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, ""), m.beginVoice()}
+	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice()}
 	// A pending retry timer will start the subscription itself.
 	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
 		m.subscribed[m.current()] = true
@@ -1605,6 +1633,20 @@ func (m Model) loadNets(resolve bool, want string) tea.Cmd {
 	}
 }
 
+// loadMembers asks for the selected channel's member list. It is its own
+// command, so a slow or refused list never holds up messages; its failure is
+// dropped in Update.
+func (m Model) loadMembers() tea.Cmd {
+	channel := m.current()
+	if channel == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		resp, err := m.api.ListChannelMembers(m.ctx, channel)
+		return membersLoaded{channel: channel, members: resp.Members, err: err}
+	}
+}
+
 // netsLoaded records the roster and, for a "/net <name>" that had to wait for
 // it, finishes the command. A plain refresh that fails is silent: the roster
 // only names badges and resolves /net, and /net reports its own failures.
@@ -1710,39 +1752,110 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 	}
 }
 
-// messageLine renders one message on exactly one line of at most width cells.
+// messageLine renders one message on exactly one line of at most width cells:
 //
-// A message body must not be able to pass for a scope badge. That is
-// guaranteed three ways, none of which depends on colour (a pipe, NO_COLOR or
-// a monochrome terminal show no styling):
+//	[scope] HH:MM name [agent] [payload]: body
+//
+// A message body or an author name must not be able to pass for a scope badge,
+// the agent badge or the payload badge. That is guaranteed three ways, none of
+// which depends on colour (a pipe, NO_COLOR or a monochrome terminal show no
+// styling):
 //  1. Position: the scope badge is the first thing on the line, before the
-//     author id. Every other line starts with the author's digits, and the
-//     body is always rendered after the author id, never at column 0.
+//     time and the author. Every other line starts with the time or the author,
+//     and the body is always rendered after the author, never at column 0.
 //  2. One line: sanitize removes line breaks and every control character, so
-//     a body cannot start a second line (or an escape sequence) of its own.
-//  3. Escape: a body that starts with "[" is shown with a leading backslash,
-//     so even in the body's own position it never reads as a badge or as the
-//     payload badge.
+//     neither can start a second line (or an escape sequence) of its own.
+//  3. Escape: a body or a name that starts with "[" is shown with a leading
+//     backslash, and a name has any later "[" escaped too, so neither reads as
+//     a badge, least of all as the "[agent]" badge that follows a name.
 func (m Model) messageLine(channel string, message schema.MessageV2, width int) string {
-	badge, badgeWidth := "", 0
-	if inner := m.scopeText(channel, message.Audience); inner != "" {
-		text := "[" + clip(inner, width/3) + "]"
-		badgeWidth = utf8.RuneCountInString(text) + 1
-		badge = badgeStyle.Render(text) + " "
+	inner := width - 2 // the pane's border
+	var prefix strings.Builder
+	used := 0
+	if scope := m.scopeText(channel, message.Audience); scope != "" {
+		text := "[" + clip(scope, width/3) + "]"
+		used += utf8.RuneCountInString(text) + 1
+		prefix.WriteString(badgeStyle.Render(text) + " ")
 	}
-	payload, payloadWidth := "", 0
+	if when := m.messageTime(message); when != "" {
+		used += len(when) + 1
+		prefix.WriteString(when + " ")
+	}
+	name, agent := m.authorName(channel, message.AuthorID)
+	name = fitCells(name, max(4, min(24, inner/2)))
+	used += cellWidth(name)
+	prefix.WriteString(name)
+	if agent {
+		used += len(" [agent]")
+		prefix.WriteString(" " + badgeStyle.Render("[agent]"))
+	}
 	if message.Payload != nil {
 		text := "[" + clip(sanitize(message.Payload.Schema), width/3) + "]"
-		payloadWidth = utf8.RuneCountInString(text) + 1
-		payload = " " + badgeStyle.Render(text)
+		used += utf8.RuneCountInString(text) + 1
+		prefix.WriteString(" " + badgeStyle.Render(text))
 	}
-	author := strconv.FormatInt(message.AuthorID, 10)
+	prefix.WriteString(": ")
+	used += 2
 	body := sanitize(message.Body)
 	if strings.HasPrefix(body, "[") {
 		body = "\\" + body
 	}
-	bodyWidth := width - utf8.RuneCountInString(author) - badgeWidth - payloadWidth - 7
-	return badge + author + payload + "  " + clip(body, bodyWidth)
+	return prefix.String() + fitCells(body, inner-used)
+}
+
+// narrowWidth is the terminal width below which messages carry no time.
+const narrowWidth = 60
+
+// messageTime is the time a message is shown with, in the model's time zone:
+// "HH:MM" for today and "MM-DD HH:MM" for another day. It is "" for a message
+// without a time, and on a terminal narrower than narrowWidth, where the time
+// goes before the name does.
+func (m Model) messageTime(message schema.MessageV2) string {
+	if width, _ := m.size(); width < narrowWidth || message.CreatedAt.IsZero() {
+		return ""
+	}
+	loc := m.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	at, today := message.CreatedAt.Time().In(loc), now().In(loc)
+	if at.Year() == today.Year() && at.YearDay() == today.YearDay() {
+		return at.Format("15:04")
+	}
+	return at.Format("01-02 15:04")
+}
+
+// authorName is how an author is shown: the name the member list gives, and
+// whether it is an agent. An author the list does not have (they left, or it
+// failed to load) is "#<id>".
+func (m Model) authorName(channel string, id int64) (name string, agent bool) {
+	if member, ok := m.members[channel][id]; ok {
+		name = safeName(member.Name)
+		agent = member.Kind == schema.PrincipalAgent
+	}
+	if name == "" {
+		return "#" + strconv.FormatInt(id, 10), false
+	}
+	return name, agent
+}
+
+// safeName makes a principal's name fit to print. Names stored before the
+// server's display-name rule existed can hold anything, so it goes through
+// sanitize like a body, loses the zero-width characters that would let two
+// different names look alike, and has "[" escaped so it cannot pose as a badge.
+func safeName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case 0x200b, 0x200c, 0x200d, 0x2060, 0xfeff: // zero-width space, non-joiner, joiner, word joiner, BOM
+			return -1
+		}
+		return r
+	}, sanitize(name))
+	return strings.TrimSpace(strings.ReplaceAll(name, "[", "\\["))
 }
 
 // promptWithin is prompt fitted to max cells. Only the channel name is ever

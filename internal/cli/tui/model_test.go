@@ -29,6 +29,9 @@ func (stubAPI) SubscribeV2(context.Context, string, func(schema.MessageV2) error
 func (stubAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1, error) {
 	return schema.ListNetsResponseV1{}, nil
 }
+func (stubAPI) ListChannelMembers(context.Context, string) (schema.ListChannelMembersResponseV1, error) {
+	return schema.ListChannelMembersResponseV1{}, nil
+}
 func (stubAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
 	return schema.ListChannelsResponse{}, nil
 }
@@ -1292,7 +1295,7 @@ func TestSentMessageCarriesItsBadge(t *testing.T) {
 	m = enter(m, "/net alpha")
 	m = enter(m, "on the net")
 	line := m.messageLine("ops", m.messages["ops"][0], 60)
-	if !strings.HasPrefix(line, "[net:alpha] 7") || !strings.Contains(line, "on the net") {
+	if !strings.HasPrefix(line, "[net:alpha] #7: ") || !strings.Contains(line, "on the net") {
 		t.Errorf("line = %q", line)
 	}
 }
@@ -1557,12 +1560,12 @@ func TestScopeBadges(t *testing.T) {
 		msg  schema.MessageV2
 		want string // exact prefix of the line
 	}{
-		{"channel-wide", schema.MessageV2{ID: 1, AuthorID: 4, Body: "plain"}, "4  plain"},
-		{"net by name", schema.MessageV2{ID: 2, AuthorID: 4, Body: "x", Audience: net}, "[net:alpha] 4  x"},
-		{"net unknown to the roster shows its id", schema.MessageV2{ID: 3, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 42}}, "[net:42] 4  x"},
-		{"whisper lists the others", whisper, "[whisper:4,9] 4  x"},
-		{"unknown kind is still scoped", schema.MessageV2{ID: 5, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: "future"}}, "[future] 4  x"},
-		{"payload badge after author", schema.MessageV2{ID: 6, AuthorID: 4, Body: "x", Payload: &schema.Payload{Schema: "acme.alert.v1"}}, "4 [acme.alert.v1]  x"},
+		{"channel-wide", schema.MessageV2{ID: 1, AuthorID: 4, Body: "plain"}, "#4: plain"},
+		{"net by name", schema.MessageV2{ID: 2, AuthorID: 4, Body: "x", Audience: net}, "[net:alpha] #4: x"},
+		{"net unknown to the roster shows its id", schema.MessageV2{ID: 3, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 42}}, "[net:42] #4: x"},
+		{"whisper lists the others", whisper, "[whisper:4,9] #4: x"},
+		{"unknown kind is still scoped", schema.MessageV2{ID: 5, AuthorID: 4, Body: "x", Audience: &schema.Audience{Kind: "future"}}, "[future] #4: x"},
+		{"payload badge after author", schema.MessageV2{ID: 6, AuthorID: 4, Body: "x", Payload: &schema.Payload{Schema: "acme.alert.v1"}}, "#4 [acme.alert.v1]: x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1633,10 +1636,10 @@ func TestForgedMarkersInBodies(t *testing.T) {
 			if strings.ContainsAny(line, "\n\r\x1b") || strings.ContainsRune(line, '\u009b') {
 				t.Fatalf("line has a control character: %q", line)
 			}
-			if !strings.HasPrefix(line, "4  ") {
-				t.Errorf("channel-wide line must start with the author id, got %q", line)
+			if !strings.HasPrefix(line, "#4: ") {
+				t.Errorf("channel-wide line must start with the author, got %q", line)
 			}
-			if strings.Contains(line, "  [") {
+			if strings.Contains(line, ": [") {
 				t.Errorf("body can open with a bare [ marker: %q", line)
 			}
 			// In the whole view the message is one pane row, and no row opens with a badge.
@@ -1646,7 +1649,7 @@ func TestForgedMarkersInBodies(t *testing.T) {
 				if strings.HasPrefix(l, "[") {
 					t.Errorf("pane row starts with a badge: %q", l)
 				}
-				if strings.HasPrefix(l, "4 ") {
+				if strings.HasPrefix(l, "#4") {
 					rows++
 				}
 			}
@@ -1775,7 +1778,7 @@ func TestScopedMessageWithoutAKindStillHasABadge(t *testing.T) {
 		want string // the badge, "" for "any non-empty one"
 	}{{"", "[scoped]"}, {" ", "[scoped]"}, {"\t", "[scoped]"}, {"\x1b[2J", ""}, {"\n", ""}, {"future-kind", "[future-kind]"}} {
 		line := m.messageLine("ops", schema.MessageV2{ID: 1, AuthorID: 4, Body: "hi", Audience: &schema.Audience{Kind: tt.kind}}, 80)
-		if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[]") || !strings.Contains(line, "] 4  hi") {
+		if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[]") || !strings.Contains(line, "] #4: hi") {
 			t.Errorf("kind %q: line %q, want a badge before the author", tt.kind, line)
 		}
 		if tt.want != "" && !strings.HasPrefix(line, tt.want+" ") {
@@ -2371,5 +2374,289 @@ func TestLargeBodyIsLaidOutOnce(t *testing.T) {
 	_ = m.View()
 	if &m.wrapped.result[0] == &first[0] {
 		t.Error("a new width must lay the body out again")
+	}
+}
+
+// membersAPI is a fake server whose member list is set by the test and which
+// counts how often it was asked.
+type membersAPI struct {
+	stubAPI
+	mu      sync.Mutex
+	members []schema.ChannelMemberV1
+	err     error
+	asked   []string
+}
+
+func (a *membersAPI) ListChannelMembers(_ context.Context, channel string) (schema.ListChannelMembersResponseV1, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.asked = append(a.asked, channel)
+	return schema.ListChannelMembersResponseV1{Members: a.members}, a.err
+}
+
+func (a *membersAPI) askedFor() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.asked...)
+}
+
+// authorModel is a model on channel "ops" whose clock stands at 2026-07-13 15:30
+// UTC and whose time zone is UTC+2, whatever the machine says.
+func authorModel(api API, members ...schema.ChannelMemberV1) Model {
+	m := NewModel(context.Background(), api, 7, []string{"ops", "general"})
+	m.loc = time.FixedZone("test", 2*3600)
+	m.now = func() time.Time { return time.Date(2026, time.July, 13, 15, 30, 0, 0, time.UTC) }
+	m.width, m.height = 100, 24
+	if members != nil {
+		m, _ = update(m, membersLoaded{channel: "ops", members: members})
+	}
+	return m
+}
+
+// at is a time on a day of July 2026, UTC.
+func at(day, hour, minute int) schema.Timestamp {
+	return schema.NewTimestamp(time.Date(2026, time.July, day, hour, minute, 0, 0, time.UTC))
+}
+
+func TestMessageLineAuthorsAndTimes(t *testing.T) {
+	members := []schema.ChannelMemberV1{
+		{PrincipalID: 7, Name: "nick", Kind: schema.PrincipalHuman},
+		{PrincipalID: 9, Name: "rex", Kind: schema.PrincipalAgent},
+		{PrincipalID: 11, Name: "[agent]", Kind: schema.PrincipalHuman},
+		{PrincipalID: 12, Name: "mallory [agent]", Kind: schema.PrincipalHuman},
+		{PrincipalID: 13, Name: "al\x1b[2J\x1b]0;pwn\x07ice" + string(rune(0x202e)) + string(rune(0x200b)) + string(rune(0x200d)), Kind: schema.PrincipalHuman},
+		{PrincipalID: 14, Name: "line\nbreak\rhere", Kind: schema.PrincipalAgent},
+		{PrincipalID: 15, Name: "\x1b[31m" + string(rune(0x202e)), Kind: schema.PrincipalHuman},
+		{PrincipalID: 16, Name: "no-kind"},
+		{PrincipalID: 18, Name: "\u200b\u202e \x1b", Kind: schema.PrincipalAgent},
+		{PrincipalID: 17, Name: "a-very-long-display-name-that-goes-on-and-on", Kind: schema.PrincipalHuman},
+	}
+	today := at(13, 12, 5)  // 14:05 at UTC+2
+	early := at(12, 22, 40) // 00:40 on the 13th at UTC+2: today
+	other := at(11, 9, 0)   // 11:00 on the 11th
+	// 21:59 UTC on the 12th is 23:59 on the 12th at UTC+2: yesterday.
+	yesterday := at(12, 21, 59)
+	otherYear := schema.NewTimestamp(time.Date(2025, time.July, 13, 12, 5, 0, 0, time.UTC))
+
+	tests := []struct {
+		name    string
+		message schema.MessageV2
+		width   int // terminal width
+		members []schema.ChannelMemberV1
+		want    string // exact line
+	}{
+		{"named author", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: today}, 100, members, "14:05 nick: hi"},
+		{"agent carries a text badge", schema.MessageV2{AuthorID: 9, Body: "on it", CreatedAt: today}, 100, members, "14:05 rex [agent]: on it"},
+		{"member of unknown kind is no agent", schema.MessageV2{AuthorID: 16, Body: "hi", CreatedAt: today}, 100, members, "14:05 no-kind: hi"},
+		{"former member shows the number", schema.MessageV2{AuthorID: 5, Body: "bye", CreatedAt: today}, 100, members, "14:05 #5: bye"},
+		{"failed members load shows the number", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: today}, 100, nil, "14:05 #7: hi"},
+		{"member without a name shows the number", schema.MessageV2{AuthorID: 8, Body: "hi", CreatedAt: today}, 100, []schema.ChannelMemberV1{{PrincipalID: 8, Kind: schema.PrincipalAgent}}, "14:05 #8: hi"},
+		{"utc date before local midnight is still today", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: early}, 100, members, "00:40 nick: hi"},
+		{"other day shows the date", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: other}, 100, members, "07-11 11:00 nick: hi"},
+		{"yesterday in local time", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: yesterday}, 100, members, "07-12 23:59 nick: hi"},
+		{"same day of another year", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: otherYear}, 100, members, "07-13 14:05 nick: hi"},
+		{"no time on the message", schema.MessageV2{AuthorID: 7, Body: "hi"}, 100, members, "nick: hi"},
+		{"60 columns keeps the time", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: today}, 60, members, "14:05 nick: hi"},
+		{"59 columns drops the time", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: today}, 59, members, "nick: hi"},
+		{"narrow other day drops the date too", schema.MessageV2{AuthorID: 7, Body: "hi", CreatedAt: other}, 40, members, "nick: hi"},
+		{"narrow agent keeps name and badge", schema.MessageV2{AuthorID: 9, Body: "hi", CreatedAt: today}, 40, members, "rex [agent]: hi"},
+		{"narrow unknown author keeps the number", schema.MessageV2{AuthorID: 5, Body: "hi", CreatedAt: today}, 40, members, "#5: hi"},
+		{"scope badge stays first", schema.MessageV2{AuthorID: 9, Body: "hi", CreatedAt: today, Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}}, 100, members, "[net:3] 14:05 rex [agent]: hi"},
+		{"name that is a badge is escaped", schema.MessageV2{AuthorID: 11, Body: "hi", CreatedAt: today}, 100, members, "14:05 \\[agent]: hi"},
+		{"name that is a badge is escaped without a time", schema.MessageV2{AuthorID: 11, Body: "hi", CreatedAt: today}, 40, members, "\\[agent]: hi"},
+		{"name that fakes the agent badge is escaped", schema.MessageV2{AuthorID: 12, Body: "hi", CreatedAt: today}, 100, members, "14:05 mallory \\[agent]: hi"},
+		{"hostile name loses escapes, bidi and zero-width", schema.MessageV2{AuthorID: 13, Body: "hi", CreatedAt: today}, 100, members, "14:05 al\\[2J]0;pwnice: hi"},
+		{"newlines in a name stay on one line", schema.MessageV2{AuthorID: 14, Body: "hi", CreatedAt: today}, 100, members, "14:05 line ↵ break ↵ here [agent]: hi"},
+		{"a name left with only a stray bracket is escaped", schema.MessageV2{AuthorID: 15, Body: "hi", CreatedAt: today}, 100, members, "14:05 \\[31m: hi"},
+		{"a name of nothing visible shows the number", schema.MessageV2{AuthorID: 18, Body: "hi", CreatedAt: today}, 100, members, "14:05 #18: hi"},
+		{"long name is cut", schema.MessageV2{AuthorID: 17, Body: "hi", CreatedAt: today}, 100, members, "14:05 a-very-long-display-nam…: hi"},
+		{"body starting with [ is escaped", schema.MessageV2{AuthorID: 7, Body: "[net:alpha] hi", CreatedAt: today}, 100, members, "14:05 nick: \\[net:alpha] hi"},
+		{"payload badge follows the agent badge", schema.MessageV2{AuthorID: 9, Body: "x", CreatedAt: today, Payload: &schema.Payload{Schema: "acme.alert.v1"}}, 100, members, "14:05 rex [agent] [acme.alert.v1]: x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := authorModel(stubAPI{}, tt.members...)
+			m.width = tt.width
+			// The pane is as wide as the layout makes it, so the line is
+			// measured against what View would give it.
+			got := stripANSI(m.messageLine("ops", tt.message, m.layout().rightW))
+			if got != tt.want {
+				t.Errorf("line = %q, want %q", got, tt.want)
+			}
+			if strings.ContainsAny(got, "\x1b\n\r\t\a") || strings.ContainsAny(got, string(rune(0x202e))+string(rune(0x200b))+string(rune(0x200d))) {
+				t.Errorf("line has a control or invisible character: %q", got)
+			}
+			if w := cellWidth(got); w > m.layout().rightW-2 {
+				t.Errorf("line is %d cells, the pane holds %d: %q", w, m.layout().rightW-2, got)
+			}
+		})
+	}
+}
+
+// stripANSI removes the colour sequences lipgloss may add, so a test can compare
+// text on a machine that does colour and on one that does not.
+func stripANSI(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < '@' || s[j] > '~') {
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func TestMessageLineCutsBodyNotNameOnNarrowPane(t *testing.T) {
+	m := authorModel(stubAPI{}, schema.ChannelMemberV1{PrincipalID: 9, Name: "rex", Kind: schema.PrincipalAgent})
+	m.width = 40
+	msg := schema.MessageV2{AuthorID: 9, Body: "a long message that cannot fit", CreatedAt: at(13, 12, 5)}
+	got := stripANSI(m.messageLine("ops", msg, m.layout().rightW))
+	if !strings.HasPrefix(got, "rex [agent]: a") || !strings.HasSuffix(got, "…") || cellWidth(got) > m.layout().rightW-2 {
+		t.Errorf("line = %q (%d cells in %d)", got, cellWidth(got), m.layout().rightW-2)
+	}
+}
+
+func TestViewShowsNamesAndTimes(t *testing.T) {
+	m := authorModel(stubAPI{},
+		schema.ChannelMemberV1{PrincipalID: 7, Name: "nick", Kind: schema.PrincipalHuman},
+		schema.ChannelMemberV1{PrincipalID: 9, Name: "rex", Kind: schema.PrincipalAgent})
+	m.messages["ops"] = mergeMessages(nil, []schema.MessageV2{
+		{ID: 1, AuthorID: 7, Body: "first", CreatedAt: at(11, 9, 0)},
+		{ID: 2, AuthorID: 9, Body: "second", CreatedAt: at(13, 12, 5)},
+		{ID: 3, AuthorID: 5, Body: "third", CreatedAt: at(13, 12, 6)},
+	})
+	lines := paneLines(stripANSI(m.View()))
+	want := []string{"07-11 11:00 nick: first", "14:05 rex [agent]: second", "14:06 #5: third"}
+	if len(lines) < len(want) {
+		t.Fatalf("pane lines = %q", lines)
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Errorf("row %d = %q, want %q", i, lines[i], w)
+		}
+	}
+}
+
+func TestMembersLoadedRecordsNamesPerChannel(t *testing.T) {
+	m := authorModel(stubAPI{})
+	m, _ = update(m, membersLoaded{channel: "ops", members: []schema.ChannelMemberV1{{PrincipalID: 7, Name: "nick"}}})
+	m, _ = update(m, membersLoaded{channel: "general", members: []schema.ChannelMemberV1{{PrincipalID: 7, Name: "other"}}})
+	if got, _ := m.authorName("ops", 7); got != "nick" {
+		t.Errorf("ops author 7 = %q", got)
+	}
+	if got, _ := m.authorName("general", 7); got != "other" {
+		t.Errorf("general author 7 = %q", got)
+	}
+	// A refreshed list replaces the old one: a member who left goes back to a number.
+	m, _ = update(m, membersLoaded{channel: "ops", members: nil})
+	if got, _ := m.authorName("ops", 7); got != "#7" {
+		t.Errorf("after refresh = %q, want #7", got)
+	}
+}
+
+func TestMembersFailureLeavesChannelUsable(t *testing.T) {
+	boom := errors.New("forbidden: agents may not list members")
+	m := authorModel(&membersAPI{err: boom})
+	// The failed list is dropped without a word: no status, no names, no block.
+	m, _ = update(m, messagesLoaded{channel: "ops", messages: []schema.MessageV2{{ID: 1, AuthorID: 7, Body: "still here", CreatedAt: at(13, 12, 5)}}})
+	before := m.status()
+	m, cmd := update(m, membersLoaded{channel: "ops", err: boom})
+	if cmd != nil || m.status() != before || before != "connected" {
+		t.Errorf("failed list changed status %q -> %q or returned a command", before, m.status())
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "14:05 #7: still here") {
+		t.Errorf("view does not show the message with a number:\n%s", view)
+	}
+	// Sending still works.
+	m.input = "hello"
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.sending || cmd == nil {
+		t.Errorf("send was not started: sending=%v", m.sending)
+	}
+	// A failure after a success keeps the names already known.
+	m, _ = update(m, membersLoaded{channel: "ops", members: []schema.ChannelMemberV1{{PrincipalID: 7, Name: "nick"}}})
+	m, _ = update(m, membersLoaded{channel: "ops", err: boom})
+	if got, _ := m.authorName("ops", 7); got != "nick" {
+		t.Errorf("name after a failed refresh = %q, want nick", got)
+	}
+}
+
+func TestMembersAreAskedForOnOpenSwitchAndReconnect(t *testing.T) {
+	// A cancelled context makes Init's wait for events end at once; the fake
+	// ignores the context, so its calls still happen.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	api := &membersAPI{err: errors.New("refused")}
+	m := NewModel(ctx, api, 7, []string{"ops", "general"})
+	var got []membersLoaded
+	collect := func(cmd tea.Cmd) {
+		for _, msg := range run(cmd) {
+			if loaded, ok := msg.(membersLoaded); ok {
+				got = append(got, loaded)
+			}
+		}
+	}
+	collect(m.Init())
+	if len(got) != 1 || got[0].channel != "ops" || got[0].err == nil {
+		t.Fatalf("on open: %+v", got)
+	}
+	// Failing does not make the model ask again by itself.
+	m, cmd := update(m, got[0])
+	if cmd != nil {
+		t.Fatalf("a failed list started more work")
+	}
+	if n := len(api.askedFor()); n != 1 {
+		t.Fatalf("asked %d times after one failure, want 1", n)
+	}
+	// A dropped subscription comes back: the list is asked for with the backfill.
+	m.subscribed["ops"] = false
+	m.retryPending["ops"] = true
+	got = nil
+	m, cmd = update(m, resubscribeDue{channel: "ops"})
+	collect(cmd)
+	if len(got) != 1 || got[0].channel != "ops" {
+		t.Fatalf("on reconnect: %+v", got)
+	}
+	// Switching channel asks for the new channel's list.
+	got = nil
+	_, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	collect(cmd)
+	if len(got) != 1 || got[0].channel != "general" {
+		t.Fatalf("on switch: %+v", got)
+	}
+	if want := []string{"ops", "ops", "general"}; strings.Join(api.askedFor(), ",") != strings.Join(want, ",") {
+		t.Errorf("asked = %v, want %v", api.askedFor(), want)
+	}
+}
+
+func TestMembersAskedAfterChannelListLoads(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := NewModel(ctx, &membersAPI{}, 7, nil)
+	_, cmd := update(m, channelsLoaded{channels: []schema.ChannelV0{{Name: "ops"}}})
+	found := false
+	for _, msg := range run(cmd) {
+		if loaded, ok := msg.(membersLoaded); ok && loaded.channel == "ops" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no members request after the channel list loaded")
+	}
+}
+
+// Showing names must not change how messages are merged or deduplicated.
+func TestMembersDoNotChangeMessageMerging(t *testing.T) {
+	m := authorModel(stubAPI{}, schema.ChannelMemberV1{PrincipalID: 7, Name: "nick"})
+	m, _ = update(m, messagesLoaded{channel: "ops", messages: []schema.MessageV2{{ID: 2, AuthorID: 7, Body: "b"}, {ID: 1, AuthorID: 7, Body: "a"}}})
+	m, _ = update(m, messagesLoaded{channel: "ops", messages: []schema.MessageV2{{ID: 2, AuthorID: 7, Body: "b"}}})
+	got := m.messages["ops"]
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
+		t.Errorf("messages = %+v", got)
 	}
 }
