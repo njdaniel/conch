@@ -529,6 +529,37 @@ func TestResetRefusesForeignDirectories(t *testing.T) {
 	}
 }
 
+// TestResetThroughALinkedParent is a root whose parent directory is a symlink,
+// as a linked ~/.local is: the processes carry the resolved path, and reset must
+// still find and stop them before it removes their files.
+func TestResetThroughALinkedParent(t *testing.T) {
+	s := newScratch(t)
+	resolved := filepath.Join(s.dir, "real")
+	must(t, os.MkdirAll(resolved, 0o750))
+	linked := filepath.Join(s.dir, "linked")
+	must(t, os.Symlink(resolved, linked))
+	root := filepath.Join(linked, "conch-p3")
+	runWith := func(args ...string) (string, error) {
+		cmd := s.command(args...)
+		cmd.Env = append(cmd.Env, "CONCH_P3_ROOT="+root)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() { _, _ = runWith("--reset") })
+
+	if out, err := runWith("--keep"); err != nil {
+		t.Fatalf("p3-local --keep: %v\n%s", err, out)
+	}
+	runID := runIDOf(t, root)
+	if got := processesOf(t, runID); len(got) == 0 {
+		t.Fatal("no process of the run is left running after --keep, but the server should be")
+	}
+	if out, err := runWith("--reset"); err != nil {
+		t.Fatalf("p3-local --reset: %v\n%s", err, out)
+	}
+	assertGone(t, root, runID)
+}
+
 func TestRunRefusesAnExistingRoot(t *testing.T) {
 	s := newScratch(t)
 	must(t, os.MkdirAll(s.root, 0o750))
