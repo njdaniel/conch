@@ -113,6 +113,9 @@ type Server struct {
 	// sessionSweepInterval is how often the session sweeper runs. Unexported
 	// so tests can shorten it before serving.
 	sessionSweepInterval time.Duration
+	// tickets holds the unspent WebSocket tickets (issue #270), in memory
+	// only; its clock is now.
+	tickets wsTicketStore
 	// renameFile moves a finished upload into place. It is os.Rename; tests
 	// replace it to fail the step between the temporary file and the final
 	// name.
