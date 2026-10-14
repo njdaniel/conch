@@ -158,7 +158,14 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
 	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
-	noWeb := fs.Bool("no-web", os.Getenv("CONCHD_NO_WEB") == "1", "do not serve /app/, even when a web client is built in")
+	// An off switch that is set to something it cannot read must not be
+	// taken as unset: that would serve the client the operator meant to
+	// turn off.
+	noWebDefault, err := envBool("CONCHD_NO_WEB")
+	if err != nil {
+		return serveOptions{}, err
+	}
+	noWeb := fs.Bool("no-web", noWebDefault, "do not serve /app/, even when a web client is built in")
 	originsRaw := fs.String("allowed-origins", os.Getenv("CONCHD_ALLOWED_ORIGINS"), "extra Origins the WebSocket upgrade accepts (Vite dev server only)")
 	// The environment seeds the default of each; a flag given on the command
 	// line wins because the flag set parses it afterwards.
@@ -404,6 +411,20 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("serve: %s: %q is not a duration such as 30s", key, raw)
 	}
 	return d, nil
+}
+
+// envBool reads key as a boolean (1, t, true, 0, f, false and the like):
+// unset is false, and anything else that is not a boolean is an error.
+func envBool(key string) (bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("serve: %s: %q is not a boolean such as 1 or 0", key, raw)
+	}
+	return b, nil
 }
 
 func parseMCPTokens(raw string) (map[string]int64, error) {

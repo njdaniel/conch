@@ -78,6 +78,12 @@ jobs:
       # conchd embeds the web client (issue #347): the build goes to
       # internal/web/dist (the Node setup above is the pinned one) and every
       # conchd target is built with -tags conchweb. conch is unchanged.
+      # What is embedded must pass the web gates first: the dependency
+      # allow-list, exact versions and licences, with the client's lint and
+      # tests (the Go side's depgate runs above).
+      - name: web-check
+        run: make web-check
+
       - name: Build the web client for embedding
         run: make web-embed
 

@@ -126,7 +126,10 @@ func TestParseServeArgsNoWeb(t *testing.T) {
 	}{
 		{name: "flag", args: []string{"--no-web"}},
 		{name: "env", env: "1"},
-		{name: "env other than 1 is off", env: "0"},
+		{name: "env true", env: "true"},
+		{name: "env 0 is off", env: "0"},
+		{name: "env false is off", env: "false"},
+		{name: "env that is not a boolean is refused", env: "yes", wantErr: "not a boolean"},
 		{name: "flag with --web-dir", args: []string{"--no-web", "--web-dir", t.TempDir()}, wantErr: "contradict"},
 	}
 	for _, tt := range tests {
@@ -147,7 +150,7 @@ func TestParseServeArgsNoWeb(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			off := tt.env != "0"
+			off := tt.env != "0" && tt.env != "false"
 			if off && (opts.webFS != nil || opts.webDir != "") {
 				t.Errorf("--no-web still serves a client: dir %q, embedded %v", opts.webDir, opts.webFS != nil)
 			}
