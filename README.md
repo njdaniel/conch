@@ -396,7 +396,11 @@ The subprocess does not receive the agent's Conch credentials: the adapter
 removes every `CONCH_ADAPTER_*` and `CONCH_BOT_*` variable and `CONCH_TOKEN` from
 its environment, and passes everything else (`HOME`, `PATH`, the runtime's own
 login) unchanged. A model asked to print its environment cannot reveal the
-token.
+token. On Linux the adapter also makes itself not dumpable, so a runtime running
+as the same user cannot read the token from `/proc/<adapter pid>/environ`
+either; the runtime itself is unaffected. A model can still read files the
+adapter's user can read, such as a `conch login` credential under
+`~/.config/conch`: run the adapter as a user of its own.
 
 It skips messages already present when it starts and ignores its own replies.
 It replies in kind: an answer to a net message goes to that net, an answer to
