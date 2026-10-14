@@ -455,10 +455,11 @@ mod tests {
         assert_eq!(record.heard(), [6.0]);
     }
 
-    /// The bound between a lost key device and the gate shutting: the task takes a command
-    /// before it reads another frame, so once a forced shut has been sent, the frame being
-    /// forwarded when it arrived is the last. Every frame counted passed the gate while it
-    /// was open, and none passes after the shut however many wait in the ring.
+    /// The bound between a lost key device and the gate shutting, the half this test can
+    /// show: every frame counted passed the gate while it was open, and once the shut is
+    /// obeyed none passes, however many wait in the ring. (The other half, that `run`
+    /// takes a command before it reads another frame, is its `biased` select; the keydev
+    /// integration tests exercise it.)
     #[tokio::test]
     async fn a_forced_shut_lets_through_no_frame_that_comes_after_it() {
         let (events, mut said) = mpsc::unbounded_channel();

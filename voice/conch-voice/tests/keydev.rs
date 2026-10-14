@@ -575,12 +575,14 @@ async fn mute_and_deafen_work_from_keys_and_from_standard_input_through_one_mach
     // Deafened by the key in the middle of a transmission: the gate shuts at once.
     keyboard.write_all(&press(TALK)).unwrap();
     rig.frames_beyond(3).await;
+    let stops = rig.stopped();
     keyboard.write_all(&press(DEAFEN)).unwrap();
     keyboard.write_all(&release(DEAFEN)).unwrap();
     rig.until("deafened", |rig| {
         rig.own()["deafened"] == true && rig.own()["transmitting"] == false
     })
     .await;
+    rig.stopped_beyond(stops).await;
     let sent = rig.sdk.frames();
     several_frames().await;
     assert_eq!(rig.sdk.frames(), sent, "the gate obeys deafen");

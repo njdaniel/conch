@@ -239,8 +239,9 @@ pub struct PttStatus {
     /// A transmission is in progress: from the press until the gate has shut, release tail
     /// included. Never true while any reason in `blocked` stands: a reason shuts the gate
     /// with no tail, so the moment it starts nothing more is sent, and both fields change in
-    /// the one status. It stays false after the reason ends, until the next press. (The machine itself goes on waiting for the gate to say it has shut,
-    /// to report the end; see [`Ptt::transmission_under_way`].)
+    /// the one status. It stays false after the reason ends, until the next press. (The
+    /// machine itself goes on waiting for the gate to say it has shut, to report the end;
+    /// see [`Ptt::transmission_under_way`].)
     pub transmitting: bool,
     /// Everything that currently keeps the gate shut. Empty means a press would transmit.
     pub blocked: ShutReasons,
