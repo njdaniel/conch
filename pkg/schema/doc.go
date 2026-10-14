@@ -6,4 +6,23 @@
 // Payload schemas are versioned (e.g. leviathan.trade_signal.v1). Breaking
 // changes require a version bump and Nick's sign-off; compatibility is
 // enforced against golden fixtures in testdata/ by scripts/schema-compat.sh.
+//
+// Agent presence (P3) adds the documents the events socket streams, each
+// carrying its own schema name so a reader can tell frames apart:
+//
+//   - SessionV1 (conch.session.v1), one live client or runtime of a
+//     principal, and SessionRosterV1 (conch.session_roster.v1), every session
+//     visible in a channel.
+//   - RunV1 (conch.run.v1), one piece of work an agent session does, with
+//     the lifecycle in RunTransitionAllowed and RunStateTerminal.
+//   - AgentActivityV1 (conch.agent.activity.v1), one event in a run's
+//     activity stream.
+//   - InterventionV1 (conch.intervention.v1), a person's request to a run
+//     and the adapter's answer.
+//
+// Their request and response bodies (CreateSessionRequestV1,
+// CreateRunRequestV1, SetRunStateRequestV1, ListRunsResponseV1,
+// AppendActivityRequestV1, ListActivityResponseV1,
+// CreateInterventionRequestV1, AckInterventionRequestV1 and
+// ListInterventionsResponseV1) live beside them.
 package schema

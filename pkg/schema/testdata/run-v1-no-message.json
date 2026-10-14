@@ -1,0 +1,12 @@
+{
+  "schema": "conch.run.v1",
+  "id": 40,
+  "session_id": 12,
+  "principal_id": 3,
+  "channel_id": 7,
+  "state": "completed",
+  "task": "Summarize overnight alerts",
+  "started_at": "2026-10-13T08:30:00.000Z",
+  "ended_at": "2026-10-13T08:34:12.500Z",
+  "outcome": "Posted a summary of 3 alerts"
+}
