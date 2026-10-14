@@ -96,14 +96,23 @@ func Capabilities() []Capability {
 // mcpToolCapabilities maps every MCP tool conchd exposes to the single
 // capability a caller must hold to invoke it. A tool absent from this table
 // has no capability and therefore cannot be authorized (fail closed). The
-// session and run capabilities have no tool here yet; their tools arrive with
-// the MCP issue (#267) and are added to this table there.
+// session and run tools (issue #267) front the REST routes that need the same
+// capabilities.
 var mcpToolCapabilities = map[string]Capability{
 	"post_message":     CapabilityMessagesPost,
 	"read_channel":     CapabilityMessagesRead,
 	"request_approval": CapabilityApprovalsRequest,
 	"await_decision":   CapabilityApprovalsAwait,
 	"check_decision":   CapabilityApprovalsCheck,
+
+	"register_session":   CapabilitySessionsManage,
+	"heartbeat":          CapabilitySessionsManage,
+	"end_session":        CapabilitySessionsManage,
+	"start_run":          CapabilityRunsManage,
+	"update_run":         CapabilityRunsManage,
+	"post_activity":      CapabilityRunsManage,
+	"poll_interventions": CapabilityRunsManage,
+	"ack_intervention":   CapabilityRunsManage,
 }
 
 // MCPToolCapability returns the capability required to call the named MCP

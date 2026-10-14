@@ -19,9 +19,14 @@ import (
 // about runs or activity must be one of the known ones, and each is given the
 // request's reader, readerFor(...), so the run condition is always asked for
 // the caller and never for a principal some other code chose.
+//
+// Since issue #267 the MCP tools reach the same functions as the REST routes,
+// which take the reader from a sessionCall (calls.go): call.reader is allowed
+// too, and a sessionCall's reader may only ever be set to readerFor(...) or to
+// a.reader(), the MCP scope's reader of its own authenticated agent.
 
 // runStoreMethods are the store's run methods the server may call. Each takes
-// a store.Reader, and the call must pass readerFor(...).
+// a store.Reader, and the call must pass readerFor(...) or call.reader.
 var runStoreMethods = map[string]bool{
 	"RunVisible": true, "OwnedRun": true, "ListVisibleRuns": true, "ListVisibleActivity": true,
 	"RunAnchorAudience": true, "SessionRunViews": true,
@@ -55,6 +60,26 @@ func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
 			if x.Kind == token.STRING && namesRunTable(x.Value) {
 				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" names a run table in a string")
 			}
+		case *ast.CompositeLit:
+			if types.ExprString(x.Type) != "sessionCall" {
+				return true
+			}
+			for _, elt := range x.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" builds a sessionCall without field names")
+					break
+				}
+				if v := types.ExprString(kv.Value); types.ExprString(kv.Key) == "reader" && !strings.HasPrefix(v, "readerFor(") && v != "a.reader()" {
+					bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" gives a sessionCall the reader "+v)
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "reader" {
+					bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" sets a reader field after the fact")
+				}
+			}
 		case *ast.CallExpr:
 			sel, ok := x.Fun.(*ast.SelectorExpr)
 			if !ok {
@@ -65,11 +90,11 @@ func checkRunReads(fset *token.FileSet, path string, file *ast.File) []string {
 				// Whatever the receiver: a copy of the store under another
 				// name (st := s.store) is still the store.
 				for _, arg := range x.Args {
-					if strings.HasPrefix(types.ExprString(arg), "readerFor(") {
+					if a := types.ExprString(arg); strings.HasPrefix(a, "readerFor(") || a == "call.reader" {
 						return true
 					}
 				}
-				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls "+name+" without readerFor(...) as its reader")
+				bad = append(bad, path+": "+fset.Position(x.Pos()).String()+" calls "+name+" without readerFor(...) or call.reader as its reader")
 				return true
 			}
 			// store.RunParams{} and the like are types, not calls; only a
@@ -143,7 +168,11 @@ const q4 = "UPDATE runs SET state = ? RETURNING task"
 const q5 = "SELECT body FROM interventions WHERE id = ?"
 func e(s *Server) { s.store.InterventionsSince(ctx, 1) }
 func f(s *Server) { s.store.InterventionVisible(ctx, 1, store.ChannelWideOnly) }
+func g(s *Server) { _ = sessionCall{caller: p, reader: store.Reader{PrincipalID: 9, Scoped: true}} }
+func h(s *Server) { _ = sessionCall{p, 1, store.ChannelWideOnly, "", ""} }
+func i(call sessionCall) { call.reader = store.ChannelWideOnly }
 func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, apiV2)); _ = store.RunParams{} }
+func ok2(s *Server, r *http.Request, a *agentScope, call sessionCall) { s.store.OwnedRun(ctx, 1, 2, call.reader); _ = sessionCall{reader: readerFor(r, apiV2)}; _ = sessionCall{reader: a.reader()} }
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "x.go", src, 0)
@@ -153,17 +182,23 @@ func ok(s *Server, r *http.Request) { s.store.RunVisible(ctx, 1, readerFor(r, ap
 	bad := strings.Join(checkRunReads(fset, "x.go", f), "\n")
 	for _, want := range []string{
 		"x.go:2:", "x.go:3:", "x.go:4:", "x.go:5:", "x.go:6:", "x.go:7:", "x.go:8:", "x.go:9:", "x.go:10:", "x.go:11:", "x.go:12:",
+		"x.go:13:", "x.go:14:", "x.go:15:",
+		"gives a sessionCall the reader store.Reader",
+		"builds a sessionCall without field names",
+		"sets a reader field after the fact",
 		"calls the store's RunsSince",
-		"calls RunVisible without readerFor",
-		"calls ListVisibleActivity without readerFor",
+		"calls RunVisible without readerFor(...) or call.reader",
+		"calls ListVisibleActivity without readerFor(...) or call.reader",
 		"calls the store's InterventionsSince",
-		"calls InterventionVisible without readerFor",
+		"calls InterventionVisible without readerFor(...) or call.reader",
 	} {
 		if !strings.Contains(bad, want) {
 			t.Errorf("the guard missed %q; it reported:\n%s", want, bad)
 		}
 	}
-	if strings.Contains(bad, "x.go:13:") {
-		t.Errorf("the guard refused the allowed call:\n%s", bad)
+	for _, allowed := range []string{"x.go:16:", "x.go:17:"} {
+		if strings.Contains(bad, allowed) {
+			t.Errorf("the guard refused an allowed call:\n%s", bad)
+		}
 	}
 }
