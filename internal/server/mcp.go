@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -488,13 +489,17 @@ type mcpUpdateRunInput struct {
 }
 
 // mcpPostActivityInput is schema.AppendActivityRequestV1 with its data as any
-// JSON value: the SDK infers a json.RawMessage as an array of bytes.
+// JSON value: the SDK infers a json.RawMessage as an array of bytes. A raw
+// field would not keep the agent's bytes anyway: the SDK decodes every call's
+// arguments into a map and encodes them again before the tool sees them
+// (applySchema), so an integer above 2^53 loses precision and object keys come
+// out sorted, over MCP whatever the field's type. REST stores the bytes sent.
 type mcpPostActivityInput struct {
 	RunID   int64               `json:"run_id" jsonschema:"the run's id, as start_run returned it"`
 	Kind    schema.ActivityKind `json:"kind" jsonschema:"what happened: run_started, command_started, command_finished, reply_posted, approval_requested, approval_resolved, intervention_received or run_ended"`
 	Summary string              `json:"summary" jsonschema:"one line saying what happened"`
 	Outcome string              `json:"outcome,omitempty" jsonschema:"how it went, if it is over"`
-	Data    any                 `json:"data,omitempty" jsonschema:"optional structured detail, any JSON value"`
+	Data    any                 `json:"data,omitempty" jsonschema:"optional structured detail, any JSON value. Numbers pass through float64 and object keys are sorted, as for every MCP argument"`
 }
 
 type mcpPollInterventionsInput struct {
@@ -535,7 +540,7 @@ func (a *agentScope) ownSessionCall(ctx context.Context) (sessionCall, *schema.E
 
 // addSessionTools registers the eight tools.
 func (s *Server) addSessionTools(server *mcp.Server, identity mcpIdentity) {
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "register_session", Description: "Register a session: this live runtime of the authenticated agent, so the people in its channels see it is here. Keep it alive with heartbeat and end it with end_session. List in interventions what the runtime acts on (message, cancel, pause, resume); people can ask for nothing else. Returns a conch.session.v1 document."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "register_session", Description: "Register a session: this live runtime of the authenticated agent, so the people in its channels see it is here. Keep it alive with heartbeat and end it with end_session. Say what the runtime is (client, and optionally runtime, model and host; runtime and host are shown only to operators and to the agent itself). List in interventions what the runtime acts on (message, cancel, pause, resume); people can ask for nothing else. Returns a conch.session.v1 document."},
 		func(ctx context.Context, scope *agentScope, in schema.CreateSessionRequestV1) (*mcp.CallToolResult, any, error) {
 			call, serr := scope.ownSessionCall(ctx)
 			if serr != nil {
@@ -576,7 +581,7 @@ func (s *Server) addSessionTools(server *mcp.Server, identity mcpIdentity) {
 			}
 			return mcpText("ended session %d", in.SessionID), nil, nil
 		})
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "start_run", Description: "Start a run: one piece of work in a channel, on one of the agent's own sessions, optionally answering one message there (message_id). The people who can see that message, or the whole channel if there is none, see the run. Returns a conch.run.v1 document, in state queued."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "start_run", Description: "Start a run: one piece of work in a channel, on one of the agent's own sessions, optionally answering one message there (message_id), with a one-line task and optionally a link (an https URL) to where the work can be followed. The people who can see that message, or the whole channel if there is none, see the run. Returns a conch.run.v1 document, in state queued."},
 		func(ctx context.Context, scope *agentScope, in mcpStartRunInput) (*mcp.CallToolResult, any, error) {
 			call, serr := scope.sessionCall(ctx)
 			if serr != nil {
@@ -630,7 +635,7 @@ func (s *Server) addSessionTools(server *mcp.Server, identity mcpIdentity) {
 			if in.Data != nil {
 				data, err := json.Marshal(in.Data)
 				if err != nil {
-					return mcpCallError(refuse(0, "invalid_request", "data must be valid JSON")), nil, nil //nolint:nilerr // a refusal is the tool's result, as for every other refusal here
+					return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "data must be valid JSON")), nil, nil //nolint:nilerr // a refusal is the tool's result, as for every other refusal here
 				}
 				req.Data = data
 			}
@@ -651,15 +656,15 @@ func (s *Server) addSessionTools(server *mcp.Server, identity mcpIdentity) {
 			}
 			// The same checks, in the same order, as the REST route's query.
 			if in.State != "" && !in.State.Valid() {
-				return mcpCallError(refuse(0, "invalid_request", "state must be one of requested, acknowledged, applied, failed")), nil, nil
+				return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "state must be one of requested, acknowledged, applied, failed")), nil, nil
 			}
 			if in.After < 0 {
-				return mcpCallError(refuse(0, "invalid_request", "after must be a non-negative integer")), nil, nil
+				return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "after must be a non-negative integer")), nil, nil
 			}
 			limit := int64(defaultRunLimit)
 			if in.Limit != nil {
 				if *in.Limit <= 0 || *in.Limit > maxRunLimit {
-					return mcpCallError(refuse(0, "invalid_request", "limit must be between 1 and 100")), nil, nil
+					return mcpCallError(refuse(http.StatusBadRequest, "invalid_request", "limit must be between 1 and 100")), nil, nil
 				}
 				limit = *in.Limit
 			}

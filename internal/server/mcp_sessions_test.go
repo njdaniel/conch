@@ -464,3 +464,20 @@ func TestMCPSessionToolsNeedAnIssuedCredential(t *testing.T) {
 		t.Errorf("read_channel with a static token = %s", res.code)
 	}
 }
+
+// What the README says of post_activity's data: the MCP library decodes and
+// re-encodes every call's arguments, so object keys come out sorted and
+// numbers pass through float64, where REST stores the JSON as sent. If the
+// library ever keeps the bytes, this fails and the README should say so.
+func TestMCPPostActivityDataIsReencoded(t *testing.T) {
+	f := newInterventionFixture(t)
+	const sent = `{"b":1,"a":9007199254740993}`
+	rest := validActivity(t, f.do(t, "POST", runPath(f.run.ID, "/activity"), f.botTok, `{"kind":"command_finished","summary":"s","data":`+sent+`}`))
+	if string(rest.Data) != sent {
+		t.Errorf("REST stored %s, want %s as sent", rest.Data, sent)
+	}
+	over := mustTool[schema.AgentActivityV1](t, f, f.botTok, "post_activity", map[string]any{"run_id": f.run.ID, "kind": "command_finished", "summary": "s", "data": json.RawMessage(sent)})
+	if want := `{"a":9007199254740992,"b":1}`; string(over.Data) != want {
+		t.Errorf("MCP stored %s, want %s (keys sorted, through float64)", over.Data, want)
+	}
+}
