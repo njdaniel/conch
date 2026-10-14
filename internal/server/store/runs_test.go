@@ -115,7 +115,7 @@ func (f *runFixture) count(t *testing.T, table string) int {
 // visibleRunIDs is every run of channelID that r may see, by the listing.
 func visibleRunIDs(t *testing.T, s *Store, channelID int64, r Reader) []int64 {
 	t.Helper()
-	runs, err := s.ListVisibleRuns(context.Background(), channelID, r, 0, 0, 100)
+	runs, err := s.ListVisibleRuns(context.Background(), channelID, r, 0, RunPage{}, 100)
 	if err != nil {
 		t.Fatalf("ListVisibleRuns: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestListVisibleRunsPaging(t *testing.T) {
 			if pages > 100 {
 				t.Fatalf("limit %d: paging did not terminate", limit)
 			}
-			page, err := f.s.ListVisibleRuns(ctx, f.ch.ID, Reader{f.frank.ID, true}, 0, after, limit+1)
+			page, err := f.s.ListVisibleRuns(ctx, f.ch.ID, Reader{f.frank.ID, true}, 0, RunPage{After: after}, limit+1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -295,7 +295,7 @@ func TestListVisibleRunsPaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := f.s.ListVisibleRuns(ctx, f.ch.ID, Reader{f.frank.ID, true}, other.ID, 0, 100)
+	got, err := f.s.ListVisibleRuns(ctx, f.ch.ID, Reader{f.frank.ID, true}, other.ID, RunPage{}, 100)
 	if err != nil || len(got) != 1 || got[0].ID != r.ID {
 		t.Errorf("session filter = %+v, %v; want only run %d", got, err, r.ID)
 	}

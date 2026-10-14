@@ -36,6 +36,9 @@ const (
 	SessionEndedByRevocation = "credential_revoked"
 	// SessionEndedPrincipalDisabled: the principal was disabled.
 	SessionEndedPrincipalDisabled = "principal_disabled"
+	// SessionEndedExpiry: the credential's expiry passed; the
+	// sweeper ends the session, as nothing else runs when that happens.
+	SessionEndedExpiry = "credential_expired"
 )
 
 // MaxLiveSessionsPerCredential bounds the sessions per credential that are
@@ -372,6 +375,8 @@ type SweepResult struct {
 	Stale int
 	// Offline is how many went offline (from online or from stale).
 	Offline int
+	// Expired is how many sessions were ended because their credential expired.
+	Expired int
 }
 
 // SweepSessions applies the liveness thresholds at now in one short
@@ -379,8 +384,10 @@ type SweepResult struct {
 // offline ago becomes offline (with a session_offline event, once, because
 // only a session that was not offline can become it), and an online one last
 // seen more than stale ago becomes stale (no event). A session is judged only
-// by last_seen_at, so a revived session starts over. Ended sessions and rows
-// are never touched or deleted.
+// by last_seen_at, so a revived session starts over. Every session that has
+// not ended whose credential expired at or before now is ended, with cause
+// credential_expired, whatever its state; a credential without an expiry is
+// never a reason. Rows are never deleted.
 func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline time.Duration) (SweepResult, error) {
 	now = now.Truncate(time.Millisecond)
 	var out SweepResult
@@ -435,7 +442,14 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 			return fmt.Errorf("store: sweep sessions: stale: %w", err)
 		}
 		out.Stale = int(n)
-		return nil
+		// Last, so a session that went offline above and whose credential has
+		// also expired gets both events, in the order they happened. The
+		// subquery finds the expired credentials and sessions_by_credential
+		// finds their sessions.
+		out.Expired, err = endSessionsTx(ctx, tx, "system",
+			"credential_id IN (SELECT id FROM credentials WHERE expires_at IS NOT NULL AND expires_at <= ?)",
+			[]any{now.UnixMilli()}, SessionEndedExpiry, now)
+		return err
 	})
 	if err != nil {
 		return SweepResult{}, err

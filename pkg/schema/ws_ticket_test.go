@@ -51,6 +51,7 @@ func TestWSTicketConstants(t *testing.T) {
 		{"per credential", MaxWSTicketsPerCredential, 8},
 		{"tickets_require_auth", ErrorCodeTicketsRequireAuth, "tickets_require_auth"},
 		{"too_many_tickets", ErrorCodeTooManyTickets, "too_many_tickets"},
+		{"too_many_sockets", ErrorCodeTooManySockets, "too_many_sockets"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

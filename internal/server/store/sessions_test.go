@@ -537,3 +537,129 @@ func TestBootstrapEndsSessionsOfTheCredentialsItRevokes(t *testing.T) {
 		t.Error("heartbeat on a session whose credential bootstrap revoked succeeded")
 	}
 }
+
+// A credential's expiry ends its sessions at the next sweep (issue #301),
+// whether the session was online or had already gone offline, with a
+// session_ended event of cause credential_expired; a credential with no
+// expiry is never touched, and a second sweep writes nothing more.
+func TestSweepSessionsEndsExpiredCredentials(t *testing.T) {
+	w := newSessionWorld(t)
+	ctx := context.Background()
+	stale, offline := 30*time.Second, 90*time.Second
+	// The store checks expiry against its own clock when a credential or a
+	// session is made, which is the real one; the sweeps below use ours.
+	exp := time.Now().Add(time.Hour).Truncate(time.Millisecond)
+	mk := func(p Principal, expiresAt *time.Time) int64 {
+		c, _, err := w.s.CreateCredential(ctx, "system", p.ID, "t", expiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.ID
+	}
+	online := w.create(t, w.ann, mk(w.ann, &exp), exp.Add(-time.Minute))
+	idle := w.create(t, w.bea, mk(w.bea, &exp), exp.Add(-10*time.Minute))
+	forever := w.create(t, w.ann, w.annCred, exp.Add(-time.Minute))
+	later := exp.Add(time.Hour)
+	laterSess := w.create(t, w.bea, mk(w.bea, &later), exp.Add(-time.Minute))
+
+	endedAt := func(id int64) (ended sql.NullInt64, state string) {
+		if err := w.s.db.QueryRow("SELECT ended_at, state FROM sessions WHERE id = ?", id).Scan(&ended, &state); err != nil {
+			t.Fatal(err)
+		}
+		return ended, state
+	}
+	// Before the expiry nothing is ended; the sessions age the ordinary way.
+	got, err := w.s.SweepSessions(ctx, exp.Add(-time.Millisecond), stale, offline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (SweepResult{Stale: 3, Offline: 1}); got != want {
+		t.Fatalf("before expiry: %+v, want %+v", got, want)
+	}
+	if n := len(w.audit(t, AuditSessionEnded)); n != 0 {
+		t.Fatalf("session_ended rows before expiry = %d", n)
+	}
+
+	// Exactly at the expiry, as authentication judges it (expires_at <= now).
+	got, err = w.s.SweepSessions(ctx, exp, stale, offline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Expired != 2 {
+		t.Fatalf("at expiry: Expired = %d, want 2 (%+v)", got.Expired, got)
+	}
+	for _, tt := range []struct {
+		name  string
+		id    int64
+		ended bool
+	}{
+		{"expired while online", online.ID, true},
+		{"expired while offline", idle.ID, true},
+		{"credential without expiry", forever.ID, false},
+		{"credential that expires later", laterSess.ID, false},
+	} {
+		ended, state := endedAt(tt.id)
+		if ended.Valid != tt.ended {
+			t.Errorf("%s: ended = %v, want %v", tt.name, ended.Valid, tt.ended)
+		}
+		if tt.ended && (state != "offline" || ended.Int64 != exp.UnixMilli()) {
+			t.Errorf("%s: state %q, ended_at %d, want offline at %d", tt.name, state, ended.Int64, exp.UnixMilli())
+		}
+	}
+	events := w.audit(t, AuditSessionEnded)
+	if len(events) != 2 {
+		t.Fatalf("session_ended rows = %d, want 2: %+v", len(events), events)
+	}
+	for i, sess := range []Session{online, idle} {
+		e := events[i]
+		wantDetail := "cause=credential_expired " + sessionDetail(sess.PrincipalID, sess.CredentialID)
+		if e.Actor != "system" || e.Subject != sessionSubject(sess.ID) || e.Detail != wantDetail {
+			t.Errorf("event %d = %+v, want actor system, subject %s, detail %q", i, e, sessionSubject(sess.ID), wantDetail)
+		}
+	}
+
+	// A second sweep, then one much later: nothing ends twice.
+	for _, at := range []time.Time{exp, exp.Add(30 * time.Minute)} {
+		got, err := w.s.SweepSessions(ctx, at, stale, 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Expired != 0 {
+			t.Errorf("sweep at %v: Expired = %d, want 0", at, got.Expired)
+		}
+	}
+	if n := len(w.audit(t, AuditSessionEnded)); n != 2 {
+		t.Errorf("session_ended rows after more sweeps = %d, want 2", n)
+	}
+	// The one that expires later goes at its own time.
+	if got, err := w.s.SweepSessions(ctx, later, stale, 24*time.Hour); err != nil || got.Expired != 1 {
+		t.Errorf("at the later expiry: %+v, %v, want Expired 1", got, err)
+	}
+}
+
+// The expired-credential statement finds sessions through indexes only: the
+// credentials it looks at are walked by primary key or scanned (a table that
+// holds credentials, not sessions) and the sessions come from
+// sessions_by_credential, never from a scan of the sessions table.
+func TestSweepExpiredQueryPlan(t *testing.T) {
+	w := newSessionWorld(t)
+	rows, err := w.s.db.Query(`EXPLAIN QUERY PLAN SELECT id, principal_id, credential_id FROM sessions
+		WHERE ended_at IS NULL AND credential_id IN (SELECT id FROM credentials WHERE expires_at IS NOT NULL AND expires_at <= ?) ORDER BY id`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	t.Log(strings.Join(plan, "\n"))
+	if joined := strings.Join(plan, "\n"); !strings.Contains(joined, "sessions_by_credential") || strings.Contains(joined, "SCAN sessions") || strings.Contains(joined, "SCAN s") {
+		t.Errorf("plan does not search sessions by credential:\n%s", joined)
+	}
+}

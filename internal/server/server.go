@@ -133,6 +133,9 @@ type Server struct {
 	// tickets holds the unspent WebSocket tickets (issue #270), in memory
 	// only; its clock is now.
 	tickets wsTicketStore
+	// sockets counts the open WebSockets per credential (issue #309), in
+	// memory only.
+	sockets socketCounter
 	// renameFile moves a finished upload into place. It is os.Rename; tests
 	// replace it to fail the step between the temporary file and the final
 	// name.

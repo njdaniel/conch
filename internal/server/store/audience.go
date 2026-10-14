@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -955,8 +956,12 @@ const (
 	ownedRunHead = `SELECT ` + runColumns + ` FROM runs ru JOIN sessions so ON so.id = ru.session_id
 		 WHERE ru.id = ? AND so.credential_id = ? AND ru.principal_id = ? AND `
 	runListHead = `SELECT ` + runColumns + ` FROM runs ru
-		 WHERE ru.channel_id = ? AND ru.id > ? AND (? <= 0 OR ru.session_id = ?) AND `
-	runListTail      = ` ORDER BY ru.id ASC LIMIT ?`
+		 WHERE ru.channel_id = ? AND ru.id > ? AND ru.id < ? AND (? <= 0 OR ru.session_id = ?) AND `
+	runListTail = ` ORDER BY ru.id ASC LIMIT ?`
+	// The newest-first read is the same statement walked backwards: the
+	// bounds are written the same way so the planner sees one range on the
+	// channel index, and only the direction differs.
+	runListDescTail  = ` ORDER BY ru.id DESC LIMIT ?`
 	activityListHead = `SELECT a.id, a.run_id, ru.principal_id, a.kind, a.summary, a.outcome, a.data, a.at
 		 FROM run_activity a JOIN runs ru ON ru.id = a.run_id
 		 WHERE a.run_id = ? AND a.id > ? AND `
@@ -982,7 +987,12 @@ const (
 
 func runByIDSQL(scoped bool) string  { return runByIDHead + runCond(scoped) }
 func ownedRunSQL(scoped bool) string { return ownedRunHead + runCond(scoped) }
-func runListSQL(scoped bool) string  { return runListHead + runCond(scoped) + runListTail }
+func runListSQL(scoped, newestFirst bool) string {
+	if newestFirst {
+		return runListHead + runCond(scoped) + runListDescTail
+	}
+	return runListHead + runCond(scoped) + runListTail
+}
 func activityListSQL(scoped bool) string {
 	return activityListHead + runCond(scoped) + activityListTail
 }
@@ -1073,22 +1083,40 @@ func ownedRunTx(ctx context.Context, tx execer, runID, credentialID int64, reade
 	return run, nil
 }
 
-// ListVisibleRuns returns up to limit runs of channelID with id greater than
-// afterID that reader may see, in ascending id order, narrowed to session
-// sessionID when it is positive. Hidden runs are filtered in the statement,
-// before the limit applies, so a page is full of visible runs and a cursor
-// never stalls on a hidden one. The result is never nil.
-func (s *Store) ListVisibleRuns(ctx context.Context, channelID int64, reader Reader, sessionID, afterID int64, limit int) ([]Run, error) {
+// RunPage says which runs ListVisibleRuns reads. The zero value is the first
+// page, ascending. After is the largest id already held (ascending reads);
+// Before is the smallest (newest-first reads, where zero means from the
+// newest). A page has one direction, so After with NewestFirst, or Before
+// without it, is an error rather than a guess.
+type RunPage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
+// ListVisibleRuns returns up to limit runs of channelID that reader may see:
+// ascending with id greater than page.After, or with page.NewestFirst
+// descending with id less than page.Before (all of them when it is zero).
+// Narrowed to session sessionID when it is positive. Hidden runs are filtered
+// in the statement, before the limit applies, so a page is full of visible
+// runs and a cursor never stalls on a hidden one. The result is never nil.
+func (s *Store) ListVisibleRuns(ctx context.Context, channelID int64, reader Reader, sessionID int64, page RunPage, limit int) ([]Run, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list runs: limit must be positive, got %d", limit)
+	}
+	if (page.NewestFirst && page.After != 0) || (!page.NewestFirst && page.Before != 0) {
+		return nil, errors.New("store: list runs: after goes with ascending reads and before with newest-first ones")
+	}
+	before := page.Before
+	if before <= 0 {
+		before = math.MaxInt64
 	}
 	out := []Run{}
 	scoped, args, ok := runVisibility(reader)
 	if !ok {
 		return out, nil
 	}
-	rows, err := s.db.QueryContext(ctx, runListSQL(scoped),
-		append(append([]any{channelID, afterID, sessionID, sessionID}, args...), limit)...)
+	rows, err := s.db.QueryContext(ctx, runListSQL(scoped, page.NewestFirst),
+		append(append([]any{channelID, page.After, before, sessionID, sessionID}, args...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list runs in channel %d: %w", channelID, err)
 	}

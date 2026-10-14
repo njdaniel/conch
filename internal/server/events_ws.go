@@ -359,6 +359,12 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	release, ok := s.admitSocket(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+
 	conn, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		slog.DebugContext(ctx, "events ws: accept failed", "error", err)
@@ -410,10 +416,13 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 				return
 			}
 		case <-keepAlive:
-			if !e.s.keepSessionAlive(ctx, e.sessionID, e.credID) {
-				// The session ended, or never was this credential's: it is
-				// not revived, and the socket carries on without it.
-				keepAlive = nil
+			if e.s.keepSessionAlive(ctx, e.sessionID, e.credID) == sessionGone {
+				// The session ended (DELETE, or the sweeper ending an
+				// expired credential's): nothing is left to keep alive.
+				// Closing tells the client, which reconnects and is
+				// refused 404 session_not_found.
+				_ = e.conn.Close(websocket.StatusPolicyViolation, "session ended")
+				return
 			}
 		case <-e.sub.wake:
 			if !e.flush(ctx) {
@@ -442,26 +451,36 @@ func (s *Server) sessionKeepAliveTicks() (<-chan time.Time, func()) {
 
 // keepSessionAlive refreshes session id through the heartbeat's own store call,
 // so a stale or offline session is revived the same way and held to the same
-// bound. It reports false once the session is gone (ended, or not the
+// bound. It reports sessionGone once the session is gone (ended, or not the
 // credential's): the store does not revive an ended session. The refresh is a
 // heartbeat the socket sends for its client, not a call by the agent, so it
 // does not spend the manifest's budget again.
-func (s *Server) keepSessionAlive(ctx context.Context, id, credID int64) bool {
+func (s *Server) keepSessionAlive(ctx context.Context, id, credID int64) keepAliveResult {
 	_, err := s.heartbeatStored(ctx, id, credID)
 	switch {
 	case err == nil:
-		return true
+		return sessionKept
 	case errors.Is(err, store.ErrNotFound):
-		return false
+		return sessionGone
 	case errors.Is(err, store.ErrTooManySessions):
 		// Offline, and the credential holds as many live sessions as it may.
 		// It stays offline; the next tick tries again.
-		return true
+		return sessionKept
 	case ctx.Err() == nil:
 		slog.ErrorContext(ctx, "events ws: keep session alive failed", "session", id, "error", err)
 	}
-	return true
+	return sessionKept
 }
+
+// keepAliveResult is what a keep-alive tick found.
+type keepAliveResult int
+
+const (
+	// sessionKept: refreshed, or not refreshable now; the next tick tries again.
+	sessionKept keepAliveResult = iota
+	// sessionGone: ended, or not the credential's; it will not come back.
+	sessionGone
+)
 
 // stillAllowed is the interval re-check: the credential is live, the
 // subscriber is still a member and, for an agent, the manifest still lets it
