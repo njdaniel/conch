@@ -4,8 +4,11 @@
 // typecheck.
 import { describe, expect, it } from 'vitest';
 import { listChannelMembersResponseV1, listChannelsResponse, channelMemberV1, channelV0 } from './channel';
-import { messageV2 } from './message';
+import { approvalV1, option } from './approval';
+import { listMessagesResponseV2, messageV2, postMessageRequestV2, postMessageResponseV2 } from './message';
+import { listNetsResponseV1, netV1 } from './net';
 import { whoAmIResponseV1 } from './principal';
+import { wsTicketV1 } from './ticket';
 import type { Validator } from './validate';
 
 // Read by relative path, so the test sees the fixtures of this checkout.
@@ -28,6 +31,14 @@ const families: [string, Validator<unknown>][] = [
   ['message-v2', messageV2],
   ['channel-member-v1', channelMemberV1],
   ['list-channel-members-response-v1', listChannelMembersResponseV1],
+  ['list-messages-response-v2', listMessagesResponseV2],
+  ['post-message-request-v2', postMessageRequestV2],
+  ['post-message-response-v2', postMessageResponseV2],
+  ['ws-ticket-v1', wsTicketV1],
+  ['conch-approval-v1', approvalV1],
+  ['approval-option-v1', option],
+  ['net-v1', netV1],
+  ['list-nets-response-v1', listNetsResponseV1],
 ];
 
 function inFamily(file: string, family: string): boolean {
@@ -78,6 +89,10 @@ describe('validators refuse', () => {
     { name: 'a net audience listing principals', check: messageV2, value: { ...message, audience: { kind: 'net', net_id: 3, principal_ids: [3] } }, want: '$.audience.principal_ids: key is not in the TypeScript type' },
     { name: 'a principals audience without its list', check: messageV2, value: { ...message, audience: { kind: 'principals' } }, want: '$.audience.principal_ids: required key is missing' },
     { name: 'an optional key of the wrong type', check: channelMemberV1, value: { principal_id: 3, created_at: '2026-10-08T12:00:00.000Z', kind: 'robot' }, want: '$.kind: want one of human, agent' },
+    { name: 'a ticket without its expiry', check: wsTicketV1, value: { ticket: 'conch_wst_x' }, want: '$.expires_at: required key is missing' },
+    { name: 'an approval in a state it cannot have', check: approvalV1, value: { state: 'maybe' }, want: '$.state: want one of pending, escalated, resolved, expired' },
+    { name: 'a post response without a message', check: postMessageResponseV2, value: {}, want: '$.message: required key is missing' },
+    { name: 'a page with a bad message', check: listMessagesResponseV2, value: { messages: [{ ...message, id: 'x' }] }, want: '$.messages[0].id: want an integer' },
   ];
 
   it.each(refusals)('$name', ({ check, value, want }) => {
