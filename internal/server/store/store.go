@@ -468,6 +468,30 @@ END`,
 )`,
 		`CREATE INDEX interventions_by_run ON interventions (run_id, id)`,
 	},
+	// 22: Search knows the channel (issue #235). The index of migration 15 had
+	// no notion of a channel, so a search first found every message anywhere
+	// with the words and only then kept the caller's channel: its cost grew
+	// with the whole database. The index gets a second column, fts_channel,
+	// holding the token "c<channel id>" (one whole token to the unicode61
+	// tokenizer), and the search requires it, so FTS5 intersects the word's
+	// postings with the channel's. An external-content table reads its columns
+	// from the content table by name, so messages gets a virtual generated
+	// column of that name: nothing is stored twice and the two cannot differ.
+	// The old table and trigger are dropped and the index is rebuilt, so every
+	// message that exists is indexed again, scoped ones included, as before.
+	// Messages are never updated or deleted, as in migration 15. The generated
+	// column appears in SELECT * on messages: a later migration that rebuilds
+	// the table must name its columns, never copy it with a bare SELECT *.
+	{
+		`ALTER TABLE messages ADD COLUMN fts_channel TEXT GENERATED ALWAYS AS ('c' || channel_id) VIRTUAL`,
+		`DROP TRIGGER messages_fts_insert`,
+		`DROP TABLE messages_fts`,
+		`CREATE VIRTUAL TABLE messages_fts USING fts5(body, fts_channel, content='messages', content_rowid='id')`,
+		`CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+	INSERT INTO messages_fts (rowid, body, fts_channel) VALUES (new.id, new.body, new.fts_channel);
+END`,
+		`INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
