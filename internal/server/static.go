@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -11,9 +12,10 @@ import (
 )
 
 // webCSP is the Content-Security-Policy of every /app/ response. The page and
-// everything it loads come from conchd's own origin; it may not be framed and
-// may not set a <base>.
-const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+// everything it loads come from conchd's own origin; it may not be framed, may
+// not set a <base>, embeds no plugin content, and may submit a form only to
+// conchd (form-action does not fall back to default-src, so it is spelled out).
+const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 const (
 	webIndex     = "index.html"
@@ -47,14 +49,17 @@ func CheckWebDir(dir string) error {
 // can match an API path: /app/ is a prefix no API route starts with, and
 // /{$} matches only "/".
 //
-// An unusable directory yields no routes (fail closed); conchd has already
-// refused to start in that case.
+// An unusable directory yields no routes (fail closed). conchd has already
+// refused to start in that case, so reaching it here means the directory went
+// away in between; that is logged, because /app/ answering 404 with nothing
+// said would look like a client that was never configured.
 func (s *Server) webRoutes() []route {
 	if s.cfg.WebDir == "" {
 		return nil
 	}
 	root, err := os.OpenRoot(s.cfg.WebDir)
 	if err != nil {
+		slog.Error("web: the web directory cannot be opened; /app/ is not served", "dir", s.cfg.WebDir, "error", err)
 		return nil
 	}
 	return []route{
@@ -130,18 +135,31 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, path.Base(name), fi.ModTime(), f)
 }
 
-// open opens name (slash-separated, relative) inside the root.
+// open opens name (slash-separated, relative) inside the root. Only a regular
+// file or a directory is opened: opening a FIFO would block the request until
+// something wrote to it, and a device is not a client file. The Stat comes
+// first for that reason, and follows a symlink that stays inside the root.
 func (h *staticHandler) open(name string) (*os.File, fs.FileInfo, error) {
 	if name == "" {
+		return nil, nil, fs.ErrNotExist
+	}
+	fi, err := h.root.Stat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() && !fi.IsDir() {
 		return nil, nil, fs.ErrNotExist
 	}
 	f, err := h.root.Open(name)
 	if err != nil {
 		return nil, nil, err
 	}
-	fi, err := f.Stat()
-	if err != nil {
+	// Stat again on the open file: the name may have been replaced since.
+	if fi, err = f.Stat(); err != nil || (!fi.Mode().IsRegular() && !fi.IsDir()) {
 		_ = f.Close()
+		if err == nil {
+			err = fs.ErrNotExist
+		}
 		return nil, nil, err
 	}
 	return f, fi, nil

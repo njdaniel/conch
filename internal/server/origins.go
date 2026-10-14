@@ -25,7 +25,12 @@ func ParseAllowedOrigins(raw string) ([]string, error) {
 		if o == "" {
 			return nil, errors.New("allowed origins: empty entry")
 		}
-		if strings.ContainsAny(o, `*?[]\`) {
+		// The library matches an entry with path.Match, where [ opens a
+		// character class; so an IPv6 literal cannot be listed safely.
+		if strings.ContainsAny(o, "[]") {
+			return nil, fmt.Errorf("allowed origins: %q: an IPv6 address is not supported here; use a host name or an IPv4 address", o)
+		}
+		if strings.ContainsAny(o, `*?\`) {
 			return nil, fmt.Errorf("allowed origins: %q: wildcards are not allowed; list each origin exactly", o)
 		}
 		u, err := url.Parse(o)

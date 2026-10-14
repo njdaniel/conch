@@ -154,7 +154,7 @@ func TestStaticServing(t *testing.T) {
 
 // The policy text is part of the contract; pin it character for character.
 func TestStaticCSPIsExact(t *testing.T) {
-	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 	if webCSP != want {
 		t.Errorf("webCSP = %q", webCSP)
 	}
@@ -225,6 +225,21 @@ func TestStaticMethods(t *testing.T) {
 			}
 			if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "GET") {
 				t.Errorf("Allow = %q", allow)
+			}
+		})
+	}
+	// With authentication on, a method the route does not take is not an
+	// exempt request at all: it needs a credential like anything unmatched.
+	// Nothing is served either way.
+	authed := webServer(t, AuthRequired, webFixture(t))
+	for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+		t.Run(m+" with authentication on", func(t *testing.T) {
+			resp, body := fetch(t, m, authed.URL+"/app/")
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+			if strings.Contains(body, indexHTML) {
+				t.Errorf("body = %q", body)
 			}
 		})
 	}
@@ -391,6 +406,7 @@ func TestParseAllowedOrigins(t *testing.T) {
 		{"port wildcard", "http://localhost:*", nil, true},
 		{"question mark", "http://localhos?:5173", nil, true},
 		{"character class", "http://[a-z]ocalhost:5173", nil, true},
+		{"IPv6 literal", "http://[::1]:5173", nil, true},
 		{"other scheme", "ws://localhost:5173", nil, true},
 		{"with a path", "http://localhost:5173/app", nil, true},
 		{"trailing slash", "http://localhost:5173/", nil, true},
