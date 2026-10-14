@@ -23,6 +23,11 @@ import (
 // Shift is held, which is why callers can turn it off (CONCH_MOUSE=0). The
 // mouse is only ever an addition to the keyboard.
 //
+// While it runs the TUI holds a session of its own (client "tui") on the
+// server, which is what makes it appear in other clients' rosters. It is
+// ended on the way out, signals included; if the server cannot be reached then
+// it is left to the server's own staleness thresholds.
+//
 // Being asked to stop is not a failure: once ctx has ended Run restores the
 // terminal and returns nil, as it does when the user quits with a key.
 func Run(ctx context.Context, api API, authorID int64, authenticated bool, channels []string, mouse bool, input io.Reader, output io.Writer) error {
@@ -30,6 +35,10 @@ func Run(ctx context.Context, api API, authorID int64, authenticated bool, chann
 	if authenticated {
 		model = model.WithCredential()
 	}
+	// The TUI's own session ends with the program, whatever ended it: a key, or
+	// ctx on SIGINT or SIGTERM. It is ended after the terminal is given back,
+	// with a context of its own because ctx may be the thing that ended.
+	defer model.endOwnSession()
 	_, err := tea.NewProgram(model, programOptions(ctx, input, output, mouse)...).Run()
 	if cause := ctx.Err(); cause != nil && errors.Is(err, cause) {
 		// Bubble Tea reports the end of its context as "program was killed:
