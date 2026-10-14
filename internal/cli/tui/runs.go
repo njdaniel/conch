@@ -156,11 +156,30 @@ func (m Model) tickClock() (Model, tea.Cmd) {
 
 // clockTicked re-arms the tick while a view that shows a duration is up.
 func (m Model) clockTicked() (tea.Model, tea.Cmd) {
-	if m.mode != modeRuns && m.mode != modeRun {
+	if !m.showsOpenRun() {
 		m.clockTicking = false
 		return m, nil
 	}
 	return m, m.after(time.Second, clockTick{})
+}
+
+// showsOpenRun reports whether the view on screen shows a duration that moves:
+// run detail of a run not known to have ended, or the Runs view with an open
+// run listed.
+func (m Model) showsOpenRun() bool {
+	switch m.mode {
+	case modeRun:
+		return m.rd.open() && !m.rd.terminal()
+	case modeRuns:
+		for _, r := range m.runs.visible() {
+			if !schema.RunStateTerminal(r.State) {
+				return true
+			}
+		}
+		// Nothing is listed until the first page is in.
+		return !m.runs.loaded
+	}
+	return false
 }
 
 // enterRuns shows the Runs view and reads its first page when it has none.
@@ -183,6 +202,11 @@ func (m Model) enterRuns() (Model, tea.Cmd) {
 func (m Model) runsLoaded(msg runsLoaded) (tea.Model, tea.Cmd) {
 	rv := m.runs
 	if msg.channel != rv.channel {
+		return m, nil
+	}
+	// A page that a channel switch has since reset: the view is empty again
+	// and its first page is still to come, so this one is not it.
+	if msg.before != 0 && msg.before != rv.before {
 		return m, nil
 	}
 	refresh := msg.before == 0 && rv.loaded

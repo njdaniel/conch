@@ -314,7 +314,7 @@ func TestRunsViewReadsAgainWhenTheSocketComesBack(t *testing.T) {
 	m, cmd = update(m, eventsRosterReceived{gen: m.ev.gen, roster: rosterOf(worker)})
 	m = feed(m, cmd)
 	view := m.View()
-	if !strings.Contains(view, "job eleven") || !strings.Contains(view, "completed") || strings.Contains(view, "live updates paused") {
+	if !strings.Contains(view, "job eleven") || !strings.Contains(view, "completed") || strings.Contains(view, "live updates paused") || strings.Count(view, "job ten") != 1 {
 		t.Errorf("the new socket's first roster did not bring the list up to date:\n%s", view)
 	}
 }
@@ -385,6 +385,9 @@ func TestRunsViewFitsTheTerminal(t *testing.T) {
 		r.Outcome = strings.Repeat("outcome ", 10)
 		runs = append(runs, r)
 	}
+	wide := taskRun(31, schema.RunStateFailed, "修复解析器 🚀🚀 fix 修复解析器 🚀🚀")
+	wide.Outcome = "失败了 💥💥 失败了 💥💥"
+	runs = append(runs, wide)
 	for _, size := range [][2]int{{40, 10}, {60, 14}, {80, 24}, {120, 40}} {
 		m, _ := runsModel(t, runs...)
 		m.width, m.height = size[0], size[1]
@@ -464,5 +467,34 @@ func TestClockTicksOnlyInTheViewsThatShowADuration(t *testing.T) {
 	m.now = func() time.Time { return testNow.Add(30 * time.Second) }
 	if view := m.View(); !strings.Contains(view, "for 5m30s") {
 		t.Errorf("the open run's duration did not move:\n%s", view)
+	}
+}
+
+// A page asked for before a channel switch lands after the view was reset: it
+// is not the new view's first page, or the newest runs would never be read.
+func TestRunsViewDropsAPageOfAResetView(t *testing.T) {
+	var runs []schema.RunV1
+	for i := int64(1); i <= 120; i++ {
+		runs = append(runs, taskRun(i, schema.RunStateCompleted, fmt.Sprintf("job %03d", i)))
+	}
+	m, api := runsModel(t, runs...)
+	// Scroll to the end without running the commands: the second page's stays
+	// in flight.
+	var held tea.Cmd
+	for range runsPageSize - 1 {
+		var cmd tea.Cmd
+		m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+		if cmd != nil {
+			held = cmd
+		}
+	}
+	if held == nil {
+		t.Fatal("scrolling to the end asked for no page")
+	}
+	m = pressKey(m, "tab", "down", "up") // channels, ops, general: the view is reset
+	m = feed(m, held)
+	m = pressKey(m, "tab", "tab", "r")
+	if len(m.runs.list) == 0 || m.runs.list[0].ID != 120 {
+		t.Errorf("the view starts at %v after the stale page, want run 120 (reads %+v)", m.runs.list, api.listRequests)
 	}
 }

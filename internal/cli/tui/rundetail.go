@@ -406,6 +406,12 @@ func (m Model) eventsRun(msg eventsRunReceived) (tea.Model, tea.Cmd) {
 	}
 	m = m.cacheRun(msg.run)
 	m = m.runsFrame(msg.run)
+	// A frame may make a run open that was not: the duration moves again.
+	if !schema.RunStateTerminal(msg.run.State) && m.showsOpenRun() {
+		var tick tea.Cmd
+		m, tick = m.tickClock()
+		return m, tea.Batch(wait, tick)
+	}
 	return m, wait
 }
 
