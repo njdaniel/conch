@@ -57,6 +57,12 @@ type Config struct {
 	// the server's own, so a dev server on another port can connect. Empty
 	// keeps the same-origin check. See ParseAllowedOrigins.
 	AllowedOrigins []string
+	// SessionStale and SessionOffline are how long a session may go without
+	// a heartbeat before it shows as stale and then as offline (issue #265).
+	// Zero means DefaultSessionStale and DefaultSessionOffline. Serve refuses
+	// to start unless stale is shorter than offline.
+	SessionStale   time.Duration
+	SessionOffline time.Duration
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -104,6 +110,9 @@ type Server struct {
 	limits  agentRateLimiter
 	denials denialCoalescer
 	now     func() time.Time
+	// sessionSweepInterval is how often the session sweeper runs. Unexported
+	// so tests can shorten it before serving.
+	sessionSweepInterval time.Duration
 	// tickets holds the unspent WebSocket tickets (issue #270), in memory
 	// only; its clock is now.
 	tickets wsTicketStore
@@ -145,7 +154,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now, renameFile: os.Rename}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.routes = append(s.routeTable(), s.webRoutes()...)
@@ -216,6 +225,12 @@ func (s *Server) Addr() string {
 // draining in-flight requests up to shutdownTimeout. It returns nil on a clean
 // shutdown. The store is left open for the caller to close.
 func (s *Server) Serve(ctx context.Context) error {
+	// Before anything is bound or started: thresholds that cannot work are a
+	// configuration error, not something to discover when sessions misbehave.
+	stale, offline := s.sessionThresholds()
+	if err := ValidateSessionThresholds(stale, offline); err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -239,6 +254,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		stop := s.voice.start(ctx)
 		defer stop()
 	}
+
+	// Sessions: the sweeper marks silent sessions stale and then offline. It
+	// stops with ctx and Serve waits for it, so no goroutine outlives Serve.
+	defer s.startSessionSweeper(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()
