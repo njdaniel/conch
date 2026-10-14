@@ -492,6 +492,22 @@ END`,
 END`,
 		`INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')`,
 	},
+	// 23: Read marks (issue #351). How far one person has read one channel:
+	// the id of the newest message they marked, per principal and not per
+	// credential, so a person's two clients share it. The mark is a plain
+	// number and holds no message content; what is unread is worked out when
+	// asked, by the visibility function. The mark only moves forward (the
+	// upsert in MarkRead keeps the larger id). A row outlives the person's
+	// membership of the channel, so rejoining picks the mark up again.
+	{
+		`CREATE TABLE read_marks (
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	last_read_id INTEGER NOT NULL CHECK (last_read_id >= 0),
+	updated_at   INTEGER NOT NULL,
+	PRIMARY KEY (principal_id, channel_id)
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

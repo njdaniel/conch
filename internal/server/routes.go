@@ -85,6 +85,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
 		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
 		rt("POST /v1/interventions/{id}/ack", accessAuthenticated, hf(s.handleAckIntervention)),
+		// Read state (issue #351). People only (an agent gets 403
+		// human_required, in the handler); the caller's own marks, per
+		// principal. See read_state.go.
+		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
+		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),
