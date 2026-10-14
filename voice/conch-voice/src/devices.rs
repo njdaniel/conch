@@ -142,7 +142,8 @@ pub fn audio_report(table: &NodeTable, out: &mut dyn Write) -> io::Result<()> {
     );
     if input.is_some() || output.is_some() {
         lines.push(String::new());
-        lines.push("  For example, in $XDG_CONFIG_HOME/conch/voice.toml:".to_owned());
+        lines.push("  For example, in voice.toml in your configuration directory".to_owned());
+        lines.push("  (CONCH_CONFIG_DIR, else $XDG_CONFIG_HOME/conch):".to_owned());
         lines.push(String::new());
         lines.push("    [audio]".to_owned());
         if let Some(name) = input {
@@ -364,7 +365,8 @@ fn grant(device: &str, name: &str, uid: Option<u32>) -> Vec<String> {
         "  Permission is checked when a device is opened: a program that already has it open"
             .to_owned(),
         "  (a running conch-voice included) goes on reading until then.".to_owned(),
-        "  Then name it in the configuration file ($XDG_CONFIG_HOME/conch/voice.toml):".to_owned(),
+        "  Then name it in voice.toml in your configuration directory".to_owned(),
+        "  (CONCH_CONFIG_DIR, else $XDG_CONFIG_HOME/conch):".to_owned(),
         String::new(),
         "    [keys]".to_owned(),
         format!("    device = \"{device}\""),
@@ -510,7 +512,8 @@ Speakers (`output`)
   alsa_output.usb-headset  [default]
       Headset
 
-  For example, in $XDG_CONFIG_HOME/conch/voice.toml:
+  For example, in voice.toml in your configuration directory
+  (CONCH_CONFIG_DIR, else $XDG_CONFIG_HOME/conch):
 
     [audio]
     input = \"alsa_input.builtin\"
