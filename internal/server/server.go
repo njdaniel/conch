@@ -94,8 +94,11 @@ type Server struct {
 	// every server so presence can answer "not configured"; its goroutine
 	// runs only when lk is set, started by Serve.
 	voice *voicePoller
-	http  *http.Server
-	ln    net.Listener
+	// events is the subscribers of the events socket (events_ws.go). Like
+	// voice it exists on every server.
+	events *eventsHub
+	http   *http.Server
+	ln     net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -113,6 +116,20 @@ type Server struct {
 	// sessionSweepInterval is how often the session sweeper runs. Unexported
 	// so tests can shorten it before serving.
 	sessionSweepInterval time.Duration
+	// keepAliveTicks starts the ticker that refreshes the session an events
+	// socket was opened for, and returns its channel and its stop function.
+	// Nil means every eventsKeepAliveInterval; tests replace it to drive the
+	// ticks by hand.
+	keepAliveTicks func() (<-chan time.Time, func())
+	// eventsBeforeWrite, when set by a test, runs before every frame an
+	// events socket writes: a test blocks in it to be a subscriber that is
+	// stuck in a write.
+	eventsBeforeWrite func()
+	// eventsRosterFloor is the least time between two roster rebuilds for one
+	// events socket (defaultEventsRosterFloor). It is measured on the
+	// monotonic clock, not now: it paces work, it is not a time anyone reads.
+	// Tests set it to zero to see each roster as it is owed.
+	eventsRosterFloor time.Duration
 	// tickets holds the unspent WebSocket tickets (issue #270), in memory
 	// only; its clock is now.
 	tickets wsTicketStore
@@ -157,6 +174,8 @@ func New(cfg Config, st *store.Store) *Server {
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
+	s.events = newEventsHub()
+	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()
@@ -250,6 +269,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	// this is prompt). Presence sockets are hijacked like message sockets, so
 	// they are closed explicitly.
 	defer s.voice.closeAll()
+	// Events sockets are hijacked too, and are closed the same way.
+	defer s.events.closeAll()
 	if s.lk != nil {
 		stop := s.voice.start(ctx)
 		defer stop()

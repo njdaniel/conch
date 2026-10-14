@@ -190,6 +190,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyRun(run.ChannelID, run.ID)
 	s.writeRun(w, r, http.StatusCreated, run)
 }
 
@@ -351,6 +352,7 @@ func (s *Server) handleSetRunState(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyRun(updated.ChannelID, updated.ID)
 	s.writeRun(w, r, http.StatusOK, updated)
 }
 
@@ -407,6 +409,7 @@ func (s *Server) handleAppendRunActivity(w http.ResponseWriter, r *http.Request)
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyActivity(run.ChannelID, run.ID, entry.ID)
 	doc := activityDoc(entry)
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(ctx, "runs: built an invalid activity entry", "run", run.ID, "error", err)

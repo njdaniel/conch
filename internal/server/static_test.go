@@ -436,7 +436,7 @@ func TestSocketOriginMatrix(t *testing.T) {
 		foreign = "http://evil.example"
 		devSrv  = "http://localhost:5173"
 	)
-	routes := []string{"/v0/ws", "/v1/ws", "/v2/ws", "/v1/voice/ws"}
+	routes := []string{"/v0/ws", "/v1/ws", "/v2/ws", "/v1/voice/ws", "/v1/events/ws"}
 	tests := []struct {
 		name    string
 		allowed []string

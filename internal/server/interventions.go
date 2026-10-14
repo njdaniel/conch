@@ -125,6 +125,7 @@ func (s *Server) handleCreateIntervention(w http.ResponseWriter, r *http.Request
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyIntervention(iv.ChannelID, iv.ID)
 	s.writeIntervention(w, r, http.StatusCreated, iv)
 }
 
@@ -291,6 +292,7 @@ func (s *Server) handleAckIntervention(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	s.events.notifyIntervention(updated.ChannelID, updated.ID)
 	s.writeIntervention(w, r, http.StatusOK, updated)
 }
 
