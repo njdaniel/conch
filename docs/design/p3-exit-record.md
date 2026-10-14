@@ -8,18 +8,18 @@ kept apart from completion of P3 itself. The rows are those of the brief's test 
 > **Whose run this is.** #286 asks for Nick's own run of the walkthrough, by hand. On
 > 2026-10-14 Nick said "skip waiting on me, use your recommendations, continue working on
 > p3". So this record is an **agent run** on Nick's machine: the principal session ran
-> every row from a clean checkout of `main`, through the runner the walkthrough uses, with
+> every row from a fresh worktree of `main`, through the runner the walkthrough uses, with
 > real binaries, the terminal clients on pseudo-terminals, the web client in Chromium, and
 > one real Claude Code reply. It is not a by-hand run, and it is not labelled as one. Nick's
-> own run, whenever he makes it, goes in the last section and takes precedence over
-> anything here.
+> own run is optional; if he makes one, it goes in the last section and takes precedence
+> over anything here.
 
 ## The run
 
 | | |
 | --- | --- |
 | Date | 2026-10-14 |
-| Commit | `ef72661d6e895da72f5d2f3bd1ce3a315e722fd3` (`main`, a clean checkout) |
+| Commit | `ef72661d6e895da72f5d2f3bd1ce3a315e722fd3` (`main`, a fresh `git worktree add --detach origin/main`) |
 | OS | Pop!_OS 24.04 LTS, Linux 7.0.11 x86_64 |
 | Terminal | the TUIs on pseudo-terminals driven by `e2e/p3-local` (80×24); `TERM=xterm-256color` |
 | Browser | Chromium revision 1228, driven by Playwright 1.61.0 (`make web-e2e`) |
@@ -97,8 +97,8 @@ local model running alongside Claude Code (#343, #344).
 
 The decisions on #343, #345, #347, #348, #351, #353 and #354 are recorded on each issue.
 
-## Nick's own run
+## Nick's own run (optional)
 
-Not yet made. When Nick runs the walkthrough by hand, record here the date, the commit,
+Not made. #286 closed on the agent run above, by Nick's instruction. If Nick runs the walkthrough by hand, record here the date, the commit,
 the terminal and browser, one line per row, and anything that surprised him. A row that
 fails gets its own issue.
