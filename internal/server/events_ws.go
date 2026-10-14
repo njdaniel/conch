@@ -359,6 +359,12 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	release, ok := s.admitSocket(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+
 	conn, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		slog.DebugContext(ctx, "events ws: accept failed", "error", err)
