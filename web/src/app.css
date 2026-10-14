@@ -4,3 +4,230 @@ body {
   margin: 2rem;
   font-family: system-ui, sans-serif;
 }
+
+:focus-visible {
+  outline: 3px solid #1a5fb4;
+  outline-offset: 2px;
+}
+
+.signin form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 28rem;
+}
+
+.hint {
+  color: #555;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.notice {
+  min-height: 1.5em;
+  margin: 0;
+  color: #a51d2d;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.lobby {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: calc(100vh - 4rem);
+}
+
+.lobby header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.signout {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.areas {
+  display: grid;
+  grid-template-columns: 14rem 1fr 16rem;
+  gap: 1rem;
+  border-top: 1px solid #ccc;
+  padding-top: 1rem;
+}
+
+.channel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.channel-list button {
+  width: 100%;
+  text-align: left;
+}
+
+.channel-list button[aria-current='true'] {
+  font-weight: bold;
+}
+
+.status {
+  display: flex;
+  gap: 1.5rem;
+  border-top: 1px solid #ccc;
+  padding-top: 0.5rem;
+  font-size: 0.9rem;
+}
+
+/* Narrow windows lose the right panel first: its body folds away and the
+   Members button stays. */
+@media (max-width: 899px) {
+  .areas {
+    grid-template-columns: 12rem 1fr;
+  }
+
+  .panel {
+    grid-column: 1 / -1;
+  }
+}
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.log {
+  overflow-y: auto;
+  max-height: 60vh;
+  min-height: 8rem;
+  border: 1px solid #ccc;
+  padding: 0.5rem;
+}
+
+/* A body is shown as typed, line breaks included. */
+.messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message {
+  padding: 0.15rem 0;
+}
+
+.audience,
+.kind,
+.state {
+  color: #555;
+}
+
+.pending {
+  opacity: 0.8;
+}
+
+.stale {
+  margin: 0;
+  color: #8a4b00;
+}
+
+.approval-card {
+  display: inline-block;
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  white-space: normal;
+}
+
+.composer {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.composer textarea {
+  font: inherit;
+}
+
+.jump {
+  align-self: flex-start;
+}
+
+/* Members panel and run detail. */
+.conversation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.conversation-body[hidden] {
+  display: none;
+}
+
+.ag-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ag-panel li {
+  padding: 0.15rem 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-sessions,
+.ag-runs {
+  padding-left: 1rem;
+}
+
+.ag-badge {
+  border: 1px solid #888;
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  font-size: 0.8rem;
+}
+
+.ag-status,
+.ag-kind {
+  color: #555;
+}
+
+.ag-run {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-run dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0;
+}
+
+.ag-run dd {
+  margin: 0;
+}
+
+.ag-activity,
+.ag-interventions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+/* Bodies, reasons and outcomes are shown as written, line breaks included. */
+.ag-prose {
+  white-space: pre-wrap;
+}
