@@ -463,6 +463,11 @@ describe('composing to a net or a whisper', () => {
     type('half a thought', 'Whisper to…');
     fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
     expect(screen.queryByRole('group', { name: 'Whisper to' })).toBeNull();
+    expect(document.activeElement).toBe(to());
+    // Escape in the textarea closes it as well.
+    choose('whisper');
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Escape' });
+    expect(screen.queryByRole('group', { name: 'Whisper to' })).toBeNull();
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('half a thought');
     expect(to().value).toBe('channel');
   });
@@ -550,7 +555,7 @@ describe('composing to a net or a whisper', () => {
     expect(lines()[0]).toContain('→ whisper to 2');
   });
 
-  it('shows the whole refusal line beside the composer, keeps the draft and the audience, and posts nothing more', async () => {
+  it('shows the whole refusal line beside the composer, keeps the text as a Failed line, keeps the audience, and posts nothing more', async () => {
     await ready();
     server.post = () => json({ code: 'net_not_found', message: 'net alpha is not a net you can post to' }, 404);
     choose('net:5');
@@ -559,12 +564,18 @@ describe('composing to a net or a whisper', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('net alpha is not a net you can post to');
     await new Promise((r) => setTimeout(r, 50));
     expect(server.posts).toHaveLength(1);
-    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('not allowed');
-    expect(lines()).toEqual([]);
+    expect(await screen.findByText('Failed')).toBeDefined();
+    expect(lines()[0]).toContain('not allowed');
     expect(to().value).toBe('net:5');
+    // Retry goes to the same net, and only on a click.
+    server.post = (_c, body) => json({ message: message(nextId++, body, { author_id: 2, audience: { kind: 'net', net_id: 5 } }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts[1]).toEqual({ channel: 'general', body: 'not allowed', audience: { kind: 'net', net_id: 5 } });
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('keeps a whisper chosen after it is refused', async () => {
+  it('keeps a whisper chosen after it is refused, and its text on a Failed line', async () => {
     await ready();
     server.post = () => json({ code: 'forbidden', message: 'whispers are not allowed here' }, 403);
     choose('whisper');
@@ -572,8 +583,31 @@ describe('composing to a net or a whisper', () => {
     type('nope', 'Whisper to bot');
     send();
     await screen.findByText('whispers are not allowed here');
-    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('nope');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('');
+    expect(lines()[0]).toContain('nope');
     expect(screen.queryByText('note: whispers are recorded in the audit log')).toBeNull();
+  });
+
+  it('does not let a confirmed whisper end a second one being composed', async () => {
+    await ready();
+    let release: (r: Response) => void = () => undefined;
+    server.post = () => new Promise<Response>((resolve) => (release = resolve));
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('first', 'Whisper to bot');
+    send();
+    await screen.findByText('Sending');
+    // While the first is on its way: a different recipient and new text.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    type('second', 'Whisper to <b>mallory</b>');
+    await act(async () => {
+      release(json({ message: message(nextId++, 'first', { author_id: 2, audience: { kind: 'principals', principal_ids: [2, 3] } }) }, 201));
+      await Promise.resolve();
+    });
+    await screen.findByText('Sent');
+    expect(to().value).toBe('whisper');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to <b>mallory</b>').value).toBe('second');
   });
 
   it('does not widen a net post to the channel while the nets are not known', async () => {

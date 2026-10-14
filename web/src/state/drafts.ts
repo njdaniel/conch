@@ -4,9 +4,6 @@ export type Drafts = Readonly<Record<string, string>>;
 
 export type DraftAction =
   | { readonly type: 'edit'; readonly channel: string; readonly text: string }
-  // Text put back after a refusal: only into an empty draft, so anything typed
-  // since is not overwritten.
-  | { readonly type: 'restore'; readonly channel: string; readonly text: string }
   | { readonly type: 'reset' };
 
 export const initialDrafts: Drafts = {};
@@ -17,8 +14,6 @@ export function draftsReducer(state: Drafts, action: DraftAction): Drafts {
       if (action.text === '') return Object.fromEntries(Object.entries(state).filter(([name]) => name !== action.channel));
       return { ...state, [action.channel]: action.text };
     }
-    case 'restore':
-      return (state[action.channel] ?? '') === '' ? { ...state, [action.channel]: action.text } : state;
     case 'reset':
       return initialDrafts;
   }
@@ -55,8 +50,9 @@ export type TargetAction =
   // A post is starting: what was said about the last one goes.
   | { readonly type: 'posting'; readonly channel: string }
   | { readonly type: 'refused'; readonly channel: string; readonly line: string }
-  // A whisper was accepted: back to the whole channel, with the notice if one is due.
-  | { readonly type: 'whispered'; readonly channel: string; readonly note: string | null }
+  // A whisper to `sent` was accepted: back to the whole channel, with the
+  // notice if one is due. Only if that is still the whisper being composed.
+  | { readonly type: 'whispered'; readonly channel: string; readonly sent: readonly number[]; readonly note: string | null }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -84,14 +80,19 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
       return set({ ...current, whisper: next, refusal: null });
     }
     case 'closePicker':
-      return set({ ...current, whisper: null });
+      return set({ ...current, whisper: null, refusal: null });
     case 'posting':
       return set({ ...current, refusal: null, note: null });
     case 'refused':
       return set({ ...current, refusal: action.line });
-    case 'whispered':
-      // Only if still whispering: someone who chose another audience while the
-      // post was on its way keeps that choice.
-      return set(current.whisper === null ? { ...current, note: action.note } : { ...current, net: null, whisper: null, note: action.note });
+    case 'whispered': {
+      // Only if the whisper still chosen is the one that was sent: a second one
+      // being composed while the first was on its way is left as it is.
+      const same =
+        current.whisper !== null &&
+        current.whisper.length === action.sent.length &&
+        action.sent.every((id) => current.whisper?.includes(id) === true);
+      return set(same ? { ...current, net: null, whisper: null, note: action.note } : { ...current, note: action.note });
+    }
   }
 }

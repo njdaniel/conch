@@ -162,17 +162,15 @@ export function App({ origin }: { readonly origin: string }) {
           if (audience?.kind === 'principals') {
             const note = whisperNoted.current ? null : whisperNotice;
             whisperNoted.current = true;
-            dispatchTargets({ type: 'whispered', channel: name, note });
+            dispatchTargets({ type: 'whispered', channel: name, sent: audience.principal_ids, note });
           }
         } else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
-        else if (result.outcome === 'refused' && audience !== undefined) {
-          // A refused net or whisper post is not a send to keep: nothing was
-          // stored, so the text goes back to the draft and the server's line
-          // is shown. The audience chosen stays as it was.
-          dispatchChat({ type: 'discard', channel: name, localId });
-          dispatchDrafts({ type: 'restore', channel: name, text: body });
-          dispatchTargets({ type: 'refused', channel: name, line: result.reason });
-        } else dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+        else {
+          // A refusal stays as a Failed line with Retry and Dismiss, so the text
+          // is never lost; the server's own line is shown beside the composer.
+          if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+          dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+        }
       });
     },
     [],
@@ -263,6 +261,7 @@ export function App({ origin }: { readonly origin: string }) {
                 onRetrySend={(localId) => {
                   const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
                   if (send === undefined || send.status === 'sending') return;
+                  dispatchTargets({ type: 'posting', channel: selected });
                   dispatchChat({ type: 'retrying', channel: selected, localId });
                   post(selected, localId, send.body, send.audience);
                 }}

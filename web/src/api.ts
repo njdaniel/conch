@@ -242,7 +242,7 @@ async function refusalLine(res: Response): Promise<string> {
     const body: unknown = await res.json();
     if (errorV0(body).length === 0) {
       const line = (body as { message: string }).message.replace(/\s+/g, ' ').trim();
-      if (line !== '') return line;
+      if (line !== '') return line.length > 300 ? `${line.slice(0, 299)}…` : line;
     }
   } catch {
     // No document, or not one.

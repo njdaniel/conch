@@ -159,7 +159,15 @@ export function Composer({
         onChange={(event) => {
           onDraft(event.target.value);
         }}
-        onKeyDown={key}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && whispering) {
+            event.preventDefault();
+            onTarget({ type: 'closePicker', channel });
+            select.current?.focus();
+            return;
+          }
+          key(event);
+        }}
       />
       <button type="submit" disabled={!canSend}>
         Send
