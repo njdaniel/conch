@@ -69,16 +69,18 @@ var credSpecs = []struct{ participant, principal string }{
 // manifestFor is the manifest of an agent, given the channel ids.
 //
 // worker-test can do everything the walkthrough asks of an agent, in all three
-// channels. observer-test can read and keep a session, and nothing else: it
-// cannot post, ask for approval or record a run, so what it is refused is part
-// of what the walkthrough shows.
+// channels, answering a whisper included. observer-test can read and keep a
+// session, and nothing else: it cannot post, ask for approval or record a
+// run, so what it is refused is part of what the walkthrough shows.
 func manifestFor(agent string, channels map[string]int64) schema.PutAgentManifestRequestV1 {
 	grant := func(names ...string) []schema.ChannelGrant {
 		var grants []schema.ChannelGrant
 		for _, n := range names {
 			grants = append(grants, schema.ChannelGrant{
-				ChannelID:   channels[n],
-				Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost},
+				ChannelID: channels[n],
+				// whisper as well: a run that answers a whisper, and the reply
+				// to it, need it (P3-05).
+				Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionWhisper},
 			})
 		}
 		return grants
@@ -230,7 +232,7 @@ func id(n int64) string { return strconv.FormatInt(n, 10) }
 
 // client returns an API client for token.
 func (r *runner) client(token string) (*cli.Client, error) {
-	c, err := cli.NewClient(r.baseURL(), &http.Client{Timeout: 30 * time.Second})
+	c, err := cli.NewClient(r.baseURL(), &http.Client{Timeout: 30 * time.Second, Transport: newLoggingTransport()})
 	if err != nil {
 		return nil, err
 	}

@@ -21,6 +21,13 @@ inside the test root, and `~/.config/conch` is never read or written.
 - Terminal windows: at least six (the two TUIs, a third for the repeat login, the
   two agents, and one for commands). Make each at least 80 columns by 24 rows.
 
+The same thirteen rows run without you in `go run ./e2e/p3-local` (no `--keep`):
+the runner starts its own server, drives two terminal clients on pseudo-terminals
+and the scripted agents, checks what each row says should appear, and removes
+everything (issue #284). That is what CI runs. P3-13 is not part of it unless you
+add `--real-adapter` and have `claude` on your PATH; it then runs one real reply
+as you, which this walkthrough's last section describes.
+
 ## Start it
 
 Everything is run from the repository root. This builds `conchd`, `conch` and
@@ -47,7 +54,7 @@ The community it creates:
 | | |
 | --- | --- |
 | People | `nick-test` (terminals `tui-a` and `tui-a2`, two credentials), `guest-test` (`tui-b`), `browser-test` (the browser) |
-| Agents | `worker-test` (`agent-a`): can read and post in all three channels, ask for approval, keep a session and record runs. `observer-test` (`agent-b`): can read `general` and keep a session, nothing else |
+| Agents | `worker-test` (`agent-a`): can read, post and whisper in all three channels, ask for approval, keep a session and record runs. `observer-test` (`agent-b`): can read `general` and keep a session, nothing else |
 | `general` | everyone |
 | `test-private` | `nick-test` and `worker-test` only |
 | `nets-demo` | everyone; net `red`: `nick-test` member, `guest-test` monitor; net `blue`: `guest-test` and `browser-test` members |
