@@ -356,7 +356,7 @@ func (b *botLoop) run(ctx context.Context) error {
 	// person (or a check) the adapter will answer what it is sent next. Seeding
 	// after registering would swallow a message sent in between as history.
 	if err := b.seed(ctx); err != nil {
-		return fmt.Errorf("seed cursor: %w", err)
+		return fmt.Errorf("seed cursor (the credential must be able to read the channel): %w", err)
 	}
 	if err := b.register(ctx); err != nil {
 		return fmt.Errorf("could not register a session; the adapter needs an issued credential (not a static --mcp-token) and the capabilities sessions.manage and runs.manage in its agent's manifest: %w", err)

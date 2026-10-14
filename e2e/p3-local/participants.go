@@ -397,7 +397,7 @@ func (r *runner) startAgent(part string) (*child, error) {
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if !c.running() {
-			return nil, fmt.Errorf("%s exited at once; its log is %s", part, c.log)
+			return nil, fmt.Errorf("%s exited at once; its log is %s%s", part, c.log, r.logTail(c.log))
 		}
 		sessions, err := r.sessions(r.fx.creds["tui-a"].token, chGeneral)
 		if err != nil {
@@ -413,7 +413,7 @@ func (r *runner) startAgent(part string) (*child, error) {
 		}
 	}
 	c.kill()
-	return nil, fmt.Errorf("%s did not open a session within 20s; its log is %s", part, c.log)
+	return nil, fmt.Errorf("%s did not open a session within 20s; its log is %s%s", part, c.log, r.logTail(c.log))
 }
 
 // logTailLines is how much of a child's log a failure prints.
@@ -515,7 +515,7 @@ func (r *runner) checkAgentA() error {
 		}
 		if time.Now().After(deadline) {
 			c.kill()
-			return fmt.Errorf("agent-a did not reply within 30s; its log is %s", c.log)
+			return fmt.Errorf("agent-a did not reply within 30s; its log is %s%s", c.log, r.logTail(c.log))
 		}
 		if err := pause(250 * time.Millisecond); err != nil {
 			c.kill()
