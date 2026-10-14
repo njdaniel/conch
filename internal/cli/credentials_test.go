@@ -476,7 +476,7 @@ func TestCredentialsRelativeConfigDirRefused(t *testing.T) {
 	}
 	for name, op := range ops {
 		err := op()
-		if err == nil || !strings.Contains(err.Error(), configDirEnv) || strings.Contains(err.Error(), "\n") {
+		if err == nil || !strings.Contains(err.Error(), configDirEnv) || strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "relative/dir") {
 			t.Errorf("%s: err = %v, want one line naming %s", name, err, configDirEnv)
 		}
 	}
@@ -529,5 +529,42 @@ func TestLoginTwoConfigDirs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "conch")); !os.IsNotExist(err) {
 			t.Errorf("%s: a conch/ directory was appended under CONCH_CONFIG_DIR (%v)", who, err)
 		}
+	}
+}
+
+// TestCredentialsConfigDirIsNeverChanged: a directory named by CONCH_CONFIG_DIR
+// is the user's. A missing one is created private; an existing private one is
+// used as it is; one that others may read is refused and left exactly as it
+// was, so CONCH_CONFIG_DIR=$HOME cannot lock down a home directory.
+func TestCredentialsConfigDirIsNeverChanged(t *testing.T) {
+	isolateConfig(t)
+	base := t.TempDir()
+
+	missing := filepath.Join(base, "missing")
+	t.Setenv(configDirEnv, missing)
+	if err := SaveToken("http://a:1", "tok"); err != nil {
+		t.Fatalf("save into a missing directory: %v", err)
+	}
+	if fi, err := os.Stat(missing); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("created directory: %v, %v; want mode 0700", fi, err)
+	}
+
+	open := filepath.Join(base, "open")
+	if err := os.Mkdir(open, 0o755); err != nil { // #nosec G301 -- the test needs a directory others may read
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o755); err != nil { // #nosec G302 -- the test needs a directory others may read
+		t.Fatal(err)
+	}
+	t.Setenv(configDirEnv, open)
+	err := SaveToken("http://a:1", "tok")
+	if err == nil || !strings.Contains(err.Error(), configDirEnv) || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("save into a 0755 directory: err = %v, want one line naming %s", err, configDirEnv)
+	}
+	if fi, err := os.Stat(open); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("the refused directory changed: %v, %v; want 0755 still", fi, err)
+	}
+	if entries, _ := os.ReadDir(open); len(entries) != 0 {
+		t.Errorf("the refused directory holds %d entries, want none", len(entries))
 	}
 }

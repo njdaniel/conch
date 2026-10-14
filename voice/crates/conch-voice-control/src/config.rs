@@ -1,6 +1,7 @@
 //! The configuration file (`docs/design/conch-voice.md` §8).
 //!
-//! The caller reads `$XDG_CONFIG_HOME/conch/voice.toml` and hands the text to
+//! The caller reads `voice.toml` from the configuration directory (`CONCH_CONFIG_DIR`, else
+//! `$XDG_CONFIG_HOME/conch`) and hands the text to
 //! [`Config::parse`]; a file that does not exist is [`Config::default`]. Values from the
 //! environment and the command line are the caller's to collect, into a [`ConfigOverrides`]
 //! per layer, applied with [`Config::apply`] in the order it wants them to win.

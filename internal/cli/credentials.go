@@ -77,7 +77,9 @@ func credentialsPath() (string, error) {
 	if err != nil || dir == "" {
 		return "", err
 	}
-	return filepath.Join(dir, credentialsFileName), nil
+	// Not filepath.Join: Join cleans "..", which conch-voice's Rust path join
+	// does not, and through a symlink the two would then name different files.
+	return strings.TrimSuffix(dir, string(filepath.Separator)) + string(filepath.Separator) + credentialsFileName, nil
 }
 
 // errUnsafeServerHost is returned when a server host cannot be used safely.
@@ -213,6 +215,40 @@ func readCredentials() (map[string]storedCredential, error) {
 	return creds, nil
 }
 
+// prepareCredentialsDir makes sure dir exists and is private before a token is
+// written into it. The default directory (.../conch) is conch's own, so it is
+// created 0700 and tightened to 0700 if it is not. A directory named by
+// CONCH_CONFIG_DIR is the user's: one that does not exist is created 0700, but
+// one that exists is never changed. If others may read or enter it, the login
+// is refused, so that CONCH_CONFIG_DIR=$HOME does not quietly lock down a home
+// directory, or put a token where others can list it.
+func prepareCredentialsDir(dir string) error {
+	if strings.TrimSpace(os.Getenv(configDirEnv)) == "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("cli: create credentials directory: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // 0700 is a directory mode: owner-only
+			return fmt.Errorf("cli: secure credentials directory: %w", err)
+		}
+		return nil
+	}
+	fi, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("cli: create %s: %w", configDirEnv, err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("cli: %s: %w", configDirEnv, err)
+	case !fi.IsDir():
+		return fmt.Errorf("cli: %s is not a directory", configDirEnv)
+	case fi.Mode().Perm()&0o077 != 0:
+		return fmt.Errorf("cli: %s may be read by others (mode %#o); make it private with chmod 700, or choose another directory", configDirEnv, fi.Mode().Perm())
+	}
+	return nil
+}
+
 func writeCredentials(creds map[string]storedCredential) error {
 	path, err := credentialsPath()
 	if err != nil {
@@ -222,11 +258,8 @@ func writeCredentials(creds map[string]storedCredential) error {
 		return errors.New("cli: no user configuration directory available to store credentials")
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("cli: create credentials directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // 0700 is a directory mode: owner-only
-		return fmt.Errorf("cli: secure credentials directory: %w", err)
+	if err := prepareCredentialsDir(dir); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {

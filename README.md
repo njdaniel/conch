@@ -240,7 +240,7 @@ bin/conch login --server http://127.0.0.1:8080 < alice.token
 bin/conch whoami
 ```
 
-By default the login lives in `$XDG_CONFIG_HOME/conch/credentials.json` (else `~/.config/conch/credentials.json`). `CONCH_CONFIG_DIR` moves it: set it to an absolute directory and that directory, used as it is (no `conch/` is added), holds `credentials.json` and, for `conch-voice`, `voice.toml`. A relative path is refused with one line naming the variable; a value of only white space counts as unset. `conch-voice` reads the same variable, so the two programs always agree on where the login is. To be two people on one machine, give each terminal its own directory. Two TUIs side by side, each signed in as someone else:
+By default the login lives in `$XDG_CONFIG_HOME/conch/credentials.json` (else `~/.config/conch/credentials.json`). `CONCH_CONFIG_DIR` moves it: set it to an absolute directory and that directory, used as it is (no `conch/` is added), holds `credentials.json` and, for `conch-voice`, `voice.toml`. A relative path is refused with one line naming the variable; a value of only white space counts as unset. `conch-voice` reads the same variable, so the two programs always agree on where the login is. To be two people on one machine, give each terminal its own directory. Two TUIs side by side, each signed in as someone else: `conch login` creates a missing directory private (0700); it never changes one that exists, and refuses one that others may read or enter.
 
 ```sh
 # terminal 1
