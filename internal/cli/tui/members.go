@@ -54,6 +54,16 @@ func (o *ownSession) finish() int64 {
 	return id
 }
 
+// drop forgets session id when it is the one held, because the server has
+// ended it: quit must not end it a second time.
+func (o *ownSession) drop(id int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.id == id {
+		o.id = 0
+	}
+}
+
 // endSession ends session id with a context of its own. A failure is not
 // reported: the terminal is already given back, and the server ends a session
 // nobody keeps alive by itself.
@@ -105,6 +115,19 @@ func (m Model) startSession() tea.Cmd {
 	}
 }
 
+// restartFailedStatus is the one status line a failed restart of the own
+// session leaves, saying why in the user's terms.
+func restartFailedStatus(err error) string {
+	var serverErr *cli.ServerError
+	switch {
+	case errors.Is(err, cli.ErrUnauthenticated) || (errors.As(err, &serverErr) && serverErr.Status == 401):
+		return "members: session ended; sign in again"
+	case errors.As(err, &serverErr) && serverErr.Code == schema.ErrorCodeTooManySessions:
+		return "members: session ended; too many sessions"
+	}
+	return "members: session ended; could not start a new one"
+}
+
 // eventsState is what the TUI knows about the events socket of the channel on
 // screen.
 type eventsState int
@@ -135,6 +158,13 @@ type eventsModel struct {
 	// backoff is the delay the next drop will wait; zero means the minimum.
 	backoff      time.Duration
 	retryPending bool
+	// restarting is set while a new own session is being created in place of
+	// one the server ended, and recreated from then until the socket proves
+	// healthy with a roster. A refusal in between is not answered with another
+	// session, so a server that keeps refusing cannot make the TUI create
+	// sessions in a loop.
+	restarting bool
+	recreated  bool
 }
 
 // eventsRosterReceived carries one roster frame. gen tells which socket sent
@@ -171,6 +201,11 @@ func (m *Model) beginEvents() tea.Cmd {
 	e.retryPending = false
 	channel := m.current()
 	switch {
+	case e.restarting:
+		// The new session is not there yet; its arrival opens the socket.
+		e.state = eventsDown
+		e.settled = true
+		return nil
 	case m.session == 0 && m.sessionFailed:
 		e.state = eventsDown
 		e.settled = true
@@ -230,12 +265,28 @@ func (m Model) sessionStarted(msg sessionStarted) (tea.Model, tea.Cmd) {
 		// a second reader of the events channel.
 		return m, nil
 	}
-	if msg.err != nil {
+	restart := m.ev.restarting
+	m.ev.restarting = false
+	switch {
+	case msg.err != nil:
 		m.sessionFailed = true
-	} else {
+		if restart {
+			// The old session is gone and no new one came: both views stay
+			// unavailable, and the status line says why, once.
+			m.session = 0
+			m.setStatus(modeChannels, restartFailedStatus(msg.err))
+		}
+	default:
 		m.session = msg.id
+		m.ev.recreated = restart
 	}
-	return m, m.beginEvents()
+	cmd := m.beginEvents()
+	if restart && msg.err == nil {
+		// Same as a retry: the socket is the same subscription continuing, so
+		// the views stay unavailable until its first roster.
+		m.ev.state = eventsDown
+	}
+	return m, cmd
 }
 
 // eventsRoster takes a roster frame. It touches the roster and nothing else:
@@ -253,6 +304,7 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	m.ev.roster = msg.roster
 	m.ev.state = eventsLive
 	m.ev.settled = true
+	m.ev.recreated = false
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
 		for _, row := range m.agentRows() {
@@ -291,6 +343,15 @@ func (m Model) eventsEnded(msg eventsEnded) (tea.Model, tea.Cmd) {
 	switch {
 	case errors.Is(msg.err, cli.ErrUnauthenticated):
 		return m, wait
+	case errors.As(msg.err, &serverErr) && serverErr.Status == 404 && serverErr.Code == schema.ErrorCodeSessionNotFound &&
+		m.session > 0 && !e.restarting && !e.recreated:
+		// The server ended the TUI's session (a revoke, a rotate, an expiry).
+		// It is already ended, so it is forgotten rather than ended again, and
+		// one new one is created; the socket reopens when it exists.
+		m.own.drop(m.session)
+		m.session = 0
+		e.restarting = true
+		return m, tea.Batch(wait, m.startSession())
 	case errors.As(msg.err, &serverErr) && serverErr.Status >= 400 && serverErr.Status < 500 && serverErr.Status != 429:
 		// Not a member, no such channel or session: asking again gets the
 		// same answer. Selecting a channel asks afresh.
