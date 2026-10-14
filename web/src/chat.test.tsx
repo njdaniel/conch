@@ -610,6 +610,75 @@ describe('a long channel', () => {
     expect(screen.queryByRole('log', { name: 'Messages' })).toBeNull();
   });
 
+  const grow = (n: number) => Array.from({ length: n }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+
+  // gateOlder holds back every request with before= until release is called.
+  function gateOlder() {
+    const real = globalThis.fetch;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      return path.includes('before=') ? gate.then(() => real(input, init)) : real(input, init);
+    });
+    return release;
+  }
+
+  it('holds only the newest page when a channel is opened again after it grew', async () => {
+    server.history.general = grow(500);
+    await openChat();
+    await screen.findByText('m500');
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByRole('heading', { name: 'ops' });
+    server.history.general = grow(800);
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByText('m800');
+    expect(lines().map((l) => l.match(/m\d+/)?.[0])).toEqual(Array.from({ length: 100 }, (_, i) => `m${String(701 + i)}`));
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    await screen.findByText('m601');
+    expect(server.historyRequests.at(-1)?.search).toBe('?order=desc&limit=100&before=701');
+  });
+
+  it('drops an older page that lands after the channel was left and opened again', async () => {
+    server.history.general = grow(500);
+    await openChat();
+    await screen.findByText('m500');
+    const release = gateOlder();
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByRole('heading', { name: 'ops' });
+    server.history.general = grow(800);
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByText('m800');
+    release();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(lines()).toHaveLength(100);
+    expect(screen.queryByText('m301')).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load older messages' }).disabled).toBe(false);
+  });
+
+  it('drops an older page that lands after a sign-out and a new sign-in', async () => {
+    server.history.general = grow(500);
+    await openChat();
+    await screen.findByText('m500');
+    const release = gateOlder();
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.change(await screen.findByLabelText('Credential'), { target: { value: secret } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByText('m500');
+    release();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(lines()).toHaveLength(100);
+    expect(screen.queryByText('m301')).toBeNull();
+  });
+
   it('stops offering older pages when another would not fit within maxHeld, and says so', async () => {
     server.history.general = Array.from({ length: 2100 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
     await openChat();

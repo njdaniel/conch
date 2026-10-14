@@ -121,10 +121,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'historyLoading':
       return update(state, action.channel, (c) => ({ ...c, history: 'loading' }));
     case 'historyLoaded':
+      // The page replaces what was held: held messages from an earlier open may
+      // be far below it, and keeping them would hide a gap. Older history is
+      // reached again with Load older. Pending sends and sentIds stay.
       return update(state, action.channel, (c) => ({
-        ...hold(c, action.messages),
+        ...hold({ ...c, byId: new Map() }, action.messages),
         history: 'ready',
         older: 'idle',
+        trimmed: false,
         exhausted: !action.more,
       }));
     case 'historyFailed':

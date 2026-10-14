@@ -2,7 +2,7 @@
 // the newest id held, and tells the page how the connection is. The history
 // comes first so the socket's `after` is known; a message posted in between is
 // replayed by the socket and, being the same id, is shown once.
-import { useCallback, useEffect, useState, type Dispatch } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch } from 'react';
 import * as api from './api';
 import { Feed, type FeedStatus } from './state/feed';
 import type { ConnectionAction } from './state/connection';
@@ -61,6 +61,9 @@ export function useLiveChannel({
   const [people, setPeople] = useState<ReadonlyMap<number, Person>>(new Map());
   const [nets, setNets] = useState<ReadonlyMap<number, string>>(new Map());
   const [attempt, setAttempt] = useState(0);
+  // Moved on when the effect below is cleaned up (another channel, a retry,
+  // sign-out): an older page asked for under an earlier one is then dropped.
+  const generation = useRef(0);
   const meId = me.id;
   const meName = me.name;
   const meKind = me.kind;
@@ -163,6 +166,7 @@ export function useLiveChannel({
     });
 
     return () => {
+      generation.current++;
       live = false;
       feed?.stop();
     };
@@ -176,8 +180,10 @@ export function useLiveChannel({
     if (channel === null) return;
     const before = getOldest(channel);
     if (before === null) return;
+    const asked = generation.current;
     dispatchChat({ type: 'olderLoading', channel });
     void api.loadMessages(channel, before).then((result) => {
+      if (generation.current !== asked) return;
       if (!result.ok) {
         if (result.failure === 'unauthorized') {
           onUnauthorized();
