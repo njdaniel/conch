@@ -175,6 +175,19 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "nets archive", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "archive", "--server", u, "general", "alpha"} }},
 		{key: "nets add", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "add", "--server", u, "general", "alpha", "9"} }},
 		{key: "nets remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "remove", "--server", u, "general", "alpha", "9"} }},
+		{key: "admin channel create", args: func(u, _ string) []string { return []string{"admin", "channel", "create", "--server", u, "general"} }},
+		{key: "admin principal create", args: func(u, _ string) []string {
+			return []string{"admin", "principal", "create", "--server", u, "--kind", "human", "bob"}
+		}},
+		{key: "admin principal disable|enable", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "principal", "disable", "--server", u, "9"} }},
+		{key: "admin credential issue", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "credential", "issue", "--server", u, "--label", "laptop", "9"}
+		}},
+		{key: "admin credential list", args: func(u, _ string) []string { return []string{"admin", "credential", "list", "--server", u, "9"} }},
+		{key: "admin credential revoke", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "credential", "revoke", "--server", u, "9"} }},
+		{key: "admin member add|remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
+		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
+		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
 		{key: "voice status", args: func(u, _ string) []string { return []string{"voice", "status", "--server", u, "general"} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
@@ -209,6 +222,8 @@ func usageCommands(t *testing.T) []string {
 		switch key {
 		case "nets", "voice", "audit", "approvals":
 			key += " " + fields[1]
+		case "admin":
+			key += " " + fields[1] + " " + fields[2]
 		}
 		keys = append(keys, key)
 	}
@@ -271,6 +286,27 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusCreated, schema.CreateNetResponseV1{Net: schema.NetV1{ID: 6, Name: hostile}})
 		case "DELETE /v1/channels/general/nets/alpha", "DELETE /v1/channels/general/nets/alpha/members/9", "PUT /v1/channels/general/nets/alpha/members/9":
 			w.WriteHeader(http.StatusNoContent)
+		case "POST /v0/channels":
+			write(w, http.StatusCreated, schema.CreateChannelResponse{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time()}})
+		case "POST /v0/principals":
+			write(w, http.StatusCreated, schema.CreatePrincipalResponse{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
+		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/principals/9/credentials":
+			write(w, http.StatusCreated, schema.CreateCredentialResponseV1{
+				Credential: schema.CredentialV1{ID: 5, PrincipalID: 9, Label: hostile, CreatedAt: ts},
+				Token:      schema.CredentialTokenPrefix + strings.Repeat("A", schema.CredentialTokenLength-len(schema.CredentialTokenPrefix)),
+			})
+		case "GET /v1/principals/9/credentials":
+			write(w, http.StatusOK, schema.ListCredentialsResponseV1{Credentials: []schema.CredentialV1{{ID: 5, PrincipalID: 9, Label: hostile, CreatedAt: ts}}})
+		case "PUT /v1/principals/9/manifest":
+			write(w, http.StatusOK, schema.PutAgentManifestResponseV1{Manifest: schema.AgentManifestV1{PrincipalID: 9, DisplayName: hostile, Tier: schema.AgentTier(hostile)}})
+		case "GET /v1/principals/9/manifest":
+			write(w, http.StatusOK, schema.GetAgentManifestResponseV1{Manifest: schema.AgentManifestV1{
+				PrincipalID: 9, DisplayName: hostile, Tier: schema.AgentTier(hostile),
+				Capabilities: []schema.Capability{schema.Capability(hostile)},
+				Channels:     []schema.ChannelGrant{{ChannelID: 1, Permissions: []schema.ChannelPermission{schema.ChannelPermission(hostile)}}},
+			}})
 		case "GET /v1/channels/general/voice":
 			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
 				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}},

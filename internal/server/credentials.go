@@ -125,6 +125,8 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 	// The old credential is revoked: a voice room it held a session for is
 	// rotated before the response is written (issue #161).
 	s.voiceCredentialRevoked(ctx)
+	// Rotating revokes the old credential, which ends its sessions.
+	s.events.notifyRosters()
 	writeSecretJSON(w, http.StatusCreated, schema.RotateCredentialResponseV1{Credential: cred, Token: token})
 }
 
@@ -151,5 +153,7 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 	// response is written, so a token LiveKit renewed for it is useless
 	// (issue #161). It cannot fail the request.
 	s.voiceCredentialRevoked(ctx)
+	// Revoking ends the credential's sessions.
+	s.events.notifyRosters()
 	w.WriteHeader(http.StatusNoContent)
 }

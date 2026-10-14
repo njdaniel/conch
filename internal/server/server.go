@@ -50,6 +50,19 @@ type Config struct {
 	// disables uploads (fetching existing files still works). conchd defaults
 	// it to DefaultMaxUploadBytes; the zero value here is off.
 	MaxUploadBytes int64
+	// WebDir, when set, is a built web client served at /app/ (see
+	// static.go). Empty means no /app/ routes exist.
+	WebDir string
+	// AllowedOrigins are extra origins the WebSocket upgrade accepts besides
+	// the server's own, so a dev server on another port can connect. Empty
+	// keeps the same-origin check. See ParseAllowedOrigins.
+	AllowedOrigins []string
+	// SessionStale and SessionOffline are how long a session may go without
+	// a heartbeat before it shows as stale and then as offline (issue #265).
+	// Zero means DefaultSessionStale and DefaultSessionOffline. Serve refuses
+	// to start unless stale is shorter than offline.
+	SessionStale   time.Duration
+	SessionOffline time.Duration
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -81,8 +94,11 @@ type Server struct {
 	// every server so presence can answer "not configured"; its goroutine
 	// runs only when lk is set, started by Serve.
 	voice *voicePoller
-	http  *http.Server
-	ln    net.Listener
+	// events is the subscribers of the events socket (events_ws.go). Like
+	// voice it exists on every server.
+	events *eventsHub
+	http   *http.Server
+	ln     net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -97,10 +113,38 @@ type Server struct {
 	limits  agentRateLimiter
 	denials denialCoalescer
 	now     func() time.Time
+	// sessionSweepInterval is how often the session sweeper runs. Unexported
+	// so tests can shorten it before serving.
+	sessionSweepInterval time.Duration
+	// keepAliveTicks starts the ticker that refreshes the session an events
+	// socket was opened for, and returns its channel and its stop function.
+	// Nil means every eventsKeepAliveInterval; tests replace it to drive the
+	// ticks by hand.
+	keepAliveTicks func() (<-chan time.Time, func())
+	// eventsBeforeWrite, when set by a test, runs before every frame an
+	// events socket writes: a test blocks in it to be a subscriber that is
+	// stuck in a write.
+	eventsBeforeWrite func()
+	// eventsRosterFloor is the least time between two roster rebuilds for one
+	// events socket (defaultEventsRosterFloor). It is measured on the
+	// monotonic clock, not now: it paces work, it is not a time anyone reads.
+	// Tests set it to zero to see each roster as it is owed.
+	eventsRosterFloor time.Duration
+	// tickets holds the unspent WebSocket tickets (issue #270), in memory
+	// only; its clock is now.
+	tickets wsTicketStore
+	// sockets counts the open WebSockets per credential (issue #309), in
+	// memory only.
+	sockets socketCounter
 	// renameFile moves a finished upload into place. It is os.Rename; tests
 	// replace it to fail the step between the temporary file and the final
 	// name.
 	renameFile func(oldpath, newpath string) error
+	// replayPageSize is how many messages one page of a /v2/ws ?after= replay
+	// reads; zero means the default. replayHooks lets a test act at a chosen
+	// point of a replay. Both are unexported and set by tests before serving.
+	replayPageSize int
+	replayHooks    wsReplayHooks
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -130,10 +174,12 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, now: time.Now, renameFile: os.Rename}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
-	s.routes = s.routeTable()
+	s.events = newEventsHub()
+	s.eventsRosterFloor = defaultEventsRosterFloor
+	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
@@ -201,6 +247,12 @@ func (s *Server) Addr() string {
 // draining in-flight requests up to shutdownTimeout. It returns nil on a clean
 // shutdown. The store is left open for the caller to close.
 func (s *Server) Serve(ctx context.Context) error {
+	// Before anything is bound or started: thresholds that cannot work are a
+	// configuration error, not something to discover when sessions misbehave.
+	stale, offline := s.sessionThresholds()
+	if err := ValidateSessionThresholds(stale, offline); err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -220,10 +272,16 @@ func (s *Server) Serve(ctx context.Context) error {
 	// this is prompt). Presence sockets are hijacked like message sockets, so
 	// they are closed explicitly.
 	defer s.voice.closeAll()
+	// Events sockets are hijacked too, and are closed the same way.
+	defer s.events.closeAll()
 	if s.lk != nil {
 		stop := s.voice.start(ctx)
 		defer stop()
 	}
+
+	// Sessions: the sweeper marks silent sessions stale and then offline. It
+	// stops with ctx and Serve waits for it, so no goroutine outlives Serve.
+	defer s.startSessionSweeper(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

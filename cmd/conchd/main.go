@@ -61,6 +61,7 @@ func usage(w *os.File) {
 Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
                      [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
+                     [--web-dir <dir>] [--allowed-origins <origin,...>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -82,6 +83,11 @@ Flags for serve:
   --max-upload-bytes     largest file an upload may carry, in bytes; 0 disables uploads
                          (env CONCHD_MAX_UPLOAD_BYTES, default 10485760). Files are stored
                          under <data>/files, not in the database.
+  --session-stale        how long without a heartbeat before a session shows as stale
+                         (env CONCHD_SESSION_STALE, default 30s)
+  --session-offline      how long without a heartbeat before a session shows as offline
+                         (env CONCHD_SESSION_OFFLINE, default 90s). Must be longer than
+                         --session-stale; serve refuses to start otherwise.
   --mcp-token            token=principal_id mapping for MCP bearer auth; comma-separate (env CONCHD_MCP_TOKENS)
   --ntfy-server          ntfy server URL (env CONCHD_NTFY_SERVER)
   --ntfy-topic           topic for new and resolved approvals (env CONCHD_NTFY_TOPIC)
@@ -91,6 +97,13 @@ Flags for serve:
   --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
   --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
                          default: --livekit-url with ws->http, wss->https)
+  --web-dir              a built web client (a directory holding index.html) to serve at /app/ on
+                         the API's own origin; / then redirects to /app/ (env CONCHD_WEB_DIR).
+                         Unset, there is no /app/. serve refuses to start if the directory is unusable.
+  --allowed-origins      comma-separated extra Origins the WebSocket upgrade accepts, such as
+                         http://localhost:5173 (env CONCHD_ALLOWED_ORIGINS). It exists only so a
+                         Vite dev server on another port can connect; unset keeps the same-origin
+                         check. Each entry is one exact origin; wildcards are refused.
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -111,6 +124,10 @@ type serveOptions struct {
 	ntfyUrgentTopic string
 	livekit         livekit.Config
 	maxUploadBytes  int64
+	webDir          string
+	allowedOrigins  []string
+	sessionStale    time.Duration
+	sessionOffline  time.Duration
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -127,6 +144,20 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
+	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
+	originsRaw := fs.String("allowed-origins", os.Getenv("CONCHD_ALLOWED_ORIGINS"), "extra Origins the WebSocket upgrade accepts (Vite dev server only)")
+	// The environment seeds the default of each; a flag given on the command
+	// line wins because the flag set parses it afterwards.
+	staleDefault, err := envDuration("CONCHD_SESSION_STALE", server.DefaultSessionStale)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	offlineDefault, err := envDuration("CONCHD_SESSION_OFFLINE", server.DefaultSessionOffline)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	sessionStale := fs.Duration("session-stale", staleDefault, "how long without a heartbeat before a session shows as stale")
+	sessionOffline := fs.Duration("session-offline", offlineDefault, "how long without a heartbeat before a session shows as offline")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -146,6 +177,9 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if *maxUpload < 0 {
 		return serveOptions{}, errors.New("serve: --max-upload-bytes must not be negative (0 disables uploads)")
 	}
+	if err := server.ValidateSessionThresholds(*sessionStale, *sessionOffline); err != nil {
+		return serveOptions{}, fmt.Errorf("serve: %w", err)
+	}
 	authMode, err := server.ParseAuthMode(*authFlag)
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --auth: %w", err)
@@ -159,8 +193,19 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
+	origins, err := server.ParseAllowedOrigins(*originsRaw)
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --allowed-origins: %w", err)
+	}
+	if *webDir != "" {
+		if err := server.CheckWebDir(*webDir); err != nil {
+			return serveOptions{}, fmt.Errorf("serve: --web-dir: %w", err)
+		}
+	}
 	return serveOptions{
+		webDir: *webDir, allowedOrigins: origins,
 		livekit: lk, maxUploadBytes: *maxUpload,
+		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -200,6 +245,10 @@ func runServe(args []string) error {
 		AuthMode:        opts.authMode,
 		LiveKit:         opts.livekit,
 		MaxUploadBytes:  opts.maxUploadBytes,
+		WebDir:          opts.webDir,
+		AllowedOrigins:  opts.allowedOrigins,
+		SessionStale:    opts.sessionStale,
+		SessionOffline:  opts.sessionOffline,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
@@ -292,6 +341,21 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envDuration reads a duration from the environment variable key, or returns
+// fallback when it is unset or empty. A value that is not a duration is an
+// error, not a silent fallback.
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("serve: %s: %q is not a duration such as 30s", key, raw)
+	}
+	return d, nil
 }
 
 func parseMCPTokens(raw string) (map[string]int64, error) {

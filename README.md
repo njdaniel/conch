@@ -192,37 +192,48 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 - `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
 - `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
 - `--max-upload-bytes` (or `CONCHD_MAX_UPLOAD_BYTES`) is the largest file an upload may carry (default 10 MiB; `0` disables uploads). See [Files](#files).
+- `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. The build is not embedded in the binary. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
+- `--allowed-origins` (or `CONCHD_ALLOWED_ORIGINS`) is a comma-separated list of extra `Origin`s the WebSocket upgrade accepts, such as `http://localhost:5173`. It exists only so a Vite dev server on another port can connect. Each entry is one exact origin (`http` or `https`, a host, an optional port); wildcards are refused at start-up, and so are empty entries. Unset, the same-origin check is unchanged.
+- `--session-stale` (or `CONCHD_SESSION_STALE`, default `30s`) and `--session-offline` (or `CONCHD_SESSION_OFFLINE`, default `90s`) are how long a session may go without a heartbeat before it shows as `stale` and then as `offline`; `conchd` refuses to start unless stale is shorter than offline. A session is one live client or runtime of a principal (a TUI, a browser tab, an adapter): `POST /v1/sessions` creates one (any caller with a credential; an agent needs `sessions.manage`; at most 16 online or stale per credential, then `429 too_many_sessions`; offline ones do not count, and reviving one is held to the same bound), `POST /v1/sessions/{id}/heartbeat` keeps it alive and revives a stale or offline one, `DELETE /v1/sessions/{id}` ends it, and `GET /v1/sessions?channel=<name>` lists the sessions of the channel's members, for members only (a non-member, an operator who is not a member and an unknown channel all get the same `404 channel_not_found`). A session belongs to the credential that created it: anyone else, another credential of the same principal and operators included, gets `404 session_not_found`. Revoking, rotating or revoking all of a credential, or disabling a principal, ends its sessions, and so does a credential's expiry (at the next sweep, with cause `credential_expired`). Rows are never deleted. Sessions need authentication: with `--auth off` the routes answer `400 sessions_require_auth`. A roster shows `runtime` and `host` only to an operator and to the session's own principal.
+
+  A run is one piece of work an agent session reports, in one channel and optionally answering one message there. `POST /v1/sessions/{id}/runs` with `{"channel":"<name>","message_id":<id>,"task":"<one line>","link":"https://…"}` starts one in state `queued` (agents only, a human gets `403 agent_required`; on a session of the caller's own credential, otherwise `404 session_not_found`). The agent needs `runs.manage` and, in the channel, the permission posting to the run's audience needs: `post` for a run that answers nothing or a channel-wide message, `post_net` for a net message, `whisper` for a whisper (and `whisper_agent` when another agent is in it). The message must be in that channel and visible to the agent. Every one of those refusals is the same `404 channel_not_found` an unknown channel gets. `POST /v1/runs/{id}/state` with `{"state":…,"outcome":…}` moves it along the fixed lifecycle (`409 invalid_transition` otherwise; a terminal state sets `ended_at`), and `POST /v1/runs/{id}/activity` with `{"kind":…,"summary":…,"outcome":…,"data":…}` adds an entry (`409` once the run has ended). Only the credential that owns the run's session may do either; anyone else, whatever they hold, gets `404 run_not_found`. Each report re-checks the manifest and spends `runs.manage`. `GET /v1/runs/{id}`, `GET /v1/runs/{id}/activity?after=&limit=` and `GET /v1/runs?channel=<name>&session=&after=&limit=` read them. The run list is ascending by id by default (`order=asc`, paged with `after`); `order=desc` lists the newest first, from the newest run with no `before` and below `before=<id>` otherwise, so a client pages back by passing the smallest id it holds (a newest-first page has no `next_after`). `after` goes only with `asc` and `before` only with `desc`; any other mix, both together included, is `400 invalid_request`, as is an `order` that is neither, and an empty `after=`, `before=` or `order=` is as if absent. Either way a run you may not see neither fills a page nor moves the cursor. A run that answers a message is visible to exactly the people who can see that message, and one that answers nothing to the channel's members; its activity goes with it. Operators get no exemption, and a run you may not see answers `404 run_not_found` like one that does not exist. The roster shows every agent session's `status` (`running`, `blocked`, `waiting`, `failed` or `idle`, from its runs) to all its readers, and its `current_run` and `task` only to those who may see that run; `outcome_unknown` is true while a session with a run open is `stale` or `offline`. Nothing changes a run because its session went quiet or ended. `run_started` and `run_ended` are audited; activity is not.
+
+  An intervention is a person asking an agent's run to take a message or to stop. `POST /v1/runs/{id}/interventions` with `{"kind":"message","body":"…"}` (a message needs a `body`; `cancel`, `pause` and `resume` take none) records one in state `requested`. Any human who can see the run may ask (the people who could prompt the agent by posting where it listens); operators get no exemption, and an agent gets `403 human_required`. A run you may not see answers `404 run_not_found`, like one that does not exist. A run that has ended, or whose session has, answers `409 invalid_transition`; if the run's session did not declare the kind the answer is `409 intervention_unsupported` and nothing is stored (the refusal is audited as `intervention_unsupported`); a `body` or `reason` may hold newlines and tabs but no other control character; at most 16 interventions wait (`requested`) on one run, and the next is `429 too_many_interventions`. `GET /v1/runs/{id}/interventions?after=&limit=` and `GET /v1/interventions/{id}` read them, for the same people who can see the run (an agent also needs `messages.read` and `read` in the channel). The agent's adapter polls `GET /v1/sessions/{id}/interventions?state=requested&after=&limit=` (only the credential that owns the session; it needs `runs.manage` and spends it; `state` is optional and `after` is the last id seen) and answers with `POST /v1/interventions/{id}/ack` and `{"state":"acknowledged"|"applied"|"failed","reason":"…"}` (only the credential that owns the run's session, otherwise `404 intervention_not_found`; `requested` becomes any answer, `acknowledged` becomes `applied` or `failed`, anything else is `409 invalid_transition`; `failed` needs a `reason`). An intervention never changes the run: an applied `cancel` is the adapter saying it stopped the work, and the run is `cancelled` only when the adapter also reports that on `POST /v1/runs/{id}/state`. `intervention_requested` (the person, the run and the kind) and `intervention_answered` (the state) are audited, and neither holds the instruction or the reason.
+
+  `GET /v1/events/ws?channel=<name>[&session=<id>]` is how a client follows all of this live, without polling. It takes a bearer or a ticket, and sends one `pkg/schema` document per text frame, told apart by `schema`: a `SessionRosterV1` for the channel on connect and again whenever a session of a member is created, ended, changes state or status, or the channel's membership changes (including the sweeper marking a session `stale` or `offline`; a roster identical to the last one sent is not sent again); a `RunV1` when a run in the channel that you may see is created or changes state; an `AgentActivityV1` when one is appended to such a run; and an `InterventionV1` when one on such a run is created or answered. Every frame is built for you when it is sent, by what the REST routes use, so you are never sent a document you could not fetch now: a channel member outside a whisper gets no frame about a run that answers it, and its roster shows no `current_run` or `task` for it. The upgrade asks what `GET /v1/sessions?channel=` asks (a non-member and an unknown channel get the same `404 channel_not_found`; an agent needs `messages.read` and `read` in the channel, spent once, as for `/v2/ws`, and asked again without spending before every batch of frames), and `--auth off` answers `400 sessions_require_auth`. With `&session=<id>` the session must be your credential's and not ended, otherwise `404 session_not_found` (an agent also needs `sessions.manage`); the server then refreshes its `last_seen_at` every 10 seconds while the socket is open, as a heartbeat would, so a TUI or a browser tab stays `online` without calling one. If that session is ended while the socket is open (`DELETE /v1/sessions/{id}`, or the sweeper ending an expired credential's), the next refresh, within 10 seconds, closes the socket with 1008 `session ended`, and a reconnect with that `session` is refused `404 session_not_found`; a socket without `&session=` is not affected. Membership or credential loss closes the socket with 1008 (at once for removal from the channel, a disable, a revoke-all and a new manifest, within the 30 s re-check otherwise); a reader too slow to keep up is closed with 1008 `subscriber too slow` and reconnects to get a fresh roster. One socket rebuilds its roster at most every 250 ms: changes in between are sent together, as the roster after them, so a `RunV1` may arrive up to 250 ms before the roster showing its status. There is no replay: after a reconnect, take the roster and read runs over REST.
 - `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. Set both topics with the server: a new approval and its resolution are pushed to `--ntfy-topic`, an escalation to `--ntfy-urgent-topic`. With a topic left empty the notifications that use it are not sent; `conchd` warns once at start and records each in the audit log as `notify_failed`, not attempted. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the deployment invariant (ADR-002) requires no other external process for core function.
 
 ### 3. Create a channel, people, and an agent
 
-There's no admin CLI yet; the operator does this through the REST API with their token:
+The operator does this with `conch admin`, signed in by the token `bootstrap-operator` printed. `CONCH_TOKEN` carries it for this shell; the commands below use your ordinary credential and the server decides what it may do (a member who tries one is refused).
 
 ```sh
-OP="Authorization: Bearer $(cat /tmp/conch-data/operator.token)"
-J='Content-Type: application/json'
+umask 077                                                    # a new shell (conchd holds the other one): the token files below must be private
+export CONCH_TOKEN=$(cat /tmp/conch-data/operator.token)     # --server defaults to http://127.0.0.1:8080; set CONCH_SERVER otherwise
 
-curl -s -X POST localhost:8080/v0/channels   -H "$OP" -H "$J" -d '{"name":"ops"}'
-# {"channel":{"id":1,"name":"ops", ...}}       the operator, who created it, is its only member
+bin/conch admin channel create ops
+# created channel ops (id 1)                  the operator, who created it, is its only member
 
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"alice"}'
-# {"principal":{"id":2,"kind":"human", ...}}
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"agent","name":"deploy-bot"}'
-# {"principal":{"id":3,"kind":"agent", ...}}
+bin/conch admin principal create --kind human alice
+# created human alice (id 2)
+bin/conch admin principal create --kind agent deploy-bot
+# created agent deploy-bot (id 3)
 
-# a credential for each: the token is shown once, in this response
-curl -s -X POST localhost:8080/v1/principals/2/credentials -H "$OP" -H "$J" -d '{"label":"alice laptop"}'
-curl -s -X POST localhost:8080/v1/principals/3/credentials -H "$OP" -H "$J" -d '{"label":"deploy-bot"}'
-# {"credential":{"id":2, ...},"token":"conch_..."}
+# a credential for each: the token is printed alone on stdout, once
+bin/conch admin credential issue 2 --label "alice laptop" > alice.token
+bin/conch admin credential issue 3 --label deploy-bot > deploy-bot.token
+# credential 2 does not expire                (on stderr; --expires-at <RFC 3339> sets an expiry)
 
 # channel membership decides who can see a channel at all
-curl -s -X PUT localhost:8080/v1/channels/ops/members/2 -H "$OP"
-curl -s -X PUT localhost:8080/v1/channels/ops/members/3 -H "$OP"
+bin/conch admin member add ops 2
+bin/conch admin member add ops 3
 ```
 
-On a machine you share, a header given with `-H "..."` is visible in the process list while `curl` runs. Put the header line in a private file and pass `-H @that-file` instead.
+`conch admin` is a plain client of the REST API (every command names one route), so everything it does can still be done with `curl`. `--json` prints the server's response document instead of the one-line result. The token files are only as private as the `umask 077` at the top of that block makes them, and it has to be run in this shell, not only in the one that started `conchd`; never write a token anywhere other users can read.
 
-A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. Other operator actions: `DELETE /v1/credentials/{id}` revokes one credential, `POST /v1/credentials/{id}/rotate` replaces one, `POST /v1/principals/{id}/disable` switches a principal off entirely (and `/enable` back on), and `DELETE /v1/channels/{channel}/members/{id}` removes a member.
+A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. The other `conch admin` commands: `credential list <principal-id>`, `credential revoke <credential-id>`, `principal disable|enable <id>` (switch a principal off entirely, and back on), and `member remove <channel> <principal-id>`. Rotating a credential (`POST /v1/credentials/{id}/rotate`) is REST only.
+
+Later steps sign in as someone else, so `unset CONCH_TOKEN` when you are done administering (it overrides a stored login).
 
 **Audit export.** An operator can read the audit trail as JSON Lines: `GET /v1/audit?after=<id>&limit=<n>` (both optional) streams one `conch.audit_event.v1` object per line, in ascending id order, `Content-Type: application/x-ndjson`, up to the last event at the moment the request started. To follow on, pass the last id you received as `after`. The trail names every principal and every refusal, so no one but an operator can read any of it, and each export is itself recorded as an `audit_exported` event (naming the caller and the range) that is not part of that export. `conch audit export [--after N] [--limit N]` writes the same lines to standard output unchanged: `conch audit export > audit.jsonl`. This is the one command that does not rewrite what the server sent: its output is for files and pipes, the server's own bytes.
 
@@ -235,6 +246,22 @@ bin/conch login --server http://127.0.0.1:8080 < alice.token
 # logged in to http://127.0.0.1:8080 as alice (member)
 bin/conch whoami
 ```
+
+By default the login lives in `$XDG_CONFIG_HOME/conch/credentials.json` (else `~/.config/conch/credentials.json`). `CONCH_CONFIG_DIR` moves it: set it to an absolute directory and that directory, used as it is (no `conch/` is added), holds `credentials.json` and, for `conch-voice`, `voice.toml`. A relative path is refused with one line naming the variable; a value of only white space counts as unset. `conch-voice` reads the same variable, so the two programs always agree on where the login is. To be two people on one machine, give each terminal its own directory. Two TUIs side by side, each signed in as someone else: `conch login` creates a missing directory private (0700); it never changes one that exists, and refuses one that others may read or enter.
+
+```sh
+# terminal 1
+export CONCH_CONFIG_DIR=$HOME/.config/conch-alice
+bin/conch login --server http://127.0.0.1:8080 < alice.token
+bin/conch
+
+# terminal 2
+export CONCH_CONFIG_DIR=$HOME/.config/conch-bob
+bin/conch login --server http://127.0.0.1:8080 < bob.token
+bin/conch
+```
+
+Neither process reads or writes the other's file. `CONCH_TOKEN` still wins over the file in whichever directory is in use.
 
 Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
 
@@ -288,11 +315,46 @@ bin/conch nets archive ops alpha
 
 In the TUI the prompt always says where your next message goes: `ops >` for the whole channel, `ops/alpha >` for a net. `/net alpha` sets that target, `/net` alone returns to the channel, and switching channels resets it. `/w 3,5 quick question` whispers once and leaves the target as it was. A message that really starts with `/` is sent as `//text`; any other `/word` is an error, not a message. Scoped messages start with a `[net:alpha]` or `[whisper:3,5]` badge (a whisper lists the other participants); a body that starts with `[` is shown with a leading `\`. The first whisper of a session reminds you that whispers are recorded in the audit log. If the server refuses a send, your text stays in the input and nothing else is sent: the TUI never falls back to the channel.
 
+The TUI shows who and what is connected. While it runs it holds a session of its own (`POST /v1/sessions` with `client: "tui"`, `DELETE`d when it quits, `SIGINT` and `SIGTERM` included) and follows the events socket (`/v1/events/ws?channel=&session=`) of the channel on screen, reopened when you switch channel. The members line above the input reads `online: nick(2) guest · agents: worker-test ● observer-test ○`: people with a live session (a number after the name when one person has several), then agents with a session (`●` running, idle, blocked, waiting or failed; `◐` stale; `○` offline). Members with no session are not listed there. `tab` cycles channels, inbox and agents. The Agents view lists each agent member of the channel once, with its status as the server derives it (`idle`, `running`, `blocked`, `waiting`, `failed`, `stale`, `offline`; an agent with no session is `offline`), its current task and when it was last heard from; `enter` unfolds its sessions with their runtime and model, and a stale or offline session with a run still open says `outcome unknown`. Names, tasks, runtimes and models are chosen by other people and agents, so they are printed as text with control characters dropped. When the events socket is down or refused, or the TUI's session could not be created (a server with `--auth off`), both views read `unavailable` rather than showing a roster that may be stale, messaging keeps working, and the socket is retried with the same backoff as the message stream (1 s, doubling to 30 s); a roster is never replayed, so a reconnect takes the next one as the state. When the server has ended the TUI's session (a revoke, a rotate, an expired credential) the socket is refused with `404 session_not_found`: the TUI then creates one new session and reopens the socket with it, and if that fails the views stay `unavailable` and the status line says why (for example `members: session ended; sign in again`). The message stream follows `/v2/ws?after=<last id held>`: after a drop it asks for exactly what it missed, with no reload of the channel. Below 80x24 the Agents view is one pane; below 40x10 the TUI asks for a larger terminal.
+
+In the Agents view, `↑`/`↓` also walk through an unfolded agent's sessions and each session's ten newest runs (read with one `GET /v1/runs?channel=&session=&order=desc&limit=10` per session when the agent is unfolded). `enter` on a session with a run open, or on a run, opens run detail: the run's id, state, task, link, start and end times and outcome, then its activity (read in pages, then live from the events socket; `↑`/`↓`/`pgup`/`pgdn` scroll it) and the history of interventions asked of it. `esc` goes back. `m` types a one-line message to the run (`enter` sends it, `esc` drops it; it is one line, and control characters other than tab are refused) and `x` asks `cancel this run? y/n`; a key is offered only for a kind the session's roster entry declares in `interventions`, and the rest read `(unsupported)` (`pause (unsupported)` and `resume (unsupported)` always: this client does not send them) and do nothing. A request shows as `requested…` and becomes `acknowledged`, `applied` or `failed: <reason>` only when the intervention's frame says so, and the run's state changes only on a run frame or a re-read: an applied cancel leaves the run reading `running` until the agent reports it `cancelled`. A run that has ended shows its outcome and no keys; a stale or offline session's open run says `outcome unknown` beside its state. A run you can no longer see closes the pane with one line. Every field is text written by other people or agents and is printed with control characters dropped. After the events socket reconnects the open run is read again, since nothing is replayed.
+
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
 - `CONCH_CHANNELS` — optional comma-separated override for which channels the TUI opens.
 - `CONCH_MOUSE` — the TUI takes mouse input (click a channel or approval to select it, wheel to scroll messages) unless this is `0`. While it does, the terminal's own text selection needs Shift held (Shift+drag); `CONCH_MOUSE=0` gives it back. Under tmux, `set -g mouse on` is needed for events to reach the TUI. The keyboard does everything the mouse does, and a click never sends, decides or quits.
 - `--author` / `CONCH_AUTHOR` are deprecated: identity comes from your login. They still work against a server running `--auth off`.
+
+#### The live stream and reconnecting
+
+`GET /v2/ws?channel=<name>` is the live stream: one JSON `MessageV2` per text frame, for every message posted after you connected. Add `&after=<id>` to be given the history first, gap-free: the server subscribes you, then sends every message you may see with an id greater than `<id>`, in ascending order, then carries on live. Connect with the id of the last message you have, and a message posted while you were reconnecting is not lost; `after=0` replays everything you may see, and without `after` nothing is replayed and the stream is exactly as before. The value must be a non-negative integer or the request is refused with `400 invalid_request` before any upgrade. Only `/v2/ws` has it (`/v1/ws` and `/v0/ws` cannot express an audience and ignore it).
+
+**Deduplicate by `id`.** On one connection each message arrives once: the replay is in id order, and a message posted while it is running is sent in its place, not twice. Live messages are sent as they are broadcast, which is id order except when two are posted at the same instant. Across connections the same message can arrive again, for example when you reconnect with an older id than the newest you showed, so a client treats `id` as the identity of a message and ignores a frame whose id it already has. A replay shows you what `GET /v2/channels/{channel}/messages` shows you, so a net message or whisper outside your audience is not sent, and removal from the channel ends the stream as it does for a live one. If the subscription's buffer of new messages fills while a long replay is still being sent, the connection is closed as too slow (policy violation, reason `subscriber too slow`); reconnect with the newest id you received.
+
+#### Open sockets per credential
+
+A credential may hold at most **32** WebSockets open at once, counted across `/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws` and `/v1/voice/ws` together. The next upgrade is refused before it is upgraded with `429` and `{"code":"too_many_sockets"}`; close one and the next is let in. The count is per credential, so a second credential of the same principal has its own 32, and a socket opened with a ticket counts against the credential that asked for the ticket. It is held in memory, so a restart forgets it (and every socket with it), and with `--auth off` there is no credential and no cap. The limit is a constant, not a flag.
+
+#### Opening the stream from a browser: tickets
+
+A browser cannot set an `Authorization` header on a WebSocket, and **the bearer token must never be put in a URL**: URLs end up in proxy logs, browser history and `Referer` headers. `conchd` never reads a bearer from a query parameter, under any flag. Instead the client asks for a short-lived, single-use **ticket** with its bearer, then opens the socket with `?ticket=`:
+
+```sh
+# with the bearer in the header, as for any other call
+curl -s -X POST http://127.0.0.1:8080/v1/ws-tickets -H "Authorization: Bearer $CONCH_TOKEN"
+# {"ticket":"conch_wst_...","expires_at":"2026-10-13T12:00:30.000Z"}
+```
+
+```js
+const { ticket } = await (await fetch("/v1/ws-tickets", { method: "POST", headers: { Authorization: `Bearer ${token}` } })).json();
+const ws = new WebSocket(`wss://conch.example/v2/ws?channel=ops&ticket=${ticket}`);
+```
+
+- A ticket is good for **30 seconds** and for **one** use. It is spent by the first request that presents it, whether or not that upgrade then succeeds; a second attempt is `401`. Ask for a new one for each connection, including each reconnect.
+- It does exactly what the credential that asked for it could do at the moment it is spent, as that principal. If the credential has been revoked or has expired, or its principal disabled, in the meantime, the ticket is refused. A socket opened with a ticket is re-checked every 30 seconds like any other and closed (policy violation, 1008) when its credential is revoked.
+- Only `GET /v2/ws` and `GET /v1/events/ws` accept a ticket (`/v1/ws`, `/v0/ws` and every other route ignore the parameter and want a header), and only when the request carries no `Authorization` header: with a header, the header is used and the ticket is left unspent. Any refusal (missing, used, expired, unknown, or revoked credential) is the same `401`.
+- A credential may hold at most 8 unspent tickets; the next request is `429 too_many_tickets`. Tickets live in memory, so a restart forgets them. With `--auth off` there is no credential to bind one to and the route answers `400 tickets_require_auth`.
+- A ticket is a secret for its 30 seconds. `conchd` does not log request URLs, and a ticket is never logged or audited. A reverse proxy in front of it may log the URL: that is tolerable for a value that is dead after one use, and is exactly why the bearer must not be there.
 
 ### Optional: auto-reply bot
 
@@ -322,7 +384,7 @@ agent it needs channel membership and a manifest (next section) allowing
 
 ### 5. Agent side: MCP
 
-Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the agent's token from step 3. Five tools are registered: A request to `/mcp` may be at most 1 MiB, the same as a REST post; a larger one is refused with `413 request_too_large` and does nothing.
+Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <token>` — the agent's token from step 3. Thirteen tools are registered. A request to `/mcp` may be at most 1 MiB, the same as a REST post; a larger one is refused with `413 request_too_large` and does nothing.
 
 - `post_message` — post a message to a channel as the authenticated agent. With an `audience` (`{"kind":"net","net_id":N}` or `{"kind":"principals","principal_ids":[…]}`) it goes only to that net or those principals; the agent's manifest must grant `post_net`, or `whisper` (plus `whisper_agent` to reach another agent).
 - `read_channel` — read one paginated page of messages from a channel: channel-wide ones, and scoped ones the agent is a recipient of. A message with an `audience` was not sent to everyone; reply in kind by sending the same `audience` back.
@@ -330,17 +392,25 @@ Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <tok
 - `await_decision` — block until an approval resolves (`timeout_ms`, clamped to a 60s server-side max).
 - `check_decision` — read an approval's current state/resolution immediately, without blocking.
 
+An adapter, or an agent's own runtime, reports its presence and its work with eight more (issue #267). Each is the REST route of the same purpose (below) over MCP: it takes and returns the same `pkg/schema` documents, allows and refuses the same requests with the same error codes, and spends the same budget. They need an issued credential, because a session belongs to one; a deprecated static `--mcp-token` gets `sessions_require_auth`. Two differences come from MCP itself. Arguments the tool's input schema refuses (a missing required field, an unknown one, a wrong type) are refused by the MCP library with a plain-text error, before the manifest is consulted, where REST answers `400 invalid_request`. And the library decodes and re-encodes every call's arguments, so `post_activity`'s `data` is stored with its object keys sorted and its numbers as float64 (an integer above 2^53 loses precision), where REST stores the JSON as sent.
+
+- `register_session`, `heartbeat`, `end_session` (`sessions.manage`) — `POST /v1/sessions`, `POST /v1/sessions/{id}/heartbeat`, `DELETE /v1/sessions/{id}`.
+- `start_run`, `update_run`, `post_activity` (`runs.manage`) — `POST /v1/sessions/{id}/runs`, `POST /v1/runs/{id}/state`, `POST /v1/runs/{id}/activity`.
+- `poll_interventions`, `ack_intervention` (`runs.manage`) — `GET /v1/sessions/{id}/interventions` and `POST /v1/interventions/{id}/ack`.
+
 **Agents are deny-by-default.** A token only says who the agent is. To do anything in a channel an agent needs both **membership** of the channel (step 3) and a **manifest** granting the capability and the permission there:
 
 ```sh
-curl -s -X PUT localhost:8080/v1/principals/3/manifest -H "$OP" -H "$J" -d '{
-    "display_name": "deploy-bot", "tier": "A",
-    "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
-    "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
-  }'
+CONCH_TOKEN=$(cat /tmp/conch-data/operator.token) bin/conch admin manifest put 3 <<'EOF'   # the operator's token for this one command; --file <path> reads a file
+{
+  "display_name": "deploy-bot", "tier": "A",
+  "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
+  "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
+}
+EOF
 ```
 
-Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`; each is granted separately. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log (a caller repeating the same denial gets a row for each of the first eight in a minute and then only for the 16th, 32nd… with its number, not one per request for ever). A manifest may also cap a capability with `rate_limits`; over the cap the call is refused with `429` and `Retry-After` (REST, and a webhook bound to the agent) or the `rate_limited` error (MCP). The counters are in memory, so a restart starts every window afresh. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
+Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`, `sessions.manage` (register, heartbeat and end the agent's own sessions) and `runs.manage` (report runs and activity, and read and answer interventions on its own runs); each is granted separately. The last two are P3 additions, used by the session and run tools and routes. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log (a caller repeating the same denial gets a row for each of the first eight in a minute and then only for the 16th, 32nd… with its number, not one per request for ever). A manifest may also cap a capability with `rate_limits`; over the cap the call is refused with `429` and `Retry-After` (REST, and a webhook bound to the agent) or the `rate_limited` error (MCP). The counters are in memory, so a restart starts every window afresh. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
 
 A raw JSON-RPC example (most agents will instead use an MCP client SDK):
 
@@ -383,29 +453,29 @@ It prints one `ok` line per step and ends with `p2-hardening-check: PASS`, or st
 
 A message goes to the whole channel, to a **net** (a named subset of the channel's members) or, as a **whisper**, to a list of principals. Who can see it is fixed when it is posted: joining a net later shows nothing earlier, and leaving it hides nothing already received. A net's **members** listen and speak; its **monitors** only listen. Nets overlap, which is how a lead hears her squad and the command net at once. The server never delivers a scoped message to anyone outside its audience, on any read path: REST, WebSocket, MCP and the CLI.
 
-This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and the `OP` and `J` variables from step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
+This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and `CONCH_TOKEN` set to the operator's token as in step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
 
 ```sh
 umask 077; T=$(mktemp -d)        # a private directory for the tokens; removed at the end
 
-curl -s -X POST localhost:8080/v0/channels -H "$OP" -H "$J" -d '{"name":"squads"}'
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"lead"}'
+bin/conch admin channel create squads
+bin/conch admin principal create --kind human lead
 for n in a1 a2 a3 a4 b1 b2 b3 b4; do
-  curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d "{\"kind\":\"agent\",\"name\":\"$n\"}"
+  bin/conch admin principal create --kind agent $n
 done
 
 # a credential (kept in a private file, never printed) and channel membership for each of the nine
 for id in 2 3 4 5 6 7 8 9 10; do
-  curl -fsS -X POST localhost:8080/v1/principals/$id/credentials -H "$OP" -H "$J" -d '{"label":"squads"}' \
-    | sed 's/.*"token":"\([^"]*\)".*/\1/' > "$T/$id.token"
-  curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/members/$id -H "$OP"
+  bin/conch admin credential issue $id --label squads > "$T/$id.token"
+  bin/conch admin member add squads $id
 done
 
 # agents are deny-by-default: read the channel, and speak on a net they belong to
 for id in 3 4 5 6 7 8 9 10; do
-  curl -fsS -o /dev/null -X PUT localhost:8080/v1/principals/$id/manifest -H "$OP" -H "$J" -d '{
-      "display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
-      "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}'
+  bin/conch admin manifest put $id <<'EOF'
+{"display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
+ "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}
+EOF
 done
 ```
 
@@ -413,14 +483,14 @@ The nets are created empty; members are added one at a time. Net management is a
 
 ```sh
 for net in alpha bravo command; do
-  curl -fsS -o /dev/null -X POST localhost:8080/v1/channels/squads/nets -H "$OP" -H "$J" -d "{\"name\":\"$net\"}"
+  bin/conch nets create squads $net
 done
-net() { curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/nets/$1/members/$2 -H "$OP" -H "$J" -d "{\"role\":\"$3\"}"; }
-for id in 3 4 5 6;  do net alpha   $id member; done
-for id in 7 8 9 10; do net bravo   $id member; done
-net command 3 member; net command 7 member     # the two squad leads, a1 and b1
-net command 2 monitor                          # the human lead listens on command and cannot speak there
-curl -s localhost:8080/v1/channels/squads/nets -H "$OP"   # the nets, with their ids and members
+for id in 3 4 5 6;  do bin/conch nets add squads alpha $id; done
+for id in 7 8 9 10; do bin/conch nets add squads bravo $id; done
+bin/conch nets add squads command 3; bin/conch nets add squads command 7     # the two squad leads, a1 and b1
+bin/conch nets add squads command 2 --monitor                                # the human lead listens on command and cannot speak there
+bin/conch nets list squads                                                   # the nets and their members
+unset CONCH_TOKEN                                                            # the next steps are the people and agents, not the operator
 ```
 
 Now speak. The human uses the CLI, signed in with her token as in step 4:
@@ -432,7 +502,7 @@ sleep 1                                                   # tail shows what arri
 bin/conch send --to 3 squads "a word before you brief the squad"    # a whisper to a1
 ```
 
-An agent speaks on a net over MCP by sending the net's id as the `audience` (here a1, principal 3, on `alpha`, whose id is 1 in the listing above). It replies in kind by sending back the `audience` of a message it received:
+An agent speaks on a net over MCP by sending the net's id as the `audience` (here a1, principal 3, on `alpha`, whose id is 1: the nets were created in the order alpha, bravo, command, so they are 1, 2 and 3). It replies in kind by sending back the `audience` of a message it received:
 
 ```sh
 curl -s -X POST localhost:8080/mcp \

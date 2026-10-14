@@ -60,7 +60,13 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, nil)
+	release, ok := s.admitSocket(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+
+	conn, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		slog.DebugContext(ctx, "voice ws: accept failed", "error", err)
 		return

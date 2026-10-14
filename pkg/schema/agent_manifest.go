@@ -57,13 +57,22 @@ const (
 	CapabilityApprovalsAwait Capability = "approvals.await"
 	// CapabilityApprovalsCheck permits polling an approval's current state.
 	CapabilityApprovalsCheck Capability = "approvals.check"
+	// CapabilitySessionsManage permits an agent to register, keep alive and
+	// end its own sessions and to read the interventions on its own runs
+	// (P3, decision D9). It is the one capability checked without a channel.
+	CapabilitySessionsManage Capability = "sessions.manage"
+	// CapabilityRunsManage permits an agent to start runs, change their
+	// state, append activity and answer interventions. Each of those also
+	// needs the channel permission that posting to the run's audience needs.
+	CapabilityRunsManage Capability = "runs.manage"
 )
 
 // Valid reports whether c is a recognized capability.
 func (c Capability) Valid() bool {
 	switch c {
 	case CapabilityMessagesRead, CapabilityMessagesPost,
-		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck:
+		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
+		CapabilitySessionsManage, CapabilityRunsManage:
 		return true
 	default:
 		return false
@@ -79,18 +88,31 @@ func Capabilities() []Capability {
 		CapabilityApprovalsRequest,
 		CapabilityApprovalsAwait,
 		CapabilityApprovalsCheck,
+		CapabilitySessionsManage,
+		CapabilityRunsManage,
 	}
 }
 
 // mcpToolCapabilities maps every MCP tool conchd exposes to the single
 // capability a caller must hold to invoke it. A tool absent from this table
-// has no capability and therefore cannot be authorized (fail closed).
+// has no capability and therefore cannot be authorized (fail closed). The
+// session and run tools (issue #267) front the REST routes that need the same
+// capabilities.
 var mcpToolCapabilities = map[string]Capability{
 	"post_message":     CapabilityMessagesPost,
 	"read_channel":     CapabilityMessagesRead,
 	"request_approval": CapabilityApprovalsRequest,
 	"await_decision":   CapabilityApprovalsAwait,
 	"check_decision":   CapabilityApprovalsCheck,
+
+	"register_session":   CapabilitySessionsManage,
+	"heartbeat":          CapabilitySessionsManage,
+	"end_session":        CapabilitySessionsManage,
+	"start_run":          CapabilityRunsManage,
+	"update_run":         CapabilityRunsManage,
+	"post_activity":      CapabilityRunsManage,
+	"poll_interventions": CapabilityRunsManage,
+	"ack_intervention":   CapabilityRunsManage,
 }
 
 // MCPToolCapability returns the capability required to call the named MCP

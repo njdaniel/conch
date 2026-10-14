@@ -364,6 +364,110 @@ END`,
 		`ALTER TABLE messages ADD COLUMN thread_root_id INTEGER REFERENCES messages (id)`,
 		`CREATE INDEX messages_by_thread ON messages (thread_root_id, id)`,
 	},
+	// 18: Sessions (issue #265, P3 epic #263, decision D1). One row per live
+	// client or runtime of a principal, human or agent. A session belongs to
+	// the credential that created it (credential_id), which is how ownership
+	// is decided; revoking or disabling ends it in the same transaction.
+	// Rows are never deleted: ended_at is set when a session ends and state
+	// then stays 'offline' (the CHECK says so, as SessionV1.Validate does).
+	// The server flips state to 'stale' and 'offline' on heartbeat
+	// thresholds. interventions is a JSON list, '[]' when none. Timestamps
+	// are unix milliseconds UTC. No data is backfilled. The partial index is
+	// for the sweeper, which looks only at sessions that can still change.
+	{
+		`CREATE TABLE sessions (
+	id            INTEGER PRIMARY KEY,
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	credential_id INTEGER NOT NULL REFERENCES credentials (id),
+	client        TEXT    NOT NULL,
+	runtime       TEXT    NOT NULL DEFAULT '',
+	model         TEXT    NOT NULL DEFAULT '',
+	host          TEXT    NOT NULL DEFAULT '',
+	interventions TEXT    NOT NULL DEFAULT '[]',
+	started_at    INTEGER NOT NULL,
+	last_seen_at  INTEGER NOT NULL,
+	ended_at      INTEGER,
+	state         TEXT    NOT NULL CHECK (state IN ('online','stale','offline')),
+	CHECK (ended_at IS NULL OR state = 'offline')
+)`,
+		`CREATE INDEX sessions_by_principal ON sessions (principal_id, ended_at)`,
+		`CREATE INDEX sessions_by_credential ON sessions (credential_id)`,
+		`CREATE INDEX sessions_live_by_last_seen ON sessions (last_seen_at) WHERE ended_at IS NULL AND state <> 'offline'`,
+	},
+	// 19: Runs (issue #266, P3 epic #263, decision D8). One row per piece of
+	// work an agent session reports. A run belongs to one channel and may
+	// answer one message in it (message_id, NULL for none); that pair decides
+	// who may see it, and the rule lives in audience.go beside the message
+	// rule, which it is built on. principal_id is the session's principal,
+	// copied so a run names its agent without a join. ended_at is set exactly
+	// when the state is terminal (the CHECK says so, as RunV1.Validate does).
+	// link and outcome are '' when absent. Timestamps are unix milliseconds
+	// UTC. Rows are never deleted. No data is backfilled. The indexes serve
+	// the channel listing and the roster's look-up of a session's runs.
+	{
+		`CREATE TABLE runs (
+	id           INTEGER PRIMARY KEY,
+	session_id   INTEGER NOT NULL REFERENCES sessions (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	message_id   INTEGER REFERENCES messages (id),
+	state        TEXT    NOT NULL CHECK (state IN ('queued','starting','running','blocked','waiting','completed','failed','cancelled')),
+	task         TEXT    NOT NULL,
+	link         TEXT    NOT NULL DEFAULT '',
+	started_at   INTEGER NOT NULL,
+	ended_at     INTEGER,
+	outcome      TEXT    NOT NULL DEFAULT '',
+	CHECK ((ended_at IS NULL) = (state NOT IN ('completed','failed','cancelled')))
+)`,
+		`CREATE INDEX runs_by_channel ON runs (channel_id, id)`,
+		`CREATE INDEX runs_by_session ON runs (session_id, state)`,
+	},
+	// 20: Run activity (issue #266). One row per entry an agent appends to
+	// one of its runs. An entry has no visibility of its own: it is read only
+	// through its run, by the run's rule. data is the entry's JSON detail as
+	// the server encoded it, NULL when there is none. at is the server's
+	// clock, unix milliseconds UTC. Rows are never deleted.
+	{
+		`CREATE TABLE run_activity (
+	id      INTEGER PRIMARY KEY,
+	run_id  INTEGER NOT NULL REFERENCES runs (id),
+	kind    TEXT    NOT NULL,
+	summary TEXT    NOT NULL,
+	outcome TEXT    NOT NULL DEFAULT '',
+	data    BLOB,
+	at      INTEGER NOT NULL
+)`,
+		`CREATE INDEX run_activity_by_run ON run_activity (run_id, id)`,
+	},
+	// 21: Interventions (issue #287, P3 epic #263, decision D10). One row per
+	// request a person makes of a run: take a message, cancel, pause or
+	// resume. A row has no visibility of its own: it is read only through its
+	// run, by the run's rule (audience.go). Only the server's side of the
+	// story is kept: requested_by and requested_at are the person's request;
+	// state, answered_at and reason are what the run's adapter reported, and
+	// answered_at is set exactly when the state is no longer 'requested'. A
+	// message has a body and no other kind has one (the CHECKs say so, as
+	// InterventionV1.Validate does). Timestamps are unix milliseconds UTC.
+	// Rows are never deleted, and nothing in this table changes a run. No data
+	// is backfilled. The index serves the per-run list and the 16-open bound.
+	{
+		`CREATE TABLE interventions (
+	id           INTEGER PRIMARY KEY,
+	run_id       INTEGER NOT NULL REFERENCES runs (id),
+	kind         TEXT    NOT NULL CHECK (kind IN ('message','cancel','pause','resume')),
+	body         TEXT    NOT NULL DEFAULT '',
+	state        TEXT    NOT NULL CHECK (state IN ('requested','acknowledged','applied','failed')),
+	requested_by INTEGER NOT NULL REFERENCES principals (id),
+	requested_at INTEGER NOT NULL,
+	answered_at  INTEGER,
+	reason       TEXT    NOT NULL DEFAULT '',
+	CHECK ((answered_at IS NULL) = (state = 'requested')),
+	CHECK ((kind = 'message') = (body <> '')),
+	CHECK (state <> 'requested' OR reason = ''),
+	CHECK (state <> 'failed' OR reason <> '')
+)`,
+		`CREATE INDEX interventions_by_run ON interventions (run_id, id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

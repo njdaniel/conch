@@ -47,6 +47,9 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 	// Dropped even when nothing changed: a repeat call is a harmless way to
 	// make sure no socket survives.
 	s.hub.DropPrincipalAll(id)
+	s.events.dropPrincipalAll(id)
+	// Disabling ends the principal's sessions.
+	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonPrincipalOff)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -96,6 +99,9 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.hub.DropPrincipalAll(id)
+	s.events.dropPrincipalAll(id)
+	// Revoking every credential ends the principal's sessions.
+	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonCredsRevoked)
 	writeJSON(w, http.StatusOK, schema.RevokeAllCredentialsResponseV1{Revoked: n})
 }

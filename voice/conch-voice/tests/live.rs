@@ -12,8 +12,8 @@
 //!     cargo test --locked -p conch-voice --test live -- --ignored
 //! ```
 //!
-//! Each `CONFIG_DIR` is an `XDG_CONFIG_HOME` holding `conch/credentials.json` for the
-//! server; the two logins must be different people who are members of the channel, and
+//! Each `CONFIG_DIR` is a `CONCH_CONFIG_DIR`, an absolute path holding `credentials.json`
+//! for the server; the two logins must be different people who are members of the channel, and
 //! nobody else may be talking there. Each client's "microphone" is a tone that never stops:
 //! what is asserted is that the other hears that tone while the key is down and nothing
 //! while it is up. No token, room name or login is printed.
@@ -54,7 +54,7 @@ impl Client {
         let home = tempfile::tempdir().unwrap();
         let mut child = Command::new(BIN)
             .env_clear()
-            .env("XDG_CONFIG_HOME", config_dir)
+            .env("CONCH_CONFIG_DIR", config_dir)
             .env("HOME", home.path())
             .args(["join", &var("CONCH_VOICE_LIVE_CHANNEL")])
             .args(["--server", &var("CONCH_VOICE_LIVE_SERVER"), "--json"])

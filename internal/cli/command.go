@@ -50,6 +50,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "admin":
+		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
 		return runVoice(ctx, args[1:], stdout, stderr)
 	case "audit":
@@ -94,6 +96,15 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch admin channel create [--server <url>] [--json] <name>
+  conch admin principal create [--server <url>] [--json] --kind human|agent <name>
+  conch admin principal disable|enable [--server <url>] [--json] <id>
+  conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
+  conch admin credential list [--server <url>] [--json] <principal-id>
+  conch admin credential revoke [--server <url>] [--json] <credential-id>
+  conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
+  conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
+  conch admin manifest get [--server <url>] [--json] <principal-id>
   conch voice status [--server <url>] [--watch] <channel>
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -143,6 +154,21 @@ Scope:
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
 
+  admin is the operator's setup path: create channels and principals, issue
+  and revoke credentials, set channel membership, store an agent's manifest.
+  It uses your ordinary credential; the server decides who may do what, so a
+  member running one is refused with the server's own error. Each command
+  prints one line, or with --json the response document (commands the server
+  answers with no document print nothing). --json is for a program to read:
+  its strings are the server's, JSON-escaped but not otherwise made safe for
+  a terminal, as with audit export. credential issue prints the token
+  alone on standard output, so TOKEN=$(conch admin credential issue 3 --label
+  bot) works; the credential's id and expiry go to standard error, and the
+  token never does. credential list prints
+    <id> <active|revoked> <created> <expires|-> <label>
+  manifest put reads a PutAgentManifest JSON body from standard input or
+  --file, refuses unknown fields, and checks it locally before sending.
+
   audit export (operators only) writes the audit trail to standard output as
   JSON Lines, one conch.audit_event.v1 object per line in ascending id order,
   up to the last event when the command started. --after resumes from the
@@ -151,9 +177,15 @@ Scope:
   line on standard error and exits nonzero.
 
 Environment:
-  CONCH_SERVER  server URL (default http://127.0.0.1:8080)
-  CONCH_TOKEN   bearer token; overrides the stored login
-  CONCH_AUTHOR  author ID (deprecated; with a login the server decides who you are)
+  CONCH_SERVER      server URL (default http://127.0.0.1:8080)
+  CONCH_TOKEN       bearer token; overrides the stored login
+  CONCH_CONFIG_DIR  directory that holds the stored login (credentials.json), used
+                    as given; must be an absolute path. conch login creates it
+                    private if it is missing and refuses one that others may read.
+                    Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch.
+                    conch-voice reads it too. Give two terminals two directories
+                    to be two people on one machine.
+  CONCH_AUTHOR      author ID (deprecated; with a login the server decides who you are)
   CONCH_CHANNELS optional comma-separated TUI channel override (default: all channels from the server)
   CONCH_MOUSE   set to 0 to turn off TUI mouse support (click, wheel) and keep the terminal's own text selection
 `)

@@ -26,12 +26,28 @@ type API interface {
 	// part of this interface and the TUI cannot call them.
 	ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
 	PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error)
-	SubscribeV2(context.Context, string, func(schema.MessageV2) error) error
+	// SubscribeV2After sends the visible messages with an id above the given
+	// one, then carries on live. The TUI loads a page over REST first and
+	// follows from the last id it holds, so a reconnect needs no reload.
+	// opened is called once the server has accepted the socket.
+	SubscribeV2After(ctx context.Context, channel string, after int64, opened func(), receive func(schema.MessageV2) error) error
 	ListNets(context.Context, string) (schema.ListNetsResponseV1, error)
+	ListChannelMembers(context.Context, string) (schema.ListChannelMembersResponseV1, error)
 	ListChannels(context.Context) (schema.ListChannelsResponse, error)
 	ListApprovals(context.Context) (schema.ListApprovalsResponseV1, error)
 	CastDecision(context.Context, int64, schema.CastDecisionRequestV1) (schema.CastDecisionResponseV1, error)
 	WhoAmI(context.Context) (schema.WhoAmIResponseV1, error)
+	// The session calls: the TUI's own session, the events socket that keeps
+	// it online and carries the roster, and the runs of a channel.
+	CreateSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error)
+	EndSession(context.Context, int64) error
+	SubscribeEvents(ctx context.Context, channel string, session int64, handler cli.EventHandler) error
+	ListRuns(ctx context.Context, channel string, session int64, page cli.RunsPage, limit int) (schema.ListRunsResponseV1, error)
+	// Run detail: one run, its activity and its interventions, and the ask.
+	GetRun(ctx context.Context, id int64) (schema.RunV1, error)
+	ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error)
+	CreateIntervention(ctx context.Context, run int64, request schema.CreateInterventionRequestV1) (schema.InterventionV1, error)
+	ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error)
 }
 
 type channelsLoaded struct {
@@ -42,6 +58,10 @@ type messagesLoaded struct {
 	channel  string
 	messages []schema.MessageV2
 	err      error
+	// following is set on a load that opens the channel's message socket once
+	// the page is in (loadAndFollow); when that load fails there is no socket
+	// and the model retries it.
+	following bool
 }
 type messageReceived struct {
 	channel string
@@ -58,12 +78,25 @@ type netsLoaded struct {
 	want    string
 }
 
+// membersLoaded carries a channel's member list, which names the authors of its
+// messages.
+type membersLoaded struct {
+	channel string
+	members []schema.ChannelMemberV1
+	err     error
+}
+
 // netTarget is where plain messages go instead of the whole channel.
 type netTarget struct {
 	channel string
 	id      int64
 	name    string
 }
+
+// subscriptionOpened says the server accepted channel's message socket. A
+// resumed stream may have nothing to send for a long time, so this, not a
+// message, is what ends "reconnecting".
+type subscriptionOpened struct{ channel string }
 type subscriptionEnded struct {
 	channel string
 	err     error
@@ -111,6 +144,11 @@ const (
 	modeChannels mode = iota
 	modeInbox
 	modeDecision
+	// modeAgents follows modeDecision so the modes that existed keep their
+	// values; tab reaches it from the inbox.
+	modeAgents
+	// modeRun is run detail, opened from the Agents view; esc goes back.
+	modeRun
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -169,6 +207,15 @@ type Model struct {
 	// nets is each channel's net roster as last loaded; it resolves "/net
 	// <name>" and the names shown in scope badges.
 	nets map[string][]schema.NetV1
+	// members is each channel's member names as last loaded, by principal id.
+	// A channel whose list never loaded has no entry, and its authors show as
+	// numbers.
+	members map[string]map[int64]schema.ChannelMemberV1
+	// now and loc give the clock and the time zone message times are shown in.
+	// Injectable so tests do not depend on the machine or on today's date; a nil
+	// loc means the local zone.
+	now func() time.Time
+	loc *time.Location
 	// target is the net plain messages are sent to; nil means the channel.
 	// It is never carried across channels, and nothing ever falls back from a
 	// scoped send to a channel-wide one.
@@ -194,6 +241,41 @@ type Model struct {
 	// pointer so View, which cannot change the model, can fill it: a body
 	// can be megabytes, too much to lay out again on every keystroke.
 	wrapped *wrappedBody
+	// own is the TUI's own session, shared by every copy of the model so that
+	// Run can end it after the program has returned. session is its id once
+	// created; sessionFailed says creating it failed, which leaves the roster
+	// unavailable without stopping anything else.
+	own           *ownSession
+	session       int64
+	sessionFailed bool
+	// ev is the events socket of the selected channel and its roster. Roster
+	// frames change nothing but this: not the draft, not the selection.
+	ev eventsModel
+	// loaded marks channels whose first page of history has arrived: from then
+	// on the message socket is opened after the stream mark, with no reload.
+	loaded map[string]bool
+	// streamed is, per channel, the highest message id that came from the
+	// server's stream of the channel: a loaded page or a subscription frame.
+	// A dropped subscription resumes after it. A message this client sent
+	// is not counted: its reply can carry a higher id than messages others
+	// posted while the socket was down, and resuming after it would skip
+	// them.
+	streamed map[string]int64
+	// selAgent is the principal id of the selected agent in the Agents view,
+	// and expanded the agents whose sessions are shown.
+	selAgent int64
+	expanded map[int64]bool
+	// selSub is the cursor under the selected agent when it is expanded: 0 is
+	// the agent's own line, then its sessions and their newest runs.
+	selSub int
+	// sessionRuns is the newest runs of each session that was unfolded, read
+	// from the server and then kept current by the run frames.
+	sessionRuns map[sessionRunKey][]schema.RunV1
+	// agentsStatus is the one line the Agents view shows in place of its name,
+	// until the next key: why run detail closed, or a failed read.
+	agentsStatus string
+	// rd is the open run of run detail; the zero value is none.
+	rd runDetail
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -208,8 +290,17 @@ func (m *Model) setStatus(mode mode, status string) {
 
 // status is the status line of the mode the user is in.
 func (m Model) status() string {
-	if m.mode == modeChannels {
+	switch m.mode {
+	case modeChannels:
 		return m.channelStatus
+	case modeAgents:
+		if m.agentsStatus != "" {
+			return m.agentsStatus
+		}
+		// The mode is named, and so is the channel it is about.
+		return "agents: " + sanitize(m.current())
+	case modeRun:
+		return m.runStatus()
 	}
 	return m.inboxStatus
 }
@@ -232,9 +323,11 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), subscribed: make(map[string]bool),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
-		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{}}
+		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
+		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -264,9 +357,9 @@ func (m Model) Init() tea.Cmd {
 		who = m.loadWhoAmI()
 	}
 	if m.loadingChannels {
-		return tea.Batch(who, m.loadChannels(), m.waitEvent())
+		return tea.Batch(who, m.startSession(), m.loadChannels(), m.waitEvent())
 	}
-	return tea.Batch(who, m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.kickVoice(), m.waitEvent())
+	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -277,6 +370,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:
+		if m.mode == modeRun {
+			return m.runKey(msg)
+		}
+		if m.mode == modeAgents {
+			// A line about the last key is read once.
+			m.agentsStatus = ""
+		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			if m.mode == modeDecision {
@@ -293,6 +393,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setStatus(modeInbox, "loading approvals…")
 				return m, m.loadApprovals()
 			case modeInbox:
+				m.mode = modeAgents
+				return m, nil
+			case modeAgents:
 				// The channel status is left as it is: results that landed
 				// while the user was away are already recorded in it.
 				m.mode = modeChannels
@@ -309,6 +412,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeDecision:
 				m.selOption = max(0, m.selOption-1)
 				return m, nil
+			case modeAgents:
+				return m.moveAgent(-1), nil
 			}
 		case "down":
 			switch m.mode {
@@ -330,6 +435,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.selOption = min(len(app.Options)-1, m.selOption+1)
 				return m, nil
+			case modeAgents:
+				return m.moveAgent(1), nil
 			}
 		case "pgup", "pgdown":
 			if m.mode == modeInbox || m.mode == modeDecision {
@@ -346,6 +453,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 			case modeChannels:
 				return m.submit()
+			case modeAgents:
+				return m.activateAgent()
 			case modeInbox:
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
@@ -386,7 +495,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.castDecision(app.ID, opt.ID, reason)
 			}
 		case "backspace":
-			if m.input != "" {
+			// The Agents view has no input: the draft is the channel's.
+			if m.input != "" && m.mode != modeAgents {
 				_, size := utf8.DecodeLastRuneInString(m.input)
 				m.input = m.input[:len(m.input)-size]
 			}
@@ -406,6 +516,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.voiceEnded(msg)
 	case voiceRetryDue:
 		return m.voiceRetry(msg)
+	case sessionStarted:
+		return m.sessionStarted(msg)
+	case eventsRosterReceived:
+		return m.eventsRoster(msg)
+	case eventsRunReceived:
+		return m.eventsRun(msg)
+	case eventsActivityReceived:
+		return m.eventsActivity(msg)
+	case eventsInterventionReceived:
+		return m.eventsIntervention(msg)
+	case runRead:
+		return m.runRead(msg)
+	case activityRead:
+		return m.activityRead(msg)
+	case interventionsRead:
+		return m.interventionsRead(msg)
+	case interventionSent:
+		return m.interventionSent(msg)
+	case sessionRunsLoaded:
+		return m.sessionRunsLoaded(msg)
+	case eventsEnded:
+		return m.eventsEnded(msg)
+	case eventsRetryDue:
+		return m.eventsRetry(msg)
 	case whoAmILoaded:
 		if msg.err != nil {
 			m.whoErr = msg.err
@@ -473,16 +607,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.target = nil
 		m.pendingNet = ""
 		m.subscribed[names[0]] = true
-		return m, tea.Batch(m.loadCurrent(), m.loadNets(false, ""), m.startSubscription(), m.beginVoice())
+		return m, tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
 	case netsLoaded:
 		return m.netsLoaded(msg)
+	case membersLoaded:
+		// A failure changes nothing: names already known stay, and without any
+		// the authors show as numbers. The next open or reconnect asks again.
+		if msg.err == nil {
+			names := make(map[int64]schema.ChannelMemberV1, len(msg.members))
+			for _, member := range msg.members {
+				names[member.PrincipalID] = member
+			}
+			m.members[msg.channel] = names
+		}
 	case messagesLoaded:
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
 		stale := msg.channel != m.current()
 		if msg.err != nil {
+			// The socket was to open after this page: without it there is
+			// nothing to follow from, so it retries like a dropped one.
+			var retry tea.Cmd
+			if msg.following {
+				m.subscribed[msg.channel] = false
+				if !stale {
+					retry = m.scheduleResubscribe(msg.channel)
+				}
+			}
 			if stale {
-				return m, nil
+				return m, retry
 			}
 			// A channel-list notice explains the failure better than the
 			// fallback channel's own load error does.
@@ -491,26 +644,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.setStatus(modeChannels, msg.err.Error())
 			}
-		} else {
-			m.addMessages(msg.channel, msg.messages)
-			if stale {
-				return m, nil
-			}
-			switch {
-			case m.notice != "":
-				m.setStatus(modeChannels, m.notice)
-			case m.retryPending[msg.channel]:
-				// History loaded, but the live subscription is down and a
-				// retry is waiting: "connected" would be untrue.
-				m.setStatus(modeChannels, statusReconnecting)
-			default:
-				m.setStatus(modeChannels, "connected")
-			}
+			return m, retry
 		}
+		m.loaded[msg.channel] = true
+		m.addMessages(msg.channel, msg.messages)
+		m.markStreamed(msg.channel, msg.messages...)
+		if stale {
+			return m, nil
+		}
+		switch {
+		case m.notice != "":
+			m.setStatus(modeChannels, m.notice)
+		case m.retryPending[msg.channel]:
+			// History loaded, but the live subscription is down and a
+			// retry is waiting: "connected" would be untrue.
+			m.setStatus(modeChannels, statusReconnecting)
+		default:
+			m.setStatus(modeChannels, "connected")
+		}
+		return m, nil
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
+		m.markStreamed(msg.channel, msg.message)
+		return m, m.waitEvent()
+	case subscriptionOpened:
+		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
+			m.setStatus(modeChannels, "connected")
+		}
 		return m, m.waitEvent()
 	case subscriptionEnded:
 		return m.subscriptionEnded(msg)
@@ -525,8 +687,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.subscribed[msg.channel] = true
-		// Backfill the gap; mergeMessages de-duplicates by id.
-		return m, tea.Batch(m.loadCurrent(), m.startSubscription())
+		// Resume from the last id held: the server sends what came after it,
+		// so nothing is missed and the channel is not loaded again. Only a
+		// channel whose first page never arrived loads it now.
+		if !m.loaded[msg.channel] {
+			return m, tea.Batch(m.loadAndFollow(), m.loadMembers())
+		}
+		return m, tea.Batch(m.loadMembers(), m.startSubscription(msg.channel))
 	case messageSent:
 		m.sending = false
 		if msg.err != nil {
@@ -580,16 +747,22 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 	if m.notice == "" {
 		m.setStatus(modeChannels, statusReconnecting)
 	}
-	delay, ok := m.backoff[msg.channel]
+	return m, tea.Batch(wait, m.scheduleResubscribe(msg.channel))
+}
+
+// scheduleResubscribe waits out the channel's backoff delay, which doubles up
+// to a limit, and then asks to open the subscription again.
+func (m Model) scheduleResubscribe(channel string) tea.Cmd {
+	delay, ok := m.backoff[channel]
 	if !ok {
 		delay = minResubscribeDelay
 	}
-	m.backoff[msg.channel] = delay * 2
-	if m.backoff[msg.channel] > maxResubscribeDelay {
-		m.backoff[msg.channel] = maxResubscribeDelay
+	m.backoff[channel] = delay * 2
+	if m.backoff[channel] > maxResubscribeDelay {
+		m.backoff[channel] = maxResubscribeDelay
 	}
-	m.retryPending[msg.channel] = true
-	return m, tea.Batch(wait, m.after(delay, resubscribeDue{channel: msg.channel}))
+	m.retryPending[channel] = true
+	return m.after(delay, resubscribeDue{channel: channel})
 }
 
 func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
@@ -603,11 +776,19 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadCurrent(), m.loadNets(false, ""), m.beginVoice()}
+	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents()}
 	// A pending retry timer will start the subscription itself.
-	if !m.subscribed[m.current()] && !m.retryPending[m.current()] {
+	switch {
+	case m.subscribed[m.current()] || m.retryPending[m.current()]:
+		commands = append(commands, m.loadCurrent())
+	case m.loaded[m.current()]:
+		// Held from an earlier visit: follow from the last id held while the
+		// page is brought up to date.
 		m.subscribed[m.current()] = true
-		commands = append(commands, m.startSubscription())
+		commands = append(commands, m.loadCurrent(), m.startSubscription(m.current()))
+	default:
+		m.subscribed[m.current()] = true
+		commands = append(commands, m.loadAndFollow())
 	}
 	return m, tea.Batch(commands...)
 }
@@ -673,29 +854,83 @@ func (m Model) loadCurrent() tea.Cmd {
 	}
 }
 
-func (m Model) startSubscription() tea.Cmd {
+// loadAndFollow loads the selected channel's history over REST and, once the
+// page is in, opens the live subscription from the last id on it: the page and
+// the socket meet with no gap and no replay of what the page holds.
+func (m Model) loadAndFollow() tea.Cmd {
 	channel := m.current()
-	if channel == "" {
+	load := m.loadCurrent()
+	if load == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		go func() {
-			started := time.Now()
-			err := m.api.SubscribeV2(m.ctx, channel, func(message schema.MessageV2) error {
-				select {
-				case m.events <- messageReceived{channel: channel, message: message}:
-					return nil
-				case <-m.ctx.Done():
-					return m.ctx.Err()
+		loaded := load().(messagesLoaded)
+		loaded.following = true
+		if loaded.err == nil {
+			var after int64
+			for _, message := range loaded.messages {
+				if message.ID > after {
+					after = message.ID
 				}
-			})
-			select {
-			case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
-			case <-m.ctx.Done():
 			}
-		}()
+			m.follow(channel, after)
+		}
+		return loaded
+	}
+}
+
+// lastID is where a dropped subscription of channel resumes: the highest id
+// the server streamed for it (streamed), 0 for none.
+func (m Model) lastID(channel string) int64 {
+	return m.streamed[channel]
+}
+
+// markStreamed raises channel's stream mark to the highest id in messages.
+func (m *Model) markStreamed(channel string, messages ...schema.MessageV2) {
+	for _, message := range messages {
+		if message.ID > m.streamed[channel] {
+			m.streamed[channel] = message.ID
+		}
+	}
+}
+
+// startSubscription follows channel from the last message held. A socket that
+// dropped is opened the same way, so it asks for exactly what it missed.
+func (m Model) startSubscription(channel string) tea.Cmd {
+	if channel == "" {
 		return nil
 	}
+	after := m.lastID(channel)
+	return func() tea.Msg {
+		m.follow(channel, after)
+		return nil
+	}
+}
+
+// follow opens channel's message socket after the message with id after, in a
+// goroutine that reports every message, and its end, as events.
+func (m Model) follow(channel string, after int64) {
+	go func() {
+		started := time.Now()
+		opened := func() {
+			select {
+			case m.events <- subscriptionOpened{channel: channel}:
+			case <-m.ctx.Done():
+			}
+		}
+		err := m.api.SubscribeV2After(m.ctx, channel, after, opened, func(message schema.MessageV2) error {
+			select {
+			case m.events <- messageReceived{channel: channel, message: message}:
+				return nil
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
+		})
+		select {
+		case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
+		case <-m.ctx.Done():
+		}
+	}()
 }
 
 func (m Model) waitEvent() tea.Cmd {
@@ -771,16 +1006,23 @@ var (
 
 // View renders a compact two-pane layout that fits an 80x24 terminal.
 func (m Model) View() string {
+	if w, h := m.size(); w < minWidth || h < minHeight {
+		return tooSmallScreen(w, h)
+	}
 	l := m.layout()
 	width, height := l.width, l.height
 	leftWidth, rightWidth, contentHeight := l.leftW, l.rightW, l.contentH
 	voice := ""
+	if l.members != "" {
+		voice = statusStyle.Width(width).Render(l.members) + "\n"
+	}
 	if l.voice != "" {
-		voice = statusStyle.Width(width).Render(l.voice) + "\n"
+		voice += statusStyle.Width(width).Render(l.voice) + "\n"
 	}
 
 	var panes string
-	if m.mode == modeInbox || m.mode == modeDecision {
+	switch m.mode {
+	case modeInbox, modeDecision:
 		if width < minApprovalWidth || height < minApprovalHeight {
 			return tooSmall(width, height)
 		}
@@ -791,20 +1033,12 @@ func (m Model) View() string {
 		}
 		details := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(detailsLines, "\n"))
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
-	} else {
-		channelLines := make([]string, len(m.channels))
-		for i, channel := range m.channels {
-			channel = clip(sanitize(channel), leftWidth-4)
-			prefix := "  "
-			if i == m.selected {
-				prefix = activeStyle.Render("› ")
-			}
-			channelLines[i] = prefix + channel
-		}
-		if len(channelLines) == 0 && m.loadingChannels {
-			channelLines = append(channelLines, statusStyle.Render("loading…"))
-		}
-		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(channelLines, "\n"))
+	case modeAgents:
+		panes = m.agentsPanes(l)
+	case modeRun:
+		panes = borderStyle.Width(width - 2).Height(contentHeight).Render(strings.Join(m.runLines(width-2, contentHeight), "\n"))
+	default:
+		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(m.channelLines(leftWidth), "\n"))
 		messageLines := make([]string, 0, len(m.messages[m.current()]))
 		for _, message := range m.messages[m.current()] {
 			messageLines = append(messageLines, m.messageLine(m.current(), message, rightWidth))
@@ -830,21 +1064,30 @@ func (m Model) View() string {
 		inputStr = lipgloss.NewStyle().Width(width).Render(prompt + " " + clipTail(m.input, width-utf8.RuneCountInString(prompt)-2))
 	} else {
 		inputStr = lipgloss.NewStyle().Width(width).Render("")
+		if m.mode == modeRun {
+			inputStr = lipgloss.NewStyle().Width(width).Render(fitCells(m.runPrompt(width), width))
+		}
 	}
 
 	var statusKeys string
 	switch m.mode {
 	case modeDecision:
 		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
+	case modeRun:
+		statusKeys = "  ↑/↓ activity • esc back"
+	case modeAgents:
+		statusKeys = "  ↑/↓ agents • enter sessions • tab channels • esc quit"
 	case modeInbox:
-		statusKeys = "  ↑/↓ approvals • enter decide • tab channels • esc quit"
+		statusKeys = "  ↑/↓ approvals • enter decide • tab agents • esc quit"
 	default:
 		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
 	}
 
 	status := m.status()
 	if m.mode == modeChannels {
-		status += statusKeys
+		// One line whatever the message holds: on a narrow terminal it is the
+		// message that is cut, never the key hints.
+		status = fitCells(status, width-cellWidth(statusKeys)) + statusKeys
 		if name := sanitize(m.userName); name != "" {
 			// The name gets the room the status and key hints leave; when they
 			// already fill the line the name goes, never the hints. lipgloss's
@@ -863,8 +1106,40 @@ func (m Model) View() string {
 		status = fitCells(sanitize(status), width-cellWidth(statusKeys)) + statusKeys
 		status = fitCells(status, width)
 	}
-	status = statusStyle.Width(width).Render(status)
+	// One row at the smallest terminal too, where the key hints alone are
+	// wider than the screen.
+	status = statusStyle.Width(width).Render(fitCells(status, width))
 	return panes + "\n" + voice + inputStr + "\n" + status
+}
+
+// channelLines is the channel list in a pane of the given outer width.
+func (m Model) channelLines(leftWidth int) []string {
+	lines := make([]string, len(m.channels))
+	for i, channel := range m.channels {
+		channel = clip(sanitize(channel), leftWidth-4)
+		prefix := "  "
+		if i == m.selected {
+			prefix = activeStyle.Render("› ")
+		}
+		lines[i] = prefix + channel
+	}
+	if len(lines) == 0 && m.loadingChannels {
+		lines = append(lines, statusStyle.Render("loading…"))
+	}
+	return lines
+}
+
+// agentsPanes is the Agents view: the channel list beside the agents from
+// 80x24 up, the agents alone, full width, below it.
+func (m Model) agentsPanes(l layout) string {
+	if l.width < fullWidth || l.height < fullHeight {
+		lines, sel := m.agentLines(l.width - 2)
+		return borderStyle.Width(l.width - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	}
+	channels := borderStyle.Width(l.leftW - 2).Height(l.contentH).Render(strings.Join(m.channelLines(l.leftW), "\n"))
+	lines, sel := m.agentLines(l.rightW - 2)
+	agents := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, channels, agents)
 }
 
 // size is the terminal size, or 80x24 before the first WindowSizeMsg.
@@ -905,6 +1180,8 @@ type layout struct {
 	contentH int
 	// voice is the voice line, "" when there is none.
 	voice string
+	// members is the members line, "" outside the channels view.
+	members string
 }
 
 func (m Model) layout() layout {
@@ -916,9 +1193,13 @@ func (m Model) layout() layout {
 	// are in voice, so the layout does not move as the roster changes.
 	if m.mode == modeChannels {
 		l.voice = m.voiceLine(width)
+		l.members = m.membersLine(width)
 	}
 	l.contentH = height - 4
 	if l.voice != "" {
+		l.contentH--
+	}
+	if l.members != "" {
 		l.contentH--
 	}
 	if l.contentH < 4 {
@@ -960,6 +1241,10 @@ func (l layout) inRight(x, y int) bool {
 // the one selecting a channel starts (its history and subscription).
 func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	if m.mode == modeAgents || m.mode == modeRun {
+		// Lists and a pane that are read with the keys; there is nothing to click.
 		return m, nil
 	}
 	if m.mode != modeChannels {
@@ -1605,6 +1890,20 @@ func (m Model) loadNets(resolve bool, want string) tea.Cmd {
 	}
 }
 
+// loadMembers asks for the selected channel's member list. It is its own
+// command, so a slow or refused list never holds up messages; its failure is
+// dropped in Update.
+func (m Model) loadMembers() tea.Cmd {
+	channel := m.current()
+	if channel == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		resp, err := m.api.ListChannelMembers(m.ctx, channel)
+		return membersLoaded{channel: channel, members: resp.Members, err: err}
+	}
+}
+
 // netsLoaded records the roster and, for a "/net <name>" that had to wait for
 // it, finishes the command. A plain refresh that fails is silent: the roster
 // only names badges and resolves /net, and /net reports its own failures.
@@ -1710,39 +2009,157 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 	}
 }
 
-// messageLine renders one message on exactly one line of at most width cells.
+// messageLine renders one message on exactly one line of at most width cells:
 //
-// A message body must not be able to pass for a scope badge. That is
-// guaranteed three ways, none of which depends on colour (a pipe, NO_COLOR or
-// a monochrome terminal show no styling):
+//	[scope] HH:MM name [agent] [payload]: body
+//
+// A message body or an author name must not be able to pass for a scope badge,
+// the agent badge or the payload badge. That is guaranteed three ways, none of
+// which depends on colour (a pipe, NO_COLOR or a monochrome terminal show no
+// styling):
 //  1. Position: the scope badge is the first thing on the line, before the
-//     author id. Every other line starts with the author's digits, and the
-//     body is always rendered after the author id, never at column 0.
+//     time and the author. Every other line starts with the time or the author,
+//     and the body is always rendered after the author, never at column 0.
 //  2. One line: sanitize removes line breaks and every control character, so
-//     a body cannot start a second line (or an escape sequence) of its own.
-//  3. Escape: a body that starts with "[" is shown with a leading backslash,
-//     so even in the body's own position it never reads as a badge or as the
-//     payload badge.
+//     neither can start a second line (or an escape sequence) of its own.
+//  3. Escape: a body or a name that starts with "[" is shown with a leading
+//     backslash, and a name has any later "[" escaped too, so neither reads as
+//     a badge, least of all as the "[agent]" badge that follows a name.
 func (m Model) messageLine(channel string, message schema.MessageV2, width int) string {
-	badge, badgeWidth := "", 0
-	if inner := m.scopeText(channel, message.Audience); inner != "" {
-		text := "[" + clip(inner, width/3) + "]"
-		badgeWidth = utf8.RuneCountInString(text) + 1
-		badge = badgeStyle.Render(text) + " "
+	inner := width - 2 // the pane's border
+	var scope, payload string
+	if text := m.scopeText(channel, message.Audience); text != "" {
+		scope = "[" + fitCells(text, width/3) + "]"
 	}
-	payload, payloadWidth := "", 0
 	if message.Payload != nil {
-		text := "[" + clip(sanitize(message.Payload.Schema), width/3) + "]"
-		payloadWidth = utf8.RuneCountInString(text) + 1
-		payload = " " + badgeStyle.Render(text)
+		payload = "[" + fitCells(sanitize(message.Payload.Schema), width/3) + "]"
 	}
-	author := strconv.FormatInt(message.AuthorID, 10)
+	when := m.messageTime(message)
+	name, agent := m.authorName(channel, message.AuthorID)
+	agentBadge := ""
+	if agent {
+		agentBadge = "[agent]"
+	}
+	// fixed is what the line spends on everything but the name and the body:
+	// the badges, the time, the separators and ": ".
+	fixed := func(when string) int {
+		n := 2
+		for _, part := range []string{scope, when, agentBadge, payload} {
+			if part != "" {
+				n += cellWidth(part) + 1
+			}
+		}
+		return n
+	}
+	// The name gets what the rest leaves, at most 24 cells. When that is under
+	// 4 the time goes first: the name is what says who is speaking.
+	nameCells := min(24, inner-fixed(when))
+	if nameCells < 4 && when != "" {
+		when = ""
+		nameCells = min(24, inner-fixed(when))
+	}
+	name = fitCells(name, nameCells)
+
 	body := sanitize(message.Body)
 	if strings.HasPrefix(body, "[") {
 		body = "\\" + body
 	}
-	bodyWidth := width - utf8.RuneCountInString(author) - badgeWidth - payloadWidth - 7
-	return badge + author + payload + "  " + clip(body, bodyWidth)
+	plain := strings.Join(nonEmpty(scope, when, name, agentBadge, payload), " ")
+	if cellWidth(plain)+2 > inner {
+		// Not even the prefix fits (a very narrow pane): keep as much of it as
+		// does, unstyled, and no body, so the line is still one row.
+		return fitCells(plain+": ", inner)
+	}
+	var out strings.Builder
+	for _, part := range []struct {
+		text  string
+		badge bool
+	}{{scope, true}, {when, false}, {name, false}, {agentBadge, true}, {payload, true}} {
+		switch {
+		case part.text == "":
+		case part.badge:
+			out.WriteString(badgeStyle.Render(part.text) + " ")
+		default:
+			out.WriteString(part.text + " ")
+		}
+	}
+	// The space after the last part is the one before ": " in the format, and
+	// ": " itself follows the name or badge directly.
+	line := strings.TrimSuffix(out.String(), " ") + ": "
+	return line + fitCells(body, inner-cellWidth(plain)-2)
+}
+
+func nonEmpty(parts ...string) []string {
+	out := parts[:0:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// narrowWidth is the terminal width below which messages carry no time.
+const narrowWidth = 60
+
+// messageTime is the time a message is shown with, in the model's time zone:
+// "HH:MM" for today and "MM-DD HH:MM" for another day. It is "" for a message
+// without a time, and on a terminal narrower than narrowWidth, where the time
+// goes before the name does.
+func (m Model) messageTime(message schema.MessageV2) string {
+	if width, _ := m.size(); width < narrowWidth || message.CreatedAt.IsZero() {
+		return ""
+	}
+	loc := m.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	at, today := message.CreatedAt.Time().In(loc), now().In(loc)
+	if at.Year() == today.Year() && at.YearDay() == today.YearDay() {
+		return at.Format("15:04")
+	}
+	return at.Format("01-02 15:04")
+}
+
+// authorName is how an author is shown: the name the member list gives, and
+// whether it is an agent. An author the list does not have (they left, or it
+// failed to load) is "#<id>".
+func (m Model) authorName(channel string, id int64) (name string, agent bool) {
+	if member, ok := m.members[channel][id]; ok {
+		name = safeName(member.Name)
+		agent = member.Kind == schema.PrincipalAgent
+	}
+	if name == "" {
+		return "#" + strconv.FormatInt(id, 10), false
+	}
+	return name, agent
+}
+
+// safeName makes a principal's name fit to print. Names stored before the
+// server's display-name rule existed can hold anything, so it goes through
+// sanitize like a body, loses every Unicode format character (Cf: zero-width
+// and soft-hyphen characters, tag characters and the like, which would let two
+// different names look alike) and has "[" escaped so it cannot pose as a badge.
+// ZWJ and ZWNJ are format characters too and go with them: a terminal does not
+// shape the scripts that need them, so removing them is the conservative
+// choice. A name of nothing but combining marks would draw on the space before
+// it, so it counts as empty.
+func safeName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, sanitize(name))
+	name = strings.TrimSpace(name)
+	if strings.IndexFunc(name, func(r rune) bool { return !unicode.Is(unicode.Mn, r) }) < 0 {
+		return ""
+	}
+	return strings.ReplaceAll(name, "[", "\\[")
 }
 
 // promptWithin is prompt fitted to max cells. Only the channel name is ever

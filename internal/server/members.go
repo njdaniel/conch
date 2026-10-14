@@ -121,6 +121,8 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 			PrincipalID: m.PrincipalID,
 			AddedBy:     m.AddedBy,
 			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
+			Name:        m.Name,
+			Kind:        schema.PrincipalKind(m.Kind),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -152,6 +154,8 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 	if s.writeMemberError(w, r, err) {
 		return
 	}
+	// A new member's sessions join the channel's roster.
+	s.events.notifyChannelRoster(channel.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -182,6 +186,10 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	// Always drop, even for an idempotent no-op: it is cheap and guarantees no
 	// subscription outlives the principal's membership.
 	s.hub.DropPrincipal(channel.ID, principalID)
+	// The events sockets: theirs close, and the rest are told the roster
+	// lost them (events_ws.go).
+	s.events.dropPrincipal(channel.ID, principalID)
+	s.events.notifyChannelRoster(channel.ID)
 	// Voice: close their presence sockets and remove them from the channel's
 	// rooms before the response is written. It cannot fail the request;
 	// the poller finds anyone it could not remove (issue #127).

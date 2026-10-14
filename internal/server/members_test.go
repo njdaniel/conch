@@ -164,6 +164,8 @@ func TestChannelContentLeak(t *testing.T) {
 		// (200, configured false); everyone else gets the unknown-channel 404.
 		{"voice presence", "GET", "/v1/channels/%s/voice", "", false, [4]int{ok, notFound, notFound, notFound}},
 		{"voice presence websocket", "GET", "/v1/voice/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
+		// The events socket (issue #269) is gated like the roster: a non-member is told nothing.
+		{"events websocket", "GET", "/v1/events/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
@@ -173,6 +175,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/members/{principal_id}":            "operator-only membership write; covered by the role matrix",
 		"POST /v2/channels/{channel}/files":                               "humans-only upload: an agent is refused before the channel is looked up; covered by TestFileUploadRefusals and the file visibility matrix",
 		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"POST /v1/ws-tickets":                                             "names no channel (it only matches the \"/ws\" test above by its spelling); a ticket opens the same v2 socket, which is checked per channel at the upgrade by the row above and by TestWSTicketOpensSocket",
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
@@ -786,5 +789,83 @@ func TestHookIngestIgnoresMembershipWhenAuthOff(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("ingest with auth off = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestListChannelMembersNameAndKind: every member carries its principal's name
+// and kind, and the response carries nothing else (no role, nothing about
+// disablement), checked by a strict decode and a look at the raw keys.
+func TestListChannelMembersNameAndKind(t *testing.T) {
+	f := newMemberFixture(t)
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/alpha/members/%d", f.bot.ID), f.rootTok, ""); rec.Code != 204 {
+		t.Fatal(rec.Code)
+	}
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"member", f.aliceTok},
+		{"operator non-member", f.rootTok},
+	}
+	want := map[int64]struct {
+		name string
+		kind schema.PrincipalKind
+	}{
+		f.alice.ID: {"alice", schema.PrincipalHuman},
+		f.bot.ID:   {"bot", schema.PrincipalAgent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, "GET", "/v1/channels/alpha/members", tt.token, "")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d; body %s", rec.Code, rec.Body)
+			}
+			dec := json.NewDecoder(strings.NewReader(rec.Body.String()))
+			dec.DisallowUnknownFields()
+			var resp schema.ListChannelMembersResponseV1
+			if err := dec.Decode(&resp); err != nil {
+				t.Fatalf("strict decode of %s: %v", rec.Body, err)
+			}
+			if len(resp.Members) != len(want) {
+				t.Fatalf("members = %+v, want %d", resp.Members, len(want))
+			}
+			for _, m := range resp.Members {
+				w, ok := want[m.PrincipalID]
+				if !ok {
+					t.Fatalf("unexpected member %d", m.PrincipalID)
+				}
+				if m.Name != w.name || m.Kind != w.kind {
+					t.Errorf("member %d = %q/%q, want %q/%q", m.PrincipalID, m.Name, m.Kind, w.name, w.kind)
+				}
+			}
+			var raw struct {
+				Members []map[string]json.RawMessage `json:"members"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range raw.Members {
+				for k := range m {
+					switch k {
+					case "principal_id", "added_by", "created_at", "name", "kind":
+					default:
+						t.Errorf("unexpected key %q in member entry", k)
+					}
+				}
+			}
+		})
+	}
+
+	// A disabled principal is still listed, with no sign that it is disabled.
+	if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.bot.ID), f.rootTok, ""); rec.Code >= 300 {
+		t.Fatalf("disable = %d %s", rec.Code, rec.Body)
+	}
+	rec := f.do(t, "GET", "/v1/channels/alpha/members", f.rootTok, "")
+	resp := decodeBody[schema.ListChannelMembersResponseV1](t, rec)
+	if len(resp.Members) != 2 || resp.Members[1].Name != "bot" || resp.Members[1].Kind != schema.PrincipalAgent {
+		t.Errorf("after disable members = %+v", resp.Members)
+	}
+	if strings.Contains(rec.Body.String(), "disabled") {
+		t.Errorf("body mentions disablement: %s", rec.Body)
 	}
 }
