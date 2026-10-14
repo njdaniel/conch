@@ -198,33 +198,35 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 
 ### 3. Create a channel, people, and an agent
 
-There's no admin CLI yet; the operator does this through the REST API with their token:
+The operator does this with `conch admin`, signed in by the token `bootstrap-operator` printed. `CONCH_TOKEN` carries it for this shell; the commands below use your ordinary credential and the server decides what it may do (a member who tries one is refused).
 
 ```sh
-OP="Authorization: Bearer $(cat /tmp/conch-data/operator.token)"
-J='Content-Type: application/json'
+umask 077                                                    # a new shell (conchd holds the other one): the token files below must be private
+export CONCH_TOKEN=$(cat /tmp/conch-data/operator.token)     # --server defaults to http://127.0.0.1:8080; set CONCH_SERVER otherwise
 
-curl -s -X POST localhost:8080/v0/channels   -H "$OP" -H "$J" -d '{"name":"ops"}'
-# {"channel":{"id":1,"name":"ops", ...}}       the operator, who created it, is its only member
+bin/conch admin channel create ops
+# created channel ops (id 1)                  the operator, who created it, is its only member
 
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"alice"}'
-# {"principal":{"id":2,"kind":"human", ...}}
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"agent","name":"deploy-bot"}'
-# {"principal":{"id":3,"kind":"agent", ...}}
+bin/conch admin principal create --kind human alice
+# created human alice (id 2)
+bin/conch admin principal create --kind agent deploy-bot
+# created agent deploy-bot (id 3)
 
-# a credential for each: the token is shown once, in this response
-curl -s -X POST localhost:8080/v1/principals/2/credentials -H "$OP" -H "$J" -d '{"label":"alice laptop"}'
-curl -s -X POST localhost:8080/v1/principals/3/credentials -H "$OP" -H "$J" -d '{"label":"deploy-bot"}'
-# {"credential":{"id":2, ...},"token":"conch_..."}
+# a credential for each: the token is printed alone on stdout, once
+bin/conch admin credential issue 2 --label "alice laptop" > alice.token
+bin/conch admin credential issue 3 --label deploy-bot > deploy-bot.token
+# credential 2 does not expire                (on stderr; --expires-at <RFC 3339> sets an expiry)
 
 # channel membership decides who can see a channel at all
-curl -s -X PUT localhost:8080/v1/channels/ops/members/2 -H "$OP"
-curl -s -X PUT localhost:8080/v1/channels/ops/members/3 -H "$OP"
+bin/conch admin member add ops 2
+bin/conch admin member add ops 3
 ```
 
-On a machine you share, a header given with `-H "..."` is visible in the process list while `curl` runs. Put the header line in a private file and pass `-H @that-file` instead.
+`conch admin` is a plain client of the REST API (every command names one route), so everything it does can still be done with `curl`. `--json` prints the server's response document instead of the one-line result. The token files are only as private as the `umask 077` at the top of that block makes them, and it has to be run in this shell, not only in the one that started `conchd`; never write a token anywhere other users can read.
 
-A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. Other operator actions: `DELETE /v1/credentials/{id}` revokes one credential, `POST /v1/credentials/{id}/rotate` replaces one, `POST /v1/principals/{id}/disable` switches a principal off entirely (and `/enable` back on), and `DELETE /v1/channels/{channel}/members/{id}` removes a member.
+A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. The other `conch admin` commands: `credential list <principal-id>`, `credential revoke <credential-id>`, `principal disable|enable <id>` (switch a principal off entirely, and back on), and `member remove <channel> <principal-id>`. Rotating a credential (`POST /v1/credentials/{id}/rotate`) is REST only.
+
+Later steps sign in as someone else, so `unset CONCH_TOKEN` when you are done administering (it overrides a stored login).
 
 **Audit export.** An operator can read the audit trail as JSON Lines: `GET /v1/audit?after=<id>&limit=<n>` (both optional) streams one `conch.audit_event.v1` object per line, in ascending id order, `Content-Type: application/x-ndjson`, up to the last event at the moment the request started. To follow on, pass the last id you received as `after`. The trail names every principal and every refusal, so no one but an operator can read any of it, and each export is itself recorded as an `audit_exported` event (naming the caller and the range) that is not part of that export. `conch audit export [--after N] [--limit N]` writes the same lines to standard output unchanged: `conch audit export > audit.jsonl`. This is the one command that does not rewrite what the server sent: its output is for files and pipes, the server's own bytes.
 
@@ -341,11 +343,13 @@ Agents connect to `POST /mcp` (streamable HTTP) with `Authorization: Bearer <tok
 **Agents are deny-by-default.** A token only says who the agent is. To do anything in a channel an agent needs both **membership** of the channel (step 3) and a **manifest** granting the capability and the permission there:
 
 ```sh
-curl -s -X PUT localhost:8080/v1/principals/3/manifest -H "$OP" -H "$J" -d '{
-    "display_name": "deploy-bot", "tier": "A",
-    "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
-    "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
-  }'
+CONCH_TOKEN=$(cat /tmp/conch-data/operator.token) bin/conch admin manifest put 3 <<'EOF'   # the operator's token for this one command; --file <path> reads a file
+{
+  "display_name": "deploy-bot", "tier": "A",
+  "capabilities": ["messages.read","messages.post","approvals.request","approvals.await","approvals.check"],
+  "channels": [{"channel_id": 1, "permissions": ["read","post"]}]
+}
+EOF
 ```
 
 Capabilities are `messages.read`, `messages.post`, `approvals.request`, `approvals.await`, `approvals.check`, `sessions.manage` (register, heartbeat and end the agent's own sessions) and `runs.manage` (report runs and activity, and read and answer interventions on its own runs); each is granted separately. The last two are P3 additions that no MCP tool uses yet. Without membership a channel looks like it does not exist; with membership but no grant the call returns `forbidden`. Every refusal is written to the audit log (a caller repeating the same denial gets a row for each of the first eight in a minute and then only for the 16th, 32nd… with its number, not one per request for ever). A manifest may also cap a capability with `rate_limits`; over the cap the call is refused with `429` and `Retry-After` (REST, and a webhook bound to the agent) or the `rate_limited` error (MCP). The counters are in memory, so a restart starts every window afresh. Details: [docs/design/agent-manifest.md](docs/design/agent-manifest.md).
@@ -391,29 +395,29 @@ It prints one `ok` line per step and ends with `p2-hardening-check: PASS`, or st
 
 A message goes to the whole channel, to a **net** (a named subset of the channel's members) or, as a **whisper**, to a list of principals. Who can see it is fixed when it is posted: joining a net later shows nothing earlier, and leaving it hides nothing already received. A net's **members** listen and speak; its **monitors** only listen. Nets overlap, which is how a lead hears her squad and the command net at once. The server never delivers a scoped message to anyone outside its audience, on any read path: REST, WebSocket, MCP and the CLI.
 
-This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and the `OP` and `J` variables from step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
+This builds the roadmap's layout, two squads of four with their leads on a command net: a channel `squads`, a human `lead`, and agents `a1`..`a4` and `b1`..`b4`. Start from a fresh data directory (step 2) and `CONCH_TOKEN` set to the operator's token as in step 3; the ids below are the ones a fresh instance hands out (the operator is 1, the channel is 1, `lead` is 2, `a1`..`a4` are 3..6, `b1`..`b4` are 7..10).
 
 ```sh
 umask 077; T=$(mktemp -d)        # a private directory for the tokens; removed at the end
 
-curl -s -X POST localhost:8080/v0/channels -H "$OP" -H "$J" -d '{"name":"squads"}'
-curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d '{"kind":"human","name":"lead"}'
+bin/conch admin channel create squads
+bin/conch admin principal create --kind human lead
 for n in a1 a2 a3 a4 b1 b2 b3 b4; do
-  curl -s -X POST localhost:8080/v0/principals -H "$OP" -H "$J" -d "{\"kind\":\"agent\",\"name\":\"$n\"}"
+  bin/conch admin principal create --kind agent $n
 done
 
 # a credential (kept in a private file, never printed) and channel membership for each of the nine
 for id in 2 3 4 5 6 7 8 9 10; do
-  curl -fsS -X POST localhost:8080/v1/principals/$id/credentials -H "$OP" -H "$J" -d '{"label":"squads"}' \
-    | sed 's/.*"token":"\([^"]*\)".*/\1/' > "$T/$id.token"
-  curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/members/$id -H "$OP"
+  bin/conch admin credential issue $id --label squads > "$T/$id.token"
+  bin/conch admin member add squads $id
 done
 
 # agents are deny-by-default: read the channel, and speak on a net they belong to
 for id in 3 4 5 6 7 8 9 10; do
-  curl -fsS -o /dev/null -X PUT localhost:8080/v1/principals/$id/manifest -H "$OP" -H "$J" -d '{
-      "display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
-      "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}'
+  bin/conch admin manifest put $id <<'EOF'
+{"display_name": "squad agent", "tier": "A", "capabilities": ["messages.read","messages.post"],
+ "channels": [{"channel_id": 1, "permissions": ["read","post_net"]}]}
+EOF
 done
 ```
 
@@ -421,14 +425,14 @@ The nets are created empty; members are added one at a time. Net management is a
 
 ```sh
 for net in alpha bravo command; do
-  curl -fsS -o /dev/null -X POST localhost:8080/v1/channels/squads/nets -H "$OP" -H "$J" -d "{\"name\":\"$net\"}"
+  bin/conch nets create squads $net
 done
-net() { curl -fsS -o /dev/null -X PUT localhost:8080/v1/channels/squads/nets/$1/members/$2 -H "$OP" -H "$J" -d "{\"role\":\"$3\"}"; }
-for id in 3 4 5 6;  do net alpha   $id member; done
-for id in 7 8 9 10; do net bravo   $id member; done
-net command 3 member; net command 7 member     # the two squad leads, a1 and b1
-net command 2 monitor                          # the human lead listens on command and cannot speak there
-curl -s localhost:8080/v1/channels/squads/nets -H "$OP"   # the nets, with their ids and members
+for id in 3 4 5 6;  do bin/conch nets add squads alpha $id; done
+for id in 7 8 9 10; do bin/conch nets add squads bravo $id; done
+bin/conch nets add squads command 3; bin/conch nets add squads command 7     # the two squad leads, a1 and b1
+bin/conch nets add squads command 2 --monitor                                # the human lead listens on command and cannot speak there
+bin/conch nets list squads                                                   # the nets and their members
+unset CONCH_TOKEN                                                            # the next steps are the people and agents, not the operator
 ```
 
 Now speak. The human uses the CLI, signed in with her token as in step 4:
@@ -440,7 +444,7 @@ sleep 1                                                   # tail shows what arri
 bin/conch send --to 3 squads "a word before you brief the squad"    # a whisper to a1
 ```
 
-An agent speaks on a net over MCP by sending the net's id as the `audience` (here a1, principal 3, on `alpha`, whose id is 1 in the listing above). It replies in kind by sending back the `audience` of a message it received:
+An agent speaks on a net over MCP by sending the net's id as the `audience` (here a1, principal 3, on `alpha`, whose id is 1: the nets were created in the order alpha, bravo, command, so they are 1, 2 and 3). It replies in kind by sending back the `audience` of a message it received:
 
 ```sh
 curl -s -X POST localhost:8080/mcp \
