@@ -42,7 +42,7 @@ type API interface {
 	CreateSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error)
 	EndSession(context.Context, int64) error
 	SubscribeEvents(ctx context.Context, channel string, session int64, handler cli.EventHandler) error
-	ListRuns(ctx context.Context, channel string, session, after int64, limit int) (schema.ListRunsResponseV1, error)
+	ListRuns(ctx context.Context, channel string, session int64, page cli.RunsPage, limit int) (schema.ListRunsResponseV1, error)
 	// Run detail: one run, its activity and its interventions, and the ask.
 	GetRun(ctx context.Context, id int64) (schema.RunV1, error)
 	ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error)

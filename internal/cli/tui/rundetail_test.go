@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,15 @@ type runAPI struct {
 	created   []schema.CreateInterventionRequestV1
 	gets      int
 	listed    int
+	// listRequests is every runs read, in order.
+	listRequests []runsRequest
+}
+
+// runsRequest is one ListRuns call as the fake saw it.
+type runsRequest struct {
+	session int64
+	page    cli.RunsPage
+	limit   int
 }
 
 func newRunAPI(run schema.RunV1) *runAPI {
@@ -90,11 +100,23 @@ func (a *runAPI) CreateIntervention(_ context.Context, run int64, req schema.Cre
 	return intervention(int64(100+len(a.created)), run, req.Kind, req.Body, schema.InterventionStateRequested, ""), nil
 }
 
-func (a *runAPI) ListRuns(_ context.Context, _ string, _, after int64, limit int) (schema.ListRunsResponseV1, error) {
+func (a *runAPI) ListRuns(_ context.Context, _ string, session int64, page cli.RunsPage, limit int) (schema.ListRunsResponseV1, error) {
 	a.state.Lock()
 	defer a.state.Unlock()
 	a.listed++
+	a.listRequests = append(a.listRequests, runsRequest{session: session, page: page, limit: limit})
 	resp := schema.ListRunsResponseV1{Runs: []schema.RunV1{}}
+	if page.NewestFirst {
+		// The server's newest page: up to limit runs, whatever the page size
+		// the other fake reads use.
+		for i := len(a.runs) - 1; i >= 0 && len(resp.Runs) < limit; i-- {
+			if page.Before == 0 || a.runs[i].ID < page.Before {
+				resp.Runs = append(resp.Runs, a.runs[i])
+			}
+		}
+		return resp, nil
+	}
+	after := page.After
 	for _, r := range a.runs {
 		if r.ID <= after {
 			continue
@@ -307,6 +329,13 @@ func TestRunDetailOpensFromRecentRuns(t *testing.T) {
 	m = pressKey(m, "enter")
 	if got := len(m.sessionRuns[sessionRunKey{"general", 1}]); got != 10 {
 		t.Fatalf("listed %d runs, want the newest 10", got)
+	}
+	// One request for the session, from the newest, ten of them (issue #317).
+	api.state.Lock()
+	requests := append([]runsRequest(nil), api.listRequests...)
+	api.state.Unlock()
+	if want := []runsRequest{{session: 1, page: cli.RunsPage{NewestFirst: true}, limit: 10}}; !reflect.DeepEqual(requests, want) {
+		t.Errorf("unfolding the agent made the runs requests %+v, want %+v", requests, want)
 	}
 	view := m.View()
 	if !strings.Contains(view, "run #31 completed · task: job 31") || strings.Contains(view, "job 21") || strings.Contains(view, "job 20") {

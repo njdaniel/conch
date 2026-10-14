@@ -463,9 +463,49 @@ func pageParams(w http.ResponseWriter, r *http.Request) (after int64, limit int,
 	return after, int(parsed), true
 }
 
-// handleListRuns serves GET /v1/runs?channel={name}&session=&after=&limit=:
-// the runs of the channel the caller may see, ascending by id, optionally of
-// one session. It is gated like the channel's messages (channelForCaller): an
+// runOrder reads order, after and before for the run list into the store's
+// page. order is asc (the default) or desc; after goes only with asc and
+// before only with desc, so any other mix, both cursors included, is a 400,
+// and desc with no before is the newest page. An empty value is no value, as
+// for every other parameter here. It writes the 400 and returns false when
+// the parameters are bad.
+func runOrder(w http.ResponseWriter, r *http.Request) (store.RunPage, bool) {
+	query := r.URL.Query()
+	var page store.RunPage
+	switch query.Get("order") {
+	case "", "asc":
+	case "desc":
+		page.NewestFirst = true
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request", "order must be asc or desc")
+		return page, false
+	}
+	if page.NewestFirst && query.Get("after") != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "after goes with order=asc; page back with before")
+		return page, false
+	}
+	if !page.NewestFirst && query.Get("before") != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "before goes with order=desc")
+		return page, false
+	}
+	var err error
+	if page.NewestFirst {
+		page.Before, err = nonNegativeQueryInt64(r, "before", 0)
+	} else {
+		page.After, err = nonNegativeQueryInt64(r, "after", 0)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return page, false
+	}
+	return page, true
+}
+
+// handleListRuns serves GET /v1/runs?channel={name}&session=&after=&limit=
+// and its newest-first form, ...&order=desc&before=&limit=: the runs of the
+// channel the caller may see, ascending by id or newest first, optionally of
+// one session. A client pages back by passing before the smallest id it holds;
+// no response field is added for it. It is gated like the channel's messages (channelForCaller): an
 // unknown channel and one the caller is not a member of are the same 404,
 // operators included. Runs the caller may not see are filtered in the store's
 // statement, before the limit, so they neither fill a page nor move the
@@ -492,7 +532,14 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		sessionID = id
 	}
-	after, limit, ok := pageParams(w, r)
+	page, ok := runOrder(w, r)
+	if !ok {
+		return
+	}
+	// Only the limit is used from pageParams here: the run list's cursor is
+	// runOrder's, and pageParams also checks after, which a desc read may
+	// not carry.
+	_, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}
@@ -502,7 +549,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	// One extra row, so next_after is advertised only when a further visible
 	// run exists now.
-	runs, err := s.store.ListVisibleRuns(ctx, channel.ID, readerFor(r, apiV2), sessionID, after, limit+1)
+	runs, err := s.store.ListVisibleRuns(ctx, channel.ID, readerFor(r, apiV2), sessionID, page, limit+1)
 	if err != nil {
 		slog.ErrorContext(ctx, "runs: list failed", "channel", channel.ID, "error", err)
 		writeInternalError(w)
@@ -511,7 +558,11 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	resp := schema.ListRunsResponseV1{Runs: make([]schema.RunV1, 0, len(runs))}
 	if len(runs) > limit {
 		runs = runs[:limit]
-		resp.NextAfter = runs[len(runs)-1].ID
+		// next_after is for the ascending read; a newest-first client pages
+		// back by the smallest id it holds.
+		if !page.NewestFirst {
+			resp.NextAfter = runs[len(runs)-1].ID
+		}
 	}
 	for _, run := range runs {
 		doc := runDoc(run)
