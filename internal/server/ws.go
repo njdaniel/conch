@@ -33,8 +33,34 @@ const (
 	// the stream loop.
 	wsRecheckTimeout = 5 * time.Second
 
+	// wsReplayPageSize is how many messages one page of a replay reads. It is
+	// the most the history route allows in a page, so a replay costs what
+	// paging the same history over REST costs.
+	wsReplayPageSize = maxMessageLimit
+
 	reasonCredentialInvalid = "credential no longer valid" //nolint:gosec // close-frame reason text, not a credential
 )
+
+// wsReplay is a /v2/ws ?after= request: send every message the reader may see
+// with an id greater than after, then carry on live.
+//
+// r is the request that opened the socket: the reader is built from it by
+// readerFor at the point of the query, exactly as for the history route, and
+// not kept anywhere (the visibility guard test allows no other source).
+type wsReplay struct {
+	after int64
+	r     *http.Request
+}
+
+// wsReplayHooks are test seams, nil in production. beforePage runs before page
+// n (from 0) is read from the store, afterPage after it is read and before any
+// of it is sent. A message posted from either lands in the subscription's
+// buffer as well, and, from beforePage or from afterPage of an earlier page, in
+// a page too: the case the replay must send only once.
+type wsReplayHooks struct {
+	beforePage func(page int)
+	afterPage  func(page int)
+}
 
 // handleWS serves GET /v0/ws?channel=<name>: it upgrades to a WebSocket and
 // streams every message posted to the channel from the moment of subscription,
@@ -52,13 +78,16 @@ func (s *Server) handleWSV1(w http.ResponseWriter, r *http.Request) {
 	s.handleWSVersion(w, r, apiV1)
 }
 
-// handleWSV2 serves GET /v2/ws?channel=<name>: each frame is a
+// handleWSV2 serves GET /v2/ws?channel=<name>[&after=<id>]: each frame is a
 // schema.MessageV2. It is the only socket that can be delivered a scoped
 // message, and only one the connection's principal is a recipient of; a
 // connection with no verified principal (authentication off) receives
 // channel-wide messages only. A message the subscriber is not an audience of
 // is not sent at all, not even as a placeholder. The recipient list is never
 // in a frame.
+//
+// With after=<id> the server subscribes, sends the visible messages with a
+// greater id in ascending order, then streams live; see streamWSV2.
 func (s *Server) handleWSV2(w http.ResponseWriter, r *http.Request) {
 	s.handleWSVersion(w, r, apiV2)
 }
@@ -69,6 +98,25 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel query parameter is required")
 		return
+	}
+	// ?after= is v2 only: v0 and v1 cannot express an audience, so a replay
+	// there could not be told apart from a leak. It is checked here, before
+	// anything is subscribed or upgraded, so a bad value is a plain 400.
+	var replay *wsReplay
+	if version == apiV2 && r.URL.Query().Has("after") {
+		raw := r.URL.Query().Get("after")
+		if raw == "" {
+			// nonNegativeQueryInt64 reads an empty value as its default, which
+			// would turn "after=" into a replay of the whole channel.
+			writeError(w, http.StatusBadRequest, "invalid_request", "after must be a non-negative integer")
+			return
+		}
+		after, err := nonNegativeQueryInt64(r, "after", 0)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		replay = &wsReplay{after: after, r: r}
 	}
 	channel, err := s.store.ChannelByName(ctx, name)
 	if errors.Is(err, store.ErrNotFound) {
@@ -156,7 +204,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	}
 	switch version {
 	case apiV2:
-		s.streamWSV2(ctx, conn, sub2, channel.ID, principalID, credID, recheck)
+		s.streamWSV2(ctx, conn, sub2, replay, channel.ID, principalID, credID, recheck)
 		return
 	case apiV1:
 		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID, credID, recheck)
@@ -221,8 +269,32 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 	}
 }
 
-func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, channelID, principalID, credID int64, recheck <-chan time.Time) {
+// streamWSV2 sends a v2 connection's frames. With replay set it first sends the
+// history after replay.after, then the live frames. The subscription was
+// registered before the replay read anything, so nothing can fall between the
+// two; a message committed during the replay is in both, in a replay page and
+// in the subscription's buffer, and must arrive once.
+//
+// So a live frame is dropped when its id is not greater than the last id the
+// replay sent. That is exact, not a guess: message ids are given out under
+// SQLite's single write lock, so every message with an id at or below one the
+// replay read was already committed when it was read, and, being visible to
+// this reader (it was broadcast to them), was in that page.
+//
+// The mark does not move once the replay is over. Two posts can reach the hub
+// out of id order, because each handler broadcasts after its own commit, and a
+// mark that followed the live frames would drop the lower id when it came
+// second. Live frames after the replay are sent as they arrive, as they are on
+// a connection that asked for no replay.
+func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time) {
 	ctx = conn.CloseRead(ctx)
+	var replayed int64 // the last id the replay sent; 0 without one
+	if replay != nil {
+		var ok bool
+		if replayed, ok = s.replayWSV2(ctx, conn, sub, replay, channelID, principalID, credID, recheck); !ok {
+			return
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -237,10 +309,10 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
 			}
-			wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
-			err := wsjson.Write(wctx, conn, msg)
-			cancel()
-			if err != nil {
+			if replay != nil && msg.ID <= replayed {
+				continue
+			}
+			if err := writeWSMessageV2(ctx, conn, msg); err != nil {
 				_ = conn.Close(websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return
@@ -249,7 +321,97 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 	}
 }
 
+// replayWSV2 sends the messages the reader may see after replay.after, in
+// pages through the same visibility function the history route uses, and
+// returns the id of the last one sent (0 if there were none: a live frame is
+// dropped only for an id already sent, never merely for being at or below the
+// client's cursor). ok is false when it has closed conn instead of finishing.
+//
+// While it runs nobody reads the subscription, so its buffer fills with live
+// frames. That buffer is the bound: a replay that lets wsSendBuffer frames
+// arrive is a slow consumer like any other and the hub drops it. The replay
+// notices at the next frame, closes with the slow-consumer reason and stops
+// reading history; the client reconnects with the newest id it got. It does
+// not drain the subscription into memory of its own, which would be the same
+// queue without the bound.
+func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time) (last int64, ok bool) {
+	size := s.replayPageSize
+	if size <= 0 {
+		size = wsReplayPageSize
+	}
+	cursor := replay.after
+	// The stream loop is not running yet, so the replay gives the credential
+	// its periodic check itself, before every frame: a page is up to a
+	// hundred frames, and a reader who takes each one slowly must not go on
+	// receiving history for minutes after the credential was revoked.
+	credentialOK := func() bool {
+		select {
+		case <-recheck:
+			return s.credentialStillValid(ctx, conn, credID)
+		default:
+			return true
+		}
+	}
+	for page := 0; ; page++ {
+		if !credentialOK() {
+			return last, false
+		}
+		if ctx.Err() != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			return last, false
+		}
+		if hook := s.replayHooks.beforePage; hook != nil {
+			hook(page)
+		}
+		msgs, err := s.store.ListVisibleMessages(ctx, channelID, readerFor(replay.r, apiV2), cursor, size)
+		if err != nil {
+			if ctx.Err() != nil {
+				_ = conn.Close(websocket.StatusNormalClosure, "")
+				return last, false
+			}
+			// A read that failed because the server is stopping is a
+			// shutdown, not a fault.
+			if s.hub.Closed() {
+				s.closeDropped(ctx, conn, channelID, principalID, credID)
+				return last, false
+			}
+			slog.ErrorContext(ctx, "ws: replay failed", "error", err)
+			_ = conn.Close(websocket.StatusInternalError, "replay failed")
+			return last, false
+		}
+		if hook := s.replayHooks.afterPage; hook != nil {
+			hook(page)
+		}
+		for _, m := range msgs {
+			if !credentialOK() {
+				return last, false
+			}
+			// Dropped by the hub (overflow, removal from the channel, a
+			// disabled principal, shutdown): send nothing more and say why.
+			if !sub.Live() {
+				s.closeDropped(ctx, conn, channelID, principalID, credID)
+				return last, false
+			}
+			if err := writeWSMessageV2(ctx, conn, messageV2FromStore(m)); err != nil {
+				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				_ = conn.CloseNow()
+				return last, false
+			}
+			last, cursor = m.ID, m.ID
+		}
+		if len(msgs) < size {
+			return last, true
+		}
+	}
+}
+
 func writeWSMessage(ctx context.Context, conn *websocket.Conn, msg schema.MessageV0) error {
+	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+	defer cancel()
+	return wsjson.Write(wctx, conn, msg)
+}
+
+func writeWSMessageV2(ctx context.Context, conn *websocket.Conn, msg schema.MessageV2) error {
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
 	return wsjson.Write(wctx, conn, msg)

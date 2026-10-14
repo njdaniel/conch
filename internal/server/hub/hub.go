@@ -85,6 +85,17 @@ func (h *Hub) SubscribeV2(channelID, principalID int64, buffer int) *Subscriptio
 // Messages yields MessageV2 broadcasts.
 func (s *SubscriptionV2) Messages() <-chan schema.MessageV2 { return s.msgs }
 
+// Live reports whether the hub still holds the subscription. It turns false
+// the moment the hub drops it (overflow, DropPrincipal, Close) or Cancel runs,
+// before the holder has read the closed Messages channel. A holder that is busy
+// with something other than reading, such as a replay, uses it to stop early.
+func (s *SubscriptionV2) Live() bool {
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
+	_, ok := s.hub.subsV2[s.channelID][s]
+	return ok
+}
+
 // Cancel unsubscribes the V2 subscription.
 func (s *SubscriptionV2) Cancel() {
 	s.hub.mu.Lock()
