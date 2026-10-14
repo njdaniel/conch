@@ -75,6 +75,10 @@ type route struct {
 	pattern string
 	access  access
 	handler http.Handler
+	// acceptsTicket opts the route in to ?ticket= authentication (issue
+	// #270). It is false unless a route says otherwise, and on a route that
+	// is false the parameter is never read.
+	acceptsTicket bool
 }
 
 type callerKey struct{}
@@ -146,12 +150,25 @@ func bearerToken(r *http.Request) (string, bool) {
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := s.mux.Handler(r)
-		if rt, ok := s.routeByPattern[pattern]; ok && rt.access == accessExempt {
+		rt, matched := s.routeByPattern[pattern]
+		if matched && rt.access == accessExempt {
 			next.ServeHTTP(w, r)
 			return
 		}
 		token, ok := bearerToken(r)
 		if !ok {
+			// A ticket stands in for a bearer only where the route asks for
+			// it, and only when the request carries no Authorization header
+			// at all: a header, even a bad one, is the credential, and a
+			// ticket sent with it is neither read nor spent.
+			if matched && rt.acceptsTicket && len(r.Header.Values("Authorization")) == 0 && r.URL.Query().Has("ticket") {
+				principal, credentialID, redeemed := s.redeemWSTicket(w, r)
+				if !redeemed {
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(withCredentialID(withCaller(r.Context(), principal), credentialID)))
+				return
+			}
 			writeUnauthenticated(w)
 			return
 		}

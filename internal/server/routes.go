@@ -16,7 +16,9 @@ func (s *Server) routeTable() []route {
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
 		rt("GET /v1/ws", accessAuthenticated, hf(s.handleWSV1)),
-		rt("GET /v2/ws", accessAuthenticated, hf(s.handleWSV2)),
+		// The only socket that takes ?ticket= (issue #270); see tickets.go.
+		{pattern: "GET /v2/ws", access: accessAuthenticated, handler: hf(s.handleWSV2), acceptsTicket: true},
+		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
