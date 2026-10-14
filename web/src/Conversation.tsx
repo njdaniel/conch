@@ -261,6 +261,7 @@ export function Conversation({
           if (el.scrollTop === 0 && hasOlder) showOlder();
         }}
       >
+        {chat.trimmed ? <p className="hint">older history is not loaded</p> : null}
         {hasOlder ? (
           <button type="button" onClick={showOlder}>
             Load older messages

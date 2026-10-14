@@ -104,13 +104,25 @@ export function useLiveChannel({
           onUnauthorized();
           break;
         case 'denied':
-          // 1008: lost access, or a revoked credential. Ask who we are now.
+          // 1008 is lost access, a revoked credential, or a reader too slow;
+          // the close reason is not read. Ask who we are, then whether the
+          // channel is still ours. Anything unsettled waits out the backoff.
           setStatus('reconnecting');
           void api.restore().then((who) => {
             if (!live) return;
-            if (who.ok) onLost(name);
-            else if (who.failure === 'unauthorized') onUnauthorized();
-            else feed?.start();
+            if (!who.ok) {
+              if (who.failure === 'unauthorized') onUnauthorized();
+              else feed?.retryLater();
+              return;
+            }
+            void api.listChannels().then((list) => {
+              if (!live) return;
+              if (!list.ok) {
+                if (list.failure === 'unauthorized') onUnauthorized();
+                else feed?.retryLater();
+              } else if (list.value.some((c) => c.name === name)) feed?.retryLater();
+              else onLost(name);
+            });
           });
           break;
       }

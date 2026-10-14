@@ -138,6 +138,26 @@ describe('the reconnect machine', () => {
     expect(h.attempts).toHaveLength(1);
   });
 
+  it('retries later, through the backoff, and not at once', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onClose(1008);
+    h.feed.retryLater();
+    expect(h.statuses.at(-1)).toBe('waiting');
+    expect(h.attempts).toHaveLength(1);
+    h.clock.advance(1000);
+    expect(h.attempts).toHaveLength(2);
+  });
+
+  it('does not retry later once stopped', () => {
+    const h = harness();
+    h.feed.start();
+    h.feed.stop();
+    h.feed.retryLater();
+    expect(h.clock.pending).toEqual([]);
+  });
+
   it('can be started again after a 1008, at once', async () => {
     const h = harness();
     h.feed.start();

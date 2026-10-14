@@ -75,7 +75,10 @@ interface Server {
   post: (channel: string, body: string) => Response | Promise<Response>;
   whoami: () => Response;
   ticketCalls: number;
-  channelsAfterLoss: unknown;
+  channels: { id: number; name: string; created_at: string }[];
+  endless: boolean;
+  historyCalls: number;
+  whoamiCalls: number;
 }
 
 let server: Server;
@@ -88,7 +91,10 @@ function install() {
     post: (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201),
     whoami: () => json(member),
     ticketCalls: 0,
-    channelsAfterLoss: null,
+    channels: channelList.channels,
+    endless: false,
+    historyCalls: 0,
+    whoamiCalls: 0,
   };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
@@ -98,8 +104,11 @@ function install() {
       const auth = new Headers(init?.headers).get('Authorization');
       if (auth !== `Bearer ${secret}`) return Promise.resolve(json({}, 401));
       const path = url.pathname;
-      if (path === '/v1/whoami') return Promise.resolve(server.whoami());
-      if (path === '/v1/channels') return Promise.resolve(json(channelList));
+      if (path === '/v1/whoami') {
+        server.whoamiCalls++;
+        return Promise.resolve(server.whoami());
+      }
+      if (path === '/v1/channels') return Promise.resolve(json({ channels: server.channels }));
       if (path === '/v1/ws-tickets') {
         server.ticketCalls++;
         return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
@@ -115,6 +124,8 @@ function install() {
         return Promise.resolve(server.post(channel, body));
       }
       const after = Number(url.searchParams.get('after'));
+      server.historyCalls++;
+      if (server.endless) return Promise.resolve(json({ messages: [message(after + 1, `e${String(after + 1)}`)], next_after: after + 1 }));
       return Promise.resolve(json({ messages: (server.history[channel] ?? []).filter((x) => (x as { id: number }).id > after) }));
     }),
   );
@@ -424,6 +435,7 @@ describe('reconnecting', () => {
   it('removes the channel and says so on a 1008 when whoami still works', async () => {
     const socket = await openChat();
     await connect(socket);
+    server.channels = channelList.channels.filter((c) => c.name !== 'general');
     socket.drop(1008);
     await screen.findByText('You no longer have access to #general');
     expect(screen.queryByRole('button', { name: 'general' })).toBeNull();
@@ -434,6 +446,34 @@ describe('reconnecting', () => {
     expect(FakeSocket.all.filter((s) => new URL(s.url).searchParams.get('channel') === 'general')).toHaveLength(1);
   });
 
+  it('does not remove the channel on a 1008 when it is still listed (a reader too slow), and retries after the backoff', async () => {
+    const socket = await openChat();
+    await connect(socket);
+    socket.drop(1008);
+    await waitFor(() => {
+      expect(FakeSocket.all).toHaveLength(2);
+    }, { timeout: 3000 });
+    expect(screen.queryByText('You no longer have access to #general')).toBeNull();
+    expect(screen.getByRole('button', { name: 'general' })).toBeDefined();
+  });
+
+  it('makes one further attempt, not many, when whoami fails after a 1008', async () => {
+    const socket = await openChat();
+    await connect(socket);
+    server.whoami = () => json({}, 500);
+    const before = server.whoamiCalls;
+    socket.drop(1008);
+    await new Promise((r) => setTimeout(r, 700));
+    expect(FakeSocket.all).toHaveLength(1);
+    expect(server.whoamiCalls - before).toBe(1);
+    await waitFor(() => {
+      expect(FakeSocket.all).toHaveLength(2);
+    }, { timeout: 3000 });
+    // The next wait is 2 s: nothing more arrives in the next second.
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(FakeSocket.all).toHaveLength(2);
+  });
+
   it('signs out on a 1008 when whoami is refused too', async () => {
     const socket = await openChat();
     await connect(socket);
@@ -441,6 +481,17 @@ describe('reconnecting', () => {
     socket.drop(1008);
     await screen.findByText('Signed out: the credential is no longer valid');
     expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
+  });
+});
+
+describe('a channel with endless history', () => {
+  it('is read for at most 20 pages, then follows the socket', async () => {
+    server.endless = true;
+    await openChat();
+    expect(server.historyCalls).toBe(20);
+    await waitFor(() => {
+      expect(lines()).toHaveLength(20);
+    });
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageV2 } from '../schema/message';
-import { chatFor, chatReducer, initialChat, lastId, ordered, pageSize, parseFrame, type ChatAction, type ChatState } from './messages';
+import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, pageSize, parseFrame, type ChatAction, type ChatState } from './messages';
 
 const msg = (id: number, body = `m${String(id)}`): MessageV2 => ({
   schema: 'conch.message.v2',
@@ -99,6 +99,23 @@ describe('the message store', () => {
 
   it('counts a dropped frame', () => {
     expect(chatFor(run({ type: 'dropped', channel: 'ops' }, { type: 'dropped', channel: 'ops' }), 'ops').dropped).toBe(2);
+  });
+});
+
+describe('the held messages are bounded', () => {
+  it('keeps the newest maxHeld, says it dropped some, and never touches a pending send', () => {
+    const many = Array.from({ length: maxHeld + 5 }, (_, i) => msg(i + 1));
+    let state = run({ type: 'sending', channel: 'ops', body: 'mine', at: 1 }, { type: 'historyLoaded', channel: 'ops', messages: many });
+    state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(maxHeld + 6) });
+    const held = ids(state);
+    expect(held).toHaveLength(maxHeld);
+    expect(held[0]).toBe(7);
+    expect(held.at(-1)).toBe(maxHeld + 6);
+    expect(chatFor(state, 'ops').trimmed).toBe(true);
+    expect(chatFor(state, 'ops').pending).toHaveLength(1);
+  });
+  it('does not say so when nothing was dropped', () => {
+    expect(chatFor(run({ type: 'received', channel: 'ops', message: msg(1) }), 'ops').trimmed).toBe(false);
   });
 });
 

@@ -66,6 +66,15 @@ export class Feed {
     this.attemptNow();
   }
 
+  // retryLater goes through the backoff, reporting `waiting`. It is how a host
+  // retries after a `denied` it could not settle: never start() from the
+  // status callback, which would loop as fast as the server answers.
+  retryLater(): void {
+    if (this.stopped) return;
+    this.clearTimer();
+    this.wait();
+  }
+
   // stop ends the feed and reports nothing more.
   stop(): void {
     this.stopped = true;

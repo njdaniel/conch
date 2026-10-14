@@ -63,7 +63,7 @@ describe('rendering hygiene', () => {
 describe('the socket ticket', () => {
   it('is in src/api.ts alone, and the page is never navigated by script', () => {
     const touching = Object.entries(sources)
-      .filter(([, code]) => /new\s+WebSocket\b|ws-tickets/.test(code))
+      .filter(([, code]) => /\bWebSocket\s*\(|ws-tickets/.test(code))
       .map(([path]) => path);
     expect(touching).toEqual(['./api.ts']);
     // Only the hash names the channel; nothing else may write the address bar.

@@ -174,13 +174,17 @@ const channelPath = (channel: string) => `/v1/channels/${encodeURIComponent(chan
 // A page of history is the most the server returns for one call.
 const historyLimit = 100;
 
+// At most this many pages are walked (2,000 messages). The socket, opened after
+// the newest id read, replays the rest.
+export const maxHistoryPages = 20;
+
 // loadMessages reads a channel's messages in id order. The server lists
-// forwards only (`after`, no `before`), so this walks its pages from the start
-// and the page draws the newest of them; older ones are revealed from memory.
+// forwards only (`after`, no `before`; #334), so this walks its pages from the
+// start, up to the cap, and the page draws the newest of them.
 export async function loadMessages(channel: string): Promise<ApiResult<MessageV2[]>> {
   const all: MessageV2[] = [];
   let after = 0;
-  for (;;) {
+  for (let page = 0; page < maxHistoryPages; page++) {
     const path = `/v2/channels/${encodeURIComponent(channel)}/messages?after=${String(after)}&limit=${String(historyLimit)}`;
     const result = await authed(path, listMessagesResponseV2);
     if (!result.ok) return result;
@@ -190,6 +194,7 @@ export async function loadMessages(channel: string): Promise<ApiResult<MessageV2
     if (next <= after) return { ok: true, value: all };
     after = next;
   }
+  return { ok: true, value: all };
 }
 
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {

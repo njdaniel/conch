@@ -7,6 +7,10 @@ import { messageV2, type MessageV2 } from '../schema/message';
 // through older history draws.
 export const pageSize = 100;
 
+// The most messages held per channel: the newest. Older ones are dropped (a
+// pending send of our own is kept apart and never dropped).
+export const maxHeld = 2000;
+
 // The state of one message this tab is sending. A message becomes `Sent` by
 // leaving this list: the server's copy is in `byId` and its id in `sentIds`.
 export type SendStatus = 'sending' | 'failed' | 'unconfirmed';
@@ -31,6 +35,8 @@ export interface ChannelChat {
   readonly history: HistoryStatus;
   // How many of the newest messages are drawn.
   readonly shown: number;
+  // Whether older messages were dropped to stay within maxHeld.
+  readonly trimmed: boolean;
   // Frames that failed the schema and were not shown.
   readonly dropped: number;
   readonly nextLocalId: number;
@@ -48,6 +54,7 @@ const emptyChannel: ChannelChat = {
   sentIds: new Set(),
   history: 'idle',
   shown: pageSize,
+  trimmed: false,
   dropped: 0,
   nextLocalId: 1,
 };
@@ -79,6 +86,15 @@ function merge(existing: ReadonlyMap<number, MessageV2>, incoming: readonly Mess
   return merged;
 }
 
+// hold merges and keeps only the newest maxHeld.
+function hold(c: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
+  const merged = merge(c.byId, incoming);
+  if (merged.size <= maxHeld) return merged === c.byId ? c : { ...c, byId: merged };
+  const newest = [...merged.keys()].sort((a, b) => a - b).slice(merged.size - maxHeld);
+  const keep = new Set(newest);
+  return { ...c, byId: new Map([...merged].filter(([id]) => keep.has(id))), trimmed: true };
+}
+
 function update(state: ChatState, channel: string, change: (c: ChannelChat) => ChannelChat): ChatState {
   const current = state.channels[channel] ?? emptyChannel;
   return { channels: { ...state.channels, [channel]: change(current) } };
@@ -95,11 +111,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'historyLoading':
       return update(state, action.channel, (c) => ({ ...c, history: 'loading' }));
     case 'historyLoaded':
-      return update(state, action.channel, (c) => ({ ...c, byId: merge(c.byId, action.messages), history: 'ready' }));
+      return update(state, action.channel, (c) => ({ ...hold(c, action.messages), history: 'ready' }));
     case 'historyFailed':
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':
-      return update(state, action.channel, (c) => ({ ...c, byId: merge(c.byId, [action.message]) }));
+      return update(state, action.channel, (c) => hold(c, [action.message]));
     case 'dropped':
       return update(state, action.channel, (c) => ({ ...c, dropped: c.dropped + 1 }));
     case 'sending':
@@ -112,8 +128,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return known(state, action.channel, (c) => {
         if (!c.pending.some((p) => p.localId === action.localId)) return c;
         return {
-          ...c,
-          byId: merge(c.byId, [action.message]),
+          ...hold(c, [action.message]),
           pending: c.pending.filter((p) => p.localId !== action.localId),
           sentIds: new Set(c.sentIds).add(action.message.id),
         };
