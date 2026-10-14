@@ -116,7 +116,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			}
 			name := sel.Sel.Name
 			// Any store method that mentions messages must be one of the
-			// known four. A heuristic on the method's prefix alone would miss
+			// known ones. A heuristic on the method's prefix alone would miss
 			// a read named, say, MessagesSince or LastMessage.
 			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
 				switch name {

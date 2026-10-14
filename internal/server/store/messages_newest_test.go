@@ -60,17 +60,17 @@ func TestListVisibleMessagesPageNewestFirst(t *testing.T) {
 
 	// A member of net n1 sees the net messages as well, newest first among
 	// all of them, and still not the whisper to someone else.
-	alice, err := f.s.ListVisibleMessagesPage(ctx, f.ch.ID, Reader{f.dave.ID, true}, MessagePage{NewestFirst: true}, 100)
+	dave, err := f.s.ListVisibleMessagesPage(ctx, f.ch.ID, Reader{f.dave.ID, true}, MessagePage{NewestFirst: true}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i < len(alice); i++ {
-		if alice[i-1].ID <= alice[i].ID {
-			t.Fatalf("not newest first: %d then %d", alice[i-1].ID, alice[i].ID)
+	for i := 1; i < len(dave); i++ {
+		if dave[i-1].ID <= dave[i].ID {
+			t.Fatalf("not newest first: %d then %d", dave[i-1].ID, dave[i].ID)
 		}
 	}
-	if len(alice) != 12 {
-		t.Errorf("dave sees %d messages, want the 6 open and 6 net ones", len(alice))
+	if len(dave) != 12 {
+		t.Errorf("dave sees %d messages, want the 6 open and 6 net ones", len(dave))
 	}
 
 	// The cursor is exclusive, and a cursor at the oldest message is empty.
@@ -142,8 +142,10 @@ func TestListVisibleMessagesPlan(t *testing.T) {
 				if strings.Contains(text, "TEMP B-TREE") {
 					t.Errorf("the plan sorts in a temp B-tree:\n%s", text)
 				}
-				if !strings.Contains(text, "messages_by_channel") && !strings.Contains(text, "PRIMARY KEY") {
-					t.Errorf("the plan does not use the channel/id index:\n%s", text)
+				// The outer step reads the messages themselves: it must search the
+				// channel/id index, not scan by rowid and filter the channel.
+				if len(plan) == 0 || !strings.Contains(plan[0], "USING INDEX messages_by_channel") {
+					t.Errorf("the messages are not read through messages_by_channel:\n%s", text)
 				}
 			})
 		}

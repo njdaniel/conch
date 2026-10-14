@@ -21,9 +21,9 @@ import (
 // scoped to a net or to an explicit list of principals. Who a scoped message
 // reached is decided once, at post time, and stored in message_recipients.
 //
-// This file is the only place that reads message rows. ListVisibleMessages is
-// the one visibility function: every list in every protocol version, and the
-// MCP read tool, go through it, so there is exactly one place where a scoped
+// This file is the only place that reads message rows. ListVisibleMessagesPage
+// (and ListVisibleMessages, its ascending form) is the one visibility function:
+// every list in every protocol version, and the MCP read tool, go through it, so there is exactly one place where a scoped
 // message can be handed to someone it was not meant for. A structural test
 // (TestMessageReadsStayInTheVisibilityFunction) fails if another file in the
 // server reads the messages table.
@@ -111,8 +111,11 @@ func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, re
 	if (page.NewestFirst && page.After != 0) || (!page.NewestFirst && page.Before != 0) {
 		return nil, errors.New("store: list messages: after goes with ascending reads and before with newest-first ones")
 	}
+	if page.After < 0 || page.Before < 0 {
+		return nil, errors.New("store: list messages: a cursor is never negative")
+	}
 	before := page.Before
-	if before <= 0 {
+	if before == 0 {
 		before = math.MaxInt64
 	}
 	scoped, predArgs := visibilityArgs(reader)
