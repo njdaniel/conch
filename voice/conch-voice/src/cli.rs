@@ -13,7 +13,7 @@
 //! at all (`keydev::DeviceRule`).
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
-//! (`CONCH_SERVER`), the configuration file (`$XDG_CONFIG_HOME/conch/voice.toml`), the
+//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`), the
 //! default. The login token is `CONCH_TOKEN`, or else what `conch login` stored for the
 //! server; this program never writes that file.
 
@@ -31,6 +31,9 @@ use crate::error::Error;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
+
+/// The environment variable that moves the configuration directory, as for `conch`.
+pub const CONFIG_DIR_ENV: &str = "CONCH_CONFIG_DIR";
 
 /// The peak level of `--mic tone:<hz>`: a quarter of full scale.
 pub const TONE_AMPLITUDE: f32 = 0.25;
@@ -234,6 +237,15 @@ pub fn command() -> Command {
         );
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
+        .after_help(
+            "Environment:\n  \
+             CONCH_CONFIG_DIR  The directory that holds voice.toml and the credentials.json \
+             `conch login` wrote, used exactly as given (no `conch` is added); it must be an \
+             absolute path. Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. \
+             Use it to run two logins on one machine; `conch` reads the same variable.\n  \
+             CONCH_SERVER      The address of conchd.\n  \
+             CONCH_TOKEN       A login token, used instead of the stored one.",
+        )
         .version(version)
         .subcommand_required(true)
         .arg_required_else_help(true)
@@ -299,6 +311,8 @@ where
 /// so that nothing else reads the environment and a test can supply its own.
 #[derive(Debug, Clone, Default)]
 pub struct Environment {
+    /// `CONCH_CONFIG_DIR`.
+    pub conch_config_dir: Option<OsString>,
     /// `XDG_CONFIG_HOME`.
     pub xdg_config_home: Option<OsString>,
     /// `HOME`.
@@ -315,6 +329,7 @@ impl Environment {
     pub fn from_process() -> Self {
         let text = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         Self {
+            conch_config_dir: std::env::var_os(CONFIG_DIR_ENV),
             xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
             home: std::env::var_os("HOME"),
             server: text(SERVER_ENV),
@@ -345,12 +360,13 @@ pub struct Resolved {
 /// address that cannot be used, or no login for that server.
 pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, Error> {
     let config_dir = default_config_dir(
+        environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
-    );
+    )?;
     let mut config = match &config_dir {
         Some(dir) => {
-            let path = dir.join("conch").join("voice.toml");
+            let path = dir.join("voice.toml");
             match std::fs::read_to_string(&path) {
                 Ok(text) => Config::parse(&text, &path.display().to_string())?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
@@ -446,16 +462,64 @@ mod tests {
 
     fn environment(dir: &std::path::Path) -> Environment {
         Environment {
-            xdg_config_home: Some(dir.as_os_str().to_owned()),
+            conch_config_dir: Some(dir.as_os_str().to_owned()),
+            xdg_config_home: None,
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
         }
     }
 
+    /// A private configuration directory chosen by XDG_CONFIG_HOME alone, so the `conch`
+    /// directory under it is the one used.
+    fn xdg_environment(dir: &std::path::Path) -> Environment {
+        Environment {
+            conch_config_dir: None,
+            xdg_config_home: Some(dir.as_os_str().to_owned()),
+            ..environment(dir)
+        }
+    }
+
     fn write_config(dir: &std::path::Path, text: &str) {
-        std::fs::create_dir_all(dir.join("conch")).unwrap();
-        std::fs::write(dir.join("conch").join("voice.toml"), text).unwrap();
+        std::fs::write(dir.join("voice.toml"), text).unwrap();
+    }
+
+    #[test]
+    fn voice_toml_and_the_login_move_with_the_configuration_directory() {
+        let xdg = tempfile::tempdir().unwrap();
+        let alice = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(xdg.path().join("conch")).unwrap();
+        std::fs::write(
+            xdg.path().join("conch").join("voice.toml"),
+            "channel = \"xdg\"\n",
+        )
+        .unwrap();
+        write_config(alice.path(), "channel = \"alice\"\n");
+
+        let args = join(&[]);
+        let by_xdg = resolve(&args, &xdg_environment(xdg.path())).unwrap();
+        assert_eq!(by_xdg.channel, "xdg");
+        // CONCH_CONFIG_DIR wins over XDG_CONFIG_HOME and is used without `conch` added.
+        let mut both = environment(alice.path());
+        both.xdg_config_home = Some(xdg.path().as_os_str().to_owned());
+        assert_eq!(resolve(&args, &both).unwrap().channel, "alice");
+    }
+
+    #[test]
+    fn a_relative_config_dir_is_refused_naming_the_variable() {
+        let mut environment = environment(std::path::Path::new("/made/up"));
+        environment.conch_config_dir = Some(OsString::from("relative/FAKE_dir"));
+        let error = resolve(&join(&["general"]), &environment).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "CONCH_CONFIG_DIR must be an absolute path"
+        );
+    }
+
+    #[test]
+    fn the_help_documents_the_config_dir_variable() {
+        let help = command().render_help().to_string();
+        assert!(help.contains("CONCH_CONFIG_DIR"), "{help}");
     }
 
     #[test]
@@ -664,8 +728,7 @@ mod tests {
     #[test]
     fn the_stored_login_is_used_when_the_environment_has_no_token() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("conch")).unwrap();
-        let credentials = dir.path().join("conch").join("credentials.json");
+        let credentials = dir.path().join("credentials.json");
         std::fs::write(
             &credentials,
             format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}"),

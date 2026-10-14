@@ -176,6 +176,10 @@ pub enum Error {
         server: String,
     },
 
+    /// `CONCH_CONFIG_DIR` is set to a path that is not absolute. The value is not echoed.
+    #[error("CONCH_CONFIG_DIR must be an absolute path")]
+    ConfigDirNotAbsolute,
+
     /// The credentials file can be read or written by other users. Refused, as `conch`
     /// refuses it.
     #[error(

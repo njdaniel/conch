@@ -16,6 +16,10 @@ const (
 	credentialsFileName = "credentials.json"
 	// tokenEnv overrides the credentials file; it is how scripts and CI log in.
 	tokenEnv = "CONCH_TOKEN"
+	// configDirEnv moves the directory credentials.json (and conch-voice's
+	// voice.toml) live in, so two logins can share one machine. conch-voice reads
+	// the same variable by the same rule (docs/design/conch-voice.md §8).
+	configDirEnv = "CONCH_CONFIG_DIR"
 )
 
 type storedCredential struct {
@@ -44,14 +48,36 @@ func normalizeURL(u *url.URL) string {
 // userConfigDir is injectable so tests can never reach the real directory.
 var userConfigDir = os.UserConfigDir
 
-// credentialsPath returns the credentials file location, or "" when the
-// platform has no user configuration directory.
-func credentialsPath() string {
-	dir, err := userConfigDir()
-	if err != nil || dir == "" {
-		return ""
+// configDir returns the directory that holds the credentials file, or "" when
+// there is none (no CONCH_CONFIG_DIR and the platform has no user configuration
+// directory). CONCH_CONFIG_DIR, when it holds more than white space, is used as
+// given, without "conch" appended, and must be absolute: resolving a relative
+// one against the working directory would put a login wherever the shell
+// happened to be. Otherwise it is the user configuration directory plus "conch".
+// conch-voice resolves it by the same rule; testdata/config-dir-vectors.json
+// keeps the two from drifting.
+func configDir() (string, error) {
+	if dir := os.Getenv(configDirEnv); strings.TrimSpace(dir) != "" {
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("cli: %s must be an absolute path", configDirEnv)
+		}
+		return dir, nil
 	}
-	return filepath.Join(dir, credentialsDirName, credentialsFileName)
+	// No user configuration directory is not an error: there is no stored login.
+	if base, err := userConfigDir(); err == nil && base != "" {
+		return filepath.Join(base, credentialsDirName), nil
+	}
+	return "", nil
+}
+
+// credentialsPath returns the credentials file location, or "" when there is no
+// configuration directory. An error means CONCH_CONFIG_DIR is unusable.
+func credentialsPath() (string, error) {
+	dir, err := configDir()
+	if err != nil || dir == "" {
+		return "", err
+	}
+	return filepath.Join(dir, credentialsFileName), nil
 }
 
 // errUnsafeServerHost is returned when a server host cannot be used safely.
@@ -142,7 +168,10 @@ func DeleteToken(server string) error {
 	}
 	delete(creds, key)
 	if len(creds) == 0 {
-		path := credentialsPath()
+		path, err := credentialsPath()
+		if err != nil {
+			return err
+		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("cli: remove credentials: %w", err)
 		}
@@ -153,7 +182,10 @@ func DeleteToken(server string) error {
 
 func readCredentials() (map[string]storedCredential, error) {
 	creds := make(map[string]storedCredential)
-	path := credentialsPath()
+	path, err := credentialsPath()
+	if err != nil {
+		return nil, err
+	}
 	if path == "" {
 		return creds, nil
 	}
@@ -182,7 +214,10 @@ func readCredentials() (map[string]storedCredential, error) {
 }
 
 func writeCredentials(creds map[string]storedCredential) error {
-	path := credentialsPath()
+	path, err := credentialsPath()
+	if err != nil {
+		return err
+	}
 	if path == "" {
 		return errors.New("cli: no user configuration directory available to store credentials")
 	}

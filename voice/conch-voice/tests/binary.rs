@@ -112,6 +112,34 @@ fn a_configuration_file_with_a_typo_is_refused_by_name() {
     assert!(stderr.contains("unknown key `chanel`"), "{stderr}");
 }
 
+#[test]
+fn conch_config_dir_moves_voice_toml_and_a_relative_one_is_refused_by_name() {
+    let private = tempfile::tempdir().unwrap();
+    let alice = private.path().join("alice");
+    std::fs::create_dir_all(&alice).unwrap();
+    // Not under a `conch` directory: the variable's value is the directory itself.
+    std::fs::write(alice.join("voice.toml"), "chanel = \"ops\"\n").unwrap();
+    let mut command = conch_voice(private.path());
+    let (code, _, stderr) = run(command
+        .args(["join", "ops"])
+        .env("CONCH_CONFIG_DIR", &alice)
+        .env("CONCH_TOKEN", FAKE_LOGIN));
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("unknown key `chanel`"), "{stderr}");
+
+    let mut command = conch_voice(private.path());
+    let (code, stdout, stderr) = run(command
+        .args(["join", "ops"])
+        .env("CONCH_CONFIG_DIR", "relative/FAKE_dir")
+        .env("CONCH_TOKEN", FAKE_LOGIN));
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "conch-voice: CONCH_CONFIG_DIR must be an absolute path\n"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_session_stops_it_with_one_line_naming_the_reason_and_exit_1() {
     let private = tempfile::tempdir().unwrap();
