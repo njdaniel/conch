@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -35,7 +36,10 @@ import (
 // with where only a person may act.
 const errCodeHumanRequired = schema.ErrorCodeHumanRequired
 
-var errInterventionNotFound = &schema.Error{Code: schema.ErrorCodeInterventionNotFound, Message: "intervention not found"}
+var (
+	errInterventionNotFound = &schema.Error{Code: schema.ErrorCodeInterventionNotFound, Message: "intervention not found"}
+	callInterventionMissing = refuseWith(http.StatusNotFound, errInterventionNotFound)
+)
 
 // writeInterventionNotFound is the single response for an intervention that
 // does not exist, that the caller may not see, or (on the answering route)
@@ -234,22 +238,33 @@ func (s *Server) handleListSessionInterventions(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	switch _, err := s.store.OwnedSession(ctx, sessionID, credentialID); {
-	case errors.Is(err, store.ErrNotFound):
-		writeSessionNotFound(w)
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "interventions: find session failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return
-	}
-	list, err := s.store.ListSessionInterventions(ctx, sessionID, credentialID, readerFor(r, apiV2), state, after, limit)
-	if err != nil {
-		slog.ErrorContext(ctx, "interventions: list session failed", "session", sessionID, "error", err)
-		writeInternalError(w)
+	list, cerr := s.sessionInterventions(ctx, restCall(r, caller, credentialID), sessionID, state, after, limit)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	s.writeInterventionList(w, r, list)
+}
+
+// sessionInterventions is what is waiting on session sessionID, which must be
+// one of the call's credential that has not ended (session_not_found
+// otherwise), in state state ("" for every state), after the id after. The
+// REST route and the MCP tool poll_interventions both call it, after the
+// agent gate (runs.manage, spent once) and the query.
+func (s *Server) sessionInterventions(ctx context.Context, call sessionCall, sessionID int64, state schema.InterventionState, after int64, limit int) ([]store.Intervention, *callError) {
+	switch _, err := s.store.OwnedSession(ctx, sessionID, call.credentialID); {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, callSessionMissing
+	case err != nil:
+		slog.ErrorContext(ctx, "interventions: find session failed", "principal", call.caller.ID, "error", err)
+		return nil, callInternal
+	}
+	list, err := s.store.ListSessionInterventions(ctx, sessionID, call.credentialID, call.reader, state, after, limit)
+	if err != nil {
+		slog.ErrorContext(ctx, "interventions: list session failed", "session", sessionID, "error", err)
+		return nil, callInternal
+	}
+	return list, nil
 }
 
 // handleAckIntervention serves POST /v1/interventions/{id}/ack: the owner of
@@ -258,7 +273,6 @@ func (s *Server) handleListSessionInterventions(w http.ResponseWriter, r *http.R
 // on the run itself, an answer re-checks the manifest's channel gate and
 // spends runs.manage; the run's state is never touched.
 func (s *Server) handleAckIntervention(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	caller, credentialID, ok := s.sessionCaller(w, r)
 	if !ok {
 		return
@@ -267,119 +281,110 @@ func (s *Server) handleAckIntervention(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	iv, ok := s.answerableIntervention(w, r, caller, credentialID, id)
-	if !ok {
+	call := restCall(r, caller, credentialID)
+	iv, cerr := s.answerableIntervention(r.Context(), call, id)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	var req schema.AckInterventionRequestV1
 	if !decodeRunBody(w, r, &req) {
 		return
 	}
-	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	doc, cerr := s.ackIntervention(r.Context(), call, iv, req)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
-	updated, err := s.store.AckIntervention(ctx, auditActor(ctx), iv.ID, credentialID, readerFor(r, apiV2), req.State, req.Reason, s.now())
+	writeJSON(w, http.StatusOK, doc)
+}
+
+// ackIntervention records req as the answer to iv, which
+// answerableIntervention has allowed. The REST route and the MCP tool
+// ack_intervention both call it.
+func (s *Server) ackIntervention(ctx context.Context, call sessionCall, iv store.Intervention, req schema.AckInterventionRequestV1) (schema.InterventionV1, *callError) {
+	if err := req.Validate(); err != nil {
+		return schema.InterventionV1{}, refuse(http.StatusBadRequest, "invalid_request", err.Error())
+	}
+	updated, err := s.store.AckIntervention(ctx, call.actor, iv.ID, call.credentialID, call.reader, req.State, req.Reason, s.now())
 	switch {
 	case errors.Is(err, store.ErrInterventionNotFound):
-		writeInterventionNotFound(w)
-		return
+		return schema.InterventionV1{}, callInterventionMissing
 	case errors.Is(err, store.ErrInvalidTransition):
-		writeError(w, http.StatusConflict, schema.ErrorCodeInvalidTransition, "the intervention cannot move from its current state to that one")
-		return
+		return schema.InterventionV1{}, refuse(http.StatusConflict, schema.ErrorCodeInvalidTransition, "the intervention cannot move from its current state to that one")
 	case err != nil:
-		slog.ErrorContext(ctx, "interventions: answer failed", "principal", caller.ID, "intervention", iv.ID, "error", err)
-		writeInternalError(w)
-		return
+		slog.ErrorContext(ctx, "interventions: answer failed", "principal", call.caller.ID, "intervention", iv.ID, "error", err)
+		return schema.InterventionV1{}, callInternal
 	}
 	s.events.notifyIntervention(updated.ChannelID, updated.ID)
-	s.writeIntervention(w, r, http.StatusOK, updated)
+	return checkedInterventionDoc(ctx, updated)
 }
 
 // answerableIntervention is the check the answering route starts with, after
-// the verified caller, as reportableRun is for a run's reports: the
-// intervention must be on a run the caller's credential owns and the caller
-// may see (intervention_not_found otherwise, whoever asks), and the channel
-// gate must still allow the caller to report on the run: runs.manage and the
-// permission posting to the run's audience needs. A refusal by the manifest is
-// 403, since the caller owns the run and learns nothing from it. It writes the
-// response and returns false when the call must stop.
-func (s *Server) answerableIntervention(w http.ResponseWriter, r *http.Request, caller store.Principal, credentialID, id int64) (store.Intervention, bool) {
-	ctx := r.Context()
-	iv, err := s.store.OwnedIntervention(ctx, id, credentialID, readerFor(r, apiV2))
+// the verified caller, on either front, as reportableRunFor is for a run's
+// reports: the intervention must be on a run the call's credential owns and
+// its caller may see (intervention_not_found otherwise, whoever asks), and the
+// channel gate must still allow the caller to report on the run: runs.manage
+// and the permission posting to the run's audience needs. A refusal by the
+// manifest is 403, since the caller owns the run and learns nothing from it.
+func (s *Server) answerableIntervention(ctx context.Context, call sessionCall, id int64) (store.Intervention, *callError) {
+	iv, err := s.store.OwnedIntervention(ctx, id, call.credentialID, call.reader)
 	if errors.Is(err, store.ErrInterventionNotFound) {
-		writeInterventionNotFound(w)
-		return store.Intervention{}, false
+		return store.Intervention{}, callInterventionMissing
 	}
 	if err != nil {
-		slog.ErrorContext(ctx, "interventions: find intervention failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return store.Intervention{}, false
+		slog.ErrorContext(ctx, "interventions: find intervention failed", "principal", call.caller.ID, "error", err)
+		return store.Intervention{}, callInternal
 	}
-	run, err := s.store.OwnedRun(ctx, iv.RunID, credentialID, readerFor(r, apiV2))
-	if errors.Is(err, store.ErrRunNotFound) {
-		writeInterventionNotFound(w)
-		return store.Intervention{}, false
+	if _, cerr := s.reportableRunFor(ctx, call, iv.RunID, callInterventionMissing); cerr != nil {
+		return store.Intervention{}, cerr
 	}
-	if err != nil {
-		slog.ErrorContext(ctx, "interventions: find run failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return store.Intervention{}, false
-	}
-	var audience *schema.Audience
-	if run.MessageID > 0 {
-		audience, err = s.store.RunAnchorAudience(ctx, run.ChannelID, run.MessageID, readerFor(r, apiV2))
-		if errors.Is(err, store.ErrRunAnchorNotFound) {
-			// The run was visible a moment ago and its message is not now.
-			writeInterventionNotFound(w)
-			return store.Intervention{}, false
-		}
-		if err != nil {
-			slog.ErrorContext(ctx, "interventions: find the message a run answers failed", "error", err)
-			writeInternalError(w)
-			return store.Intervention{}, false
-		}
-	}
-	allowed, limited, err := s.runGate(ctx, caller, agentSubjectFor(r, caller), run.ChannelID, audience)
-	switch {
-	case err != nil:
-		slog.ErrorContext(ctx, "interventions: authorize failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-		return store.Intervention{}, false
-	case limited != nil:
-		writeRateLimited(w, limited)
-		return store.Intervention{}, false
-	case !allowed:
-		writeError(w, http.StatusForbidden, errForbidden.Code, errForbidden.Message)
-		return store.Intervention{}, false
-	}
-	return iv, true
+	return iv, nil
 }
 
 // writeIntervention sends one intervention, after checking it is a valid
 // document.
 func (s *Server) writeIntervention(w http.ResponseWriter, r *http.Request, status int, iv store.Intervention) {
-	doc := interventionDoc(iv)
-	if err := doc.Validate(); err != nil {
-		slog.ErrorContext(r.Context(), "interventions: built an invalid intervention", "intervention", iv.ID, "error", err)
-		writeInternalError(w)
+	doc, cerr := checkedInterventionDoc(r.Context(), iv)
+	if cerr != nil {
+		writeCallError(w, cerr)
 		return
 	}
 	writeJSON(w, status, doc)
 }
 
+// checkedInterventionDoc is the wire form of iv, checked to be a valid
+// document.
+func checkedInterventionDoc(ctx context.Context, iv store.Intervention) (schema.InterventionV1, *callError) {
+	doc := interventionDoc(iv)
+	if err := doc.Validate(); err != nil {
+		slog.ErrorContext(ctx, "interventions: built an invalid intervention", "intervention", iv.ID, "error", err)
+		return schema.InterventionV1{}, callInternal
+	}
+	return doc, nil
+}
+
+// checkedInterventionList is the wire form of list, always an array, each
+// checked to be a valid document.
+func checkedInterventionList(ctx context.Context, list []store.Intervention) (schema.ListInterventionsResponseV1, *callError) {
+	resp := schema.ListInterventionsResponseV1{Interventions: make([]schema.InterventionV1, 0, len(list))}
+	for _, iv := range list {
+		doc, cerr := checkedInterventionDoc(ctx, iv)
+		if cerr != nil {
+			return schema.ListInterventionsResponseV1{}, cerr
+		}
+		resp.Interventions = append(resp.Interventions, doc)
+	}
+	return resp, nil
+}
+
 // writeInterventionList sends a list of interventions, always as an array,
 // after checking each is a valid document.
 func (s *Server) writeInterventionList(w http.ResponseWriter, r *http.Request, list []store.Intervention) {
-	resp := schema.ListInterventionsResponseV1{Interventions: make([]schema.InterventionV1, 0, len(list))}
-	for _, iv := range list {
-		doc := interventionDoc(iv)
-		if err := doc.Validate(); err != nil {
-			slog.ErrorContext(r.Context(), "interventions: built an invalid intervention", "intervention", iv.ID, "error", err)
-			writeInternalError(w)
-			return
-		}
-		resp.Interventions = append(resp.Interventions, doc)
+	resp, cerr := checkedInterventionList(r.Context(), list)
+	if cerr != nil {
+		writeCallError(w, cerr)
+		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

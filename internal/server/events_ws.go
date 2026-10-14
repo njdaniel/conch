@@ -456,7 +456,7 @@ func (s *Server) sessionKeepAliveTicks() (<-chan time.Time, func()) {
 // heartbeat the socket sends for its client, not a call by the agent, so it
 // does not spend the manifest's budget again.
 func (s *Server) keepSessionAlive(ctx context.Context, id, credID int64) keepAliveResult {
-	_, err := s.heartbeatSession(ctx, id, credID)
+	_, err := s.heartbeatStored(ctx, id, credID)
 	switch {
 	case err == nil:
 		return sessionKept
