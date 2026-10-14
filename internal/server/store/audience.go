@@ -886,3 +886,391 @@ func withAuthor(ids []int64, authorID int64) []int64 {
 	}
 	return out
 }
+
+// Runs (issue #266, decision D8). A run belongs to one channel and may answer
+// one message in it. Its task and its activity can quote that message, so the
+// run is visible to exactly the readers who can see the message, and a run
+// that answers no message to the channel's members. Activity has no rule of
+// its own: it is read only through its run.
+//
+// This file is the only place that reads rows of runs and run_activity
+// (TestOnlyAudienceGoReadsRunRows): the reads below, the roster's look-up of a
+// session's runs, and the reads the writes in runs.go make inside their
+// transactions all embed the one condition, runVisibility, in the statement
+// that selects the row, as the message reads embed visibleToScopedReader.
+//
+// The rule, in full. A reader sees a run when they have a verified
+// PrincipalID, are now a member of the run's channel, are an enabled
+// principal, and either the run answers no message or the message is in the
+// run's channel and visible to them by the message rule above (for a scoped
+// message: a recipient row, current membership and an enabled principal; a
+// v0/v1 reader sees only a run on a channel-wide message). Removing a reader
+// from the channel hides every run there from them, those they saw before
+// included. Operators get no exemption. A run the reader cannot see and a run
+// that does not exist are the same answer, ErrRunNotFound, everywhere.
+
+// runColumns is the column list scanRun reads, over runs aliased ru.
+const runColumns = `ru.id, ru.session_id, ru.principal_id, ru.channel_id, ru.message_id, ru.state, ru.task, ru.link, ru.started_at, ru.ended_at, ru.outcome`
+
+// runVisibleHead and runVisibleTail wrap the message condition into the run
+// condition, over runs aliased ru. Every value is a bound parameter, in this
+// order: reader (member), reader (enabled), then the message predicate's own.
+// The aliases differ from the message predicate's (r, c, p) so nothing in it
+// can bind to the run by accident.
+const (
+	runVisibleHead = `(EXISTS (SELECT 1 FROM channel_members rc
+	                   WHERE rc.channel_id = ru.channel_id AND rc.principal_id = ?)
+	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)
+	     AND (ru.message_id IS NULL OR EXISTS (
+	           SELECT 1 FROM messages m
+	            WHERE m.id = ru.message_id AND m.channel_id = ru.channel_id AND `
+	runVisibleTail = `)))`
+)
+
+// runVisibility reports whether reader may see any run at all (a reader with
+// no verified identity sees none), which form of the message predicate the
+// run condition embeds for them, and the condition's arguments.
+func runVisibility(reader Reader) (scoped bool, args []any, ok bool) {
+	if reader.PrincipalID <= 0 {
+		return false, nil, false
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	return scoped, append([]any{reader.PrincipalID, reader.PrincipalID}, predArgs...), true
+}
+
+// runCond is the run condition over runs aliased ru. Like listSQL it is
+// built from constants only; scoped picks the message predicate.
+func runCond(scoped bool) string {
+	if scoped {
+		return runVisibleHead + visibleToScopedReader + runVisibleTail
+	}
+	return runVisibleHead + visibleToAnyReader + runVisibleTail
+}
+
+// The statements that read runs and activity, each with the run condition
+// spliced in by the function below it. Their parameters are listed in order
+// at each call.
+const (
+	runByIDHead  = `SELECT ` + runColumns + ` FROM runs ru WHERE ru.id = ? AND `
+	ownedRunHead = `SELECT ` + runColumns + ` FROM runs ru JOIN sessions so ON so.id = ru.session_id
+		 WHERE ru.id = ? AND so.credential_id = ? AND ru.principal_id = ? AND `
+	runListHead = `SELECT ` + runColumns + ` FROM runs ru
+		 WHERE ru.channel_id = ? AND ru.id > ? AND (? <= 0 OR ru.session_id = ?) AND `
+	runListTail      = ` ORDER BY ru.id ASC LIMIT ?`
+	activityListHead = `SELECT a.id, a.run_id, ru.principal_id, a.kind, a.summary, a.outcome, a.data, a.at
+		 FROM run_activity a JOIN runs ru ON ru.id = a.run_id
+		 WHERE a.run_id = ? AND a.id > ? AND `
+	activityListTail = ` ORDER BY a.id ASC LIMIT ?`
+	// The rows are, per session, its most recent open run and its most
+	// recent run, which may be the same row. The open states are listed
+	// rather than the terminal ones negated, so runs_by_session serves the
+	// look-up. The task is selected only under the run condition.
+	sessionRunsHead = `SELECT ru.session_id, ru.id, ru.state, CASE WHEN `
+	sessionRunsTail = ` THEN ru.task END
+		 FROM runs ru
+		 WHERE ru.id IN (
+		       SELECT max(o.id) FROM runs o
+		        WHERE o.session_id IN (SELECT value FROM json_each(?))
+		          AND o.state IN ('queued','starting','running','blocked','waiting')
+		        GROUP BY o.session_id
+		       UNION
+		       SELECT max(l.id) FROM runs l
+		        WHERE l.session_id IN (SELECT value FROM json_each(?))
+		        GROUP BY l.session_id)
+		 ORDER BY ru.session_id, ru.id`
+)
+
+func runByIDSQL(scoped bool) string  { return runByIDHead + runCond(scoped) }
+func ownedRunSQL(scoped bool) string { return ownedRunHead + runCond(scoped) }
+func runListSQL(scoped bool) string  { return runListHead + runCond(scoped) + runListTail }
+func activityListSQL(scoped bool) string {
+	return activityListHead + runCond(scoped) + activityListTail
+}
+
+// sessionRunsSQL takes ok = false for a reader with no verified identity,
+// for whom the condition is false and no task is selected.
+func sessionRunsSQL(scoped, ok bool) string {
+	if !ok {
+		return sessionRunsHead + "0" + sessionRunsTail
+	}
+	return sessionRunsHead + runCond(scoped) + sessionRunsTail
+}
+
+func scanRun(row interface{ Scan(...any) error }) (Run, error) {
+	var (
+		r              Run
+		message, ended sql.NullInt64
+		state          string
+		started        int64
+	)
+	if err := row.Scan(&r.ID, &r.SessionID, &r.PrincipalID, &r.ChannelID, &message, &state, &r.Task, &r.Link,
+		&started, &ended, &r.Outcome); err != nil {
+		return Run{}, err
+	}
+	r.MessageID = message.Int64 // zero when NULL
+	r.State = schema.RunState(state)
+	if !r.State.Valid() {
+		// The CHECK constraint makes this impossible; never guess a state.
+		return Run{}, fmt.Errorf("store: run %d has an unreadable state %q", r.ID, state)
+	}
+	r.StartedAt = time.UnixMilli(started)
+	if ended.Valid {
+		t := time.UnixMilli(ended.Int64)
+		r.EndedAt = &t
+	}
+	return r, nil
+}
+
+// RunVisible returns run runID if reader may see it, and ErrRunNotFound
+// otherwise, whatever the reason.
+func (s *Store) RunVisible(ctx context.Context, runID int64, reader Reader) (Run, error) {
+	scoped, args, ok := runVisibility(reader)
+	if !ok {
+		return Run{}, ErrRunNotFound
+	}
+	run, err := scanRun(s.db.QueryRowContext(ctx, runByIDSQL(scoped), append([]any{runID}, args...)...))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Run{}, ErrRunNotFound
+	case err != nil:
+		return Run{}, fmt.Errorf("store: read run %d: %w", runID, err)
+	}
+	return run, nil
+}
+
+// OwnedRun is RunVisible narrowed to the runs of credentialID's sessions, and
+// to runs of reader's own principal: a run the caller may report on. Every
+// other case is ErrRunNotFound, so a run of another credential, of the same
+// principal or not, cannot be told from one that does not exist.
+func (s *Store) OwnedRun(ctx context.Context, runID, credentialID int64, reader Reader) (Run, error) {
+	return ownedRunTx(ctx, s.db, runID, credentialID, reader)
+}
+
+// ownedRunTx is OwnedRun inside a transaction, for the writes in runs.go.
+func ownedRunTx(ctx context.Context, tx execer, runID, credentialID int64, reader Reader) (Run, error) {
+	scoped, args, ok := runVisibility(reader)
+	if !ok || credentialID <= 0 {
+		return Run{}, ErrRunNotFound
+	}
+	// The reader is the caller and the credential is the caller's, so the run
+	// is also required to be the reader's own: a credential and a reader that
+	// do not belong together are refused, not reconciled.
+	run, err := scanRun(tx.QueryRowContext(ctx, ownedRunSQL(scoped),
+		append([]any{runID, credentialID, reader.PrincipalID}, args...)...))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Run{}, ErrRunNotFound
+	case err != nil:
+		return Run{}, fmt.Errorf("store: read run %d: %w", runID, err)
+	}
+	return run, nil
+}
+
+// ListVisibleRuns returns up to limit runs of channelID with id greater than
+// afterID that reader may see, in ascending id order, narrowed to session
+// sessionID when it is positive. Hidden runs are filtered in the statement,
+// before the limit applies, so a page is full of visible runs and a cursor
+// never stalls on a hidden one. The result is never nil.
+func (s *Store) ListVisibleRuns(ctx context.Context, channelID int64, reader Reader, sessionID, afterID int64, limit int) ([]Run, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list runs: limit must be positive, got %d", limit)
+	}
+	out := []Run{}
+	scoped, args, ok := runVisibility(reader)
+	if !ok {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, runListSQL(scoped),
+		append(append([]any{channelID, afterID, sessionID, sessionID}, args...), limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list runs in channel %d: %w", channelID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: list runs in channel %d: %w", channelID, err)
+		}
+		out = append(out, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list runs in channel %d: %w", channelID, err)
+	}
+	return out, nil
+}
+
+// ListVisibleActivity returns up to limit entries of run runID with id greater
+// than afterID, oldest first, if reader may see the run, and ErrRunNotFound
+// otherwise. The run condition is also in the statement that selects the
+// entries, so a reader who loses sight of the run between the two gets
+// nothing. The result is never nil.
+func (s *Store) ListVisibleActivity(ctx context.Context, runID int64, reader Reader, afterID int64, limit int) ([]Activity, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list activity: limit must be positive, got %d", limit)
+	}
+	if _, err := s.RunVisible(ctx, runID, reader); err != nil {
+		return nil, err
+	}
+	scoped, args, ok := runVisibility(reader)
+	if !ok {
+		return nil, ErrRunNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, activityListSQL(scoped),
+		append(append([]any{runID, afterID}, args...), limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list activity of run %d: %w", runID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []Activity{}
+	for rows.Next() {
+		var (
+			a    Activity
+			kind string
+			data []byte
+			at   int64
+		)
+		if err := rows.Scan(&a.ID, &a.RunID, &a.PrincipalID, &kind, &a.Summary, &a.Outcome, &data, &at); err != nil {
+			return nil, fmt.Errorf("store: list activity of run %d: %w", runID, err)
+		}
+		a.Kind = schema.ActivityKind(kind)
+		if len(data) > 0 {
+			a.Data = json.RawMessage(data)
+		}
+		a.At = time.UnixMilli(at)
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list activity of run %d: %w", runID, err)
+	}
+	return out, nil
+}
+
+// RunAnchorAudience returns the audience of message messageID of channelID if
+// reader may see it by the message rule: nil for a channel-wide message, the
+// net for a net message, the principal list for a whisper. It is how the
+// server decides which channel permission a run answering the message needs.
+// A message that does not exist, is in another channel or is not visible to
+// reader is ErrRunAnchorNotFound, one answer for all. The body is read, as
+// every message read here reads it, and never returned.
+func (s *Store) RunAnchorAudience(ctx context.Context, channelID, messageID int64, reader Reader) (*schema.Audience, error) {
+	if reader.PrincipalID <= 0 {
+		return nil, ErrRunAnchorNotFound
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	rows, err := s.db.QueryContext(ctx, anchorSQL(messageColumns, scoped),
+		append([]any{messageID, channelID}, predArgs...)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read run message %d: %w", messageID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := s.scanMessages(ctx, rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: read run message %d: %w", messageID, err)
+	}
+	if len(msgs) != 1 {
+		return nil, ErrRunAnchorNotFound
+	}
+	return msgs[0].Audience, nil
+}
+
+// anchorFrom selects a message of a channel that the reader may see (the
+// visibility condition is appended). Unlike a thread root, any message can be
+// answered by a run, a reply included.
+const anchorFrom = ` FROM messages m
+		 WHERE m.id = ? AND m.channel_id = ? AND `
+
+func anchorSQL(columns string, scoped bool) string {
+	if scoped {
+		return `SELECT ` + columns + anchorFrom + visibleToScopedReader
+	}
+	return `SELECT ` + columns + anchorFrom + visibleToAnyReader
+}
+
+// runAnchorVisibleTx is RunAnchorAudience's check inside CreateRun's
+// transaction: the message must be in the channel and visible to reader now.
+func runAnchorVisibleTx(ctx context.Context, tx execer, channelID, messageID int64, reader Reader) error {
+	if reader.PrincipalID <= 0 {
+		return ErrRunAnchorNotFound
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	var id int64
+	switch err := tx.QueryRowContext(ctx, anchorSQL("m.id", scoped),
+		append([]any{messageID, channelID}, predArgs...)...).Scan(&id); {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrRunAnchorNotFound
+	case err != nil:
+		return fmt.Errorf("store: check run message %d: %w", messageID, err)
+	}
+	return nil
+}
+
+// SessionRuns is what a roster needs about one session's runs.
+type SessionRuns struct {
+	// OpenState is the state of the session's most recent open (not
+	// terminal) run, and "" when none is open. It decides the status, which
+	// every reader of the roster is shown.
+	OpenState schema.RunState
+	// LastState is the state of the session's most recent run, and "" when
+	// it has none.
+	LastState schema.RunState
+	// CurrentRun and Task are that open run's id and task, set only when the
+	// reader may see the run; otherwise both are empty.
+	CurrentRun int64
+	Task       string
+}
+
+// SessionRunViews returns, for each of sessionIDs that has a run, what
+// SessionRuns says, as reader may see it. A session with no run is absent.
+//
+// The status a session shows is everyone's to see, so the states are read
+// whoever reads. The task is selected only under the run condition, in the
+// same statement: for a reader who may not see the open run, it never leaves
+// the database, and the run's id is dropped with it.
+func (s *Store) SessionRunViews(ctx context.Context, sessionIDs []int64, reader Reader) (map[int64]SessionRuns, error) {
+	out := map[int64]SessionRuns{}
+	if len(sessionIDs) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: session runs: %w", err)
+	}
+	// args is nil for a reader with no verified identity, whose condition is
+	// false and takes none.
+	scoped, args, ok := runVisibility(reader)
+	rows, err := s.db.QueryContext(ctx, sessionRunsSQL(scoped, ok), append(args, string(list), string(list))...)
+	if err != nil {
+		return nil, fmt.Errorf("store: session runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			sessionID, runID int64
+			state            string
+			task             sql.NullString
+		)
+		if err := rows.Scan(&sessionID, &runID, &state, &task); err != nil {
+			return nil, fmt.Errorf("store: session runs: %w", err)
+		}
+		st := schema.RunState(state)
+		if !st.Valid() {
+			return nil, fmt.Errorf("store: run %d has an unreadable state %q", runID, state)
+		}
+		v := out[sessionID]
+		// Rows come in ascending id within a session, so the last one is
+		// its most recent run.
+		v.LastState = st
+		if !schema.RunStateTerminal(st) {
+			v.OpenState = st
+			v.CurrentRun, v.Task = 0, ""
+			if task.Valid {
+				v.CurrentRun, v.Task = runID, task.String
+			}
+		}
+		out[sessionID] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: session runs: %w", err)
+	}
+	return out, nil
+}

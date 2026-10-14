@@ -64,6 +64,16 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/sessions/{id}/heartbeat", accessAuthenticated, hf(s.handleSessionHeartbeat)),
 		rt("DELETE /v1/sessions/{id}", accessAuthenticated, hf(s.handleEndSession)),
 		rt("GET /v1/sessions", accessAuthenticated, hf(s.handleListSessions)),
+		// Runs (issue #266). Any caller with a credential: starting a run is
+		// for agents, on a session of their own credential; reporting is for
+		// the credential that owns the run's session; reads are for the
+		// readers who may see the run. Checked in the handlers.
+		rt("POST /v1/sessions/{id}/runs", accessAuthenticated, hf(s.handleCreateRun)),
+		rt("POST /v1/runs/{id}/state", accessAuthenticated, hf(s.handleSetRunState)),
+		rt("POST /v1/runs/{id}/activity", accessAuthenticated, hf(s.handleAppendRunActivity)),
+		rt("GET /v1/runs/{id}", accessAuthenticated, hf(s.handleGetRun)),
+		rt("GET /v1/runs", accessAuthenticated, hf(s.handleListRuns)),
+		rt("GET /v1/runs/{id}/activity", accessAuthenticated, hf(s.handleListRunActivity)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),

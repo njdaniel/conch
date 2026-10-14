@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -513,6 +514,76 @@ func TestOnlyAudienceGoReadsMessageRows(t *testing.T) {
 			if strings.Contains(src, forbidden) {
 				t.Errorf("%s contains %q; messages are read only in audience.go (ListVisibleMessages)", name, forbidden)
 			}
+		}
+	}
+}
+
+// runRowRead matches SQL that reads rows of runs or run_activity: the table
+// after FROM or JOIN, in any case and with any spacing. Writes (INSERT INTO,
+// UPDATE) and the schema (CREATE TABLE, REFERENCES, CREATE INDEX ... ON) do
+// not match.
+var runRowRead = regexp.MustCompile(`(?i)\b(from|join)\s+(runs|run_activity)\b`)
+
+// The structural half of the run rule (D8), as TestOnlyAudienceGoReadsMessageRows
+// is for messages: only audience.go reads rows of runs and run_activity, so
+// the run condition there is the only way a run, its task or its activity is
+// handed to anyone. runs.go writes, and asks audience.go for the run it
+// changes.
+func TestOnlyAudienceGoReadsRunRows(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") || name == "audience.go" {
+			continue
+		}
+		data, err := os.ReadFile(name) // #nosec G304 -- a source file of this package, from the glob above
+		if err != nil {
+			t.Fatal(err)
+		}
+		checked++
+		if m := runRowRead.FindString(string(data)); m != "" {
+			t.Errorf("%s contains %q; runs and their activity are read only in audience.go (RunVisible)", name, m)
+		}
+	}
+	if checked < 10 {
+		t.Fatalf("only %d source files were checked; the glob is not finding the store", checked)
+	}
+	// And audience.go does read them, so the pattern is the one that matters.
+	data, err := os.ReadFile("audience.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runRowRead.MatchString(string(data)) {
+		t.Error("audience.go reads no run rows by this pattern; the guard is looking for the wrong thing")
+	}
+}
+
+// The guard's pattern catches the spellings a read could take, and leaves the
+// writes and the schema alone.
+func TestRunRowReadPattern(t *testing.T) {
+	for _, c := range []struct {
+		sql  string
+		read bool
+	}{
+		{"SELECT * FROM runs WHERE id = ?", true},
+		{"select task from runs", true},
+		{"SELECT 1 FROM\n\t\truns ru", true},
+		{"SELECT a.id FROM run_activity a", true},
+		{"SELECT ... FROM sessions s JOIN runs r ON r.session_id = s.id", true},
+		{"left join run_activity a on a.run_id = r.id", true},
+		{"INSERT INTO runs (session_id) VALUES (?)", false},
+		{"UPDATE runs SET state = ? WHERE id = ?", false},
+		{"INSERT INTO run_activity (run_id) VALUES (?)", false},
+		{"CREATE TABLE runs (", false},
+		{"run_id INTEGER NOT NULL REFERENCES runs (id)", false},
+		{"CREATE INDEX runs_by_channel ON runs (channel_id, id)", false},
+		{"SELECT * FROM runs_archive", false},
+	} {
+		if got := runRowRead.MatchString(c.sql); got != c.read {
+			t.Errorf("%q: read = %v, want %v", c.sql, got, c.read)
 		}
 	}
 }
