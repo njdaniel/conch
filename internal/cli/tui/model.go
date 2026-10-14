@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,12 +20,16 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// historyLimit is how many of a channel's newest messages the first load reads:
+// the most the server returns in one page.
+const historyLimit = 100
+
 // API is the shared Conch client surface used by the TUI.
 type API interface {
 	// Messages travel through the v2 methods only: a v1 reader would render a
 	// scoped message as an open one, so the v1 methods are deliberately not
 	// part of this interface and the TUI cannot call them.
-	ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
+	ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error)
 	PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error)
 	// SubscribeV2After sends the visible messages with an id above the given
 	// one, then carries on live. The TUI loads a page over REST first and
@@ -838,19 +843,16 @@ func (m Model) loadCurrent() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		var messages []schema.MessageV2
-		var after int64
-		for {
-			page, err := m.api.ListMessagesV2(m.ctx, channel, after, 100)
-			if err != nil {
-				return messagesLoaded{channel: channel, err: err}
-			}
-			messages = append(messages, page.Messages...)
-			if page.NextAfter == 0 || page.NextAfter <= after {
-				return messagesLoaded{channel: channel, messages: messages}
-			}
-			after = page.NextAfter
+		// One request for the newest page, whatever the channel's size; older
+		// history is not shown, and the TUI has no scroll-back to fetch it.
+		page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
+		if err != nil {
+			return messagesLoaded{channel: channel, err: err}
 		}
+		// The server sends newest first; the model holds ascending.
+		messages := slices.Clone(page.Messages)
+		slices.Reverse(messages)
+		return messagesLoaded{channel: channel, messages: messages}
 	}
 }
 

@@ -85,7 +85,13 @@ func (s *txStore) assertHealthy(t *testing.T, label string) {
 		t.Fatal(err)
 	}
 	defer func() { _ = other.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The write is bounded by SQLite's own busy timeout, not by this context:
+	// a lock that is really held makes it fail with "database is locked" after
+	// busy_timeout, while a slow machine only makes it take longer. The
+	// context is a backstop far beyond either, so a loaded machine (a race
+	// build next to the server suite) cannot hit it and be mistaken for a
+	// held lock (issue #294).
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	if _, err := other.AppendAuditEvent(ctx, "tx-test", "other-"+label, "s", "d"); err != nil {
 		t.Errorf("a writer on another connection is locked out: %v", err)
