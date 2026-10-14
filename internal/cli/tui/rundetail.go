@@ -63,6 +63,9 @@ type runDetail struct {
 	// cannot send the same ask twice.
 	sending bool
 	status  string
+	// refusal is status while it holds the server's reason for refusing a
+	// send, which a transport error must not overwrite (runReadFailed).
+	refusal string
 	// syncGen is the events socket the pane last read from; another socket
 	// means frames may have been missed, and everything is read again.
 	syncGen int
@@ -240,7 +243,19 @@ func (m Model) runReadFailed(err error) Model {
 	if isCode(err, schema.ErrorCodeRunNotFound) {
 		return m.closeRun(runGone)
 	}
+	// A transport failure (the server down, being retried) is already said by
+	// the header's "live updates paused"; it does not overwrite the server's
+	// reason for refusing a send, which is more use to the reader.
+	var serverErr *cli.ServerError
+	refusal := errors.As(err, &serverErr)
+	if !refusal && m.rd.status != "" && m.rd.status == m.rd.refusal {
+		return m
+	}
 	m.rd.status = runError(err)
+	m.rd.refusal = ""
+	if refusal {
+		m.rd.refusal = m.rd.status
+	}
 	return m
 }
 

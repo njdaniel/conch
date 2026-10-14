@@ -149,7 +149,9 @@ func intervention(id, run int64, kind schema.InterventionKind, body string, stat
 
 // collect runs a command and the commands it batches, the way the runtime
 // would, and returns what they produce. A command that blocks (the wait for
-// the next event) is given up on: the model tests push events by hand.
+// the next event, a retry's timer) is given up on after a second: the model
+// tests push events by hand. The second is generous so that a read command
+// scheduled late on a loaded machine is still waited for.
 func collect(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
 		return nil
@@ -169,7 +171,7 @@ func collect(cmd tea.Cmd) []tea.Msg {
 			return nil
 		}
 		return []tea.Msg{msg}
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(time.Second):
 		return nil
 	}
 }
@@ -850,5 +852,28 @@ func TestRunFramesFromAnotherSocketAreDropped(t *testing.T) {
 	m, _ = update(m, eventsInterventionReceived{gen: m.ev.gen + 1, intervention: intervention(9, 41, schema.InterventionKindCancel, "", schema.InterventionStateRequested, "")})
 	if m.rd.run.State != schema.RunStateRunning || len(m.rd.interventions) != 0 || strings.Contains(m.View(), "stale") {
 		t.Errorf("frames of a closed socket were taken: %s, %d interventions", m.rd.run.State, len(m.rd.interventions))
+	}
+}
+
+// A transport failure of a later read (the server down while the events
+// socket retries) does not overwrite the server's reason for refusing a send:
+// the header already says live updates are paused.
+func TestRunDetailRefusalOutlivesTransportErrors(t *testing.T) {
+	api := newRunAPI(testRun(41, schema.RunStateRunning))
+	m := openCurrent(runModel(t, api, bothKinds...))
+	api.createErr = &cli.ServerError{Status: 409, Code: schema.ErrorCodeInterventionUnsupported, Message: "no"}
+	m = pressKey(m, "x", "y")
+	const want = "run: this session does not accept that intervention"
+	if got := m.status(); got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	m = m.runReadFailed(errors.New("connection refused"))
+	if got := m.status(); got != want {
+		t.Errorf("after a transport error the status = %q, want the refusal %q kept", got, want)
+	}
+	// Another refusal from the server does replace it.
+	m = m.runReadFailed(&cli.ServerError{Status: 429, Code: schema.ErrorCodeTooManyInterventions, Message: "no"})
+	if got := m.status(); !strings.Contains(got, "too many requests") {
+		t.Errorf("a new refusal did not replace the old: %q", got)
 	}
 }
