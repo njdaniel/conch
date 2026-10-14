@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build web-node web-check web-build p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build web-node web-check web-build web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -58,7 +58,7 @@ WEB_NODE = $(shell cat web/.nvmrc)
 # When nvm has the pinned Node, the web targets use it, whatever node a shell
 # profile puts first on PATH; otherwise the node on PATH, checked below.
 WEB_NODE_BIN = $(HOME)/.nvm/versions/node/v$(WEB_NODE)/bin
-web-node web-check web-build: export PATH := $(if $(wildcard $(WEB_NODE_BIN)/node),$(WEB_NODE_BIN):)$(PATH)
+web-node web-check web-build web-e2e: export PATH := $(if $(wildcard $(WEB_NODE_BIN)/node),$(WEB_NODE_BIN):)$(PATH)
 
 web-node:
 	@v=$$(node --version 2>/dev/null) || { echo "web: FAIL: Node.js is not installed; install Node $(WEB_NODE) (web/.nvmrc)"; exit 1; }; \
@@ -72,6 +72,17 @@ web-check: web-node
 	cd web && npm run typecheck
 	cd web && npm run lint
 	cd web && npm test
+
+# The browser suite (issue #285, Playwright, Chromium only): the web client in a
+# real browser against the fixture community of e2e/p3-local. It is not part of
+# `make check`, which needs no browser. The browser is the one Playwright's own
+# version pins; fetch it once with `cd web && npx playwright install chromium`
+# (CI uses --with-deps, which needs root; do not here). The suite starts and
+# removes its own server and root, and leaves nothing running.
+web-e2e: web-node
+	cd web && npm ci --no-audit
+	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
+	cd web && npm run e2e
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test
