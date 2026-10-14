@@ -21,9 +21,9 @@ import (
 // scoped to a net or to an explicit list of principals. Who a scoped message
 // reached is decided once, at post time, and stored in message_recipients.
 //
-// This file is the only place that reads message rows. ListVisibleMessages is
-// the one visibility function: every list in every protocol version, and the
-// MCP read tool, go through it, so there is exactly one place where a scoped
+// This file is the only place that reads message rows. ListVisibleMessagesPage
+// (and ListVisibleMessages, its ascending form) is the one visibility function:
+// every list in every protocol version, and the MCP read tool, go through it, so there is exactly one place where a scoped
 // message can be handed to someone it was not meant for. A structural test
 // (TestMessageReadsStayInTheVisibilityFunction) fails if another file in the
 // server reads the messages table.
@@ -86,12 +86,41 @@ var ChannelWideOnly = Reader{}
 //   - Operators get no exemption. Oversight of scoped traffic is the audit
 //     log, not a read bypass.
 func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) ([]Message, error) {
+	return s.ListVisibleMessagesPage(ctx, channelID, reader, MessagePage{After: afterID}, limit)
+}
+
+// MessagePage says which messages ListVisibleMessagesPage reads. The zero
+// value is the first page, ascending. After is the largest id already held
+// (ascending reads); Before is the smallest (newest-first reads, where zero
+// means from the newest). A page has one direction, so After with NewestFirst,
+// or Before without it, is an error rather than a guess.
+type MessagePage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
+// ListVisibleMessagesPage is ListVisibleMessages with a direction: up to limit
+// visible messages of channelID, ascending with id greater than page.After, or
+// with page.NewestFirst descending with id less than page.Before (all of them
+// when it is zero). The visibility rule is the one documented above and is in
+// the same statement, before the limit, in either direction.
+func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, reader Reader, page MessagePage, limit int) ([]Message, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list messages: limit must be positive, got %d", limit)
 	}
+	if (page.NewestFirst && page.After != 0) || (!page.NewestFirst && page.Before != 0) {
+		return nil, errors.New("store: list messages: after goes with ascending reads and before with newest-first ones")
+	}
+	if page.After < 0 || page.Before < 0 {
+		return nil, errors.New("store: list messages: a cursor is never negative")
+	}
+	before := page.Before
+	if before == 0 {
+		before = math.MaxInt64
+	}
 	scoped, predArgs := visibilityArgs(reader)
-	rows, err := s.db.QueryContext(ctx, listSQL(scoped),
-		append(append([]any{channelID, afterID}, predArgs...), limit)...)
+	rows, err := s.db.QueryContext(ctx, listSQL(scoped, page.NewestFirst),
+		append(append([]any{channelID, page.After, before}, predArgs...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
 	}
@@ -126,9 +155,14 @@ const (
 	visibleToAnyReader = `m.audience_kind IS NULL`
 
 	listHead = `SELECT ` + messageColumns + ` FROM messages m
-		 WHERE m.channel_id = ? AND m.id > ? AND `
+		 WHERE m.channel_id = ? AND m.id > ? AND m.id < ? AND `
 	listTail = `
 		 ORDER BY m.id ASC LIMIT ?`
+	// The newest-first read is the same statement walked backwards: both
+	// bounds are always written so the planner sees one range on the
+	// channel index, and only the direction differs.
+	listDescTail = `
+		 ORDER BY m.id DESC LIMIT ?`
 
 	searchHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
@@ -146,11 +180,15 @@ func visibilityArgs(reader Reader) (scoped bool, args []any) {
 	return false, nil
 }
 
-func listSQL(scoped bool) string {
-	if scoped {
-		return listHead + visibleToScopedReader + listTail
+func listSQL(scoped, newestFirst bool) string {
+	tail := listTail
+	if newestFirst {
+		tail = listDescTail
 	}
-	return listHead + visibleToAnyReader + listTail
+	if scoped {
+		return listHead + visibleToScopedReader + tail
+	}
+	return listHead + visibleToAnyReader + tail
 }
 
 func searchSQL(scoped bool) string {
