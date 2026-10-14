@@ -20,11 +20,13 @@ const (
 
 // ChannelMember is one row of a channel's member list. AddedBy is 0 when
 // unknown (rows backfilled by the upgrade migration, or added with
-// authentication off).
+// authentication off). Name and Kind come from the principal row.
 type ChannelMember struct {
 	PrincipalID int64
 	AddedBy     int64
 	CreatedAt   time.Time
+	Name        string
+	Kind        PrincipalKind
 }
 
 func channelSubject(id int64) string { return fmt.Sprintf("channel:%d", id) }
@@ -180,12 +182,15 @@ func (s *Store) IsChannelMember(ctx context.Context, channelID, principalID int6
 	return true, nil
 }
 
-// ListChannelMembers returns channelID's members ordered by principal id. It
-// returns an empty, non-nil slice when there are none.
+// ListChannelMembers returns channelID's members, with each principal's name
+// and kind, ordered by principal id. It returns an empty, non-nil slice when
+// there are none. The join cannot drop a member: principal_id is a foreign
+// key, and principals are never deleted.
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT principal_id, added_by, created_at FROM channel_members
-		 WHERE channel_id = ? ORDER BY principal_id ASC`, channelID)
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind FROM channel_members m
+		 JOIN principals p ON p.id = m.principal_id
+		 WHERE m.channel_id = ? ORDER BY m.principal_id ASC`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list members of channel %d: %w", channelID, err)
 	}
@@ -195,7 +200,7 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 		var m ChannelMember
 		var addedBy sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt); err != nil {
+		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt, &m.Name, &m.Kind); err != nil {
 			return nil, fmt.Errorf("store: list members of channel %d: %w", channelID, err)
 		}
 		m.AddedBy = addedBy.Int64
