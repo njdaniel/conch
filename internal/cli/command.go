@@ -50,6 +50,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "admin":
+		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
 		return runVoice(ctx, args[1:], stdout, stderr)
 	case "audit":
@@ -94,6 +96,15 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch admin channel create [--server <url>] [--json] <name>
+  conch admin principal create [--server <url>] [--json] --kind human|agent <name>
+  conch admin principal disable|enable [--server <url>] <id>
+  conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
+  conch admin credential list [--server <url>] [--json] <principal-id>
+  conch admin credential revoke [--server <url>] <credential-id>
+  conch admin member add|remove [--server <url>] <channel> <principal-id>
+  conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
+  conch admin manifest get [--server <url>] [--json] <principal-id>
   conch voice status [--server <url>] [--watch] <channel>
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -142,6 +153,19 @@ Scope:
   exits 0; voice not configured or unavailable prints one line and exits
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
+
+  admin is the operator's setup path: create channels and principals, issue
+  and revoke credentials, set channel membership, store an agent's manifest.
+  It uses your ordinary credential; the server decides who may do what, so a
+  member running one is refused with the server's own error. Each command
+  prints one line, or with --json the response document (commands the server
+  answers with no document print nothing). credential issue prints the token
+  alone on standard output, so TOKEN=$(conch admin credential issue 3 --label
+  bot) works; the credential's id and expiry go to standard error, and the
+  token never does. credential list prints
+    <id> <active|revoked> <created> <expires|-> <label>
+  manifest put reads a PutAgentManifest JSON body from standard input or
+  --file, refuses unknown fields, and checks it locally before sending.
 
   audit export (operators only) writes the audit trail to standard output as
   JSON Lines, one conch.audit_event.v1 object per line in ascending id order,
