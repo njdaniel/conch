@@ -19,7 +19,7 @@ import (
 
 type stubAPI struct{}
 
-func (stubAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
+func (stubAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
 	return schema.ListMessagesResponseV2{}, nil
 }
 func (stubAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
@@ -233,7 +233,7 @@ func (a *listAPI) ListChannels(context.Context) (schema.ListChannelsResponse, er
 	return a.resp, a.err
 }
 
-func (a *listAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
+func (a *listAPI) ListMessagesV2Page(_ context.Context, channel string, _ cli.MessagesPage, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.listed = append(a.listed, channel)
 	a.mu.Unlock()
@@ -626,7 +626,7 @@ func newResubAPI() *resubAPI {
 	return &resubAPI{backfills: map[string]int{}, subscribes: map[string]int{}, started: make(chan string, 16)}
 }
 
-func (a *resubAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
+func (a *resubAPI) ListMessagesV2Page(_ context.Context, channel string, _ cli.MessagesPage, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.backfills[channel]++
 	a.mu.Unlock()
@@ -1095,8 +1095,8 @@ func (a *scopeAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1,
 	return schema.ListNetsResponseV1{Nets: a.roster}, a.netsErr
 }
 
-func (a *scopeAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
-	a.record("ListMessagesV2")
+func (a *scopeAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
+	a.record("ListMessagesV2Page")
 	return schema.ListMessagesResponseV2{}, nil
 }
 
@@ -1548,7 +1548,7 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	enter(m, "hi")
-	for _, name := range []string{"ListMessagesV2", "SubscribeV2After", "PostMessageV2"} {
+	for _, name := range []string{"ListMessagesV2Page", "SubscribeV2After", "PostMessageV2"} {
 		if api.count(name) != 1 {
 			t.Errorf("%s calls = %d, want 1", name, api.count(name))
 		}
@@ -1557,7 +1557,7 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 	// TUI cannot call them; the compile-time check above ties API to the
 	// real client.
 	for _, c := range api.callNames() {
-		if !strings.HasSuffix(c, "V2") && c != "SubscribeV2After" && c != "ListNets" {
+		if !strings.HasSuffix(c, "V2") && c != "ListMessagesV2Page" && c != "SubscribeV2After" && c != "ListNets" {
 			t.Errorf("unexpected call %s", c)
 		}
 	}
