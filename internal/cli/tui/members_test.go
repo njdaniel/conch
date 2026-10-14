@@ -48,8 +48,12 @@ func rosterOf(sessions ...schema.SessionV1) schema.SessionRosterV1 {
 // blocks until its context ends, like a healthy one.
 type sessionAPI struct {
 	stubAPI
-	mu         sync.Mutex
-	createErr  error
+	mu        sync.Mutex
+	createErr error
+	// ids are the ids the next sessions get, in order; 9 once they run out.
+	ids []int64
+	// gone is the sessions whose events socket is refused with session_not_found.
+	gone       map[int64]bool
 	created    []schema.CreateSessionRequestV1
 	ended      []int64
 	endCtxErrs []error
@@ -83,7 +87,11 @@ func (a *sessionAPI) CreateSession(_ context.Context, req schema.CreateSessionRe
 	if a.createErr != nil {
 		return schema.SessionV1{}, a.createErr
 	}
-	return sess(9, 5, schema.PrincipalHuman, "alice", schema.SessionStatusOnline), nil
+	id := int64(9)
+	if len(a.ids) > 0 {
+		id, a.ids = a.ids[0], a.ids[1:]
+	}
+	return sess(id, 5, schema.PrincipalHuman, "alice", schema.SessionStatusOnline), nil
 }
 
 func (a *sessionAPI) EndSession(ctx context.Context, id int64) error {
@@ -100,6 +108,12 @@ func (a *sessionAPI) SubscribeEvents(ctx context.Context, channel string, sessio
 	a.events = append(a.events, call)
 	a.mu.Unlock()
 	a.started <- call
+	a.mu.Lock()
+	refused := a.gone[session]
+	a.mu.Unlock()
+	if refused {
+		return &cli.ServerError{Status: 404, Code: schema.ErrorCodeSessionNotFound, Message: "no such session"}
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -154,9 +168,13 @@ func awaitEvents(t *testing.T, a *sessionAPI, channel string) {
 // (id 9) and its first events socket open, a recording clock and a fixed now.
 func sessionModel(t *testing.T) (Model, *sessionAPI, *[]recordedTimer) {
 	t.Helper()
+	return sessionModelWith(t, newSessionAPI())
+}
+
+func sessionModelWith(t *testing.T, api *sessionAPI) (Model, *sessionAPI, *[]recordedTimer) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	api := newSessionAPI()
 	m := NewModel(ctx, api, 5, []string{"general", "ops"})
 	m.userName = "alice"
 	m.now = func() time.Time { return testNow }
