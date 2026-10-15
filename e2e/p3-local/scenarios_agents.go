@@ -749,3 +749,130 @@ func (s *suite) p313Real() error {
 	fmt.Printf("P3-13 runtime=%s model=%s outcome=%q state=%s\n", session.Runtime, session.Model, ended.Outcome, ended.State)
 	return nil
 }
+
+// ---------------------------------------------------------------- P3-14
+
+// threeRuntimes are the adapters of P3-14: one per runtime the roadmap names,
+// each with a stub in place of the program. The profile decides how the output
+// is read, so the codex stub prints Codex's events and the others plain text.
+var threeRuntimes = []struct{ runtime, model, script, tag string }{
+	{"claude-code", "stub-claude", "claude-stub.sh", "claude-stub: "},
+	{"codex", "stub-codex", "codex-stub.sh", "codex-stub: "},
+	{"ollama", "stub-ollama", "ollama-stub.sh", "ollama-stub: "},
+}
+
+// p314Three runs three adapters at once against one server, one for each
+// runtime, with stubs for the programs, and checks that the roster shows three
+// sessions with three runtimes, that each answers one message with a run of its
+// own, and that the events socket delivers the activity of all three runs. No
+// model is involved; the walkthrough's P3-14 is the same with real ones.
+func (s *suite) p314Three() error {
+	if err := s.stopAgent(s.worker); err != nil {
+		return err
+	}
+	s.worker = nil
+	feed, err := s.followEvents(partNick, chGeneral)
+	if err != nil {
+		return err
+	}
+	var started []*agent
+	defer func() {
+		for _, a := range started {
+			_ = s.stopAgent(a)
+		}
+	}()
+	sessions := map[int64]string{} // session id -> runtime
+	for _, rt := range threeRuntimes {
+		a, err := s.launchAgent(agentSpec{part: partWorker, script: rt.script, env: []string{
+			"CONCH_ADAPTER_RUNTIME=" + rt.runtime,
+			"CONCH_ADAPTER_MODEL=" + rt.model,
+			"CONCH_ADAPTER_FIXTURE=0",
+			"CONCH_ADAPTER_LOCK_FILE=" + s.r.path("p314-"+rt.runtime+".lock"),
+		}})
+		if err != nil {
+			return fmt.Errorf("the %s adapter: %w", rt.runtime, err)
+		}
+		started = append(started, a)
+		sessions[a.session] = rt.runtime
+	}
+
+	// The roster: three sessions, three runtimes. The runtime is for the
+	// operator and for the agent itself; a member sees the model.
+	roster, err := s.roster(partWorker, chGeneral)
+	if err != nil {
+		return err
+	}
+	for id, runtime := range sessions {
+		sess, ok := sessionOf(roster, id)
+		if !ok || sess.Runtime != runtime || sess.Status == schema.SessionStatusOffline {
+			return fmt.Errorf("session #%d should be a live %s session in the roster; it is %+v", id, runtime, sess)
+		}
+	}
+	member, err := s.roster(partNick, chGeneral)
+	if err != nil {
+		return err
+	}
+	for id, runtime := range sessions {
+		sess, ok := sessionOf(member, id)
+		if !ok || sess.Model == "" || sess.Runtime != "" {
+			return fmt.Errorf("nick-test should see a model and no runtime for the %s session #%d; it sees %+v", runtime, id, sess)
+		}
+	}
+	step("P3-14 the roster shows three sessions: claude-code, codex and ollama; a member sees their models")
+
+	if err := s.say(chGeneral, "p314 three runtimes, answer please"); err != nil {
+		return err
+	}
+	msg, err := s.waitMessage(partNick, chGeneral, "p314 three runtimes")
+	if err != nil {
+		return err
+	}
+	runs := map[int64]schema.RunV1{} // by session
+	if err := s.until("one completed run from each of the three sessions", 40*time.Second, func() (bool, error) {
+		all, err := s.runsOf(partNick, chGeneral)
+		if err != nil {
+			return false, err
+		}
+		for _, r := range all {
+			if _, ours := sessions[r.SessionID]; ours && r.MessageID == msg.ID && r.State == schema.RunStateCompleted {
+				runs[r.SessionID] = r
+			}
+		}
+		return len(runs) == len(sessions), nil
+	}); err != nil {
+		return err
+	}
+	// Each runtime answered in its own words.
+	history, err := s.history(partNick, chGeneral, msg.ID)
+	if err != nil {
+		return err
+	}
+	for _, rt := range threeRuntimes {
+		// A stub answers with the last line of the prompt, which is the
+		// message behind its author's id.
+		if !slices.ContainsFunc(history, func(m schema.MessageV2) bool {
+			return m.AuthorID == s.pid("worker-test") && strings.HasPrefix(m.Body, rt.tag) && strings.Contains(m.Body, "p314 three runtimes")
+		}) {
+			return fmt.Errorf("no reply from the %s adapter's stub: want one starting %q", rt.runtime, rt.tag)
+		}
+	}
+	// The events socket delivered the activity of all three runs.
+	if err := s.until("the activity of all three runs on the events socket", 20*time.Second, func() (bool, error) {
+		for _, run := range runs {
+			kinds := map[schema.ActivityKind]bool{}
+			for _, a := range feed.activitySeen() {
+				if a.RunID == run.ID {
+					kinds[a.Kind] = true
+				}
+			}
+			if !kinds[schema.ActivityKindCommandStarted] || !kinds[schema.ActivityKindReplyPosted] {
+				return false, nil
+			}
+		}
+		return true, nil
+	}); err != nil {
+		return err
+	}
+	step("P3-14 each of the three adapters answered with a run of its own, and the events socket carried the activity of all three")
+	return nil
+}
