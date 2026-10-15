@@ -475,8 +475,11 @@ func (r *relay) askReport(w http.ResponseWriter, req *http.Request, route, metho
 	session, err := r.up.heartbeat(req.Context(), r.sessionID())
 	if err != nil {
 		// Typically too_many_sessions: the session cannot be revived, so the
-		// retry would be refused again.
-		logRelayError("heartbeat for a refused report", err)
+		// retry would be refused again. A runtime that went away cancels the
+		// heartbeat, which is not worth a warning.
+		if req.Context().Err() == nil {
+			logRelayError("heartbeat for a refused report", err)
+		}
 		return rep, true
 	}
 	r.mu.Lock()

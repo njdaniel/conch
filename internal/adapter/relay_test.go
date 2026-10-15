@@ -1151,11 +1151,16 @@ func TestRelayHeartbeatsAndRetriesOnSessionOffline(t *testing.T) {
 				t.Errorf("body = %s, want code %s", body, tt.wantCode)
 			}
 			var order []string
-			for _, c := range r.fake.calls[before:] {
+			calls := r.fake.calls[before:]
+			for _, c := range calls {
 				order = append(order, c.path)
 			}
 			if strings.Join(order, " ") != strings.Join(tt.wantOrder, " ") {
 				t.Errorf("conchd saw %v, want %v", order, tt.wantOrder)
+			}
+			// A retry sends the very bytes the first forward sent.
+			if len(calls) == 3 && !bytes.Equal(calls[2].body, calls[0].body) {
+				t.Errorf("the retry sent %s, the first forward %s", calls[2].body, calls[0].body)
 			}
 		})
 	}
