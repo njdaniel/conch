@@ -58,6 +58,10 @@ func TestLoadConfigNamesAndFallbacks(t *testing.T) {
 			return c.Runtime == "fixture" && c.Heartbeat == 250*time.Millisecond && c.MaxRepliesPerMinute == 3 && c.Fixture &&
 				reflect.DeepEqual(c.Command.args, []string{"sh", "-c", "cat", "sh"})
 		}},
+		{"the pause bound defaults to the reply timeout", merge(required, map[string]string{"CONCH_ADAPTER_REPLY_TIMEOUT": "45s"}),
+			func(c config) bool { return c.MaxPause == 45*time.Second }},
+		{"the pause bound is its own setting", merge(required, map[string]string{"CONCH_ADAPTER_REPLY_TIMEOUT": "45s", "CONCH_ADAPTER_MAX_PAUSE": "10m"}),
+			func(c config) bool { return c.MaxPause == 10*time.Minute && c.ReplyTimeout == 45*time.Second }},
 		{"fixture is only on for 1", merge(required, map[string]string{"CONCH_ADAPTER_FIXTURE": "true"}), func(c config) bool { return !c.Fixture }},
 		{"CLAUDE_BIN replaces the first word of the default", merge(required, map[string]string{"CLAUDE_BIN": "/x/claude"}),
 			func(c config) bool { return c.Command.args[0] == "/x/claude" && c.Command.args[1] == "-p" }},
@@ -90,6 +94,8 @@ func TestLoadConfigRefusals(t *testing.T) {
 		{"bad heartbeat", map[string]string{"CONCH_ADAPTER_HEARTBEAT": "soon"}, "CONCH_ADAPTER_HEARTBEAT"},
 		{"zero heartbeat", map[string]string{"CONCH_ADAPTER_HEARTBEAT": "0s"}, "CONCH_ADAPTER_HEARTBEAT"},
 		{"bad cap", map[string]string{"CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE": "many"}, "CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE"},
+		{"bad pause bound", map[string]string{"CONCH_ADAPTER_MAX_PAUSE": "long"}, "CONCH_ADAPTER_MAX_PAUSE"},
+		{"zero pause bound", map[string]string{"CONCH_ADAPTER_MAX_PAUSE": "0s"}, "CONCH_ADAPTER_MAX_PAUSE"},
 		{"zero cap", map[string]string{"CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE": "0"}, "CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE"},
 	}
 	for _, tt := range tests {

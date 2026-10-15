@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -422,6 +423,11 @@ func TestSetRunStateTransitionTable(t *testing.T) {
 		for _, to := range allRunStates {
 			t.Run(fmt.Sprintf("%s to %s", from, to), func(t *testing.T) {
 				id := f.mustRun(t, f.ch.ID, 0, "t")
+				// The table makes a run per case on one session; end it, if
+				// the case left it open, so the open-run bound is not reached.
+				t.Cleanup(func() {
+					_, _ = f.s.SetRunState(ctx, "system", id, f.agtCred, f.agtReader(), schema.RunStateCancelled, "", runT0)
+				})
 				for _, step := range pathTo[from] {
 					if _, err := f.s.SetRunState(ctx, "system", id, f.agtCred, f.agtReader(), step, "", runT0); err != nil {
 						t.Fatalf("path to %s: %v", from, err)
@@ -739,11 +745,14 @@ func TestSessionRunViews(t *testing.T) {
 	if err != nil || r.State != schema.RunStateBlocked || r.EndedAt != nil {
 		t.Errorf("run after its session went offline and ended = %+v, %v; want blocked and open", r, err)
 	}
-	// An ended session's run is still the owner's to close.
-	set(secret, schema.RunStateRunning)
-	set(secret, schema.RunStateCompleted)
-	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateCompleted}) {
-		t.Errorf("after completing = %+v", v)
+	// An ended session's run is still the owner's to close, though no longer
+	// to move along (issue #392: the session is offline).
+	if _, err := f.s.SetRunState(ctx, "system", secret, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); !errors.Is(err, ErrSessionOffline) {
+		t.Errorf("moving a run on an ended session: err = %v, want ErrSessionOffline", err)
+	}
+	set(secret, schema.RunStateCancelled)
+	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateCancelled}) {
+		t.Errorf("after cancelling = %+v", v)
 	}
 }
 
@@ -823,5 +832,299 @@ func TestRunsMigrationFromSchema18(t *testing.T) {
 		if _, err := s.db.Exec(stmt); err == nil {
 			t.Errorf("the runs table accepted %q", stmt)
 		}
+	}
+}
+
+// startOn is f.start on session sess, which must belong to the agent's
+// credential f.agtCred.
+func (f *runFixture) startOn(sess int64) (Run, error) {
+	return f.s.CreateRun(context.Background(), principalActor(f.agt.ID), RunParams{
+		SessionID: sess, CredentialID: f.agtCred, ChannelID: f.ch.ID, Task: "bounded",
+	}, f.agtReader(), runT0)
+}
+
+// freshSession is a session of the agent with no runs.
+func (f *runFixture) freshSession(t *testing.T) int64 {
+	t.Helper()
+	s, err := f.s.CreateSession(context.Background(), principalActor(f.agt.ID),
+		SessionParams{PrincipalID: f.agt.ID, CredentialID: f.agtCred, Client: "adapter"}, runT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.ID
+}
+
+// fillActivity writes n entries to run runID straight into the table, the
+// only way to reach a bound of ten thousand without ten thousand
+// transactions. The rows are what AppendRunActivity writes.
+func (f *runFixture) fillActivity(t *testing.T, runID int64, n int) {
+	t.Helper()
+	if _, err := f.s.db.Exec(
+		`WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
+		 INSERT INTO run_activity (run_id, kind, summary, outcome, at) SELECT ?, ?, 'fill', '', ? FROM seq`,
+		n, runID, string(schema.ActivityKindCommandStarted), runT0.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The 33rd open run of a session is refused and writes nothing, not even an
+// audit row; ending one frees a slot; ended runs and other sessions' runs do
+// not count.
+func TestCreateRunOpenBound(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	sess := f.freshSession(t)
+	var ids []int64
+	for i := range MaxOpenRunsPerSession {
+		r, err := f.startOn(sess)
+		if err != nil {
+			t.Fatalf("run %d: %v", i+1, err)
+		}
+		ids = append(ids, r.ID)
+	}
+	runs, audit := f.count(t, "runs"), f.count(t, "audit_events")
+	if _, err := f.startOn(sess); !errors.Is(err, ErrTooManyRuns) {
+		t.Fatalf("run %d: err = %v, want ErrTooManyRuns", MaxOpenRunsPerSession+1, err)
+	}
+	if n := f.count(t, "runs"); n != runs {
+		t.Errorf("runs = %d, want %d: the refused create wrote one", n, runs)
+	}
+	if n := f.count(t, "audit_events"); n != audit {
+		t.Errorf("audit rows = %d, want %d: the refused create audited", n, audit)
+	}
+	// Another session has its own budget.
+	if _, err := f.start(f.ch.ID, 0, "elsewhere"); err != nil {
+		t.Errorf("a run on another session: %v", err)
+	}
+	// Ending one frees exactly one slot.
+	if _, err := f.s.SetRunState(ctx, "system", ids[0], f.agtCred, f.agtReader(), schema.RunStateCancelled, "", runT0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.startOn(sess); err != nil {
+		t.Errorf("after ending one: %v", err)
+	}
+	if _, err := f.startOn(sess); !errors.Is(err, ErrTooManyRuns) {
+		t.Errorf("after refilling: err = %v, want ErrTooManyRuns", err)
+	}
+}
+
+// Creates racing for the last slots cannot pass the bound together: the count
+// and the insert are one transaction.
+func TestConcurrentCreateRunsCannotExceedTheBound(t *testing.T) {
+	f := newRunFixture(t)
+	sess := f.freshSession(t)
+	const attempts = MaxOpenRunsPerSession + 16
+	var (
+		wg      sync.WaitGroup
+		created atomic.Int32
+		refused atomic.Int32
+		start   = make(chan struct{})
+		other   = make(chan error, attempts)
+	)
+	for range attempts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			switch _, err := f.startOn(sess); {
+			case err == nil:
+				created.Add(1)
+			case errors.Is(err, ErrTooManyRuns):
+				refused.Add(1)
+			default:
+				other <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(other)
+	for err := range other {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if created.Load() != MaxOpenRunsPerSession || refused.Load() != attempts-MaxOpenRunsPerSession {
+		t.Errorf("created %d, refused %d; want %d and %d", created.Load(), refused.Load(), MaxOpenRunsPerSession, attempts-MaxOpenRunsPerSession)
+	}
+	var open int
+	if err := f.s.db.QueryRow("SELECT COUNT(*) FROM runs WHERE session_id = ? AND ended_at IS NULL", sess).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != MaxOpenRunsPerSession {
+		t.Errorf("open runs stored = %d, want %d", open, MaxOpenRunsPerSession)
+	}
+}
+
+// The 10,001st activity entry of a run is refused and writes nothing; another
+// run is unaffected; and racing appends cannot pass the bound.
+func TestAppendRunActivityBound(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	id := f.mustRun(t, f.ch.ID, 0, "chatty")
+	f.fillActivity(t, id, MaxActivityPerRun-4)
+	append1 := func(runID int64) error {
+		_, err := f.s.AppendRunActivity(ctx, runID, f.agtCred, f.agtReader(),
+			ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "more"}, runT0)
+		return err
+	}
+
+	// Eight racing appends for the last four slots.
+	var (
+		wg      sync.WaitGroup
+		created atomic.Int32
+		refused atomic.Int32
+		start   = make(chan struct{})
+		other   = make(chan error, 8)
+	)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			switch err := append1(id); {
+			case err == nil:
+				created.Add(1)
+			case errors.Is(err, ErrTooMuchActivity):
+				refused.Add(1)
+			default:
+				other <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(other)
+	for err := range other {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if created.Load() != 4 || refused.Load() != 4 {
+		t.Errorf("created %d, refused %d; want 4 and 4", created.Load(), refused.Load())
+	}
+	var held int
+	if err := f.s.db.QueryRow("SELECT COUNT(*) FROM run_activity WHERE run_id = ?", id).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if held != MaxActivityPerRun {
+		t.Errorf("entries stored = %d, want %d", held, MaxActivityPerRun)
+	}
+	if err := append1(id); !errors.Is(err, ErrTooMuchActivity) {
+		t.Errorf("the %dth entry: err = %v, want ErrTooMuchActivity", MaxActivityPerRun+1, err)
+	}
+	if err := append1(f.runWide); err != nil {
+		t.Errorf("an entry on another run: %v", err)
+	}
+	// A run that has ended still answers as ended, not as full.
+	if _, err := f.s.SetRunState(ctx, "system", id, f.agtCred, f.agtReader(), schema.RunStateCancelled, "", runT0); err != nil {
+		t.Fatal(err)
+	}
+	if err := append1(id); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("an entry on an ended full run: err = %v, want ErrInvalidTransition", err)
+	}
+}
+
+// TestOpenRunStatesAreTheStatesThatHaveNotEnded keeps the open-runs count's
+// state list in step with the schema: every valid state is listed exactly
+// when it is not terminal.
+func TestOpenRunStatesAreTheStatesThatHaveNotEnded(t *testing.T) {
+	all := []schema.RunState{
+		schema.RunStateQueued, schema.RunStateStarting, schema.RunStateRunning, schema.RunStateBlocked,
+		schema.RunStateWaiting, schema.RunStateCompleted, schema.RunStateFailed, schema.RunStateCancelled,
+	}
+	for _, s := range all {
+		if !s.Valid() {
+			t.Fatalf("%q is not a valid run state", s)
+		}
+		listed := false
+		for _, o := range openRunStates {
+			listed = listed || o == s
+		}
+		if listed == schema.RunStateTerminal(s) {
+			t.Errorf("%q: listed as open = %v, terminal = %v", s, listed, schema.RunStateTerminal(s))
+		}
+	}
+}
+
+// An offline session takes no new run, no activity and no state change that
+// leaves a run open, and writes nothing when it refuses; ending a run is
+// allowed. A heartbeat brings the session back (issue #392).
+func TestOfflineSessionRunRules(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	sess := f.freshSession(t)
+	open, err := f.startOn(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ending, err := f.startOn(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill the session's bound, so the test also shows the offline refusal
+	// wins over nothing else and the bound is not what stops the next start.
+	for i := 2; i < MaxOpenRunsPerSession; i++ {
+		if _, err := f.startOn(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := runT0.Add(time.Hour)
+	if got, err := f.s.SweepSessions(ctx, later, 30*time.Second, 90*time.Second); err != nil || got.Offline < 1 {
+		t.Fatalf("sweep = %+v, %v; want the session offline", got, err)
+	}
+
+	runs, audit := f.count(t, "runs"), f.count(t, "audit_events")
+	activity := f.count(t, "run_activity")
+	refused := []struct {
+		name string
+		do   func() error
+	}{
+		{"start", func() error { _, err := f.startOn(sess); return err }},
+		{"activity", func() error {
+			_, err := f.s.AppendRunActivity(ctx, open.ID, f.agtCred, f.agtReader(), ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "s"}, later)
+			return err
+		}},
+		{"running", func() error {
+			_, err := f.s.SetRunState(ctx, "system", open.ID, f.agtCred, f.agtReader(), schema.RunStateRunning, "", later)
+			return err
+		}},
+	}
+	for _, tc := range refused {
+		if err := tc.do(); !errors.Is(err, ErrSessionOffline) {
+			t.Errorf("%s on an offline session: err = %v, want ErrSessionOffline", tc.name, err)
+		}
+	}
+	if f.count(t, "runs") != runs || f.count(t, "audit_events") != audit || f.count(t, "run_activity") != activity {
+		t.Error("a refused call wrote a row")
+	}
+	// Another session of the credential is unaffected: the fixture's own
+	// beats, which also went offline in the sweep.
+	if _, err := f.s.HeartbeatSession(ctx, f.sess.ID, f.agtCred, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.start(f.ch.ID, 0, "elsewhere"); err != nil {
+		t.Errorf("a run on a live session: %v", err)
+	}
+
+	// Ending is allowed, and audited.
+	got, err := f.s.SetRunState(ctx, "system", ending.ID, f.agtCred, f.agtReader(), schema.RunStateCancelled, "gone", later)
+	if err != nil || got.State != schema.RunStateCancelled || got.EndedAt == nil {
+		t.Fatalf("ending on an offline session = %+v, %v", got, err)
+	}
+	// run_started of the run elsewhere, and run_ended of this one.
+	if n := f.count(t, "audit_events"); n != audit+2 {
+		t.Errorf("audit rows = %d, want %d", n, audit+2)
+	}
+	// An ended run is told it has ended.
+	if _, err := f.s.AppendRunActivity(ctx, ending.ID, f.agtCred, f.agtReader(), ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "s"}, later); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("activity on an ended run: err = %v, want ErrInvalidTransition", err)
+	}
+
+	// A heartbeat brings the session back, and the open run takes a report.
+	if _, err := f.s.HeartbeatSession(ctx, sess, f.agtCred, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.SetRunState(ctx, "system", open.ID, f.agtCred, f.agtReader(), schema.RunStateRunning, "", later); err != nil {
+		t.Errorf("after the heartbeat: %v", err)
+	}
+	if _, err := f.startOn(sess); err != nil {
+		t.Errorf("start after the heartbeat: %v", err)
 	}
 }

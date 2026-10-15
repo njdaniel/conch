@@ -548,17 +548,32 @@ describe('a run link', () => {
 });
 
 describe('interventions', () => {
-  it('offers Message and Cancel when the session declares them', async () => {
+  it('offers Message and Cancel when the session declares them, and says Pause and Resume are not supported when it does not', async () => {
     const socket = await openApp();
     const detail = within(await openRunDetail(socket));
     expect((detail.getByRole<HTMLButtonElement>('button', { name: 'Message' })).disabled).toBe(false);
     expect((detail.getByRole<HTMLButtonElement>('button', { name: 'Cancel' })).disabled).toBe(false);
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Pause' }).disabled).toBe(true);
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Resume' }).disabled).toBe(true);
+    expect(detail.getAllByText('Not supported by this agent')).toHaveLength(2);
+  });
+
+  it('offers all four, with no note, when the session declares all four', async () => {
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket, { interventions: ['message', 'cancel', 'pause', 'resume'] }));
     expect(detail.queryByText('Not supported by this agent')).toBeNull();
+    for (const name of ['Message', 'Cancel', 'Pause']) {
+      expect(detail.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(false);
+    }
+    // Resume waits for a run that reads waiting.
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Resume' }).disabled).toBe(true);
   });
 
   it.each([
-    ['message', 'Message', ['cancel']],
-    ['cancel', 'Cancel', ['message']],
+    ['message', 'Message', ['cancel', 'pause', 'resume']],
+    ['cancel', 'Cancel', ['message', 'pause', 'resume']],
+    ['pause', 'Pause', ['message', 'cancel', 'resume']],
+    ['resume', 'Resume', ['message', 'cancel', 'pause']],
   ])('shows %s disabled, saying Not supported by this agent, when it is not declared', async (_kind, name, declared) => {
     const socket = await openApp();
     const detail = within(await openRunDetail(socket, { interventions: declared }));
@@ -569,10 +584,90 @@ describe('interventions', () => {
     expect(note?.textContent).toBe('Not supported by this agent');
   });
 
-  it('shows both unsupported for a session that declares nothing', async () => {
+  it('shows all four unsupported for a session that declares nothing', async () => {
     const socket = await openApp();
     const detail = within(await openRunDetail(socket, { interventions: [] }));
-    expect(detail.getAllByText('Not supported by this agent')).toHaveLength(2);
+    expect(detail.getAllByText('Not supported by this agent')).toHaveLength(4);
+    for (const name of ['Message', 'Cancel', 'Pause', 'Resume']) {
+      expect(detail.getByRole<HTMLButtonElement>('button', { name }).disabled).toBe(true);
+    }
+  });
+
+  // A declared kind is enabled only in the states it applies to, and then
+  // without a note: Pause on running, Resume on waiting.
+  it.each([
+    ['running', true, false],
+    ['waiting', false, true],
+    ['blocked', false, false],
+    ['starting', false, false],
+  ])('in state %s enables Pause=%s and Resume=%s when both are declared', async (state, pause, resume) => {
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket, { interventions: ['message', 'cancel', 'pause', 'resume'] }));
+    socket.send(run({ state }));
+    await waitFor(() => {
+      expect(detail.getByTestId('run-state').textContent).toBe(state);
+    });
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Pause' }).disabled).toBe(!pause);
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Resume' }).disabled).toBe(!resume);
+    expect(detail.queryByText('Not supported by this agent')).toBeNull();
+  });
+
+  it('pauses with no question, shows Requested, and reads waiting only from the run frame; then resumes the same way', async () => {
+    // The reply is for the ask just recorded: #20 for the first, #21 for the second.
+    server.askReply = () => json(intervention(19 + server.asks.length, 'requested', { kind: server.asks[server.asks.length - 1]?.body.kind, body: undefined }), 201);
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket, { interventions: ['message', 'cancel', 'pause', 'resume'] }));
+    fireEvent.click(detail.getByRole('button', { name: 'Pause' }));
+    await waitFor(() => {
+      expect(detail.getByTestId('intervention-20').textContent).toBe('↳ #20 pause · requested…');
+    });
+    expect(server.asks).toEqual([{ run: 41, body: { kind: 'pause' } }]);
+    expect(detail.queryByRole('alertdialog')).toBeNull();
+    expect(detail.getByTestId('run-state').textContent).toBe('running');
+    for (const state of ['acknowledged', 'applied']) {
+      socket.send(intervention(20, state, { kind: 'pause', body: undefined }));
+      await waitFor(() => {
+        expect(detail.getByTestId('intervention-20').textContent).toBe(`↳ #20 ${state}`);
+      });
+      expect(detail.getByTestId('run-state').textContent).toBe('running');
+    }
+    socket.send(run({ state: 'waiting', outcome: 'paused' }));
+    await waitFor(() => {
+      expect(detail.getByTestId('run-state').textContent).toBe('waiting');
+    });
+    expect(detail.getByRole<HTMLButtonElement>('button', { name: 'Pause' }).disabled).toBe(true);
+
+    fireEvent.click(detail.getByRole('button', { name: 'Resume' }));
+    await waitFor(() => {
+      expect(detail.getByTestId('intervention-21').textContent).toBe('↳ #21 resume · requested…');
+    });
+    expect(server.asks).toEqual([
+      { run: 41, body: { kind: 'pause' } },
+      { run: 41, body: { kind: 'resume' } },
+    ]);
+    socket.send(intervention(21, 'applied', { kind: 'resume', body: undefined }));
+    await waitFor(() => {
+      expect(detail.getByTestId('intervention-21').textContent).toBe('↳ #21 applied');
+    });
+    expect(detail.getByTestId('run-state').textContent).toBe('waiting');
+    socket.send(run({ state: 'running' }));
+    await waitFor(() => {
+      expect(detail.getByTestId('run-state').textContent).toBe('running');
+    });
+  });
+
+  it.each(['not paused', 'already paused'])('shows a failed answer %j as its reason, as text, and leaves the run as it was', async (reason) => {
+    server.interventions = [intervention(9, 'requested', { kind: reason === 'not paused' ? 'resume' : 'pause', body: undefined })];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket, { interventions: ['pause', 'resume'] }));
+    await waitFor(() => {
+      expect(detail.getByTestId('intervention-9').textContent).toMatch(/requested…$/);
+    });
+    socket.send(intervention(9, 'failed', { kind: reason === 'not paused' ? 'resume' : 'pause', body: undefined, reason }));
+    await waitFor(() => {
+      expect(detail.getByTestId('intervention-9').textContent).toBe(`↳ #9 failed: ${reason}`);
+    });
+    expect(detail.getByTestId('run-state').textContent).toBe('running');
   });
 
   it('says the interventions are unavailable when the session is not in the roster', async () => {

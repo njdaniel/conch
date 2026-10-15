@@ -1133,3 +1133,89 @@ func TestNewClientRefusedHosts(t *testing.T) {
 		})
 	}
 }
+
+func TestClientReadState(t *testing.T) {
+	const stateBody = `{"schema":"conch.read_state.v1","channel_id":2,"last_read_id":9,"unread":3}`
+	tests := []struct {
+		name       string
+		call       func(*Client) (any, error)
+		wantMethod string
+		wantPath   string
+		wantBody   string // the request body; "" for none
+		status     int
+		response   string
+		want       any
+		wantCode   string
+	}{
+		{
+			name: "list", wantMethod: http.MethodGet, wantPath: "/v1/read-state",
+			call:   func(c *Client) (any, error) { return c.ListReadState(context.Background()) },
+			status: http.StatusOK, response: `{"read_state":[` + stateBody + `]}`,
+			want: schema.ListReadStateResponseV1{ReadState: []schema.ReadStateV1{{Schema: schema.ReadStateSchemaV1, ChannelID: 2, LastReadID: 9, Unread: 3}}},
+		},
+		{
+			name: "list by an agent", wantMethod: http.MethodGet, wantPath: "/v1/read-state",
+			call:   func(c *Client) (any, error) { return c.ListReadState(context.Background()) },
+			status: http.StatusForbidden, response: `{"code":"human_required","message":"read state is for human principals only"}`,
+			wantCode: schema.ErrorCodeHumanRequired,
+		},
+		{
+			name: "list with auth off", wantMethod: http.MethodGet, wantPath: "/v1/read-state",
+			call:   func(c *Client) (any, error) { return c.ListReadState(context.Background()) },
+			status: http.StatusBadRequest, response: `{"code":"read_state_require_auth","message":"read state requires authentication"}`,
+			wantCode: schema.ErrorCodeReadStateRequireAuth,
+		},
+		{
+			name: "mark", wantMethod: http.MethodPut, wantPath: "/v1/channels/ops/read-state", wantBody: `{"last_read_id":9}`,
+			call:   func(c *Client) (any, error) { return c.MarkRead(context.Background(), "ops", 9) },
+			status: http.StatusOK, response: stateBody,
+			want: schema.ReadStateV1{Schema: schema.ReadStateSchemaV1, ChannelID: 2, LastReadID: 9, Unread: 3},
+		},
+		{
+			name: "mark escapes the channel name", wantMethod: http.MethodPut, wantPath: "/v1/channels/a b/read-state", wantBody: `{"last_read_id":4}`,
+			call:   func(c *Client) (any, error) { return c.MarkRead(context.Background(), "a b", 4) },
+			status: http.StatusOK, response: stateBody,
+			want: schema.ReadStateV1{Schema: schema.ReadStateSchemaV1, ChannelID: 2, LastReadID: 9, Unread: 3},
+		},
+		{
+			name: "mark in an unknown channel", wantMethod: http.MethodPut, wantPath: "/v1/channels/nope/read-state", wantBody: `{"last_read_id":1}`,
+			call:   func(c *Client) (any, error) { return c.MarkRead(context.Background(), "nope", 1) },
+			status: http.StatusNotFound, response: `{"code":"channel_not_found","message":"channel not found"}`,
+			wantCode: "channel_not_found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tt.wantMethod || r.URL.Path != tt.wantPath {
+					t.Errorf("request = %s %s, want %s %s", r.Method, r.URL.Path, tt.wantMethod, tt.wantPath)
+				}
+				body, _ := io.ReadAll(r.Body)
+				if string(body) != tt.wantBody {
+					t.Errorf("body = %q, want %q", body, tt.wantBody)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.response))
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, server.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			got, err := tt.call(client)
+			if tt.wantCode != "" {
+				var serverErr *ServerError
+				if !errors.As(err, &serverErr) || serverErr.Code != tt.wantCode {
+					t.Fatalf("err = %v, want a server error with code %q", err, tt.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}

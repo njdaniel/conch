@@ -64,12 +64,16 @@ func (b *botLoop) heartbeatInterval() time.Duration {
 // register opens this adapter's session.
 func (b *botLoop) register(ctx context.Context) error {
 	host, _ := os.Hostname() // an adapter without a hostname is still an adapter
+	kinds := []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel}
+	if canPauseGroup {
+		kinds = append(kinds, schema.InterventionKindPause, schema.InterventionKindResume)
+	}
 	session, err := b.mcp.RegisterSession(ctx, schema.CreateSessionRequestV1{
 		Client:        sessionClient,
 		Runtime:       b.cfg.Runtime,
 		Model:         b.cfg.Model,
 		Host:          host,
-		Interventions: []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel},
+		Interventions: kinds,
 	})
 	if err != nil {
 		return err

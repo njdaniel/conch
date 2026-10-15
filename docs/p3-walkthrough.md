@@ -26,7 +26,9 @@ the runner starts its own server, drives two terminal clients on pseudo-terminal
 and the scripted agents, checks what each row says should appear, and removes
 everything (issue #284). That is what CI runs. P3-13 is not part of it unless you
 add `--real-adapter` and have `claude` on your PATH; it then runs one real reply
-as you, which this walkthrough's last section describes.
+as you, which this walkthrough's last section describes. P3-14, below, is an extra
+row: Claude Code, Codex and a local model at once, run by you; its stubbed twin is
+part of the same automated run.
 
 ## Start it
 
@@ -262,7 +264,7 @@ was open, the view says `outcome unknown` beside its last reported state; it
 does not invent a result. After step 4 the agent has a new session but is still
 one `worker-test` (or `observer-test`): no duplicate identity.
 
-## P3-08 Instructions and cancel
+## P3-08 Instructions, pause, resume and cancel
 
 1. Stop `agent-a`, start it with the slow script, and send a line in `general`:
    the run now waits 30 seconds before it replies.
@@ -272,18 +274,39 @@ one `worker-test` (or `observer-test`): no duplicate identity.
    ```
 
 2. In a TUI, open the run (agents view, `enter` on the agent, `enter` on the
-   run). Press `m`, type an instruction and press enter. Then press `x` and answer
-   `y` to cancel the run. In the browser's run detail use the `Message` and
-   `Cancel` buttons.
-3. Open the run of `observer-test` or look at what the detail offers for a kind
-   the agent did not declare, such as pause.
+   run). Press `m`, type an instruction and press enter. In the browser's run
+   detail use the `Message` button.
+3. Pause the run: press `p` in the TUI's run detail, or `Pause` in the
+   browser's. Look at the command's process with
+   `ps -o pid,stat,args --ppid <pid:agent-a>`. Then resume it: `r`, or
+   `Resume`. (Both ask at once, with no question. The run offers `p` and
+   `Pause` while it is running and `r` and `Resume` while it reads waiting.)
+   To see the answers that fail, ask the API as `nick-test`, whose credential
+   `tui-a.env` holds (the run id is in the detail): a resume while the run is
+   running, or a second pause while it is paused.
+
+   ```
+   set -a; . <root>/tui-a.env; set +a
+   curl -s -X POST -H "Authorization: Bearer $CONCH_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"kind":"resume"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
+   ```
+
+4. Press `x` and answer `y` to cancel the run (in the browser, `Cancel`).
+5. Open the run of `observer-test` and look at what the detail offers.
 
 What should appear. The intervention shows `requested…`, then `acknowledged`,
-then `applied` (or `failed: <reason>`), from the agent's own reports. The run
-changes to cancelled only when the run's own update says so, not when you
-press `y`. Kinds the agent does not support are listed as unsupported (TUI:
-`pause (unsupported)`; browser: disabled with `Not supported by this agent`) and
-do nothing.
+then `applied` (or `failed: <reason>`), from the agent's own reports. After the
+pause the run is `waiting` with the outcome `paused` (the clients read it only
+from the run's own update, not when you press `p`) and the command's state in
+`ps` is `T` (stopped); the wait for its reply does not run out while it is
+paused. After the resume the run is `running` again and the state is `S`. A
+second pause says `failed: already paused`, a resume of a run that is not paused
+`failed: not paused`. The run changes to cancelled only when the run's own
+update says so, not when you press `y`, and no process of the command is left.
+An agent that did not declare a kind (an adapter on a platform without process
+groups does not declare `pause` or `resume`) is shown as unsupported (TUI:
+`pause (unsupported)`; browser: disabled with `Not supported by this agent`)
+and the server refuses the request with `409 intervention_unsupported`.
 
 ## P3-09 Drop a connection, then restart the server
 
@@ -426,6 +449,108 @@ When you post in `general`, the run's activity lists each command Codex ran as a
 only (never its arguments), then `reply_posted`, and the reply is Codex's final
 message. If `codex` is missing or not signed in, the run fails with that stated;
 nothing falls back to a fixture or to another paid service.
+
+## P3-14 Three runtimes at once, opt-in
+
+The roadmap's P3 success criterion in one sitting: Claude Code, Codex and a
+local model running side by side. Each is a principal of its own, `real-claude`,
+`real-codex` and `real-ollama`, with the manifest of `worker-test` and an
+environment file `real-<runtime>.env`. You need `claude` and `codex` installed
+and signed in, and Ollama running with the model pulled. The models come from
+`CONCH_P3_MODEL_CLAUDE`, `CONCH_P3_MODEL_CODEX` and `CONCH_P3_MODEL_OLLAMA`; the
+runner refuses a runtime whose variable is unset and names it. Read the warning it
+prints first: Claude Code runs with its permission checks off, and `claude` and
+`codex` spend your own quota. The local model only writes text.
+
+`go run ./e2e/p3-local --reset` then
+`CONCH_P3_MODEL_CLAUDE=<model> CONCH_P3_MODEL_CODEX=<model> CONCH_P3_MODEL_OLLAMA=<model> go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama`
+
+(Not fenced, for the reason in P3-13. `--real-adapters` needs `--keep` and takes any
+of the three, in any order.) The runner prints one start command for each, under
+the name `real-claude`, `real-codex` and `real-ollama`: each is
+`set -a; . <root>/real-<runtime>.env; set +a; <root>/bin/conch-adapter`, run in a
+window of its own and in a directory you would let it read. The Ollama adapter
+checks first that Ollama can answer for the model and exits with one line saying
+which of the three things is missing if it cannot; nothing else is tried.
+
+What should appear. Start the three, then post one message in `general`. The
+roster in the TUI and the browser's panel show three agents, each with its
+`model`. Their `runtime` (`claude-code`, `codex`, `ollama`) is shown to operators
+and to the agent itself, not to members, so look at it as the operator (the
+`<root>/operator.env` credential on `GET /v1/sessions?channel=general`) or in the
+adapter's own session; a member sees three models, not three runtimes. Open each
+agent's run in the TUI to read its activity, and send a `message` intervention to
+one of them with `m` in the run's detail. Write down which runtime answered what.
+Record the run, dated, in [the exit record](design/p3-exit-record.md) as a run of
+its own, as P3-13 is.
+
+The same row without any model, with a stub for each program, is part of
+`go run ./e2e/p3-local` (it is listed there as P3-14, "three runtimes at once, with stubs").
+
+## From a guest
+
+Rows P3-02, P3-05, P3-09 and P3-10 can be repeated from a virtual machine on the
+same network, to see them from a client that is not on the server's own machine
+(issue #379; the tracking issue is #353). Windows and macOS guests are out of
+scope. The commands in this section are not checked against the runner's output
+the way the rest are; they are fenced as `text` for that reason.
+
+Start the community bound to the host's address on your network instead of
+loopback. Use an address of this machine and a port you choose:
+
+```text
+go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
+```
+
+It refuses an address that is not one of this machine's (loopback and link-local
+ones too), a missing `--keep`, and a URL that is not `http://` (`https://` needs a
+TLS front end of its own: issue #380), before it builds or starts anything. Its
+first output is a warning: over `http://` the credentials travel in clear text, so
+use it on a network you trust and use only the credentials this run creates. Every
+file in the root (`tui-b.env`, `agent-a.env`, `browser.txt` and the rest) then names
+that address. `--reset` removes the advertised run like any other.
+
+Stop `tui-b` and `agent-a` on the host before you start them on the guest: each
+credential would otherwise be one person twice. After the host's commands, the runner prints
+the guest's, apart under
+`---- on the guest ----`: `conch` as `guest-test`, the browser address, and
+`conch-adapter` as `worker-test`. The guest has none of the host's files. Copy
+`tui-b.env`, `agent-a.env`, `browser.txt` and `fixtures/` from the root to
+`~/conch-p3` on the guest (they hold credentials: use `scp`, not a shared
+folder others can read), and build `conch` and `conch-adapter` on the guest from a
+checkout of this repository. The printed commands override the paths in the env
+files that point into the host's root.
+
+The host's firewall must let the guest reach the port. One line for each of the
+two common firewalls:
+
+```text
+sudo ufw allow from <guest-subnet> to any port <port> proto tcp
+sudo firewall-cmd --zone=<zone> --add-rich-rule='rule family="ipv4" source address="<guest-subnet>" port port="<port>" protocol="tcp" accept'
+```
+
+`<zone>` is the zone of the interface the guest arrives on: find it with
+`firewall-cmd --get-zone-of-interface <iface>`. libvirt puts its bridge `virbr0` in
+a zone of its own, `libvirt`, which rejects everything not listed, so for NAT
+through `virbr0` the zone is `libvirt`, not the default one. `firewall-cmd`
+changes the running rules only; remove the rule when you are done.
+
+Which address to advertise depends on the guest's network. With NAT (the usual
+default of a VM manager) the guest reaches the host at the host's address on the
+virtual bridge (for libvirt, `192.168.122.1`), and nothing else on your network
+can reach the guest. VirtualBox's NAT host alias, `10.0.2.2`, is on no host
+interface, so the runner refuses it: advertise the host's LAN address there. With bridged networking the guest is a machine on your LAN
+and reaches the host at its LAN address. `localhost` in the guest is the guest,
+not the host: never use it, and never `127.0.0.1`, for the server.
+
+Repeat these rows from the guest, with the host's windows as the other people:
+
+| Row | What to check from the guest |
+| --- | --- |
+| P3-02 | A line sent from the guest appears once in every host window, in order, and theirs appear in the guest. |
+| P3-05 | `guest-test` is refused `test-private` from the guest as from the host. |
+| P3-09 | Stop and start the server (the host's commands); the guest reconnects without signing in again. |
+| P3-10 | Revoking a credential or removing a member on the host takes effect for the guest's session. |
 
 ## When you are done
 

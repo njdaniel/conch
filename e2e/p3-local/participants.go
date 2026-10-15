@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,24 @@ var participants = []struct{ name, principal, what string }{
 	{"tui-a2", "nick-test", "terminal 3: nick-test again, with a second credential"},
 	{"agent-a", "worker-test", "worker-test, the scripted agent that can post"},
 	{"agent-b", "observer-test", "observer-test, the scripted agent that can only read"},
+}
+
+// allParticipants is the participants of this run: those above and one agent
+// per real runtime asked for with --real-adapters.
+func (r *runner) allParticipants() []struct{ name, principal, what string } {
+	all := slices.Clone(participants)
+	for _, rt := range realRuntimes {
+		if slices.Contains(r.realAgents, rt.name) {
+			all = append(all, struct{ name, principal, what string }{realAgent(rt.name),
+				realAgent(rt.name), "real-" + rt.name + ", the real " + rt.label + " adapter (model " + r.models[rt.name] + ")"})
+		}
+	}
+	return all
+}
+
+// isAgentPart reports whether the participant is an agent, run by conch-adapter.
+func isAgentPart(part string) bool {
+	return strings.HasPrefix(part, "agent-") || strings.HasPrefix(part, "real-")
 }
 
 var safeWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
@@ -68,13 +87,13 @@ func (r *runner) writeParticipantFiles() error {
 			"CONCH_TOKEN", token,
 		}
 	}
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		c := fx.creds[p.name]
 		if err := ensureDir(r.path("config", p.name)); err != nil {
 			return err
 		}
 		pairs := common(p.name, c.token)
-		if strings.HasPrefix(p.name, "agent-") {
+		if isAgentPart(p.name) {
 			pairs = append(pairs, r.adapterVars(p.name, c)...)
 		}
 		header := p.name + ": " + p.what + ". Source it, then run the program; it holds a credential."
@@ -109,6 +128,15 @@ func (r *runner) adapterVars(part string, c credential) []string {
 		"CONCH_ADAPTER_POLL_INTERVAL", "1s",
 		"CONCH_ADAPTER_LOCK_FILE", r.path(part + ".lock"),
 	}
+	if rt, ok := strings.CutPrefix(part, "real-"); ok {
+		// The profile's default command, no fixture; the model is the one the
+		// caller named, and the adapter's profile is told by its own name.
+		for _, known := range realRuntimes {
+			if known.name == rt {
+				return append(vars, "CONCH_ADAPTER_RUNTIME", known.profile, "CONCH_ADAPTER_MODEL", r.models[rt])
+			}
+		}
+	}
 	if part == "agent-a" && r.realAdapter {
 		if r.runtime == "codex" {
 			// The profile's default command is Codex's; the model has no default
@@ -133,7 +161,7 @@ func (r *runner) adapterCmd(script string) string {
 	return shq(r.path("fixtures", script))
 }
 
-var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh", "hang.sh"}
+var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh", "hang.sh", "codex-stub.sh", "ollama-stub.sh", "claude-stub.sh"}
 
 func (r *runner) copyFixtureScripts() error {
 	for _, n := range fixtureNames {
@@ -153,7 +181,7 @@ func (r *runner) copyFixtureScripts() error {
 func (r *runner) verifyFiles() error {
 	op := r.fx.operatorToken
 	files := []string{"operator.env", "browser.txt"}
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		files = append(files, p.name+".env")
 	}
 	for _, f := range files {
@@ -226,9 +254,9 @@ func (r *runner) printCommands() error {
 	say("%s: ready. conchd is serving %s (pid %d); its log is %s", name, r.baseURL(), r.server.pid(), shq(r.path("logs", "conchd.log")))
 	say("Run each command in a window of its own. Nothing below is started for you.")
 	say("")
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		command := r.tuiCommand(p.name)
-		if strings.HasPrefix(p.name, "agent-") {
+		if isAgentPart(p.name) {
 			command = r.agentCommand(p.name)
 		}
 		cmd(p.name+": "+p.what, command)
@@ -274,15 +302,18 @@ func (r *runner) printCommands() error {
 	cmd("start again after a reset", r.selfCommand("--keep"))
 	cmd("stop everything and remove "+r.root, r.selfCommand("--reset"))
 	say("")
+	if r.advertise != nil {
+		r.guestCommands(say, cmd)
+	}
 	say("values the walkthrough names:")
 	say("  root %s", r.root)
 	say("  address %s", r.addr)
 	say("  webdir %s", r.webDir)
 	say("  pid conchd %d", r.server.pid())
-	for _, n := range everyone {
+	for _, n := range r.everyone() {
 		say("  principal %s %s", n, pid(n))
 	}
-	for _, spec := range credSpecs {
+	for _, spec := range r.credSpecs() {
 		say("  credential %s %d", spec.participant, fx.creds[spec.participant].id)
 	}
 
@@ -292,6 +323,34 @@ func (r *runner) printCommands() error {
 	}
 	fmt.Print(text)
 	return nil
+}
+
+// guestCommands prints what to run on the guest, apart from the commands for
+// this machine. The guest has none of this machine's files: it needs the env
+// files of the participants it plays (they hold the test credentials), the
+// fixture scripts, and conch and conch-adapter built for its own system. Each
+// env file also sets paths inside this machine's root, so the commands
+// override those.
+func (r *runner) guestCommands(say func(string, ...any), cmd func(comment, command string)) {
+	home := `"$HOME"/conch-p3`
+	say("# ---- on the guest ----")
+	say("# Everything above runs on this machine. The commands below run on the guest, which must reach %s.", r.baseURL())
+	say("# Nothing here is started for you, and no credential is printed: the files hold them.")
+	say("# Copy these from %s to ~/conch-p3 on the guest: tui-b.env agent-a.env browser.txt fixtures/", r.root)
+	say("# On the guest, in a checkout of this repository: go build -o ~/conch-p3/bin/ ./cmd/conch ./cmd/conch-adapter")
+	say("# On the guest, the address in these commands is the host; a name for the guest itself would be the guest.")
+	say("# Stop tui-b and agent-a on this machine (ctrl-c) before starting them on the guest: two clients on one credential would be one person twice.")
+	cmd("guest: conch as guest-test (tui-b)",
+		"set -a; . "+home+"/tui-b.env; CONCH_CONFIG_DIR="+home+"/config/tui-b; set +a; "+home+"/bin/conch")
+	say("# guest: the browser. Open %s/app/ in it and paste the credential from this file", r.baseURL())
+	say("cat %s/browser.txt", home)
+	adapter := "set -a; . " + home + "/agent-a.env; CONCH_ADAPTER_LOCK_FILE=" + home + "/agent-a.lock; "
+	if !r.realAdapter {
+		adapter += "CONCH_ADAPTER_CMD=" + home + "/fixtures/echo.sh; "
+	}
+	cmd("guest: conch-adapter as worker-test (agent-a)", adapter+"CONCH_CONFIG_DIR="+home+"/config/agent-a; set +a; "+home+"/bin/conch-adapter")
+	say("# Repeat on the guest: P3-02, P3-05, P3-09, P3-10 (docs/p3-walkthrough.md, \"From a guest\").")
+	say("")
 }
 
 // defaultRoot is where the root is without CONCH_P3_ROOT.
@@ -383,7 +442,7 @@ func (r *runner) checkParticipants() error {
 }
 
 func (r *runner) checkWebApp() error {
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(r.baseURL() + "/app/") // #nosec G107 -- this run's own loopback conchd
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(r.localURL() + "/app/") // #nosec G107 -- this run's own loopback conchd
 	if err != nil {
 		return fmt.Errorf("GET /app/: %w", err)
 	}
@@ -441,7 +500,7 @@ func (r *runner) logTail(path string) string {
 
 // sessions is the roster of channel as the holder of token sees it.
 func (r *runner) sessions(token, channel string) ([]schema.SessionV1, error) {
-	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, r.baseURL()+"/v1/sessions?channel="+url.QueryEscape(channel), nil)
+	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, r.localURL()+"/v1/sessions?channel="+url.QueryEscape(channel), nil)
 	if err != nil {
 		return nil, err
 	}

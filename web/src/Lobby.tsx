@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { VoiceStatus } from './VoiceStatus';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
 
@@ -17,6 +18,7 @@ export function Lobby({
   origin,
   name,
   channels,
+  unread,
   connection,
   conversation,
   panel,
@@ -27,6 +29,7 @@ export function Lobby({
   readonly origin: string;
   readonly name: string;
   readonly channels: ChannelsState;
+  readonly unread: ReadonlyMap<string, number>;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
@@ -53,7 +56,7 @@ export function Lobby({
         <nav aria-label="Channels" className="channels">
           <h2>Channels</h2>
           {channels.loaded ? (
-            <ChannelList channels={channels.channels} selected={channels.selected} onOpen={onOpen} />
+            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} onOpen={onOpen} />
           ) : connection === 'reconnecting' ? (
             <div>
               <p className="empty">Cannot reach the server</p>
@@ -72,6 +75,7 @@ export function Lobby({
           {conversation}
         </section>
         <aside aria-label="Members panel" className="panel">
+          <VoiceStatus />
           <button
             type="button"
             aria-expanded={panelOpen}

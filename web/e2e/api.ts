@@ -4,6 +4,7 @@
 import { listActivityResponseV1, type AgentActivityV1 } from '../src/schema/activity';
 import { listInterventionsResponseV1, type InterventionV1 } from '../src/schema/intervention';
 import { listMessagesResponseV2, postMessageResponseV2, type MessageV2 } from '../src/schema/message';
+import { listReadStateResponseV1, type ReadStateV1 } from '../src/schema/readstate';
 import { listRunsResponseV1, runV1, type RunV1 } from '../src/schema/run';
 import { sessionRosterV1, sessionV1, type SessionV1 } from '../src/schema/session';
 import { call, ok, type World } from './world';
@@ -55,4 +56,9 @@ export async function interventions(world: World, token: string, runId: number):
 
 export async function activityOf(world: World, token: string, runId: number): Promise<AgentActivityV1[]> {
   return (await ok(world, token, 'GET', `/v1/runs/${String(runId)}/activity?after=0&limit=100`, listActivityResponseV1)).activity;
+}
+
+// readState is the caller's mark and unread count in every channel they are in.
+export async function readState(world: World, token: string): Promise<ReadStateV1[]> {
+  return (await ok(world, token, 'GET', '/v1/read-state', listReadStateResponseV1)).read_state;
 }

@@ -75,12 +75,24 @@ jobs:
       - name: p3-local-check
         run: go run ./e2e/p3-local
 
+      # conchd embeds the web client (issue #347): the build goes to
+      # internal/web/dist (the Node setup above is the pinned one) and every
+      # conchd target is built with -tags conchweb. conch is unchanged.
+      # What is embedded must pass the web gates first: the dependency
+      # allow-list, exact versions and licences, with the client's lint and
+      # tests (the Go side's depgate runs above).
+      - name: web-check
+        run: make web-check
+
+      - name: Build the web client for embedding
+        run: make web-embed
+
       - name: Build binaries
         run: |
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" \
+              go build -tags conchweb -trimpath -ldflags "-s -w" \
               -o "dist/conchd_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conchd
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
               go build -trimpath -ldflags "-s -w" \
@@ -94,4 +106,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --draft --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Draft — Nick publishes. dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --notes "Draft — Nick publishes. dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
