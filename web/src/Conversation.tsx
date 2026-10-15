@@ -171,6 +171,7 @@ export function Conversation({
   onDismissSend,
   onLoadOlder,
   onReload,
+  onBottom,
 }: {
   readonly channel: string;
   readonly chat: ChannelChat;
@@ -188,6 +189,8 @@ export function Conversation({
   readonly onDismissSend: (localId: number) => void;
   readonly onLoadOlder: () => void;
   readonly onReload: () => void;
+  // Told whether the reader is at the newest message, whenever that changes.
+  readonly onBottom: (atBottom: boolean) => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
@@ -235,6 +238,7 @@ export function Conversation({
     if (el !== null) el.scrollTop = el.scrollHeight;
     atBottom.current = true;
     setUnseen(false);
+    onBottom(true);
   }
 
   return (
@@ -258,6 +262,7 @@ export function Conversation({
         onScroll={(event) => {
           const el = event.currentTarget;
           atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
+          onBottom(atBottom.current);
           if (atBottom.current) setUnseen(false);
           if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
@@ -302,6 +307,7 @@ export function Conversation({
         onSend={onSend}
         atBottom={() => {
           atBottom.current = true;
+          onBottom(true);
         }}
       />
     </>

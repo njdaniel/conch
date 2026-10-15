@@ -264,7 +264,7 @@ was open, the view says `outcome unknown` beside its last reported state; it
 does not invent a result. After step 4 the agent has a new session but is still
 one `worker-test` (or `observer-test`): no duplicate identity.
 
-## P3-08 Instructions and cancel
+## P3-08 Instructions, pause, resume and cancel
 
 1. Stop `agent-a`, start it with the slow script, and send a line in `general`:
    the run now waits 30 seconds before it replies.
@@ -274,18 +274,34 @@ one `worker-test` (or `observer-test`): no duplicate identity.
    ```
 
 2. In a TUI, open the run (agents view, `enter` on the agent, `enter` on the
-   run). Press `m`, type an instruction and press enter. Then press `x` and answer
-   `y` to cancel the run. In the browser's run detail use the `Message` and
-   `Cancel` buttons.
-3. Open the run of `observer-test` or look at what the detail offers for a kind
-   the agent did not declare, such as pause.
+   run). Press `m`, type an instruction and press enter. In the browser's run
+   detail use the `Message` button.
+3. Pause the run. The clients have no key for it yet, so ask the API as
+   `nick-test`, whose credential `tui-a.env` holds (the run id is in the detail), and look at the command's process
+   with `ps -o pid,stat,args --ppid <pid:agent-a>`:
+
+   ```
+   set -a; . <root>/tui-a.env; set +a
+   curl -s -X POST -H "Authorization: Bearer $CONCH_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"kind":"pause"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
+   ```
+
+   Then the same with `{"kind":"resume"}`.
+4. Press `x` and answer `y` to cancel the run (in the browser, `Cancel`).
+5. Open the run of `observer-test` and look at what the detail offers.
 
 What should appear. The intervention shows `requested…`, then `acknowledged`,
-then `applied` (or `failed: <reason>`), from the agent's own reports. The run
-changes to cancelled only when the run's own update says so, not when you
-press `y`. Kinds the agent does not support are listed as unsupported (TUI:
-`pause (unsupported)`; browser: disabled with `Not supported by this agent`) and
-do nothing.
+then `applied` (or `failed: <reason>`), from the agent's own reports. After the
+pause the run is `waiting` with the outcome `paused` and the command's state in
+`ps` is `T` (stopped); the wait for its reply does not run out while it is
+paused. After the resume the run is `running` again and the state is `S`. A
+second pause says `failed: already paused`, a resume of a run that is not paused
+`failed: not paused`. The run changes to cancelled only when the run's own
+update says so, not when you press `y`, and no process of the command is left.
+An agent that did not declare a kind (an adapter on a platform without process
+groups does not declare `pause` or `resume`) is shown as unsupported (TUI:
+`pause (unsupported)`; browser: disabled with `Not supported by this agent`)
+and the server refuses the request with `409 intervention_unsupported`.
 
 ## P3-09 Drop a connection, then restart the server
 

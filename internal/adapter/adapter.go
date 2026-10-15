@@ -28,7 +28,9 @@ type config struct {
 	ContextMessages int
 	Model           string
 	ReplyTimeout    time.Duration
-	LockFile        string
+	// MaxPause is how long a run may stay paused before it is failed.
+	MaxPause time.Duration
+	LockFile string
 	// Command is the command that makes a reply, split, with CLAUDE_BIN
 	// already in place of its first word.
 	Command             commandSpec
@@ -79,7 +81,7 @@ func run() error {
 	if err := client.Initialize(ctx, "conch-adapter"); err != nil {
 		return fmt.Errorf("initialize MCP: %w", err)
 	}
-	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir}
+	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir, maxPause: cfg.MaxPause}
 	loop := &botLoop{cfg: cfg, mcp: mcpAdapter{client}, claude: runner}
 	return loop.run(ctx)
 }
@@ -164,6 +166,9 @@ func loadConfig(lookup envLookup) (config, error) {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL must not start with '-' or contain whitespace or control characters")
 	}
 	if cfg.ReplyTimeout, err = parseDuration(get("CONCH_ADAPTER_REPLY_TIMEOUT", "CONCH_BOT_REPLY_TIMEOUT", "120s"), "CONCH_ADAPTER_REPLY_TIMEOUT"); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxPause, err = parseDuration(get("CONCH_ADAPTER_MAX_PAUSE", "", cfg.ReplyTimeout.String()), "CONCH_ADAPTER_MAX_PAUSE"); err != nil {
 		return config{}, err
 	}
 	cfg.LockFile = get("CONCH_ADAPTER_LOCK_FILE", "CONCH_BOT_LOCK_FILE", filepath.Join(os.TempDir(), "conch-adapter.lock"))

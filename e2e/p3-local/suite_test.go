@@ -146,7 +146,7 @@ func TestChannelList(t *testing.T) {
 		"╰────────────────╯╰──────╯",
 		"online: nobody",
 	}
-	names, marked := channelList(rows)
+	names, marked := channelList(rows, suiteChannels)
 	if !slices.Equal(names, []string{"general", "nets-demo", "test-private"}) || marked != 1 {
 		t.Errorf("channelList = %v, %d", names, marked)
 	}
@@ -273,5 +273,41 @@ func TestRealAdapterPlanFor(t *testing.T) {
 				t.Errorf("run = %v, why = %q; want %v, %q", run, why, tc.wantRun, tc.wantWhy)
 			}
 		})
+	}
+}
+
+func TestChannelListIgnoresUnreadCounts(t *testing.T) {
+	rows := []string{
+		"╭────────────────╮╭──────╮",
+		"│› general 2     ││ msg  │",
+		"│  nets-demo 999+││      │",
+		"│  test-private  ││      │",
+		"╰────────────────╯╰──────╯",
+	}
+	names, marked := channelList(rows, suiteChannels)
+	if !slices.Equal(names, []string{"general", "nets-demo", "test-private"}) || marked != 0 {
+		t.Errorf("channelList = %v, %d", names, marked)
+	}
+}
+
+func TestChannelListKnowsNamesThatEndInANumber(t *testing.T) {
+	rows := []string{
+		"│› room 2        ││      │",
+		"│  room 2 5      ││      │",
+		"│  room          ││      │",
+	}
+	names, _ := channelList(rows, []string{"room 2", "room"})
+	if !slices.Equal(names, []string{"room 2", "room 2", "room"}) {
+		t.Errorf("channelList = %v", names)
+	}
+}
+
+// The parser tells a count from a name by the known names, but the suite's own
+// names must also never look like one.
+func TestSuiteChannelNamesDoNotEndInACount(t *testing.T) {
+	for _, name := range suiteChannels {
+		if _, last, ok := strings.Cut(name, " "); ok && unreadCount(last) {
+			t.Errorf("channel %q ends like an unread count", name)
+		}
 	}
 }
