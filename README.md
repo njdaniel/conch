@@ -818,7 +818,7 @@ The proxy terminates TLS and forwards everything, WebSocket upgrades included, t
 
 - **Keep the `Host` header the client sent.** A browser's WebSocket upgrade carries an `Origin`, and `conchd` accepts it only when its host equals the request's `Host` (the library's same-origin check; `internal/server/origins.go` adds extra origins only for `--allowed-origins`). If the proxy rewrites `Host` to the backend's address, the upgrade is refused with `403`. Caddy keeps `Host` by default. nginx does not (its default is `$proxy_host`), so the block below sets it. With `Host` kept and one public name for the page and the sockets, the origins match and **`--allowed-origins` is not needed**; leave it unset. (`conch`, `conch-adapter` and `conch-voice` send no `Origin`, so they are not subject to this check; the web page is.)
 - **Bind `conchd` to loopback** (`--listen 127.0.0.1:8080`) so the proxy is the only way in. `conchd` does not read `X-Forwarded-*` headers; it sees every request as coming from the proxy.
-- **Do not let the proxy cut the stream or the upload.** An open stream (`/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) can be silent for long stretches, and neither `conchd` nor any client sends WebSocket pings, so the proxy's read timeout is how long a stream with no messages lives: after it the proxy closes the socket, `conch tail` exits with an error and the TUI and the web page reconnect. nginx closes a proxied connection after 60 s without data unless told otherwise (the block below sets 1 h; raise it if that is too short), and limits a request body to 1 MiB; `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
+- **The stream needs no long idle timeout, but the upload needs the body limit raised.** `conchd` pings every open stream (`/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) every 25 s and closes one whose peer does not answer within 10 s, so a proxy's idle timer never runs out on a healthy connection and a dead one is dropped in about 35 s. `/v1/events/ws` and, for a client that asks with `?heartbeat=1`, `/v2/ws` also carry a small `conch.heartbeat.v1` frame at the same rate, which is how the web page (a browser cannot see pings) tells that the connection is alive; it reconnects after 60 s without a frame. `conch tail` and the TUI send their own pings every 20 s and reconnect (the TUI) or exit (`conch tail`) within about 30 s of a connection that went silent. Any proxy read timeout over about 30 s therefore works: nginx's 60 s default is enough. nginx limits a request body to 1 MiB (the block below sets 11m); `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
 
 Start `conchd` as in step 2, on loopback, optionally with the page:
 
@@ -863,8 +863,7 @@ server {
         proxy_set_header Host $http_host;               # the Host the client sent, port included
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 1h;                          # no pings: a quiet stream lives this long
-        proxy_send_timeout 1h;
+        proxy_read_timeout 120s;                        # conchd pings every 25 s; this only has to be longer than that
     }
 }
 ```

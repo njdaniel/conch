@@ -86,7 +86,7 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 // the socket carries one frame per change and nothing otherwise. Writes carry
 // a deadline; the poller never waits for this loop.
 func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64, recheck <-chan time.Time) {
-	ctx = conn.CloseRead(ctx)
+	ctx = s.keepAlive(ctx, conn, false)
 	var last []byte
 	send := func() bool {
 		snap, live := sub.current()

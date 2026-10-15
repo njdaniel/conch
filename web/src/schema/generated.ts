@@ -428,6 +428,17 @@ export const sessionRosterV1 = object<SessionRosterV1>({
   sessions: array(sessionV1),
 });
 
+// schema.HeartbeatV1
+export const heartbeatV1Schema = 'conch.heartbeat.v1';
+
+export interface HeartbeatV1 {
+  schema: typeof heartbeatV1Schema;
+}
+
+export const heartbeatV1 = object<HeartbeatV1>({
+  schema: vocab<typeof heartbeatV1Schema>({ [heartbeatV1Schema]: true }),
+});
+
 // schema.CreateSessionRequestV1
 export interface CreateSessionRequestV1 {
   client: string;
