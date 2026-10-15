@@ -271,3 +271,19 @@ body {
 .voice p {
   margin: 0;
 }
+
+.channel-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.channel-list .unread {
+  min-width: 1.4rem;
+  padding: 0 0.4rem;
+  border-radius: 0.7rem;
+  background: #0b57d0;
+  color: #fff;
+  font-size: 0.8rem;
+  text-align: center;
+}

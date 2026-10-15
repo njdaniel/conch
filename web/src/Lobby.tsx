@@ -18,6 +18,7 @@ export function Lobby({
   origin,
   name,
   channels,
+  unread,
   connection,
   conversation,
   panel,
@@ -28,6 +29,7 @@ export function Lobby({
   readonly origin: string;
   readonly name: string;
   readonly channels: ChannelsState;
+  readonly unread: ReadonlyMap<string, number>;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
@@ -54,7 +56,7 @@ export function Lobby({
         <nav aria-label="Channels" className="channels">
           <h2>Channels</h2>
           {channels.loaded ? (
-            <ChannelList channels={channels.channels} selected={channels.selected} onOpen={onOpen} />
+            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} onOpen={onOpen} />
           ) : connection === 'reconnecting' ? (
             <div>
               <p className="empty">Cannot reach the server</p>
