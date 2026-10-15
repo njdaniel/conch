@@ -40,7 +40,13 @@ thread changes the displayed content only. Changing the voice channel or transmi
 target requires its own action. A speaking indicator names the actual source net.
 
 Navigation labels include unread counts only when backed by a defined read-state
-model. In P3 an honest unread-unavailable state is preferable to invented counts.
+model. That model now exists (issue #351): `GET /v1/read-state` gives each channel
+the caller is in a `conch.read_state.v1` document with the person's read mark and an
+`unread` count of the messages after it that this person may see (capped at 1000, so
+a label shows `1000+`). The mark is the person's, shared by all their clients, and
+moves forward only (`PUT /v1/channels/{channel}/read-state`). A client that cannot
+reach the API shows the honest unread-unavailable state, not an invented count.
+Showing the counts in the TUI and the browser is later work; agents have no read state.
 Member lists show principals once with expandable sessions; distinguish humans
 from agents using a text badge as well as visual styling.
 
