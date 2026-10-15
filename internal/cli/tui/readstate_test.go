@@ -541,3 +541,34 @@ func TestReadStateKeepsNamedChannelsWhenTheChannelListFails(t *testing.T) {
 		t.Errorf("unread = %d, want the named channel's 3 kept", got)
 	}
 }
+
+// While the server is down nothing of read state is sent on a timer of ours:
+// the held mark goes when the message socket has opened again.
+func TestMarkHeldBackWhileTheSocketIsDown(t *testing.T) {
+	api := &readAPI{}
+	m, clock := readModel(t, api)
+	m.subscribed["general"] = true
+	m, cmd := update(m, messagesLoaded{channel: "general", messages: threeMessages()})
+	m = feedRead(m, cmd)
+	clock.now = clock.now.Add(time.Second)
+	m, cmd = update(m, messageReceived{channel: "general", message: schema.MessageV2{ID: 4, AuthorID: 9}})
+	m = feedRead(m, cmd) // held: inside the interval
+
+	// The socket drops and the retry is waiting; the timer comes due.
+	m, _ = update(m, subscriptionEnded{channel: "general", err: errors.New("eof")})
+	clock.now = clock.now.Add(time.Second)
+	m, cmd = update(m, markDue{channel: "general"})
+	m = feedRead(m, cmd)
+	if _, _, marks := api.counts(); len(marks) != 1 {
+		t.Fatalf("marks while down = %v, want only the first", marks)
+	}
+
+	// The socket is back: the held mark goes, with the re-read.
+	m.subscribed["general"] = true
+	delete(m.retryPending, "general")
+	m, cmd = update(m, subscriptionOpened{channel: "general"})
+	feedRead(m, cmd)
+	if _, _, marks := api.counts(); len(marks) != 2 || marks[1] != (markCall{"general", 4}) {
+		t.Errorf("marks after the socket reopened = %v, want general at 4 second", marks)
+	}
+}

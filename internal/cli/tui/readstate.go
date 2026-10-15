@@ -238,11 +238,27 @@ func (m *Model) sendMark(channel string, id int64, now time.Time) tea.Cmd {
 // markDue sends what the interval held back.
 func (m Model) markDue(msg markDue) (tea.Model, tea.Cmd) {
 	delete(m.rs.timer, msg.channel)
-	id := m.rs.pending[msg.channel]
-	if m.rs.off || id <= m.rs.marked[msg.channel] {
+	if !m.socketUp(msg.channel) {
+		// The server is not answering: nothing is sent on a timer of ours.
+		// The mark waits in pending until the socket is back (flushMark).
 		return m, nil
 	}
-	return m, m.sendMark(msg.channel, id, m.now())
+	return m, m.flushMark(msg.channel)
+}
+
+// socketUp is true while channel's message socket is open or opening, that is
+// not waiting out a retry after a drop.
+func (m Model) socketUp(channel string) bool {
+	return m.subscribed[channel] && !m.retryPending[channel]
+}
+
+// flushMark sends the mark that was held back for channel, if any.
+func (m *Model) flushMark(channel string) tea.Cmd {
+	id := m.rs.pending[channel]
+	if m.rs.off || id <= m.rs.marked[channel] {
+		return nil
+	}
+	return m.sendMark(channel, id, m.now())
 }
 
 // readMarked takes the server's count after a mark as the channel's count.

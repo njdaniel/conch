@@ -714,9 +714,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.rs.dropped[msg.channel] {
 			// Messages may have come while it was down: ask what is unread now.
 			delete(m.rs.dropped, msg.channel)
-			return m, tea.Batch(m.waitEvent(), m.loadReadState())
+			return m, tea.Batch(m.waitEvent(), m.loadReadState(), m.flushMark(msg.channel))
 		}
-		return m, m.waitEvent()
+		return m, tea.Batch(m.waitEvent(), m.flushMark(msg.channel))
 	case subscriptionEnded:
 		return m.subscriptionEnded(msg)
 	case resubscribeDue:
