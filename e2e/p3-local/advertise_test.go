@@ -44,20 +44,22 @@ func TestParseAdvertise(t *testing.T) {
 		keep, reset bool
 		wantURL     string
 		wantBind    string
-		wantClear   bool
 		wantErr     string // a part of the message; empty means success
 	}{
 		{name: "unset", raw: "", keep: true},
-		{name: "http on a host address", raw: "http://192.168.1.20:8080", keep: true, wantURL: "http://192.168.1.20:8080", wantBind: "192.168.1.20:8080", wantClear: true},
-		{name: "a trailing slash is dropped", raw: "http://192.168.1.20:8080/", keep: true, wantURL: "http://192.168.1.20:8080", wantBind: "192.168.1.20:8080", wantClear: true},
-		{name: "https is accepted", raw: "https://192.168.1.20:8443", keep: true, wantURL: "https://192.168.1.20:8443", wantBind: "192.168.1.20:8443"},
-		{name: "ipv6", raw: "http://[fd00::20]:9000", keep: true, wantURL: "http://[fd00::20]:9000", wantBind: "[fd00::20]:9000", wantClear: true},
+		{name: "http on a host address", raw: "http://192.168.1.20:8080", keep: true, wantURL: "http://192.168.1.20:8080", wantBind: "192.168.1.20:8080"},
+		{name: "a trailing slash is dropped", raw: "http://192.168.1.20:8080/", keep: true, wantURL: "http://192.168.1.20:8080", wantBind: "192.168.1.20:8080"},
+		{name: "https is refused", raw: "https://192.168.1.20:8443", keep: true, wantErr: "TLS front end"},
+		{name: "loopback", raw: "http://127.0.0.1:8080", keep: true, wantErr: "loopback"},
+		{name: "ipv6 loopback", raw: "http://[::1]:8080", keep: true, wantErr: "loopback"},
+		{name: "link-local", raw: "http://[fe80::1]:8080", keep: true, wantErr: "link-local"},
+		{name: "ipv6", raw: "http://[fd00::20]:9000", keep: true, wantURL: "http://[fd00::20]:9000", wantBind: "[fd00::20]:9000"},
 		{name: "missing --keep", raw: "http://192.168.1.20:8080", wantErr: "needs --keep"},
 		{name: "with --reset", raw: "http://192.168.1.20:8080", keep: true, reset: true, wantErr: "--reset"},
 		{name: "not this host", raw: "http://192.168.1.99:8080", keep: true, wantErr: "not an address of this machine"},
 		{name: "wildcard", raw: "http://0.0.0.0:8080", keep: true, wantErr: "not an address of this machine"},
 		{name: "a name", raw: "http://example.test:8080", keep: true, wantErr: "IP address"},
-		{name: "ftp", raw: "ftp://192.168.1.20:8080", keep: true, wantErr: "http or https"},
+		{name: "ftp", raw: "ftp://192.168.1.20:8080", keep: true, wantErr: "must be http"},
 		{name: "no scheme", raw: "192.168.1.20:8080", keep: true, wantErr: "--advertise"},
 		{name: "no port", raw: "http://192.168.1.20", keep: true, wantErr: "explicit port"},
 		{name: "port zero", raw: "http://192.168.1.20:0", keep: true, wantErr: "explicit port"},
@@ -83,26 +85,19 @@ func TestParseAdvertise(t *testing.T) {
 				}
 				return
 			}
-			if got.url != tt.wantURL || got.bind != tt.wantBind || got.clearText != tt.wantClear {
-				t.Errorf("got %+v, want url %s bind %s clear %v", got, tt.wantURL, tt.wantBind, tt.wantClear)
+			if got.url != tt.wantURL || got.bind != tt.wantBind {
+				t.Errorf("got %+v, want url %s bind %s", got, tt.wantURL, tt.wantBind)
 			}
 		})
 	}
 }
 
-// TestAdvertiseWarnings: the clear-text warning is for http and says so; https
-// gets the note about the TLS front end instead.
-func TestAdvertiseWarnings(t *testing.T) {
-	for _, tt := range []struct {
-		adv  advertise
-		want string
-	}{
-		{advertise{bind: "10.0.0.5:80", clearText: true}, "clear text"},
-		{advertise{bind: "10.0.0.5:443"}, "TLS front end"},
-	} {
-		if got := tt.adv.warning(); !strings.Contains(got, tt.want) || !strings.Contains(got, tt.adv.bind) {
-			t.Errorf("warning for %+v = %q, want it to hold %q and the bind", tt.adv, got, tt.want)
-		}
+// TestAdvertiseWarning: the warning says the credentials travel in clear text
+// and names the bind.
+func TestAdvertiseWarning(t *testing.T) {
+	adv := advertise{bind: "10.0.0.5:80"}
+	if got := adv.warning(); !strings.Contains(got, "clear text") || !strings.Contains(got, adv.bind) {
+		t.Errorf("warning = %q, want it to hold \"clear text\" and the bind", got)
 	}
 }
 
@@ -117,6 +112,8 @@ func TestAdvertiseRefusals(t *testing.T) {
 		{"without --keep", []string{"--advertise", "http://127.0.0.1:8080"}},
 		{"with --reset", []string{"--reset", "--advertise", "http://127.0.0.1:8080"}},
 		{"not http", []string{"--keep", "--advertise", "ftp://127.0.0.1:8080"}},
+		{"https", []string{"--keep", "--advertise", "https://192.0.2.1:8443"}},
+		{"loopback", []string{"--keep", "--advertise", "http://127.0.0.1:8080"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newScratch(t)

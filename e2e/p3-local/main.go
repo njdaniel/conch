@@ -21,8 +21,8 @@
 // what to do with a kept community. With --keep --advertise the server binds to
 // that address of this machine instead of loopback, every file names it, and
 // the commands for a guest (a VM) are printed apart; the guest's credentials
-// then travel in clear text over http://, which the run says first (issue #379). CONCH_P3_ROWS=P3-06,P3-07 limits the suite
-// to those rows (and P3-01, which starts everyone) while working on them.
+// then travel in clear text over http://, which the run says first (issue
+// #379). CONCH_P3_ROWS=P3-06,P3-07 limits the suite to those rows (and P3-01, which starts everyone) while working on them.
 //
 // The root is $CONCH_P3_ROOT, else $XDG_STATE_HOME/conch-p3, else
 // ~/.local/state/conch-p3. This program never reads or writes the user's own
@@ -780,6 +780,9 @@ func (r *runner) startServer() error {
 			if err == nil {
 				_ = resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
+					if err := r.checkAdvertised(); err != nil {
+						return err
+					}
 					step("conchd is serving on http://%s (pid %d)", r.addr, c.pid())
 					return nil
 				}
@@ -790,6 +793,24 @@ func (r *runner) startServer() error {
 		}
 	}
 	return errors.New("conchd did not become healthy within 20s")
+}
+
+// checkAdvertised fetches /healthz from the address the files will name, so a
+// mismatch between it and where conchd listens fails the run instead of
+// leaving files that cannot work.
+func (r *runner) checkAdvertised() error {
+	if r.advertise == nil {
+		return nil
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(r.baseURL() + "/healthz") // #nosec G107 -- the address this run's own conchd was bound to
+	if err != nil {
+		return fmt.Errorf("conchd does not answer on the advertised %s: %w", r.baseURL(), err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("conchd answered %d on the advertised %s/healthz", resp.StatusCode, r.baseURL())
+	}
+	return nil
 }
 
 // The heartbeat thresholds of a server the suite runs against. Passed to

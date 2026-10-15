@@ -481,14 +481,17 @@ loopback. Use an address of this machine and a port you choose:
 go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
 ```
 
-It refuses an address that is not one of this machine's, a missing `--keep`, and a
-URL that is not `http://` or `https://`, before it builds or starts anything. Its
+It refuses an address that is not one of this machine's (loopback and link-local
+ones too), a missing `--keep`, and a URL that is not `http://` (`https://` needs a
+TLS front end of its own: issue #380), before it builds or starts anything. Its
 first output is a warning: over `http://` the credentials travel in clear text, so
 use it on a network you trust and use only the credentials this run creates. Every
 file in the root (`tui-b.env`, `agent-a.env`, `browser.txt` and the rest) then names
 that address. `--reset` removes the advertised run like any other.
 
-After the host's commands, the runner prints the guest's, apart under
+Stop `tui-b` and `agent-a` on the host before you start them on the guest: each
+credential would otherwise be one person twice. After the host's commands, the runner prints
+the guest's, apart under
 `---- on the guest ----`: `conch` as `guest-test`, the browser address, and
 `conch-adapter` as `worker-test`. The guest has none of the host's files. Copy
 `tui-b.env`, `agent-a.env`, `browser.txt` and `fixtures/` from the root to
@@ -502,15 +505,20 @@ two common firewalls:
 
 ```text
 sudo ufw allow from <guest-subnet> to any port <port> proto tcp
-sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="<guest-subnet>" port port="<port>" protocol="tcp" accept'
+sudo firewall-cmd --zone=<zone> --add-rich-rule='rule family="ipv4" source address="<guest-subnet>" port port="<port>" protocol="tcp" accept'
 ```
 
-`firewall-cmd` changes the running rules only; remove the rule when you are done.
+`<zone>` is the zone of the interface the guest arrives on: find it with
+`firewall-cmd --get-zone-of-interface <iface>`. libvirt puts its bridge `virbr0` in
+a zone of its own, `libvirt`, which rejects everything not listed, so for NAT
+through `virbr0` the zone is `libvirt`, not the default one. `firewall-cmd`
+changes the running rules only; remove the rule when you are done.
 
 Which address to advertise depends on the guest's network. With NAT (the usual
 default of a VM manager) the guest reaches the host at the host's address on the
 virtual bridge (for libvirt, `192.168.122.1`), and nothing else on your network
-can reach the guest. With bridged networking the guest is a machine on your LAN
+can reach the guest. VirtualBox's NAT host alias, `10.0.2.2`, is on no host
+interface, so the runner refuses it: advertise the host's LAN address there. With bridged networking the guest is a machine on your LAN
 and reaches the host at its LAN address. `localhost` in the guest is the guest,
 not the host: never use it, and never `127.0.0.1`, for the server.
 

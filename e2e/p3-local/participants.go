@@ -339,6 +339,7 @@ func (r *runner) guestCommands(say func(string, ...any), cmd func(comment, comma
 	say("# Copy these from %s to ~/conch-p3 on the guest: tui-b.env agent-a.env browser.txt fixtures/", r.root)
 	say("# On the guest, in a checkout of this repository: go build -o ~/conch-p3/bin/ ./cmd/conch ./cmd/conch-adapter")
 	say("# On the guest, the address in these commands is the host; a name for the guest itself would be the guest.")
+	say("# Stop tui-b and agent-a on this machine (ctrl-c) before starting them on the guest: two clients on one credential would be one person twice.")
 	cmd("guest: conch as guest-test (tui-b)",
 		"set -a; . "+home+"/tui-b.env; CONCH_CONFIG_DIR="+home+"/config/tui-b; set +a; "+home+"/bin/conch")
 	say("# guest: the browser. Open %s/app/ in it and paste the credential from this file", r.baseURL())
