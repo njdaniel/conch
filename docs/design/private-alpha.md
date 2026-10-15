@@ -31,30 +31,38 @@ go-ahead to file the implementation issues in §5.
 
 | | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share |
 | --- | --- | --- | --- | --- | --- | --- |
-| Windows, Chrome or Edge | yes | yes | tab focused | yes | tab or whole system | yes |
-| macOS, Chrome or Edge | yes | yes | tab focused | yes | tab only | yes |
-| Linux, Chrome or Edge | yes | yes | tab focused | yes | tab only | yes |
-| Firefox or Safari, any desktop | yes | yes | tab focused | yes | no | yes |
-| Phone or tablet browser | yes | yes | while open on screen | no | no | yes |
+| Windows, Chrome or Edge | expected | expected | tab focused | expected | tab or whole system | expected |
+| macOS, Chrome or Edge | expected | expected | tab focused | expected | tab; whole screen to check | expected |
+| Linux, Chrome or Edge | expected | expected | tab focused | expected | tab only | expected |
+| Firefox or Safari, any desktop | expected | expected | tab focused | expected | none | expected |
+| iPhone or iPad browser | expected | expected | while open on screen | no | no | expected |
+| Android, Chrome | expected | expected | while open on screen | to check | no | expected |
 | Linux, `conch-voice` | (TUI) | yes | **global** | no | no | no |
 | TUI, any OS | yes | no | no | no | no | no |
 
-This table shows what the browsers allow. It becomes the tester-facing table once each row has been tried; untried rows say "expected".
+This table shows what the browsers document today. Every browser cell says "expected" until it has been tried (A10, A11, A16), and "to check" where the documentation is unclear: macOS whole-screen sound in recent Chrome, and screen sharing from Android Chrome. Once tried, it becomes the tester-facing table.
 
 A talk key that works while a game has focus needs a desktop app. That is Electron (ADR-007), after the alpha.
 
-## 3. Decided (Nick, #420, 2026-10-15)
+## 3. Decided
 
-- **The browser is the alpha client everywhere** (ADR-008 §1).
+**By Nick** (recorded on #420, 2026-10-15):
+- **Platforms:** Linux, Windows, macOS, and phones or tablets. The browser is the alpha client everywhere (ADR-008 §1).
 - **No global talk key for the alpha.**
 - **Screen sharing carries sound** where the browser can.
 - **Invites are the way in.** There is no public signup. Testers may invite testers. Operators may put out an **open link**: anyone with it may join until it expires, and a use cap is optional and off by default.
-- **About 30 at once**, many more accounts in total.
-- **"Deleting" an account means disable plus hide.** The account leaves rosters and member lists, and stays in the audit trail. Operators get bulk cleanup: everyone from one link, or by name prefix.
-- **Agents are never created by invites.**
+- **About 30 at once**, many more accounts in total, including Nick's throwaway test accounts and AI agents.
 - **One server; each group in its own private channels;** one-on-ones are two-member private channels.
-- **Display names stay unique per server,** and a clash means choosing another name.
-- **A second server stays one deployment step away.** That needs a per-server LiveKit room prefix and a per-instance deploy layout.
+
+**Adopted by this plan** from the recommendations on #420, under Nick's standing "use your recommendations". He can overrule any of them at review:
+- **"Deleting" an account means disable plus hide.** The account leaves rosters and member lists, and stays in the audit trail. Operators get bulk cleanup: everyone from one link, or by name prefix.
+- **Agents are never created by invites.** Testers bringing their own agents would be a separate invite kind, not planned.
+- **Inviting is a per-person permission,** on by default for alpha testers, with:
+  - a small allowance of outstanding personal invites (default 5);
+  - single-use personal invites (default 7-day expiry);
+  - an operator option to revoke an inviter's invitees too (off by default).
+- **A second server stays one deployment step away.** That needs a per-server LiveKit room prefix and a per-instance deploy layout. A client keeps one profile per server (TUI: `CONCH_CONFIG_DIR`; browser: one origin per server), and the onboarding docs say how to switch.
+- **No per-group moderators in the alpha.** Moderation stays operator-only.
 
 ## 4. Open decisions, with recommendations
 
@@ -77,7 +85,7 @@ The alternative is an HttpOnly session cookie. It needs CSRF protection on every
 
 **O3. Names.**
 
-Make uniqueness case-insensitive and refuse look-alike names. Today "Alice" and "alice" can both exist.
+Names are unique per server today, and #420 left open whether that needs fixing. Uniqueness is also case-sensitive: today "Alice" and "alice" can both exist.
 
 *Recommend:* fold case and apply Unicode confusable skeletons at redemption and at operator create, and let a person rename themselves. Renaming is new, small, and audited.
 
@@ -130,7 +138,7 @@ Each item below becomes one issue in a **Private alpha** milestone. They are fil
 
 | # | Work | Size | Depends on |
 | --- | --- | --- | --- |
-| A1 (#425) | Versioned builds: stamp the version, show it in web, `/healthz` and whoami; tagged pre-releases with notes (*independent*) | S | |
+| A1 (#425) | Versioned builds: stamp the version, show it in web, `/healthz` and whoami; tagged pre-releases with notes (*independent*) | S–M | |
 | A2 (#426) | Feedback workflow: bug and feedback issue templates, priority and type labels, the Project board (§6) (*independent*; the board needs Nick's `gh auth refresh -h github.com -s project`) | S | |
 | A3 (#427) | Per-server LiveKit room prefix and a separate API key per instance (*independent*) | S | |
 | A4 (#428) | WebSocket keepalive on every socket, server and clients (*independent*) | S | |
@@ -145,7 +153,7 @@ Each item below becomes one issue in a **Private alpha** milestone. They are fil
 | A8 | Invites in the web client: the landing page, choosing a name, invite creation for those allowed | M | A6, A7 |
 | A9 | Names: case and look-alike uniqueness, rename (O3) | S | A6 |
 | A10 | Browser voice: LiveKit JS, CSP and hygiene rules relaxed for it, mute, deafen, focused push-to-talk, talking indicator; the dependency signed off | L | ADR-008, A3 |
-| A11 | Screen share: grant sources and server rule, share with sound, the watch view, simulcast (O5, O6) | L | A10 |
+| A11 | Screen share: grant sources and server rule, share with sound, a watch view that works on a phone, simulcast (O5, O6); try the "to check" cells of §2 | L | A10 |
 | A12 | Disable plus hide, bulk cleanup, operator list of principals, audit rows for principal and channel creation | M | A6 |
 | A13 | Diagnostics: connection logs with request ids, LiveKit health, and an in-product "report a problem" that files build and environment (#332) | M | A1, A2 |
 
@@ -153,13 +161,13 @@ Each item below becomes one issue in a **Private alpha** milestone. They are fil
 
 | # | Work | Size | Depends on |
 | --- | --- | --- | --- |
-| A14 | Cross-group isolation e2e: one group finds nothing of another over REST, the sockets, search, files, voice, screen share and invites | M | A6, A10, A11 |
+| A14 | Cross-group isolation e2e: one group finds nothing of another over REST, the sockets, search, files, voice, screen share and invites. A revoked tester's open sockets and LiveKit participant are gone at once. | M | A6, A10, A11 |
 | A15 | The bandwidth measurement (O6) on the real droplet | S | A5, A11 |
-| A16 | The exit scenario (§1) on a deployed build, by Nick with two or more testers, recorded like the P3 exit | S | everything above |
+| A16 | The exit scenario (§1) on a deployed build, by Nick with two or more testers, recorded like the P3 exit. It includes a real network drop: the web client catches up on missed messages with none lost or repeated, as P3-09 already checks for a server restart. | S | everything above |
 
 **After the alpha:** a desktop app with a global talk key (Electron); nets in voice (V5); live transcription and captions; web files, search and threads. Translation, richer agent participation, and assemblies and deliberation (P4/P5) are deferred.
 
-The existing voice-track issues stay where they are: #185, #189 and #393–#396 in P8, and #381 and #353 in "P3 extensions". The alpha does not wait for them.
+The existing voice-track issues stay where they are: #185, #189, #393, #394 and #396 in P8, and #381 and #353 in "P3 extensions". The alpha does not wait for them.
 
 ## 6. How it is built, tested and fed back
 

@@ -328,6 +328,10 @@ happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 ### P7 — Small-team multi-human + Slack-style GUI ⚠️ *charter amendment*
 
+> **Amended by ADR-008:** invite onboarding and a browser client for invited testers
+> (chat, voice, screen share) move into the private alpha. The full small-team GUI,
+> presence preferences, human DMs and password or OIDC login stay here.
+
 ADR-007 brings the shared React foundation and a limited browser lobby/chat/agent
 view into P3, and with it a basic online / stale / offline roster for people as well
 as agents. P7 still owns the full small-team GUI, presence preferences and social /

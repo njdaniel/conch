@@ -6,11 +6,13 @@
 - **Proposal:** [#420](https://github.com/njdaniel/conch/issues/420)
 - **Amends:**
   - [ADR-000](ADR-000-charter.md)'s non-goals: the full multi-human GUI before P7, and video or screen sharing before P9;
-  - [ADR-003](ADR-003-multi-human-access.md)'s clients, and its operator-issued credentials as the only way in;
+  - [ADR-003](ADR-003-multi-human-access.md)'s clients (the TUI/CLI and `conch-voice` only);
+  - ROADMAP.md's rule that people sign in only with a credential an operator issues, until P7 (the P2 exit and P7 paragraphs);
+  - the P3 plan's D2 ([#260](https://github.com/njdaniel/conch/issues/260)), that the browser keeps its credential per tab, *if* the plan's open decision O1 is taken;
   - [ADR-004](ADR-004-voice-via-livekit.md)'s "no browser client" and screen sharing at P9;
   - [ADR-007](ADR-007-client-interfaces.md)'s bound of the browser to a P3 prototype.
 
-  It changes neither [ADR-006](ADR-006-rust-voice-client.md) (the native Linux client) nor single-tenancy.
+  It changes neither [ADR-006](ADR-006-rust-voice-client.md) (the native Linux client) nor single-tenancy. ADR-004's gate, that #87's by-hand checks close before V4, stays on the native client. Browser voice is held to the alpha's own exit instead (plan item A16).
 - **Design:** [docs/design/private-alpha.md](../design/private-alpha.md)
 
 ## Context
@@ -22,7 +24,7 @@ P3 is done (#423). Nick now wants Conch used by people, not only by him and his 
 
 The testers run Linux, Windows, macOS and phones. Today voice exists only as `conch-voice`, a native Linux binary built from source. Screen sharing does not exist and the charter places it at P9. A person can get in only with a bearer credential that an operator issues and hands over by hand.
 
-Nick's answers on #420 (2026-10-15):
+Nick's decisions, recorded on #420 (2026-10-15):
 - **Clients:** every platform above.
 - **Push-to-talk:** a talk key that works while a game has focus is *not* needed for the alpha.
 - **Screen share:** needs the shared computer's sound where possible.
@@ -39,10 +41,10 @@ Nick's answers on #420 (2026-10-15):
    - The browser offers an open microphone with voice detection, mute and deafen, and push-to-talk while the tab has focus.
    - It cannot offer a talk key while another app has focus; the alpha says so plainly.
 3. **Screen sharing moves into the alpha from P9.** One person shares into a channel's voice room and the others in that room watch it.
-   - The share carries sound where the browser provides it:
-     - Chrome and Edge share a tab's sound on every desktop OS, and the whole system's sound on Windows;
+   - The share carries sound where the browser provides it. As the browsers document it today, to be verified in plan item A11:
+     - Chrome and Edge share a tab's sound on every desktop OS, and the whole system's sound on Windows. macOS may have a whole-screen path in recent Chrome.
      - Firefox and Safari share no sound.
-   - Phones can watch and cannot share.
+   - Phones can watch. iOS cannot share; Android Chrome may be able to, which A11 checks.
    - Recording stays out.
 4. **Invite links are a second way to get a credential**, beside an operator issuing one. There are two kinds:
    - **Personal invites:** single-use, made by testers an operator lets invite.
@@ -56,6 +58,14 @@ Nick's answers on #420 (2026-10-15):
 
    Invites are new security surface: their implementation gets a `security-reviewer` pass, and their wire shapes go through the schema-change skill.
 5. **One server, one org, still.** Separate groups are separate private channels on one server; a one-on-one is a private channel with two members (D12 holds: no standalone DMs). A group that needs harder separation gets a second server; the deployment is laid out so that is one more instance.
+
+## Alternatives considered
+
+| Option | For | Against |
+| --- | --- | --- |
+| **The browser everywhere (chosen)** | One client for every platform, phones included. `conchd` already serves it. Nothing to install. LiveKit JS is mature. | No talk key while another app has focus. Share sound depends on the browser. |
+| Native clients per OS now | A global talk key; full system sound | Windows, macOS and phone clients would each be new work. `conch-voice` is Linux/PipeWire only (ADR-006) and built from source. Far longer before anyone tests. |
+| Electron desktop app now (ADR-007) | A global talk key and system sound on desktops, sharing the React code | Packaging, signing and updating for three OSes before the first tester, and no phones. It belongs after the alpha, once the browser client works. |
 
 ## Unchanged
 
@@ -74,14 +84,18 @@ Nick's answers on #420 (2026-10-15):
 
 ## Consequences
 
-- **The web client gets real media code.** These on `main` forbid it today and change with this decision:
-  - its hygiene test forbids `getUserMedia`, `mediaDevices`, `getDisplayMedia` and `https://` literals;
-  - its CSP allows `connect-src 'self'` only;
-  - the voice e2e asserts a microphone-only grant.
+- **The web client gets real media code.** These on `main` forbid it today and change with this decision. The security review checks each change.
+  - The hygiene test (`web/src/hygiene.test.ts`) forbids:
+    - `getUserMedia`, `mediaDevices` and `getDisplayMedia`;
+    - any `http://` or `https://` literal;
+    - `localStorage` in the built bundle;
+    - credential and `sessionStorage` handling outside `api.ts`.
+  - Its CSP allows `connect-src 'self'` only.
+  - The voice e2e asserts a microphone-only grant.
 
   The LiveKit JavaScript SDK is a new npm dependency and needs Nick's sign-off.
 - **The server's LiveKit grant gains screen-share sources,** with a server rule for who may publish them. Screen share sizes the deployment: one sharer to about 29 viewers is roughly 30–90 Mbps out. That figure is measured before the alpha opens.
-- **Invites add schema, storage, routes, audit events, a landing page and rate limits.** Per-address limits behind a reverse proxy need the proxy's client address, which `conchd` does not read today.
-- **The browser's sign-in has to last beyond one tab** for testers to use it day to day. Today it is per tab by decision D2; the design note proposes the change.
+- **Invites add schema, storage, routes, audit events, a landing page and rate limits.** Per-address limits behind a reverse proxy need the proxy's client address. Today `conchd` reads no client address at all, neither `RemoteAddr` nor `X-Forwarded-For`.
+- **The browser's sign-in has to last beyond one tab** for testers to use it day to day. Today it is per tab, by the P3 plan's D2 (#260, approved by Nick). The design note's O1 proposes reversing it, which needs Nick's yes.
 - **The voice track's native exit (#185, #189) stays open** for the Linux client. The alpha does not wait for it, since its testers use the browser.
 - **ROADMAP.md is reordered.** The alpha comes first. P4/P5 (assemblies, deliberation) are deferred, not removed. Screen sharing moves out of P9. Onboarding moves out of P7. Live transcription follows the alpha.
