@@ -24,9 +24,18 @@ type Client struct {
 	mu        sync.Mutex
 }
 
-// New constructs a client using http.DefaultClient.
+// New constructs a client that refuses redirects. Go re-sends the
+// Authorization header to a redirect target on the same hostname, even on
+// another port or from https to http, so following one would hand the agent's
+// bearer to whatever a misconfigured front proxy points at. A redirect comes
+// back as the 3xx response and surfaces as a status error.
+//
+// There is no client timeout: await_decision is a long poll, and every call
+// is already bounded by its caller's context.
 func New(baseURL, token string) *Client {
-	return &Client{baseURL: baseURL, token: token, http: http.DefaultClient}
+	return &Client{baseURL: baseURL, token: token, http: &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 // Initialize performs the MCP handshake.
