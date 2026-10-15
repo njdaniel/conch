@@ -33,6 +33,12 @@ const (
 	// ErrorCodeInvalidTransition: the requested state is not reachable from
 	// the run's current state under RunTransitionAllowed (HTTP 409).
 	ErrorCodeInvalidTransition = "invalid_transition"
+	// ErrorCodeTooManyRuns: the run's session already has as many runs that
+	// have not ended as the server allows (HTTP 429). Ending one frees a slot.
+	ErrorCodeTooManyRuns = "too_many_runs"
+	// ErrorCodeTooMuchActivity: the run already holds as many activity entries
+	// as the server allows (HTTP 429). Starting another run is the way on.
+	ErrorCodeTooMuchActivity = "too_much_activity"
 )
 
 // Length limits on the free-text fields of a run, in characters.

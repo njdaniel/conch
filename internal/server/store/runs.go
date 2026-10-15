@@ -34,6 +34,18 @@ const (
 	AuditRunEnded   = "run_ended"
 )
 
+// The bounds on what one session and one run may hold (issue #388). Nothing
+// else stops a misbehaving runtime from growing the runs and run_activity
+// tables, because the runs.manage rate limit is optional in a manifest. They
+// apply to every agent.
+const (
+	// MaxOpenRunsPerSession bounds the runs of one session that have not
+	// ended. Ended runs do not count, so ending one frees a slot.
+	MaxOpenRunsPerSession = 32
+	// MaxActivityPerRun bounds the activity entries of one run.
+	MaxActivityPerRun = 10000
+)
+
 var (
 	// ErrRunNotFound is returned when no run the reader may see, and (for a
 	// write) that the credential owns, has the id. A missing run, a run the
@@ -48,6 +60,12 @@ var (
 	// ErrInvalidTransition is returned when a state change is not in the
 	// lifecycle, and for activity on a run that has ended. Nothing is written.
 	ErrInvalidTransition = errors.New("store: invalid run transition")
+	// ErrTooManyRuns is returned by CreateRun when the session already has
+	// MaxOpenRunsPerSession runs that have not ended. Nothing is written.
+	ErrTooManyRuns = errors.New("store: too many open runs for this session")
+	// ErrTooMuchActivity is returned by AppendRunActivity when the run already
+	// holds MaxActivityPerRun entries. Nothing is written.
+	ErrTooMuchActivity = errors.New("store: too much activity for this run")
 )
 
 // Run is one row of the runs table. MessageID is 0 for a run that answers no
@@ -110,7 +128,10 @@ func storedTime(t time.Time) time.Time { return time.UnixMilli(t.UnixMilli()) }
 //   - reader must be, now, a member of the channel and an enabled principal
 //     (ErrNotChannelMember);
 //   - a message the run answers must be in the channel and visible to reader
-//     by the message rule (ErrRunAnchorNotFound).
+//     by the message rule (ErrRunAnchorNotFound);
+//   - the session must hold fewer than MaxOpenRunsPerSession runs that have
+//     not ended (ErrTooManyRuns). The count and the insert share this
+//     transaction, so concurrent creates cannot pass the bound together.
 //
 // reader is the agent itself; the run is then visible to it by RunVisible's
 // rule. A refused run stores nothing.
@@ -143,6 +164,13 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 				return err
 			}
 			message = p.MessageID
+		}
+		open, err := countOpenRunsTx(ctx, tx, p.SessionID)
+		if err != nil {
+			return err
+		}
+		if open >= MaxOpenRunsPerSession {
+			return ErrTooManyRuns
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO runs (session_id, principal_id, channel_id, message_id, state, task, link, started_at)
@@ -243,6 +271,8 @@ type ActivityParams struct {
 // one credentialID owns, that reader may see and whose message reader may
 // still speak to (reportableRunTx), decided inside the transaction
 // (ErrRunNotFound otherwise), and must not have ended (ErrInvalidTransition).
+// A run that already holds MaxActivityPerRun entries takes no more
+// (ErrTooMuchActivity), counted in the same transaction as the insert.
 // Nothing is audited: the entry is the record.
 func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64, reader Reader, p ActivityParams, now time.Time) (Activity, error) {
 	now = storedTime(now)
@@ -254,6 +284,13 @@ func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64
 		}
 		if schema.RunStateTerminal(run.State) {
 			return ErrInvalidTransition
+		}
+		held, err := countRunActivityTx(ctx, tx, run.ID)
+		if err != nil {
+			return err
+		}
+		if held >= MaxActivityPerRun {
+			return ErrTooMuchActivity
 		}
 		var data any
 		if len(p.Data) > 0 {

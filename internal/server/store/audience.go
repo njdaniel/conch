@@ -1201,6 +1201,30 @@ func ownedRunTx(ctx context.Context, tx execer, runID, credentialID int64, reade
 	return run, nil
 }
 
+// countOpenRunsTx is how many runs of session sessionID have not ended. It
+// reads no run's content, only how many there are, and is here because this
+// is the one file that reads the runs table. CreateRun asks it inside its
+// transaction.
+func countOpenRunsTx(ctx context.Context, tx execer, sessionID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM runs WHERE session_id = ? AND ended_at IS NULL", sessionID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count open runs of session %d: %w", sessionID, err)
+	}
+	return n, nil
+}
+
+// countRunActivityTx is how many activity entries run runID holds, for
+// AppendRunActivity, inside its transaction.
+func countRunActivityTx(ctx context.Context, tx execer, runID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM run_activity WHERE run_id = ?", runID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count activity of run %d: %w", runID, err)
+	}
+	return n, nil
+}
+
 // RunPage says which runs ListVisibleRuns reads. The zero value is the first
 // page, ascending. After is the largest id already held (ascending reads);
 // Before is the smallest (newest-first reads, where zero means from the
