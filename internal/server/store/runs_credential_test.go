@@ -195,6 +195,11 @@ func TestEndingASessionEndsItsRuns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// The expiry is checked against credentialNow, so pin it to the
+			// test's own clock; otherwise runT0+24h is in the past from the
+			// day after runT0 on (issue #413).
+			now := runT0
+			setCredentialClock(t, &now)
 			expires := runT0.Add(24 * time.Hour)
 			expCred, _, err := f.s.CreateCredential(ctx, "system", f.agt.ID, "expiring", &expires)
 			if err != nil {
