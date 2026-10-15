@@ -21,7 +21,7 @@ var roomNamePattern = regexp.MustCompile(`^conch-[a-z2-7]{26}$`)
 func TestNewVoiceRoomName(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		name, err := newVoiceRoomName()
+		name, err := newVoiceRoomName("conch-")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -33,6 +33,70 @@ func TestNewVoiceRoomName(t *testing.T) {
 		}
 		seen[name] = true
 	}
+}
+
+func TestVoiceRoomPrefix(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name   string
+		prefix string // "" leaves the store as opened
+		want   string
+		bad    bool
+	}{
+		{name: "default", want: "conch-"},
+		{name: "chosen", prefix: "alpha-", want: "alpha-"},
+		{name: "invalid is refused", prefix: "Alpha", bad: true, want: "conch-"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			if tt.prefix != "" {
+				if err := s.SetVoiceRoomPrefix(tt.prefix); (err != nil) != tt.bad {
+					t.Fatalf("SetVoiceRoomPrefix(%q) = %v, want error %v", tt.prefix, err, tt.bad)
+				}
+			}
+			ch, err := s.CreateChannel(ctx, "alpha")
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := s.ChannelVoiceRoom(ctx, ch.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, rotated, err := s.RotateVoiceRoom(ctx, first.ID, VoiceRotateMemberRemoved)
+			if err != nil || !rotated {
+				t.Fatalf("rotate: %v %v", rotated, err)
+			}
+			for _, name := range []string{first.RoomName, next.RoomName} {
+				if !strings.HasPrefix(name, tt.want) || len(name) != len(tt.want)+26 {
+					t.Errorf("room name %q, want prefix %q and 26 more characters", name, tt.want)
+				}
+			}
+		})
+	}
+
+	t.Run("rooms already stored keep their names", func(t *testing.T) {
+		s := openTestStore(t)
+		ch, err := s.CreateChannel(ctx, "alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		old, err := s.ChannelVoiceRoom(ctx, ch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetVoiceRoomPrefix("beta-"); err != nil {
+			t.Fatal(err)
+		}
+		again, err := s.ChannelVoiceRoom(ctx, ch.ID)
+		if err != nil || again.RoomName != old.RoomName || !strings.HasPrefix(old.RoomName, "conch-") {
+			t.Fatalf("existing room = %q, %v; want %q unchanged", again.RoomName, err, old.RoomName)
+		}
+		next, _, err := s.RotateVoiceRoom(ctx, old.ID, VoiceRotateMemberRemoved)
+		if err != nil || !strings.HasPrefix(next.RoomName, "beta-") {
+			t.Errorf("new room = %q, %v; want the new prefix", next.RoomName, err)
+		}
+	})
 }
 
 func TestChannelVoiceRoom(t *testing.T) {

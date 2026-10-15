@@ -19,11 +19,36 @@ import (
 // Environment variable names, kept here so error messages and conchd's flag
 // wiring cannot drift apart.
 const (
-	EnvURL       = "CONCHD_LIVEKIT_URL"
-	EnvAPIURL    = "CONCHD_LIVEKIT_API_URL"
-	EnvAPIKey    = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
-	EnvAPISecret = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvURL        = "CONCHD_LIVEKIT_URL"
+	EnvAPIURL     = "CONCHD_LIVEKIT_API_URL"
+	EnvAPIKey     = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
+	EnvAPISecret  = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvRoomPrefix = "CONCHD_LIVEKIT_ROOM_PREFIX"
 )
+
+// DefaultRoomPrefix starts every room name when --livekit-room-prefix is not
+// given.
+const DefaultRoomPrefix = "conch-"
+
+// maxRoomPrefix is the longest room-name prefix, in bytes.
+const maxRoomPrefix = 32
+
+// ValidateRoomPrefix checks a room-name prefix: lower-case letters, digits and
+// "-", at most 32 characters, ending in "-". The trailing "-" keeps one
+// server's prefix from running into the random part of its names. The error
+// states the rule in one line.
+func ValidateRoomPrefix(p string) error {
+	const rule = "livekit: invalid room prefix: must be lower-case letters, digits and '-', at most 32 characters, and end with '-'"
+	if p == "" || len(p) > maxRoomPrefix || p[len(p)-1] != '-' {
+		return errors.New(rule)
+	}
+	for _, c := range []byte(p) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return errors.New(rule)
+		}
+	}
+	return nil
+}
 
 // Secret holds the signing secret. It keeps the value behind a pointer, so
 // that no fmt verb, reflection walk, JSON encoder or structured logger can
