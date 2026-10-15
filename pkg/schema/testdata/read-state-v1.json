@@ -1,0 +1,7 @@
+{
+  "schema": "conch.read_state.v1",
+  "channel_id": 7,
+  "last_read_id": 120,
+  "unread": 5,
+  "updated_at": "2026-10-14T09:30:00.000Z"
+}

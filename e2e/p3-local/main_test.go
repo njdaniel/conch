@@ -1026,6 +1026,38 @@ func TestFixtureManifests(t *testing.T) {
 	}
 }
 
+func TestLogTail(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, "line "+strconv.Itoa(i))
+	}
+	long := strings.Join(lines, "\n") + "\n"
+	for _, tc := range []struct {
+		name    string
+		content string
+		missing bool
+		want    string
+	}{
+		{"a short log is whole", "one\ntwo\n", false, "\none\ntwo"},
+		{"a long log keeps its last 40 lines", long, false, "\n" + strings.Join(lines[10:], "\n")},
+		{"a token is redacted", "token sekret-token here\n", false, "\ntoken [token] here"},
+		{"an unreadable log adds nothing", "", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agent.log")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := &runner{secrets: []string{"sekret-token"}}
+			if got := r.logTail(path); got != tc.want {
+				t.Fatalf("logTail = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRealAdapterCodex checks --runtime codex: agent-a.env names the codex
 // runtime and no fixture, the warning is the Codex one, and the flag is only
 // accepted with --real-adapter and a known name. Nothing is started.

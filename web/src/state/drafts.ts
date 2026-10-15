@@ -22,3 +22,77 @@ export function draftsReducer(state: Drafts, action: DraftAction): Drafts {
 export function draftFor(state: Drafts, channel: string): string {
   return state[channel] ?? '';
 }
+
+// Who the next message of each channel goes to, kept beside the draft. A net is
+// sticky until changed, as /net is in the TUI. A whisper is not: it is the
+// choice of the next message only, and ends when that is sent.
+export interface Target {
+  // The net chosen, or null for the whole channel.
+  readonly net: number | null;
+  // The principals chosen for a whisper, or null when not whispering. An empty
+  // list is the picker open with nobody chosen yet.
+  readonly whisper: readonly number[] | null;
+  // The server's line when it refused the last post here.
+  readonly refusal: string | null;
+  // A note to show beside the composer (the audit-log notice).
+  readonly note: string | null;
+}
+
+export type Targets = Readonly<Record<string, Target>>;
+
+export type TargetAction =
+  | { readonly type: 'channel'; readonly channel: string }
+  | { readonly type: 'net'; readonly channel: string; readonly net: number }
+  | { readonly type: 'whisper'; readonly channel: string }
+  | { readonly type: 'toggle'; readonly channel: string; readonly principal: number }
+  // Escape in the picker: back to the net or channel chosen before.
+  | { readonly type: 'closePicker'; readonly channel: string }
+  // A post is starting: what was said about the last one goes.
+  | { readonly type: 'posting'; readonly channel: string }
+  | { readonly type: 'refused'; readonly channel: string; readonly line: string }
+  // A whisper to `sent` was accepted: back to the whole channel, with the
+  // notice if one is due. Only if that is still the whisper being composed.
+  | { readonly type: 'whispered'; readonly channel: string; readonly sent: readonly number[]; readonly note: string | null }
+  | { readonly type: 'reset' };
+
+export const initialTargets: Targets = {};
+
+const wholeChannel: Target = { net: null, whisper: null, refusal: null, note: null };
+
+export function targetFor(state: Targets, channel: string): Target {
+  return state[channel] ?? wholeChannel;
+}
+
+export function targetsReducer(state: Targets, action: TargetAction): Targets {
+  if (action.type === 'reset') return initialTargets;
+  const current = targetFor(state, action.channel);
+  const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
+  switch (action.type) {
+    case 'channel':
+      return set({ ...current, net: null, whisper: null, refusal: null });
+    case 'net':
+      return set({ ...current, net: action.net, whisper: null, refusal: null });
+    case 'whisper':
+      return set({ ...current, whisper: current.whisper ?? [], refusal: null });
+    case 'toggle': {
+      const chosen = current.whisper ?? [];
+      const next = chosen.includes(action.principal) ? chosen.filter((id) => id !== action.principal) : [...chosen, action.principal];
+      return set({ ...current, whisper: next, refusal: null });
+    }
+    case 'closePicker':
+      return set({ ...current, whisper: null, refusal: null });
+    case 'posting':
+      return set({ ...current, refusal: null, note: null });
+    case 'refused':
+      return set({ ...current, refusal: action.line });
+    case 'whispered': {
+      // Only if the whisper still chosen is the one that was sent: a second one
+      // being composed while the first was on its way is left as it is.
+      const same =
+        current.whisper !== null &&
+        current.whisper.length === action.sent.length &&
+        action.sent.every((id) => current.whisper?.includes(id) === true);
+      return set(same ? { ...current, net: null, whisper: null, note: action.note } : { ...current, note: action.note });
+    }
+  }
+}

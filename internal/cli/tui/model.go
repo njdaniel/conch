@@ -152,8 +152,12 @@ const (
 	// modeAgents follows modeDecision so the modes that existed keep their
 	// values; tab reaches it from the inbox.
 	modeAgents
-	// modeRun is run detail, opened from the Agents view; esc goes back.
+	// modeRun is run detail, opened from the Agents view or the Runs view; esc
+	// goes back to the one it came from.
 	modeRun
+	// modeRuns is the Runs view: the channel's runs. r in the Agents view enters
+	// it, a goes back, tab moves on to the channels.
+	modeRuns
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -281,6 +285,10 @@ type Model struct {
 	agentsStatus string
 	// rd is the open run of run detail; the zero value is none.
 	rd runDetail
+	// runs is the Runs view of the selected channel.
+	runs runsView
+	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
+	clockTicking bool
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -306,6 +314,8 @@ func (m Model) status() string {
 		return "agents: " + sanitize(m.current())
 	case modeRun:
 		return m.runStatus()
+	case modeRuns:
+		return m.runsStatus()
 	}
 	return m.inboxStatus
 }
@@ -381,6 +391,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeAgents {
 			// A line about the last key is read once.
 			m.agentsStatus = ""
+			if msg.String() == "r" {
+				return m.enterRuns()
+			}
+		}
+		if m.mode == modeRuns {
+			if next, cmd, ok := m.runsKey(msg.String()); ok {
+				return next, cmd
+			}
 		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -400,7 +418,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeInbox:
 				m.mode = modeAgents
 				return m, nil
-			case modeAgents:
+			case modeAgents, modeRuns:
 				// The channel status is left as it is: results that landed
 				// while the user was away are already recorded in it.
 				m.mode = modeChannels
@@ -500,8 +518,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.castDecision(app.ID, opt.ID, reason)
 			}
 		case "backspace":
-			// The Agents view has no input: the draft is the channel's.
-			if m.input != "" && m.mode != modeAgents {
+			// The Agents and Runs views have no input: the draft is the channel's.
+			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
 				_, size := utf8.DecodeLastRuneInString(m.input)
 				m.input = m.input[:len(m.input)-size]
 			}
@@ -541,6 +559,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.interventionSent(msg)
 	case sessionRunsLoaded:
 		return m.sessionRunsLoaded(msg)
+	case runsLoaded:
+		return m.runsLoaded(msg)
+	case clockTick:
+		return m.clockTicked()
 	case eventsEnded:
 		return m.eventsEnded(msg)
 	case eventsRetryDue:
@@ -777,6 +799,8 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	}
 	m.selected = next
 	m.scroll = 0
+	// The Runs view is of one channel.
+	m.runs = runsView{channel: m.current(), filter: m.runs.filter}
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
 	m.pendingNet = ""
@@ -1037,6 +1061,8 @@ func (m Model) View() string {
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
 	case modeAgents:
 		panes = m.agentsPanes(l)
+	case modeRuns:
+		panes = m.runsPanes(l)
 	case modeRun:
 		panes = borderStyle.Width(width - 2).Height(contentHeight).Render(strings.Join(m.runLines(width-2, contentHeight), "\n"))
 	default:
@@ -1076,9 +1102,11 @@ func (m Model) View() string {
 	case modeDecision:
 		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
 	case modeRun:
-		statusKeys = "  ↑/↓ activity • esc back"
+		statusKeys = "  ↑/↓ timeline • enter data • g message • esc back"
 	case modeAgents:
-		statusKeys = "  ↑/↓ agents • enter sessions • tab channels • esc quit"
+		statusKeys = "  ↑/↓ agents • enter sessions • r runs • tab channels • esc quit"
+	case modeRuns:
+		statusKeys = "  ↑/↓ runs • enter open • f filter • a agents • esc quit"
 	case modeInbox:
 		statusKeys = "  ↑/↓ approvals • enter decide • tab agents • esc quit"
 	default:
@@ -1142,6 +1170,18 @@ func (m Model) agentsPanes(l layout) string {
 	lines, sel := m.agentLines(l.rightW - 2)
 	agents := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
 	return lipgloss.JoinHorizontal(lipgloss.Top, channels, agents)
+}
+
+// runsPanes is the Runs view: laid out as the Agents view is.
+func (m Model) runsPanes(l layout) string {
+	if l.width < fullWidth || l.height < fullHeight {
+		lines, sel := m.runsLines(l.width - 2)
+		return borderStyle.Width(l.width - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	}
+	channels := borderStyle.Width(l.leftW - 2).Height(l.contentH).Render(strings.Join(m.channelLines(l.leftW), "\n"))
+	lines, sel := m.runsLines(l.rightW - 2)
+	runs := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, channels, runs)
 }
 
 // size is the terminal size, or 80x24 before the first WindowSizeMsg.
@@ -1245,7 +1285,7 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
-	if m.mode == modeAgents || m.mode == modeRun {
+	if m.mode == modeAgents || m.mode == modeRun || m.mode == modeRuns {
 		// Lists and a pane that are read with the keys; there is nothing to click.
 		return m, nil
 	}

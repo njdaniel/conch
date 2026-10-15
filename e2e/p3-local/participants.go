@@ -406,7 +406,7 @@ func (r *runner) startAgent(part string) (*child, error) {
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if !c.running() {
-			return nil, fmt.Errorf("%s exited at once; its log is %s", part, c.log)
+			return nil, fmt.Errorf("%s exited at once; its log is %s%s", part, c.log, r.logTail(c.log))
 		}
 		sessions, err := r.sessions(r.fx.creds["tui-a"].token, chGeneral)
 		if err != nil {
@@ -422,7 +422,21 @@ func (r *runner) startAgent(part string) (*child, error) {
 		}
 	}
 	c.kill()
-	return nil, fmt.Errorf("%s did not open a session within 20s; its log is %s", part, c.log)
+	return nil, fmt.Errorf("%s did not open a session within 20s; its log is %s%s", part, c.log, r.logTail(c.log))
+}
+
+// logTailLines is how much of a child's log a failure prints.
+const logTailLines = 40
+
+// logTail is the end of the log at path, redacted, for a failure message: the
+// log of a CI run is gone by the time anyone looks. It is empty when the log
+// cannot be read.
+func (r *runner) logTail(path string) string {
+	data, err := os.ReadFile(path) // #nosec G304 -- a log this run's child wrote
+	if err != nil {
+		return ""
+	}
+	return "\n" + r.redact(tailLines(strings.TrimRight(string(data), "\n"), logTailLines))
 }
 
 // sessions is the roster of channel as the holder of token sees it.
@@ -510,7 +524,7 @@ func (r *runner) checkAgentA() error {
 		}
 		if time.Now().After(deadline) {
 			c.kill()
-			return fmt.Errorf("agent-a did not reply within 30s; its log is %s", c.log)
+			return fmt.Errorf("agent-a did not reply within 30s; its log is %s%s", c.log, r.logTail(c.log))
 		}
 		if err := pause(250 * time.Millisecond); err != nil {
 			c.kill()
