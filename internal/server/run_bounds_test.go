@@ -39,6 +39,15 @@ func TestMCPRunBoundsMatchREST(t *testing.T) {
 		t.Errorf("start_run after ending one = %s", res.code)
 	}
 
+	// The activity half fills 10,000 entries one transaction at a time: seconds
+	// normally, minutes under the race detector, which pushed this package past
+	// go test's ten-minute limit in CI (#340). Under -race it is skipped; the
+	// bound itself is proved fast in store (TestAppendRunActivityBound, a bulk
+	// fill), the REST and MCP refusal share calls.go with the run bound above,
+	// and make check runs this half without -race.
+	if raceEnabled {
+		return
+	}
 	run := f.start(t, f.botTok, f.session(t, f.botTok), "general", 0, "chatty")
 	f.fillActivity(t, run.ID, store.MaxActivityPerRun)
 	f.checkParity(t, []parityCase{
