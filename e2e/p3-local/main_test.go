@@ -439,7 +439,7 @@ func commandFor(t *testing.T, lines []string, envFile, programSuffix string) str
 // down and leaves nothing. A root with a space in its path makes the printed
 // and sourced quoting do real work.
 func TestRunWithoutKeep(t *testing.T) {
-	all := []string{"P3-01", "P3-02", "P3-03", "P3-04", "P3-05", "P3-06", "P3-07", "P3-08", "P3-09", "P3-10", "P3-11", "P3-14"}
+	all := []string{"P3-01", "P3-02", "P3-03", "P3-04", "P3-05", "P3-06", "P3-07", "P3-08", "P3-09", "P3-10", "P3-11", "P3-14", "P3-15"}
 	for _, tc := range []struct {
 		name string
 		root func(*scratch) string

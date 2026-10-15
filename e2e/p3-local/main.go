@@ -6,6 +6,7 @@
 //	go run ./e2e/p3-local [--keep] [--reset] [--real-adapter [--runtime claude|codex]]
 //	go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama
 //	go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
+//	go run ./e2e/p3-local --non-loopback
 //
 // It builds conchd, conch and conch-adapter into <root>/bin, starts conchd on
 // a loopback port of its own choosing, provisions the community through
@@ -22,7 +23,9 @@
 // that address of this machine instead of loopback, every file names it, and
 // the commands for a guest (a VM) are printed apart; the guest's credentials
 // then travel in clear text over http://, which the run says first (issue
-// #379). CONCH_P3_ROWS=P3-06,P3-07 limits the suite to those rows (and P3-01, which starts everyone) while working on them.
+// #379). Without --keep, --non-loopback runs the suite with conchd bound to
+// this machine's first non-loopback IPv4 and every client pointed at it, and
+// refuses when there is none (issue #382). CONCH_P3_ROWS=P3-06,P3-07 limits the suite to those rows (and P3-01, which starts everyone) while working on them.
 //
 // The root is $CONCH_P3_ROOT, else $XDG_STATE_HOME/conch-p3, else
 // ~/.local/state/conch-p3. This program never reads or writes the user's own
@@ -77,13 +80,15 @@ func main() {
 	runtimeName := flag.String("runtime", "claude", "with --real-adapter, which real command agent-a.env names: claude or codex")
 	realList := flag.String("real-adapters", "", "with --keep, add an agent real-<runtime> for each of claude, codex, ollama (comma-separated); each model comes from CONCH_P3_MODEL_<RUNTIME>")
 	advertiseURL := flag.String("advertise", "", "with --keep, bind conchd to this address of this machine (http://<ip>:<port>) and write it into every file, for a guest on the LAN")
+	nonLoopback := flag.Bool("non-loopback", false, "without --keep, run the suite with conchd bound to this machine's own non-loopback IPv4 and every client pointed at it (CI uses it)")
 	flag.Parse()
 	runtimeSet := false
 	flag.Visit(func(f *flag.Flag) { runtimeSet = runtimeSet || f.Name == "runtime" })
-	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) {
+	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) || (*nonLoopback && (*keep || *reset || *advertiseURL != "")) {
 		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep] [--real-adapter [--runtime claude|codex]] | --reset")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>")
+		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --non-loopback")
 		os.Exit(2)
 	}
 	// Before anything is built or started: a runtime without its model is
@@ -98,7 +103,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
 		os.Exit(2)
 	}
-	if adv != nil {
+	if *nonLoopback {
+		if adv, err = suiteAddress(); err != nil {
+			fmt.Fprintln(os.Stderr, name+": FAIL:", err)
+			os.Exit(2)
+		}
+		fmt.Printf("%s: --non-loopback: conchd is bound to %s, and every client is given that address\n\n", name, adv.bind)
+	} else if adv != nil {
 		// First of everything the run prints, and before anything is built.
 		fmt.Println(adv.warning())
 		fmt.Println()
@@ -735,9 +746,12 @@ var listeningOn = regexp.MustCompile(`(?m)^conchd \S+ listening on (\S+:\d+) `)
 
 // startServer bootstraps the operator into a fresh data directory and starts
 // conchd on a loopback port it chooses itself, or, with --advertise, on the
-// address given. conchd is asked for port 0 and says which port it got:
-// choosing a free port here and handing it over would leave a moment in which
-// something else could take it.
+// address given. On loopback conchd is asked for port 0 and says which port it
+// got: choosing a free port here and handing it over would leave a moment in
+// which something else could take it. --advertise and --non-loopback accept
+// that moment, because the URL every file names must be known before conchd
+// starts; if something takes the port, conchd fails to bind and the run fails
+// loudly.
 func (r *runner) startServer() error {
 	data := filepath.Join(r.root, "data")
 	out, err := r.output("", r.repo, r.isolatedEnv(), r.bin.conchd, "bootstrap-operator", "--data", data, "--name", "p3-operator")

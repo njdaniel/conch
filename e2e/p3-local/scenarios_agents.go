@@ -449,7 +449,7 @@ func (s *suite) p308Interventions() error {
 		return err
 	}
 	if err := t.waitFor("the run's detail with its keys", 15*time.Second, func(r []string) bool {
-		return showing(r, "m message", "x cancel", "pause (unsupported)", "resume (unsupported)")
+		return showing(r, "m message", "x cancel", "p pause") && !showing(r, "(unsupported)")
 	}); err != nil {
 		return err
 	}
@@ -481,10 +481,10 @@ func (s *suite) p308Interventions() error {
 		return fmt.Errorf("the run's interventions are %+v, want one message applied for nick-test", ivs)
 	}
 
-	// Pause and resume. The people's keys for them are F2b (#346); the API is
-	// the same. The command stops, the run is waiting with the outcome paused
-	// only once the adapter says so, and resume lets the command go on.
-	if err := s.pauseAndResume(run.ID, runPath); err != nil {
+	// Pause and resume, by their keys (and the API for the answers that fail).
+	// The command stops, the run is waiting with the outcome paused only once
+	// the adapter says so, and resume lets the command go on.
+	if err := s.pauseAndResume(t, run.ID, runPath); err != nil {
 		return err
 	}
 
@@ -551,11 +551,12 @@ func (s *suite) p308Interventions() error {
 	return s.privateRunIsOffLimits()
 }
 
-// pauseAndResume pauses the open run through the API, checks that the
-// adapter's command and what it started are stopped and the run waiting with the outcome paused,
+// pauseAndResume pauses the open run with p, checks that the adapter's command
+// and what it started are stopped and the run waiting with the outcome paused,
 // refuses nothing it should accept and accepts nothing it should refuse, and
-// resumes it.
-func (s *suite) pauseAndResume(runID int64, runPath string) error {
+// resumes it with r. The two answers that must fail go through the API: the
+// TUI offers neither key in a state where they would.
+func (s *suite) pauseAndResume(t *tui, runID int64, runPath string) error {
 	ask := func(kind schema.InterventionKind) (schema.InterventionV1, error) {
 		var iv schema.InterventionV1
 		err := s.as(partNick).call(http.MethodPost, runPath+"/interventions", schema.CreateInterventionRequestV1{Kind: kind}, &iv)
@@ -597,8 +598,46 @@ func (s *suite) pauseAndResume(runID int64, runPath string) error {
 		return fmt.Errorf("after a resume of a run not paused the run is %q, want running", r.State)
 	}
 
-	paused, err := ask(schema.InterventionKindPause)
+	// pressed is the intervention the key left behind: one of its kind newer
+	// than any the run had.
+	pressed := func(key string, kind schema.InterventionKind) (schema.InterventionV1, error) {
+		before, err := s.interventionsOf(runID)
+		if err != nil {
+			return schema.InterventionV1{}, err
+		}
+		var newest int64
+		for _, iv := range before {
+			newest = max(newest, iv.ID)
+		}
+		if err := t.press(key); err != nil {
+			return schema.InterventionV1{}, err
+		}
+		var found schema.InterventionV1
+		err = s.until("the "+string(kind)+" asked with "+key+" to be recorded", 15*time.Second, func() (bool, error) {
+			ivs, err := s.interventionsOf(runID)
+			if err != nil {
+				return false, err
+			}
+			for _, got := range ivs {
+				if got.ID > newest {
+					if got.Kind != kind || got.RequestedBy != s.pid("nick-test") {
+						return false, fmt.Errorf("%s left intervention %d: %q by %d, want a %s by nick-test", key, got.ID, got.Kind, got.RequestedBy, kind)
+					}
+					found = got
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+		return found, err
+	}
+	paused, err := pressed("p", schema.InterventionKindPause)
 	if err != nil {
+		return err
+	}
+	if err := t.waitFor("the pause applied on the screen and the run waiting", 30*time.Second, func(r []string) bool {
+		return showing(r, "run #"+id(runID)+" · waiting") && showing(r, "r resume") && !showing(r, "p pause")
+	}); err != nil {
 		return err
 	}
 	if err := answered(paused, schema.InterventionStateApplied, ""); err != nil {
@@ -623,8 +662,13 @@ func (s *suite) pauseAndResume(runID int64, runPath string) error {
 		return err
 	}
 
-	resumed, err := ask(schema.InterventionKindResume)
+	resumed, err := pressed("r", schema.InterventionKindResume)
 	if err != nil {
+		return err
+	}
+	if err := t.waitFor("the run running again", 30*time.Second, func(r []string) bool {
+		return showing(r, "run #"+id(runID)+" · running") && showing(r, "p pause")
+	}); err != nil {
 		return err
 	}
 	if err := answered(resumed, schema.InterventionStateApplied, ""); err != nil {

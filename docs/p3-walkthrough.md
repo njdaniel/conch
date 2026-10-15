@@ -276,23 +276,28 @@ one `worker-test` (or `observer-test`): no duplicate identity.
 2. In a TUI, open the run (agents view, `enter` on the agent, `enter` on the
    run). Press `m`, type an instruction and press enter. In the browser's run
    detail use the `Message` button.
-3. Pause the run. The clients have no key for it yet, so ask the API as
-   `nick-test`, whose credential `tui-a.env` holds (the run id is in the detail), and look at the command's process
-   with `ps -o pid,stat,args --ppid <pid:agent-a>`:
+3. Pause the run: press `p` in the TUI's run detail, or `Pause` in the
+   browser's. Look at the command's process with
+   `ps -o pid,stat,args --ppid <pid:agent-a>`. Then resume it: `r`, or
+   `Resume`. (Both ask at once, with no question. The run offers `p` and
+   `Pause` while it is running and `r` and `Resume` while it reads waiting.)
+   To see the answers that fail, ask the API as `nick-test`, whose credential
+   `tui-a.env` holds (the run id is in the detail): a resume while the run is
+   running, or a second pause while it is paused.
 
    ```
    set -a; . <root>/tui-a.env; set +a
    curl -s -X POST -H "Authorization: Bearer $CONCH_TOKEN" -H 'Content-Type: application/json' \
-     -d '{"kind":"pause"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
+     -d '{"kind":"resume"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
    ```
 
-   Then the same with `{"kind":"resume"}`.
 4. Press `x` and answer `y` to cancel the run (in the browser, `Cancel`).
 5. Open the run of `observer-test` and look at what the detail offers.
 
 What should appear. The intervention shows `requested…`, then `acknowledged`,
 then `applied` (or `failed: <reason>`), from the agent's own reports. After the
-pause the run is `waiting` with the outcome `paused` and the command's state in
+pause the run is `waiting` with the outcome `paused` (the clients read it only
+from the run's own update, not when you press `p`) and the command's state in
 `ps` is `T` (stopped); the wait for its reply does not run out while it is
 paused. After the resume the run is `running` again and the state is `S`. A
 second pause says `failed: already paused`, a resume of a run that is not paused
