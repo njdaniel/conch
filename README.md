@@ -484,6 +484,25 @@ a model name) and the adapter exits with one line naming it if it is missing.
 `CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
 written, but is still read as the profile reads.
 
+`ollama` is the local-model profile. It runs `ollama run {model}` with the
+prompt on standard input and reads the printed text as the reply, so a run
+reports the process as one `command_started` and `command_finished` pair, as
+`claude-code` does (and, as there, `CONCH_ADAPTER_FIXTURE=1` must never be set
+with a real model). `CONCH_ADAPTER_MODEL` is
+required and nothing is invented (for example `llama3.1:8b`; pull it first with
+`ollama pull`). `OLLAMA_BIN`, if set, replaces `ollama` in the default command
+and in the probe, under the same rule as `CLAUDE_BIN`. **The probe:** before the
+adapter reads the channel or registers a session, it runs `ollama show {model}`
+and waits at most 10 seconds for exit status 0. If it does not get it, the
+adapter exits with status 1 and one line, and posts nothing: `ollama: not on PATH`,
+`ollama: daemon not reachable` (also printed when the daemon does not answer in
+10 seconds), or `ollama: model X is not pulled; run: ollama pull X`. The adapter
+never switches to another runtime or model; no paid service is reached. A run
+whose command later exits non-zero is `failed` with that exit status, as for the
+other profiles. The probe is made only for the default command: a
+`CONCH_ADAPTER_CMD` you set is run as written, unprobed. The model only writes
+text; it has no tools here.
+
 **Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
 
 **Sandbox.** Unlike `claude -p`, Codex has a sandbox, and the default command
