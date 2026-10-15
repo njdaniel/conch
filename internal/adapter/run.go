@@ -112,17 +112,64 @@ func reportContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), reportTimeout)
 }
 
+// reportWithRetry makes one report about a run. A session that went offline
+// refuses a run report until it is heartbeaten, and the ticker may not have
+// beaten yet, so a report refused with session_offline is followed by one
+// heartbeat and one retry. There is no loop: if the heartbeat or the retry
+// fails, the report is dropped, as any failed report is, and the ticker
+// remains the steady-state path. The error returned is the last one.
+func (b *botLoop) reportWithRetry(ctx context.Context, call string, send func(ctx context.Context) error) error {
+	rctx, cancel := reportContext(ctx)
+	err := send(rctx)
+	cancel()
+	if !isToolCode(err, schema.ErrorCodeSessionOffline) {
+		return err
+	}
+	hctx, cancel := reportContext(ctx)
+	_, beatErr := b.mcp.Heartbeat(hctx, b.sessionID)
+	cancel()
+	if beatErr != nil {
+		// Typically too_many_sessions: the session cannot be revived, so the
+		// retry would be refused again.
+		logHeartbeatForReport(call, beatErr)
+		return err
+	}
+	rctx, cancel = reportContext(ctx)
+	defer cancel()
+	return send(rctx)
+}
+
+// isToolCode reports whether err is a tool error with the given code. It
+// matches on the code, never on the message.
+func isToolCode(err error, code string) bool {
+	var toolErr *mcpclient.ToolError
+	return errors.As(err, &toolErr) && toolErr.Code == code
+}
+
+// logHeartbeatForReport says why a report was dropped when its heartbeat
+// failed: the code if the server refused it, the error otherwise.
+func logHeartbeatForReport(call string, err error) {
+	var toolErr *mcpclient.ToolError
+	if errors.As(err, &toolErr) && toolErr.Code != "" {
+		slog.Warn("conch-adapter: report dropped, the session is offline and could not be revived", "call", call, "code", toolErr.Code)
+		return
+	}
+	slog.Warn("conch-adapter: report dropped, the session is offline and could not be revived", "call", call, "error", err)
+}
+
 // beginRun starts the run for a reply and moves it to running. Telling the
 // server about a run is not what the adapter is for: if that fails, the reply
 // is made without one.
 func (b *botLoop) beginRun(ctx context.Context, stopCommand context.CancelFunc, g *audienceGroup, human []schema.MessageV2) *activeRun {
 	newest := human[len(human)-1]
-	rctx, cancel := reportContext(ctx)
-	defer cancel()
-	run, err := b.mcp.StartRun(rctx, b.sessionID, schema.CreateRunRequestV1{
-		Channel:   b.cfg.Channel,
-		MessageID: newest.ID,
-		Task:      runTask(newest.Body),
+	var run schema.RunV1
+	err := b.reportWithRetry(ctx, "start_run", func(rctx context.Context) (err error) {
+		run, err = b.mcp.StartRun(rctx, b.sessionID, schema.CreateRunRequestV1{
+			Channel:   b.cfg.Channel,
+			MessageID: newest.ID,
+			Task:      runTask(newest.Body),
+		})
+		return err
 	})
 	if err != nil {
 		var toolErr *mcpclient.ToolError
@@ -152,9 +199,11 @@ func (b *botLoop) setState(ctx context.Context, run *activeRun, state schema.Run
 	if run == nil {
 		return
 	}
-	rctx, cancel := reportContext(ctx)
-	defer cancel()
-	if _, err := b.mcp.UpdateRun(rctx, run.id, schema.SetRunStateRequestV1{State: state, Outcome: outcome}); err != nil {
+	err := b.reportWithRetry(ctx, "update_run", func(rctx context.Context) error {
+		_, err := b.mcp.UpdateRun(rctx, run.id, schema.SetRunStateRequestV1{State: state, Outcome: outcome})
+		return err
+	})
+	if err != nil {
 		logReportError("update_run", err)
 	}
 }
@@ -165,9 +214,11 @@ func (b *botLoop) activity(ctx context.Context, run *activeRun, kind schema.Acti
 	if run == nil {
 		return
 	}
-	rctx, cancel := reportContext(ctx)
-	defer cancel()
-	if _, err := b.mcp.PostActivity(rctx, run.id, schema.AppendActivityRequestV1{Kind: kind, Summary: summary, Outcome: outcome, Data: data}); err != nil {
+	err := b.reportWithRetry(ctx, "post_activity", func(rctx context.Context) error {
+		_, err := b.mcp.PostActivity(rctx, run.id, schema.AppendActivityRequestV1{Kind: kind, Summary: summary, Outcome: outcome, Data: data})
+		return err
+	})
+	if err != nil {
 		logReportError("post_activity", err)
 	}
 }

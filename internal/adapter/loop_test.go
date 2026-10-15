@@ -43,6 +43,21 @@ type fakeMCP struct {
 	startErr    error
 	activityErr error
 	endCalls    int
+	// offline is how many more times each report ("start_run", "update_run",
+	// "post_activity") is refused with session_offline; beatErr is returned
+	// by every heartbeat when set.
+	offline map[string]int
+	beatErr error
+}
+
+// refuseOffline reports whether this call is refused with session_offline,
+// and counts the refusal down. The caller holds mu.
+func (f *fakeMCP) refuseOffline(call string) error {
+	if f.offline[call] > 0 {
+		f.offline[call]--
+		return &mcpclient.ToolError{Method: call, Code: schema.ErrorCodeSessionOffline}
+	}
+	return nil
 }
 
 type postAttempt struct {
@@ -97,12 +112,12 @@ func (f *fakeMCP) RegisterSession(_ context.Context, req schema.CreateSessionReq
 func (f *fakeMCP) Heartbeat(context.Context, int64) (schema.SessionV1, error) {
 	f.mu.Lock()
 	f.record("heartbeat")
-	beats := f.beats
+	beats, beatErr := f.beats, f.beatErr
 	f.mu.Unlock()
 	if beats != nil {
 		beats <- struct{}{}
 	}
-	return schema.SessionV1{ID: 7}, nil
+	return schema.SessionV1{ID: 7}, beatErr
 }
 
 func (f *fakeMCP) EndSession(context.Context, int64) error {
@@ -116,6 +131,10 @@ func (f *fakeMCP) EndSession(context.Context, int64) error {
 func (f *fakeMCP) StartRun(_ context.Context, _ int64, req schema.CreateRunRequestV1) (schema.RunV1, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.refuseOffline("start_run"); err != nil {
+		f.record("start_run:refused")
+		return schema.RunV1{}, err
+	}
 	f.record("start_run")
 	if f.startErr != nil {
 		return schema.RunV1{}, f.startErr
@@ -132,6 +151,10 @@ func (f *fakeMCP) UpdateRun(_ context.Context, runID int64, req schema.SetRunSta
 	if req.Outcome != "" {
 		state += ":" + req.Outcome
 	}
+	if err := f.refuseOffline("update_run"); err != nil {
+		f.record("update_run:" + state + ":refused")
+		return schema.RunV1{}, err
+	}
 	f.record("update_run:" + state)
 	f.runStates = append(f.runStates, state)
 	return schema.RunV1{ID: runID}, nil
@@ -140,6 +163,10 @@ func (f *fakeMCP) UpdateRun(_ context.Context, runID int64, req schema.SetRunSta
 func (f *fakeMCP) PostActivity(_ context.Context, runID int64, req schema.AppendActivityRequestV1) (schema.AgentActivityV1, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.refuseOffline("post_activity"); err != nil {
+		f.record("activity:" + string(req.Kind) + ":refused")
+		return schema.AgentActivityV1{}, err
+	}
 	f.record("activity:" + string(req.Kind))
 	f.activities = append(f.activities, activityCall{runID: runID, kind: req.Kind, summary: req.Summary, outcome: req.Outcome, data: string(req.Data)})
 	return schema.AgentActivityV1{}, f.activityErr
