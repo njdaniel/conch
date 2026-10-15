@@ -453,7 +453,7 @@ func (c commandRunner) readText(ctx context.Context, stdout io.Reader, fx fixtur
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxReplyBytes)
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := stripControl(scanner.Text())
 		if c.fixture {
 			handled, err := c.fixtureMarker(ctx, line, fx)
 			if err != nil {
@@ -476,6 +476,51 @@ func (c commandRunner) readText(ctx context.Context, stdout io.Reader, fx fixtur
 		return "", fmt.Errorf("read command output: %w", err)
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// stripControl removes terminal control sequences from a line of reply text:
+// CSI and OSC sequences whole, then any other C0 control (a bare ESC, BEL,
+// CR) and DEL, keeping tab. Nothing is interpreted: a cursor move is dropped,
+// not applied. The newline never reaches it, the scanner has split on it.
+func stripControl(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == 0x1b && i+1 < len(s) && s[i+1] == '[':
+			// CSI: parameter bytes, intermediate bytes, one final byte.
+			i += 2
+			for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+				i++
+			}
+			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+				i++
+			}
+			// s[i] is the final byte, which the loop's i++ skips. A byte out
+			// of the final range (a UTF-8 lead byte, another ESC) ends a
+			// malformed sequence without being eaten, so it is looked at again.
+			if i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i--
+			}
+		case ch == 0x1b && i+1 < len(s) && s[i+1] == ']':
+			// OSC: up to BEL or ESC \; an unterminated one runs to the line end.
+			i += 2
+			for i < len(s) && s[i] != 0x07 {
+				if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+					i++
+					break
+				}
+				i++
+			}
+		case ch == '\t' || (ch >= 0x20 && ch != 0x7f):
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
 }
 
 // fixtureMarker acts on a marker line and reports whether the line was one. A
