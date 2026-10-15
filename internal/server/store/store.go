@@ -537,7 +537,9 @@ type EndedRun struct {
 
 // OnRunsEnded sets the function the store calls, after the commit and never
 // inside a transaction, with the runs a session-ending call failed. Set it
-// before the store is used from more than one goroutine.
+// before the store is used from more than one goroutine. There is one such
+// function: a later call replaces the earlier one, so one store serves one
+// Server.
 func (s *Store) OnRunsEnded(fn func([]EndedRun)) { s.runsEnded = fn }
 
 // announceRunsEnded tells the OnRunsEnded function about runs, if there are

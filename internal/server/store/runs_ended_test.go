@@ -49,8 +49,9 @@ func TestSessionEndingCallsReportTheirRuns(t *testing.T) {
 	}
 }
 
-// Nothing is reported for a call that changed nothing or failed.
-func TestSessionEndingCallsReportNothingWithoutACommit(t *testing.T) {
+// Nothing is reported for a call that ended no run: one that found nothing,
+// and a sweep that only took sessions offline.
+func TestSessionEndingCallsReportNothingWhenNothingEnds(t *testing.T) {
 	ctx := context.Background()
 	f := newRunFixture(t)
 	f.s.OnRunsEnded(func(runs []EndedRun) { t.Errorf("reported %v", runs) })

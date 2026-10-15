@@ -42,8 +42,12 @@ func TestEventsPushRunsThatEndWithTheirSession(t *testing.T) {
 
 			sess := f.create(t, f.botTok, interventionAgentBody).ID
 			run := f.start(t, f.botTok, sess, "general", 0, "tidy the build")
-			f.mustState(t, f.botTok, run.ID, schema.RunStateRunning)
-			alice.until("the run running", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateRunning }))
+			// Starting the run is its only push, and this frame is read from
+			// it, so no run ref is left queued: a failed frame after the
+			// session ends can come only from the store's hook. (A second push
+			// before the end, such as a move to running, could be read late
+			// and show the failure without the hook.)
+			alice.until("the run queued", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateQueued }))
 
 			tc.end(t, f.runFixture, sess)
 			alice.until("the run failed with its session", isRun(func(r schema.RunV1) bool {
