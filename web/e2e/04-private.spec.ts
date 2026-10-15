@@ -96,7 +96,9 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   // moment the confirmed message and the pending copy (tagged Sending) are both
   // shown. Wait for the confirmed one, then for the pending one to go.
   const netItems = messages(page).getByRole('listitem').filter({ hasText: netBody });
-  await expect(netItems.filter({ hasNotText: 'Sending' })).toHaveCount(1);
+  // The settled copy carries the Sent tag (not a substring of Sending); a
+  // failed or unconfirmed send never does.
+  await expect(netItems.filter({ hasText: 'Sent' })).toHaveCount(1);
   await expect(netItems).toHaveCount(1);
   await expect(netItems).toContainText('→ net blue');
   // A net stays chosen after a post.
@@ -105,6 +107,8 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   expect(seenByGuest).toHaveLength(1);
   expect(seenByGuest[0]?.audience?.kind).toBe('net');
   expect((await history(world, world.tokens.nick, 'nets-demo')).filter((m) => m.body === netBody)).toHaveLength(0);
+  // Still once after the round trips: a late duplicate would show here.
+  await expect(netItems).toHaveCount(1);
 
   // A whisper to guest-test only; the composer is the channel's again after it,
   // and the audit notice shows.
@@ -113,6 +117,11 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   const whisperBody = `p3-05 browser whispers to guest ${runTag}`;
   await page.getByLabel('Whisper to guest-test').fill(whisperBody);
   await page.getByRole('button', { name: 'Send' }).click();
+  // As for the net: the settled copy, once, with the whisper's badge.
+  const whisperItems = messages(page).getByRole('listitem').filter({ hasText: whisperBody });
+  await expect(whisperItems.filter({ hasText: 'Sent' })).toHaveCount(1);
+  await expect(whisperItems).toHaveCount(1);
+  await expect(whisperItems).toContainText('→ whisper to 1');
   await expect(page.getByText('note: whispers are recorded in the audit log')).toBeVisible();
   await expect(to).toHaveValue('channel');
   const guest = await principalId(world, world.tokens.guest);
