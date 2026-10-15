@@ -11,7 +11,9 @@ import { SignIn } from './SignIn';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
 import { connectionReducer } from './state/connection';
-import { draftFor, draftsReducer, initialDrafts } from './state/drafts';
+import { whisperNotice } from './Composer';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer } from './state/drafts';
+import type { Audience } from './schema/message';
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { MembersPanel } from './agents/MembersPanel';
@@ -25,6 +27,9 @@ export function App({ origin }: { readonly origin: string }) {
   const [channels, dispatchChannels] = useReducer(channelsReducer, initialChannels);
   const [chat, dispatchRaw] = useReducer(chatReducer, initialChat);
   const [drafts, dispatchDrafts] = useReducer(draftsReducer, initialDrafts);
+  const [targets, dispatchTargets] = useReducer(targetsReducer, initialTargets);
+  // Whether this tab has shown the audit-log notice: once per tab.
+  const whisperNoted = useRef(false);
   const [attempt, setAttempt] = useState(0);
   // The newest chat state, for code that outlives a render (the socket's resume point).
   // It is moved by the same reducer in the same call as the state, so it is
@@ -85,6 +90,7 @@ export function App({ origin }: { readonly origin: string }) {
       dispatchChannels({ type: 'reset' });
       dispatchChat({ type: 'reset' });
       dispatchDrafts({ type: 'reset' });
+      dispatchTargets({ type: 'reset' });
       setAttempt(0);
     }
   }, [auth.phase]);
@@ -149,11 +155,22 @@ export function App({ origin }: { readonly origin: string }) {
 
   // One POST per click. Nothing here sends a message a second time on its own.
   const post = useCallback(
-    (name: string, localId: number, body: string) => {
-      void api.postMessage(name, body).then((result) => {
-        if (result.ok) dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
-        else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
-        else dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+    (name: string, localId: number, body: string, audience?: Audience) => {
+      void api.postMessage(name, body, audience).then((result) => {
+        if (result.ok) {
+          dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
+          if (audience?.kind === 'principals') {
+            const note = whisperNoted.current ? null : whisperNotice;
+            whisperNoted.current = true;
+            dispatchTargets({ type: 'whispered', channel: name, sent: audience.principal_ids, note });
+          }
+        } else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+        else {
+          // A refusal stays as a Failed line with Retry and Dismiss, so the text
+          // is never lost; the server's own line is shown beside the composer.
+          if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+          dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+        }
       });
     },
     [],
@@ -226,22 +243,27 @@ export function App({ origin }: { readonly origin: string }) {
                 live={live.status}
                 people={live.people}
                 nets={live.nets}
+                monitored={live.monitored}
                 viewer={auth.principal.id}
                 draft={draftFor(drafts, selected)}
+                target={targetFor(targets, selected)}
                 onDraft={(text) => {
                   dispatchDrafts({ type: 'edit', channel: selected, text });
                 }}
-                onSend={(body) => {
+                onTarget={dispatchTargets}
+                onSend={(body, audience) => {
                   const localId = chatFor(chat, selected).nextLocalId;
-                  dispatchChat({ type: 'sending', channel: selected, body, at: Date.now() });
+                  dispatchTargets({ type: 'posting', channel: selected });
+                  dispatchChat({ type: 'sending', channel: selected, body, at: Date.now(), ...(audience === undefined ? {} : { audience }) });
                   dispatchDrafts({ type: 'edit', channel: selected, text: '' });
-                  post(selected, localId, body);
+                  post(selected, localId, body, audience);
                 }}
                 onRetrySend={(localId) => {
                   const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
                   if (send === undefined || send.status === 'sending') return;
+                  dispatchTargets({ type: 'posting', channel: selected });
                   dispatchChat({ type: 'retrying', channel: selected, localId });
-                  post(selected, localId, send.body);
+                  post(selected, localId, send.body, send.audience);
                 }}
                 onDismissSend={(localId) => {
                   dispatchChat({ type: 'discard', channel: selected, localId });

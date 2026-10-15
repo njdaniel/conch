@@ -199,11 +199,16 @@ var routeExpectations = map[string]routeExpectation{
 	// below); the poll is an own-session call, so a human and the fixture
 	// agent both get 404 session_not_found. AuthOff gets 400
 	// sessions_require_auth on all five (special-cased below).
-	"POST /v1/runs/{id}/interventions":            {classAuth, "/v1/runs/9999/interventions", `{"kind":"cancel"}`, 404},
-	"GET /v1/runs/{id}/interventions":             {classAuth, "/v1/runs/9999/interventions", "", 404},
-	"GET /v1/interventions/{id}":                  {classAuth, "/v1/interventions/9999", "", 404},
-	"GET /v1/sessions/{id}/interventions":         {classAuth, "/v1/sessions/9999/interventions?state=requested", "", 404},
-	"POST /v1/interventions/{id}/ack":             {classAuth, "/v1/interventions/9999/ack", `{"state":"applied"}`, 404},
+	"POST /v1/runs/{id}/interventions":    {classAuth, "/v1/runs/9999/interventions", `{"kind":"cancel"}`, 404},
+	"GET /v1/runs/{id}/interventions":     {classAuth, "/v1/runs/9999/interventions", "", 404},
+	"GET /v1/interventions/{id}":          {classAuth, "/v1/interventions/9999", "", 404},
+	"GET /v1/sessions/{id}/interventions": {classAuth, "/v1/sessions/9999/interventions?state=requested", "", 404},
+	"POST /v1/interventions/{id}/ack":     {classAuth, "/v1/interventions/9999/ack", `{"state":"applied"}`, 404},
+	// Read state (issue #351): people only, so an agent gets 403 on both and
+	// AuthOff 400 read_state_require_auth (both special-cased below). A mark of
+	// 0 writes nothing.
+	"GET /v1/read-state":                          {classAuth, "/v1/read-state", "", 200},
+	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
@@ -353,6 +358,11 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "POST /v1/runs/{id}/interventions" {
 				agentWant = http.StatusForbidden
 			}
+			// Read state is for people (issue #351): an agent is refused before
+			// any channel is looked at.
+			if strings.HasSuffix(rt.pattern, "/read-state") {
+				agentWant = http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -394,6 +404,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
+				}
+				if strings.HasSuffix(rt.pattern, "/read-state") {
+					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential

@@ -790,3 +790,39 @@ func TestScopedMessagesNeverReachAnotherAudiencesPrompt(t *testing.T) {
 		})
 	}
 }
+
+// registerPostsMCP is a server where a person posts the instant the adapter's
+// session opens: the message a check sends when it sees the session online.
+type registerPostsMCP struct {
+	*fakeMCP
+	posted schema.MessageV2
+}
+
+func (r *registerPostsMCP) RegisterSession(ctx context.Context, req schema.CreateSessionRequestV1) (schema.SessionV1, error) {
+	r.mu.Lock()
+	r.pages[0] = schema.ListMessagesResponseV2{Messages: []schema.MessageV2{r.posted}}
+	r.mu.Unlock()
+	return r.fakeMCP.RegisterSession(ctx, req)
+}
+
+// A message sent as soon as the session is online must be answered: the
+// session opening is the signal that the adapter is listening, so the cursor
+// is seeded before it, not after.
+func TestRunAnswersMessageSentWhenSessionOpens(t *testing.T) {
+	mcp := &registerPostsMCP{
+		fakeMCP: &fakeMCP{pages: map[int64]schema.ListMessagesResponseV2{0: {}}},
+		posted:  message(1, 5, "please answer"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := &botLoop{cfg: testConfig(), mcp: mcp, claude: &fakeClaude{reply: "answered"}}
+	loop.sleep = func(context.Context, time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+	if err := loop.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"answered"}; !reflect.DeepEqual(mcp.posts, want) {
+		t.Fatalf("posts = %v, want %v", mcp.posts, want)
+	}
+}
