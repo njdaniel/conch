@@ -1,7 +1,7 @@
-// Hand-written validators for the wire types in this directory. pkg/schema is
-// the source of every wire shape (CLAUDE.md rule 2); the TypeScript types here
-// copy it by hand, and schema.test.ts checks each against the Go golden
-// fixtures through these validators.
+// The combinators the wire types' validators are built from. pkg/schema is
+// the source of every wire shape (CLAUDE.md rule 2): cmd/schema-ts writes each
+// type and its validator into generated.ts from the Go types, and
+// schema.test.ts checks each against the Go golden fixtures through them.
 //
 // A validator is tied to its type by the compiler: object<T>() must be given a
 // validator for every key of T, of that key's type, and vocab<T>() every member
