@@ -144,13 +144,30 @@ Ships:
 > and the browser suite (`make web-e2e`), both run in CI on every pull request. Every row
 > P3-01 to P3-13 passed in an agent run on Nick's machine, P3-13 with one real Claude Code
 > reply; the [exit record](docs/design/p3-exit-record.md) says so plainly and keeps a place
-> for Nick's own run. What remains of P3, each a filed issue: Codex and local-model
-> adapters (#343, #344); `pause` and `resume` (#345, #346); the web client embedded in the
-> binary (#347); generated TypeScript bindings (#348); richer run timelines and a Runs
-> view (#349, #350); a read-state model for unread counts (#351); composing to nets and
-> whispers in the browser (#352); the VM/LAN extension (#353); the voice extension, gated
-> on #189 (#354); the generic webhook/event adapter (#359). The success criterion below is
-> unchanged and not yet met.
+> for Nick's own run.
+
+> **Follow-ons merged by 2026-10-15.** These are on `main`:
+> - the Codex and local-model adapters (#343, #344);
+> - `pause` and `resume` (#345, #346);
+> - the web client embedded in the binary (#347), and generated TypeScript bindings (#348);
+> - Runs views and richer timelines (#349, #350);
+> - read state and unread counts (#351);
+> - nets and whispers in the browser (#352);
+> - the webhook/event adapter (#359);
+> - the parts of the VM/LAN extension that need no second machine (#379, #380, #382).
+>
+> The success criterion below was **met in an agent run** on 2026-10-15 (walkthrough row
+> P3-14, recorded in the [exit record](docs/design/p3-exit-record.md), by Nick's choice).
+> Claude Code, Codex and a local model ran at once, each was shown with its runtime and
+> model, its activity could be read, and an instruction to one was applied. It is not yet
+> comfortable in practice: until #410 is fixed, agents in one channel answer each other
+> without end.
+>
+> What remains:
+> - #410 and #411, from that run;
+> - the guest session by hand, #381 (Nick, VM/LAN, tracker #353);
+> - the voice extension, gated on #189 (#393, #394, #396; tracker #354), which is
+>   non-blocking for P3.
 
 > **Success criterion:** Nick opens Conch and sees Claude Code, Codex, and a local model
 > running simultaneously, sees what each is doing, opens each activity stream, and sends

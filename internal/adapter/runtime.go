@@ -30,8 +30,10 @@ const codexCommand = "codex exec --json --model {model} --sandbox read-only --sk
 
 // ollamaCommand is what the ollama profile runs when CONCH_ADAPTER_CMD is not
 // set. There is no {prompt}: the prompt goes to standard input, and `ollama
-// run` prints the answer on standard output.
-const ollamaCommand = "ollama run {model}"
+// run` prints the answer on standard output. --nowordwrap is there because
+// ollama writes cursor-movement sequences for its word wrap even into a pipe
+// (found in the P3-14 run, #411); present in ollama 0.32.0.
+const ollamaCommand = "ollama run --nowordwrap {model}"
 
 // probeTimeout bounds the check that the local runtime can answer for the
 // model, so an adapter pointed at a hung daemon says so and stops.

@@ -64,6 +64,48 @@ once, as Nick's user, in a directory of the runner's root, which was removed aft
 | Outcome | `replied`; the run ended `completed` (5.7 s) |
 | Note | The runner printed its warning first and never started the real command in its setup checks. The run, its activity and the reply went through the same contract as the scripted agents. |
 
+## P3-14: three runtimes at once (the success criterion)
+
+The roadmap's P3 success criterion, by walkthrough row P3-14. On 2026-10-15 Nick chose
+to have this run done as an **agent run**, as P3-13 was ("Agent run it"); it is not a
+by-hand run. The principal session ran it once on Nick's machine, from a fresh
+`git worktree add --detach origin/main`:
+
+`go run ./e2e/p3-local --reset` then `CONCH_P3_MODEL_CLAUDE=sonnet CONCH_P3_MODEL_CODEX=gpt-6.1-sol CONCH_P3_MODEL_OLLAMA=llama3.1:8b go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama`
+
+The three printed `conch-adapter` commands were then started, each in an empty directory
+of its own. Afterwards the run was reset, which removed its root and stopped `conchd`. A
+check of every process whose working directory was one of those three found none left.
+
+| | |
+| --- | --- |
+| Date | 2026-10-15, 13:25 UTC |
+| Commit | `4cd8faaef3ec5a8e64c07cd4415971c693dee953` (`main`) |
+| Claude Code | 2.1.300, model `sonnet` (principal `real-claude`) |
+| Codex | codex-cli 0.162.1, model `gpt-6.1-sol`, Nick's configured default (principal `real-codex`) |
+| Ollama | 0.32.0, model `llama3.1:8b` (principal `real-ollama`) |
+
+**What appeared.**
+- **Roster:** the operator's `GET /v1/sessions?channel=general` showed three `conch-adapter` sessions, all online:
+  - `claude-code` / `sonnet`;
+  - `codex` / `gpt-6.1-sol`;
+  - `ollama` / `llama3.1:8b`.
+- **One message, three replies:** `nick-test` posted one message asking each agent to say which runtime and model it is. Each agent started a run answering it and replied:
+  - **Claude Code:** "Claude Code (Claude Agent SDK runtime), running the Sonnet 5.5 model (claude-sonnet-5-5)."
+  - **Codex:** "I'm running in the Codex runtime with the GPT-6 model."
+  - **The local model:** "I am running PyTorch and MobileNet." The 8B model's answer is wrong, but the contract carried it like the others.
+- **Activity per run:**
+  - Claude Code and Ollama: `command_started`, `command_finished` (exit 0) and `reply_posted`.
+  - Codex: `reply_posted` only, because it ran no command.
+- **The instruction to one agent:** a `message` intervention to Codex's open run was `applied` 1.1 s after it was sent, and the run's activity shows `intervention_received`. By design the body goes into that agent's *next* prompt, not the reply it is already writing (`internal/adapter/run.go`). The adapters were stopped before Codex's next reply finished, so the intervention's effect on a reply was not observed.
+- **On stop:** stopping the adapters cancelled their open runs with outcome `adapter stopped`.
+
+**What went wrong.**
+- **#410: the agents answered each other.** After the three replies, each agent answered the others' replies, and so on: 21 messages and 22 runs in about 30 s, until the adapters were stopped. An adapter answers every message not written by itself. With two or more adapters in one channel this loop has no end, and it spends the operator's quota.
+- **#411: escapes in a reply.** One Ollama reply was posted with raw terminal control sequences in it (`\x1b[13D\x1b[K`), from `ollama run`'s word wrap.
+
+**Where this leaves the success criterion.** Claude Code, Codex and a local model ran at the same time against one server. Each showed in the roster with its runtime and model, each run's activity could be read, and an instruction to one was delivered and acknowledged. That is the criterion, met in an agent run. It is not yet comfortable in practice: until #410 is fixed, three agents in one channel talk to each other without end. The observation was through the API and the CLI, not on the TUI's screen; the TUI shows the same data (P3-06).
+
 ## What surprised us
 
 Found while building and testing the prototype. Each item is fixed, or filed:
@@ -76,26 +118,25 @@ Found while building and testing the prototype. Each item is fixed, or filed:
 
 ## What remains of P3
 
-The P3 success criterion is unchanged and is not met by this slice. It needs Codex and a
-local model running alongside Claude Code (#343, #344).
+Updated 2026-10-15. Every follow-on filed at the first exit has merged:
+- adapters and controls: #343 (Codex), #344 (local model), #345 and #346 (pause and resume);
+- the web client: #347 (embedded in the binary), #348 (TypeScript bindings), #350 (Runs view), #352 (composing to nets and whispers);
+- the TUI: #349 (Runs view);
+- read state: #351, #372, #373;
+- the webhook adapter: #359, with #386–#388 and its hardening #392, #402, #403, #405, #406;
+- the VM/LAN children: #379, #380, #382.
 
-| Issue | Item |
-| --- | --- |
-| #343 | `conch-adapter`: Codex runtime profile |
-| #344 | `conch-adapter`: local model (Ollama), and three runtimes at once |
-| #345 | `conch-adapter`: `pause` and `resume` |
-| #346 | TUI and web: `pause` and `resume` controls |
-| #347 | The web client embedded in the `conchd` binary |
-| #348 | TypeScript bindings generated from `pkg/schema` |
-| #349 | TUI: Runs view and a richer run timeline |
-| #350 | Web: Runs view and a richer run timeline |
-| #351 | Read state: a per-person read mark and unread counts on the API |
-| #352 | Web: composing to nets and whispers |
-| #353 | VM/LAN extension of the local prototype (tracking) |
-| #354 | Voice extension of the local prototype (tracking, gated on #189) |
-| #359 | A generic webhook/event adapter (tracking) |
+What is open:
 
-The decisions on #343, #345, #347, #348, #351, #353 and #354 are recorded on each issue.
+| Issue | Item | Who or what it waits on |
+| --- | --- | --- |
+| #410 | `conch-adapter` answers other agents, so agents loop in a shared channel | In progress |
+| #411 | Terminal escapes in text replies (Ollama) | In progress |
+| #381 | The guest session by hand (VM/LAN record), which keeps tracker #353 open | Nick: it needs a real second machine |
+| #396 | The voice session by hand | Nick, after #393 and #394; non-blocking for P3 (decided on #354) |
+| #393, #394 | Voice rows in the automated suite, which keep tracker #354 open | Gated on #189 (the V4 exit) |
+
+The decisions taken on the follow-ons (#343, #345, #347, #348, #351, #353 and #354 among them) are recorded on each issue.
 
 ## Nick's own run (optional)
 

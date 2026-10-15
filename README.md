@@ -504,7 +504,7 @@ a model name) and the adapter exits with one line naming it if it is missing.
 `CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
 written, but is still read as the profile reads.
 
-`ollama` is the local-model profile. It runs `ollama run {model}` with the
+`ollama` is the local-model profile. It runs `ollama run --nowordwrap {model}` with the
 prompt on standard input and reads the printed text as the reply, so a run
 reports the process as one `command_started` and `command_finished` pair, as
 `claude-code` does (and, as there, `CONCH_ADAPTER_FIXTURE=1` must never be set
