@@ -307,6 +307,11 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	m.ev.recreated = false
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
+		// Frames were missed while the socket was down: the Runs view's newest
+		// page is read again and merged.
+		if m.runs.loaded && m.runs.channel == m.current() {
+			cmds = append(cmds, m.loadRuns(0))
+		}
 		for _, row := range m.agentRows() {
 			if !m.expanded[row.id] {
 				continue

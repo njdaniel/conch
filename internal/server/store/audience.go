@@ -133,6 +133,48 @@ func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, re
 	return msgs, nil
 }
 
+// CountVisibleMessagesAfter returns how many messages in channelID with ID
+// greater than afterID reader may see, counting no further than limit (so a
+// result equal to limit means "at least that many"). It is the unread count of
+// a read mark (issue #351). It embeds the same visibility condition as
+// ListVisibleMessages, in the same statement, so a message the reader cannot
+// see is not counted, and a count is never a way to learn that a hidden
+// message exists. The cap is applied inside the statement, so the work is
+// bounded by it however long the channel has gone unread.
+func (s *Store) CountVisibleMessagesAfter(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: count messages: limit must be positive, got %d", limit)
+	}
+	if afterID < 0 {
+		return 0, errors.New("store: count messages: a cursor is never negative")
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	var n int
+	err := s.db.QueryRowContext(ctx, countSQL(scoped),
+		append(append([]any{channelID, afterID}, predArgs...), limit)...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count messages in channel %d: %w", channelID, err)
+	}
+	return n, nil
+}
+
+// newestVisibleMessageID returns the id of the newest message in channelID
+// that reader may see, or 0 when there is none. MarkRead clamps a mark to it,
+// so a mark can never point past what the reader has seen, nor be used to
+// probe for the ids of messages they cannot see.
+func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, reader Reader) (int64, error) {
+	scoped, predArgs := visibilityArgs(reader)
+	var id int64
+	err := s.db.QueryRowContext(ctx, newestSQL(scoped), append([]any{channelID}, predArgs...)...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: newest message in channel %d: %w", channelID, err)
+	}
+	return id, nil
+}
+
 // messageColumns is the column list scanMessages reads.
 const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id`
 
@@ -164,6 +206,17 @@ const (
 	listDescTail = `
 		 ORDER BY m.id DESC LIMIT ?`
 
+	countHead = `SELECT COUNT(*) FROM (SELECT 1 FROM messages m
+		 WHERE m.channel_id = ? AND m.id > ? AND `
+	countTail = `
+		 LIMIT ?)`
+	newestHead = `SELECT m.id FROM messages m
+		 WHERE m.channel_id = ? AND `
+	// Newest first and stopping at the first visible row, so the cost is the
+	// hidden messages at the top of the channel and not the whole channel.
+	newestTail = `
+		 ORDER BY m.id DESC LIMIT 1`
+
 	searchHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
 		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND `
@@ -189,6 +242,20 @@ func listSQL(scoped, newestFirst bool) string {
 		return listHead + visibleToScopedReader + tail
 	}
 	return listHead + visibleToAnyReader + tail
+}
+
+func countSQL(scoped bool) string {
+	if scoped {
+		return countHead + visibleToScopedReader + countTail
+	}
+	return countHead + visibleToAnyReader + countTail
+}
+
+func newestSQL(scoped bool) string {
+	if scoped {
+		return newestHead + visibleToScopedReader + newestTail
+	}
+	return newestHead + visibleToAnyReader + newestTail
 }
 
 func searchSQL(scoped bool) string {
