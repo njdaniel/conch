@@ -1,10 +1,10 @@
 // Run detail, in the centre area: the run's fields, its activity (a REST read,
-// then live frames) and the history of interventions asked of it, and the two
+// then live frames) and the interventions asked of it, interleaved by time, and the two
 // asks a person can make. Nothing here claims an outcome: an ask shows as
 // Requested until its frame says more, and the run's state is only what a
 // RunV1 says. Every field is another person's or an agent's text.
 import { useState } from 'react';
-import type { InterventionKind, InterventionV1 } from '../schema/intervention';
+import type { InterventionKind } from '../schema/intervention';
 import { runEnded } from '../schema/run';
 import { ago, clockSeconds, dataBody, askText, runSpan, spanText, timeline, type TimelineItem } from './format';
 import { safeLink } from './links';
@@ -12,27 +12,14 @@ import type { RunDetail as Detail } from './state';
 import type { Agents } from './useAgents';
 import { useNow } from './useNow';
 
-// The ask's state as the history words it.
-export function interventionWord(iv: InterventionV1): string {
-  switch (iv.state) {
-    case 'requested':
-      return 'Requested';
-    case 'acknowledged':
-      return 'Acknowledged';
-    case 'applied':
-      return 'Applied';
-    case 'failed':
-      return `Failed: ${iv.reason ?? ''}`;
-  }
-}
-
-const kindWord: Record<InterventionKind, string> = { message: 'Message', cancel: 'Cancel', pause: 'Pause', resume: 'Resume' };
-
 // One line of the timeline: the offset from the run's start, the gap from the
 // line before it when that is a second or more, and the words. An entry with
 // data is a <details>: the line is its summary and the body, as text, is the
 // data pretty-printed and bounded.
 function TimelineLine({ item, previous, start }: { readonly item: TimelineItem; readonly previous: TimelineItem | undefined; readonly start: number | null }) {
+  // The line that says where an intervention stands now: its request while
+  // that is the only word, its answer after.
+  const latest = item.kind === 'answer' || (item.kind === 'ask' && item.iv.state === 'requested');
   const gap = previous === undefined ? 0 : item.at - previous.at;
   const line = (
     <>
@@ -44,7 +31,9 @@ function TimelineLine({ item, previous, start }: { readonly item: TimelineItem; 
           {item.entry.outcome === undefined || item.entry.outcome === '' ? null : <span className="ag-prose"> → {item.entry.outcome}</span>}
         </>
       ) : (
-        <span className="ag-iv ag-prose">{askText(item)}</span>
+        <span className="ag-iv ag-prose" data-testid={latest ? `intervention-${String(item.iv.id)}` : undefined}>
+          {askText(item)}
+        </span>
       )}
     </>
   );
@@ -287,19 +276,13 @@ export function RunDetail({ agents, now, onGoToMessage }: { readonly agents: Age
           Go to message
         </button>
       )}
-      <h3>Activity ({detail.activity.length})</h3>
+      <h3>
+        Activity ({detail.activity.length})
+        {detail.interventions.length === 0 ? '' : ` · ↳ interventions (${String(detail.interventions.length)})`}
+      </h3>
       <ol className="ag-activity" aria-label="Timeline">
         {items.map((item, i) => (
           <TimelineLine key={item.key} item={item} previous={items[i - 1]} start={run === null ? null : Date.parse(run.started_at)} />
-        ))}
-      </ol>
-      <h3>Interventions ({detail.interventions.length})</h3>
-      <ol className="ag-interventions" aria-label="Interventions">
-        {detail.interventions.map((iv) => (
-          <li key={iv.id}>
-            <span>{kindWord[iv.kind]}</span> · <span data-testid={`intervention-${String(iv.id)}`}>{interventionWord(iv)}</span>
-            {iv.body === undefined || iv.body === '' ? null : <span className="ag-prose"> · {iv.body}</span>}
-          </li>
         ))}
       </ol>
       <Controls key={detail.runId} detail={detail} declared={declared} inRoster={session !== undefined && agents.state.link === 'live'} onAsk={agents.ask} />

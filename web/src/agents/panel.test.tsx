@@ -140,6 +140,10 @@ interface Server {
   channelRunUrls: string[];
   // The channel's messages, newest first, as the history read returns them.
   messages: Json[];
+  // While holdBefore matches the `before` of a channel runs read, its answer
+  // waits in `held` until a test calls it.
+  holdBefore: string | null;
+  held: (() => void)[];
   runs: Record<number, Json>;
   activity: Json[];
   interventions: Json[];
@@ -166,6 +170,8 @@ function install() {
     channelRuns: [],
     channelRunUrls: [],
     messages: [],
+    holdBefore: null,
+    held: [],
     runs: { 41: run() },
     activity: [],
     interventions: [],
@@ -199,6 +205,14 @@ function install() {
       if (path === '/v1/runs') {
         if (!url.searchParams.has('session')) {
           server.channelRunUrls.push(url.search);
+          const answer = () => json({ runs: server.channelRuns.filter(beforeOf(url)).slice(0, Number(url.searchParams.get('limit'))) });
+          if (server.holdBefore !== null && url.searchParams.get('before') === server.holdBefore) {
+            return new Promise<Response>((done) => {
+              server.held.push(() => {
+                done(answer());
+              });
+            });
+          }
           return Promise.resolve(json({ runs: server.channelRuns.filter(beforeOf(url)).slice(0, Number(url.searchParams.get('limit'))) }));
         }
         server.runListUrls.push(url.search);
@@ -417,12 +431,12 @@ describe('run detail', () => {
     expect(detail.getByTestId('run-state').textContent).toBe('running');
     expect(detail.getByText('Answer <i>the</i> question')).toBeDefined();
     await detail.findByText('ran step 2');
-    expect(within(detail.getByRole('list', { name: 'Interventions' })).getByTestId('intervention-9').textContent).toBe('Applied');
+    expect(detail.getByTestId('intervention-9').textContent).toBe('↳ #9 applied');
     socket.send(activity(3));
     await detail.findByText('ran step 3');
     socket.send(activity(3, { summary: 'another run', run_id: 99 }));
     expect(detail.queryByText('another run')).toBeNull();
-    expect(detail.getByRole('heading', { name: 'Activity (3)' })).toBeDefined();
+    expect(detail.getByRole('heading', { name: 'Activity (3) · ↳ interventions (1)' })).toBeDefined();
   });
 
   it('opens the same run from the list of recent runs', async () => {
@@ -577,20 +591,20 @@ describe('interventions', () => {
     fireEvent.change(detail.getByLabelText('Message to the agent'), { target: { value: 'hello agent' } });
     fireEvent.click(detail.getByRole('button', { name: 'Send' }));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-7').textContent).toBe('Requested');
+      expect(detail.getByTestId('intervention-7').textContent).toBe('↳ #7 message · requested… · hello agent');
     });
     expect(server.asks).toEqual([{ run: 41, body: { kind: 'message', body: 'hello agent' } }]);
     socket.send(intervention(7, 'acknowledged'));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-7').textContent).toBe('Acknowledged');
+      expect(detail.getByTestId('intervention-7').textContent).toBe('↳ #7 acknowledged');
     });
     socket.send(intervention(7, 'applied'));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-7').textContent).toBe('Applied');
+      expect(detail.getByTestId('intervention-7').textContent).toBe('↳ #7 applied');
     });
     // A repeated, older document does not take it back.
     socket.send(intervention(7, 'requested'));
-    expect(detail.getByTestId('intervention-7').textContent).toBe('Applied');
+    expect(detail.getByTestId('intervention-7').textContent).toBe('↳ #7 applied');
     expect(server.asks).toHaveLength(1);
   });
 
@@ -599,13 +613,13 @@ describe('interventions', () => {
     const socket = await openApp();
     const detail = within(await openRunDetail(socket));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-8').textContent).toBe('Requested');
+      expect(detail.getByTestId('intervention-8').textContent).toBe('↳ #8 message · requested… · hello agent');
     });
     socket.send(intervention(8, 'failed', { reason: 'the agent is <b>busy</b>' }));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-8').textContent).toBe('Failed: the agent is <b>busy</b>');
+      expect(detail.getByTestId('intervention-8').textContent).toBe('↳ #8 failed: the agent is <b>busy</b>');
     });
-    expect(detail.getByRole('list', { name: 'Interventions' }).querySelector('b')).toBeNull();
+    expect(detail.getByTestId('intervention-8').querySelector('b')).toBeNull();
   });
 
   it('asks for confirmation before cancelling, and a keep leaves nothing sent', async () => {
@@ -626,14 +640,14 @@ describe('interventions', () => {
     fireEvent.click(detail.getByRole('button', { name: 'Cancel' }));
     fireEvent.click(detail.getByRole('button', { name: 'Yes, cancel the run' }));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-5').textContent).toBe('Requested');
+      expect(detail.getByTestId('intervention-5').textContent).toBe('↳ #5 cancel · requested…');
     });
     expect(server.asks).toEqual([{ run: 41, body: { kind: 'cancel' } }]);
     expect(detail.getByTestId('run-state').textContent).toBe('running');
     socket.send(intervention(5, 'acknowledged', { kind: 'cancel', body: undefined }));
     socket.send(intervention(5, 'applied', { kind: 'cancel', body: undefined }));
     await waitFor(() => {
-      expect(detail.getByTestId('intervention-5').textContent).toBe('Applied');
+      expect(detail.getByTestId('intervention-5').textContent).toBe('↳ #5 applied');
     });
     expect(detail.getByTestId('run-state').textContent).toBe('running');
     socket.send(run({ state: 'cancelled', ended_at: at }));
@@ -651,7 +665,7 @@ describe('interventions', () => {
     fireEvent.change(detail.getByLabelText('Message to the agent'), { target: { value: 'hi' } });
     fireEvent.click(detail.getByRole('button', { name: 'Send' }));
     await detail.findByText('This session does not accept that request');
-    expect(detail.getByRole('heading', { name: 'Interventions (0)' })).toBeDefined();
+    expect(detail.getByRole('heading', { name: 'Activity (0)' })).toBeDefined();
   });
 
   it('does not send an empty message', async () => {
@@ -832,6 +846,56 @@ describe('the Runs view', () => {
     expect(within(list).queryByRole('button', { name: '#10 · running' })).toBeNull();
   });
 
+  it('drops a page read for a channel that was left and came back to, and one for a channel no longer on screen', async () => {
+    server.holdBefore = '51';
+    const socket = await openRuns(Array.from({ length: 60 }, (_, i) => run({ id: 100 - i })));
+    const list = await runsList();
+    expect(within(list).getAllByRole('button')).toHaveLength(50);
+    fireEvent.click(panel().getByRole('button', { name: 'Show older runs' }));
+    await waitFor(() => {
+      expect(server.held).toHaveLength(1);
+    });
+    // Away to ops: the page for general lands on ops, which has its own first page.
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await waitFor(() => {
+      expect(events()).toHaveLength(2);
+    });
+    expect(socket.closed).toBe(true);
+    lastEvents().open();
+    lastEvents().send(roster([session(100, 2)], 8));
+    await waitFor(() => {
+      expect(within(panel().getByRole('list', { name: 'Channel runs' })).getAllByRole('button')).toHaveLength(50);
+    });
+    server.held[0]?.();
+    await act(() => Promise.resolve());
+    expect(within(panel().getByRole('list', { name: 'Channel runs' })).getAllByRole('button')).toHaveLength(50);
+    expect(panel().getByRole('button', { name: 'Show older runs' })).toBeDefined();
+
+    // Away to general and back to ops, with a page of the first stay still to land.
+    server.held = [];
+    fireEvent.click(panel().getByRole('button', { name: 'Show older runs' }));
+    await waitFor(() => {
+      expect(server.held).toHaveLength(1);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await waitFor(() => {
+      expect(events()).toHaveLength(3);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await waitFor(() => {
+      expect(events()).toHaveLength(4);
+    });
+    lastEvents().open();
+    lastEvents().send(roster([session(100, 2)], 8));
+    await waitFor(() => {
+      expect(within(panel().getByRole('list', { name: 'Channel runs' })).getAllByRole('button')).toHaveLength(50);
+    });
+    server.held[0]?.();
+    await act(() => Promise.resolve());
+    expect(within(panel().getByRole('list', { name: 'Channel runs' })).getAllByRole('button')).toHaveLength(50);
+    expect(panel().getByRole('button', { name: 'Show older runs' })).toBeDefined();
+  });
+
   it('opens the run in the centre when selected', async () => {
     server.runs[42] = run({ id: 42, state: 'failed', ended_at: at, task: 'Third' });
     await openRuns([run({ id: 42, state: 'failed', ended_at: at, task: 'Third' })]);
@@ -936,8 +1000,10 @@ describe('the run timeline', () => {
     // The mark is a class, not only the arrow.
     expect(lineOf(detail)[1]?.querySelector('.ag-iv')).not.toBeNull();
     expect(lineOf(detail)[0]?.querySelector('.ag-iv')).toBeNull();
-    // The history list stays.
-    expect(detail.getByTestId('intervention-9').textContent).toBe('Applied');
+    // One timeline: no second list, and the heading counts both.
+    expect(detail.queryByRole('list', { name: 'Interventions' })).toBeNull();
+    expect(detail.getByRole('heading', { name: 'Activity (3) · ↳ interventions (1)' })).toBeDefined();
+    expect(detail.getByTestId('intervention-9').textContent).toBe('↳ #9 applied');
   });
 
   it('words a request not yet answered as requested… and a failed one with its reason', async () => {

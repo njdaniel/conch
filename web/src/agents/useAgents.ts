@@ -207,6 +207,11 @@ export function useAgents({
   const now = useRef(state);
   now.current = state;
 
+  // Counts the resets of the view; an answer asked before the latest one is
+  // not for the view on screen, even when it is for a channel of the same name
+  // (general, then ops, then general again).
+  const epoch = useRef(0);
+
   // The members list: where each principal comes from. It is read again when
   // the socket comes back and when the roster names someone it does not hold.
   const [membersAttempt, setMembersAttempt] = useState(0);
@@ -246,6 +251,7 @@ export function useAgents({
   // the session changes. Nothing is replayed, so every reconnect takes the next
   // roster as the state.
   useEffect(() => {
+    epoch.current++;
     dispatch({ type: 'reset', channelId });
     askedFor.current = '';
   }, [channelId]);
@@ -362,19 +368,18 @@ export function useAgents({
   // The Runs view: the first page when the socket is first live and again
   // each time it comes back (frames were missed), older pages on request.
   // An answer for a channel no longer on screen is dropped.
-  const channelNow = useRef(channel);
-  channelNow.current = channel;
   const askRuns = useCallback(
     (before: number) => {
       if (channel === null) return;
       const asked = channel;
+      const mine = epoch.current;
       const refresh = before === 0 && now.current.runs.loaded;
       if (!refresh) {
         if (now.current.runs.loading || now.current.runs.pages >= maxRunPages) return;
         dispatch({ type: 'runsAsk' });
       }
       void api.listChannelRuns(asked, runsPageSize, before).then((result) => {
-        if (channelNow.current !== asked) return;
+        if (epoch.current !== mine) return;
         if (result.ok) {
           dispatch({ type: 'runsPage', before, runs: result.value });
         } else if (result.failure === 'unauthorized') {
@@ -386,9 +391,13 @@ export function useAgents({
     },
     [channel, onUnauthorized],
   );
+  // Keyed on liveGen alone: a channel switch reads again with the roster of
+  // the new socket, not once more before it.
+  const askRunsNow = useRef(askRuns);
+  askRunsNow.current = askRuns;
   useEffect(() => {
-    if (state.liveGen > 0) askRuns(0);
-  }, [state.liveGen, askRuns]);
+    if (state.liveGen > 0) askRunsNow.current(0);
+  }, [state.liveGen]);
   const moreRuns = useCallback(() => {
     const view = now.current.runs;
     // Before the first page is in, this is the retry of it.

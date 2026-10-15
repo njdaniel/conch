@@ -260,6 +260,8 @@ export function agentsReducer(state: AgentsState, action: AgentsAction): AgentsS
       return { ...state, runs: runsPage(state.runs, action.before, action.runs) };
     case 'runsFailed': {
       if (action.before !== 0 && action.before !== state.runs.before) return state;
+      // The refresh of a held first page is best effort: the list stands.
+      if (action.before === 0 && state.runs.loaded) return state;
       return { ...state, runs: { ...state.runs, loading: false, note: action.line } };
     }
     case 'runsFilter':

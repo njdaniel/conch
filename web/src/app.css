@@ -218,8 +218,7 @@ body {
   margin: 0;
 }
 
-.ag-activity,
-.ag-interventions {
+.ag-activity {
   list-style: none;
   margin: 0;
   padding: 0;

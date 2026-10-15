@@ -70,7 +70,7 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
       let last = '';
       new MutationObserver(() => {
         const state = document.querySelector('[data-testid="run-state"]')?.textContent ?? '';
-        const asks = [...document.querySelectorAll('[data-testid^="intervention-"]')].map((e) => e.textContent);
+        const asks = [...document.querySelectorAll('[data-testid^="intervention-"]')].map((e) => /requested…|acknowledged|applied|failed/.exec(e.textContent)?.[0] ?? '');
         const key = JSON.stringify([state, asks]);
         if (key === last) return;
         last = key;
@@ -94,18 +94,18 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     const ask = asks[0];
     expect(ask?.kind).toBe('cancel');
     expect(['acknowledged', 'applied']).toContain(ask?.state);
-    await expect(detail.getByTestId(`intervention-${String(ask?.id)}`)).toHaveText(ask?.state === 'applied' ? 'Applied' : 'Acknowledged');
+    await expect(detail.getByTestId(`intervention-${String(ask?.id)}`)).toHaveText(ask?.state === 'applied' ? `↳ #${String(ask.id)} applied` : `↳ #${String(ask?.id)} acknowledged`);
 
     // Nothing the page showed was ahead of what the API said at that moment.
     await expect.poll(() => changes.some((o) => o.state === 'cancelled'), { message: 'the page was seen to change to cancelled' }).toBe(true);
-    const rank: Record<string, number> = { Requested: 0, requested: 0, Acknowledged: 1, acknowledged: 1, Applied: 2, applied: 2 };
+    const rank: Record<string, number> = { 'requested…': 0, requested: 0, acknowledged: 1, applied: 2 };
     for (const o of changes) {
       if (o.state === 'cancelled') expect(o.apiState, 'the page showed cancelled before the API did').toBe('cancelled');
       o.asks.forEach((word, i) => {
         expect(rank[o.apiAsks[i] ?? ''] ?? -1, `the page showed ${word} before the API did`).toBeGreaterThanOrEqual(rank[word] ?? 99);
       });
     }
-    expect(changes.some((o) => o.asks.some((w) => w === 'Acknowledged' || w === 'Applied'))).toBe(true);
+    expect(changes.some((o) => o.asks.some((w) => w === 'acknowledged' || w === 'applied'))).toBe(true);
   } finally {
     await worker.stop();
   }

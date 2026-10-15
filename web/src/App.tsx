@@ -162,7 +162,7 @@ export function App({ origin }: { readonly origin: string }) {
   const goToMessage = useCallback(
     (id: number) => {
       if (selected !== null && ordered(chatFor(chatNow.current, selected)).some((m) => m.id === id)) {
-        closeRun();
+        closeRun(`Run answers message #${String(id)}`);
         setScrollTo(id);
       } else {
         closeRun(`Message #${String(id)} is older than the history held`);
