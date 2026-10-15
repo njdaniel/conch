@@ -638,6 +638,30 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 // is one request to a public route; the caller's ordinary credential decides
 // whether the server allows it.
 
+// ListReadState returns the caller's read state in every channel they are in:
+// how far they have read and how many messages they may see after that. It is
+// for people only; an agent gets human_required and a server with
+// authentication off gets read_state_require_auth.
+func (c *Client) ListReadState(ctx context.Context) (schema.ListReadStateResponseV1, error) {
+	var result schema.ListReadStateResponseV1
+	if err := c.roundTrip(ctx, "list read state", http.MethodGet, c.resolve("v1", "read-state"), nil, &result); err != nil {
+		return schema.ListReadStateResponseV1{}, err
+	}
+	return result, nil
+}
+
+// MarkRead moves the caller's read mark in channel forward to lastReadID and
+// returns the stored state. The server never moves it back, and takes an id
+// above the newest message the caller may see as that message.
+func (c *Client) MarkRead(ctx context.Context, channel string, lastReadID int64) (schema.ReadStateV1, error) {
+	var result schema.ReadStateV1
+	endpoint := c.resolve("v1", "channels", channel, "read-state")
+	if err := c.roundTrip(ctx, "mark read", http.MethodPut, endpoint, schema.MarkReadRequestV1{LastReadID: lastReadID}, &result); err != nil {
+		return schema.ReadStateV1{}, err
+	}
+	return result, nil
+}
+
 // CreateChannel creates a channel. The caller becomes its only member.
 func (c *Client) CreateChannel(ctx context.Context, name string) (schema.ChannelV0, error) {
 	var result schema.CreateChannelResponse

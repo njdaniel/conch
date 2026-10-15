@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -43,36 +44,112 @@ func CheckWebDir(dir string) error {
 	return nil
 }
 
+// CheckWebFS reports why an embedded client cannot be served at /app/: its
+// root must hold a regular index.html. conchd calls it before it starts, as
+// it calls CheckWebDir for a directory.
+func CheckWebFS(fsys fs.FS) error {
+	fi, err := fs.Stat(fsys, webIndex)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("embedded web client has no %s", webIndex)
+	case err != nil:
+		return fmt.Errorf("embedded web client: %s: %w", webIndex, err)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("embedded web client: %s is not a regular file", webIndex)
+	}
+	return nil
+}
+
 // webRoutes returns the routes that serve the web client: /app/ and the
 // redirect from /. They need no credential because the page must load before
 // sign-in; the API it then calls stays behind its own routes. Neither pattern
 // can match an API path: /app/ is a prefix no API route starts with, and
 // /{$} matches only "/".
 //
-// An unusable directory yields no routes (fail closed). conchd has already
-// refused to start in that case, so reaching it here means the directory went
-// away in between; that is logged, because /app/ answering 404 with nothing
-// said would look like a client that was never configured.
+// The client comes from WebDir when that is set, otherwise from WebFS (the
+// build embedded in the binary), otherwise there are no routes. An unusable
+// directory yields no routes (fail closed), never a fall-back to WebFS: the
+// operator asked for that directory. conchd has already refused to start in
+// that case, so reaching it here means the directory went away in between;
+// that is logged, because /app/ answering 404 with nothing said would look
+// like a client that was never configured.
 func (s *Server) webRoutes() []route {
-	if s.cfg.WebDir == "" {
-		return nil
-	}
-	root, err := os.OpenRoot(s.cfg.WebDir)
-	if err != nil {
-		slog.Error("web: the web directory cannot be opened; /app/ is not served", "dir", s.cfg.WebDir, "error", err)
+	var src webSource
+	switch {
+	case s.cfg.WebDir != "":
+		root, err := os.OpenRoot(s.cfg.WebDir)
+		if err != nil {
+			slog.Error("web: the web directory cannot be opened; /app/ is not served", "dir", s.cfg.WebDir, "error", err)
+			return nil
+		}
+		src = rootSource{root}
+	case s.cfg.WebFS != nil:
+		src = fsSource{s.cfg.WebFS}
+	default:
 		return nil
 	}
 	return []route{
-		{pattern: "GET /app/", access: accessExempt, handler: &staticHandler{root: root}},
+		{pattern: "GET /app/", access: accessExempt, handler: &staticHandler{src: src}},
 		{pattern: "GET /{$}", access: accessExempt, handler: http.RedirectHandler("/app/", http.StatusFound)},
 	}
 }
 
-// staticHandler serves a built web client out of an os.Root, which refuses
-// ".." and any symlink that leaves the directory, so confinement is the
-// standard library's, not a path check of ours.
+// webFile is what the handler needs of an open file: http.ServeContent reads
+// and seeks it, and the handler closes it and asks it for its info.
+type webFile interface {
+	io.ReadSeeker
+	io.Closer
+	Stat() (fs.FileInfo, error)
+}
+
+// webSource is where the built client lives: a directory on disk (--web-dir)
+// or the build embedded in the binary. Names are slash-separated and relative.
+// Stat follows a symlink that stays inside the source; confinement is the
+// source's, not the handler's.
+type webSource interface {
+	Stat(name string) (fs.FileInfo, error)
+	Open(name string) (webFile, error)
+}
+
+// rootSource serves a directory through an os.Root, which refuses ".." and
+// any symlink that leaves the directory.
+type rootSource struct{ root *os.Root }
+
+func (r rootSource) Stat(name string) (fs.FileInfo, error) { return r.root.Stat(name) }
+
+func (r rootSource) Open(name string) (webFile, error) {
+	f, err := r.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// fsSource serves an fs.FS, the embedded build. An embed.FS holds no
+// symlinks, so there is nothing to confine beyond fs.ValidPath, which every
+// fs.FS applies to the name it is given.
+type fsSource struct{ fsys fs.FS }
+
+func (f fsSource) Stat(name string) (fs.FileInfo, error) { return fs.Stat(f.fsys, name) }
+
+func (f fsSource) Open(name string) (webFile, error) {
+	file, err := f.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	// http.ServeContent needs to seek. embed and the in-memory test
+	// filesystem both do; a source that cannot is refused, not buffered.
+	wf, ok := file.(webFile)
+	if !ok {
+		_ = file.Close()
+		return nil, fmt.Errorf("web: %q cannot be served: the file does not seek", name)
+	}
+	return wf, nil
+}
+
+// staticHandler serves a built web client out of a webSource.
 type staticHandler struct {
-	root *os.Root
+	src webSource
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +174,7 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil && fi.IsDir():
 		// Never a listing: a directory is just a path that names no file.
-		_ = f.Close()
+		// open hands back no file for it.
 		f = nil
 	case err == nil, errors.Is(err, fs.ErrNotExist):
 	default:
@@ -135,27 +212,34 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, path.Base(name), fi.ModTime(), f)
 }
 
-// open opens name (slash-separated, relative) inside the root. Only a regular
-// file or a directory is opened: opening a FIFO would block the request until
-// something wrote to it, and a device is not a client file. The Stat comes
-// first for that reason, and follows a symlink that stays inside the root.
-func (h *staticHandler) open(name string) (*os.File, fs.FileInfo, error) {
+// open opens name (slash-separated, relative) inside the source. Only a
+// regular file is opened; a directory comes back as its info alone. Opening a
+// FIFO would block the request until something wrote to it, and a device is
+// not a client file. The Stat comes first for that reason, and follows a
+// symlink that stays inside the source.
+func (h *staticHandler) open(name string) (webFile, fs.FileInfo, error) {
 	if name == "" {
 		return nil, nil, fs.ErrNotExist
 	}
-	fi, err := h.root.Stat(name)
+	fi, err := h.src.Stat(name)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() && !fi.IsDir() {
 		return nil, nil, fs.ErrNotExist
 	}
-	f, err := h.root.Open(name)
+	if fi.IsDir() {
+		// Nothing is read from a directory, and an embedded one does not
+		// seek, so it is not opened.
+		return nil, fi, nil
+	}
+	f, err := h.src.Open(name)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Stat again on the open file: the name may have been replaced since.
-	if fi, err = f.Stat(); err != nil || (!fi.Mode().IsRegular() && !fi.IsDir()) {
+	// Stat again on the open file: the name may have been replaced since,
+	// and a directory is not served from an open file.
+	if fi, err = f.Stat(); err != nil || !fi.Mode().IsRegular() {
 		_ = f.Close()
 		if err == nil {
 			err = fs.ErrNotExist
