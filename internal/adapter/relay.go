@@ -460,6 +460,44 @@ func (r *relay) ask(w http.ResponseWriter, req *http.Request, route, method, pat
 	return rep, true
 }
 
+// askReport is ask for a report about a run. A session that went offline
+// refuses a report until it is heartbeaten, and the runtime cannot heartbeat
+// the relay's session, so a report refused with session_offline is followed by
+// one heartbeat and one retry, and the retry's answer is the one passed back.
+// There is no loop: if the heartbeat fails, the original refusal stands and the
+// ticker remains the steady-state path. The code is read from the error body,
+// never the message.
+func (r *relay) askReport(w http.ResponseWriter, req *http.Request, route, method, path string, body []byte) (reply, bool) {
+	rep, ok := r.ask(w, req, route, method, path, nil, body)
+	if !ok || !isSessionOffline(rep) {
+		return rep, ok
+	}
+	session, err := r.up.heartbeat(req.Context(), r.sessionID())
+	if err != nil {
+		// Typically too_many_sessions: the session cannot be revived, so the
+		// retry would be refused again. A runtime that went away cancels the
+		// heartbeat, which is not worth a warning.
+		if req.Context().Err() == nil {
+			logRelayError("heartbeat for a refused report", err)
+		}
+		return rep, true
+	}
+	r.mu.Lock()
+	r.session = session
+	r.mu.Unlock()
+	return r.ask(w, req, route, method, path, nil, body)
+}
+
+// isSessionOffline reports whether conchd refused a call because the session
+// is offline.
+func isSessionOffline(rep reply) bool {
+	if rep.status != http.StatusConflict {
+		return false
+	}
+	var e schema.Error
+	return json.Unmarshal(rep.body, &e) == nil && e.Code == schema.ErrorCodeSessionOffline
+}
+
 // decodeRequest reads the body of a request as one JSON object of type T at
 // most schema.MaxPostRequestBytes long, refuses an unknown field, and checks
 // it with the type's own Validate. It returns the body encoded again from the
@@ -526,7 +564,7 @@ func (r *relay) handleStartRun(w http.ResponseWriter, req *http.Request) {
 		refuse(w, route, http.StatusNotFound, codeChannelNotFound, "channel not found")
 		return
 	}
-	rep, ok := r.ask(w, req, route, http.MethodPost, fmt.Sprintf("/v1/sessions/%d/runs", r.sessionID()), nil, encoded)
+	rep, ok := r.askReport(w, req, route, http.MethodPost, fmt.Sprintf("/v1/sessions/%d/runs", r.sessionID()), encoded)
 	if !ok {
 		return
 	}
@@ -573,7 +611,7 @@ func (r *relay) handleRunState(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	if rep, ok := r.ask(w, req, route, http.MethodPost, fmt.Sprintf("/v1/runs/%d/state", id), nil, encoded); ok {
+	if rep, ok := r.askReport(w, req, route, http.MethodPost, fmt.Sprintf("/v1/runs/%d/state", id), encoded); ok {
 		pass(w, rep)
 	}
 }
@@ -588,7 +626,7 @@ func (r *relay) handleActivity(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	if rep, ok := r.ask(w, req, route, http.MethodPost, fmt.Sprintf("/v1/runs/%d/activity", id), nil, encoded); ok {
+	if rep, ok := r.askReport(w, req, route, http.MethodPost, fmt.Sprintf("/v1/runs/%d/activity", id), encoded); ok {
 		pass(w, rep)
 	}
 }
