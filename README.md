@@ -405,7 +405,7 @@ another agent). If the server refuses a scoped reply, the adapter logs one line
 and posts nothing; it never falls back to a wider audience. It does not start
 scoped conversations.
 
-**Presence.** On start it registers a session (client `conch-adapter`, its
+**Presence.** On start it first reads the channel, to skip what is already there, and only then registers its session, so a session that shows online will answer the next message sent; a credential that cannot read the channel fails at that first step (`seed cursor`). It registers a session (client `conch-adapter`, its
 runtime, model and host, and the interventions `message` and `cancel`) and
 sends a heartbeat every 10 seconds from a goroutine of its own, so a long reply
 does not make it look offline. Each reply is one run, in the channel and
