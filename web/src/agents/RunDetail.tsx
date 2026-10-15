@@ -1,5 +1,5 @@
 // Run detail, in the centre area: the run's fields, its activity (a REST read,
-// then live frames) and the interventions asked of it, interleaved by time, and the two
+// then live frames) and the interventions asked of it, interleaved by time, and the
 // asks a person can make. Nothing here claims an outcome: an ask shows as
 // Requested until its frame says more, and the run's state is only what a
 // RunV1 says. Every field is another person's or an agent's text.
@@ -78,6 +78,15 @@ function Controls({ detail, declared, inRoster, onAsk }: {
   const busy = detail.sending;
   const canMessage = declared.has('message');
   const canCancel = declared.has('cancel');
+  // Declared, and in a state the kind applies to: only a running run is paused
+  // and only a waiting one (a paused run reads waiting) is resumed. The state is
+  // the run's last frame, never what a click assumed. Pause and resume ask at
+  // once: both are reversible. The outcome is deliberately not consulted: a run
+  // paused while it waits for an approval keeps an empty outcome.
+  const canPause = declared.has('pause');
+  const canResume = declared.has('resume');
+  const pauseNow = canPause && run.state === 'running';
+  const resumeNow = canResume && run.state === 'waiting';
 
   return (
     <div className="ag-controls">
@@ -112,6 +121,36 @@ function Controls({ detail, declared, inRoster, onAsk }: {
         </button>
         {canCancel ? null : (
           <span id="ag-no-cancel" className="hint">
+            Not supported by this agent
+          </span>
+        )}{' '}
+        <button
+          type="button"
+          disabled={!pauseNow || busy}
+          aria-describedby={canPause ? undefined : 'ag-no-pause'}
+          onClick={() => {
+            onAsk({ kind: 'pause' });
+          }}
+        >
+          Pause
+        </button>
+        {canPause ? null : (
+          <span id="ag-no-pause" className="hint">
+            Not supported by this agent
+          </span>
+        )}{' '}
+        <button
+          type="button"
+          disabled={!resumeNow || busy}
+          aria-describedby={canResume ? undefined : 'ag-no-resume'}
+          onClick={() => {
+            onAsk({ kind: 'resume' });
+          }}
+        >
+          Resume
+        </button>
+        {canResume ? null : (
+          <span id="ag-no-resume" className="hint">
             Not supported by this agent
           </span>
         )}
