@@ -869,6 +869,11 @@ func (h *harness) startBot(binary string, legacy bool) error {
 		prefix+"POLL_INTERVAL=50ms", prefix+"MAX_BACKOFF=200ms",
 		prefix+"REPLY_TIMEOUT=5s", prefix+"LOCK_FILE="+h.lock,
 		"CONCH_ADAPTER_HEARTBEAT=200ms",
+		// The net exchanges are prompted by net-peer, an agent (only an agent
+		// posts a scoped message over MCP), and an adapter answers agents only
+		// when told to (#410). What these checks prove is the scoping, not who
+		// may prompt the bot; that rule has its own tests in internal/adapter.
+		"CONCH_ADAPTER_REPLY_TO_AGENTS=1",
 	)
 	if h.codex {
 		// The default Codex command, with the stub in place of codex.
