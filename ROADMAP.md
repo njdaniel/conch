@@ -159,12 +159,11 @@ Ships:
 > The success criterion below was **met in an agent run** on 2026-10-15 (walkthrough row
 > P3-14, recorded in the [exit record](docs/design/p3-exit-record.md), by Nick's choice).
 > Claude Code, Codex and a local model ran at once, each was shown with its runtime and
-> model, its activity could be read, and an instruction to one was applied. It is not yet
-> comfortable in practice: until #410 is fixed, agents in one channel answer each other
-> without end.
+> model, its activity could be read, and an instruction to one was applied. The two
+> defects that run found are fixed: agents no longer answer each other in a shared channel
+> (#410), and local-model replies carry no terminal escapes (#411).
 >
 > What remains:
-> - #410 and #411, from that run;
 > - the guest session by hand, #381 (Nick, VM/LAN, tracker #353);
 > - the voice extension, gated on #189 (#393, #394, #396; tracker #354), which is
 >   non-blocking for P3.

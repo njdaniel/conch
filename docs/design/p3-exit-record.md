@@ -101,10 +101,10 @@ check of every process whose working directory was one of those three found none
 - **On stop:** stopping the adapters cancelled their open runs with outcome `adapter stopped`.
 
 **What went wrong.**
-- **#410: the agents answered each other.** After the three replies, each agent answered the others' replies, and so on: 21 messages and 22 runs in about 30 s, until the adapters were stopped. An adapter answers every message not written by itself. With two or more adapters in one channel this loop has no end, and it spends the operator's quota.
-- **#411: escapes in a reply.** One Ollama reply was posted with raw terminal control sequences in it (`\x1b[13D\x1b[K`), from `ollama run`'s word wrap.
+- **#410: the agents answered each other.** After the three replies, each agent answered the others' replies, and so on: 21 messages and 22 runs in about 30 s, until the adapters were stopped. An adapter answers every message not written by itself. With two or more adapters in one channel this loop has no end, and it spends the operator's quota. Fixed in #415: an adapter now answers people, and takes other agents' messages as context only, unless `CONCH_ADAPTER_REPLY_TO_AGENTS=1`.
+- **#411: escapes in a reply.** One Ollama reply was posted with raw terminal control sequences in it (`\x1b[13D\x1b[K`), from `ollama run`'s word wrap. Fixed in #416: the profile runs `ollama run --nowordwrap`, and every text reply is stripped of control sequences.
 
-**Where this leaves the success criterion.** Claude Code, Codex and a local model ran at the same time against one server. Each showed in the roster with its runtime and model, each run's activity could be read, and an instruction to one was delivered and acknowledged. That is the criterion, met in an agent run. It is not yet comfortable in practice: until #410 is fixed, three agents in one channel talk to each other without end. The observation was through the API and the CLI, not on the TUI's screen; the TUI shows the same data (P3-06).
+**Where this leaves the success criterion.** Claude Code, Codex and a local model ran at the same time against one server. Each showed in the roster with its runtime and model, each run's activity could be read, and an instruction to one was delivered and acknowledged. That is the criterion, met in an agent run. Both defects it found are fixed (#410, #411). The observation was through the API and the CLI, not on the TUI's screen; the TUI shows the same data (P3-06).
 
 ## What surprised us
 
@@ -124,14 +124,13 @@ Updated 2026-10-15. Every follow-on filed at the first exit has merged:
 - the TUI: #349 (Runs view);
 - read state: #351, #372, #373;
 - the webhook adapter: #359, with #386–#388 and its hardening #392, #402, #403, #405, #406;
+- from the P3-14 run and its reviews: #410, #411, #418;
 - the VM/LAN children: #379, #380, #382.
 
 What is open:
 
 | Issue | Item | Who or what it waits on |
 | --- | --- | --- |
-| #410 | `conch-adapter` answers other agents, so agents loop in a shared channel | In progress |
-| #411 | Terminal escapes in text replies (Ollama) | In progress |
 | #381 | The guest session by hand (VM/LAN record), which keeps tracker #353 open | Nick: it needs a real second machine |
 | #396 | The voice session by hand | Nick, after #393 and #394; non-blocking for P3 (decided on #354) |
 | #393, #394 | Voice rows in the automated suite, which keep tracker #354 open | Gated on #189 (the V4 exit) |
