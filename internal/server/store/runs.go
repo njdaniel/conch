@@ -63,6 +63,14 @@ var (
 	// ErrTooManyRuns is returned by CreateRun when the session already has
 	// MaxOpenRunsPerSession runs that have not ended. Nothing is written.
 	ErrTooManyRuns = errors.New("store: too many open runs for this session")
+	// ErrSessionOffline is returned by CreateRun, AppendRunActivity and
+	// SetRunState (to a state that is not terminal) when the run's session is
+	// offline. Offline sessions are outside the credential's live-session
+	// bound, so without this a credential could start MaxOpenRunsPerSession
+	// runs on each of its sessions, let them go offline, and do it again
+	// (issue #392). A heartbeat revives the session; ending a run is always
+	// allowed. Nothing is written.
+	ErrSessionOffline = errors.New("store: session is offline")
 	// ErrTooMuchActivity is returned by AppendRunActivity when the run already
 	// holds MaxActivityPerRun entries. Nothing is written.
 	ErrTooMuchActivity = errors.New("store: too much activity for this run")
@@ -125,6 +133,8 @@ func storedTime(t time.Time) time.Time { return time.UnixMilli(t.UnixMilli()) }
 //   - the session must exist, not have ended, belong to credential
 //     p.CredentialID and to reader's principal (ErrNotFound otherwise, the
 //     same answer as every session route gives);
+//   - the session must not be offline (ErrSessionOffline), checked once the
+//     caller is known to own it so that it tells a stranger nothing;
 //   - reader must be, now, a member of the channel and an enabled principal
 //     (ErrNotChannelMember);
 //   - a message the run answers must be in the channel and visible to reader
@@ -140,9 +150,10 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 	var out Run
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		var principalID int64
+		var sessionState string
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id FROM sessions WHERE id = ? AND credential_id = ? AND ended_at IS NULL",
-			p.SessionID, p.CredentialID).Scan(&principalID); {
+			"SELECT principal_id, state FROM sessions WHERE id = ? AND credential_id = ? AND ended_at IS NULL",
+			p.SessionID, p.CredentialID).Scan(&principalID, &sessionState); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:
@@ -150,6 +161,9 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 		}
 		if reader.PrincipalID <= 0 || reader.PrincipalID != principalID {
 			return ErrNotFound
+		}
+		if sessionState == string(schema.SessionStateOffline) {
+			return ErrSessionOffline
 		}
 		usable, err := principalUsableInChannelTx(ctx, tx, p.ChannelID, principalID)
 		if err != nil {
@@ -220,6 +234,13 @@ func (s *Store) SetRunState(ctx context.Context, actor string, runID, credential
 		if !schema.RunTransitionAllowed(run.State, to) {
 			return ErrInvalidTransition
 		}
+		// Ending a run is how an agent cleans up, so a terminal state is
+		// allowed on an offline session; any other change is not.
+		if !schema.RunStateTerminal(to) {
+			if err := refuseOfflineSessionTx(ctx, tx, run.SessionID); err != nil {
+				return err
+			}
+		}
 		var ended any
 		if schema.RunStateTerminal(to) {
 			// Never before started_at, whatever the clock did, which
@@ -285,6 +306,9 @@ func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64
 		if schema.RunStateTerminal(run.State) {
 			return ErrInvalidTransition
 		}
+		if err := refuseOfflineSessionTx(ctx, tx, run.SessionID); err != nil {
+			return err
+		}
 		held, err := countRunActivityTx(ctx, tx, run.ID)
 		if err != nil {
 			return err
@@ -338,6 +362,21 @@ func reportableRunTx(ctx context.Context, tx execer, runID, credentialID int64, 
 		}
 	}
 	return run, nil
+}
+
+// refuseOfflineSessionTx is ErrSessionOffline when session sessionID is
+// offline, read inside the caller's transaction. A session that has ended is
+// offline too (sessions.go sets both together), so a run left on one cannot
+// be reported on either, though it can still be ended.
+func refuseOfflineSessionTx(ctx context.Context, tx execer, sessionID int64) error {
+	var state string
+	if err := tx.QueryRowContext(ctx, "SELECT state FROM sessions WHERE id = ?", sessionID).Scan(&state); err != nil {
+		return fmt.Errorf("store: read session %d: %w", sessionID, err)
+	}
+	if state == string(schema.SessionStateOffline) {
+		return ErrSessionOffline
+	}
+	return nil
 }
 
 // principalUsableInChannelTx reports whether principalID is, now, a member of

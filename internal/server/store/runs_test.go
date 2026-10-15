@@ -745,11 +745,14 @@ func TestSessionRunViews(t *testing.T) {
 	if err != nil || r.State != schema.RunStateBlocked || r.EndedAt != nil {
 		t.Errorf("run after its session went offline and ended = %+v, %v; want blocked and open", r, err)
 	}
-	// An ended session's run is still the owner's to close.
-	set(secret, schema.RunStateRunning)
-	set(secret, schema.RunStateCompleted)
-	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateCompleted}) {
-		t.Errorf("after completing = %+v", v)
+	// An ended session's run is still the owner's to close, though no longer
+	// to move along (issue #392: the session is offline).
+	if _, err := f.s.SetRunState(ctx, "system", secret, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); !errors.Is(err, ErrSessionOffline) {
+		t.Errorf("moving a run on an ended session: err = %v, want ErrSessionOffline", err)
+	}
+	set(secret, schema.RunStateCancelled)
+	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateCancelled}) {
+		t.Errorf("after cancelling = %+v", v)
 	}
 }
 
@@ -1037,5 +1040,91 @@ func TestOpenRunStatesAreTheStatesThatHaveNotEnded(t *testing.T) {
 		if listed == schema.RunStateTerminal(s) {
 			t.Errorf("%q: listed as open = %v, terminal = %v", s, listed, schema.RunStateTerminal(s))
 		}
+	}
+}
+
+// An offline session takes no new run, no activity and no state change that
+// leaves a run open, and writes nothing when it refuses; ending a run is
+// allowed. A heartbeat brings the session back (issue #392).
+func TestOfflineSessionRunRules(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	sess := f.freshSession(t)
+	open, err := f.startOn(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ending, err := f.startOn(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill the session's bound, so the test also shows the offline refusal
+	// wins over nothing else and the bound is not what stops the next start.
+	for i := 2; i < MaxOpenRunsPerSession; i++ {
+		if _, err := f.startOn(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := runT0.Add(time.Hour)
+	if got, err := f.s.SweepSessions(ctx, later, 30*time.Second, 90*time.Second); err != nil || got.Offline < 1 {
+		t.Fatalf("sweep = %+v, %v; want the session offline", got, err)
+	}
+
+	runs, audit := f.count(t, "runs"), f.count(t, "audit_events")
+	activity := f.count(t, "run_activity")
+	refused := []struct {
+		name string
+		do   func() error
+	}{
+		{"start", func() error { _, err := f.startOn(sess); return err }},
+		{"activity", func() error {
+			_, err := f.s.AppendRunActivity(ctx, open.ID, f.agtCred, f.agtReader(), ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "s"}, later)
+			return err
+		}},
+		{"running", func() error {
+			_, err := f.s.SetRunState(ctx, "system", open.ID, f.agtCred, f.agtReader(), schema.RunStateRunning, "", later)
+			return err
+		}},
+	}
+	for _, tc := range refused {
+		if err := tc.do(); !errors.Is(err, ErrSessionOffline) {
+			t.Errorf("%s on an offline session: err = %v, want ErrSessionOffline", tc.name, err)
+		}
+	}
+	if f.count(t, "runs") != runs || f.count(t, "audit_events") != audit || f.count(t, "run_activity") != activity {
+		t.Error("a refused call wrote a row")
+	}
+	// Another session of the credential is unaffected: the fixture's own
+	// beats, which also went offline in the sweep.
+	if _, err := f.s.HeartbeatSession(ctx, f.sess.ID, f.agtCred, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.start(f.ch.ID, 0, "elsewhere"); err != nil {
+		t.Errorf("a run on a live session: %v", err)
+	}
+
+	// Ending is allowed, and audited.
+	got, err := f.s.SetRunState(ctx, "system", ending.ID, f.agtCred, f.agtReader(), schema.RunStateCancelled, "gone", later)
+	if err != nil || got.State != schema.RunStateCancelled || got.EndedAt == nil {
+		t.Fatalf("ending on an offline session = %+v, %v", got, err)
+	}
+	// run_started of the run elsewhere, and run_ended of this one.
+	if n := f.count(t, "audit_events"); n != audit+2 {
+		t.Errorf("audit rows = %d, want %d", n, audit+2)
+	}
+	// An ended run is told it has ended.
+	if _, err := f.s.AppendRunActivity(ctx, ending.ID, f.agtCred, f.agtReader(), ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "s"}, later); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("activity on an ended run: err = %v, want ErrInvalidTransition", err)
+	}
+
+	// A heartbeat brings the session back, and the open run takes a report.
+	if _, err := f.s.HeartbeatSession(ctx, sess, f.agtCred, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.SetRunState(ctx, "system", open.ID, f.agtCred, f.agtReader(), schema.RunStateRunning, "", later); err != nil {
+		t.Errorf("after the heartbeat: %v", err)
+	}
+	if _, err := f.startOn(sess); err != nil {
+		t.Errorf("start after the heartbeat: %v", err)
 	}
 }

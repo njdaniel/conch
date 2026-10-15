@@ -47,6 +47,12 @@ const (
 	// credential, not per principal: one person on two devices is two
 	// credentials with a budget each.
 	ErrorCodeTooManySessions = "too_many_sessions"
+	// ErrorCodeSessionOffline: the session has gone offline, so it takes no
+	// new run, no activity and no non-terminal run state (HTTP 409). Offline
+	// sessions are not counted against the credential's live-session bound,
+	// so what they accept must be bounded some other way. A heartbeat brings
+	// the session back (within that bound); ending a run stays allowed.
+	ErrorCodeSessionOffline = "session_offline"
 	// ErrorCodeAgentRequired: the call is for agent principals only, as a
 	// human called it (HTTP 403). It mirrors the approval routes'
 	// human_required.
