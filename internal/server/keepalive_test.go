@@ -126,4 +126,10 @@ func TestKeepAliveDefaults(t *testing.T) {
 	if wsPingInterval != 25*time.Second || wsPingTimeout != 10*time.Second {
 		t.Errorf("ping interval %v, timeout %v; want 25s and 10s", wsPingInterval, wsPingTimeout)
 	}
+	// The browser recognises a heartbeat only in a text frame of at most 64
+	// bytes (web/src/state/feed.ts isHeartbeat); a larger one would reach
+	// the page as a frame it cannot read, every 25 s.
+	if n := len(heartbeatFrame); n > 64 {
+		t.Errorf("heartbeat frame is %d bytes; the web client recognises at most 64", n)
+	}
 }

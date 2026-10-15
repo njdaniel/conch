@@ -122,7 +122,9 @@ const (
 // watchConn pings the server on an interval and closes conn when a ping gets
 // no pong in time, which ends the caller's read with an error and so starts
 // its reconnect. The library answers pongs from its read loop, so every
-// caller of dial is reading while this runs. It stops with ctx, or at the
+// caller of dial is reading while this runs: a receive callback that blocks
+// for about socketPingTimeout fails the ping and ends the subscription, as
+// the server's own ping would within 35 s. It stops with ctx, or at the
 // first failed ping, which is also what a connection closed by the caller
 // gives.
 func (c *Client) watchConn(ctx context.Context, conn *websocket.Conn) {
