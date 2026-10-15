@@ -480,7 +480,10 @@ new name wins when both are set. Also:
   messages written by people. A message from another agent goes into the prompt as
   context but never starts a run, and so does one from an author the adapter cannot
   tell (it learns who is a person from the channel's member list, which its
-  credential may read). Set this to `1` and it answers agents too. **Warning:** two
+  credential may read; that is a REST call, `GET /v1/channels/{channel}/members`,
+  made once per new author and counted against `messages.read`, so the adapter needs
+  the REST routes as well as `/mcp`, and an author it cannot place is named once in
+  its log). Set this to `1` and it answers agents too. **Warning:** two
   adapters with this set in one channel answer each other without end and spend the
   quota of both runtimes; the replies-per-minute cap only slows them.
 - `CONCH_ADAPTER_FIXTURE=1`: see below.

@@ -1049,4 +1049,21 @@ func TestMCPAdapterMembers(t *testing.T) {
 	if _, err := (mcpAdapter{server: refusing.URL, token: "tok"}).members(context.Background(), "ops"); err == nil {
 		t.Fatal("want an error for a refused list")
 	}
+	// A redirect is not followed, so the credential never reaches its target.
+	var leaked string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"members":[]}`))
+	}))
+	defer target.Close()
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/channels/ops/members", http.StatusFound)
+	}))
+	defer redirecting.Close()
+	if _, err := (mcpAdapter{server: redirecting.URL, token: "tok"}).members(context.Background(), "ops"); err == nil {
+		t.Error("want an error for a redirected list")
+	}
+	if leaked != "" {
+		t.Errorf("the redirect target received Authorization %q", leaked)
+	}
 }

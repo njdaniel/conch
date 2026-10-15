@@ -79,6 +79,9 @@ type botLoop struct {
 	// kinds is what the channel's members are, by principal id. A kind never
 	// changes, so an id is looked up once; only pollOnce touches it.
 	kinds map[int64]schema.PrincipalKind
+	// unplaced are authors not on the member list (or listed without a
+	// kind), whose messages are therefore not answered; each is said once.
+	unplaced map[int64]bool
 
 	// mu guards recent and clock, which the intervention watcher reaches
 	// while a reply is being made.
@@ -232,7 +235,18 @@ func (b *botLoop) learnKinds(ctx context.Context, messages []schema.MessageV2) e
 // kind is not known (no longer a member, say) is not answered: not knowing
 // whether it is an agent is the case that starts a loop.
 func (b *botLoop) triggers(message schema.MessageV2) bool {
-	return b.cfg.ReplyToAgents || b.kinds[message.AuthorID] == schema.PrincipalHuman
+	if b.cfg.ReplyToAgents {
+		return true
+	}
+	kind := b.kinds[message.AuthorID]
+	if kind == "" && !b.unplaced[message.AuthorID] {
+		if b.unplaced == nil {
+			b.unplaced = map[int64]bool{}
+		}
+		b.unplaced[message.AuthorID] = true
+		slog.Warn("conch-adapter: not answering an author the channel's member list does not place as a person or an agent", "author", message.AuthorID)
+	}
+	return kind == schema.PrincipalHuman
 }
 
 // replyTo answers one audience's new messages in that same audience, as one
