@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ApiResult } from '../api';
-import { Feed, maxDelay, type Clock, type FeedSocket, type FeedStatus, type OpenSocket, type SocketEvents } from './feed';
+import { Feed, isHeartbeat, maxDelay, silenceTimeout, type Clock, type FeedSocket, type FeedStatus, type OpenSocket, type SocketEvents } from './feed';
 
 // A clock that only moves when the test says so.
 class FakeClock implements Clock {
@@ -203,5 +203,101 @@ describe('the reconnect machine', () => {
     h.feed.stop();
     h.clock.advance(60_000);
     expect(h.attempts).toHaveLength(1);
+  });
+});
+
+const heartbeat = '{"schema":"conch.heartbeat.v1"}';
+
+describe('the silence watchdog', () => {
+  it('reconnects after 60 s with no frame, once, through the backoff', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onOpen();
+    h.clock.advance(silenceTimeout - 1);
+    expect(h.statuses).toEqual(['connecting', 'open']);
+    h.clock.advance(1);
+    expect(h.statuses).toEqual(['connecting', 'open', 'waiting']);
+    expect(h.attempts[0]?.closed).toBe(true);
+    // The dead socket's own close event, whenever it comes, changes nothing.
+    h.attempts[0]?.events.onClose(1006);
+    expect(h.statuses).toEqual(['connecting', 'open', 'waiting']);
+    expect(h.clock.pending).toEqual([1000]);
+    h.clock.advance(1000);
+    expect(h.attempts).toHaveLength(2);
+  });
+
+  it('resumes from the newest id held, and loses nothing', async () => {
+    let held = 3;
+    const h = harness(() => held);
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onOpen();
+    held = 9;
+    h.clock.advance(silenceTimeout);
+    h.clock.advance(1000);
+    expect(h.attempts.map((a) => a.after)).toEqual([3, 9]);
+  });
+
+  it('is restarted by a heartbeat, which is not passed on', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onOpen();
+    for (let i = 0; i < 5; i++) {
+      h.clock.advance(silenceTimeout - 1);
+      h.attempts[0]?.events.onFrame(heartbeat);
+    }
+    expect(h.statuses).toEqual(['connecting', 'open']);
+    expect(h.frames).toEqual([]);
+    h.clock.advance(silenceTimeout);
+    expect(h.statuses.at(-1)).toBe('waiting');
+  });
+
+  it('is restarted by any frame, which is passed on', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onOpen();
+    h.clock.advance(silenceTimeout - 1);
+    h.attempts[0]?.events.onFrame('{"schema":"conch.message.v2"}');
+    h.clock.advance(silenceTimeout - 1);
+    expect(h.statuses).toEqual(['connecting', 'open']);
+    expect(h.frames).toHaveLength(1);
+  });
+
+  it('also covers a connection that never opens', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.clock.advance(silenceTimeout);
+    expect(h.statuses).toEqual(['connecting', 'waiting']);
+    expect(h.attempts[0]?.closed).toBe(true);
+  });
+
+  it('is off while waiting, after a close, and after stop', async () => {
+    const h = harness();
+    h.feed.start();
+    await h.settle(0);
+    h.attempts[0]?.events.onOpen();
+    h.attempts[0]?.events.onClose(1006);
+    expect(h.clock.pending).toEqual([1000]);
+    h.clock.advance(1000);
+    await h.settle(1);
+    h.feed.stop();
+    expect(h.clock.pending).toEqual([]);
+  });
+});
+
+describe('isHeartbeat', () => {
+  it.each([
+    ['the frame', heartbeat, true],
+    ['another schema', '{"schema":"conch.run.v1"}', false],
+    ['no schema', '{}', false],
+    ['not JSON', 'x', false],
+    ['binary', new ArrayBuffer(2), false],
+    ['extra fields', '{"schema":"conch.heartbeat.v1","x":1}', true],
+  ])('%s', (_name, data, want) => {
+    expect(isHeartbeat(data)).toBe(want);
   });
 });

@@ -208,6 +208,10 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 		defer ticker.Stop()
 		recheck = ticker.C
 	}
+	// The reader and the keepalive start here, so every version has them. Only
+	// /v2/ws sends heartbeat frames, and only to a client that asked: the
+	// others' readers take every frame for a message.
+	ctx = s.keepAlive(ctx, conn, version == apiV2 && r.URL.Query().Get(schema.HeartbeatQueryParam) == "1")
 	switch version {
 	case apiV2:
 		s.streamWSV2(ctx, conn, sub2, replay, channel.ID, principalID, credID, recheck)
@@ -218,9 +222,8 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	}
 	sub := sub0
 
-	// The stream is server-to-client only; CloseRead discards client frames
-	// and cancels the context when the peer closes or errors.
-	ctx = conn.CloseRead(ctx)
+	// The stream is server-to-client only; keepAlive's reader discards client
+	// frames and cancels the context when the peer closes or errors.
 	for {
 		select {
 		case <-ctx.Done():
@@ -251,7 +254,6 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 }
 
 func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, channelID, principalID, credID int64, recheck <-chan time.Time) {
-	ctx = conn.CloseRead(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -293,7 +295,6 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 // second. Live frames after the replay are sent as they arrive, as they are on
 // a connection that asked for no replay.
 func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time) {
-	ctx = conn.CloseRead(ctx)
 	var replayed int64 // the last id the replay sent; 0 without one
 	if replay != nil {
 		var ok bool
