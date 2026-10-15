@@ -679,7 +679,7 @@ The proxy terminates TLS and forwards everything, WebSocket upgrades included, t
 
 - **Keep the `Host` header the client sent.** A browser's WebSocket upgrade carries an `Origin`, and `conchd` accepts it only when its host equals the request's `Host` (the library's same-origin check; `internal/server/origins.go` adds extra origins only for `--allowed-origins`). If the proxy rewrites `Host` to the backend's address, the upgrade is refused with `403`. Caddy keeps `Host` by default. nginx does not (its default is `$proxy_host`), so the block below sets it. With `Host` kept and one public name for the page and the sockets, the origins match and **`--allowed-origins` is not needed**; leave it unset. (`conch`, `conch-adapter` and `conch-voice` send no `Origin`, so they are not subject to this check; the web page is.)
 - **Bind `conchd` to loopback** (`--listen 127.0.0.1:8080`) so the proxy is the only way in. `conchd` does not read `X-Forwarded-*` headers; it sees every request as coming from the proxy.
-- **Do not let the proxy cut the stream or the upload.** An open stream (`/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) can be silent for long stretches. nginx closes a proxied connection after 60 s without data unless told otherwise, and limits a request body to 1 MiB; `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
+- **Do not let the proxy cut the stream or the upload.** An open stream (`/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) can be silent for long stretches, and neither `conchd` nor any client sends WebSocket pings, so the proxy's read timeout is how long a stream with no messages lives: after it the proxy closes the socket, `conch tail` exits with an error and the TUI and the web page reconnect. nginx closes a proxied connection after 60 s without data unless told otherwise (the block below sets 1 h; raise it if that is too short), and limits a request body to 1 MiB; `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
 
 Start `conchd` as in step 2, on loopback, optionally with the page:
 
@@ -714,6 +714,7 @@ server {
 
     ssl_certificate     /etc/ssl/conch/conch.lan.crt;   # your certificate for conch.lan
     ssl_certificate_key /etc/ssl/conch/conch.lan.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;            # nginx before 1.23.4 also allows TLSv1 and TLSv1.1 by default
 
     client_max_body_size 11m;       # above conchd's 10 MiB upload default; raise both together
 
@@ -723,11 +724,13 @@ server {
         proxy_set_header Host $http_host;               # the Host the client sent, port included
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 1h;                          # an open stream may be silent
+        proxy_read_timeout 1h;                          # no pings: a quiet stream lives this long
         proxy_send_timeout 1h;
     }
 }
 ```
+
+nginx's default access log records each request's URI. For the web page's sockets that includes a single-use ticket valid for 30 seconds (`?ticket=`); the `Authorization` header is not logged. Treat the log as sensitive, or log less.
 
 The certificate and key are yours to make: a certificate from your own CA, or one from a public CA for a public name. `openssl` or `mkcert` will make a private CA; the certificate must list `conch.lan` (or the IP you connect to) in its subject alternative names.
 
@@ -737,7 +740,7 @@ Point each client at the `https://` address. Each accepts it, and each takes the
 
 | Client | Where `https://` is accepted | What it does with it |
 | --- | --- | --- |
-| `conch` | `cli.NewClient` in `internal/cli/client.go` (and `cli.NormalizeServer` in `internal/cli/credentials.go`, which names the stored login) accept `http` or `https` and refuse anything else | Calls go over HTTPS. Each socket function (`Subscribe`, `SubscribeV2After`, `SubscribeEvents`, `SubscribeVoicePresence` in the same file) turns `http` into `ws` and `https` into `wss` |
+| `conch` | `cli.NewClient` in `internal/cli/client.go` (and `cli.NormalizeServer` in `internal/cli/credentials.go`, which names the stored login) accept `http` or `https` and refuse anything else | Calls go over HTTPS. Each socket function (`Tail`, `Subscribe`, `SubscribeV2After`, `SubscribeEvents`, `SubscribeVoicePresence` in the same file) turns `http` into `ws` and `https` into `wss` |
 | `conch-adapter` | `loadConfig` in `internal/adapter/adapter.go` takes `CONCH_ADAPTER_SERVER` as is, with no scheme check; `mcpclient.New` in `internal/mcpclient/client.go` posts to `<server>/mcp` with Go's `net/http`, which speaks HTTPS to an `https://` URL | It reaches `conchd` over MCP only (HTTP POST, no WebSocket), so `https://` is all it needs |
 | `conch-voice` | `ServerAddress::parse` in `voice/crates/conch-voice-api/src/server.rs` and `Config::validate` in `voice/crates/conch-voice-control/src/config.rs` accept `http` or `https`; `Client::new` in `voice/crates/conch-voice-api/src/client.rs` builds a `reqwest` client with TLS from `rustls-tls-native-roots` (`voice/crates/conch-voice-api/Cargo.toml`) | REST calls and the presence socket (`presence_stream` in `presence.rs`, made by `reqwest`) go over TLS. It ignores `HTTPS_PROXY` and friends (`no_proxy()`), and it never follows a redirect |
 
