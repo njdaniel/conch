@@ -92,3 +92,67 @@ conchd is bound to %s, not to loopback, for as long as the run is kept.`
 func (a *advertise) warning() string {
 	return fmt.Sprintf(advertiseClearTextWarning, a.bind)
 }
+
+// hostIPv4 is the IPv4 address the suite binds to when it is asked to run off
+// loopback (--non-loopback): the first usable one on an interface that is up.
+// It is a function of the addresses so that a test can say which there are.
+// Loopback, link-local and non-IPv4 addresses are skipped, as parseAdvertise
+// would refuse them; with none left it is an error, never a fall back to
+// 127.0.0.1, which would make the run pass without proving anything.
+func hostIPv4(addrs []net.Addr) (net.IP, error) {
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := n.IP.To4()
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			continue
+		}
+		return ip, nil
+	}
+	return nil, errors.New("--non-loopback: this machine has no non-loopback IPv4 address on an interface that is up")
+}
+
+// upInterfaceAddrs are the addresses of the interfaces that are up.
+func upInterfaceAddrs() ([]net.Addr, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	var all []net.Addr
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, addrs...)
+	}
+	return all, nil
+}
+
+// suiteAddress is the address the suite binds to under --non-loopback: this
+// machine's own IPv4 and a port that was free a moment ago. It goes through
+// the same fields as --advertise, so every client is given it the same way.
+func suiteAddress() (*advertise, error) {
+	addrs, err := upInterfaceAddrs()
+	if err != nil {
+		return nil, fmt.Errorf("--non-loopback: list the interfaces: %w", err)
+	}
+	ip, err := hostIPv4(addrs)
+	if err != nil {
+		return nil, err
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip.String(), "0"))
+	if err != nil {
+		return nil, fmt.Errorf("--non-loopback: pick a port on %s: %w", ip, err)
+	}
+	bind := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		return nil, err
+	}
+	return &advertise{url: "http://" + bind, bind: bind}, nil
+}

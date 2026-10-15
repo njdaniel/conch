@@ -366,6 +366,14 @@ jobs:
       - name: p3-local
         run: go run ./e2e/p3-local
 
+      # The same suite again with conchd bound to the runner's own private
+      # IPv4 (eth0) and every client given that address, to catch an address
+      # assumption in the server, the runner or the clients (issue #382). It
+      # proves addressing, not another machine. The run refuses to start where
+      # there is no such address, and never falls back to loopback.
+      - name: p3-local, non-loopback
+        run: go run ./e2e/p3-local --non-loopback
+
   web-e2e:
     # The browser suite (issue #285, D7): the web client in Chromium, against
     # the fixture community of e2e/p3-local (started with --keep and a
