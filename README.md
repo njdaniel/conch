@@ -413,7 +413,10 @@ answering the newest message it is replying to: `starting`, `running`, then
 `completed`, or `failed` with the exit status or `timeout` as the outcome (and
 nothing posted). The run's activity is `command_started` (it names the
 command's first word only, never the prompt), `command_finished`, and
-`reply_posted`. Sessions belong to an issued credential, so the adapter needs
+`reply_posted`. (With the `codex` runtime, below, `command_started` and
+`command_finished` come once for each command or tool call Codex reports,
+instead of once for the process, and name that command's first word only.)
+Sessions belong to an issued credential, so the adapter needs
 one: create it with `POST /v1/principals/{id}/credentials`. A static
 `--mcp-token` cannot register a session. The agent's manifest needs the
 capabilities `sessions.manage` and `runs.manage` besides `messages.read` and
@@ -444,12 +447,41 @@ new name wins when both are set. Also:
   replaced by the prompt or the model name, as that one argument. If `{prompt}`
   does not appear, the prompt is written to the command's standard input.
   `CLAUDE_BIN`, if set, replaces the first word of the default command; a `CONCH_ADAPTER_CMD` you set is run as written.
-- `CONCH_ADAPTER_RUNTIME` (default `claude-code`), the label shown for the runtime.
+- `CONCH_ADAPTER_RUNTIME` (default `claude-code`): the runtime profile (below) and the label shown for the runtime. A value that names no profile (`claude-code`, `codex`) is refused unless `CONCH_ADAPTER_CMD` is set, in which case it is only a label with plain-text output: a misspelt name never falls back to the Claude default command.
+- `CONCH_ADAPTER_WORKDIR`: the directory the command runs in; default the adapter's own. With the default Codex command it is also given to Codex with `-C`.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
   dropped with a log line. It is what stops two adapters from answering each
   other for ever.
 - `CONCH_ADAPTER_FIXTURE=1`: see below.
+
+**Runtime profiles.** `CONCH_ADAPTER_RUNTIME` picks a profile: a default
+command, a default model and a reader for the command's output. `claude-code`
+is the default described above. `codex` runs
+`codex exec --json --model {model} --sandbox read-only --skip-git-repo-check --ephemeral --color never`,
+with the prompt on standard input, and reads the JSONL events it prints: each
+command or tool call becomes a `command_started` and a `command_finished` entry
+(the first word of the command only, and its exit status), the last agent
+message is the reply, and every other event is ignored. Lines that are not JSON
+are ignored; more than 100 of them fail the run (`codex output not JSONL`).
+Fixture markers are never read for this profile, whatever `CONCH_ADAPTER_FIXTURE`
+says. `CONCH_ADAPTER_MODEL` is required for `codex` (the adapter will not invent
+a model name) and the adapter exits with one line naming it if it is missing.
+`CODEX_BIN`, if set, replaces `codex` in the default command only, as
+`CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
+written, but is still read as the profile reads.
+
+**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
+
+**Sandbox.** Unlike `claude -p`, Codex has a sandbox, and the default command
+uses it read-only: the agent can read files and run commands that do not
+write, which is what a reply agent needs. It still runs as the user who started
+the adapter, with that user's Codex credentials. To widen it, write the command
+yourself, for example `CONCH_ADAPTER_CMD="codex exec --json --model {model} --sandbox workspace-write ..."`;
+`--dangerously-bypass-approvals-and-sandbox` is reachable only that way. What
+that gives is what the default Claude command gives: anyone who can post where
+the agent listens, or send its run a `message`, steers a process that can
+change files and run anything as you. Run it only where that is acceptable.
 
 Two adapters on one host need different `CONCH_ADAPTER_LOCK_FILE` values and
 nothing else. `conch-bot` is the old name of the program; it still works for

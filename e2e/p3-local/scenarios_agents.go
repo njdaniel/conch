@@ -647,20 +647,40 @@ func (s *suite) privateRunIsOffLimits() error {
 // checks off, and spends their quota: it runs only when they asked for it with
 // --real-adapter and the claude program is there to run.
 func realAdapterPlan(flag bool, lookPath func(string) (string, error)) (run bool, why string) {
+	return realAdapterPlanFor(flag, "claude", "sonnet", lookPath)
+}
+
+// realAdapterPlanFor is realAdapterPlan for the program --runtime chose. Codex
+// has no default model, so it also needs the one the adapter will be given.
+func realAdapterPlanFor(flag bool, program, model string, lookPath func(string) (string, error)) (run bool, why string) {
 	if !flag {
-		return false, "it runs the real Claude Code command as you; pass --real-adapter to run it"
+		return false, "it runs the real " + realProgramLabel(program) + " command as you; pass --real-adapter to run it"
 	}
-	if _, err := lookPath("claude"); err != nil {
-		return false, "the claude program is not on PATH"
+	if _, err := lookPath(program); err != nil {
+		return false, "the " + program + " program is not on PATH"
+	}
+	if model == "" {
+		return false, "CONCH_ADAPTER_MODEL names no model for the " + program + " runtime"
 	}
 	return true, ""
+}
+
+func realProgramLabel(program string) string {
+	if program == "codex" {
+		return "Codex"
+	}
+	return "Claude Code"
 }
 
 // p313Real runs one reply of the real adapter command, when asked to, and
 // writes what ran and how it ended. The row has no assertion about the model's
 // words: that a reply came, and from what, is the result.
 func (s *suite) p313Real() error {
-	run, why := realAdapterPlan(s.r.realAdapter, exec.LookPath)
+	program, model := "claude", "sonnet"
+	if s.r.runtime == "codex" {
+		program, model = "codex", os.Getenv("CONCH_ADAPTER_MODEL")
+	}
+	run, why := realAdapterPlanFor(s.r.realAdapter, program, model, exec.LookPath)
 	if !run {
 		s.skip("P3-13", why)
 		return nil
@@ -724,7 +744,7 @@ func (s *suite) p313Real() error {
 	}); err != nil {
 		return err
 	}
-	// A run that failed (claude not signed in, say) is an answer too: it says
+	// A run that failed (the program not signed in, say) is an answer too: it says
 	// so in the outcome, and nothing falls back to anything else.
 	fmt.Printf("P3-13 runtime=%s model=%s outcome=%q state=%s\n", session.Runtime, session.Model, ended.Outcome, ended.State)
 	return nil

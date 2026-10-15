@@ -231,3 +231,20 @@ body {
 .ag-prose {
   white-space: pre-wrap;
 }
+
+.audience-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.whisper-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.whisper-person {
+  white-space: nowrap;
+}
