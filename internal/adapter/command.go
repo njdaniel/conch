@@ -483,7 +483,7 @@ func (c commandRunner) readText(ctx context.Context, stdout io.Reader, fx fixtur
 // CR) and DEL, keeping tab. Nothing is interpreted: a cursor move is dropped,
 // not applied. The newline never reaches it, the scanner has split on it.
 func stripControl(s string) string {
-	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	if !strings.ContainsFunc(s, func(r rune) bool { return (r < 0x20 && r != '\t') || r == 0x7f }) {
 		return s
 	}
 	var b strings.Builder
@@ -500,7 +500,12 @@ func stripControl(s string) string {
 			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
 				i++
 			}
-			// s[i] is the final byte, or the line ended inside the sequence.
+			// s[i] is the final byte, which the loop's i++ skips. A byte out
+			// of the final range (a UTF-8 lead byte, another ESC) ends a
+			// malformed sequence without being eaten, so it is looked at again.
+			if i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i--
+			}
 		case ch == 0x1b && i+1 < len(s) && s[i+1] == ']':
 			// OSC: up to BEL or ESC \; an unterminated one runs to the line end.
 			i += 2
