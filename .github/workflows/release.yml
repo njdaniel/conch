@@ -92,20 +92,36 @@ jobs:
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -tags conchweb -trimpath -ldflags "-s -w" \
+              go build -tags conchweb -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/conchd_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conchd
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" \
+              go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/conch_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conch
           done
           (cd dist && sha256sum ./* > checksums.txt)
 
-      - name: Create draft release
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --draft --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Draft — Nick publishes. dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
+          # A tag with a semver pre-release suffix (v0.1.0-alpha.1) is
+          # published at once, marked a pre-release, with generated notes; a
+          # plain tag stays a draft that Nick publishes.
+          case "$GITHUB_REF_NAME" in
+            *-*)
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --prerelease --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
+                --notes "Pre-release. $checks
 
-          The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
+          $web"
+              ;;
+            *)
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --draft --verify-tag --title "$GITHUB_REF_NAME" \
+                --notes "Draft — Nick publishes. $checks
+
+          $web"
+              ;;
+          esac

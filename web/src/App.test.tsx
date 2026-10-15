@@ -31,6 +31,8 @@ function serve(routes: Record<string, Handler>) {
   return fetchMock;
 }
 
+const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok' });
+
 const asMember: Record<string, Handler> = {
   '/v1/whoami': (a) => (a === `Bearer ${secret}` ? json(member) : json({}, 401)),
   '/v1/channels': (a) => (a === `Bearer ${secret}` ? json(channels) : json({}, 401)),
@@ -57,6 +59,25 @@ describe('sign-in', () => {
     render(<App origin={origin} />);
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Conch');
     expect(screen.getByText(origin)).toBeDefined();
+  });
+
+  it('shows the server version from /healthz on the sign-in page and in the lobby', async () => {
+    serve({ ...asMember, '/healthz': healthz('v0.1.0-alpha.1') });
+    render(<App origin={origin} />);
+    expect(await screen.findByText('v0.1.0-alpha.1')).toBeDefined();
+    signIn();
+    await screen.findByRole('button', { name: 'Sign out' });
+    expect(await screen.findByText('v0.1.0-alpha.1')).toBeDefined();
+  });
+
+  it('shows no version when /healthz does not answer, and sign-in still works', async () => {
+    serve(asMember);
+    render(<App origin={origin} />);
+    await waitFor(() => {
+      expect(screen.queryByText(/Version/)).toBeNull();
+    });
+    signIn();
+    expect(await screen.findByRole('button', { name: 'Sign out' })).toBeDefined();
   });
 
   it('has one password field and no username or reset', () => {

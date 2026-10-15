@@ -283,5 +283,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		Kind: schema.PrincipalKind(caller.Kind),
 		Name: caller.Name,
 		Role: schema.PrincipalRole(caller.Role),
+
+		ServerVersion: s.cfg.Version,
 	})
 }

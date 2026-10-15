@@ -673,9 +673,9 @@ func TestWhoAmI(t *testing.T) {
 		token string
 		want  schema.WhoAmIResponseV1
 	}{
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember}},
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test"}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -685,6 +685,34 @@ func TestWhoAmI(t *testing.T) {
 			}
 			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); got != tt.want {
 				t.Errorf("whoami = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestVersionAgrees checks that /healthz and whoami report the one version the
+// server was configured with (issue #425).
+func TestVersionAgrees(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	tests := []struct {
+		name, path, token string
+		version           func(t *testing.T, rec *httptest.ResponseRecorder) string
+	}{
+		{"healthz", "/healthz", "", func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			return decodeBody[schema.Health](t, rec).Version
+		}},
+		{"whoami", "/v1/whoami", f.aliceTok, func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			return decodeBody[schema.WhoAmIResponseV1](t, rec).ServerVersion
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, "GET", tt.path, tt.token, "")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			if got := tt.version(t, rec); got != "v1.2.3-test" {
+				t.Errorf("version = %q, want v1.2.3-test", got)
 			}
 		})
 	}

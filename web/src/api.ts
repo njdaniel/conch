@@ -5,6 +5,7 @@
 // an error: a failure is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
 import { errorV0 } from './schema/error';
+import { health } from './schema/health';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
@@ -147,6 +148,20 @@ async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?
 }
 
 const authedPost = (path: string, body?: unknown) => authedSend('POST', path, body);
+
+// serverVersion reads the server's build version from GET /healthz, which
+// needs no credential. It is null when the server cannot be reached or does not
+// answer with a health document. A degraded server (503) still names its
+// version, so the status is not looked at.
+export async function serverVersion(): Promise<string | null> {
+  try {
+    const res = await fetch('/healthz', { headers: { Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' });
+    const body: unknown = await res.json();
+    return health(body).length === 0 ? (body as { version: string }).version : null;
+  } catch {
+    return null;
+  }
+}
 
 // hasToken says whether this tab holds a credential from an earlier load.
 export function hasToken(): boolean {

@@ -22,6 +22,11 @@ body {
   margin: 0;
 }
 
+.version {
+  color: #555;
+  font-size: 0.9rem;
+}
+
 .notice {
   min-height: 1.5em;
   margin: 0;

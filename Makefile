@@ -4,12 +4,18 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
+# Local builds say which commit they are (issue #425); release.yml stamps the
+# tag instead. Outside a git checkout this is empty and the binary falls back
+# to its embedded build info.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+LDFLAGS  = -X main.version=$(VERSION)
+
 .PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
-	$(GO) build -o bin/conchd ./cmd/conchd
-	$(GO) build -o bin/conch ./cmd/conch
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/conchd ./cmd/conchd
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/conch ./cmd/conch
 	$(GO) build -o bin/conch-adapter ./cmd/conch-adapter
 	$(GO) build -o bin/conch-bot ./cmd/conch-bot
 
@@ -112,7 +118,7 @@ web-embed: web-build
 # has no client, and with the tag but no internal/web/dist the compile fails,
 # which is intended.
 build-web-embedded: web-embed
-	$(GO) build -tags conchweb -o bin/conchd ./cmd/conchd
+	$(GO) build -tags conchweb -ldflags "$(LDFLAGS)" -o bin/conchd ./cmd/conchd
 
 schema-compat:
 	./scripts/schema-compat.sh

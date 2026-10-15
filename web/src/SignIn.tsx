@@ -1,4 +1,5 @@
 import { useEffect, useRef, type SyntheticEvent } from 'react';
+import { ServerVersion } from './ServerVersion';
 import { noticeText, type AuthNotice } from './state/auth';
 
 // One field for a credential an operator issued. There is no username and no
@@ -64,6 +65,9 @@ export function SignIn({
           {notice === null ? '' : noticeText(notice)}
         </p>
       </form>
+      <p className="hint">
+        <ServerVersion />
+      </p>
     </main>
   );
 }

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { ServerVersion } from './ServerVersion';
 import { VoiceStatus } from './VoiceStatus';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -95,6 +96,7 @@ export function Lobby({
         <span>{name}</span>
         <span>{origin}</span>
         <span>{connectionLabel(connection)}</span>
+        <ServerVersion />
       </footer>
     </div>
   );
