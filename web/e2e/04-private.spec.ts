@@ -85,12 +85,20 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
 
   // A net post: a member (guest-test) reads it with the net's audience; a
   // non-member (nick-test) never does.
-  const netBody = 'p3-05 browser to blue';
+  // Unique per run: a repeated run on the same server must not see an
+  // earlier run's message as a second copy.
+  const runTag = Date.now().toString(36);
+  const netBody = `p3-05 browser to blue ${runTag}`;
   await to.selectOption({ label: 'net blue' });
   await page.getByLabel('Message net blue').fill(netBody);
   await page.getByRole('button', { name: 'Send' }).click();
-  await expect(messages(page).getByText(netBody)).toHaveCount(1);
-  await expect(messages(page).getByRole('listitem').filter({ hasText: netBody })).toContainText('→ net blue');
+  // The socket's frame can arrive before the POST's answer, and for that
+  // moment the confirmed message and the pending copy (tagged Sending) are both
+  // shown. Wait for the confirmed one, then for the pending one to go.
+  const netItems = messages(page).getByRole('listitem').filter({ hasText: netBody });
+  await expect(netItems.filter({ hasNotText: 'Sending' })).toHaveCount(1);
+  await expect(netItems).toHaveCount(1);
+  await expect(netItems).toContainText('→ net blue');
   // A net stays chosen after a post.
   await expect(to).toHaveValue(/^net:/);
   const seenByGuest = (await history(world, world.tokens.guest, 'nets-demo')).filter((m) => m.body === netBody);
@@ -102,7 +110,7 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   // and the audit notice shows.
   await to.selectOption({ label: 'Whisper to…' });
   await page.getByRole('group', { name: 'Whisper to' }).getByRole('checkbox', { name: 'guest-test' }).check();
-  const whisperBody = 'p3-05 browser whispers to guest';
+  const whisperBody = `p3-05 browser whispers to guest ${runTag}`;
   await page.getByLabel('Whisper to guest-test').fill(whisperBody);
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.getByText('note: whispers are recorded in the audit log')).toBeVisible();
