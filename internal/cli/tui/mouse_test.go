@@ -32,6 +32,8 @@ func wheel(up bool, x, y int) tea.MouseMsg {
 func mouseModel(width, height, n int) Model {
 	m := NewModel(context.Background(), stubAPI{}, 7, []string{"general", "ops", "dev", "lab"})
 	m.width, m.height = width, height
+	// These tests are about the mouse; read state has its own.
+	m.rs.off = true
 	for i := 1; i <= n; i++ {
 		m.messages["general"] = append(m.messages["general"], schema.MessageV2{ID: int64(i), AuthorID: 4, Body: fmt.Sprintf("message %02d", i)})
 	}

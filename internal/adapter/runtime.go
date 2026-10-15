@@ -2,16 +2,20 @@ package adapter
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -23,6 +27,19 @@ import (
 // answers. Anything wider is reached only by writing CONCH_ADAPTER_CMD
 // yourself.
 const codexCommand = "codex exec --json --model {model} --sandbox read-only --skip-git-repo-check --ephemeral --color never"
+
+// ollamaCommand is what the ollama profile runs when CONCH_ADAPTER_CMD is not
+// set. There is no {prompt}: the prompt goes to standard input, and `ollama
+// run` prints the answer on standard output.
+const ollamaCommand = "ollama run {model}"
+
+// probeTimeout bounds the check that the local runtime can answer for the
+// model, so an adapter pointed at a hung daemon says so and stops.
+const probeTimeout = 10 * time.Second
+
+// maxProbeStderr bounds how much of the probe's complaint is kept to tell a
+// missing model from a daemon that is not running.
+const maxProbeStderr = 4 << 10
 
 // readerKind says how a profile's command output is read.
 type readerKind int
@@ -50,6 +67,9 @@ type runtimeProfile struct {
 	// command as well; empty if the command has none.
 	workdirFlag string
 	reader      readerKind
+	// probe is set for a runtime that is checked before the session opens: a
+	// local runtime that is not there is said so, and nothing else is tried.
+	probe bool
 }
 
 // streamsActivity reports whether the reader reports the command's own steps
@@ -59,6 +79,7 @@ func (p runtimeProfile) streamsActivity() bool { return p.reader != readerText }
 var runtimeProfiles = map[string]runtimeProfile{
 	"claude-code": {name: "claude-code", command: defaultCommand, model: "sonnet", binEnv: "CLAUDE_BIN", reader: readerText},
 	"codex":       {name: "codex", command: codexCommand, binEnv: "CODEX_BIN", workdirFlag: "-C", reader: readerCodexJSONL},
+	"ollama":      {name: "ollama", command: ollamaCommand, binEnv: "OLLAMA_BIN", reader: readerText, probe: true},
 }
 
 // profileFor returns the profile CONCH_ADAPTER_RUNTIME names. A name that is
@@ -264,4 +285,68 @@ func readBoundedLine(r *bufio.Reader, limit int) (line []byte, overlong bool, er
 			return line, overlong, readErr
 		}
 	}
+}
+
+// probeSpec is the check made before the ollama session opens: `ollama show
+// <model>` must exit 0 within probeTimeout.
+type probeSpec struct {
+	bin   string // the program, OLLAMA_BIN if it is set
+	model string
+}
+
+// check runs the probe. Each way it can fail is an error of one line saying
+// which; none of them leads to another runtime or model. clk gives the
+// timeout, so a test need not wait for it.
+func (p probeSpec) check(ctx context.Context, clk timeSource) error {
+	path, err := exec.LookPath(p.bin)
+	if err != nil {
+		return errors.New("ollama: not on PATH")
+	}
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, path, "show", p.model) // #nosec G204 -- the operator configures the program (OLLAMA_BIN) and the model
+	ownProcessGroup(cmd)
+	cmd.Env = childEnv(os.Environ())
+	cmd.WaitDelay = 2 * time.Second
+	var stderr limitedBuffer
+	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
+	if err := cmd.Start(); err != nil {
+		return errors.New("ollama: not on PATH")
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	tick := clk.newTicker(probeTimeout)
+	defer tick.Stop()
+	select {
+	case err = <-done:
+	case <-tick.C():
+		cancel()
+		<-done
+		waitGroupGone(cmd.Process.Pid, 2*time.Second)
+		return errors.New("ollama: daemon not reachable (no answer in 10s)")
+	case <-ctx.Done():
+		cancel()
+		<-done
+		waitGroupGone(cmd.Process.Pid, 2*time.Second)
+		return ctx.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	// Ollama exits 1 for both; what it says tells them apart.
+	if bytes.Contains(bytes.ToLower(stderr.buf), []byte("not found")) {
+		return fmt.Errorf("ollama: model %s is not pulled; run: ollama pull %s", p.model, p.model)
+	}
+	return errors.New("ollama: daemon not reachable")
+}
+
+// limitedBuffer keeps the first maxProbeStderr bytes written to it and drops
+// the rest.
+type limitedBuffer struct{ buf []byte }
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := maxProbeStderr - len(b.buf); room > 0 {
+		b.buf = append(b.buf, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }

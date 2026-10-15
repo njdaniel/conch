@@ -181,6 +181,7 @@ Without that toolchain `make check` fails and names the script; it does not skip
 ```sh
 make web-check   # gates (direct dependencies, exact versions, licences), typecheck, lint, unit tests; part of make check
 make web-build   # builds web/dist, for conchd serve --web-dir web/dist (served at /app/)
+make build-web-embedded   # web-build, then bin/conchd with the client inside it (-tags conchweb)
 ```
 
 Without that Node `make check` fails and names the version to install; it does not skip the web leg. `make build` is unaffected, and `conchd` never needs Node: it serves the built `web/dist` as plain files.
@@ -201,7 +202,8 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 - `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
 - `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
 - `--max-upload-bytes` (or `CONCHD_MAX_UPLOAD_BYTES`) is the largest file an upload may carry (default 10 MiB; `0` disables uploads). See [Files](#files).
-- `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. The build is not embedded in the binary. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
+- `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, `conchd` serves the web client built into the binary, if there is one, and otherwise there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
+- Release binaries have the web client built in, so `/app/` works with no Node and no `--web-dir`; `conchd version` prints `web: embedded` or `web: none`, and the start-up output names the source (`conchd web: embedded`, `dir <path>` or `none`). A plain `go build` or `make build` has none (it needs no Node); `make build-web-embedded` builds one that has, and fails to compile if `internal/web/dist` is empty. `--web-dir` wins over the built-in client. `--no-web` (or `CONCHD_NO_WEB` set to a boolean such as `1` or `true`; any other value is refused at start) turns `/app/` off even when a client is built in, and `/` is then not redirected; it is refused together with `--web-dir`.
 - `--allowed-origins` (or `CONCHD_ALLOWED_ORIGINS`) is a comma-separated list of extra `Origin`s the WebSocket upgrade accepts, such as `http://localhost:5173`. It exists only so a Vite dev server on another port can connect. Each entry is one exact origin (`http` or `https`, a host, an optional port); wildcards are refused at start-up, and so are empty entries. Unset, the same-origin check is unchanged.
 - `--session-stale` (or `CONCHD_SESSION_STALE`, default `30s`) and `--session-offline` (or `CONCHD_SESSION_OFFLINE`, default `90s`) are how long a session may go without a heartbeat before it shows as `stale` and then as `offline`; `conchd` refuses to start unless stale is shorter than offline. A session is one live client or runtime of a principal (a TUI, a browser tab, an adapter): `POST /v1/sessions` creates one (any caller with a credential; an agent needs `sessions.manage`; at most 16 online or stale per credential, then `429 too_many_sessions`; offline ones do not count, and reviving one is held to the same bound), `POST /v1/sessions/{id}/heartbeat` keeps it alive and revives a stale or offline one, `DELETE /v1/sessions/{id}` ends it, and `GET /v1/sessions?channel=<name>` lists the sessions of the channel's members, for members only (a non-member, an operator who is not a member and an unknown channel all get the same `404 channel_not_found`). A session belongs to the credential that created it: anyone else, another credential of the same principal and operators included, gets `404 session_not_found`. Revoking, rotating or revoking all of a credential, or disabling a principal, ends its sessions, and so does a credential's expiry (at the next sweep, with cause `credential_expired`). Rows are never deleted. Sessions need authentication: with `--auth off` the routes answer `400 sessions_require_auth`. A roster shows `runtime` and `host` only to an operator and to the session's own principal.
 
@@ -273,7 +275,7 @@ bin/conch
 
 Neither process reads or writes the other's file. `CONCH_TOKEN` still wins over the file in whichever directory is in use.
 
-Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
+Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. Each channel shows how many messages you have not read after its name (`general 3`; nothing at 0, `999+` at the server's cap of 1000): the TUI reads the counts from `GET /v1/read-state` on start, after a reconnect and when a message arrives in another channel (at most every 2 seconds; between reads it adds one locally), and moves your read mark with `PUT /v1/channels/{channel}/read-state` to the newest message on screen when you open a channel and as messages arrive while you are at the bottom of it, at most once every 2 seconds per channel. Scrolled up, the mark does not move; it moves when the newest message comes back into view (you scroll down to it, or return to the channels view). The mark is yours, shared by all your clients. With `--auth off`, or signed in as an agent, there is no read state, and the TUI shows no counts and says nothing. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
 
 ```sh
 bin/conch
@@ -481,6 +483,25 @@ a model name) and the adapter exits with one line naming it if it is missing.
 `CODEX_BIN`, if set, replaces `codex` in the default command only, as
 `CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
 written, but is still read as the profile reads.
+
+`ollama` is the local-model profile. It runs `ollama run {model}` with the
+prompt on standard input and reads the printed text as the reply, so a run
+reports the process as one `command_started` and `command_finished` pair, as
+`claude-code` does (and, as there, `CONCH_ADAPTER_FIXTURE=1` must never be set
+with a real model). `CONCH_ADAPTER_MODEL` is
+required and nothing is invented (for example `llama3.1:8b`; pull it first with
+`ollama pull`). `OLLAMA_BIN`, if set, replaces `ollama` in the default command
+and in the probe, under the same rule as `CLAUDE_BIN`. **The probe:** before the
+adapter reads the channel or registers a session, it runs `ollama show {model}`
+and waits at most 10 seconds for exit status 0. If it does not get it, the
+adapter exits with status 1 and one line, and posts nothing: `ollama: not on PATH`,
+`ollama: daemon not reachable` (also printed when the daemon does not answer in
+10 seconds), or `ollama: model X is not pulled; run: ollama pull X`. The adapter
+never switches to another runtime or model; no paid service is reached. A run
+whose command later exits non-zero is `failed` with that exit status, as for the
+other profiles. The probe is made only for the default command: a
+`CONCH_ADAPTER_CMD` you set is run as written, unprobed. The model only writes
+text; it has no tools here.
 
 **Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
 
