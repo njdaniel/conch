@@ -29,9 +29,11 @@ type runAPI struct {
 	runs      []schema.RunV1
 	pageSize  int
 	createErr error
-	created   []schema.CreateInterventionRequestV1
-	gets      int
-	listed    int
+	// listErr fails the runs reads.
+	listErr error
+	created []schema.CreateInterventionRequestV1
+	gets    int
+	listed  int
 	// listRequests is every runs read, in order.
 	listRequests []runsRequest
 }
@@ -105,6 +107,9 @@ func (a *runAPI) ListRuns(_ context.Context, _ string, session int64, page cli.R
 	defer a.state.Unlock()
 	a.listed++
 	a.listRequests = append(a.listRequests, runsRequest{session: session, page: page, limit: limit})
+	if a.listErr != nil {
+		return schema.ListRunsResponseV1{}, a.listErr
+	}
 	resp := schema.ListRunsResponseV1{Runs: []schema.RunV1{}}
 	if page.NewestFirst {
 		// The server's newest page: up to limit runs, whatever the page size
@@ -294,7 +299,8 @@ func TestRunDetailShowsFieldsActivityAndHistory(t *testing.T) {
 		"run #41 · running", "task: fix the parser", "link: https://example.com/pr/1", "started: 11:55:00 (5m ago)",
 		// Five entries over pages of two: every page was read.
 		"step 1", "step 2", "step 3", "step 4", "step 5 → ok", "activity (5)",
-		"#3 message · applied · use the cache", "#4 cancel · failed: cannot stop now", "interventions (2)",
+		// An intervention is two lines of the timeline: the ask, and its answer.
+		"↳ #3 message · asked · use the cache", "↳ #3 applied", "↳ #4 cancel · asked", "↳ #4 failed: cannot stop now", "interventions (2)",
 		"m message · x cancel",
 	} {
 		if !strings.Contains(view, want) {
@@ -405,10 +411,11 @@ func TestInterventionStatesRenderFromFrames(t *testing.T) {
 		why   string
 		want  string
 	}{
-		{"requested", schema.InterventionStateRequested, "", "#101 message · requested… · hello"},
-		{"acknowledged", schema.InterventionStateAcknowledged, "", "#101 message · acknowledged · hello"},
-		{"applied", schema.InterventionStateApplied, "", "#101 message · applied · hello"},
-		{"failed", schema.InterventionStateFailed, "no such file", "#101 message · failed: no such file · hello"},
+		{"requested", schema.InterventionStateRequested, "", "↳ #101 message · requested… · hello"},
+		// Once answered the ask reads "asked" and the answer is a line of its own.
+		{"acknowledged", schema.InterventionStateAcknowledged, "", "↳ #101 acknowledged"},
+		{"applied", schema.InterventionStateApplied, "", "↳ #101 applied"},
+		{"failed", schema.InterventionStateFailed, "no such file", "↳ #101 failed: no such file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

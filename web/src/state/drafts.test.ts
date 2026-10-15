@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { draftFor, draftsReducer, initialDrafts } from './drafts';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer } from './drafts';
 
 describe('drafts', () => {
   it('keeps one per channel, so switching channels loses none', () => {
@@ -15,5 +15,50 @@ describe('drafts', () => {
     expect(state).toEqual({});
     state = draftsReducer(draftsReducer(state, { type: 'edit', channel: 'ops', text: 'x' }), { type: 'reset' });
     expect(state).toEqual({});
+  });
+});
+
+describe('targets', () => {
+  it('keeps a net per channel until changed', () => {
+    let state = targetsReducer(initialTargets, { type: 'net', channel: 'ops', net: 5 });
+    state = targetsReducer(state, { type: 'net', channel: 'dev', net: 9 });
+    expect(targetFor(state, 'ops').net).toBe(5);
+    expect(targetFor(state, 'dev').net).toBe(9);
+    expect(targetFor(state, 'general')).toMatchObject({ net: null, whisper: null });
+    expect(targetFor(targetsReducer(state, { type: 'channel', channel: 'ops' }), 'ops').net).toBeNull();
+  });
+  it('toggles recipients, and a whisper ends the net and itself when accepted', () => {
+    let state = targetsReducer(initialTargets, { type: 'net', channel: 'ops', net: 5 });
+    state = targetsReducer(state, { type: 'whisper', channel: 'ops' });
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 3 });
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 4 });
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 3 });
+    expect(targetFor(state, 'ops')).toMatchObject({ net: 5, whisper: [4] });
+    state = targetsReducer(state, { type: 'whispered', channel: 'ops', sent: [4], note: 'n' });
+    expect(targetFor(state, 'ops')).toMatchObject({ net: null, whisper: null, note: 'n' });
+  });
+  it('closing the picker returns to the net chosen before', () => {
+    let state = targetsReducer(initialTargets, { type: 'net', channel: 'ops', net: 5 });
+    state = targetsReducer(targetsReducer(state, { type: 'whisper', channel: 'ops' }), { type: 'closePicker', channel: 'ops' });
+    expect(targetFor(state, 'ops')).toMatchObject({ net: 5, whisper: null });
+  });
+  it('clears the last refusal and note when a post starts', () => {
+    let state = targetsReducer(initialTargets, { type: 'refused', channel: 'ops', line: 'no' });
+    state = targetsReducer(state, { type: 'posting', channel: 'ops' });
+    expect(targetFor(state, 'ops')).toMatchObject({ refusal: null, note: null });
+  });
+  it('leaves a second whisper being composed alone when the first is confirmed', () => {
+    let state = targetsReducer(initialTargets, { type: 'whisper', channel: 'ops' });
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 3 });
+    // The first (to 3) is sent; another to 4 is chosen while it is on its way.
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 3 });
+    state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 4 });
+    state = targetsReducer(state, { type: 'whispered', channel: 'ops', sent: [3], note: 'n' });
+    expect(targetFor(state, 'ops')).toMatchObject({ whisper: [4], note: 'n' });
+  });
+  it('clears the refusal when the picker closes', () => {
+    let state = targetsReducer(initialTargets, { type: 'whisper', channel: 'ops' });
+    state = targetsReducer(state, { type: 'refused', channel: 'ops', line: 'no' });
+    expect(targetFor(targetsReducer(state, { type: 'closePicker', channel: 'ops' }), 'ops').refusal).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 // The messages of each channel the tab has opened: what the server has told us,
 // and what this tab has sent that the server has not yet confirmed. Pure
 // reducer; src/api.ts and the socket feed it through App.
-import { messageV2, type MessageV2 } from '../schema/message';
+import { messageV2, type Audience, type MessageV2 } from '../schema/message';
 
 // The most messages held per channel. Messages arriving live push the oldest
 // out (a pending send of our own is kept apart and never dropped). Loading
@@ -23,6 +23,8 @@ export interface PendingSend {
   // When it was typed (ms since the epoch), for the time shown beside it.
   readonly at: number;
   readonly status: SendStatus;
+  // Who it goes to when not the whole channel; kept so a Retry goes to the same.
+  readonly audience?: Audience;
 }
 
 export type HistoryStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -75,7 +77,7 @@ export type ChatAction =
   | { readonly type: 'received'; readonly channel: string; readonly message: MessageV2 }
   // A frame that was not a message of this schema or channel.
   | { readonly type: 'dropped'; readonly channel: string }
-  | { readonly type: 'sending'; readonly channel: string; readonly body: string; readonly at: number }
+  | { readonly type: 'sending'; readonly channel: string; readonly body: string; readonly at: number; readonly audience?: Audience }
   // The POST returned: the server's copy replaces the local one, by id.
   | { readonly type: 'sent'; readonly channel: string; readonly localId: number; readonly message: MessageV2 }
   | { readonly type: 'sendFailed'; readonly channel: string; readonly localId: number; readonly outcome: 'failed' | 'unconfirmed' }
@@ -140,7 +142,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'sending':
       return update(state, action.channel, (c) => ({
         ...c,
-        pending: [...c.pending, { localId: c.nextLocalId, body: action.body, at: action.at, status: 'sending' }],
+        pending: [
+          ...c.pending,
+          {
+            localId: c.nextLocalId,
+            body: action.body,
+            at: action.at,
+            status: 'sending',
+            ...(action.audience === undefined ? {} : { audience: action.audience }),
+          },
+        ],
         nextLocalId: c.nextLocalId + 1,
       }));
     case 'sent':

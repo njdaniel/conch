@@ -329,7 +329,11 @@ In the TUI the prompt always says where your next message goes: `ops >` for the 
 
 The TUI shows who and what is connected. While it runs it holds a session of its own (`POST /v1/sessions` with `client: "tui"`, `DELETE`d when it quits, `SIGINT` and `SIGTERM` included) and follows the events socket (`/v1/events/ws?channel=&session=`) of the channel on screen, reopened when you switch channel. The members line above the input reads `online: nick(2) guest · agents: worker-test ● observer-test ○`: people with a live session (a number after the name when one person has several), then agents with a session (`●` running, idle, blocked, waiting or failed; `◐` stale; `○` offline). Members with no session are not listed there. `tab` cycles channels, inbox and agents. The Agents view lists each agent member of the channel once, with its status as the server derives it (`idle`, `running`, `blocked`, `waiting`, `failed`, `stale`, `offline`; an agent with no session is `offline`), its current task and when it was last heard from; `enter` unfolds its sessions with their runtime and model, and a stale or offline session with a run still open says `outcome unknown`. Names, tasks, runtimes and models are chosen by other people and agents, so they are printed as text with control characters dropped. When the events socket is down or refused, or the TUI's session could not be created (a server with `--auth off`), both views read `unavailable` rather than showing a roster that may be stale, messaging keeps working, and the socket is retried with the same backoff as the message stream (1 s, doubling to 30 s); a roster is never replayed, so a reconnect takes the next one as the state. When the server has ended the TUI's session (a revoke, a rotate, an expired credential) the socket is refused with `404 session_not_found`: the TUI then creates one new session and reopens the socket with it, and if that fails the views stay `unavailable` and the status line says why (for example `members: session ended; sign in again`). The message stream follows `/v2/ws?after=<last id held>`: after a drop it asks for exactly what it missed, with no reload of the channel. Below 80x24 the Agents view is one pane; below 40x10 the TUI asks for a larger terminal.
 
-In the Agents view, `↑`/`↓` also walk through an unfolded agent's sessions and each session's ten newest runs (read with one `GET /v1/runs?channel=&session=&order=desc&limit=10` per session when the agent is unfolded). `enter` on a session with a run open, or on a run, opens run detail: the run's id, state, task, link, start and end times and outcome, then its activity (read in pages, then live from the events socket; `↑`/`↓`/`pgup`/`pgdn` scroll it) and the history of interventions asked of it. `esc` goes back. `m` types a one-line message to the run (`enter` sends it, `esc` drops it; it is one line, and control characters other than tab are refused) and `x` asks `cancel this run? y/n`; a key is offered only for a kind the session's roster entry declares in `interventions`, and the rest read `(unsupported)` (`pause (unsupported)` and `resume (unsupported)` always: this client does not send them) and do nothing. A request shows as `requested…` and becomes `acknowledged`, `applied` or `failed: <reason>` only when the intervention's frame says so, and the run's state changes only on a run frame or a re-read: an applied cancel leaves the run reading `running` until the agent reports it `cancelled`. A run that has ended shows its outcome and no keys; a stale or offline session's open run says `outcome unknown` beside its state. A run you can no longer see closes the pane with one line. Every field is text written by other people or agents and is printed with control characters dropped. After the events socket reconnects the open run is read again, since nothing is replayed.
+In the Agents view, `↑`/`↓` also walk through an unfolded agent's sessions and each session's ten newest runs (read with one `GET /v1/runs?channel=&session=&order=desc&limit=10` per session when the agent is unfolded). `enter` on a session with a run open, or on a run, opens run detail: the run's id, state, task, link, start and end times and outcome, then its timeline (see below). `esc` goes back to the view it was opened from. `m` types a one-line message to the run (`enter` sends it, `esc` drops it; it is one line, and control characters other than tab are refused) and `x` asks `cancel this run? y/n`; a key is offered only for a kind the session's roster entry declares in `interventions`, and the rest read `(unsupported)` (`pause (unsupported)` and `resume (unsupported)` always: this client does not send them) and do nothing. A request shows as `requested…` and becomes `acknowledged`, `applied` or `failed: <reason>` only when the intervention's frame says so, and the run's state changes only on a run frame or a re-read: an applied cancel leaves the run reading `running` until the agent reports it `cancelled`. A run that has ended shows its outcome and no keys; a stale or offline session's open run says `outcome unknown` beside its state. A run you can no longer see closes the pane with one line. Every field is text written by other people or agents and is printed with control characters dropped. After the events socket reconnects the open run is read again, since nothing is replayed.
+
+The Runs view lists the channel's runs across all agents, newest first (`r` in the Agents view; `a` goes back, `tab` moves on to the channels). One line per run: its state, the agent's name (from the members list; `#<id>` when the list lacks it), its task, when it started, then `for <duration>` for an open run (counted to now, redrawn once a second) or `ended <time>` for one that ended, and its outcome. A narrow terminal drops the outcome, then the end, then the start, never the state, the agent or the task. It reads the newest 50 runs (`GET /v1/runs?channel=&order=desc&limit=50`, no session filter) and the next 50 below the oldest held when the selection reaches the end of what is listed, and a run frame updates or inserts a line at once; after the events socket reconnects the newest page is read again and merged (only that page: an older run that changed while the socket was down keeps its old state until it is opened), and a line at the top of the pane says `live updates paused` while it is down. `f` cycles the filter `all`, `open`, `ended` (open means a state a run can still leave); the status line names it and the number listed. `enter` opens the run in run detail, the same pane the Agents view opens; `esc` there returns to the Runs view, and a run you can no longer see closes the pane with one line, as from the Agents view. No keys here type into the channel's draft.
+
+Run detail's timeline is one stream: each activity entry reads `+12.4s  (+3s)  <kind> <summary> → <outcome>`, the offset from the run's start (`+0.0s`, `+12.4s`, `+3m02s`, `+1h02m03s`) and, in brackets, the gap from the line above when that is a second or more. A person's request to the run and the agent's answer are lines of the same stream, in time order, marked `↳`: `↳ #7 message · asked · <body>` at the time it was asked (`↳ #7 message · requested… · <body>` while no frame has answered it), and `↳ #7 acknowledged`, `↳ #7 applied` or `↳ #7 failed: <reason>` at the time it was answered. The header shows `duration: 5m00s so far` (redrawn once a second) for an open run and `duration: 4m00s` for one that ended. `↑`/`↓`/`pgup`/`pgdn` move the cursor `›` (the bottom line shown) back and forward through the timeline, in pages as before; the newest 1000 entries are kept. An entry that carries `data` is marked `▸`; `enter` on it unfolds the data under it, pretty-printed and cut at 2 KiB with `…` (while it is unfolded, `pgup`/`pgdn` scroll it; moving the cursor folds it), and `enter` again folds it. `enter` on a line without data says `this entry has no data` in the status line. `g` leaves for the channels view at the message the run answers, or says `no message` when the run answers none (`message #N is older than the history held` when it is not among the messages the TUI holds). Everything shown to whom is the server's: the TUI makes no request for this beyond the ones above.
 
 - `CONCH_SERVER` (or `--server`) — conchd URL (default `http://127.0.0.1:8080`).
 - `CONCH_TOKEN` — a token to use instead of the stored login, for scripts and CI.
@@ -402,7 +406,7 @@ another agent). If the server refuses a scoped reply, the adapter logs one line
 and posts nothing; it never falls back to a wider audience. It does not start
 scoped conversations.
 
-**Presence.** On start it registers a session (client `conch-adapter`, its
+**Presence.** On start it first reads the channel, to skip what is already there, and only then registers its session, so a session that shows online will answer the next message sent; a credential that cannot read the channel fails at that first step (`seed cursor`). It registers a session (client `conch-adapter`, its
 runtime, model and host, and the interventions `message` and `cancel`) and
 sends a heartbeat every 10 seconds from a goroutine of its own, so a long reply
 does not make it look offline. Each reply is one run, in the channel and
@@ -410,7 +414,10 @@ answering the newest message it is replying to: `starting`, `running`, then
 `completed`, or `failed` with the exit status or `timeout` as the outcome (and
 nothing posted). The run's activity is `command_started` (it names the
 command's first word only, never the prompt), `command_finished`, and
-`reply_posted`. Sessions belong to an issued credential, so the adapter needs
+`reply_posted`. (With the `codex` runtime, below, `command_started` and
+`command_finished` come once for each command or tool call Codex reports,
+instead of once for the process, and name that command's first word only.)
+Sessions belong to an issued credential, so the adapter needs
 one: create it with `POST /v1/principals/{id}/credentials`. A static
 `--mcp-token` cannot register a session. The agent's manifest needs the
 capabilities `sessions.manage` and `runs.manage` besides `messages.read` and
@@ -441,12 +448,41 @@ new name wins when both are set. Also:
   replaced by the prompt or the model name, as that one argument. If `{prompt}`
   does not appear, the prompt is written to the command's standard input.
   `CLAUDE_BIN`, if set, replaces the first word of the default command; a `CONCH_ADAPTER_CMD` you set is run as written.
-- `CONCH_ADAPTER_RUNTIME` (default `claude-code`), the label shown for the runtime.
+- `CONCH_ADAPTER_RUNTIME` (default `claude-code`): the runtime profile (below) and the label shown for the runtime. A value that names no profile (`claude-code`, `codex`) is refused unless `CONCH_ADAPTER_CMD` is set, in which case it is only a label with plain-text output: a misspelt name never falls back to the Claude default command.
+- `CONCH_ADAPTER_WORKDIR`: the directory the command runs in; default the adapter's own. With the default Codex command it is also given to Codex with `-C`.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
   dropped with a log line. It is what stops two adapters from answering each
   other for ever.
 - `CONCH_ADAPTER_FIXTURE=1`: see below.
+
+**Runtime profiles.** `CONCH_ADAPTER_RUNTIME` picks a profile: a default
+command, a default model and a reader for the command's output. `claude-code`
+is the default described above. `codex` runs
+`codex exec --json --model {model} --sandbox read-only --skip-git-repo-check --ephemeral --color never`,
+with the prompt on standard input, and reads the JSONL events it prints: each
+command or tool call becomes a `command_started` and a `command_finished` entry
+(the first word of the command only, and its exit status), the last agent
+message is the reply, and every other event is ignored. Lines that are not JSON
+are ignored; more than 100 of them fail the run (`codex output not JSONL`).
+Fixture markers are never read for this profile, whatever `CONCH_ADAPTER_FIXTURE`
+says. `CONCH_ADAPTER_MODEL` is required for `codex` (the adapter will not invent
+a model name) and the adapter exits with one line naming it if it is missing.
+`CODEX_BIN`, if set, replaces `codex` in the default command only, as
+`CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
+written, but is still read as the profile reads.
+
+**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
+
+**Sandbox.** Unlike `claude -p`, Codex has a sandbox, and the default command
+uses it read-only: the agent can read files and run commands that do not
+write, which is what a reply agent needs. It still runs as the user who started
+the adapter, with that user's Codex credentials. To widen it, write the command
+yourself, for example `CONCH_ADAPTER_CMD="codex exec --json --model {model} --sandbox workspace-write ..."`;
+`--dangerously-bypass-approvals-and-sandbox` is reachable only that way. What
+that gives is what the default Claude command gives: anyone who can post where
+the agent listens, or send its run a `message`, steers a process that can
+change files and run anything as you. Run it only where that is acceptable.
 
 Two adapters on one host need different `CONCH_ADAPTER_LOCK_FILE` values and
 nothing else. `conch-bot` is the old name of the program; it still works for

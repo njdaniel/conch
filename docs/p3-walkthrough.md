@@ -399,6 +399,34 @@ model `sonnet`, and a real task and activity stream when you post in `general`.
 If `claude` is missing or not signed in, the run fails with that stated; nothing
 falls back to a fixture or to another paid service.
 
+### P3-13 with Codex instead
+
+The same row runs Codex, the other real runtime. Reset, then start with the
+runtime named (Codex has no default model, so name one you can use; it is
+written into `agent-a.env`, or leave it out and set it when you start the
+adapter):
+
+`go run ./e2e/p3-local --reset` then `CONCH_ADAPTER_MODEL=<model> go run ./e2e/p3-local --keep --real-adapter --runtime codex`
+
+(Not fenced, for the reason above.) `agent-a.env` then holds
+`CONCH_ADAPTER_RUNTIME=codex` and no fixture, so `conch-adapter` runs its Codex
+profile: `codex exec --json --model <model> --sandbox read-only
+--skip-git-repo-check --ephemeral --color never`, with the prompt on standard
+input. The sandbox is read-only on purpose: Codex can read what your account can
+and run commands that do not write, and it uses your own quota. Start the
+adapter from the same fenced command as above, in a directory you would let it
+read; `CONCH_ADAPTER_WORKDIR` makes the directory something other than the one
+you start from, and `CODEX_BIN` names a `codex` that is not on `PATH`. If you
+did not set `CONCH_ADAPTER_MODEL` before, set it for this start, or the adapter
+exits with one line naming it.
+
+What should appear. `worker-test` appears with runtime `codex` and your model.
+When you post in `general`, the run's activity lists each command Codex ran as a
+`command_started` and `command_finished` pair, naming the command's first word
+only (never its arguments), then `reply_posted`, and the reply is Codex's final
+message. If `codex` is missing or not signed in, the run fails with that stated;
+nothing falls back to a fixture or to another paid service.
+
 ## When you are done
 
 ```sh
