@@ -337,3 +337,36 @@ func TestRunServePartialLiveKitFailsBeforeDatabase(t *testing.T) {
 		t.Errorf("data dir was created (stat err %v); serve should fail before opening anything", statErr)
 	}
 }
+
+func TestParseServeArgsRoomPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: "conch-"},
+		{name: "flag", args: []string{"--livekit-room-prefix", "alpha-"}, want: "alpha-"},
+		{name: "env", env: "beta-", want: "beta-"},
+		{name: "flag wins over env", args: []string{"--livekit-room-prefix", "alpha-"}, env: "beta-", want: "alpha-"},
+		{name: "invalid flag", args: []string{"--livekit-room-prefix", "Alpha"}, wantErr: true},
+		{name: "invalid env", env: "no-dash", wantErr: true},
+		{name: "empty flag", args: []string{"--livekit-room-prefix="}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCHD_LIVEKIT_ROOM_PREFIX", tt.env)
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--livekit-room-prefix") || !strings.Contains(err.Error(), "end with '-'") {
+					t.Fatalf("err = %v, want one line naming the flag and the rule", err)
+				}
+				return
+			}
+			if err != nil || opts.livekitRoomPrefix != tt.want {
+				t.Fatalf("prefix = %q, %v; want %q", opts.livekitRoomPrefix, err, tt.want)
+			}
+		})
+	}
+}

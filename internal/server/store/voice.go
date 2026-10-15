@@ -71,9 +71,54 @@ const (
 	VoiceRotateNotHuman          = "not_human"
 )
 
-// voiceRoomPrefix starts every room name. The rest is 128 random bits, never
-// derived from a channel or net name.
-const voiceRoomPrefix = "conch-"
+// DefaultVoiceRoomPrefix starts every room name when --livekit-room-prefix is not
+// given.
+const DefaultVoiceRoomPrefix = "conch-"
+
+// maxVoiceRoomPrefix is the longest room-name prefix, in bytes.
+const maxVoiceRoomPrefix = 32
+
+// ValidateVoiceRoomPrefix checks a room-name prefix: lower-case letters, digits and
+// "-", at most 32 characters, ending in "-". The trailing "-" keeps one
+// server's prefix from running into the random part of its names. The error
+// states the rule in one line.
+func ValidateVoiceRoomPrefix(p string) error {
+	const rule = "invalid room prefix: must be lower-case letters, digits and '-', at most 32 characters, and end with '-'"
+	if p == "" || len(p) > maxVoiceRoomPrefix || p[len(p)-1] != '-' {
+		return errors.New(rule)
+	}
+	for _, c := range []byte(p) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return errors.New(rule)
+		}
+	}
+	return nil
+}
+
+// A room name is a prefix (DefaultVoiceRoomPrefix unless
+// SetVoiceRoomPrefix chose another) and 128 random bits, never derived from a
+// channel or net name. Stored names are never rewritten: a room's prefix is
+// whatever the server used when it created the room.
+
+// SetVoiceRoomPrefix sets the prefix of every room name this store creates
+// from now on; rooms already stored keep their names. An invalid prefix is
+// refused and the earlier one stays. Call it before the store is used from
+// more than one goroutine.
+func (s *Store) SetVoiceRoomPrefix(prefix string) error {
+	if err := ValidateVoiceRoomPrefix(prefix); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	s.voiceRoomPrefix = prefix
+	return nil
+}
+
+// roomPrefix is the prefix for a new room name.
+func (s *Store) roomPrefix() string {
+	if s.voiceRoomPrefix == "" {
+		return DefaultVoiceRoomPrefix
+	}
+	return s.voiceRoomPrefix
+}
 
 // VoiceRoom is a stored voice room. NetID is 0 for the channel-wide room.
 // RetiredAt is zero for a live room. A retired room is one the channel no
@@ -93,15 +138,15 @@ type VoiceRoom struct {
 // that was rotated away. The caller asks for the channel's current room again.
 var ErrVoiceRoomRetired = errors.New("store: voice room is retired")
 
-// newVoiceRoomName returns "conch-" plus 128 random bits in lower-case base32
+// newVoiceRoomName returns prefix plus 128 random bits in lower-case base32
 // without padding (26 characters).
-func newVoiceRoomName() (string, error) {
+func newVoiceRoomName(prefix string) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("store: generate voice room name: %w", err)
 	}
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])
-	return voiceRoomPrefix + strings.ToLower(enc), nil
+	return prefix + strings.ToLower(enc), nil
 }
 
 // ChannelVoiceRoom returns the channel's live channel-wide voice room,
@@ -125,7 +170,7 @@ func (s *Store) ChannelVoiceRoom(ctx context.Context, channelID int64) (VoiceRoo
 	if !errors.Is(err, sql.ErrNoRows) {
 		return VoiceRoom{}, fmt.Errorf("store: read voice room for channel %d: %w", channelID, err)
 	}
-	name, err := newVoiceRoomName()
+	name, err := newVoiceRoomName(s.roomPrefix())
 	if err != nil {
 		return VoiceRoom{}, err
 	}
@@ -473,7 +518,7 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 // Deleting the room in LiveKit is the caller's job and is retried by the sweep
 // from the retired row.
 func (s *Store) RotateVoiceRoom(ctx context.Context, roomID int64, reason string) (next VoiceRoom, rotated bool, err error) {
-	name, err := newVoiceRoomName()
+	name, err := newVoiceRoomName(s.roomPrefix())
 	if err != nil {
 		return VoiceRoom{}, false, err
 	}
