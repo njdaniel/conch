@@ -22,6 +22,16 @@ via LiveKit, never bespoke WebRTC.
 > (#81), runs on every pull request. Password login and OIDC (#24) did not ship in it and
 > move to P7; see the P2 paragraph. P3 is next among the numbered phases.
 
+> **Amended 2026-10-15:** **P3 is done** (#423). All its code is on `main`, and its
+> success criterion was met in an agent run on 2026-10-15 (walkthrough row P3-14, recorded
+> in the [exit record](docs/design/p3-exit-record.md)). Its optional extensions moved out
+> of the P3 milestone, by Nick's choice:
+> - the voice rows (#393, #394, #396; tracker #354) went to the P8 Voice milestone, beside
+>   #189, which gates them;
+> - the by-hand VM/LAN guest session (#381; tracker #353) went to "P3 extensions".
+>
+> Which numbered phase comes next is Nick's call.
+
 **Two invariants hold the whole way:**
 
 - **Usable at every phase.** Each phase ends in a deployment you actually run, not
@@ -83,18 +93,7 @@ Two things this paragraph used to list did not ship here:
 
 *Deployment: dependency-free core, localhost, Nick + one or more agents in the TUI.*
 
----
-
-## The long arc
-
-> **Client/P3 amendment (2026-10-13, #259):**
-> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the client stack and adds a
-> small read/write browser prototype alongside the TUI at P3. The
-> [P3 local prototype brief](docs/design/p3-local-prototype.md) and the plan on
-> [#260](https://github.com/njdaniel/conch/issues/260) define the work; none of it is
-> built yet. No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
-
-### P3 — Agent presence & runs 🎯 *next*
+### P3 — Agent presence & runs ✅
 Make agents visible, first-class **workspace members**, not just participants that read
 and post. This is the "open Conch and see everything running" phase — the most
 immediately useful thing on the roadmap.
@@ -183,6 +182,17 @@ LiveKit remains optional for the parallel voice track.*
 > Slack-style multi-human GUI in P7. The TUI stays first-class for ops and approvals.
 > **Extended by ADR-007:** the early GUI allowance now covers the bounded read/write
 > local prototype above, and no more than that.
+
+---
+
+## The long arc
+
+> **Client/P3 amendment (2026-10-13, #259):**
+> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the client stack and adds a
+> small read/write browser prototype alongside the TUI at P3. The
+> [P3 local prototype brief](docs/design/p3-local-prototype.md) and the plan on
+> [#260](https://github.com/njdaniel/conch/issues/260) define the work; none of it is
+> built yet. No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
 
 ### Parallel track — nets and voice (V0–V6)
 
@@ -329,7 +339,7 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | Phase | Focus | Deployment |
 | ----- | ----- | ---------- |
 | P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
-| **P3** | **Agent presence, sessions, runs, activity, adapters**; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
+| P3 ✅ | Agent presence, sessions, runs, activity, adapters; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
 | **P4** | **Assemblies / floor-controlled multi-agent rooms** | Core, local, solo+agents |
 | **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |
