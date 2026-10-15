@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,24 @@ var participants = []struct{ name, principal, what string }{
 	{"tui-a2", "nick-test", "terminal 3: nick-test again, with a second credential"},
 	{"agent-a", "worker-test", "worker-test, the scripted agent that can post"},
 	{"agent-b", "observer-test", "observer-test, the scripted agent that can only read"},
+}
+
+// allParticipants is the participants of this run: those above and one agent
+// per real runtime asked for with --real-adapters.
+func (r *runner) allParticipants() []struct{ name, principal, what string } {
+	all := slices.Clone(participants)
+	for _, rt := range realRuntimes {
+		if slices.Contains(r.realAgents, rt.name) {
+			all = append(all, struct{ name, principal, what string }{realAgent(rt.name),
+				realAgent(rt.name), "real-" + rt.name + ", the real " + rt.label + " adapter (model " + r.models[rt.name] + ")"})
+		}
+	}
+	return all
+}
+
+// isAgentPart reports whether the participant is an agent, run by conch-adapter.
+func isAgentPart(part string) bool {
+	return strings.HasPrefix(part, "agent-") || strings.HasPrefix(part, "real-")
 }
 
 var safeWord = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
@@ -68,13 +87,13 @@ func (r *runner) writeParticipantFiles() error {
 			"CONCH_TOKEN", token,
 		}
 	}
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		c := fx.creds[p.name]
 		if err := ensureDir(r.path("config", p.name)); err != nil {
 			return err
 		}
 		pairs := common(p.name, c.token)
-		if strings.HasPrefix(p.name, "agent-") {
+		if isAgentPart(p.name) {
 			pairs = append(pairs, r.adapterVars(p.name, c)...)
 		}
 		header := p.name + ": " + p.what + ". Source it, then run the program; it holds a credential."
@@ -109,6 +128,15 @@ func (r *runner) adapterVars(part string, c credential) []string {
 		"CONCH_ADAPTER_POLL_INTERVAL", "1s",
 		"CONCH_ADAPTER_LOCK_FILE", r.path(part + ".lock"),
 	}
+	if rt, ok := strings.CutPrefix(part, "real-"); ok {
+		// The profile's default command, no fixture; the model is the one the
+		// caller named, and the adapter's profile is told by its own name.
+		for _, known := range realRuntimes {
+			if known.name == rt {
+				return append(vars, "CONCH_ADAPTER_RUNTIME", known.profile, "CONCH_ADAPTER_MODEL", r.models[rt])
+			}
+		}
+	}
 	if part == "agent-a" && r.realAdapter {
 		if r.runtime == "codex" {
 			// The profile's default command is Codex's; the model has no default
@@ -133,7 +161,7 @@ func (r *runner) adapterCmd(script string) string {
 	return shq(r.path("fixtures", script))
 }
 
-var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh", "hang.sh"}
+var fixtureNames = []string{"echo.sh", "approval.sh", "slow.sh", "fail.sh", "hang.sh", "codex-stub.sh", "ollama-stub.sh"}
 
 func (r *runner) copyFixtureScripts() error {
 	for _, n := range fixtureNames {
@@ -153,7 +181,7 @@ func (r *runner) copyFixtureScripts() error {
 func (r *runner) verifyFiles() error {
 	op := r.fx.operatorToken
 	files := []string{"operator.env", "browser.txt"}
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		files = append(files, p.name+".env")
 	}
 	for _, f := range files {
@@ -226,9 +254,9 @@ func (r *runner) printCommands() error {
 	say("%s: ready. conchd is serving %s (pid %d); its log is %s", name, r.baseURL(), r.server.pid(), shq(r.path("logs", "conchd.log")))
 	say("Run each command in a window of its own. Nothing below is started for you.")
 	say("")
-	for _, p := range participants {
+	for _, p := range r.allParticipants() {
 		command := r.tuiCommand(p.name)
-		if strings.HasPrefix(p.name, "agent-") {
+		if isAgentPart(p.name) {
 			command = r.agentCommand(p.name)
 		}
 		cmd(p.name+": "+p.what, command)
@@ -279,10 +307,10 @@ func (r *runner) printCommands() error {
 	say("  address %s", r.addr)
 	say("  webdir %s", r.webDir)
 	say("  pid conchd %d", r.server.pid())
-	for _, n := range everyone {
+	for _, n := range r.everyone() {
 		say("  principal %s %s", n, pid(n))
 	}
-	for _, spec := range credSpecs {
+	for _, spec := range r.credSpecs() {
 		say("  credential %s %d", spec.participant, fx.creds[spec.participant].id)
 	}
 

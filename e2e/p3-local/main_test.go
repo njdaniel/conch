@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -437,7 +439,7 @@ func commandFor(t *testing.T, lines []string, envFile, programSuffix string) str
 // down and leaves nothing. A root with a space in its path makes the printed
 // and sourced quoting do real work.
 func TestRunWithoutKeep(t *testing.T) {
-	all := []string{"P3-01", "P3-02", "P3-03", "P3-04", "P3-05", "P3-06", "P3-07", "P3-08", "P3-09", "P3-10", "P3-11"}
+	all := []string{"P3-01", "P3-02", "P3-03", "P3-04", "P3-05", "P3-06", "P3-07", "P3-08", "P3-09", "P3-10", "P3-11", "P3-14"}
 	for _, tc := range []struct {
 		name string
 		root func(*scratch) string
@@ -1104,4 +1106,121 @@ func TestRealAdapterCodex(t *testing.T) {
 	if strings.Contains(string(a), "CONCH_ADAPTER_MODEL") || !strings.Contains(string(a), "CONCH_ADAPTER_RUNTIME=codex") {
 		t.Errorf("agent-a.env:\n%s", a)
 	}
+}
+
+// ------------------------------------------------------- --real-adapters
+
+func TestParseRealAdapters(t *testing.T) {
+	env := func(kv ...string) func(string) (string, bool) {
+		m := map[string]string{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+	}
+	all := env("CONCH_P3_MODEL_CLAUDE", "sonnet", "CONCH_P3_MODEL_CODEX", "gpt-x", "CONCH_P3_MODEL_OLLAMA", "llama3.1:8b")
+	tests := []struct {
+		name       string
+		list       string
+		lookup     func(string) (string, bool)
+		want       []string
+		wantModels map[string]string
+		wantErr    string // all of it must be in the error
+	}{
+		{"none", "", all, nil, nil, ""},
+		{"all three", "claude,codex,ollama", all, []string{"claude", "codex", "ollama"}, map[string]string{"claude": "sonnet", "codex": "gpt-x", "ollama": "llama3.1:8b"}, ""},
+		{"one, with spaces", " ollama ", all, []string{"ollama"}, map[string]string{"ollama": "llama3.1:8b"}, ""},
+		{"order is kept", "ollama,claude", all, []string{"ollama", "claude"}, map[string]string{"ollama": "llama3.1:8b", "claude": "sonnet"}, ""},
+		{"a model unset", "claude,codex,ollama", env("CONCH_P3_MODEL_CLAUDE", "a", "CONCH_P3_MODEL_CODEX", "b"), nil, nil, "CONCH_P3_MODEL_OLLAMA"},
+		{"a model empty", "codex", env("CONCH_P3_MODEL_CODEX", ""), nil, nil, "CONCH_P3_MODEL_CODEX"},
+		{"unknown", "claude,gemini", all, nil, nil, "gemini"},
+		{"twice", "claude,claude", all, nil, nil, "claude is listed twice"},
+		{"empty item", "claude,", all, nil, nil, "not a runtime"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, models, err := parseRealAdapters(tt.list, tt.lookup)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one with %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) || !maps.Equal(models, tt.wantModels) {
+				t.Fatalf("got %v %v, want %v %v", got, models, tt.want, tt.wantModels)
+			}
+		})
+	}
+}
+
+// TestRealAdapters checks --real-adapters --keep: one agent per runtime with
+// the manifest of worker-test, its own env file and start command, the model
+// from the variable, and a refusal that names a variable left unset. Nothing
+// is started.
+func TestRealAdapters(t *testing.T) {
+	s := newScratch(t)
+	for _, args := range [][]string{{"--real-adapters", "claude"}, {"--reset", "--real-adapters", "claude"}} {
+		if _, _, err := s.run(args...); err == nil {
+			t.Errorf("p3-local %v succeeded", args)
+		}
+	}
+
+	cmd := s.command("--keep", "--real-adapters", "claude,codex")
+	cmd.Env = append(s.env(), "CONCH_P3_MODEL_CLAUDE=m-claude", "CONCH_P3_MODEL_CODEX=m-codex")
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	// With a variable unset it refuses, names it, and starts nothing.
+	refused := s.command("--keep", "--real-adapters", "claude,ollama")
+	refused.Env = append(s.env(), "CONCH_P3_MODEL_CLAUDE=m-claude")
+	var rout, rerr bytes.Buffer
+	refused.Stdout, refused.Stderr = &rout, &rerr
+	if err := refused.Run(); err == nil || !strings.Contains(rerr.String(), "CONCH_P3_MODEL_OLLAMA") {
+		t.Fatalf("p3-local with a model unset: %v\n%s\n%s", err, rout.String(), rerr.String())
+	}
+	if _, err := os.Lstat(s.root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a refused run left a root behind: %v", err)
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("p3-local --keep --real-adapters claude,codex: %v\n%s\n%s", err, out.String(), errb.String())
+	}
+	for _, want := range []string{"real-claude", "real-codex"} {
+		commandFor(t, printedLines(out.String()), want+".env", "conch-adapter")
+	}
+	if strings.Contains(out.String(), "real-ollama") {
+		t.Errorf("an agent for a runtime that was not asked for:\n%s", out.String())
+	}
+	for file, wants := range map[string][]string{
+		"real-claude.env": {"CONCH_ADAPTER_RUNTIME=claude-code", "CONCH_ADAPTER_MODEL=m-claude", "real-claude.lock"},
+		"real-codex.env":  {"CONCH_ADAPTER_RUNTIME=codex", "CONCH_ADAPTER_MODEL=m-codex", "real-codex.lock"},
+	} {
+		data, err := os.ReadFile(filepath.Join(s.root, file)) // #nosec G304 -- a path in this test's scratch
+		must(t, err)
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s lacks %s:\n%s", file, want, data)
+			}
+		}
+		for _, absent := range []string{"CONCH_ADAPTER_CMD", "CONCH_ADAPTER_FIXTURE"} {
+			if strings.Contains(string(data), absent) {
+				t.Errorf("%s sets %s; a real adapter runs its default", file, absent)
+			}
+		}
+		if info, err := os.Stat(filepath.Join(s.root, file)); err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v, %v", file, info, err)
+		}
+	}
+	if !strings.Contains(errb.String(), "WARNING: --real-adapters") {
+		t.Errorf("the warning is missing from standard error:\n%s", errb.String())
+	}
+	// agent-a stays the fixture.
+	a, err := os.ReadFile(filepath.Join(s.root, "agent-a.env")) // #nosec G304 -- a path in this test's scratch
+	must(t, err)
+	if !strings.Contains(string(a), "CONCH_ADAPTER_FIXTURE=1") {
+		t.Errorf("agent-a.env is not a fixture:\n%s", a)
+	}
+	s.mustRun("--reset")
 }

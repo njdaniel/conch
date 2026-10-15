@@ -44,6 +44,9 @@ type config struct {
 	StreamsActivity bool
 	// WorkDir is the command's working directory; empty means the adapter's.
 	WorkDir string
+	// Probe is the check made before the session opens, from the runtime's
+	// profile; nil for none. Only the profile's own command is probed.
+	Probe *probeSpec
 }
 
 // Main is the program: cmd/conch-adapter, and cmd/conch-bot under its old
@@ -184,6 +187,9 @@ func loadConfig(lookup envLookup) (config, error) {
 	}
 	if cfg.Command, err = parseCommand(line, binary); err != nil {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CMD: %w", err)
+	}
+	if isDefault && profile.probe {
+		cfg.Probe = &probeSpec{bin: cfg.Command.args[0], model: cfg.Model}
 	}
 	if isDefault && cfg.WorkDir != "" && profile.workdirFlag != "" {
 		cfg.Command.args = append(cfg.Command.args, profile.workdirFlag, cfg.WorkDir)
