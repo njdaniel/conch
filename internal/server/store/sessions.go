@@ -325,8 +325,9 @@ func endPrincipalSessionsTx(ctx context.Context, tx execer, actor string, princi
 // endSessionsTx ends the sessions that match where, which is a fixed condition
 // written by this package (never request text), and have not ended. It sets
 // ended_at and the offline state together and writes one session_ended event
-// per session. The caller must hold the write lock (withImmediateTx) so the
-// set it reads is the set it ends. It returns how many it ended.
+// per session, and fails the session's open runs (endSessionRunsTx). The
+// caller must hold the write lock (withImmediateTx) so the set it reads is the
+// set it ends. It returns how many it ended.
 func endSessionsTx(ctx context.Context, tx execer, actor, where string, args []any, cause string, now time.Time) (int, error) {
 	type live struct{ id, principalID, credentialID int64 }
 	rows, err := tx.QueryContext(ctx,
@@ -363,6 +364,11 @@ func endSessionsTx(ctx context.Context, tx execer, actor, where string, args []a
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditSessionEnded, sessionSubject(l.id),
 			"cause="+cause+" "+sessionDetail(l.principalID, l.credentialID), now); err != nil {
+			return 0, err
+		}
+		// The agent can no longer see this session's runs, so they end with
+		// it, in the same transaction (issue #402).
+		if _, err := endSessionRunsTx(ctx, tx, actor, l.id, now); err != nil {
 			return 0, err
 		}
 	}

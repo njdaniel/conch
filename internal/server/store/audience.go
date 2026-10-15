@@ -1222,6 +1222,72 @@ func countOpenRunsTx(ctx context.Context, tx execer, sessionID int64) (int, erro
 	return n, nil
 }
 
+// countOpenRunsOfCredentialTx is how many runs have not ended on all the
+// sessions of credential credentialID: live, offline and ended alike (issue
+// #402). Offline sessions' runs stay open and a session cannot be told to
+// forget them, so a bound on live sessions alone would let new sessions pile
+// new runs on top. CreateRun asks it inside its transaction.
+func countOpenRunsOfCredentialTx(ctx context.Context, tx execer, credentialID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs r JOIN sessions s ON s.id = r.session_id
+		 WHERE s.credential_id = ? AND r.state IN (?, ?, ?, ?, ?)`, credentialID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4]).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count open runs of credential %d: %w", credentialID, err)
+	}
+	return n, nil
+}
+
+// endSessionRunsTx ends every run of session sessionID that has not ended:
+// state failed, outcome RunOutcomeSessionEnded, ended_at now (never before the
+// run's started_at), and one run_ended event each, in the caller's
+// transaction. The agent can no longer see these runs, so left open they
+// would hold a slot of the credential's bound for good (issue #402). It
+// returns how many it ended.
+func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID int64, now time.Time) (int, error) {
+	type open struct{ id, principalID, channelID int64 }
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, principal_id, channel_id FROM runs WHERE session_id = ? AND state IN (?, ?, ?, ?, ?) ORDER BY id", sessionID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
+	if err != nil {
+		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	var found []open
+	for rows.Next() {
+		var o open
+		if err := rows.Scan(&o.id, &o.principalID, &o.channelID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: scan open run: %w", err)
+		}
+		found = append(found, o)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	for _, o := range found {
+		res, err := tx.ExecContext(ctx,
+			"UPDATE runs SET state = ?, outcome = ?, ended_at = max(started_at, ?) WHERE id = ? AND state IN (?, ?, ?, ?, ?)",
+			string(schema.RunStateFailed), RunOutcomeSessionEnded, now.UnixMilli(), o.id,
+			openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
+		if err != nil {
+			return 0, fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return 0, fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+		} else if n != 1 {
+			return 0, fmt.Errorf("store: end run %d with its session: affected %d rows", o.id, n)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditRunEnded, runSubject(o.id),
+			fmt.Sprintf("state=%s session=%d principal=%d channel=%d", schema.RunStateFailed, sessionID, o.principalID, o.channelID), now); err != nil {
+			return 0, err
+		}
+	}
+	return len(found), nil
+}
+
 // countRunActivityTx is how many activity entries run runID holds, for
 // AppendRunActivity, inside its transaction.
 func countRunActivityTx(ctx context.Context, tx execer, runID int64) (int, error) {
