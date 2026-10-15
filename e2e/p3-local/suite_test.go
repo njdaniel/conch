@@ -250,3 +250,17 @@ func TestRealAdapterPlanFor(t *testing.T) {
 		})
 	}
 }
+
+func TestChannelListIgnoresUnreadCounts(t *testing.T) {
+	rows := []string{
+		"╭────────────────╮╭──────╮",
+		"│› general 2     ││ msg  │",
+		"│  nets-demo 999+││      │",
+		"│  test-private  ││      │",
+		"╰────────────────╯╰──────╯",
+	}
+	names, marked := channelList(rows)
+	if !slices.Equal(names, []string{"general", "nets-demo", "test-private"}) || marked != 0 {
+		t.Errorf("channelList = %v, %d", names, marked)
+	}
+}

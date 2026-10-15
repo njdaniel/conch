@@ -53,6 +53,9 @@ type API interface {
 	ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error)
 	CreateIntervention(ctx context.Context, run int64, request schema.CreateInterventionRequestV1) (schema.InterventionV1, error)
 	ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error)
+	// Read state: the unread count of each channel, and moving the read mark.
+	ListReadState(context.Context) (schema.ListReadStateResponseV1, error)
+	MarkRead(ctx context.Context, channel string, lastReadID int64) (schema.ReadStateV1, error)
 }
 
 type channelsLoaded struct {
@@ -287,6 +290,8 @@ type Model struct {
 	rd runDetail
 	// runs is the Runs view of the selected channel.
 	runs runsView
+	// rs is the person's read state: the unread counts and the read mark.
+	rs readState
 	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
 	clockTicking bool
 }
@@ -342,7 +347,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
-		sessionRuns: make(map[sessionRunKey][]schema.RunV1)}
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -372,9 +377,9 @@ func (m Model) Init() tea.Cmd {
 		who = m.loadWhoAmI()
 	}
 	if m.loadingChannels {
-		return tea.Batch(who, m.startSession(), m.loadChannels(), m.waitEvent())
+		return tea.Batch(who, m.startSession(), m.loadChannels(), m.loadReadState(), m.waitEvent())
 	}
-	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.waitEvent())
+	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.loadReadState(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -531,6 +536,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case readStateLoaded:
+		return m.readStateLoaded(msg)
+	case readMarked:
+		return m.readMarked(msg)
+	case markDue:
+		return m.markDue(msg)
 	case voiceKick:
 		return m, m.beginVoice()
 	case voicePresenceReceived:
@@ -689,16 +700,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, nil
+		return m, m.markReading()
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, m.waitEvent()
+		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading())
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
+		}
+		if m.rs.dropped[msg.channel] {
+			// Messages may have come while it was down: ask what is unread now.
+			delete(m.rs.dropped, msg.channel)
+			return m, tea.Batch(m.waitEvent(), m.loadReadState())
 		}
 		return m, m.waitEvent()
 	case subscriptionEnded:
@@ -755,6 +771,7 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 		return m, wait
 	}
 	m.subscribed[msg.channel] = false
+	m.rs.dropped[msg.channel] = true
 	selected := msg.channel == m.current()
 	if errors.Is(msg.err, cli.ErrUnauthenticated) {
 		// Retrying cannot fix a missing login; the user must act, and
@@ -805,7 +822,7 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents()}
+	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents(), m.markReading()}
 	// A pending retry timer will start the subscription itself.
 	switch {
 	case m.subscribed[m.current()] || m.retryPending[m.current()]:
@@ -1146,12 +1163,20 @@ func (m Model) View() string {
 func (m Model) channelLines(leftWidth int) []string {
 	lines := make([]string, len(m.channels))
 	for i, channel := range m.channels {
-		channel = clip(sanitize(channel), leftWidth-4)
+		badge := m.unreadBadge(channel)
+		room := leftWidth - 4
+		if badge != "" {
+			room -= 1 + len(badge)
+		}
+		name := clip(sanitize(channel), room)
 		prefix := "  "
 		if i == m.selected {
 			prefix = activeStyle.Render("› ")
 		}
-		lines[i] = prefix + channel
+		lines[i] = prefix + name
+		if badge != "" {
+			lines[i] += " " + badgeStyle.Render(badge)
+		}
 	}
 	if len(lines) == 0 && m.loadingChannels {
 		lines = append(lines, statusStyle.Render("loading…"))

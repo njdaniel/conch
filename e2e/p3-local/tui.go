@@ -133,6 +133,11 @@ func channelList(rows []string) (names []string, marked int) {
 		pane, _, _ := strings.Cut(strings.TrimPrefix(r, "│"), "│")
 		isMarked := strings.HasPrefix(pane, "› ")
 		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(pane, "› "), "  "))
+		// The unread count shown after a name ("general 3", "general 999+") is
+		// not part of it.
+		if head, count, ok := strings.Cut(name, " "); ok && unreadCount(count) {
+			name = head
+		}
 		if name == "" {
 			continue
 		}
@@ -142,6 +147,21 @@ func channelList(rows []string) (names []string, marked int) {
 		names = append(names, name)
 	}
 	return names, marked
+}
+
+// unreadCount says s is what the channel list shows after a name: a number,
+// or "999+" at the cap.
+func unreadCount(s string) bool {
+	s = strings.TrimSuffix(s, "+")
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // selectedChannel is the channel the left pane marks, "" when none shows.
