@@ -582,7 +582,7 @@ EOF
 
 A rate limit is opt-in: a capability with no entry is unlimited, so declare both. A heartbeat every 10 seconds spends 6 `sessions.manage` a minute. The sender needs `post` in the channel because a run is shown to the channel's audience, but not `messages.read` or `messages.post`: it cannot read or post messages.
 
-**The sequence** (the sender; `$CONCH_SERVER` is the server's URL, `ci.token` the credential):
+**The sequence** (the sender; `$CONCH_SERVER` is the server's URL, `ci.token` the credential). In a CI job, keep the credential in a masked secret and never run this block under `set -x`, which would print the token into the job log:
 
 ```sh
 AUTH="Authorization: Bearer $(cat ci.token)"
@@ -614,7 +614,7 @@ curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
 curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"completed","outcome":"passed"}' >/dev/null
 
 # 6. stop the heartbeat and end the session
-kill $HEARTBEAT
+kill $HEARTBEAT 2>/dev/null; wait $HEARTBEAT 2>/dev/null
 curl -sf -X DELETE "$API/v1/sessions/$SESSION" -H "$AUTH"
 ```
 
