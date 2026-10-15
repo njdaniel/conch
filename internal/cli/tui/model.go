@@ -427,7 +427,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// The channel status is left as it is: results that landed
 				// while the user was away are already recorded in it.
 				m.mode = modeChannels
-				return m, nil
+				return m, m.markReading()
 			}
 		case "up":
 			switch m.mode {
@@ -475,7 +475,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "pgdown" {
 					step = -step
 				}
-				return m.scrollMessages(step), nil
+				return m.scrolled(step)
 			}
 		case "enter":
 			switch m.mode {
@@ -1168,7 +1168,7 @@ func (m Model) channelLines(leftWidth int) []string {
 		if badge != "" {
 			room -= 1 + len(badge)
 		}
-		name := clip(sanitize(channel), room)
+		name := fitCells(sanitize(channel), room)
 		prefix := "  "
 		if i == m.selected {
 			prefix = activeStyle.Render("› ")
@@ -1332,7 +1332,7 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeChannels:
 			if l.inRight(msg.X, msg.Y) {
-				return m.scrollMessages(step), nil
+				return m.scrolled(step)
 			}
 		case modeInbox:
 			if l.inLeft(msg.X, msg.Y) {

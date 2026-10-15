@@ -21,6 +21,7 @@ type readAPI struct {
 	states   []schema.ReadStateV1
 	channels []schema.ChannelV0
 	listErr  error
+	chanErr  error
 	markErr  error
 
 	mu      sync.Mutex
@@ -49,6 +50,9 @@ func (a *readAPI) ListChannels(context.Context) (schema.ListChannelsResponse, er
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.listed++
+	if a.chanErr != nil {
+		return schema.ListChannelsResponse{}, a.chanErr
+	}
 	return schema.ListChannelsResponse{Channels: a.channels}, nil
 }
 
@@ -195,19 +199,30 @@ func TestReadStateLongNameKeepsItsCount(t *testing.T) {
 	if got := cellWidth(line); got > m.layout().leftW-2 {
 		t.Errorf("line is %d cells, wider than the pane", got)
 	}
+	// Wide runes take two cells each: the budget is in cells, not runes.
+	wide := strings.Repeat("会", 30)
+	api = &readAPI{states: []schema.ReadStateV1{readDoc(1, 12)}, channels: []schema.ChannelV0{{ID: 1, Name: wide}}}
+	m, _ = readModel(t, api)
+	m.channels = []string{wide}
+	m = feedRead(m, m.loadReadState())
+	line = m.channelLines(m.layout().leftW)[0]
+	if !strings.HasSuffix(line, "12") || cellWidth(line) > m.layout().leftW-2 {
+		t.Errorf("line %q is %d cells, want it in the pane with its count", line, cellWidth(line))
+	}
 }
 
 func TestNoCountsAndNoErrorWhenRefused(t *testing.T) {
 	tests := []struct {
-		name string
-		code string
+		name   string
+		code   string
+		status int
 	}{
-		{"an agent credential", schema.ErrorCodeHumanRequired},
-		{"authentication off", schema.ErrorCodeReadStateRequireAuth},
+		{"an agent credential", schema.ErrorCodeHumanRequired, 403},
+		{"authentication off", schema.ErrorCodeReadStateRequireAuth, 400},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := &readAPI{listErr: &cli.ServerError{Status: 403, Code: tt.code, Message: "no"}}
+			api := &readAPI{listErr: &cli.ServerError{Status: tt.status, Code: tt.code, Message: "no"}}
 			m, _ := readModel(t, api)
 			m.setStatus(modeChannels, "connected")
 			m = feedRead(m, m.loadReadState())
@@ -280,7 +295,6 @@ func TestMarkMovesOnOpenAndAtTheBottomButNotScrolledUp(t *testing.T) {
 		t.Error("a message that was not shown did not count as unread")
 	}
 
-	// Back at the bottom: the newest message is shown, so it is read.
 	// Back at the bottom the next message that arrives is shown, and marks
 	// everything above it.
 	m.scroll = 0
@@ -448,5 +462,82 @@ func TestInitReadsTheCounts(t *testing.T) {
 	}
 	if !loaded {
 		t.Error("Init did not read the counts")
+	}
+}
+
+// A read the server answered before it had our mark must not bring back the
+// count of a channel that has since been left.
+func TestStaleReadDoesNotResurrectAReadChannel(t *testing.T) {
+	api := &readAPI{
+		states:   []schema.ReadStateV1{readDoc(1, 3)}, // served before the PUT
+		channels: []schema.ChannelV0{{ID: 1, Name: "general"}},
+		markDoc:  schema.ReadStateV1{Schema: schema.ReadStateSchemaV1, ChannelID: 1, LastReadID: 3},
+	}
+	m, _ := readModel(t, api)
+	m.rs.unread["general"] = 3
+	m, cmd := update(m, messagesLoaded{channel: "general", messages: threeMessages()})
+	m = feedRead(m, cmd) // the PUT is answered: acknowledged at 3
+	m, cmd = update(m, tea.KeyMsg{Type: tea.KeyDown})
+	m = feedRead(m, cmd)
+	// The GET that was served before the PUT lands now.
+	m = feedRead(m, m.loadReadState())
+	if got := m.rs.unread["general"]; got != 0 {
+		t.Errorf("unread after a stale read = %d, want 0", got)
+	}
+	// A read that is not older than the mark still counts.
+	api.states = []schema.ReadStateV1{{Schema: schema.ReadStateSchemaV1, ChannelID: 1, LastReadID: 3, Unread: 2}}
+	m = feedRead(m, m.loadReadState())
+	if got := m.rs.unread["general"]; got != 2 {
+		t.Errorf("unread after a current read = %d, want 2", got)
+	}
+}
+
+// The newest message coming back into view is read, by scrolling down and by
+// returning to the channels view.
+func TestMarkWhenTheNewestMessageComesBackIntoView(t *testing.T) {
+	tests := []struct {
+		name string
+		away func(*Model)
+		back tea.Msg
+	}{
+		{"scrolling down", func(m *Model) { m.scroll = 2 }, tea.KeyMsg{Type: tea.KeyPgDown}},
+		{"returning to the channels view", func(m *Model) { m.mode = modeAgents }, tea.KeyMsg{Type: tea.KeyTab}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &readAPI{}
+			m, clock := readModel(t, api)
+			m, cmd := update(m, messagesLoaded{channel: "general", messages: threeMessages()})
+			m = feedRead(m, cmd)
+			tt.away(&m)
+			clock.now = clock.now.Add(3 * time.Second)
+			m, cmd = update(m, messageReceived{channel: "general", message: schema.MessageV2{ID: 4, AuthorID: 9}})
+			m = feedRead(m, cmd)
+			if _, _, marks := api.counts(); len(marks) != 1 {
+				t.Fatalf("marks while away = %v, want one", marks)
+			}
+			if m.rs.unread["general"] != 1 {
+				t.Fatalf("unread while away = %d, want 1", m.rs.unread["general"])
+			}
+			m, cmd = update(m, tt.back)
+			m = feedRead(m, cmd)
+			if _, _, marks := api.counts(); len(marks) != 2 || marks[1] != (markCall{"general", 4}) {
+				t.Errorf("marks after coming back = %v, want general at 4 second", marks)
+			}
+			if got := m.rs.unread["general"]; got != 0 {
+				t.Errorf("unread after coming back = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestReadStateKeepsNamedChannelsWhenTheChannelListFails(t *testing.T) {
+	api := &readAPI{states: []schema.ReadStateV1{readDoc(1, 3), readDoc(2, 4)}, channels: []schema.ChannelV0{{ID: 1, Name: "general"}}}
+	m, _ := readModel(t, api)
+	m.rs.names[1] = "general"
+	api.chanErr = errors.New("boom")
+	m = feedRead(m, m.loadReadState())
+	if got := m.rs.unread["general"]; got != 3 {
+		t.Errorf("unread = %d, want the named channel's 3 kept", got)
 	}
 }

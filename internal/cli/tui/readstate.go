@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"maps"
+	"slices"
 	"strconv"
 	"time"
 
@@ -31,7 +32,11 @@ type readState struct {
 	names map[int64]string
 	// marked is the newest message id a mark was requested for, per channel.
 	// A request that fails is not repeated until a newer message is shown.
-	marked   map[string]int64
+	marked map[string]int64
+	// acked is the mark the server last confirmed, per channel. A read the
+	// server served before that is older than the person's own reading and
+	// must not bring a count back.
+	acked    map[string]int64
 	markedAt map[string]time.Time
 	// pending is the newest id waiting for the interval to pass, and timer says
 	// the markDue that will send it is in flight.
@@ -51,10 +56,21 @@ type readState struct {
 func newReadState() readState {
 	return readState{
 		unread: make(map[string]int), names: make(map[int64]string),
-		marked: make(map[string]int64), markedAt: make(map[string]time.Time),
+		marked: make(map[string]int64), acked: make(map[string]int64), markedAt: make(map[string]time.Time),
 		pending: make(map[string]int64), timer: make(map[string]bool),
 		dropped: make(map[string]bool), after: tickAfter,
 	}
+}
+
+// scrolled scrolls the message pane and, when that brings the newest message
+// back into view, reads it.
+func (m Model) scrolled(lines int) (tea.Model, tea.Cmd) {
+	was := m.scroll
+	m = m.scrollMessages(lines)
+	if was > 0 && m.scroll == 0 {
+		return m, m.markReading()
+	}
+	return m, nil
 }
 
 // readStateLoaded is one read of the counts. names holds every id it could
@@ -98,20 +114,26 @@ func (m Model) loadReadState() tea.Cmd {
 		if err != nil {
 			return readStateLoaded{err: err}
 		}
-		for _, state := range resp.ReadState {
+		states := resp.ReadState
+		for _, state := range states {
 			if _, ok := names[state.ChannelID]; ok {
 				continue
 			}
 			list, err := api.ListChannels(ctx)
 			if err != nil {
-				return readStateLoaded{err: err}
+				// Keep what can still be named.
+				states = slices.DeleteFunc(slices.Clone(states), func(s schema.ReadStateV1) bool {
+					_, ok := names[s.ChannelID]
+					return !ok
+				})
+				break
 			}
 			for _, channel := range list.Channels {
 				names[channel.ID] = channel.Name
 			}
 			break
 		}
-		return readStateLoaded{states: resp.ReadState, names: names}
+		return readStateLoaded{states: states, names: names}
 	}
 }
 
@@ -129,7 +151,8 @@ func (m Model) readStateLoaded(msg readStateLoaded) (tea.Model, tea.Cmd) {
 	maps.Copy(m.rs.names, msg.names)
 	clear(m.rs.unread)
 	for _, state := range msg.states {
-		if name := m.rs.names[state.ChannelID]; name != "" && state.Unread > 0 {
+		name := m.rs.names[state.ChannelID]
+		if name != "" && state.Unread > 0 && state.LastReadID >= m.rs.acked[name] {
 			m.rs.unread[name] = min(state.Unread, schema.MaxUnreadCount)
 		}
 	}
@@ -170,8 +193,8 @@ func (m Model) reading() bool {
 // markReading clears the selected channel's count and asks for its mark to
 // move when the newest message is on screen and the mark is behind it. It is
 // called when a channel is opened (selected, or its page arrives) and when a
-// message arrives. It is not called when the user scrolls back down: the next
-// message or the next visit moves the mark.
+// message arrives. It is also called when the newest message comes back into view: scrolling down to
+// it, and returning to the channels view.
 func (m *Model) markReading() tea.Cmd {
 	if m.rs.off || !m.reading() {
 		return nil
@@ -232,6 +255,13 @@ func (m Model) readMarked(msg readMarked) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.rs.off {
+		return m, nil
+	}
+	if msg.state.LastReadID > m.rs.acked[msg.channel] {
+		m.rs.acked[msg.channel] = msg.state.LastReadID
+	}
+	if msg.channel == m.current() && m.reading() && m.rs.pending[msg.channel] > msg.state.LastReadID {
+		// A newer mark is waiting: this count is already out of date.
 		return m, nil
 	}
 	if msg.state.Unread > 0 {

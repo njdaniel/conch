@@ -124,7 +124,11 @@ rows:
 
 // channelList is the channels the left pane lists, in order, and the index of
 // the one it marks (-1 when none is).
-func channelList(rows []string) (names []string, marked int) {
+//
+// A name may be followed by its unread count ("general 3", "general 999+").
+// That is dropped only when what remains is one of known, so a channel whose
+// own name ends in a number is still read whole.
+func channelList(rows []string, known []string) (names []string, marked int) {
 	marked = -1
 	for _, r := range rows {
 		if !strings.HasPrefix(r, "│") {
@@ -135,8 +139,8 @@ func channelList(rows []string) (names []string, marked int) {
 		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(pane, "› "), "  "))
 		// The unread count shown after a name ("general 3", "general 999+") is
 		// not part of it.
-		if head, count, ok := strings.Cut(name, " "); ok && unreadCount(count) {
-			name = head
+		if i := strings.LastIndex(name, " "); i > 0 && !slices.Contains(known, name) && unreadCount(name[i+1:]) && slices.Contains(known, name[:i]) {
+			name = name[:i]
 		}
 		if name == "" {
 			continue
@@ -148,6 +152,9 @@ func channelList(rows []string) (names []string, marked int) {
 	}
 	return names, marked
 }
+
+// suiteChannels are the channels the walkthrough's community has.
+var suiteChannels = []string{chGeneral, chPrivate, chNets}
 
 // unreadCount says s is what the channel list shows after a name: a number,
 // or "999+" at the cap.
@@ -166,7 +173,7 @@ func unreadCount(s string) bool {
 
 // selectedChannel is the channel the left pane marks, "" when none shows.
 func selectedChannel(rows []string) string {
-	names, marked := channelList(rows)
+	names, marked := channelList(rows, suiteChannels)
 	if marked < 0 {
 		return ""
 	}
@@ -177,7 +184,7 @@ func selectedChannel(rows []string) string {
 // waits for the TUI to mark it.
 func (t *tui) selectChannel(channel string) error {
 	for range 8 {
-		names, marked := channelList(t.rows())
+		names, marked := channelList(t.rows(), suiteChannels)
 		if marked >= 0 && names[marked] == channel {
 			return t.waitFor("the prompt of "+channel, 10*time.Second, func(r []string) bool { return showing(r, channel+" >") })
 		}
