@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -421,14 +422,11 @@ func (s *suite) p308Interventions() error {
 	}
 	runPath := "/v1/runs/" + id(run.ID)
 
-	// Who may ask. An agent never does, and a kind the agent did not declare
-	// is refused whoever asks.
+	// Who may ask. An agent never does. (Every kind in the vocabulary is
+	// declared by this adapter on Linux, so there is no undeclared kind to
+	// be refused for; the server's refusal is the server tests' row.)
 	if err := s.as(partObserver).refused("an agent asking", http.MethodPost, runPath+"/interventions",
 		schema.CreateInterventionRequestV1{Kind: schema.InterventionKindMessage, Body: "p308 from an agent"}, http.StatusForbidden, schema.ErrorCodeHumanRequired); err != nil {
-		return err
-	}
-	if err := s.as(partNick).refused("a kind the agent did not declare", http.MethodPost, runPath+"/interventions",
-		schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause}, http.StatusConflict, schema.ErrorCodeInterventionUnsupported); err != nil {
 		return err
 	}
 
@@ -474,13 +472,20 @@ func (s *suite) p308Interventions() error {
 	if err := t.waitFor("the instruction applied", 30*time.Second, func(r []string) bool { return showing(r, "↳ #", "applied") }); err != nil {
 		return err
 	}
-	ivs, err := s.interventionsOf(partNick, run.ID)
+	ivs, err := s.interventionsOf(run.ID)
 	if err != nil {
 		return err
 	}
 	if len(ivs) != 1 || ivs[0].Kind != schema.InterventionKindMessage || ivs[0].State != schema.InterventionStateApplied ||
 		ivs[0].Body != "p308 take note" || ivs[0].RequestedBy != s.pid("nick-test") || ivs[0].AnsweredAt == nil {
 		return fmt.Errorf("the run's interventions are %+v, want one message applied for nick-test", ivs)
+	}
+
+	// Pause and resume. The people's keys for them are F2b (#346); the API is
+	// the same. The command stops, the run is waiting with the outcome paused
+	// only once the adapter says so, and resume lets the command go on.
+	if err := s.pauseAndResume(run.ID, runPath); err != nil {
+		return err
 	}
 
 	// Cancel: asked with x and answered y. The run is cancelled when the
@@ -496,9 +501,9 @@ func (s *suite) p308Interventions() error {
 		return err
 	}
 	if err := t.waitFor("the cancel applied and the run cancelled", 30*time.Second, func(r []string) bool {
-		// The timeline has an answer line for each intervention: the message's
-		// and now the cancel's.
-		return countRows(r, "↳ #", "applied") >= 2 && showing(r, "cancelled")
+		// The timeline has an answer line for each intervention: the message's,
+		// the pause's, the resume's and now the cancel's.
+		return countRows(r, "↳ #", "applied") >= 4 && showing(r, "cancelled")
 	}); err != nil {
 		return err
 	}
@@ -506,13 +511,13 @@ func (s *suite) p308Interventions() error {
 	if err != nil {
 		return err
 	}
-	if ivs, err = s.interventionsOf(partNick, run.ID); err != nil {
+	if ivs, err = s.interventionsOf(run.ID); err != nil {
 		return err
 	}
-	if len(ivs) != 2 {
-		return fmt.Errorf("the run has %d interventions, want 2", len(ivs))
+	if len(ivs) != 6 {
+		return fmt.Errorf("the run has %d interventions, want 6 (message, a resume that fails, pause, a pause that fails, resume, cancel)", len(ivs))
 	}
-	cancel := ivs[1]
+	cancel := ivs[5]
 	if cancel.Kind != schema.InterventionKindCancel || cancel.State != schema.InterventionStateApplied || cancel.AnsweredAt == nil || ended.EndedAt == nil {
 		return fmt.Errorf("the cancel is %q %q, answered %v; the run ended %v", cancel.Kind, cancel.State, cancel.AnsweredAt != nil, ended.EndedAt != nil)
 	}
@@ -544,6 +549,142 @@ func (s *suite) p308Interventions() error {
 	}
 
 	return s.privateRunIsOffLimits()
+}
+
+// pauseAndResume pauses the open run through the API, checks that the
+// adapter's command and what it started are stopped and the run waiting with the outcome paused,
+// refuses nothing it should accept and accepts nothing it should refuse, and
+// resumes it.
+func (s *suite) pauseAndResume(runID int64, runPath string) error {
+	ask := func(kind schema.InterventionKind) (schema.InterventionV1, error) {
+		var iv schema.InterventionV1
+		err := s.as(partNick).call(http.MethodPost, runPath+"/interventions", schema.CreateInterventionRequestV1{Kind: kind}, &iv)
+		return iv, err
+	}
+	answered := func(iv schema.InterventionV1, state schema.InterventionState, reason string) error {
+		return s.until(fmt.Sprintf("intervention %d to be %s", iv.ID, state), 30*time.Second, func() (bool, error) {
+			ivs, err := s.interventionsOf(runID)
+			if err != nil {
+				return false, err
+			}
+			for _, got := range ivs {
+				if got.ID == iv.ID {
+					if got.State == state && (reason == "" || got.Reason == reason) {
+						return true, nil
+					}
+					if (got.State == schema.InterventionStateApplied || got.State == schema.InterventionStateFailed) && got.State != state {
+						return false, fmt.Errorf("intervention %d is %q (%q), want %q", iv.ID, got.State, got.Reason, state)
+					}
+				}
+			}
+			return false, nil
+		})
+	}
+
+	// A resume of a run that is not paused fails and changes nothing.
+	early, err := ask(schema.InterventionKindResume)
+	if err != nil {
+		return err
+	}
+	if err := answered(early, schema.InterventionStateFailed, "not paused"); err != nil {
+		return err
+	}
+	r, err := s.getRun(runID)
+	if err != nil {
+		return err
+	}
+	if r.State != schema.RunStateRunning {
+		return fmt.Errorf("after a resume of a run not paused the run is %q, want running", r.State)
+	}
+
+	paused, err := ask(schema.InterventionKindPause)
+	if err != nil {
+		return err
+	}
+	if err := answered(paused, schema.InterventionStateApplied, ""); err != nil {
+		return err
+	}
+	r, err = s.waitRunState(runID, schema.RunStateWaiting, 15*time.Second)
+	if err != nil {
+		return err
+	}
+	if r.Outcome != "paused" {
+		return fmt.Errorf("the paused run has outcome %q, want paused", r.Outcome)
+	}
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.Join(states, "") != strings.Repeat("T", len(states)) {
+		return fmt.Errorf("the command's process states after the pause are %v, want all T", states)
+	}
+	// A second pause fails and changes nothing.
+	again, err := ask(schema.InterventionKindPause)
+	if err != nil {
+		return err
+	}
+	if err := answered(again, schema.InterventionStateFailed, "already paused"); err != nil {
+		return err
+	}
+
+	resumed, err := ask(schema.InterventionKindResume)
+	if err != nil {
+		return err
+	}
+	if err := answered(resumed, schema.InterventionStateApplied, ""); err != nil {
+		return err
+	}
+	if _, err := s.waitRunState(runID, schema.RunStateRunning, 15*time.Second); err != nil {
+		return err
+	}
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.ContainsRune(strings.Join(states, ""), 'T') {
+		return fmt.Errorf("the command's process states after the resume are %v, want none T", states)
+	}
+	return nil
+}
+
+// childStatesOf is the /proc state letter of every live descendant of pid
+// (its children, theirs, and so on): a pause must reach what the command
+// started, not only the command.
+func childStatesOf(pid int) []string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	type proc struct {
+		ppid  int
+		state string
+	}
+	procs := map[int]proc{}
+	for _, e := range entries {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat") // #nosec G304 -- a /proc path built from a number
+		if err != nil {
+			continue
+		}
+		i := strings.LastIndexByte(string(stat), ')')
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(string(stat)[i+1:])
+		if len(fields) < 2 || fields[0] == "Z" {
+			continue
+		}
+		ppid, _ := strconv.Atoi(fields[1])
+		procs[n] = proc{ppid: ppid, state: fields[0]}
+	}
+	var out []string
+	frontier := []int{pid}
+	for len(frontier) > 0 {
+		var next []int
+		for n, p := range procs {
+			if slices.Contains(frontier, p.ppid) {
+				out = append(out, p.state)
+				next = append(next, n)
+			}
+		}
+		frontier = next
+	}
+	return out
 }
 
 // processesOfRun lists the live processes of this run (the ones whose
@@ -580,9 +721,9 @@ func atoi(s string) int {
 	return n
 }
 
-// interventionsOf lists the interventions of a run as part sees them.
-func (s *suite) interventionsOf(part string, run int64) ([]schema.InterventionV1, error) {
-	c, err := s.r.client(s.token(part))
+// interventionsOf lists the interventions of a run as nick-test sees them.
+func (s *suite) interventionsOf(run int64) ([]schema.InterventionV1, error) {
+	c, err := s.r.client(s.token(partNick))
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +765,7 @@ func (s *suite) privateRunIsOffLimits() error {
 			return err
 		}
 	}
-	ivs, err := s.interventionsOf(partNick, run.ID)
+	ivs, err := s.interventionsOf(run.ID)
 	if err != nil {
 		return err
 	}

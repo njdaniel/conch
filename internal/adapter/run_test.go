@@ -348,7 +348,7 @@ func TestInterventions(t *testing.T) {
 		},
 		{
 			name:     "an unsupported kind fails",
-			queued:   []schema.InterventionV1{intervention(1, 1, schema.InterventionKindPause, "")},
+			queued:   []schema.InterventionV1{intervention(1, 1, schema.InterventionKind("hold"), "")},
 			wantAcks: []ackCall{{1, schema.InterventionStateFailed, "unsupported"}},
 		},
 		{
@@ -360,7 +360,7 @@ func TestInterventions(t *testing.T) {
 			name: "several are taken in order",
 			queued: []schema.InterventionV1{
 				intervention(1, 1, schema.InterventionKindMessage, "one"),
-				intervention(2, 1, schema.InterventionKindResume, ""),
+				intervention(2, 1, schema.InterventionKind("hold"), ""),
 				intervention(3, 1, schema.InterventionKindMessage, "three"),
 			},
 			wantAcks: []ackCall{{1, schema.InterventionStateApplied, ""}, {2, schema.InterventionStateFailed, "unsupported"}, {3, schema.InterventionStateApplied, ""}},
@@ -481,9 +481,13 @@ func TestRegisterSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	host, _ := os.Hostname()
+	kinds := []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel}
+	if canPauseGroup {
+		kinds = append(kinds, schema.InterventionKindPause, schema.InterventionKindResume)
+	}
 	want := schema.CreateSessionRequestV1{
 		Client: "conch-adapter", Runtime: "claude-code", Model: "sonnet", Host: host,
-		Interventions: []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel},
+		Interventions: kinds,
 	}
 	if len(mcp.registered) != 1 || !reflect.DeepEqual(mcp.registered[0], want) {
 		t.Fatalf("registered %+v, want %+v", mcp.registered, want)

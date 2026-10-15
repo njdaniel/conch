@@ -34,6 +34,27 @@ type activeRun struct {
 	mu          sync.Mutex
 	cancelAsked bool
 	cancelIDs   []int64 // cancel interventions not yet answered
+	proc        processControl
+
+	// stateMu orders the reports that move the run between running and
+	// waiting, which the watcher (pause, resume) and the command's reader
+	// (an approval) both make. paused and inApproval are guarded by it.
+	stateMu    sync.Mutex
+	paused     bool
+	inApproval bool
+}
+
+// commandStarted is what a runner tells the run once its command has a process.
+func (f *runFixture) commandStarted(p processControl) {
+	f.run.mu.Lock()
+	f.run.proc = p
+	f.run.mu.Unlock()
+}
+
+func (a *activeRun) process() processControl {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.proc
 }
 
 // requestCancel records a cancel intervention and stops the command. The
@@ -221,7 +242,10 @@ func (b *botLoop) finishReply(ctx context.Context, g *audienceGroup, run *active
 
 // finishFailedCommand reports a command that did not produce a reply.
 func (b *botLoop) finishFailedCommand(ctx context.Context, run *activeRun, err error) error {
-	var exit *exitError
+	var (
+		exit    *exitError
+		tooLong *pausedTooLongError
+	)
 	switch {
 	case run != nil && run.wasCancelled() && errors.Is(err, context.Canceled):
 		// The command is gone: Reply does not return before its process group
@@ -243,6 +267,9 @@ func (b *botLoop) finishFailedCommand(ctx context.Context, run *activeRun, err e
 	case errors.Is(err, errTooMuchActivity):
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command stopped", "error", nil)
 		b.setState(ctx, run, schema.RunStateFailed, err.Error())
+	case errors.As(err, &tooLong):
+		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command stopped", "paused too long", nil)
+		b.setState(ctx, run, schema.RunStateFailed, tooLong.Error())
 	case errors.Is(err, errReplyTimeout):
 		b.activity(ctx, run, schema.ActivityKindCommandFinished, "command timed out", "timeout", nil)
 		b.setState(ctx, run, schema.RunStateFailed, "timeout")
@@ -325,9 +352,71 @@ func (b *botLoop) handleIntervention(ctx context.Context, run *activeRun, g *aud
 		b.activity(ctx, run, schema.ActivityKindInterventionReceived, "message received", "", nil)
 	case iv.Kind == schema.InterventionKindCancel:
 		run.requestCancel(iv.ID)
+	case iv.Kind == schema.InterventionKindPause && canPauseGroup:
+		b.pauseRun(ctx, run, iv.ID)
+	case iv.Kind == schema.InterventionKindResume && canPauseGroup:
+		b.resumeRun(ctx, run, iv.ID)
 	default:
 		b.ack(ctx, iv.ID, schema.InterventionStateFailed, "unsupported")
 	}
+}
+
+// pauseRun freezes the command. The run is reported waiting, with the outcome
+// paused, only after the command is stopped; it is parked in waiting already
+// when an approval is being waited for, and nothing is reported then.
+func (b *botLoop) pauseRun(ctx context.Context, run *activeRun, id int64) {
+	run.stateMu.Lock()
+	defer run.stateMu.Unlock()
+	proc := run.process()
+	if proc == nil {
+		b.ack(ctx, id, schema.InterventionStateFailed, "not running")
+		return
+	}
+	if err := proc.pause(); err != nil {
+		b.ack(ctx, id, schema.InterventionStateFailed, pauseFailure(err, "already paused"))
+		return
+	}
+	run.paused = true
+	b.ack(ctx, id, schema.InterventionStateApplied, "")
+	if !run.inApproval {
+		b.setState(ctx, run, schema.RunStateWaiting, "paused")
+	}
+	b.activity(ctx, run, schema.ActivityKindInterventionReceived, "paused", "", nil)
+}
+
+// resumeRun lets the command go on and puts the run back to running, unless
+// an approval it is waiting for is still open: that puts it back itself.
+func (b *botLoop) resumeRun(ctx context.Context, run *activeRun, id int64) {
+	run.stateMu.Lock()
+	defer run.stateMu.Unlock()
+	proc := run.process()
+	if proc == nil {
+		b.ack(ctx, id, schema.InterventionStateFailed, "not running")
+		return
+	}
+	if err := proc.resume(); err != nil {
+		b.ack(ctx, id, schema.InterventionStateFailed, pauseFailure(err, "not paused"))
+		return
+	}
+	run.paused = false
+	if !run.inApproval {
+		b.setState(ctx, run, schema.RunStateRunning, "")
+	}
+	b.ack(ctx, id, schema.InterventionStateApplied, "")
+	b.activity(ctx, run, schema.ActivityKindInterventionReceived, "resumed", "", nil)
+}
+
+// pauseFailure is the reason an intervention failed for. It is one of a few
+// fixed words: the error of a signal is logged, not sent.
+func pauseFailure(err error, wrongState string) string {
+	switch {
+	case errors.Is(err, errAlreadyPaused), errors.Is(err, errNotPaused):
+		return wrongState
+	case errors.Is(err, errNotRunning):
+		return "not running"
+	}
+	slog.Warn("conch-adapter: could not signal the command", "error", err)
+	return "could not signal the command"
 }
 
 // runFixture is what the fixture markers ask of a run. It is also where the
@@ -367,7 +456,12 @@ func (f *runFixture) approval(ctx context.Context, title string) error {
 	if err != nil {
 		return fmt.Errorf("request approval: %w", err)
 	}
-	b.setState(ctx, f.run, schema.RunStateWaiting, "")
+	f.run.stateMu.Lock()
+	f.run.inApproval = true
+	if !f.run.paused { // a paused run is waiting already
+		b.setState(ctx, f.run, schema.RunStateWaiting, "")
+	}
+	f.run.stateMu.Unlock()
 	data, _ := json.Marshal(map[string]int64{"approval_id": created.ID}) // a map of one integer always encodes
 	b.activity(ctx, f.run, schema.ActivityKindApprovalRequested, "asked for approval", "", data)
 
@@ -391,6 +485,11 @@ func (f *runFixture) approval(ctx context.Context, title string) error {
 		}
 	}
 	b.activity(ctx, f.run, schema.ActivityKindApprovalResolved, "approval decided", outcome, data)
-	b.setState(ctx, f.run, schema.RunStateRunning, "")
+	f.run.stateMu.Lock()
+	f.run.inApproval = false
+	if !f.run.paused { // a paused run goes back to running when it is resumed
+		b.setState(ctx, f.run, schema.RunStateRunning, "")
+	}
+	f.run.stateMu.Unlock()
 	return nil
 }

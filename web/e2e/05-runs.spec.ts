@@ -2,9 +2,7 @@
 // instruction a person can give it.
 import { activityOf, interventions, post, roster, run, runsIn } from './api';
 import { expect, signIn, test } from './fixtures';
-import { errorV0, type ErrorV0 } from '../src/schema/error';
 import { launchWorker } from './agents';
-import { call } from './world';
 
 test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is acknowledged, Pause is not offered', async ({ meet, world }) => {
   const worker = await launchWorker(world, 'slow.sh', { sleep: 120 });
@@ -49,12 +47,12 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     await expect(detail.getByTestId('run-state')).toHaveText(started.state);
     await expect(detail).toContainText(started.task);
 
-    // Pause is not something a person is given here, and the server refuses it.
+    // Pause is not something a person is given here until #346 adds the
+    // control. The adapter now declares pause, so the server no longer refuses
+    // it; no API request for it is made, because one that the adapter applies
+    // would pause this run under the steps below. #346 adds the control and
+    // its test.
     await expect(detail.getByRole('button', { name: 'Pause' })).toHaveCount(0);
-    const pause = await call(world, world.tokens.nick, 'POST', `/v1/runs/${String(started.id)}/interventions`, { kind: 'pause' });
-    expect(pause.status).toBe(409);
-    expect(errorV0(pause.body)).toEqual([]);
-    expect((pause.body as ErrorV0).code).toBe('intervention_unsupported');
 
     // From here every change the page makes to the run's state or to its
     // history of asks is reported to the test as it happens, and the test
