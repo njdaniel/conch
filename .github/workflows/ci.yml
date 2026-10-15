@@ -65,6 +65,15 @@ jobs:
           SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/schema-compat.sh
 
+      # The web client's wire types are generated from pkg/schema (#348): this
+      # fails when web/src/schema/generated*.ts differ from what
+      # `go generate ./pkg/schema` writes. Go only. The script's own test
+      # runs first.
+      - name: generated TypeScript wire types
+        run: |
+          ./scripts/schema-ts-check-test.sh
+          ./scripts/schema-ts-check.sh
+
       - name: dependency gate
         run: ./scripts/depgate.sh
 

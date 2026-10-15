@@ -3,7 +3,7 @@ import type { AgentActivityV1 } from '../schema/activity';
 import type { InterventionState, InterventionV1 } from '../schema/intervention';
 import type { RunState, RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
-import { agentsReducer, initialAgents, keptActivity, keptInterventions, mergeActivity, recentRuns, upsertIntervention, type AgentsAction, type AgentsState } from './state';
+import { agentsReducer, initialAgents, initialRuns, keptActivity, keptInterventions, mergeActivity, recentRuns, runsPageSize, upsertIntervention, type AgentsAction, type AgentsState } from './state';
 import { parseEventFrame } from './frames';
 
 const at = '2026-10-14T10:00:00Z';
@@ -170,5 +170,42 @@ describe('parseEventFrame', () => {
     ['a null', 'null'],
   ])('skips %s', (_name, data) => {
     expect(parseEventFrame(data)).toBeNull();
+  });
+});
+
+describe('the Runs view', () => {
+  const page = (from: number, count: number): RunV1[] => Array.from({ length: count }, (_, i) => run({ id: from - i }));
+  const loaded = (): AgentsState => play([{ type: 'reset', channelId: 7 }, { type: 'runsAsk' }, { type: 'runsPage', before: 0, runs: page(100, runsPageSize) }]);
+
+  it('keeps the paging of the first page: the smallest id, more below', () => {
+    const s = loaded();
+    expect(s.runs).toMatchObject({ loaded: true, loading: false, more: true, before: 51, pages: 1 });
+  });
+
+  it('drops a page asked before a reset, which is not the first page of the new view', () => {
+    const s = play([{ type: 'runsAsk' }, { type: 'reset', channelId: 7 }, { type: 'runsPage', before: 51, runs: page(50, 50) }], loaded());
+    expect(s.runs).toEqual(initialRuns);
+  });
+
+  it('reads the first page again as a merge: no duplicates, the paging as it was', () => {
+    const s = play([{ type: 'runsPage', before: 0, runs: [run({ id: 101 }), run({ id: 100, state: 'blocked' }), ...page(99, 3)] }], loaded());
+    expect(s.runs.list).toHaveLength(51);
+    expect(s.runs.list.map((r) => r.id).slice(0, 3)).toEqual([101, 100, 99]);
+    expect(s.runs.list[1]?.state).toBe('blocked');
+    expect(s.runs).toMatchObject({ before: 51, pages: 1, more: true });
+  });
+
+  it('does not take an ended run held from a frame back to a state a read held earlier', () => {
+    let s = play([{ type: 'run', run: run({ id: 100, state: 'completed', ended_at: at }) }], loaded());
+    s = play([{ type: 'runsPage', before: 0, runs: [run({ id: 100, state: 'running' })] }], s);
+    expect(s.runs.list.find((r) => r.id === 100)?.state).toBe('completed');
+  });
+
+  it('lets the failure of a refresh of a held first page, and of a page no longer asked for, change nothing', () => {
+    const s = loaded();
+    expect(play([{ type: 'runsFailed', before: 0, line: 'x' }], s)).toBe(s);
+    expect(play([{ type: 'runsFailed', before: 7, line: 'x' }], s)).toBe(s);
+    const first = play([{ type: 'reset', channelId: 7 }, { type: 'runsAsk' }, { type: 'runsFailed', before: 0, line: 'x' }]);
+    expect(first.runs).toMatchObject({ loading: false, note: 'x', loaded: false });
   });
 });

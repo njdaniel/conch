@@ -2,7 +2,9 @@ import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  { ignores: ['dist/', 'node_modules/'] },
+  // The generated wire types are written by cmd/schema-ts, not by hand; tsc
+  // still checks them, and schema.test.ts runs them against the fixtures.
+  { ignores: ['dist/', 'node_modules/', 'src/schema/generated.ts', 'src/schema/generated.families.ts'] },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [tseslint.configs.strictTypeChecked],
