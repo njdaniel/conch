@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -156,6 +157,11 @@ func loadConfig(lookup envLookup) (config, error) {
 	cfg.Reader, cfg.StreamsActivity = profile.reader, profile.streamsActivity()
 	if cfg.Model = get("CONCH_ADAPTER_MODEL", "CONCH_BOT_MODEL", profile.model); cfg.Model == "" {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL (or CONCH_BOT_MODEL) is required when CONCH_ADAPTER_RUNTIME is %s", profile.name)
+	}
+	// The model becomes one argument of the command; a leading dash would be
+	// read by the program as a flag (`ollama show --help` exits 0).
+	if strings.HasPrefix(cfg.Model, "-") || strings.IndexFunc(cfg.Model, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL must not start with '-' or contain whitespace or control characters")
 	}
 	if cfg.ReplyTimeout, err = parseDuration(get("CONCH_ADAPTER_REPLY_TIMEOUT", "CONCH_BOT_REPLY_TIMEOUT", "120s"), "CONCH_ADAPTER_REPLY_TIMEOUT"); err != nil {
 		return config{}, err

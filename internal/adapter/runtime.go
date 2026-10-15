@@ -322,10 +322,12 @@ func (p probeSpec) check(ctx context.Context, clk timeSource) error {
 	case <-tick.C():
 		cancel()
 		<-done
+		waitGroupGone(cmd.Process.Pid, 2*time.Second)
 		return errors.New("ollama: daemon not reachable (no answer in 10s)")
 	case <-ctx.Done():
 		cancel()
 		<-done
+		waitGroupGone(cmd.Process.Pid, 2*time.Second)
 		return ctx.Err()
 	}
 	if err == nil {

@@ -756,7 +756,7 @@ func (s *suite) p313Real() error {
 // each with a stub in place of the program. The profile decides how the output
 // is read, so the codex stub prints Codex's events and the others plain text.
 var threeRuntimes = []struct{ runtime, model, script, tag string }{
-	{"claude-code", "stub-claude", "echo.sh", ""},
+	{"claude-code", "stub-claude", "claude-stub.sh", "claude-stub: "},
 	{"codex", "stub-codex", "codex-stub.sh", "codex-stub: "},
 	{"ollama", "stub-ollama", "ollama-stub.sh", "ollama-stub: "},
 }

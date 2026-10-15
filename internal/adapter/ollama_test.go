@@ -163,3 +163,34 @@ func TestOllamaRunThroughTheLoop(t *testing.T) {
 		t.Fatalf("events = %v, want %v", got, want)
 	}
 }
+
+// A model is one argument of the command and of the probe: one that a program
+// would read as a flag, or that is not one word, is refused with one line, for
+// every profile.
+func TestModelIsRefusedUnlessOneWord(t *testing.T) {
+	tests := []struct {
+		name, runtime, model string
+		ok                   bool
+	}{
+		{"help", "ollama", "--help", false},
+		{"short flag", "ollama", "-v", false},
+		{"space", "ollama", "a b", false},
+		{"newline", "ollama", "a\nb", false},
+		{"tab", "codex", "a\tb", false},
+		{"flag for claude", "claude-code", "-p", false},
+		{"flag for codex", "codex", "--oss", false},
+		{"tag", "ollama", "llama3.1:8b", true},
+		{"path-like", "codex", "org/model-1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadConfig(withEnv(map[string]string{"CONCH_ADAPTER_RUNTIME": tt.runtime, "CONCH_ADAPTER_MODEL": tt.model}))
+			switch {
+			case tt.ok && err != nil:
+				t.Fatal(err)
+			case !tt.ok && (err == nil || !strings.Contains(err.Error(), "CONCH_ADAPTER_MODEL") || strings.Contains(err.Error(), "\n")):
+				t.Fatalf("error = %v, want one line naming CONCH_ADAPTER_MODEL", err)
+			}
+		})
+	}
+}

@@ -866,6 +866,9 @@ func parseRealAdapters(list string, lookup func(string) (string, bool)) ([]strin
 		if model == "" {
 			return nil, nil, fmt.Errorf("--real-adapters %s: %s is not set; it names the model real-%s runs", n, modelVar(n), n)
 		}
+		if !safeWord.MatchString(model) || strings.HasPrefix(model, "-") {
+			return nil, nil, fmt.Errorf("--real-adapters %s: %s is not a model name (one word, no leading '-')", n, modelVar(n))
+		}
 		names, models[n] = append(names, n), model
 	}
 	return names, models, nil
