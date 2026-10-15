@@ -130,10 +130,10 @@ Each item below becomes one issue in a **Private alpha** milestone. They are fil
 
 | # | Work | Size | Depends on |
 | --- | --- | --- | --- |
-| A1 | Versioned builds: stamp the version, show it in web, `/healthz` and whoami; tagged pre-releases with notes (*independent*) | S | |
-| A2 | Feedback workflow: bug and feedback issue templates, priority and type labels, the Project board (§6) (*independent*; the board needs Nick's `gh auth refresh -h github.com -s project`) | S | |
-| A3 | Per-server LiveKit room prefix and a separate API key per instance (*independent*) | S | |
-| A4 | WebSocket keepalive on every socket, server and clients (*independent*) | S | |
+| A1 (#425) | Versioned builds: stamp the version, show it in web, `/healthz` and whoami; tagged pre-releases with notes (*independent*) | S | |
+| A2 (#426) | Feedback workflow: bug and feedback issue templates, priority and type labels, the Project board (§6) (*independent*; the board needs Nick's `gh auth refresh -h github.com -s project`) | S | |
+| A3 (#427) | Per-server LiveKit room prefix and a separate API key per instance (*independent*) | S | |
+| A4 (#428) | WebSocket keepalive on every socket, server and clients (*independent*) | S | |
 | A5 | The deployment: systemd unit per instance, Caddy, LiveKit on a public host, firewall, backups and a restore drill, upgrade and rollback (O7) | M | A1 |
 | A6 | Invites on the server: schema, storage, audit, redemption, rate limits (with the proxy's client address), pause switch, operator administration; security review | L | ADR-008 |
 | A7 | Lasting browser sign-in (O1) | S | ADR-008 |
