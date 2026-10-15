@@ -136,6 +136,8 @@ What is open:
 | #396 | The voice session by hand | Nick, after #393 and #394; non-blocking for P3 (decided on #354) |
 | #393, #394 | Voice rows in the automated suite, which keep tracker #354 open | Gated on #189 (the V4 exit) |
 
+The decisions taken on the follow-ons (#343, #345, #347, #348, #351, #353 and #354 among them) are recorded on each issue.
+
 ## Nick's own run (optional)
 
 Not made. #286 closed on the agent run above, by Nick's instruction. If Nick runs the walkthrough by hand, record here the date, the commit,
