@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -132,6 +133,47 @@ func TestErrorsDoNotQuoteToolResults(t *testing.T) {
 			}
 			if len(err.Error()) > 300 {
 				t.Errorf("the error is %d bytes long", len(err.Error()))
+			}
+		})
+	}
+}
+
+func TestRedirectIsNotFollowedWithBearer(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{"found", http.StatusFound},
+		{"moved permanently", http.StatusMovedPermanently},
+		{"temporary redirect keeps the method and body", http.StatusTemporaryRedirect},
+		{"permanent redirect", http.StatusPermanentRedirect},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hits int
+			var auth string
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				auth = r.Header.Get("Authorization")
+				_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			}))
+			defer target.Close()
+			// Another port of the same host: the case Go's default policy
+			// forwards credentials to.
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/mcp", tt.status)
+			}))
+			defer redirector.Close()
+
+			err := New(redirector.URL, "secret-token").Initialize(context.Background(), "test")
+			if err == nil {
+				t.Fatal("redirect was followed: want an error")
+			}
+			if want := "status " + strconv.Itoa(tt.status); !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not name %q", err, want)
+			}
+			if hits != 0 || auth != "" {
+				t.Fatalf("redirect target was reached (%d hits) with Authorization %q", hits, auth)
 			}
 		})
 	}
