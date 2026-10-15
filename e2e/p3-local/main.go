@@ -4,6 +4,7 @@
 // docs/design/p3-local-prototype.md). Run it from the repository:
 //
 //	go run ./e2e/p3-local [--keep] [--reset] [--real-adapter [--runtime claude|codex]]
+//	go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama
 //
 // It builds conchd, conch and conch-adapter into <root>/bin, starts conchd on
 // a loopback port of its own choosing, provisions the community through
@@ -40,6 +41,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,18 +71,27 @@ func main() {
 	reset := flag.Bool("reset", false, "stop what an earlier run started and remove its root")
 	realAdapter := flag.Bool("real-adapter", false, "write agent-a.env for the real Claude Code command instead of a fixture (it runs as you; see the warning)")
 	runtimeName := flag.String("runtime", "claude", "with --real-adapter, which real command agent-a.env names: claude or codex")
+	realList := flag.String("real-adapters", "", "with --keep, add an agent real-<runtime> for each of claude, codex, ollama (comma-separated); each model comes from CONCH_P3_MODEL_<RUNTIME>")
 	flag.Parse()
 	runtimeSet := false
 	flag.Visit(func(f *flag.Flag) { runtimeSet = runtimeSet || f.Name == "runtime" })
-	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) {
+	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) {
 		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep] [--real-adapter [--runtime claude|codex]] | --reset")
+		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama")
+		os.Exit(2)
+	}
+	// Before anything is built or started: a runtime without its model is
+	// refused by name.
+	realNames, models, err := parseRealAdapters(*realList, os.LookupEnv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
 		os.Exit(2)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	runCtx = ctx
 
-	r, err := newRunner(*realAdapter, *runtimeName)
+	r, err := newRunner(*realAdapter, *runtimeName, realNames, models)
 	if err != nil {
 		stop()
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
@@ -135,6 +146,10 @@ type runner struct {
 	realAdapter bool
 	// runtime is which real command --real-adapter names: claude or codex.
 	runtime string
+	// real are the runtimes --real-adapters asked for, each an agent of its own
+	// named real-<runtime>, and models the model of each.
+	realAgents []string
+	models     map[string]string
 	// hold is a test hook: CONCH_P3_HOLD=build|provision|check makes the run
 	// wait, interruptible, at that stage, so a test can interrupt it exactly
 	// there.
@@ -163,7 +178,7 @@ type runner struct {
 
 type binaries struct{ conchd, conch, adapter string }
 
-func newRunner(realAdapter bool, runtimeName string) (*runner, error) {
+func newRunner(realAdapter bool, runtimeName string, realNames []string, models map[string]string) (*runner, error) {
 	repo, err := moduleRoot()
 	if err != nil {
 		return nil, err
@@ -176,7 +191,7 @@ func newRunner(realAdapter bool, runtimeName string) (*runner, error) {
 	if _, err := rand.Read(id); err != nil {
 		return nil, err
 	}
-	r := &runner{repo: repo, root: root, runID: hex.EncodeToString(id), realAdapter: realAdapter, runtime: runtimeName, hold: os.Getenv("CONCH_P3_HOLD")}
+	r := &runner{repo: repo, root: root, runID: hex.EncodeToString(id), realAdapter: realAdapter, runtime: runtimeName, realAgents: realNames, models: models, hold: os.Getenv("CONCH_P3_HOLD")}
 	r.webDir, r.ownWebDir = filepath.Join(repo, "web", "dist"), true
 	if dir := os.Getenv("CONCH_P3_WEB_DIR"); dir != "" {
 		if !filepath.IsAbs(dir) {
@@ -267,6 +282,9 @@ func (r *runner) run(keep bool) (err error) {
 	}
 	if r.realAdapter {
 		fmt.Fprintln(os.Stderr, r.realAdapterWarning())
+	}
+	if len(r.realAgents) > 0 {
+		fmt.Fprintln(os.Stderr, realAdaptersWarning)
 	}
 
 	stage("build")
@@ -810,4 +828,48 @@ func (r *runner) realAdapterWarning() string {
 		return realCodexWarning
 	}
 	return realAdapterWarning
+}
+
+const realAdaptersWarning = `WARNING: --real-adapters. Each real-<runtime> agent will run that runtime's
+default command with no fixture mode: Claude Code with every permission check
+off, Codex in its read-only sandbox, Ollama as a local model that only writes
+text. They run as you, on this machine, in the directory you start them from,
+and claude and codex spend your own quota. Nothing is started for you; start
+only the ones you mean to, in a directory you would let them read.`
+
+// modelVar is the variable that names the model of a real runtime.
+func modelVar(runtime string) string { return "CONCH_P3_MODEL_" + strings.ToUpper(runtime) }
+
+// parseRealAdapters reads the --real-adapters list: comma-separated names from
+// the runtimes there are, each once. It returns the names in the order given
+// and the model of each from CONCH_P3_MODEL_<RUNTIME>; a runtime whose variable
+// is unset or empty is an error naming it, because no model is invented.
+func parseRealAdapters(list string, lookup func(string) (string, bool)) ([]string, map[string]string, error) {
+	if list == "" {
+		return nil, nil, nil
+	}
+	var names []string
+	models := make(map[string]string)
+	for _, n := range strings.Split(list, ",") {
+		n = strings.TrimSpace(n)
+		known := false
+		for _, rt := range realRuntimes {
+			known = known || rt.name == n
+		}
+		switch {
+		case !known:
+			return nil, nil, fmt.Errorf("--real-adapters: %q is not a runtime; use claude, codex or ollama", n)
+		case slices.Contains(names, n):
+			return nil, nil, fmt.Errorf("--real-adapters: %s is listed twice", n)
+		}
+		model, _ := lookup(modelVar(n))
+		if model == "" {
+			return nil, nil, fmt.Errorf("--real-adapters %s: %s is not set; it names the model real-%s runs", n, modelVar(n), n)
+		}
+		if !safeWord.MatchString(model) || strings.HasPrefix(model, "-") {
+			return nil, nil, fmt.Errorf("--real-adapters %s: %s is not a model name (one word, no leading '-')", n, modelVar(n))
+		}
+		names, models[n] = append(names, n), model
+	}
+	return names, models, nil
 }
