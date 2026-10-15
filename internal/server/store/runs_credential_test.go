@@ -269,7 +269,7 @@ func TestEndingASessionEndsItsRuns(t *testing.T) {
 			for _, e := range events {
 				if e.Action == AuditRunEnded {
 					seen[e.Subject]++
-					if !strings.HasPrefix(e.Detail, "state=failed session=") {
+					if !strings.HasPrefix(e.Detail, "state=failed cause=session_ended session=") {
 						t.Errorf("run_ended detail = %q", e.Detail)
 					}
 				}
@@ -283,5 +283,29 @@ func TestEndingASessionEndsItsRuns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Runs left open by a session that ended before #402 (when ending a session
+// left its runs alone) are not counted: nothing could ever end them, so
+// counting them would lock the credential out for good.
+func TestRunsOfAnEndedSessionDoNotCount(t *testing.T) {
+	ctx := context.Background()
+	f := newRunFixture(t)
+	if err := f.s.EndSession(ctx, "system", f.sess.ID, f.agtCred, runT0); err != nil {
+		t.Fatal(err)
+	}
+	first := f.credentialFill(t)
+	// End the sessions as the old code did: the session ends, its runs stay.
+	for _, id := range first {
+		if _, err := f.s.db.Exec("UPDATE sessions SET ended_at = ?, state = 'offline' WHERE id = ?", runT0.UnixMilli(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := f.openRuns(t); n != MaxOpenRunsPerCredential {
+		t.Fatalf("open runs left behind = %d, want %d", n, MaxOpenRunsPerCredential)
+	}
+	if _, err := f.startOn(f.freshSession(t)); err != nil {
+		t.Fatalf("a run beside runs left open by ended sessions: %v", err)
 	}
 }

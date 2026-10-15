@@ -43,10 +43,10 @@ const (
 	// MaxOpenRunsPerSession bounds the runs of one session that have not
 	// ended. Ended runs do not count, so ending one frees a slot.
 	MaxOpenRunsPerSession = 32
-	// MaxOpenRunsPerCredential bounds the runs that have not ended across all
-	// the sessions of one credential, whether the session is live, offline or
-	// ended: what the live-session and per-session bounds allow together
-	// (issue #402). New sessions would otherwise each start with a fresh 32.
+	// MaxOpenRunsPerCredential bounds the runs that have not ended across the
+	// sessions of one credential that have not ended, live or offline: what
+	// the live-session and per-session bounds allow together (issue #402).
+	// Ending a session ends its runs, so ended sessions hold none. New sessions would otherwise each start with a fresh 32.
 	MaxOpenRunsPerCredential = MaxLiveSessionsPerCredential * MaxOpenRunsPerSession
 	// RunOutcomeSessionEnded is the outcome of a run the server failed
 	// because its session ended (issue #402).
@@ -73,8 +73,8 @@ var (
 	// MaxOpenRunsPerSession runs that have not ended. Nothing is written.
 	ErrTooManyRuns = errors.New("store: too many open runs for this session")
 	// ErrTooManyCredentialRuns is returned by CreateRun when the credential
-	// already has MaxOpenRunsPerCredential runs that have not ended, on
-	// sessions of any state. Ending a session ends its runs, so ending the
+	// already has MaxOpenRunsPerCredential runs that have not ended, on its
+	// live and offline sessions. Ending a session ends its runs, so ending the
 	// old sessions frees the slots. Nothing is written.
 	ErrTooManyCredentialRuns = errors.New("store: too many open runs for this credential")
 	// ErrSessionOffline is returned by CreateRun, AppendRunActivity and
@@ -159,7 +159,8 @@ func storedTime(t time.Time) time.Time { return time.UnixMilli(t.UnixMilli()) }
 //     not ended (ErrTooManyRuns). The count and the insert share this
 //     transaction, so concurrent creates cannot pass the bound together;
 //   - the credential must hold fewer than MaxOpenRunsPerCredential runs that
-//     have not ended, on sessions of any state (ErrTooManyCredentialRuns).
+//     have not ended, on its live and offline sessions
+//     (ErrTooManyCredentialRuns).
 //
 // reader is the agent itself; the run is then visible to it by RunVisible's
 // rule. A refused run stores nothing.

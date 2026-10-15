@@ -1222,16 +1222,22 @@ func countOpenRunsTx(ctx context.Context, tx execer, sessionID int64) (int, erro
 	return n, nil
 }
 
-// countOpenRunsOfCredentialTx is how many runs have not ended on all the
-// sessions of credential credentialID: live, offline and ended alike (issue
-// #402). Offline sessions' runs stay open and a session cannot be told to
-// forget them, so a bound on live sessions alone would let new sessions pile
-// new runs on top. CreateRun asks it inside its transaction.
+// countOpenRunsOfCredentialTx is how many runs have not ended on the sessions
+// of credential credentialID that have not ended, live and offline alike
+// (issue #402). Offline sessions' runs stay open and a session cannot be told
+// to forget them, so a bound on live sessions alone would let new sessions
+// pile new runs on top. Ended sessions are left out: ending one ends its runs
+// in the same transaction, so they hold none, except runs left open by a
+// session that ended before #402. Those could never be freed (the session
+// cannot be ended again, and a run the agent no longer sees cannot be ended
+// by it), so counting them could lock the credential out for good; leaving
+// ended sessions out also keeps the walk to the sessions still in use.
+// CreateRun asks it inside its transaction.
 func countOpenRunsOfCredentialTx(ctx context.Context, tx execer, credentialID int64) (int, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM runs r JOIN sessions s ON s.id = r.session_id
-		 WHERE s.credential_id = ? AND r.state IN (?, ?, ?, ?, ?)`, credentialID,
+		 WHERE s.credential_id = ? AND s.ended_at IS NULL AND r.state IN (?, ?, ?, ?, ?)`, credentialID,
 		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4]).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count open runs of credential %d: %w", credentialID, err)
 	}
@@ -1281,7 +1287,7 @@ func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID in
 			return 0, fmt.Errorf("store: end run %d with its session: affected %d rows", o.id, n)
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditRunEnded, runSubject(o.id),
-			fmt.Sprintf("state=%s session=%d principal=%d channel=%d", schema.RunStateFailed, sessionID, o.principalID, o.channelID), now); err != nil {
+			fmt.Sprintf("state=%s cause=session_ended session=%d principal=%d channel=%d", schema.RunStateFailed, sessionID, o.principalID, o.channelID), now); err != nil {
 			return 0, err
 		}
 	}
