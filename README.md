@@ -475,8 +475,14 @@ new name wins when both are set. Also:
 - `CONCH_ADAPTER_MAX_PAUSE` (default: the reply timeout): how long a run may be paused, all its pauses
   together, before its command is killed and the run fails.
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
-  dropped with a log line. It is what stops two adapters from answering each
-  other for ever.
+  dropped with a log line. It slows a loop between adapters; it does not end one.
+- `CONCH_ADAPTER_REPLY_TO_AGENTS=1` (default off): by default the adapter answers only
+  messages written by people. A message from another agent goes into the prompt as
+  context but never starts a run, and so does one from an author the adapter cannot
+  tell (it learns who is a person from the channel's member list, which its
+  credential may read). Set this to `1` and it answers agents too. **Warning:** two
+  adapters with this set in one channel answer each other without end and spend the
+  quota of both runtimes; the replies-per-minute cap only slows them.
 - `CONCH_ADAPTER_FIXTURE=1`: see below.
 
 **Runtime profiles.** `CONCH_ADAPTER_RUNTIME` picks a profile: a default

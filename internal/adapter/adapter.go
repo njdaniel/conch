@@ -51,6 +51,9 @@ type config struct {
 	Runtime             string
 	Heartbeat           time.Duration
 	MaxRepliesPerMinute int
+	// ReplyToAgents makes the adapter answer messages from other agents, not
+	// only from people. Two adapters that do loop without end.
+	ReplyToAgents bool
 	// Fixture turns on the fixture markers in the command's output. Never set
 	// it for a real model.
 	Fixture bool
@@ -103,13 +106,18 @@ func run() error {
 		return fmt.Errorf("initialize MCP: %w", err)
 	}
 	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir, maxPause: cfg.MaxPause}
-	loop := &botLoop{cfg: cfg, mcp: mcpAdapter{client}, claude: runner}
+	loop := &botLoop{cfg: cfg, mcp: mcpAdapter{Client: client, server: strings.TrimRight(cfg.Server, "/"), token: cfg.Token}, claude: runner}
 	return loop.run(ctx)
 }
 
 // mcpAdapter is the client with the two channel calls the loop makes in terms
 // of its own types.
-type mcpAdapter struct{ *mcpclient.Client }
+type mcpAdapter struct {
+	*mcpclient.Client
+	// server and token are for the member list, which is a REST call: the MCP
+	// tools do not carry it.
+	server, token string
+}
 
 func (m mcpAdapter) readChannel(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
 	return m.ReadChannel(ctx, channel, after, limit)
@@ -242,6 +250,7 @@ func loadConfig(lookup envLookup) (config, error) {
 	}
 	cfg.MaxRepliesPerMinute = perMinute
 	cfg.Fixture = get("CONCH_ADAPTER_FIXTURE", "", "") == "1"
+	cfg.ReplyToAgents = get("CONCH_ADAPTER_REPLY_TO_AGENTS", "", "") == "1"
 	return cfg, nil
 }
 

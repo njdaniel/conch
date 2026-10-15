@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
@@ -48,6 +50,37 @@ type fakeMCP struct {
 	// by every heartbeat when set.
 	offline map[string]int
 	beatErr error
+	// agents are the authors that are agents; every other author in pages is a
+	// human member. unlisted are authors the member list leaves out, and
+	// membersErr fails the list.
+	agents, unlisted map[int64]bool
+	membersErr       error
+	memberCalls      int
+}
+
+func (f *fakeMCP) members(context.Context, string) ([]schema.ChannelMemberV1, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.memberCalls++
+	if f.membersErr != nil {
+		return nil, f.membersErr
+	}
+	seen := map[int64]bool{}
+	var out []schema.ChannelMemberV1
+	for _, page := range f.pages {
+		for _, m := range page.Messages {
+			if seen[m.AuthorID] || f.unlisted[m.AuthorID] {
+				continue
+			}
+			seen[m.AuthorID] = true
+			kind := schema.PrincipalHuman
+			if f.agents[m.AuthorID] {
+				kind = schema.PrincipalAgent
+			}
+			out = append(out, schema.ChannelMemberV1{PrincipalID: m.AuthorID, Kind: kind})
+		}
+	}
+	return out, nil
 }
 
 // refuseOffline reports whether this call is refused with session_offline,
@@ -851,5 +884,169 @@ func TestRunAnswersMessageSentWhenSessionOpens(t *testing.T) {
 	}
 	if want := []string{"answered"}; !reflect.DeepEqual(mcp.posts, want) {
 		t.Fatalf("posts = %v, want %v", mcp.posts, want)
+	}
+}
+
+func TestPollOnceAgentMessages(t *testing.T) {
+	tests := []struct {
+		name       string
+		messages   []schema.MessageV2
+		agents     map[int64]bool
+		unlisted   map[int64]bool
+		replyAgent bool
+		wantRuns   int
+		wantIn     []string
+	}{
+		{
+			name:     "an agent message alone starts no run",
+			messages: []schema.MessageV2{message(1, 2, "from an agent")},
+			agents:   map[int64]bool{2: true},
+			wantRuns: 0,
+		},
+		{
+			name:     "a human message with an agent message is one run with both",
+			messages: []schema.MessageV2{message(1, 2, "from an agent"), message(2, 3, "from a person")},
+			agents:   map[int64]bool{2: true},
+			wantRuns: 1,
+			wantIn:   []string{"2: from an agent", "3: from a person"},
+		},
+		{
+			name:       "opt in answers an agent message",
+			messages:   []schema.MessageV2{message(1, 2, "from an agent")},
+			agents:     map[int64]bool{2: true},
+			replyAgent: true,
+			wantRuns:   1,
+			wantIn:     []string{"2: from an agent"},
+		},
+		{
+			name:     "an author the member list does not know is not answered",
+			messages: []schema.MessageV2{message(1, 4, "who is this")},
+			unlisted: map[int64]bool{4: true},
+			wantRuns: 0,
+		},
+		{
+			name:     "its own message is never answered",
+			messages: []schema.MessageV2{message(1, 9, "mine")},
+			wantRuns: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mcp := &fakeMCP{pages: map[int64]schema.ListMessagesResponseV2{0: {Messages: tt.messages}}, agents: tt.agents, unlisted: tt.unlisted}
+			claude := &fakeClaude{reply: "ok"}
+			cfg := testConfig()
+			cfg.ReplyToAgents = tt.replyAgent
+			loop := &botLoop{cfg: cfg, mcp: mcp, claude: claude}
+			if err := loop.pollOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(claude.prompts) != tt.wantRuns {
+				t.Fatalf("runs = %d, want %d", len(claude.prompts), tt.wantRuns)
+			}
+			for _, want := range tt.wantIn {
+				if !strings.Contains(claude.prompts[0], want) {
+					t.Errorf("prompt lacks %q:\n%s", want, claude.prompts[0])
+				}
+			}
+			if loop.lastSeen != tt.messages[len(tt.messages)-1].ID {
+				t.Errorf("lastSeen = %d", loop.lastSeen)
+			}
+		})
+	}
+}
+
+// The agent message stays in the audience's window, so it is in the prompt of
+// the next human message even though it started nothing.
+func TestAgentMessageIsHistoryForLaterHumanMessage(t *testing.T) {
+	mcp := &fakeMCP{pages: map[int64]schema.ListMessagesResponseV2{
+		0: {Messages: []schema.MessageV2{message(1, 2, "agent said")}},
+		1: {Messages: []schema.MessageV2{message(2, 3, "person asks")}},
+	}, agents: map[int64]bool{2: true}}
+	claude := &fakeClaude{reply: "ok"}
+	loop := &botLoop{cfg: testConfig(), mcp: mcp, claude: claude}
+	for range 2 {
+		if err := loop.pollOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(claude.prompts) != 1 || !strings.Contains(claude.prompts[0], "2: agent said") || !strings.Contains(claude.prompts[0], "3: person asks") {
+		t.Fatalf("prompts = %q", claude.prompts)
+	}
+}
+
+// A failed member lookup must not swallow the message: the cursor stays, and
+// the next poll answers it.
+func TestMemberLookupFailureRetriesMessage(t *testing.T) {
+	mcp := &fakeMCP{pages: map[int64]schema.ListMessagesResponseV2{0: {Messages: []schema.MessageV2{message(1, 3, "hello")}}}, membersErr: errors.New("down")}
+	claude := &fakeClaude{reply: "ok"}
+	loop := &botLoop{cfg: testConfig(), mcp: mcp, claude: claude}
+	if err := loop.pollOnce(context.Background()); err == nil {
+		t.Fatal("want an error")
+	}
+	if loop.lastSeen != 0 || len(claude.prompts) != 0 {
+		t.Fatalf("lastSeen = %d, runs = %d", loop.lastSeen, len(claude.prompts))
+	}
+	mcp.membersErr = nil
+	if err := loop.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(claude.prompts) != 1 {
+		t.Fatalf("runs = %d, want 1", len(claude.prompts))
+	}
+}
+
+// Two adapters in one channel, one human message: each replies once, then
+// neither answers the other's reply.
+func TestTwoAdaptersAnswerOnceAndStop(t *testing.T) {
+	pages := func() map[int64]schema.ListMessagesResponseV2 {
+		return map[int64]schema.ListMessagesResponseV2{0: {Messages: []schema.MessageV2{message(1, 3, "hello")}}}
+	}
+	cfgA, cfgB := testConfig(), testConfig()
+	cfgA.PrincipalID, cfgB.PrincipalID = 11, 12
+	mcpA := &fakeMCP{pages: pages(), agents: map[int64]bool{11: true, 12: true}}
+	mcpB := &fakeMCP{pages: pages(), agents: map[int64]bool{11: true, 12: true}}
+	claudeA, claudeB := &fakeClaude{reply: "from A"}, &fakeClaude{reply: "from B"}
+	a := &botLoop{cfg: cfgA, mcp: mcpA, claude: claudeA}
+	b := &botLoop{cfg: cfgB, mcp: mcpB, claude: claudeB}
+	// Each poll, the channel holds the human message and the replies so far.
+	for round := 0; round < 3; round++ {
+		replyA, replyB := message(2, 11, "from A"), message(3, 12, "from B")
+		msgs := []schema.MessageV2{message(1, 3, "hello")}
+		if round > 0 {
+			msgs = []schema.MessageV2{replyA, replyB}
+		}
+		for _, l := range []*botLoop{a, b} {
+			l.mcp.(*fakeMCP).pages = map[int64]schema.ListMessagesResponseV2{l.lastSeen: {Messages: msgs}}
+			if err := l.pollOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if len(claudeA.prompts) != 1 || len(claudeB.prompts) != 1 {
+		t.Fatalf("runs: A %d, B %d, want 1 each", len(claudeA.prompts), len(claudeB.prompts))
+	}
+}
+
+func TestMCPAdapterMembers(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"members":[{"principal_id":2,"kind":"agent"},{"principal_id":3,"kind":"human"}]}`))
+	}))
+	defer srv.Close()
+	got, err := mcpAdapter{server: srv.URL, token: "tok"}.members(context.Background(), "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/channels/ops/members" || gotAuth != "Bearer tok" {
+		t.Fatalf("path %q, auth %q", gotPath, gotAuth)
+	}
+	if len(got) != 2 || got[0].Kind != schema.PrincipalAgent || got[1].Kind != schema.PrincipalHuman {
+		t.Fatalf("members = %+v", got)
+	}
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer refusing.Close()
+	if _, err := (mcpAdapter{server: refusing.URL, token: "tok"}).members(context.Background(), "ops"); err == nil {
+		t.Fatal("want an error for a refused list")
 	}
 }
