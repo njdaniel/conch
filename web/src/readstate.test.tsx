@@ -365,15 +365,124 @@ describe('the counts are read again', () => {
   });
 
   it('when another channel is opened', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     server.read = () => [state(7, 0, 4), state(8, 0, 4), state(9, 2)];
     await openChat();
     await badge('2 unread');
     expect(server.gets).toBe(1);
     server.read = () => [state(7, 0, 4), state(8, 0, 4), state(9, 6)];
     fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    // Within the interval of the last read it waits for the interval to end.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(markInterval);
+    });
     await waitFor(() => {
       expect(server.gets).toBe(2);
     });
     await badge('6 unread');
+  });
+});
+
+describe('after review', () => {
+  const fake = () => vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  const advance = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
+  // reconnect lets the feed's retry timer run and opens the new socket.
+  async function reconnect(count: number) {
+    for (let i = 0; i < 10 && FakeSocket.all.length < count; i++) await advance(1000);
+    expect(FakeSocket.all).toHaveLength(count);
+    (FakeSocket.all[count - 1] as FakeSocket).open();
+  }
+
+  it('sends no mark while the socket is down, even when the interval ends, and one at the newest id after reconnect', async () => {
+    fake();
+    server.history = [message(1)];
+    const socket = await openChat();
+    await waitFor(() => {
+      expect(server.puts).toHaveLength(1);
+    });
+    socket.send(message(2));
+    await screen.findByText('m2');
+    socket.drop(1006);
+    await screen.findByText('This conversation may be out of date');
+    await advance(markInterval * 2);
+    expect(server.puts).toHaveLength(1);
+    await reconnect(2);
+    await waitFor(() => {
+      expect(server.puts.map((p) => p.id)).toEqual([1, 2]);
+    });
+    await advance(markInterval * 3);
+    expect(server.puts).toHaveLength(2);
+  });
+
+  it('sends no mark for scrolling to the bottom while the socket is down, and one after reconnect', async () => {
+    fake();
+    server.history = [message(1)];
+    const socket = await openChat();
+    await waitFor(() => {
+      expect(server.puts).toHaveLength(1);
+    });
+    scrollTo(400);
+    socket.send(message(2));
+    await badge('1 unread');
+    await advance(markInterval * 2);
+    socket.drop(1006);
+    await screen.findByText('This conversation may be out of date');
+    scrollTo(0);
+    await advance(markInterval);
+    expect(server.puts).toHaveLength(1);
+    await reconnect(2);
+    await waitFor(() => {
+      expect(server.puts.map((p) => p.id)).toEqual([1, 2]);
+    });
+    await advance(markInterval * 3);
+    expect(server.puts).toHaveLength(2);
+  });
+
+  it('reads at most twice for many channels opened within the interval', async () => {
+    fake();
+    server.read = () => [state(7, 0, 4), state(8, 0, 4), state(9, 2)];
+    await openChat();
+    await badge('2 unread');
+    expect(server.gets).toBe(1);
+    for (const name of ['ops', 'general', 'ops', 'general', 'ops']) {
+      fireEvent.click(screen.getByRole('button', { name }));
+    }
+    await advance(markInterval + 100);
+    expect(server.gets).toBe(2);
+  });
+
+  it('moves the mark and clears the count when a channel left scrolled up is opened again', async () => {
+    server.history = [message(1), message(2)];
+    const socket = await openChat();
+    await waitFor(() => {
+      expect(server.puts.map((p) => p.id)).toEqual([2]);
+    });
+    scrollTo(400);
+    socket.send(message(3));
+    socket.send(message(4));
+    socket.send(message(5));
+    await screen.findByText('m5');
+    const openLatest = async (count: number) => {
+      await waitFor(() => {
+        expect(FakeSocket.all).toHaveLength(count);
+      });
+      (FakeSocket.all[count - 1] as FakeSocket).open();
+    };
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await openLatest(2);
+    await screen.findByLabelText('Message #ops');
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await openLatest(3);
+    await screen.findByLabelText('Message #general');
+    await waitFor(() => {
+      expect(server.puts.filter((p) => p.channel === 'general').map((p) => p.id)).toEqual([2, 5]);
+    }, { timeout: 4000 });
+    await waitFor(() => {
+      expect(screen.queryByRole('img', { name: /unread/ })).toBeNull();
+    });
   });
 });

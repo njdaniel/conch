@@ -147,8 +147,15 @@ export function App({ origin }: { readonly origin: string }) {
   // Whether the reader is at the newest message of the open channel; a channel
   // newly opened starts at it.
   const [bottom, setBottom] = useState<{ readonly channel: string | null; readonly atBottom: boolean }>({ channel: null, atBottom: true });
+  // A channel opened again starts at the bottom, whatever it was left at.
+  const [bottomFor, setBottomFor] = useState(selected);
+  if (bottomFor !== selected) {
+    setBottomFor(selected);
+    setBottom({ channel: selected, atBottom: true });
+  }
   const held = selected === null ? null : chatFor(chat, selected);
-  const head = held === null ? undefined : ordered(held).at(-1);
+  const headId = held === null ? 0 : lastId(held);
+  const head = held?.byId.get(headId);
   const unread = useReadState({
     signedIn,
     channels: channels.channels,
@@ -318,7 +325,7 @@ export function App({ origin }: { readonly origin: string }) {
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
                 onBottom={(atBottom) => {
-                  setBottom({ channel: selected, atBottom });
+                  setBottom((prev) => (prev.channel === selected && prev.atBottom === atBottom ? prev : { channel: selected, atBottom }));
                 }}
               />
                 </div>
