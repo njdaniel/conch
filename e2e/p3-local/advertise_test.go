@@ -201,3 +201,69 @@ func TestKeepAdvertise(t *testing.T) {
 		t.Errorf("something still listens on %s after --reset", bind)
 	}
 }
+
+// TestHostIPv4: the suite's own address is the first non-loopback,
+// non-link-local IPv4 there is, and with none the answer is an error, never
+// loopback.
+func TestHostIPv4(t *testing.T) {
+	cidr := func(s string) net.Addr {
+		ip, n, err := net.ParseCIDR(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n.IP = ip
+		return n
+	}
+	for _, tt := range []struct {
+		name    string
+		addrs   []net.Addr
+		want    string
+		wantErr bool
+	}{
+		{"private address", []net.Addr{cidr("127.0.0.1/8"), cidr("10.1.2.3/24")}, "10.1.2.3", false},
+		{"skips loopback, link-local and IPv6", []net.Addr{cidr("127.0.0.1/8"), cidr("::1/128"), cidr("169.254.1.1/16"), cidr("fe80::1/64"), cidr("2001:db8::1/64"), cidr("192.168.0.9/24")}, "192.168.0.9", false},
+		{"only loopback", []net.Addr{cidr("127.0.0.1/8"), cidr("::1/128")}, "", true},
+		{"none", nil, "", true},
+		{"not an IP network", []net.Addr{&net.UnixAddr{Name: "x", Net: "unix"}}, "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := hostIPv4(tt.addrs)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("got %v, want an error", got)
+				}
+				return
+			}
+			if err != nil || got.String() != tt.want {
+				t.Errorf("got %v, %v, want %s", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestNonLoopbackRefusals: --non-loopback is for the suite alone, and is
+// refused before anything is created when given with a mode it contradicts.
+func TestNonLoopbackRefusals(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{"with --keep", []string{"--keep", "--non-loopback"}},
+		{"with --reset", []string{"--reset", "--non-loopback"}},
+		{"with --advertise", []string{"--non-loopback", "--advertise", "http://192.0.2.1:8080"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newScratch(t)
+			stdout, stderr, err := s.run(tt.args...)
+			if err == nil {
+				t.Fatalf("p3-local %v succeeded", tt.args)
+			}
+			if stdout != "" || !strings.Contains(stderr, "usage") {
+				t.Errorf("stdout %q, stderr %q: want the usage and nothing else printed", stdout, stderr)
+			}
+			if _, err := os.Lstat(s.root); err == nil {
+				t.Errorf("the refusal left %s behind", s.root)
+			}
+		})
+	}
+}

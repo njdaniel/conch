@@ -6,6 +6,7 @@
 //	go run ./e2e/p3-local [--keep] [--reset] [--real-adapter [--runtime claude|codex]]
 //	go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama
 //	go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
+//	go run ./e2e/p3-local --non-loopback
 //
 // It builds conchd, conch and conch-adapter into <root>/bin, starts conchd on
 // a loopback port of its own choosing, provisions the community through
@@ -77,13 +78,15 @@ func main() {
 	runtimeName := flag.String("runtime", "claude", "with --real-adapter, which real command agent-a.env names: claude or codex")
 	realList := flag.String("real-adapters", "", "with --keep, add an agent real-<runtime> for each of claude, codex, ollama (comma-separated); each model comes from CONCH_P3_MODEL_<RUNTIME>")
 	advertiseURL := flag.String("advertise", "", "with --keep, bind conchd to this address of this machine (http://<ip>:<port>) and write it into every file, for a guest on the LAN")
+	nonLoopback := flag.Bool("non-loopback", false, "without --keep, run the suite with conchd bound to this machine's own non-loopback IPv4 and every client pointed at it (CI uses it)")
 	flag.Parse()
 	runtimeSet := false
 	flag.Visit(func(f *flag.Flag) { runtimeSet = runtimeSet || f.Name == "runtime" })
-	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) {
+	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) || (*nonLoopback && (*keep || *reset || *advertiseURL != "")) {
 		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep] [--real-adapter [--runtime claude|codex]] | --reset")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>")
+		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --non-loopback")
 		os.Exit(2)
 	}
 	// Before anything is built or started: a runtime without its model is
@@ -98,7 +101,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
 		os.Exit(2)
 	}
-	if adv != nil {
+	if *nonLoopback {
+		if adv, err = suiteAddress(); err != nil {
+			fmt.Fprintln(os.Stderr, name+": FAIL:", err)
+			os.Exit(2)
+		}
+		fmt.Printf("%s: --non-loopback: conchd is bound to %s, and every client is given that address\n\n", name, adv.bind)
+	} else if adv != nil {
 		// First of everything the run prints, and before anything is built.
 		fmt.Println(adv.warning())
 		fmt.Println()
