@@ -19,6 +19,89 @@ export const recentRuns = 10;
 export const keptActivity = 1000;
 export const keptInterventions = 1000;
 
+// How many runs one read of the Runs view asks for (the TUI's page), and the
+// most pages it follows.
+export const runsPageSize = 50;
+export const maxRunPages = 100;
+
+export type RunFilter = 'all' | 'open' | 'ended';
+
+// keeps says whether the filter lists the run. A run is open until its state
+// is one a run never leaves.
+export function filterKeeps(filter: RunFilter, run: RunV1): boolean {
+  switch (filter) {
+    case 'open':
+      return !runEnded(run.state);
+    case 'ended':
+      return runEnded(run.state);
+    case 'all':
+      return true;
+  }
+}
+
+// The channel's runs, newest first, read a page at a time and kept current by
+// the run frames.
+export interface RunsView {
+  readonly list: readonly RunV1[];
+  // loaded once the first page is in; loading while a page is asked for; more
+  // while an older page may exist.
+  readonly loaded: boolean;
+  readonly loading: boolean;
+  readonly more: boolean;
+  // The smallest id the pages read so far reached: the next page starts below
+  // it. A run a frame brought in does not move it, or the runs between would
+  // never be read.
+  readonly before: number;
+  readonly pages: number;
+  readonly filter: RunFilter;
+  // One line about the last read that failed, or null.
+  readonly note: string | null;
+}
+
+export const initialRuns: RunsView = { list: [], loaded: false, loading: false, more: false, before: 0, pages: 0, filter: 'all', note: null };
+
+// mergeRuns puts incoming into list by id, newest first. A run does not leave
+// a terminal state, so a document that would take it back is an older one.
+export function mergeRuns(list: readonly RunV1[], incoming: readonly RunV1[]): RunV1[] {
+  const byId = new Map<number, RunV1>();
+  for (const r of list) byId.set(r.id, r);
+  for (const r of incoming) {
+    const old = byId.get(r.id);
+    if (old !== undefined && runEnded(old.state) && !runEnded(r.state)) continue;
+    byId.set(r.id, r);
+  }
+  return [...byId.values()].sort((a, b) => b.id - a.id);
+}
+
+// visibleRuns is the runs the filter lists.
+export function visibleRuns(view: RunsView): readonly RunV1[] {
+  return view.filter === 'all' ? view.list : view.list.filter((r) => filterKeeps(view.filter, r));
+}
+
+// runsFrame keeps the view current from a run frame: a run it lists is
+// replaced, a new one joins. A run older than the pages read so far is not
+// added, since paging will reach it.
+function runsFrame(view: RunsView, run: RunV1): RunsView {
+  if (!view.loaded && !view.loading) return view;
+  const known = view.list.some((r) => r.id === run.id);
+  if (!known && view.loaded && view.more && run.id < view.before) return view;
+  return { ...view, list: mergeRuns(view.list, [run]) };
+}
+
+// runsPage takes a page. before is the page it was asked for, 0 for the
+// newest. The first page read again (the socket came back, so frames may have
+// been missed) is merged in and leaves the paging alone.
+function runsPage(view: RunsView, before: number, runs: readonly RunV1[]): RunsView {
+  // A page that a channel switch has since reset is not the first page of the
+  // new view.
+  if (before !== 0 && before !== view.before) return view;
+  const list = mergeRuns(view.list, runs);
+  if (before === 0 && view.loaded) return { ...view, list, note: null };
+  let next = view.before;
+  for (const r of runs) if (next === 0 || r.id < next) next = r.id;
+  return { ...view, list, loaded: true, loading: false, more: runs.length >= runsPageSize, before: next, pages: view.pages + 1, note: null };
+}
+
 export interface RunDetail {
   readonly runId: number;
   readonly sessionId: number;
@@ -44,6 +127,8 @@ export interface AgentsState {
   readonly roster: readonly SessionV1[];
   // Each session's newest runs, newest first.
   readonly sessionRuns: Readonly<Record<number, readonly RunV1[]>>;
+  // The Runs view: every run of the channel the person may see.
+  readonly runs: RunsView;
   readonly detail: RunDetail | null;
   // Why run detail closed, or another line for the panel.
   readonly notice: string | null;
@@ -56,6 +141,7 @@ export const initialAgents: AgentsState = {
   liveGen: 0,
   roster: [],
   sessionRuns: {},
+  runs: initialRuns,
   detail: null,
   notice: null,
 };
@@ -68,6 +154,10 @@ export type AgentsAction =
   | { readonly type: 'activity'; readonly entry: AgentActivityV1 }
   | { readonly type: 'intervention'; readonly intervention: InterventionV1 }
   | { readonly type: 'sessionRuns'; readonly session: number; readonly runs: readonly RunV1[] }
+  | { readonly type: 'runsAsk' }
+  | { readonly type: 'runsPage'; readonly before: number; readonly runs: readonly RunV1[] }
+  | { readonly type: 'runsFailed'; readonly before: number; readonly line: string }
+  | { readonly type: 'runsFilter'; readonly filter: RunFilter }
   | { readonly type: 'open'; readonly runId: number; readonly sessionId: number; readonly run: RunV1 | null }
   | { readonly type: 'close'; readonly notice: string | null }
   | { readonly type: 'runRead'; readonly runId: number; readonly stamp: number; readonly run: RunV1 }
@@ -152,8 +242,9 @@ export function agentsReducer(state: AgentsState, action: AgentsAction): AgentsS
     case 'run': {
       if (action.run.channel_id !== state.channelId) return state;
       const sessionRuns = cacheRun(state.sessionRuns, action.run);
-      if (detail === null || detail.runId !== action.run.id) return { ...state, sessionRuns };
-      return { ...state, sessionRuns, detail: applyRun({ ...detail, runStamp: detail.runStamp + 1 }, action.run) };
+      const runs = runsFrame(state.runs, action.run);
+      if (detail === null || detail.runId !== action.run.id) return { ...state, sessionRuns, runs };
+      return { ...state, sessionRuns, runs, detail: applyRun({ ...detail, runStamp: detail.runStamp + 1 }, action.run) };
     }
     case 'activity':
       if (detail === null || detail.runId !== action.entry.run_id) return state;
@@ -163,6 +254,16 @@ export function agentsReducer(state: AgentsState, action: AgentsAction): AgentsS
       return { ...state, detail: { ...detail, interventions: upsertIntervention(detail.interventions, action.intervention) } };
     case 'sessionRuns':
       return { ...state, sessionRuns: { ...state.sessionRuns, [action.session]: action.runs.slice(0, recentRuns) } };
+    case 'runsAsk':
+      return { ...state, runs: { ...state.runs, loading: true, note: null } };
+    case 'runsPage':
+      return { ...state, runs: runsPage(state.runs, action.before, action.runs) };
+    case 'runsFailed': {
+      if (action.before !== 0 && action.before !== state.runs.before) return state;
+      return { ...state, runs: { ...state.runs, loading: false, note: action.line } };
+    }
+    case 'runsFilter':
+      return { ...state, runs: { ...state.runs, filter: action.filter } };
     case 'open':
       return {
         ...state,

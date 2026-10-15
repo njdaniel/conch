@@ -87,7 +87,7 @@ function Message({
 }) {
   const approval = approvalOf(message);
   return (
-    <li className="message">
+    <li className="message" data-message-id={message.id} tabIndex={-1}>
       <Line
         time={clock(message.created_at)}
         author={nameOf(people, message.author_id)}

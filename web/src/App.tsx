@@ -14,7 +14,7 @@ import { connectionReducer } from './state/connection';
 import { whisperNotice } from './Composer';
 import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer } from './state/drafts';
 import type { Audience } from './schema/message';
-import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, type ChatAction } from './state/messages';
+import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
@@ -153,6 +153,33 @@ export function App({ origin }: { readonly origin: string }) {
   });
   const now = useNow(signedIn);
 
+  // Go to message: run detail closes, and once the conversation is on screen
+  // again it scrolls to the message the run answers and puts focus on it. A
+  // message older than the history held is said so, since there is nothing to
+  // scroll to.
+  const [scrollTo, setScrollTo] = useState<number | null>(null);
+  const closeRun = agents.closeRun;
+  const goToMessage = useCallback(
+    (id: number) => {
+      if (selected !== null && ordered(chatFor(chatNow.current, selected)).some((m) => m.id === id)) {
+        closeRun();
+        setScrollTo(id);
+      } else {
+        closeRun(`Message #${String(id)} is older than the history held`);
+      }
+    },
+    [selected, closeRun],
+  );
+  const detailOpen = agents.state.detail !== null;
+  useEffect(() => {
+    if (scrollTo === null || detailOpen) return;
+    setScrollTo(null);
+    const el = document.querySelector<HTMLElement>(`[data-message-id="${String(scrollTo)}"]`);
+    if (el === null) return;
+    el.scrollIntoView({ block: 'center' });
+    el.focus({ preventScroll: true });
+  }, [scrollTo, detailOpen]);
+
   // One POST per click. Nothing here sends a message a second time on its own.
   const post = useCallback(
     (name: string, localId: number, body: string, audience?: Audience) => {
@@ -234,7 +261,7 @@ export function App({ origin }: { readonly origin: string }) {
           conversation={
             selected === null || channelId === null ? null : (
               <>
-                {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} />}
+                {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 <div className="conversation-body" hidden={agents.state.detail !== null}>
               <Conversation
                 key={selected}

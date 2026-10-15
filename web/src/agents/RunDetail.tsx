@@ -6,10 +6,11 @@
 import { useState } from 'react';
 import type { InterventionKind, InterventionV1 } from '../schema/intervention';
 import { runEnded } from '../schema/run';
-import { clockSeconds, ago } from './format';
+import { ago, clockSeconds, dataBody, askText, runSpan, spanText, timeline, type TimelineItem } from './format';
 import { safeLink } from './links';
 import type { RunDetail as Detail } from './state';
 import type { Agents } from './useAgents';
+import { useNow } from './useNow';
 
 // The ask's state as the history words it.
 export function interventionWord(iv: InterventionV1): string {
@@ -26,6 +27,39 @@ export function interventionWord(iv: InterventionV1): string {
 }
 
 const kindWord: Record<InterventionKind, string> = { message: 'Message', cancel: 'Cancel', pause: 'Pause', resume: 'Resume' };
+
+// One line of the timeline: the offset from the run's start, the gap from the
+// line before it when that is a second or more, and the words. An entry with
+// data is a <details>: the line is its summary and the body, as text, is the
+// data pretty-printed and bounded.
+function TimelineLine({ item, previous, start }: { readonly item: TimelineItem; readonly previous: TimelineItem | undefined; readonly start: number | null }) {
+  const gap = previous === undefined ? 0 : item.at - previous.at;
+  const line = (
+    <>
+      {start === null ? null : <span className="ag-offset">+{spanText(item.at - start, true)}</span>}{' '}
+      {gap >= 1000 ? <span className="ag-gap">(+{spanText(gap, false)})</span> : null}{' '}
+      {item.kind === 'activity' ? (
+        <>
+          <span className="ag-kind">{item.entry.kind}</span> <span>{item.entry.summary}</span>
+          {item.entry.outcome === undefined || item.entry.outcome === '' ? null : <span className="ag-prose"> → {item.entry.outcome}</span>}
+        </>
+      ) : (
+        <span className="ag-iv ag-prose">{askText(item)}</span>
+      )}
+    </>
+  );
+  if (item.kind === 'activity' && item.entry.data !== undefined) {
+    return (
+      <li>
+        <details aria-label={`Data of ${item.entry.kind} ${item.entry.summary}`}>
+          <summary>{line}</summary>
+          <pre className="ag-data">{dataBody(item.entry.data)}</pre>
+        </details>
+      </li>
+    );
+  }
+  return <li>{line}</li>;
+}
 
 type Asking = 'none' | 'message' | 'cancel';
 
@@ -161,19 +195,29 @@ function Controls({ detail, declared, inRoster, onAsk }: {
   );
 }
 
-export function RunDetail({ agents, now }: { readonly agents: Agents; readonly now: number }) {
+export function RunDetail({ agents, now, onGoToMessage }: { readonly agents: Agents; readonly now: number; readonly onGoToMessage: (messageId: number) => void }) {
   const detail = agents.state.detail;
+  const held = detail?.run ?? null;
+  const open = held !== null && !runEnded(held.state);
+  // The duration of an open run is to now: it moves every second.
+  const tick = useNow(open, 1000);
   if (detail === null) return null;
   const run = detail.run;
   const session = agents.state.roster.find((s) => s.id === detail.sessionId);
   const declared = new Set<InterventionKind>(session?.interventions ?? []);
   const href = safeLink(run?.link);
   const ended = run !== null && runEnded(run.state);
+  const items = timeline(detail.activity, detail.interventions);
 
   return (
     <article aria-label="Run detail" className="ag-run">
       <header>
-        <button type="button" onClick={agents.closeRun}>
+        <button
+          type="button"
+          onClick={() => {
+            agents.closeRun();
+          }}
+        >
           Back to conversation
         </button>
         <h2>Run #{detail.runId}</h2>
@@ -213,6 +257,11 @@ export function RunDetail({ agents, now }: { readonly agents: Agents; readonly n
               <dd>{clockSeconds(run.ended_at)}</dd>
             </>
           )}
+          <dt>Duration</dt>
+          <dd data-testid="run-duration">
+            {spanText(runSpan(run, tick), false)}
+            {ended ? '' : ' so far'}
+          </dd>
           {run.outcome === undefined || run.outcome === '' ? null : (
             <>
               <dt>Outcome</dt>
@@ -223,13 +272,25 @@ export function RunDetail({ agents, now }: { readonly agents: Agents; readonly n
       )}
       {agents.state.link === 'live' ? null : <p className="stale">Live updates paused: reconnecting…</p>}
       {detail.problem === null ? null : <p role="alert">{detail.problem}</p>}
+      {run === null ? null : run.message_id === undefined ? (
+        <button type="button" disabled aria-label="Go to message: this run answers no message">
+          No message
+        </button>
+      ) : (
+        <button
+          type="button"
+          aria-label={`Go to message #${String(run.message_id)}`}
+          onClick={() => {
+            if (run.message_id !== undefined) onGoToMessage(run.message_id);
+          }}
+        >
+          Go to message
+        </button>
+      )}
       <h3>Activity ({detail.activity.length})</h3>
-      <ol className="ag-activity" aria-label="Activity">
-        {detail.activity.map((e) => (
-          <li key={e.id}>
-            <time>{clockSeconds(e.at)}</time> <span className="ag-kind">{e.kind}</span> <span>{e.summary}</span>
-            {e.outcome === undefined || e.outcome === '' ? null : <span className="ag-prose"> → {e.outcome}</span>}
-          </li>
+      <ol className="ag-activity" aria-label="Timeline">
+        {items.map((item, i) => (
+          <TimelineLine key={item.key} item={item} previous={items[i - 1]} start={run === null ? null : Date.parse(run.started_at)} />
         ))}
       </ol>
       <h3>Interventions ({detail.interventions.length})</h3>

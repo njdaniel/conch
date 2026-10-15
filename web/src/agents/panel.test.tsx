@@ -2,6 +2,7 @@
 // sees them, against a fake conchd (fetch) and a fake WebSocket that sends the
 // frames. No network, no browser.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { BoundFunctions, queries } from '@testing-library/dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import type { SessionStatus } from '../schema/session';
@@ -134,6 +135,11 @@ interface Server {
   deletes: { id: number; keepalive: boolean | undefined }[];
   runList: Json[];
   runListUrls: string[];
+  // The channel's runs (no session in the query), and the queries asked.
+  channelRuns: Json[];
+  channelRunUrls: string[];
+  // The channel's messages, newest first, as the history read returns them.
+  messages: Json[];
   runs: Record<number, Json>;
   activity: Json[];
   interventions: Json[];
@@ -144,6 +150,12 @@ interface Server {
 
 let server: Server;
 
+// beforeOf keeps the runs below the query's `before`, as the server pages.
+const beforeOf = (url: URL) => (r: Json) => {
+  const before = Number(url.searchParams.get('before') ?? 0);
+  return before === 0 || (r.id as number) < before;
+};
+
 function install() {
   server = {
     sessionCreates: [],
@@ -151,6 +163,9 @@ function install() {
     deletes: [],
     runList: [],
     runListUrls: [],
+    channelRuns: [],
+    channelRunUrls: [],
+    messages: [],
     runs: { 41: run() },
     activity: [],
     interventions: [],
@@ -182,6 +197,10 @@ function install() {
         return Promise.resolve(new Response(null, { status: 204 }));
       }
       if (path === '/v1/runs') {
+        if (!url.searchParams.has('session')) {
+          server.channelRunUrls.push(url.search);
+          return Promise.resolve(json({ runs: server.channelRuns.filter(beforeOf(url)).slice(0, Number(url.searchParams.get('limit'))) }));
+        }
         server.runListUrls.push(url.search);
         return Promise.resolve(json({ runs: server.runList }));
       }
@@ -202,7 +221,7 @@ function install() {
       const m = /^\/v[12]\/channels\/([^/]+)\/(members|nets|messages)$/.exec(path);
       if (m?.[2] === 'members') return Promise.resolve(json(members));
       if (m?.[2] === 'nets') return Promise.resolve(json({ nets: [] }));
-      if (m?.[2] === 'messages') return Promise.resolve(json({ messages: [] }));
+      if (m?.[2] === 'messages') return Promise.resolve(json({ messages: server.messages }));
       return Promise.resolve(json({}, 404));
     }),
   );
@@ -705,5 +724,320 @@ describe('a session the server ended', () => {
     await panel().findByText('Session ended; could not start a new one');
     expect(server.sessionCreates).toHaveLength(2);
     expect(events()).toHaveLength(1);
+  });
+});
+
+// The Runs view and the richer timeline (issue #350).
+
+const runsList = () => panel().findByRole('list', { name: 'Channel runs' });
+const rowOf = (list: HTMLElement, label: string) => within(list).getByRole('button', { name: label }).closest('li') as HTMLElement;
+
+async function openRuns(runs: Json[]) {
+  server.channelRuns = runs;
+  const socket = await openApp();
+  await showRoster(socket, [session(100, 2), agentSession({ current_run: undefined, task: undefined })]);
+  return socket;
+}
+
+describe('the Runs view', () => {
+  it('lists the channel runs newest first with state, agent, task, start, end and outcome, from one request', async () => {
+    await openRuns([
+      run({ id: 40, state: 'completed', ended_at: '2026-10-14T10:00:12.000Z', outcome: 'all <b>done</b>', task: 'Earlier job' }),
+      run({ id: 42, state: 'failed', ended_at: '2026-10-14T10:03:00.000Z', task: 'Third' }),
+      run({ id: 41 }),
+    ]);
+    const list = await runsList();
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.map((r) => within(r).getByRole('button').textContent)).toEqual(['#42 · failed', '#41 · running', '#40 · completed']);
+    expect(rowOf(list, '#40 · completed').textContent).toContain('bot');
+    expect(rowOf(list, '#40 · completed').textContent).toContain('task: Earlier job');
+    expect(rowOf(list, '#40 · completed').textContent).toContain('ended');
+    expect(rowOf(list, '#40 · completed').textContent).toContain('all <b>done</b>');
+    expect(list.querySelector('b')).toBeNull();
+    expect(rowOf(list, '#41 · running').textContent).toContain('for ');
+    expect(server.channelRunUrls).toHaveLength(1);
+    const query = new URLSearchParams(server.channelRunUrls[0]);
+    expect(query.get('channel')).toBe('general');
+    expect(query.get('order')).toBe('desc');
+    expect(query.get('limit')).toBe('50');
+    expect(query.has('before')).toBe(false);
+    expect(query.has('session')).toBe(false);
+  });
+
+  it('says so when the channel has no runs', async () => {
+    await openRuns([]);
+    await panel().findByText('No runs in this channel');
+  });
+
+  it('filters all, open and ended, with a named control', async () => {
+    await openRuns([run({ id: 42, state: 'cancelled', ended_at: at }), run({ id: 41 }), run({ id: 40, state: 'blocked' })]);
+    const list = await runsList();
+    const filter = panel().getByRole('combobox', { name: 'Filter runs' });
+    fireEvent.change(filter, { target: { value: 'open' } });
+    expect(within(list).getAllByRole('button').map((b) => b.textContent)).toEqual(['#41 · running', '#40 · blocked']);
+    fireEvent.change(filter, { target: { value: 'ended' } });
+    expect(within(await runsList()).getAllByRole('button').map((b) => b.textContent)).toEqual(['#42 · cancelled']);
+    fireEvent.change(filter, { target: { value: 'all' } });
+    expect(within(await runsList()).getAllByRole('button')).toHaveLength(3);
+  });
+
+  it('says no runs of that kind when the filter keeps none', async () => {
+    await openRuns([run({ id: 41 })]);
+    await runsList();
+    fireEvent.change(panel().getByRole('combobox', { name: 'Filter runs' }), { target: { value: 'ended' } });
+    expect(panel().getByText('No ended runs here')).toBeDefined();
+  });
+
+  it('is kept current by run frames: a state change, a new run, and never a step back from ended', async () => {
+    const socket = await openRuns([run({ id: 41 })]);
+    await runsList();
+    socket.send(run({ id: 41, state: 'blocked' }));
+    await panel().findByRole('button', { name: '#41 · blocked' });
+    socket.send(run({ id: 43, task: 'brand new' }));
+    const list = await runsList();
+    await waitFor(() => {
+      expect(within(list).getAllByRole('button').map((b) => b.textContent)).toEqual(['#43 · running', '#41 · blocked']);
+    });
+    socket.send(run({ id: 41, state: 'completed', ended_at: at }));
+    await panel().findByRole('button', { name: '#41 · completed' });
+    socket.send(run({ id: 41, state: 'running' }));
+    socket.send(run({ id: 44, channel_id: 8 }));
+    socket.send(run({ id: 45 }));
+    await panel().findByRole('button', { name: '#45 · running' });
+    expect(within(list).queryByRole('button', { name: '#44 · running' })).toBeNull();
+    expect(within(list).getByRole('button', { name: '#41 · completed' })).toBeDefined();
+  });
+
+  it('pages: a full page offers older runs, read below the smallest id, until a short page', async () => {
+    const all = Array.from({ length: 60 }, (_, i) => run({ id: 100 - i }));
+    await openRuns(all);
+    const list = await runsList();
+    expect(within(list).getAllByRole('button')).toHaveLength(50);
+    fireEvent.click(panel().getByRole('button', { name: 'Show older runs' }));
+    await waitFor(() => {
+      expect(within(list).getAllByRole('button')).toHaveLength(60);
+    });
+    expect(new URLSearchParams(server.channelRunUrls[1]).get('before')).toBe('51');
+    expect(panel().queryByRole('button', { name: 'Show older runs' })).toBeNull();
+    // Newest first still.
+    expect(within(list).getAllByRole('button')[59]?.textContent).toBe('#41 · running');
+  });
+
+  it('does not add a frame for a run older than the pages read, since paging will reach it', async () => {
+    const socket = await openRuns(Array.from({ length: 50 }, (_, i) => run({ id: 100 - i })));
+    const list = await runsList();
+    socket.send(run({ id: 10 }));
+    socket.send(run({ id: 101 }));
+    await panel().findByRole('button', { name: '#101 · running' });
+    expect(within(list).queryByRole('button', { name: '#10 · running' })).toBeNull();
+  });
+
+  it('opens the run in the centre when selected', async () => {
+    server.runs[42] = run({ id: 42, state: 'failed', ended_at: at, task: 'Third' });
+    await openRuns([run({ id: 42, state: 'failed', ended_at: at, task: 'Third' })]);
+    fireEvent.click(await panel().findByRole('button', { name: '#42 · failed' }));
+    const detail = within(await screen.findByRole('article', { name: 'Run detail' }));
+    expect(detail.getByRole('heading', { name: 'Run #42' })).toBeDefined();
+    expect(detail.getByTestId('run-state').textContent).toBe('failed');
+  });
+
+  it('says it could not list runs, and tries again', async () => {
+    const real = globalThis.fetch;
+    let fail = true;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+        if (fail && url.pathname === '/v1/runs') return Promise.resolve(json({}, 500));
+        return real(input, init);
+      }),
+    );
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2)]);
+    await panel().findByText('Could not list runs');
+    server.channelRuns = [run({ id: 41 })];
+    fail = false;
+    fireEvent.click(panel().getByRole('button', { name: 'Try again' }));
+    await panel().findByRole('button', { name: '#41 · running' });
+  });
+
+  it('shows the duration of an open run moving, and of an ended one fixed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.parse('2026-10-14T10:01:30.000Z'));
+      await openRuns([run({ id: 42, state: 'completed', ended_at: '2026-10-14T10:00:07.900Z' }), run({ id: 41 })]);
+      const list = await runsList();
+      expect(rowOf(list, '#41 · running').textContent).toContain('for 1m30s');
+      expect(rowOf(list, '#42 · completed').textContent).not.toContain('for ');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+const start = Date.parse(at);
+const stamp = (ms: number) => new Date(start + ms).toISOString();
+
+describe('the run timeline', () => {
+  const lineOf = (detail: BoundFunctions<typeof queries>) =>
+    detail.getAllByRole('listitem').filter((li) => li.closest('ol')?.getAttribute('aria-label') === 'Timeline');
+
+  it('gives each line its offset from the start and a gap only of a second or more', async () => {
+    server.activity = [
+      activity(1, { kind: 'run_started', summary: 'begin', at: stamp(0) }),
+      activity(2, { summary: 'a', at: stamp(3200) }),
+      activity(3, { summary: 'b', at: stamp(3900) }),
+      activity(4, { summary: 'c', at: stamp(65_000) }),
+      activity(5, { summary: 'd', at: stamp(3_725_000) }),
+    ];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    await detail.findByText('d');
+    const lines = lineOf(detail).map((li) => li.textContent.replace(/\s+/g, ' ').trim());
+    expect(lines).toEqual([
+      '+0.0s run_started begin',
+      '+3.2s (+3s) command_finished a',
+      '+3.9s command_finished b',
+      '+1m05s (+1m01s) command_finished c',
+      '+1h02m05s (+1h01m00s) command_finished d',
+    ]);
+  });
+
+  it('shows the live duration of an open run, and the fixed one of an ended run', async () => {
+    server.runs[41] = run({ ended_at: stamp(83_000), state: 'completed' });
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    await waitFor(() => {
+      expect(detail.getByTestId('run-duration').textContent).toBe('1m23s');
+    });
+  });
+
+  it('interleaves the interventions by time among the activity, marked, a request and its answer each at its own time', async () => {
+    server.activity = [
+      activity(1, { summary: 'one', at: stamp(4000) }),
+      activity(2, { summary: 'two', at: stamp(6000) }),
+      activity(3, { summary: 'three', at: stamp(9000) }),
+    ];
+    server.interventions = [intervention(9, 'applied', { requested_at: stamp(5000), answered_at: stamp(8000) })];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    await detail.findByText('three');
+    await waitFor(() => {
+      expect(lineOf(detail)).toHaveLength(5);
+    });
+    const lines = lineOf(detail).map((li) => li.textContent.replace(/\s+/g, ' ').trim());
+    expect(lines).toEqual([
+      '+4.0s command_finished one',
+      '+5.0s (+1s) ↳ #9 message · asked · hello agent',
+      '+6.0s (+1s) command_finished two',
+      '+8.0s (+2s) ↳ #9 applied',
+      '+9.0s (+1s) command_finished three',
+    ]);
+    // The mark is a class, not only the arrow.
+    expect(lineOf(detail)[1]?.querySelector('.ag-iv')).not.toBeNull();
+    expect(lineOf(detail)[0]?.querySelector('.ag-iv')).toBeNull();
+    // The history list stays.
+    expect(detail.getByTestId('intervention-9').textContent).toBe('Applied');
+  });
+
+  it('words a request not yet answered as requested… and a failed one with its reason', async () => {
+    server.interventions = [
+      intervention(9, 'requested', { requested_at: stamp(1000) }),
+      intervention(10, 'failed', { requested_at: stamp(2000), answered_at: stamp(2500), reason: 'no <b>way</b>' }),
+    ];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    await waitFor(() => {
+      expect(lineOf(detail)).toHaveLength(3);
+    });
+    const text = lineOf(detail).map((li) => li.textContent.replace(/\s+/g, ' ').trim());
+    expect(text[0]).toBe('+1.0s ↳ #9 message · requested… · hello agent');
+    expect(text[2]).toBe('+2.5s ↳ #10 failed: no <b>way</b>');
+  });
+
+  it('takes a new activity frame into place by its time', async () => {
+    server.activity = [activity(1, { summary: 'one', at: stamp(1000) }), activity(3, { summary: 'three', at: stamp(5000) })];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    await detail.findByText('three');
+    socket.send(activity(2, { summary: 'two', at: stamp(3000) }));
+    await detail.findByText('two');
+    expect(lineOf(detail).map((li) => li.textContent.replace(/\s+/g, ' ').trim().split(' ').pop())).toEqual(['one', 'two', 'three']);
+  });
+
+  it('unfolds and folds an entry with data, as text, and an entry without data is a plain line', async () => {
+    server.activity = [activity(1, { summary: 'with data', data: { a: 1, tag: '<i>x</i>' } }), activity(2, { summary: 'plain' })];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    const group = await detail.findByRole('group', { name: 'Data of command_finished with data' });
+    const body = group.querySelector('pre');
+    expect(group.hasAttribute('open')).toBe(false);
+    fireEvent.click(group.querySelector('summary') as HTMLElement);
+    expect(group.hasAttribute('open')).toBe(true);
+    expect(body?.textContent).toBe(JSON.stringify({ a: 1, tag: '<i>x</i>' }, null, 2));
+    expect(body?.querySelector('i')).toBeNull();
+    fireEvent.click(group.querySelector('summary') as HTMLElement);
+    expect(group.hasAttribute('open')).toBe(false);
+    expect(detail.getAllByRole('group')).toHaveLength(1);
+  });
+
+  it('cuts a body over 2 KiB with an ellipsis', async () => {
+    server.activity = [activity(1, { summary: 'big', data: { text: 'x'.repeat(5000) } })];
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    const body = (await detail.findByRole('group', { name: 'Data of command_finished big' })).querySelector('pre');
+    const text = body?.textContent ?? '';
+    expect(text.endsWith('…')).toBe(true);
+    expect(new TextEncoder().encode(text.slice(0, -1))).toHaveLength(2048);
+  });
+});
+
+describe('Go to message', () => {
+  const held = (id: number) => ({ schema: 'conch.message.v2', id, channel_id: 7, author_id: 3, created_at: at, body: `message ${String(id)}` });
+  let scrolled: Element[];
+  beforeEach(() => {
+    scrolled = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+  });
+
+  it('closes run detail and scrolls to the message the run answers, with focus on it', async () => {
+    server.messages = [held(6), held(5), held(4)];
+    server.runs[41] = run({ message_id: 5 });
+    const socket = await openApp();
+    await screen.findByText('message 5');
+    const detail = within(await openRunDetail(socket, {}));
+    fireEvent.click(await detail.findByRole('button', { name: 'Go to message #5' }));
+    await waitFor(() => {
+      expect(scrolled).toHaveLength(1);
+    });
+    expect(screen.queryByRole('article', { name: 'Run detail' })).toBeNull();
+    expect(scrolled[0]?.getAttribute('data-message-id')).toBe('5');
+    expect(scrolled[0]?.textContent).toContain('message 5');
+    expect(document.activeElement).toBe(scrolled[0]);
+  });
+
+  it('says the message is older than the history held when it is not there', async () => {
+    server.messages = [held(6)];
+    server.runs[41] = run({ message_id: 5 });
+    const socket = await openApp();
+    await screen.findByText('message 6');
+    const detail = within(await openRunDetail(socket, {}));
+    fireEvent.click(await detail.findByRole('button', { name: 'Go to message #5' }));
+    await panel().findByText('Message #5 is older than the history held');
+    expect(scrolled).toHaveLength(0);
+    expect(screen.queryByRole('article', { name: 'Run detail' })).toBeNull();
+  });
+
+  it('is disabled and says No message when the run answers none', async () => {
+    const socket = await openApp();
+    const detail = within(await openRunDetail(socket));
+    const button = await detail.findByRole('button', { name: 'Go to message: this run answers no message' });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.textContent).toBe('No message');
   });
 });
