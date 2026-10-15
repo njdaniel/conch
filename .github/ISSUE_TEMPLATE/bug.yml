@@ -33,7 +33,7 @@ body:
     id: version
     attributes:
       label: Conch version
-      description: Shown in the web client's about panel, or by `conch version` / `conchd version`.
+      description: The version you were sent with your invite or the release notes. Or run `conch version`. If you are not sure, write "not sure".
       placeholder: v0.1.0-alpha.1
     validations:
       required: true
@@ -58,4 +58,4 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics (optional)
-      description: Anything else that might help, such as a diagnostics bundle or a log excerpt. Check it for secrets first.
+      description: Logs or error text, if you have them. Check them for secrets first.
