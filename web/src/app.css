@@ -267,3 +267,7 @@ body {
 .whisper-person {
   white-space: nowrap;
 }
+
+.voice p {
+  margin: 0;
+}

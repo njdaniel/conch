@@ -60,6 +60,16 @@ describe('rendering hygiene', () => {
   });
 });
 
+// The browser has no voice (#395): no device permission is ever asked for.
+describe('media devices', () => {
+  it('are never reached for: no getUserMedia, no navigator.mediaDevices', () => {
+    const hits = Object.entries(sources)
+      .filter(([, code]) => /getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/.test(code))
+      .map(([path]) => path);
+    expect(hits).toEqual([]);
+  });
+});
+
 describe('the socket ticket', () => {
   it('is in src/api.ts alone, and the page is never navigated by script', () => {
     const touching = Object.entries(sources)
