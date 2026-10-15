@@ -1205,10 +1205,18 @@ func ownedRunTx(ctx context.Context, tx execer, runID, credentialID int64, reade
 // reads no run's content, only how many there are, and is here because this
 // is the one file that reads the runs table. CreateRun asks it inside its
 // transaction.
+// openRunStates are the states of a run that has not ended; a terminal state
+// sets ended_at (the table's CHECK ties them), so the two are the same set.
+var openRunStates = [5]schema.RunState{schema.RunStateQueued, schema.RunStateStarting, schema.RunStateRunning, schema.RunStateBlocked, schema.RunStateWaiting}
+
 func countOpenRunsTx(ctx context.Context, tx execer, sessionID int64) (int, error) {
 	var n int
+	// By the open states, not ended_at: runs_by_session (session_id, state)
+	// then answers from the index alone, touching only open runs instead of
+	// the session's whole history, inside the write lock.
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM runs WHERE session_id = ? AND ended_at IS NULL", sessionID).Scan(&n); err != nil {
+		"SELECT COUNT(*) FROM runs WHERE session_id = ? AND state IN (?, ?, ?, ?, ?)", sessionID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4]).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count open runs of session %d: %w", sessionID, err)
 	}
 	return n, nil

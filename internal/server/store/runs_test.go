@@ -1017,3 +1017,25 @@ func TestAppendRunActivityBound(t *testing.T) {
 		t.Errorf("an entry on an ended full run: err = %v, want ErrInvalidTransition", err)
 	}
 }
+
+// TestOpenRunStatesAreTheStatesThatHaveNotEnded keeps the open-runs count's
+// state list in step with the schema: every valid state is listed exactly
+// when it is not terminal.
+func TestOpenRunStatesAreTheStatesThatHaveNotEnded(t *testing.T) {
+	all := []schema.RunState{
+		schema.RunStateQueued, schema.RunStateStarting, schema.RunStateRunning, schema.RunStateBlocked,
+		schema.RunStateWaiting, schema.RunStateCompleted, schema.RunStateFailed, schema.RunStateCancelled,
+	}
+	for _, s := range all {
+		if !s.Valid() {
+			t.Fatalf("%q is not a valid run state", s)
+		}
+		listed := false
+		for _, o := range openRunStates {
+			listed = listed || o == s
+		}
+		if listed == schema.RunStateTerminal(s) {
+			t.Errorf("%q: listed as open = %v, terminal = %v", s, listed, schema.RunStateTerminal(s))
+		}
+	}
+}
