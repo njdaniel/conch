@@ -293,8 +293,10 @@ func (s *Store) HeartbeatSession(ctx context.Context, id, credentialID int64, no
 // ended.
 func (s *Store) EndSession(ctx context.Context, actor string, id, credentialID int64, now time.Time) error {
 	now = now.Truncate(time.Millisecond)
-	return s.withImmediateTx(ctx, func(tx execer) error {
-		ended, err := endSessionsTx(ctx, tx, actor, "id = ? AND credential_id = ?", []any{id, credentialID}, SessionEndedByClient, now)
+	var runs []EndedRun
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
+		ended, err := endSessionsTx(ctx, tx, actor, "id = ? AND credential_id = ?", []any{id, credentialID}, SessionEndedByClient, now, &runs)
 		if err != nil {
 			return err
 		}
@@ -303,22 +305,27 @@ func (s *Store) EndSession(ctx context.Context, actor string, id, credentialID i
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.announceRunsEnded(runs)
+	return nil
 }
 
 // endCredentialSessionsTx ends every session that has not ended of credential
 // credentialID, one session_ended event each with the given cause. It is
 // called inside the transactions that revoke a credential, so there is no
 // moment at which the credential is dead and its session is live.
-func endCredentialSessionsTx(ctx context.Context, tx execer, actor string, credentialID int64, cause string, now time.Time) error {
-	_, err := endSessionsTx(ctx, tx, actor, "credential_id = ?", []any{credentialID}, cause, now)
+func endCredentialSessionsTx(ctx context.Context, tx execer, actor string, credentialID int64, cause string, now time.Time, ended *[]EndedRun) error {
+	_, err := endSessionsTx(ctx, tx, actor, "credential_id = ?", []any{credentialID}, cause, now, ended)
 	return err
 }
 
 // endPrincipalSessionsTx is endCredentialSessionsTx for every session of a
 // principal, whatever credential it was made with: disabling a principal ends
 // them all.
-func endPrincipalSessionsTx(ctx context.Context, tx execer, actor string, principalID int64, cause string, now time.Time) error {
-	_, err := endSessionsTx(ctx, tx, actor, "principal_id = ?", []any{principalID}, cause, now)
+func endPrincipalSessionsTx(ctx context.Context, tx execer, actor string, principalID int64, cause string, now time.Time, ended *[]EndedRun) error {
+	_, err := endSessionsTx(ctx, tx, actor, "principal_id = ?", []any{principalID}, cause, now, ended)
 	return err
 }
 
@@ -327,8 +334,9 @@ func endPrincipalSessionsTx(ctx context.Context, tx execer, actor string, princi
 // ended_at and the offline state together and writes one session_ended event
 // per session, and fails the session's open runs (endSessionRunsTx). The
 // caller must hold the write lock (withImmediateTx) so the set it reads is the
-// set it ends. It returns how many it ended.
-func endSessionsTx(ctx context.Context, tx execer, actor, where string, args []any, cause string, now time.Time) (int, error) {
+// set it ends. It returns how many it ended, and appends the runs that ended
+// with them to *endedRuns, for the caller to announce after the commit.
+func endSessionsTx(ctx context.Context, tx execer, actor, where string, args []any, cause string, now time.Time, endedRuns *[]EndedRun) (int, error) {
 	type live struct{ id, principalID, credentialID int64 }
 	rows, err := tx.QueryContext(ctx,
 		"SELECT id, principal_id, credential_id FROM sessions WHERE ended_at IS NULL AND "+where+" ORDER BY id", args...) // #nosec G202 -- where is a constant of this package
@@ -368,7 +376,7 @@ func endSessionsTx(ctx context.Context, tx execer, actor, where string, args []a
 		}
 		// The agent can no longer see this session's runs, so they end with
 		// it, in the same transaction (issue #402).
-		if _, err := endSessionRunsTx(ctx, tx, actor, l.id, now); err != nil {
+		if err := endSessionRunsTx(ctx, tx, actor, l.id, now, endedRuns); err != nil {
 			return 0, err
 		}
 	}
@@ -397,8 +405,10 @@ type SweepResult struct {
 func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline time.Duration) (SweepResult, error) {
 	now = now.Truncate(time.Millisecond)
 	var out SweepResult
+	var runs []EndedRun
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out = SweepResult{}
+		runs = nil
 		type going struct{ id, principalID, credentialID int64 }
 		rows, err := tx.QueryContext(ctx,
 			`SELECT id, principal_id, credential_id FROM sessions
@@ -454,12 +464,13 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 		// finds their sessions.
 		out.Expired, err = endSessionsTx(ctx, tx, "system",
 			"credential_id IN (SELECT id FROM credentials WHERE expires_at IS NOT NULL AND expires_at <= ?)",
-			[]any{now.UnixMilli()}, SessionEndedExpiry, now)
+			[]any{now.UnixMilli()}, SessionEndedExpiry, now, &runs)
 		return err
 	})
 	if err != nil {
 		return SweepResult{}, err
 	}
+	s.announceRunsEnded(runs)
 	return out, nil
 }
 

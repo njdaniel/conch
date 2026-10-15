@@ -1249,29 +1249,30 @@ func countOpenRunsOfCredentialTx(ctx context.Context, tx execer, credentialID in
 // run's started_at), and one run_ended event each, in the caller's
 // transaction. The agent can no longer see these runs, so left open they
 // would hold a slot of the credential's bound for good (issue #402). It
-// returns how many it ended.
-func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID int64, now time.Time) (int, error) {
+// appends each run it ended to *ended, for the caller to announce once the
+// transaction has committed (issue #405).
+func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID int64, now time.Time, ended *[]EndedRun) error {
 	type open struct{ id, principalID, channelID int64 }
 	rows, err := tx.QueryContext(ctx,
 		"SELECT id, principal_id, channel_id FROM runs WHERE session_id = ? AND state IN (?, ?, ?, ?, ?) ORDER BY id", sessionID,
 		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
 	if err != nil {
-		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
 	}
 	var found []open
 	for rows.Next() {
 		var o open
 		if err := rows.Scan(&o.id, &o.principalID, &o.channelID); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("store: scan open run: %w", err)
+			return fmt.Errorf("store: scan open run: %w", err)
 		}
 		found = append(found, o)
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
 	}
 	for _, o := range found {
 		res, err := tx.ExecContext(ctx,
@@ -1279,19 +1280,20 @@ func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID in
 			string(schema.RunStateFailed), RunOutcomeSessionEnded, now.UnixMilli(), o.id,
 			openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
 		if err != nil {
-			return 0, fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+			return fmt.Errorf("store: end run %d with its session: %w", o.id, err)
 		}
 		if n, err := res.RowsAffected(); err != nil {
-			return 0, fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+			return fmt.Errorf("store: end run %d with its session: %w", o.id, err)
 		} else if n != 1 {
-			return 0, fmt.Errorf("store: end run %d with its session: affected %d rows", o.id, n)
+			return fmt.Errorf("store: end run %d with its session: affected %d rows", o.id, n)
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditRunEnded, runSubject(o.id),
 			fmt.Sprintf("state=%s cause=session_ended session=%d principal=%d channel=%d", schema.RunStateFailed, sessionID, o.principalID, o.channelID), now); err != nil {
-			return 0, err
+			return err
 		}
+		*ended = append(*ended, EndedRun{ID: o.id, ChannelID: o.channelID})
 	}
-	return len(found), nil
+	return nil
 }
 
 // countRunActivityTx is how many activity entries run runID holds, for
