@@ -4,8 +4,10 @@ name: Release
 # the tag push is the sign-off act. Procedure: .claude/skills/release/.
 # Re-runs the full gate plus the three canaries, dogfood-check (P1),
 # p2-hardening-check (P2) and p3-local-check (P3); a release does not ship
-# when any fails. Builds both binaries and creates a DRAFT release —
-# publishing stays human.
+# when any fails. Builds both binaries. A plain tag (v1.2.3) creates a DRAFT
+# release that Nick publishes; a tag with a pre-release suffix
+# (v0.1.0-alpha.1) is published at once as a GitHub pre-release, since
+# pushing that tag is itself Nick's sign-off for a test build.
 
 on:
   push:

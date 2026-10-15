@@ -14,5 +14,5 @@ release that Nick publishes.
   reports `git describe`, and a plain `go build` reports its commit. `conchd
   version`, `conch version`, `GET /healthz`, `GET /v1/whoami` (a new optional
   `server_version` field), `conch whoami` and the web client (sign-in page and
-  the lobby header) show it.
+  the lobby footer) show it.
 - Tags with a pre-release suffix produce a GitHub pre-release.

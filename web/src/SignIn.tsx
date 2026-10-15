@@ -65,9 +65,7 @@ export function SignIn({
           {notice === null ? '' : noticeText(notice)}
         </p>
       </form>
-      <p className="hint">
-        <ServerVersion />
-      </p>
+      <ServerVersion className="hint" />
     </main>
   );
 }
