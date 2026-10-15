@@ -1,10 +1,10 @@
 // P3-06 and P3-08: a run of a scripted agent as the panel shows it, and the
-// instruction a person can give it.
+// instructions a person can give it: cancel, pause and resume.
 import { activityOf, interventions, post, roster, run, runsIn } from './api';
 import { expect, signIn, test } from './fixtures';
 import { launchWorker } from './agents';
 
-test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is acknowledged, Pause is not offered', async ({ meet, world }) => {
+test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is acknowledged', async ({ meet, world }) => {
   const worker = await launchWorker(world, 'slow.sh', { sleep: 120 });
   try {
     const { page } = await meet();
@@ -47,12 +47,12 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     await expect(detail.getByTestId('run-state')).toHaveText(started.state);
     await expect(detail).toContainText(started.task);
 
-    // Pause is not something a person is given here until #346 adds the
-    // control. The adapter now declares pause, so the server no longer refuses
-    // it; no API request for it is made, because one that the adapter applies
-    // would pause this run under the steps below. #346 adds the control and
-    // its test.
-    await expect(detail.getByRole('button', { name: 'Pause' })).toHaveCount(0);
+    // The adapter declares pause and resume: Pause is offered on a running run
+    // and Resume waits for a paused one. Neither is clicked here; the next test
+    // does.
+    await expect(detail.getByRole('button', { name: 'Pause' })).toBeEnabled();
+    await expect(detail.getByRole('button', { name: 'Resume' })).toBeDisabled();
+    await expect(detail.getByText('Not supported by this agent')).toHaveCount(0);
 
     // From here every change the page makes to the run's state or to its
     // history of asks is reported to the test as it happens, and the test
@@ -104,6 +104,84 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
       });
     }
     expect(changes.some((o) => o.asks.some((w) => w === 'acknowledged' || w === 'applied'))).toBe(true);
+  } finally {
+    await worker.stop();
+  }
+});
+
+test('P3-08 Pause and Resume reach the real adapter: the page reads waiting only after the API does, then the run completes', async ({ meet, world }) => {
+  // hang.sh keeps a process of its own for 12 seconds before it replies; the
+  // wait does not run out while the command is stopped.
+  const worker = await launchWorker(world, 'hang.sh', { sleep: 12 });
+  try {
+    const { page } = await meet();
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const asked = await post(world, world.tokens.nick, 'general', 'p3-08 pause and resume work for the worker');
+    let seen = 0;
+    await expect
+      .poll(async () => {
+        seen = (await runsIn(world, world.tokens.browser, 'general')).find((r) => r.message_id === asked.id)?.id ?? 0;
+        return seen;
+      }, { message: 'a run answering the message' })
+      .toBeGreaterThan(0);
+    await expect.poll(async () => (await run(world, world.tokens.browser, seen)).state, { message: 'the run is running' }).toBe('running');
+
+    const panel = page.getByRole('region', { name: 'Members list' });
+    await panel.getByRole('button', { name: /worker-test/ }).click();
+    await panel.getByRole('button', { name: new RegExp(`^Run #${String(seen)} · `) }).click();
+    const detail = page.getByRole('article', { name: 'Run detail' });
+    await expect(detail.getByTestId('run-state')).toHaveText('running');
+
+    // Report every state the page shows, with what the API says at that moment:
+    // the page must never read waiting before the API does.
+    const changes: { state: string; apiState: string }[] = [];
+    await page.exposeFunction('conchObserved', async (state: string) => {
+      changes.push({ state, apiState: (await run(world, world.tokens.browser, seen)).state });
+    });
+    await page.evaluate(() => {
+      const report = (window as unknown as { conchObserved: (state: string) => Promise<void> }).conchObserved;
+      let last = '';
+      new MutationObserver(() => {
+        const state = document.querySelector('[data-testid="run-state"]')?.textContent ?? '';
+        if (state === last) return;
+        last = state;
+        void report(state);
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
+
+    // Pause: no question, requested first, then the adapter's own answer.
+    await detail.getByRole('button', { name: 'Pause' }).click();
+    await expect(detail.getByRole('alertdialog')).toHaveCount(0);
+    await expect
+      .poll(async () => (await interventions(world, world.tokens.browser, seen)).map((i) => `${i.kind}:${i.state}`), { message: 'the pause is applied', timeout: 30_000 })
+      .toEqual(['pause:applied']);
+    await expect.poll(async () => (await run(world, world.tokens.browser, seen)).state, { message: 'the API reports the run waiting' }).toBe('waiting');
+    expect((await run(world, world.tokens.browser, seen)).outcome).toBe('paused');
+    await expect(detail.getByTestId('run-state')).toHaveText('waiting');
+    await expect(detail.getByRole('button', { name: 'Pause' })).toBeDisabled();
+    await expect(detail.getByRole('button', { name: 'Resume' })).toBeEnabled();
+    const paused = (await interventions(world, world.tokens.browser, seen))[0];
+    await expect(detail.getByTestId(`intervention-${String(paused?.id)}`)).toHaveText(`↳ #${String(paused?.id)} applied`);
+
+    // Stays paused past the command's own 12 seconds: the clock stopped too.
+    await page.waitForTimeout(14_000);
+    expect((await run(world, world.tokens.browser, seen)).state).toBe('waiting');
+
+    // Resume, and the run completes.
+    await detail.getByRole('button', { name: 'Resume' }).click();
+    await expect
+      .poll(async () => (await interventions(world, world.tokens.browser, seen)).map((i) => `${i.kind}:${i.state}`), { message: 'the resume is applied', timeout: 30_000 })
+      .toEqual(['pause:applied', 'resume:applied']);
+    await expect.poll(async () => (await run(world, world.tokens.browser, seen)).state, { message: 'the API reports the run completed', timeout: 45_000 }).toBe('completed');
+    await expect(detail.getByTestId('run-state')).toHaveText('completed');
+    await expect(detail.getByText('The run has ended')).toBeVisible();
+
+    await expect.poll(() => changes.some((o) => o.state === 'completed'), { message: 'the page was seen to change to completed' }).toBe(true);
+    expect(changes.some((o) => o.state === 'waiting')).toBe(true);
+    for (const o of changes) {
+      if (o.state === 'waiting') expect(o.apiState, 'the page showed waiting before the API did').not.toBe('running');
+      if (o.state === 'completed') expect(o.apiState, 'the page showed completed before the API did').toBe('completed');
+    }
   } finally {
     await worker.stop();
   }

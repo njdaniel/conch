@@ -276,23 +276,28 @@ one `worker-test` (or `observer-test`): no duplicate identity.
 2. In a TUI, open the run (agents view, `enter` on the agent, `enter` on the
    run). Press `m`, type an instruction and press enter. In the browser's run
    detail use the `Message` button.
-3. Pause the run. The clients have no key for it yet, so ask the API as
-   `nick-test`, whose credential `tui-a.env` holds (the run id is in the detail), and look at the command's process
-   with `ps -o pid,stat,args --ppid <pid:agent-a>`:
+3. Pause the run: press `p` in the TUI's run detail, or `Pause` in the
+   browser's. Look at the command's process with
+   `ps -o pid,stat,args --ppid <pid:agent-a>`. Then resume it: `r`, or
+   `Resume`. (Both ask at once, with no question. The run offers `p` and
+   `Pause` while it is running and `r` and `Resume` while it reads waiting.)
+   To see the answers that fail, ask the API as `nick-test`, whose credential
+   `tui-a.env` holds (the run id is in the detail): a resume while the run is
+   running, or a second pause while it is paused.
 
    ```
    set -a; . <root>/tui-a.env; set +a
    curl -s -X POST -H "Authorization: Bearer $CONCH_TOKEN" -H 'Content-Type: application/json' \
-     -d '{"kind":"pause"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
+     -d '{"kind":"resume"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
    ```
 
-   Then the same with `{"kind":"resume"}`.
 4. Press `x` and answer `y` to cancel the run (in the browser, `Cancel`).
 5. Open the run of `observer-test` and look at what the detail offers.
 
 What should appear. The intervention shows `requested…`, then `acknowledged`,
 then `applied` (or `failed: <reason>`), from the agent's own reports. After the
-pause the run is `waiting` with the outcome `paused` and the command's state in
+pause the run is `waiting` with the outcome `paused` (the clients read it only
+from the run's own update, not when you press `p`) and the command's state in
 `ps` is `T` (stopped); the wait for its reply does not run out while it is
 paused. After the resume the run is `running` again and the state is `S`. A
 second pause says `failed: already paused`, a resume of a run that is not paused
@@ -481,6 +486,71 @@ its own, as P3-13 is.
 
 The same row without any model, with a stub for each program, is part of
 `go run ./e2e/p3-local` (it is listed there as P3-14, "three runtimes at once, with stubs").
+
+## From a guest
+
+Rows P3-02, P3-05, P3-09 and P3-10 can be repeated from a virtual machine on the
+same network, to see them from a client that is not on the server's own machine
+(issue #379; the tracking issue is #353). Windows and macOS guests are out of
+scope. The commands in this section are not checked against the runner's output
+the way the rest are; they are fenced as `text` for that reason.
+
+Start the community bound to the host's address on your network instead of
+loopback. Use an address of this machine and a port you choose:
+
+```text
+go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
+```
+
+It refuses an address that is not one of this machine's (loopback and link-local
+ones too), a missing `--keep`, and a URL that is not `http://` (`https://` needs a
+TLS front end of its own: issue #380), before it builds or starts anything. Its
+first output is a warning: over `http://` the credentials travel in clear text, so
+use it on a network you trust and use only the credentials this run creates. Every
+file in the root (`tui-b.env`, `agent-a.env`, `browser.txt` and the rest) then names
+that address. `--reset` removes the advertised run like any other.
+
+Stop `tui-b` and `agent-a` on the host before you start them on the guest: each
+credential would otherwise be one person twice. After the host's commands, the runner prints
+the guest's, apart under
+`---- on the guest ----`: `conch` as `guest-test`, the browser address, and
+`conch-adapter` as `worker-test`. The guest has none of the host's files. Copy
+`tui-b.env`, `agent-a.env`, `browser.txt` and `fixtures/` from the root to
+`~/conch-p3` on the guest (they hold credentials: use `scp`, not a shared
+folder others can read), and build `conch` and `conch-adapter` on the guest from a
+checkout of this repository. The printed commands override the paths in the env
+files that point into the host's root.
+
+The host's firewall must let the guest reach the port. One line for each of the
+two common firewalls:
+
+```text
+sudo ufw allow from <guest-subnet> to any port <port> proto tcp
+sudo firewall-cmd --zone=<zone> --add-rich-rule='rule family="ipv4" source address="<guest-subnet>" port port="<port>" protocol="tcp" accept'
+```
+
+`<zone>` is the zone of the interface the guest arrives on: find it with
+`firewall-cmd --get-zone-of-interface <iface>`. libvirt puts its bridge `virbr0` in
+a zone of its own, `libvirt`, which rejects everything not listed, so for NAT
+through `virbr0` the zone is `libvirt`, not the default one. `firewall-cmd`
+changes the running rules only; remove the rule when you are done.
+
+Which address to advertise depends on the guest's network. With NAT (the usual
+default of a VM manager) the guest reaches the host at the host's address on the
+virtual bridge (for libvirt, `192.168.122.1`), and nothing else on your network
+can reach the guest. VirtualBox's NAT host alias, `10.0.2.2`, is on no host
+interface, so the runner refuses it: advertise the host's LAN address there. With bridged networking the guest is a machine on your LAN
+and reaches the host at its LAN address. `localhost` in the guest is the guest,
+not the host: never use it, and never `127.0.0.1`, for the server.
+
+Repeat these rows from the guest, with the host's windows as the other people:
+
+| Row | What to check from the guest |
+| --- | --- |
+| P3-02 | A line sent from the guest appears once in every host window, in order, and theirs appear in the guest. |
+| P3-05 | `guest-test` is refused `test-private` from the guest as from the host. |
+| P3-09 | Stop and start the server (the host's commands); the guest reconnects without signing in again. |
+| P3-10 | Revoking a credential or removing a member on the host takes effect for the guest's session. |
 
 ## When you are done
 
