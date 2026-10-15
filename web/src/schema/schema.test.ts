@@ -1,19 +1,25 @@
-// Checks the hand-written TypeScript wire types against pkg/schema's golden
-// fixtures, the same files the Go tests decode. A type that has drifted from
-// Go fails here; a validator that has drifted from its type fails the
-// typecheck.
+// Checks the TypeScript wire types, generated from pkg/schema by
+// `go generate ./pkg/schema`, against pkg/schema's golden fixtures, the same
+// files the Go tests decode. A generated validator that disagrees with Go
+// fails here; one that disagrees with its type fails the typecheck.
 import { describe, expect, it } from 'vitest';
-import { listChannelMembersResponseV1, listChannelsResponse, channelMemberV1, channelV0 } from './channel';
-import { approvalV1, option } from './approval';
-import { listMessagesResponseV2, messageV2, postMessageRequestV2, postMessageResponseV2 } from './message';
-import { listNetsResponseV1, netV1 } from './net';
-import { whoAmIResponseV1 } from './principal';
-import { wsTicketV1 } from './ticket';
-import { agentActivityV1, listActivityResponseV1 } from './activity';
-import { errorV0 } from './error';
-import { createInterventionRequestV1, interventionV1, listInterventionsResponseV1 } from './intervention';
-import { listRunsResponseV1, runV1 } from './run';
-import { createSessionRequestV1, sessionRosterV1, sessionV1 } from './session';
+import {
+  agentActivityV1,
+  approvalV1,
+  channelMemberV1,
+  channelV0,
+  interventionV1,
+  listChannelsResponse,
+  listMessagesResponseV2,
+  messageV2,
+  postMessageResponseV2,
+  runV1,
+  sessionRosterV1,
+  sessionV1,
+  whoAmIResponseV1,
+  wsTicketV1,
+} from './generated';
+import { families } from './generated.families';
 import type { Validator } from './validate';
 
 // Read by relative path, so the test sees the fixtures of this checkout.
@@ -26,37 +32,10 @@ const byName = new Map(
   Object.entries(fixtures).map(([path, doc]) => [path.slice(path.lastIndexOf('/') + 1), doc]),
 );
 
-// Each fixture family that has a TypeScript type. A family is a base name and
-// its variants: message-v2 is message-v2.json and every message-v2-*.json, so
-// a fixture Go adds later is checked without a change here.
-const families: [string, Validator<unknown>][] = [
-  ['whoami-response-v1', whoAmIResponseV1],
-  ['channel-v0', channelV0],
-  ['list-channels-response', listChannelsResponse],
-  ['message-v2', messageV2],
-  ['channel-member-v1', channelMemberV1],
-  ['list-channel-members-response-v1', listChannelMembersResponseV1],
-  ['list-messages-response-v2', listMessagesResponseV2],
-  ['post-message-request-v2', postMessageRequestV2],
-  ['post-message-response-v2', postMessageResponseV2],
-  ['ws-ticket-v1', wsTicketV1],
-  ['conch-approval-v1', approvalV1],
-  ['approval-option-v1', option],
-  ['net-v1', netV1],
-  ['list-nets-response-v1', listNetsResponseV1],
-  ['session-v1', sessionV1],
-  ['session-roster-v1', sessionRosterV1],
-  ['create-session-request-v1', createSessionRequestV1],
-  ['run-v1', runV1],
-  ['list-runs-response-v1', listRunsResponseV1],
-  ['agent-activity-v1', agentActivityV1],
-  ['list-activity-response-v1', listActivityResponseV1],
-  ['intervention-v1', interventionV1],
-  ['create-intervention-request-v1', createInterventionRequestV1],
-  ['list-interventions-response-v1', listInterventionsResponseV1],
-  ['error', errorV0],
-];
-
+// families, generated from pkg/schema/ts.go, is each fixture family that has
+// a TypeScript type. A family is a base name and its variants: message-v2 is
+// message-v2.json and every message-v2-*.json, so a fixture Go adds later is
+// checked without a change here.
 function inFamily(file: string, family: string): boolean {
   return file === `${family}.json` || (file.startsWith(`${family}-`) && file.endsWith('.json'));
 }
