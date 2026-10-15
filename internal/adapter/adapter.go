@@ -18,7 +18,21 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// The two modes of the program. The subprocess mode runs a command per message;
+// the relay holds a session for a runtime that cannot (relay.go).
+const (
+	modeSubprocess = "subprocess"
+	modeRelay      = "relay"
+)
+
 type config struct {
+	// Mode is modeSubprocess or modeRelay.
+	Mode string
+	// The relay's own settings; see loadRelayConfig.
+	RelaySocket         string
+	Interventions       []schema.InterventionKind
+	InterventionTimeout time.Duration
+
 	Server          string
 	Token           string
 	PrincipalID     int64
@@ -69,7 +83,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	release, err := acquireLock(cfg.LockFile)
+	lock := acquireLock
+	if cfg.Mode == modeRelay {
+		lock = acquireRelayLock
+	}
+	release, err := lock(cfg.LockFile)
 	if err != nil {
 		return err
 	}
@@ -77,6 +95,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.Mode == modeRelay {
+		return runRelay(ctx, cfg, realTime{})
+	}
 	client := mcpclient.New(strings.TrimRight(cfg.Server, "/"), cfg.Token)
 	if err := client.Initialize(ctx, "conch-adapter"); err != nil {
 		return fmt.Errorf("initialize MCP: %w", err)
@@ -128,6 +149,13 @@ func loadConfig(lookup envLookup) (config, error) {
 	cfg.Server = get("CONCH_ADAPTER_SERVER", "CONCH_BOT_SERVER", "http://127.0.0.1:8080")
 	if cfg.Token, err = required("CONCH_ADAPTER_TOKEN", "CONCH_BOT_TOKEN"); err != nil {
 		return config{}, err
+	}
+	switch cfg.Mode = get("CONCH_ADAPTER_MODE", "", modeSubprocess); cfg.Mode {
+	case modeSubprocess:
+	case modeRelay:
+		return loadRelayConfig(cfg, get, lookup)
+	default:
+		return config{}, fmt.Errorf("CONCH_ADAPTER_MODE must be %s or %s", modeSubprocess, modeRelay)
 	}
 	principal, err := required("CONCH_ADAPTER_PRINCIPAL_ID", "CONCH_BOT_PRINCIPAL_ID")
 	if err != nil {

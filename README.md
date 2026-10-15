@@ -661,6 +661,31 @@ A member sees the session, the run and each activity entry live on `GET /v1/even
 
 What is refused: a wrong or revoked credential is `401`. Starting a run without `runs.manage`, or in a channel the sender is not in, is `404 channel_not_found` (audited as `access_denied`, with `capability_not_granted` or `not_a_member`); a report on an existing run after `runs.manage` is gone is `403 forbidden`. A body over 1 MiB is `413`; malformed JSON, an unknown field, activity `data` over 8 KiB or an `http://` link is `400`. Over a rate limit is `429` with `Retry-After`, audited as `agent_rate_limited`.
 
+#### When the sender cannot hold a session: the relay
+
+A one-shot script, or a CI job made of separate short commands, has no process that lives as long as its run, so nothing keeps its session alive and nothing remembers the ids. `conch-adapter` has a second mode for that: `CONCH_ADAPTER_MODE=relay`. The relay is an optional process beside the runtime. It registers one session, heartbeats it, and takes the runtime's reports on a Unix socket, which it forwards to `conchd` over REST with the same bodies as above. It runs no command and reads no channel, so its manifest needs `sessions.manage`, `runs.manage` and `post` in its one channel, and neither `messages.read` nor `messages.post`. It is not required for anything: a sender that can run the sequence above does not need it. It does not use MCP, which re-encodes activity `data`. Design and threat model: `docs/design/webhook-adapter.md` sections 7 and 8.
+
+```sh
+export CONCH_ADAPTER_MODE=relay CONCH_ADAPTER_SERVER=$API CONCH_ADAPTER_TOKEN=$(cat ci.token) \
+       CONCH_ADAPTER_CHANNEL=ops CONCH_ADAPTER_RUNTIME=github-actions
+conch-adapter &        # the socket is $XDG_RUNTIME_DIR/conch-adapter-relay.sock
+RELAY="curl -sf --unix-socket $XDG_RUNTIME_DIR/conch-adapter-relay.sock"
+
+RUN=$($RELAY -X POST http://relay/v1/runs -d '{"channel":"ops","task":"nightly build"}' | jq .id)
+$RELAY -X POST http://relay/v1/runs/$RUN/state -d '{"state":"running"}' >/dev/null
+$RELAY -X POST http://relay/v1/runs/$RUN/activity -d '{"kind":"command_finished","summary":"go test ./...","outcome":"passed"}' >/dev/null
+$RELAY -X POST http://relay/v1/runs/$RUN/state -d '{"state":"completed","outcome":"passed"}' >/dev/null
+kill %1                # SIGTERM ends the session
+```
+
+- **The socket.** A Unix socket only, mode 0600, in a directory that must be mode 0700 and owned by the relay's user: anyone who can open it (that user, and root) can report as the relay's principal, and nobody else. The relay never listens on TCP. It refuses to start without `XDG_RUNTIME_DIR` or `CONCH_ADAPTER_RELAY_SOCKET` (an absolute path of under 100 bytes), refuses a path that exists and is not a socket, and replaces the socket of a relay that died but not one that is running. Its lock file is `<socket>.lock`. In a CI job every step runs as that user, third-party actions included; they could already read the job's credential.
+- **The routes.** `GET /v1/session` (the relay's own session, for a readiness check), `POST /v1/runs`, `POST /v1/runs/{id}/state`, `POST /v1/runs/{id}/activity`, `GET /v1/interventions?state=&after=&limit=` and `POST /v1/interventions/{id}/ack`. They are `conchd`'s routes with the session made implicit, and take and return the same documents. Bodies are decoded strictly at 1 MiB with the same types before anything is forwarded: over the limit is `413 request_too_large`; malformed, an unknown field or a value the type refuses is `400 invalid_request`. `conchd`'s status, error body and `Retry-After` come back unchanged, so a manifest without `runs.manage` or a rate limit looks the same as on the direct routes.
+- **What the relay refuses itself,** without asking `conchd` (so it is not in the audit log; the relay logs the code and never a body): a run id it did not create (`404 run_not_found`; two relays on one credential cannot report on each other's runs), an intervention id it did not return from a poll (`404 intervention_not_found`) and a channel other than `CONCH_ADAPTER_CHANNEL` (`404 channel_not_found`).
+- **Interventions.** `CONCH_ADAPTER_INTERVENTIONS`, a comma-separated list of kinds, default empty: the relay declares none, so a request for any is refused at once with `409 intervention_unsupported`. For the kinds it declares, the script polls and answers through the socket. A request the script has not answered within `CONCH_ADAPTER_INTERVENTION_TIMEOUT` (default `60s`) is answered `failed` by the relay, with the reason `not taken by <runtime> within 60s`, so that a person who asks gets an answer; the script's late answer is then `conchd`'s `409 invalid_transition`. The relay looks for waiting requests at each heartbeat even if the script never polls, which costs one `runs.manage` call per heartbeat when kinds are declared. Answering never moves the run: after a cancel, the script reports `cancelled` itself.
+- **Stopping.** On SIGTERM or SIGINT the relay ends its session. It leaves open runs as they are and does not invent an outcome, so report a terminal state before stopping. Once the session has ended it is no longer in the roster, and the run stays open until someone changes it. A relay that is killed instead leaves its session to go stale and then offline, and the roster shows `outcome_unknown` on its open run.
+- **Settings.** `CONCH_ADAPTER_SERVER`, `CONCH_ADAPTER_TOKEN` and `CONCH_ADAPTER_CHANNEL` are required; `CONCH_ADAPTER_RUNTIME` (default `relay`) is a free label here, since no command runs; `CONCH_ADAPTER_MODEL` (default none), `CONCH_ADAPTER_HEARTBEAT` (default `10s`), `CONCH_ADAPTER_RELAY_SOCKET`, `CONCH_ADAPTER_LOCK_FILE`. `CONCH_ADAPTER_PRINCIPAL_ID` and the command settings are not read. Give each external runtime its own principal and credential, as above. A relay needs a `conchd` with authentication on: with `--auth off` it cannot start, because `conchd` refuses its session.
+- **A relay that cannot reach `conchd`** answers `502 internal_error` and keeps heartbeating; one that cannot register at start exits with the reason.
+
 ### 6. Verify your install
 
 ```sh
