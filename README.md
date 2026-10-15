@@ -443,6 +443,15 @@ interventions. A `message` is answered `applied` and its text goes into the
 prompt of the next replies to the same audience, and only that audience (the
 last five are kept). A `cancel` kills the command and everything it started,
 reports the run `cancelled` once they are gone, and then answers `applied`.
+On Unix a `pause` stops the command and everything it started (`SIGSTOP` to its
+process group), answers `applied` and reports the run `waiting` with the outcome
+`paused`; a `resume` continues them (`SIGCONT`), reports the run `running` and
+answers `applied`. A `pause` of a run already paused, or of one whose command has
+not started, and a `resume` of a run not paused, are answered `failed`. A `cancel`
+still works on a paused run. Time spent paused does not count against the reply
+timeout, and a run paused for longer than `CONCH_ADAPTER_MAX_PAUSE` has its
+command killed and fails with the outcome `paused longer than <duration>`. Where
+there are no process groups the adapter does not declare `pause` and `resume`.
 Anything else is answered `failed`. On SIGTERM or SIGINT it stops the
 command, reports an open run `cancelled` with the outcome `adapter stopped`,
 ends its session and releases the lock file.
@@ -461,6 +470,8 @@ new name wins when both are set. Also:
 - `CONCH_ADAPTER_RUNTIME` (default `claude-code`): the runtime profile (below) and the label shown for the runtime. A value that names no profile (`claude-code`, `codex`) is refused unless `CONCH_ADAPTER_CMD` is set, in which case it is only a label with plain-text output: a misspelt name never falls back to the Claude default command.
 - `CONCH_ADAPTER_WORKDIR`: the directory the command runs in; default the adapter's own. With the default Codex command it is also given to Codex with `-C`.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
+- `CONCH_ADAPTER_MAX_PAUSE` (default: the reply timeout): how long a run may stay
+  paused before its command is killed and the run fails.
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
   dropped with a log line. It is what stops two adapters from answering each
   other for ever.
@@ -482,7 +493,7 @@ a model name) and the adapter exits with one line naming it if it is missing.
 `CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
 written, but is still read as the profile reads.
 
-**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
+**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill (and a pause's `SIGSTOP`) may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
 
 **Sandbox.** Unlike `claude -p`, Codex has a sandbox, and the default command
 uses it read-only: the agent can read files and run commands that do not
