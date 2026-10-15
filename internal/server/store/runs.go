@@ -65,11 +65,12 @@ var (
 	ErrTooManyRuns = errors.New("store: too many open runs for this session")
 	// ErrSessionOffline is returned by CreateRun, AppendRunActivity and
 	// SetRunState (to a state that is not terminal) when the run's session is
-	// offline. Offline sessions are outside the credential's live-session
-	// bound, so without this a credential could start MaxOpenRunsPerSession
-	// runs on each of its sessions, let them go offline, and do it again
-	// (issue #392). A heartbeat revives the session; ending a run is always
-	// allowed. Nothing is written.
+	// offline (an ended session is offline too). Offline sessions are outside
+	// the credential's live-session bound, so without this each would stay an
+	// uncounted channel for new runs and activity (issue #392). It keeps
+	// reports on the credential's live sessions; it does not bound the runs
+	// already open on offline or ended ones (issue #402). A heartbeat revives
+	// the session; ending a run is always allowed. Nothing is written.
 	ErrSessionOffline = errors.New("store: session is offline")
 	// ErrTooMuchActivity is returned by AppendRunActivity when the run already
 	// holds MaxActivityPerRun entries. Nothing is written.
