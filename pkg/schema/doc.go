@@ -28,4 +28,12 @@
 // CreateInterventionRequestV1, AckInterventionRequestV1 and
 // ListInterventionsResponseV1, MarkReadRequestV1 and ListReadStateResponseV1)
 // live beside them.
+//
+// The web client's TypeScript types and validators are generated from this
+// package (issue #348): ts.go lists the types, vocabularies.go the values of
+// each closed vocabulary, and cmd/schema-ts writes web/src/schema/generated.ts
+// from them. Run `go generate ./pkg/schema` after changing either or a listed
+// type; scripts/schema-ts-check.sh fails while the committed file is stale.
 package schema
+
+//go:generate go run ../../cmd/schema-ts -out ../../web/src/schema

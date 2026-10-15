@@ -171,6 +171,13 @@ func unreadCount(s string) bool {
 	return true
 }
 
+// channelsLoaded says the left pane lists channels and marks one, which it
+// does not while it still shows "loading…".
+func channelsLoaded(rows []string) bool {
+	names, marked := channelList(rows, suiteChannels)
+	return len(names) > 0 && marked >= 0
+}
+
 // selectedChannel is the channel the left pane marks, "" when none shows.
 func selectedChannel(rows []string) string {
 	names, marked := channelList(rows, suiteChannels)
@@ -183,6 +190,11 @@ func selectedChannel(rows []string) string {
 // selectChannel moves to channel with the arrow keys, one step at a time, and
 // waits for the TUI to mark it.
 func (t *tui) selectChannel(channel string) error {
+	// A TUI that has only just started shows "loading…" in the left pane; a
+	// list that has loaded without the channel fails below at once.
+	if err := t.waitFor("the channel list of "+t.part+" to load", 15*time.Second, channelsLoaded); err != nil {
+		return err
+	}
 	for range 8 {
 		names, marked := channelList(t.rows(), suiteChannels)
 		if marked >= 0 && names[marked] == channel {

@@ -57,6 +57,8 @@ func Main() {
 }
 
 func run() error {
+	// First, before the token is used or any child is started.
+	hardenProcess()
 	cfg, err := loadConfig(os.LookupEnv)
 	if err != nil {
 		return err

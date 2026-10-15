@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat depgate rust-check rust-build web-node web-check web-build web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate rust-check rust-build web-node web-check web-build web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -29,7 +29,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat depgate rust-check web-check
+check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate rust-check web-check
 
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
@@ -102,6 +102,14 @@ web-build: web-node
 
 schema-compat:
 	./scripts/schema-compat.sh
+
+# The web client's wire types are generated from pkg/schema by
+# `go generate ./pkg/schema` (issue #348); this fails when the committed
+# web/src/schema/generated*.ts differ from what that writes. Go only, no Node.
+# The script's own test runs first.
+schema-ts:
+	./scripts/schema-ts-check-test.sh
+	./scripts/schema-ts-check.sh
 
 depgate:
 	./scripts/depgate.sh

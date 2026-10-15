@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -213,6 +214,7 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 	cmd := exec.CommandContext(replyCtx, argv[0], argv[1:]...) // #nosec G204 -- the operator explicitly configures the command; it is split without a shell
 	ownProcessGroup(cmd)
 	cmd.Dir = c.dir
+	cmd.Env = childEnv(os.Environ())
 	// A grandchild that kept the output pipe open must not hold Wait after the
 	// group has been killed.
 	cmd.WaitDelay = 2 * time.Second
@@ -261,6 +263,22 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 		return "", fmt.Errorf("wait for command: %w", waitErr)
 	}
 	return reply, nil
+}
+
+// childEnv is environ without the agent's Conch credentials and settings. The
+// runtime's output is posted to a channel and a person's message can ask the
+// model to print its environment, so the command must not hold the token.
+// Everything else (HOME, PATH, the runtime's own login) passes unchanged.
+func childEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "CONCH_ADAPTER_") || strings.HasPrefix(name, "CONCH_BOT_") || name == "CONCH_TOKEN" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // readReply reads the command's output the way its profile says.
