@@ -74,6 +74,13 @@ func (stubAPI) ListInterventions(context.Context, int64, int64, int) (schema.Lis
 	return schema.ListInterventionsResponseV1{}, nil
 }
 
+func (stubAPI) ListReadState(context.Context) (schema.ListReadStateResponseV1, error) {
+	return schema.ListReadStateResponseV1{}, nil
+}
+func (stubAPI) MarkRead(context.Context, string, int64) (schema.ReadStateV1, error) {
+	return schema.ReadStateV1{}, nil
+}
+
 var errNoSessions = errors.New("no sessions on the stub")
 
 func TestModelUpdate(t *testing.T) {
