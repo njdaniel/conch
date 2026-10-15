@@ -2623,3 +2623,43 @@ func TestVoiceSweepPrunesRetiredRooms(t *testing.T) {
 		t.Errorf("live rooms = %d, %v; want the two channels' current rooms", len(live), err)
 	}
 }
+
+// Two servers share one LiveKit and differ in their room prefix. Whatever
+// the sweep lists or deletes is a room this server stored, never the other
+// server's, including a retired one the other server has not deleted yet.
+func TestVoiceSweepLeavesAnotherServersRoomsAlone(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	if err := f.srv.store.SetVoiceRoomPrefix("mine-"); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []string{"theirs-live00000000000000000000", "theirs-retired000000000000000000"}
+	for _, name := range foreign {
+		f.lk.setRoom(name, fakeParticipant{identity: "someone", joinedMs: 1_000})
+	}
+
+	stuck := f.holder(t, "ann", f.ops)
+	if !strings.HasPrefix(stuck.RoomName, "mine-") {
+		t.Fatalf("room %q does not carry the server's prefix", stuck.RoomName)
+	}
+	f.lk.setRoom(stuck.RoomName, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+	if _, ok, err := f.srv.store.RotateVoiceRoom(ctx, stuck.ID, store.VoiceRotateMemberRemoved); err != nil || !ok {
+		t.Fatalf("rotate: %v %v", ok, err)
+	}
+	f.sweep(t)
+	f.sweep(t)
+
+	if f.lk.callsFor("DeleteRoom", stuck.RoomName) != 1 || f.lk.has(stuck.RoomName) {
+		t.Error("the sweep did not delete this server's retired room")
+	}
+	for _, name := range foreign {
+		if !f.lk.has(name) || f.lk.callsFor("DeleteRoom", name) != 0 {
+			t.Errorf("the other server's room %q was touched", name)
+		}
+	}
+	for _, c := range f.lk.calls() {
+		if c.method == "DeleteRoom" && c.room != stuck.RoomName {
+			t.Errorf("DeleteRoom(%q) is not a room this server stored", c.room)
+		}
+	}
+}
