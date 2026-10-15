@@ -1063,3 +1063,105 @@ func TestRelayExpireRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestRelayHeartbeatsAndRetriesOnSessionOffline(t *testing.T) {
+	offline := func(w http.ResponseWriter) {
+		fakeJSON(w, http.StatusConflict, schema.Error{Code: schema.ErrorCodeSessionOffline, Message: "session offline"})
+	}
+	tests := []struct {
+		name         string
+		method, path string
+		body         string
+		upstream     string
+		refusals     int                         // how many times the report is refused before it is accepted
+		heartbeat    func(w http.ResponseWriter) // nil for the fake's own answer
+		other        func(w http.ResponseWriter) // the refusal instead of session_offline
+		wantStatus   int
+		wantCode     string
+		wantOrder    []string
+	}{
+		{name: "start run", method: "POST", path: "/v1/runs", body: `{"channel":"ops","task":"t"}`, upstream: "/v1/sessions/7/runs",
+			refusals: 1, wantStatus: http.StatusCreated,
+			wantOrder: []string{"/v1/sessions/7/runs", "/v1/sessions/7/heartbeat", "/v1/sessions/7/runs"}},
+		{name: "run state", method: "POST", path: "/v1/runs/1/state", body: `{"state":"running"}`, upstream: "/v1/runs/1/state",
+			refusals: 1, wantStatus: http.StatusOK,
+			wantOrder: []string{"/v1/runs/1/state", "/v1/sessions/7/heartbeat", "/v1/runs/1/state"}},
+		{name: "activity", method: "POST", path: "/v1/runs/1/activity", body: `{"kind":"command_started","summary":"s"}`, upstream: "/v1/runs/1/activity",
+			refusals: 1, wantStatus: http.StatusCreated,
+			wantOrder: []string{"/v1/runs/1/activity", "/v1/sessions/7/heartbeat", "/v1/runs/1/activity"}},
+		{name: "still offline after the heartbeat is passed back, with no second try", method: "POST", path: "/v1/runs/1/state", body: `{"state":"running"}`, upstream: "/v1/runs/1/state",
+			refusals: 2, wantStatus: http.StatusConflict, wantCode: schema.ErrorCodeSessionOffline,
+			wantOrder: []string{"/v1/runs/1/state", "/v1/sessions/7/heartbeat", "/v1/runs/1/state"}},
+		{name: "a heartbeat that fails passes the first refusal back", method: "POST", path: "/v1/runs/1/state", body: `{"state":"running"}`, upstream: "/v1/runs/1/state",
+			refusals: 1, wantStatus: http.StatusConflict, wantCode: schema.ErrorCodeSessionOffline,
+			heartbeat: func(w http.ResponseWriter) {
+				fakeJSON(w, http.StatusTooManyRequests, schema.Error{Code: schema.ErrorCodeTooManySessions, Message: "too many sessions"})
+			},
+			wantOrder: []string{"/v1/runs/1/state", "/v1/sessions/7/heartbeat"}},
+		{name: "another 409 passes through", method: "POST", path: "/v1/runs/1/state", body: `{"state":"queued"}`, upstream: "/v1/runs/1/state",
+			refusals: 1, wantStatus: http.StatusConflict, wantCode: schema.ErrorCodeInvalidTransition,
+			other: func(w http.ResponseWriter) {
+				fakeJSON(w, http.StatusConflict, schema.Error{Code: schema.ErrorCodeInvalidTransition, Message: "no"})
+			},
+			wantOrder: []string{"/v1/runs/1/state"}},
+		{name: "a 409 whose message only says offline passes through", method: "POST", path: "/v1/runs/1/activity", body: `{"kind":"command_started","summary":"s"}`, upstream: "/v1/runs/1/activity",
+			refusals: 1, wantStatus: http.StatusConflict, wantCode: schema.ErrorCodeInvalidTransition,
+			other: func(w http.ResponseWriter) {
+				fakeJSON(w, http.StatusConflict, schema.Error{Code: schema.ErrorCodeInvalidTransition, Message: "session_offline"})
+			},
+			wantOrder: []string{"/v1/runs/1/activity"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := startRelay(t, nil)
+			r.startRun(t)
+			before := r.fake.count()
+			var mu sync.Mutex
+			refused := 0
+			r.fake.mu.Lock()
+			r.fake.override = func(w http.ResponseWriter, req *http.Request) bool {
+				switch req.URL.Path {
+				case "/v1/sessions/7/heartbeat":
+					if tt.heartbeat == nil {
+						return false
+					}
+					tt.heartbeat(w)
+					return true
+				case tt.upstream:
+					mu.Lock()
+					defer mu.Unlock()
+					if refused < tt.refusals {
+						refused++
+						if tt.other != nil {
+							tt.other(w)
+						} else {
+							offline(w)
+						}
+						return true
+					}
+				}
+				return false
+			}
+			r.fake.mu.Unlock()
+			status, _, body := r.do(t, tt.method, tt.path, tt.body)
+			if status != tt.wantStatus {
+				t.Fatalf("status = %d %s, want %d", status, body, tt.wantStatus)
+			}
+			if tt.wantCode != "" && decodeError(t, body).Code != tt.wantCode {
+				t.Errorf("body = %s, want code %s", body, tt.wantCode)
+			}
+			var order []string
+			calls := r.fake.calls[before:]
+			for _, c := range calls {
+				order = append(order, c.path)
+			}
+			if strings.Join(order, " ") != strings.Join(tt.wantOrder, " ") {
+				t.Errorf("conchd saw %v, want %v", order, tt.wantOrder)
+			}
+			// A retry sends the very bytes the first forward sent.
+			if len(calls) == 3 && !bytes.Equal(calls[2].body, calls[0].body) {
+				t.Errorf("the retry sent %s, the first forward %s", calls[2].body, calls[0].body)
+			}
+		})
+	}
+}

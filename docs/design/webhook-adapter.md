@@ -113,7 +113,7 @@ Things deliberately not added. Each would change a published request type, so it
 
 **The socket.** A Unix domain socket only, at `CONCH_ADAPTER_RELAY_SOCKET`, by default `$XDG_RUNTIME_DIR/conch-adapter-relay.sock`. If neither is set, the relay refuses to start. The relay creates the socket mode 0600, in a directory that must be mode 0700 and owned by its uid. It refuses a path that exists and is not a socket. It removes a stale socket only while it holds its lock file. There is no TCP listener and no shared secret. A sender that cannot reach a local socket calls `conchd`'s REST routes itself. On a platform without Unix sockets, relay mode refuses to start.
 
-**What the socket serves.** These are `conchd`'s routes with the session made implicit. The bodies are the `pkg/schema` types, decoded strictly at 1 MiB, and the relay forwards them over REST. It does not use MCP: MCP re-encodes `post_activity`'s `data`, which sorts its keys and turns its numbers into float64. `conchd`'s status, `Error` body and `Retry-After` header are passed back unchanged.
+**What the socket serves.** These are `conchd`'s routes with the session made implicit. The bodies are the `pkg/schema` types, decoded strictly at 1 MiB, and the relay forwards them over REST. It does not use MCP: MCP re-encodes `post_activity`'s `data`, which sorts its keys and turns its numbers into float64. `conchd`'s status, `Error` body and `Retry-After` header are passed back unchanged, with one exception: a run report refused `409 session_offline` is retried once after the relay heartbeats its session, and the retry's answer is the one passed back (#406).
 
 | On the socket | Forwarded to |
 |---|---|
