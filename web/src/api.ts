@@ -374,6 +374,16 @@ export async function listSessionRuns(channel: string, session: number, limit: n
   return result.ok ? { ok: true, value: result.value.runs } : result;
 }
 
+// listChannelRuns reads one page of a channel's runs, newest first: without
+// `before` the newest, with it the page just below that id (the server's
+// order=desc and before, issue #317). Every run the caller may see is listed.
+export async function listChannelRuns(channel: string, limit: number, before?: number): Promise<ApiResult<RunV1[]>> {
+  const query = new URLSearchParams({ channel, order: 'desc', limit: String(limit) });
+  if (before !== undefined && before > 0) query.set('before', String(before));
+  const result = await authed(`/v1/runs?${query.toString()}`, listRunsResponseV1);
+  return result.ok ? { ok: true, value: result.value.runs } : result;
+}
+
 export function getRun(id: number): Promise<ApiResult<RunV1>> {
   return authed(`/v1/runs/${String(id)}`, runV1);
 }
