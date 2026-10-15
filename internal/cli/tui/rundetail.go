@@ -528,6 +528,8 @@ func (m Model) canAsk(kind schema.InterventionKind) bool {
 // fitsState reports whether the run's state, as its last frame said it, is one
 // the kind applies to: only a running run is paused, and only a waiting one
 // (a paused run reads waiting) is resumed. Never what a key press assumed.
+// The outcome is deliberately not consulted: a run paused while it waits for
+// an approval keeps an empty outcome, and gating on "paused" would strand it.
 func (m Model) fitsState(kind schema.InterventionKind) bool {
 	switch kind {
 	case schema.InterventionKindPause:

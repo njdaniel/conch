@@ -81,7 +81,8 @@ function Controls({ detail, declared, inRoster, onAsk }: {
   // Declared, and in a state the kind applies to: only a running run is paused
   // and only a waiting one (a paused run reads waiting) is resumed. The state is
   // the run's last frame, never what a click assumed. Pause and resume ask at
-  // once: both are reversible.
+  // once: both are reversible. The outcome is deliberately not consulted: a run
+  // paused while it waits for an approval keeps an empty outcome.
   const canPause = declared.has('pause');
   const canResume = declared.has('resume');
   const pauseNow = canPause && run.state === 'running';
