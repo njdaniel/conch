@@ -1,8 +1,8 @@
 // P3-05: what is restricted to test-private stays there, a run in it included.
-import { post, roster, run, runsIn } from './api';
+import { history, post, roster, run, runsIn } from './api';
 import { launchWorker } from './agents';
-import { channelButton, conversation, expect, test } from './fixtures';
-import { call } from './world';
+import { channelButton, conversation, expect, messages, signIn, test } from './fixtures';
+import { call, principalId } from './world';
 
 test('P3-05 browser-test cannot open test-private and nothing about a run there shows in its members panel', async ({ meet, world }) => {
   // worker-test is busy in test-private (a slow fixture, so that the run stays)
@@ -67,4 +67,51 @@ test('P3-05 browser-test cannot open test-private and nothing about a run there 
   } finally {
     await worker.stop();
   }
+});
+
+// The browser as sender (issue #352). nets-demo has two nets: red (nick-test
+// transmits, guest-test monitors) and blue (guest-test and browser-test). Who
+// reads what is checked through the API with the participants' own
+// credentials, as the TUI's would be: the server decides the audience.
+test('P3-05 the browser composes to a net and to a whisper, and only the audience reads it', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await channelButton(page, 'nets-demo').click();
+  await expect(conversation(page).getByRole('heading', { name: 'nets-demo' })).toBeVisible();
+
+  // The control offers the channel, the viewer's nets (blue, not red) and the whisper.
+  const to = page.getByLabel('To:');
+  await expect(to.getByRole('option')).toHaveText(['#nets-demo', 'net blue', 'Whisper to…']);
+
+  // A net post: a member (guest-test) reads it with the net's audience; a
+  // non-member (nick-test) never does.
+  const netBody = 'p3-05 browser to blue';
+  await to.selectOption({ label: 'net blue' });
+  await page.getByLabel('Message net blue').fill(netBody);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(messages(page).getByText(netBody)).toHaveCount(1);
+  await expect(messages(page).getByRole('listitem').filter({ hasText: netBody })).toContainText('→ net blue');
+  // A net stays chosen after a post.
+  await expect(to).toHaveValue(/^net:/);
+  const seenByGuest = (await history(world, world.tokens.guest, 'nets-demo')).filter((m) => m.body === netBody);
+  expect(seenByGuest).toHaveLength(1);
+  expect(seenByGuest[0]?.audience?.kind).toBe('net');
+  expect((await history(world, world.tokens.nick, 'nets-demo')).filter((m) => m.body === netBody)).toHaveLength(0);
+
+  // A whisper to guest-test only; the composer is the channel's again after it,
+  // and the audit notice shows.
+  await to.selectOption({ label: 'Whisper to…' });
+  await page.getByRole('group', { name: 'Whisper to' }).getByRole('checkbox', { name: 'guest-test' }).check();
+  const whisperBody = 'p3-05 browser whispers to guest';
+  await page.getByLabel('Whisper to guest-test').fill(whisperBody);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByText('note: whispers are recorded in the audit log')).toBeVisible();
+  await expect(to).toHaveValue('channel');
+  const guest = await principalId(world, world.tokens.guest);
+  const whispered = (await history(world, world.tokens.guest, 'nets-demo')).filter((m) => m.body === whisperBody);
+  expect(whispered).toHaveLength(1);
+  expect(whispered[0]?.audience).toMatchObject({ kind: 'principals' });
+  expect(whispered[0]?.audience?.kind === 'principals' ? whispered[0].audience.principal_ids : []).toContain(guest);
+  expect((await history(world, world.tokens.nick, 'nets-demo')).filter((m) => m.body === whisperBody)).toHaveLength(0);
+  expect((await history(world, world.tokens.worker, 'nets-demo')).filter((m) => m.body === whisperBody)).toHaveLength(0);
 });
