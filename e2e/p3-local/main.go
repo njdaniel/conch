@@ -23,7 +23,9 @@
 // that address of this machine instead of loopback, every file names it, and
 // the commands for a guest (a VM) are printed apart; the guest's credentials
 // then travel in clear text over http://, which the run says first (issue
-// #379). CONCH_P3_ROWS=P3-06,P3-07 limits the suite to those rows (and P3-01, which starts everyone) while working on them.
+// #379). Without --keep, --non-loopback runs the suite with conchd bound to
+// this machine's first non-loopback IPv4 and every client pointed at it, and
+// refuses when there is none (issue #382). CONCH_P3_ROWS=P3-06,P3-07 limits the suite to those rows (and P3-01, which starts everyone) while working on them.
 //
 // The root is $CONCH_P3_ROOT, else $XDG_STATE_HOME/conch-p3, else
 // ~/.local/state/conch-p3. This program never reads or writes the user's own
@@ -744,9 +746,12 @@ var listeningOn = regexp.MustCompile(`(?m)^conchd \S+ listening on (\S+:\d+) `)
 
 // startServer bootstraps the operator into a fresh data directory and starts
 // conchd on a loopback port it chooses itself, or, with --advertise, on the
-// address given. conchd is asked for port 0 and says which port it got:
-// choosing a free port here and handing it over would leave a moment in which
-// something else could take it.
+// address given. On loopback conchd is asked for port 0 and says which port it
+// got: choosing a free port here and handing it over would leave a moment in
+// which something else could take it. --advertise and --non-loopback accept
+// that moment, because the URL every file names must be known before conchd
+// starts; if something takes the port, conchd fails to bind and the run fails
+// loudly.
 func (r *runner) startServer() error {
 	data := filepath.Join(r.root, "data")
 	out, err := r.output("", r.repo, r.isolatedEnv(), r.bin.conchd, "bootstrap-operator", "--data", data, "--name", "p3-operator")
