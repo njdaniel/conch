@@ -449,7 +449,7 @@ process group), answers `applied` and reports the run `waiting` with the outcome
 answers `applied`. A `pause` of a run already paused, or of one whose command has
 not started, and a `resume` of a run not paused, are answered `failed`. A `cancel`
 still works on a paused run. Time spent paused does not count against the reply
-timeout, and a run paused for longer than `CONCH_ADAPTER_MAX_PAUSE` has its
+timeout, and a run paused, over all its pauses, for longer than `CONCH_ADAPTER_MAX_PAUSE` has its
 command killed and fails with the outcome `paused longer than <duration>`. Where
 there are no process groups the adapter does not declare `pause` and `resume`.
 Anything else is answered `failed`. On SIGTERM or SIGINT it stops the
@@ -470,8 +470,8 @@ new name wins when both are set. Also:
 - `CONCH_ADAPTER_RUNTIME` (default `claude-code`): the runtime profile (below) and the label shown for the runtime. A value that names no profile (`claude-code`, `codex`) is refused unless `CONCH_ADAPTER_CMD` is set, in which case it is only a label with plain-text output: a misspelt name never falls back to the Claude default command.
 - `CONCH_ADAPTER_WORKDIR`: the directory the command runs in; default the adapter's own. With the default Codex command it is also given to Codex with `-C`.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
-- `CONCH_ADAPTER_MAX_PAUSE` (default: the reply timeout): how long a run may stay
-  paused before its command is killed and the run fails.
+- `CONCH_ADAPTER_MAX_PAUSE` (default: the reply timeout): how long a run may be paused, all its pauses
+  together, before its command is killed and the run fails.
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
   dropped with a log line. It is what stops two adapters from answering each
   other for ever.

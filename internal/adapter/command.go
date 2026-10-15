@@ -213,20 +213,22 @@ var (
 // commandControl owns the reply timeout of one command and the command's
 // pause. Time spent paused does not count against the reply timeout: pausing
 // stops its timer, resuming starts it again with what was left. A command
-// paused for longer than maxPause is killed.
+// paused for longer than maxPause, all its pauses together, is killed.
 type commandControl struct {
 	// kill ends the command, saying why; it is the cancel of the reply context.
 	kill     func(cause error)
 	maxPause time.Duration
 
-	mu         sync.Mutex
-	pid        int // 0 until the command is started
-	ended      bool
-	paused     bool
-	deadline   time.Time
-	remaining  time.Duration // of the timeout, while paused
-	timeout    *time.Timer
-	pauseTimer *time.Timer
+	mu          sync.Mutex
+	pid         int // 0 until the command is started
+	ended       bool
+	paused      bool
+	pausedAt    time.Time     // when the current pause began
+	pausedTotal time.Duration // of the pauses already resumed
+	deadline    time.Time
+	remaining   time.Duration // of the timeout, while paused
+	timeout     *time.Timer
+	pauseTimer  *time.Timer
 }
 
 func newCommandControl(timeout, maxPause time.Duration, kill func(error)) *commandControl {
@@ -279,8 +281,17 @@ func (c *commandControl) pause() error {
 	if c.timeout.Stop() {
 		c.remaining = max(time.Until(c.deadline), 0)
 	}
+	// The bound is for the run, not for each pause: cycling pause and resume
+	// must not stretch a reply for ever.
+	c.pausedAt = time.Now()
 	limit := c.maxPause
-	c.pauseTimer = time.AfterFunc(limit, func() { c.kill(&pausedTooLongError{limit: limit}) })
+	tooLong := &pausedTooLongError{limit: limit}
+	left := limit - c.pausedTotal
+	if left <= 0 {
+		c.kill(tooLong)
+		return nil
+	}
+	c.pauseTimer = time.AfterFunc(left, func() { c.kill(tooLong) })
 	return nil
 }
 
@@ -300,7 +311,10 @@ func (c *commandControl) resume() error {
 		return fmt.Errorf("continue command: %w", err)
 	}
 	c.paused = false
-	c.pauseTimer.Stop()
+	c.pausedTotal += time.Since(c.pausedAt)
+	if c.pauseTimer != nil {
+		c.pauseTimer.Stop()
+	}
 	c.deadline = time.Now().Add(c.remaining)
 	c.timeout.Reset(c.remaining)
 	return nil

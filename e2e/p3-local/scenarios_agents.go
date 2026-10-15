@@ -552,7 +552,7 @@ func (s *suite) p308Interventions() error {
 }
 
 // pauseAndResume pauses the open run through the API, checks that the
-// adapter's command is stopped and the run waiting with the outcome paused,
+// adapter's command and what it started are stopped and the run waiting with the outcome paused,
 // refuses nothing it should accept and accepts nothing it should refuse, and
 // resumes it.
 func (s *suite) pauseAndResume(runID int64, runPath string) error {
@@ -611,7 +611,7 @@ func (s *suite) pauseAndResume(runID int64, runPath string) error {
 	if r.Outcome != "paused" {
 		return fmt.Errorf("the paused run has outcome %q, want paused", r.Outcome)
 	}
-	if states := childStatesOf(s.worker.c.pid()); len(states) == 0 || strings.Join(states, "") != strings.Repeat("T", len(states)) {
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.Join(states, "") != strings.Repeat("T", len(states)) {
 		return fmt.Errorf("the command's process states after the pause are %v, want all T", states)
 	}
 	// A second pause fails and changes nothing.
@@ -633,21 +633,28 @@ func (s *suite) pauseAndResume(runID int64, runPath string) error {
 	if _, err := s.waitRunState(runID, schema.RunStateRunning, 15*time.Second); err != nil {
 		return err
 	}
-	if states := childStatesOf(s.worker.c.pid()); len(states) == 0 || strings.ContainsRune(strings.Join(states, ""), 'T') {
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.ContainsRune(strings.Join(states, ""), 'T') {
 		return fmt.Errorf("the command's process states after the resume are %v, want none T", states)
 	}
 	return nil
 }
 
-// childStatesOf is the /proc state letter of each live direct child of pid.
+// childStatesOf is the /proc state letter of every live descendant of pid
+// (its children, theirs, and so on): a pause must reach what the command
+// started, not only the command.
 func childStatesOf(pid int) []string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
-	var out []string
+	type proc struct {
+		ppid  int
+		state string
+	}
+	procs := map[int]proc{}
 	for _, e := range entries {
-		if _, err := strconv.Atoi(e.Name()); err != nil {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
 			continue
 		}
 		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat") // #nosec G304 -- a /proc path built from a number
@@ -662,9 +669,20 @@ func childStatesOf(pid int) []string {
 		if len(fields) < 2 || fields[0] == "Z" {
 			continue
 		}
-		if ppid, _ := strconv.Atoi(fields[1]); ppid == pid {
-			out = append(out, fields[0])
+		ppid, _ := strconv.Atoi(fields[1])
+		procs[n] = proc{ppid: ppid, state: fields[0]}
+	}
+	var out []string
+	frontier := []int{pid}
+	for len(frontier) > 0 {
+		var next []int
+		for n, p := range procs {
+			if slices.Contains(frontier, p.ppid) {
+				out = append(out, p.state)
+				next = append(next, n)
+			}
 		}
+		frontier = next
 	}
 	return out
 }

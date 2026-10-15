@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -178,5 +179,74 @@ func TestPausedTooLongKillsTheCommand(t *testing.T) {
 	}
 	if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("a process of the group is left: %v", err)
+	}
+}
+
+// The bound is for all the pauses of a run together: pausing and resuming
+// again and again does not stretch a reply past it.
+func TestPausesShareOneBound(t *testing.T) {
+	// 300 ms of pause in all; five pauses of 150 ms are 750 ms.
+	_, ctl, result := startSleeper(t, context.Background(), sleeper(t, "30", time.Minute, 300*time.Millisecond))
+	go func() {
+		for range 5 {
+			if err := ctl.pause(); err != nil {
+				return
+			}
+			time.Sleep(150 * time.Millisecond)
+			if err := ctl.resume(); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-result:
+		var tooLong *pausedTooLongError
+		if !errors.As(err, &tooLong) || tooLong.Error() != "paused longer than 300ms" {
+			t.Fatalf("Reply = %v, want paused longer than 300ms", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pausing again and again kept the command alive past the bound")
+	}
+}
+
+// The signals reach the whole group: a process the command started is
+// stopped and continued with it.
+func TestPauseReachesTheWholeGroup(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	spec, err := parseCommand(`sh -c 'sleep 300 & echo $! > `+pidFile+`; wait' sh`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := commandRunner{spec: spec, timeout: time.Minute, maxPause: time.Minute, sleep: sleepContext}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leader, ctl, result := startSleeper(t, ctx, runner)
+	var grandchild int
+	deadline := time.Now().Add(5 * time.Second)
+	for grandchild == 0 && time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(pidFile); err == nil { //nolint:gosec // a file this test made in its own temp directory
+			grandchild, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if grandchild == 0 || grandchild == leader {
+		t.Fatalf("no grandchild started (pid %d)", grandchild)
+	}
+	waitProcState(t, grandchild, isRunning, "grandchild before the pause")
+
+	if err := ctl.pause(); err != nil {
+		t.Fatal(err)
+	}
+	waitProcState(t, leader, isStopped, "leader after pause")
+	waitProcState(t, grandchild, isStopped, "grandchild after pause")
+	if err := ctl.resume(); err != nil {
+		t.Fatal(err)
+	}
+	waitProcState(t, grandchild, isRunning, "grandchild after resume")
+
+	cancel()
+	<-result
+	if err := syscall.Kill(grandchild, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("the grandchild outlived the cancel: %v", err)
 	}
 }
