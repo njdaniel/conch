@@ -16,6 +16,7 @@ import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targ
 import type { Audience } from './schema/message';
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
+import { useReadState } from './useReadState';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
@@ -143,6 +144,31 @@ export function App({ origin }: { readonly origin: string }) {
     onLost,
   });
 
+  // Whether the reader is at the newest message of the open channel; a channel
+  // newly opened starts at it.
+  const [bottom, setBottom] = useState<{ readonly channel: string | null; readonly atBottom: boolean }>({ channel: null, atBottom: true });
+  // A channel opened again starts at the bottom, whatever it was left at.
+  const [bottomFor, setBottomFor] = useState(selected);
+  if (bottomFor !== selected) {
+    setBottomFor(selected);
+    setBottom({ channel: selected, atBottom: true });
+  }
+  const held = selected === null ? null : chatFor(chat, selected);
+  const headId = held === null ? 0 : lastId(held);
+  const head = held?.byId.get(headId);
+  const unread = useReadState({
+    signedIn,
+    channels: channels.channels,
+    loaded: channels.loaded,
+    open: channelId === null ? null : selected,
+    ready: held?.history === 'ready',
+    newest: head === undefined ? null : { id: head.id, author: head.author_id },
+    atBottom: bottom.channel === selected ? bottom.atBottom : true,
+    status: live.status,
+    me: principal?.id ?? 0,
+    onUnauthorized,
+  });
+
   // The browser's own session, the events socket and what the panel and run
   // detail show from them.
   const agents = useAgents({
@@ -256,6 +282,7 @@ export function App({ origin }: { readonly origin: string }) {
           origin={origin}
           name={auth.principal.name}
           channels={channels}
+          unread={unread}
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
           conversation={
@@ -297,6 +324,9 @@ export function App({ origin }: { readonly origin: string }) {
                 }}
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
+                onBottom={(atBottom) => {
+                  setBottom((prev) => (prev.channel === selected && prev.atBottom === atBottom ? prev : { channel: selected, atBottom }));
+                }}
               />
                 </div>
               </>

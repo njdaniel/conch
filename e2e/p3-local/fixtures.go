@@ -33,13 +33,63 @@ var (
 	everyone   = append(append([]string(nil), humanNames...), agentNames...)
 )
 
+// The three real runtimes --real-adapters can start, each as an agent of its
+// own named real-<runtime>. The runtime is the name the adapter's profile has.
+var realRuntimes = []struct{ name, profile, label string }{
+	{"claude", "claude-code", "Claude Code"},
+	{"codex", "codex", "Codex"},
+	{"ollama", "ollama", "Ollama"},
+}
+
+// realAgent is the participant, and the principal, of a real runtime.
+func realAgent(runtime string) string { return "real-" + runtime }
+
+// agentNames is the agents of this run: the two scripted ones and one per real
+// runtime asked for.
+func (r *runner) agentNames() []string {
+	names := append([]string(nil), agentNames...)
+	for _, rt := range r.realAgents {
+		names = append(names, realAgent(rt))
+	}
+	return names
+}
+
+// everyone is every principal of this run.
+func (r *runner) everyone() []string {
+	return append(append([]string(nil), humanNames...), r.agentNames()...)
+}
+
+// channelSpecs is the channels of this run: the real agents are in all three,
+// as the manifest of worker-test they share grants.
+func (r *runner) channelSpecs() []channelSpec {
+	specs := slices.Clone(channelSpecs)
+	for i := range specs {
+		specs[i].members = slices.Clone(specs[i].members)
+		for _, rt := range r.realAgents {
+			specs[i].members = append(specs[i].members, realAgent(rt))
+		}
+	}
+	return specs
+}
+
+// credSpecs is the credentials of this run.
+func (r *runner) credSpecs() []credSpec {
+	specs := slices.Clone(credSpecs)
+	for _, rt := range r.realAgents {
+		specs = append(specs, credSpec{realAgent(rt), realAgent(rt)})
+	}
+	return specs
+}
+
 // channelSpecs lists each channel and who is a member of it. "Everyone" is the
 // five principals; the observer is in them, and its manifest is what keeps it
 // to general.
-var channelSpecs = []struct {
+type channelSpec struct {
 	name    string
 	members []string
-}{
+}
+
+var channelSpecs = []channelSpec{
 	{chGeneral, everyone},
 	{chPrivate, []string{"nick-test", "worker-test"}},
 	{chNets, everyone},
@@ -57,7 +107,9 @@ var netSpecs = []struct {
 
 // credSpecs are the credentials issued, one per participant. nick-test has
 // two, for the repeat login.
-var credSpecs = []struct{ participant, principal string }{
+type credSpec struct{ participant, principal string }
+
+var credSpecs = []credSpec{
 	{"tui-a", "nick-test"},
 	{"tui-b", "guest-test"},
 	{"tui-a2", "nick-test"},
@@ -156,9 +208,9 @@ func (r *runner) provision() error {
 	if err := ensureDir(filepath.Join(r.root, "config", "operator")); err != nil {
 		return err
 	}
-	for _, name := range everyone {
+	for _, name := range r.everyone() {
 		kind := "human"
-		if slices.Contains(agentNames, name) {
+		if slices.Contains(r.agentNames(), name) {
 			kind = "agent"
 		}
 		out, err := r.conch("", "admin", "principal", "create", "--json", "--kind", kind, name)
@@ -171,7 +223,7 @@ func (r *runner) provision() error {
 		}
 		fx.principals[name] = resp.Principal.ID
 	}
-	for _, spec := range channelSpecs {
+	for _, spec := range r.channelSpecs() {
 		out, err := r.conch("", "admin", "channel", "create", "--json", spec.name)
 		if err != nil {
 			return err
@@ -182,7 +234,7 @@ func (r *runner) provision() error {
 		}
 		fx.channels[spec.name] = resp.Channel.ID
 	}
-	for _, spec := range channelSpecs {
+	for _, spec := range r.channelSpecs() {
 		for _, member := range spec.members {
 			if _, err := r.conch("", "admin", "member", "add", spec.name, id(fx.principals[member])); err != nil {
 				return err
@@ -203,7 +255,7 @@ func (r *runner) provision() error {
 			}
 		}
 	}
-	for _, agent := range agentNames {
+	for _, agent := range r.agentNames() {
 		body, err := json.Marshal(manifestFor(agent, fx.channels))
 		if err != nil {
 			return err
@@ -212,7 +264,7 @@ func (r *runner) provision() error {
 			return err
 		}
 	}
-	for _, spec := range credSpecs {
+	for _, spec := range r.credSpecs() {
 		out, err := r.conch("", "admin", "credential", "issue", "--json", "--label", spec.participant, id(fx.principals[spec.principal]))
 		if err != nil {
 			return err
@@ -224,7 +276,7 @@ func (r *runner) provision() error {
 		r.secret(resp.Token)
 		fx.creds[spec.participant] = credential{id: resp.Credential.ID, principal: spec.principal, token: resp.Token}
 	}
-	step("provisioned %d principals, %d channels, %d nets, %d manifests and %d credentials", len(fx.principals), len(fx.channels), len(netSpecs), len(agentNames), len(fx.creds))
+	step("provisioned %d principals, %d channels, %d nets, %d manifests and %d credentials", len(fx.principals), len(fx.channels), len(netSpecs), len(r.agentNames()), len(fx.creds))
 	return r.verifyFixtures()
 }
 
@@ -267,7 +319,7 @@ func (r *runner) verifyFixtures() error {
 	for _, ch := range channels.Channels {
 		byName[ch.Name] = ch.ID
 	}
-	for _, spec := range channelSpecs {
+	for _, spec := range r.channelSpecs() {
 		if byName[spec.name] != fx.channels[spec.name] || byName[spec.name] == 0 {
 			return fmt.Errorf("channel %s: the API lists id %d, provisioning made %d", spec.name, byName[spec.name], fx.channels[spec.name])
 		}
@@ -321,7 +373,7 @@ func (r *runner) verifyFixtures() error {
 		}
 	}
 
-	for _, agent := range agentNames {
+	for _, agent := range r.agentNames() {
 		got, err := op.GetManifest(ctx, fx.principals[agent])
 		if err != nil {
 			return err
@@ -333,7 +385,7 @@ func (r *runner) verifyFixtures() error {
 
 	active := make(map[string]int)
 	tokens := map[string]string{fx.operatorToken: operatorName}
-	for _, spec := range credSpecs {
+	for _, spec := range r.credSpecs() {
 		c := fx.creds[spec.participant]
 		if other, dup := tokens[c.token]; dup {
 			return fmt.Errorf("%s and %s hold the same credential", spec.participant, other)

@@ -529,6 +529,7 @@ func (r *runner) runSuite() error {
 		{"P3-08", "instructions and cancel", s.p308Interventions},
 		{"P3-11", "no LiveKit, no model", s.p311Core},
 		{"P3-13", "one real adapter reply, opt in", s.p313Real},
+		{"P3-14", "three runtimes at once, with stubs", s.p314Three},
 	}
 	// CONCH_P3_ROWS=P3-06,P3-07 runs only those rows, after P3-01 which starts
 	// everyone. It is for working on one row, not for a result: the rows lean

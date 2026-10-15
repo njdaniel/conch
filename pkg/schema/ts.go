@@ -82,6 +82,11 @@ var TSTypes = []TSType{
 	{Value: CreateInterventionRequestV1{}, Family: "create-intervention-request-v1"},
 	{Value: ListInterventionsResponseV1{}, Family: "list-interventions-response-v1"},
 
+	// Read state: the person's mark in each channel and the unread counts.
+	{Value: ReadStateV1{}, Family: "read-state-v1", Schema: ReadStateSchemaV1},
+	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
+	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
