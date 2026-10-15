@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in Conch did not work the way you expected.
+title: "Bug: "
+labels: ["type/bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Conch. A short report is fine; the fields below are what help most.
+        Please leave out passwords, invite links and credentials (anything starting with `conch_`).
+  - type: textarea
+    id: did
+    attributes:
+      label: What you did
+      description: The steps, as you remember them.
+      placeholder: "1. Opened the invite link on my phone\n2. Joined voice in the group channel\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened instead
+      description: Error messages, what you saw or heard. A screenshot helps.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Conch version
+      description: The version you were sent with your invite or the release notes. Or run `conch version`. If you are not sure, write "not sure".
+      placeholder: v0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Device, system and browser (or client)
+      placeholder: "Windows 11, Chrome 141 / Pixel 8, Chrome / Linux, conch TUI"
+    validations:
+      required: true
+  - type: dropdown
+    id: often
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional)
+      description: Logs or error text, if you have them. Check them for secrets first.
