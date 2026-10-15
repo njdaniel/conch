@@ -630,6 +630,43 @@ export const listInterventionsResponseV1 = object<ListInterventionsResponseV1>({
   interventions: array(interventionV1),
 });
 
+// schema.ReadStateV1
+export const readStateV1Schema = 'conch.read_state.v1';
+
+export interface ReadStateV1 {
+  schema: typeof readStateV1Schema;
+  channel_id: number;
+  last_read_id: number;
+  unread: number;
+  updated_at?: string;
+}
+
+export const readStateV1 = object<ReadStateV1>({
+  schema: vocab<typeof readStateV1Schema>({ [readStateV1Schema]: true }),
+  channel_id: int,
+  last_read_id: int,
+  unread: int,
+  updated_at: optional(timestamp),
+});
+
+// schema.MarkReadRequestV1
+export interface MarkReadRequestV1 {
+  last_read_id: number;
+}
+
+export const markReadRequestV1 = object<MarkReadRequestV1>({
+  last_read_id: int,
+});
+
+// schema.ListReadStateResponseV1
+export interface ListReadStateResponseV1 {
+  read_state: ReadStateV1[];
+}
+
+export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
+  read_state: array(readStateV1),
+});
+
 // schema.Error
 export interface ErrorV0 {
   code: string;

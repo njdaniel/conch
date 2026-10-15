@@ -11,6 +11,7 @@ import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema
 import { listChannelMembersResponseV1, listChannelsResponse, type ChannelMemberV1, type ChannelV0 } from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
+import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import { whoAmIResponseV1, type WhoAmIResponseV1 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import type { Validator } from './schema/validate';
@@ -118,7 +119,7 @@ type PostReply =
   | { readonly kind: 'none' }
   | { readonly kind: 'unauthorized' };
 
-async function authedSend(method: 'POST' | 'DELETE', path: string, body?: unknown, keepalive = false): Promise<PostReply> {
+async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false): Promise<PostReply> {
   const token = readToken();
   if (token === null) return { kind: 'unauthorized' };
   let res: Response;
@@ -269,6 +270,36 @@ export async function postMessage(channel: string, body: string, audience?: Audi
     // Fall through: the body was cut off.
   }
   return { ok: false, outcome: 'unconfirmed' };
+}
+
+// Read state (UX-02). Both calls are for people: an agent credential, or
+// conchd with authentication off, is refused with one of the codes below and
+// the caller then asks for nothing more.
+export const readStateRefusals: readonly string[] = ['read_state_require_auth', 'human_required'];
+
+// listReadState reads the caller's mark and unread count in every channel they
+// are in, by channel id.
+export async function listReadState(): Promise<ApiResult<ReadStateV1[]>> {
+  const result = await authed('/v1/read-state', listReadStateResponseV1);
+  return result.ok ? { ok: true, value: result.value.read_state } : result;
+}
+
+// markRead asks for the caller's mark in a channel to move to message `id`. The
+// answer is the state as stored: the mark only moves forward, so it may be
+// ahead of `id`.
+export async function markRead(channel: string, id: number): Promise<ApiResult<ReadStateV1>> {
+  const request: MarkReadRequestV1 = { last_read_id: id };
+  const reply = await authedSend('PUT', `${channelPath(channel)}/read-state`, request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  try {
+    const parsed: unknown = await reply.res.json();
+    if (readStateV1(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
 }
 
 // requestTicket asks for a single-use ticket to open a socket with.
