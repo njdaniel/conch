@@ -1,6 +1,7 @@
 // What the tests read from the server directly, as a person's credential sees
 // it. The shapes are the web client's own schema modules, which are checked
 // against pkg/schema's golden fixtures.
+import { listActivityResponseV1, type AgentActivityV1 } from '../src/schema/activity';
 import { listInterventionsResponseV1, type InterventionV1 } from '../src/schema/intervention';
 import { listMessagesResponseV2, postMessageResponseV2, type MessageV2 } from '../src/schema/message';
 import { listRunsResponseV1, runV1, type RunV1 } from '../src/schema/run';
@@ -50,4 +51,8 @@ export function run(world: World, token: string, id: number): Promise<RunV1> {
 
 export async function interventions(world: World, token: string, runId: number): Promise<InterventionV1[]> {
   return (await ok(world, token, 'GET', `/v1/runs/${String(runId)}/interventions`, listInterventionsResponseV1)).interventions;
+}
+
+export async function activityOf(world: World, token: string, runId: number): Promise<AgentActivityV1[]> {
+  return (await ok(world, token, 'GET', `/v1/runs/${String(runId)}/activity?after=0&limit=100`, listActivityResponseV1)).activity;
 }

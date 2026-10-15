@@ -580,12 +580,25 @@ func (s *suite) p309Restart() error {
 		return errors.New("the TUI dropped the history it had while the server was down")
 	}
 
-	// Held down long enough for two retries, which come one second and then
-	// two seconds after each other. The attempts are read and the stand-in is
-	// closed before the line is typed, so that the send's own connection is not
-	// counted as a retry.
-	if err := s.until("the server to have been down for 4s", 30*time.Second, func() (bool, error) {
-		return time.Since(cut) >= 4*time.Second, nil
+	// Held down until the TUI's first three retry waves have come (one, three
+	// and seven seconds after the drop: the delays double from a second), so
+	// that two gaps can be compared, or until retryDeadline,
+	// when what was seen is judged as it is. A fixed window was too short on a
+	// starved machine, where the TUI's timers run late. The attempts are read
+	// and the stand-in is closed before the line is typed, so that the send's
+	// own connection is not counted as a retry.
+	if err := s.until("three retry waves from the TUI", retryDeadline+5*time.Second, func() (bool, error) {
+		if time.Since(cut) >= retryDeadline {
+			return true, nil // judged as it is, with what was seen
+		}
+		waves := retryWaves(standIn.attempts())
+		if len(waves) < 3 {
+			return false, nil
+		}
+		// The last wave is complete once nothing has joined it for longer
+		// than the gap that separates waves.
+		last := waves[len(waves)-1]
+		return time.Since(last[len(last)-1]) > 600*time.Millisecond, nil
 	}); err != nil {
 		return err
 	}
@@ -675,6 +688,12 @@ func retryWaves(times []time.Time) [][]time.Time {
 // what the TUI keeps open and no more.
 func boundedRetries(attempts []time.Time, down time.Duration) error {
 	waves := retryWaves(attempts)
+	// A starved machine runs the TUI's timers late, so a window shorter than
+	// retryGrace may close before the first retry; that is no verdict. A client
+	// that was given the grace and did not retry is.
+	if len(waves) < 2 && down < retryGrace {
+		return nil
+	}
 	if len(waves) < 2 {
 		return fmt.Errorf("the TUI tried the server %d times in the %s it was down, and did not retry", len(attempts), down.Round(time.Second))
 	}
@@ -689,6 +708,13 @@ func boundedRetries(attempts []time.Time, down time.Duration) error {
 		if i > 1 && gap+300*time.Millisecond < prev {
 			return fmt.Errorf("the TUI's retries came closer together (%s, then %s) instead of further apart", prev.Round(100*time.Millisecond), gap.Round(100*time.Millisecond))
 		}
+		// The scenario stops at three waves, so the count above cannot catch
+		// a TUI that retries at a flat interval; the growth can. The TUI's
+		// delays double from a second, so each gap is about twice the last,
+		// late timers and all, and half a second is far inside that.
+		if i > 1 && gap < prev+500*time.Millisecond {
+			return fmt.Errorf("the TUI's retries did not back off (%s, then %s)", prev.Round(100*time.Millisecond), gap.Round(100*time.Millisecond))
+		}
 		prev = gap
 	}
 	for _, w := range waves {
@@ -698,6 +724,14 @@ func boundedRetries(attempts []time.Time, down time.Duration) error {
 	}
 	return nil
 }
+
+const (
+	// retryDeadline is how long P3-09 waits to see the TUI retry.
+	retryDeadline = 30 * time.Second
+	// retryGrace is how long a server may be down with no retry seen before
+	// the TUI is judged not to retry: ten times its first delay.
+	retryGrace = 10 * time.Second
+)
 
 // doublings is how many times a delay that starts at one second can double
 // and still have run out before d.
