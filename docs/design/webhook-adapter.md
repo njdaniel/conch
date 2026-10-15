@@ -1,6 +1,6 @@
 # Design: the generic webhook/event adapter
 
-- **Status:** Proposed, 2026-10-14. Needs Nick's sign-off on §11 before any child issue is worked; the issue asks for it because the work could add an ingress.
+- **Status:** Adopted 2026-10-14 under Nick's delegation ("skip waiting on me, use your recommendations"); §11 lists each decision that is his to overrule. Children: #386 (F10a), #387 (F10b), #388 (F10c).
 - **Touches:** [ADR-000](../adr/ADR-000-charter.md) D3 (deployment invariant), D6 (API parity), D8 (schema-first), D10 (manifests); [ADR-001](../adr/ADR-001-mcp-native-architecture.md); the P3 epic #263 decisions D1 (sessions), D5 (reference adapter), D8 (run audience), D9 (channel-less agent calls), D10 (who may intervene).
 - **Owner:** protocol-designer (this note), server-engineer (the children)
 - **Issue:** #359 (tracking)
@@ -56,7 +56,7 @@ The issue asks that the new path be bounded, rate limited and audited like the w
 
 | | Webhook ingest (`hooks.go`) | Run and session routes (§1) | The relay's socket (§7) |
 |---|---|---|---|
-| Who authenticates | Whoever holds the URL; the token is stored only as its SHA-256 | An issued credential in the header; never in a URL; a static `--mcp-token` is refused (`sessions_require_auth`) | Whoever can open the socket: its owner's uid (mode 0600 in a 0700 directory) |
+| Who authenticates | Whoever holds the URL; the token is stored only as its SHA-256 | An issued credential in the header; never in a URL; a static `--mcp-token` is not accepted (REST: 401, since it is wired only to `/mcp`; MCP: `sessions_require_auth`) | Whoever can open the socket: its owner's uid (mode 0600 in a 0700 directory) |
 | With `--auth off` | Posts, with no membership or manifest check | Refused: `sessions_require_auth` | Cannot start: `conchd` refuses its session |
 | Disabled principal | 404 `hook_not_found` | 401: the credential no longer resolves; its sessions are ended (`principal_disabled`) | `conchd`'s 401, passed back |
 | Membership | Required (agent or human principal); refusal looks like an unknown token | Required; refusal is 404 `channel_not_found`, audited `access_denied reason=not_a_member` | `conchd`'s refusal; the relay also refuses any channel but its own, with the same 404 |
@@ -97,7 +97,7 @@ A CI job maps onto the closed vocabularies without strain:
 | Job waits on a manual gate | state | `waiting`, then `running` |
 | Job ends | state, activity | `completed`, `failed` or `cancelled` with a one-line `outcome`; activity `run_ended` |
 
-Things deliberately not added. Each would change a published request type, so it would go through the `schema-change` skill; adding a field to a request is additive, because conchd refuses unknown fields today. Each is recorded so it is not reinvented by a handler:
+Things deliberately not added. Each would change a published request type, so it would go through the `schema-change` skill: a new request field is additive on the wire, but because conchd decodes strictly, an older server would refuse a request carrying it. Each is recorded so it is not reinvented by a handler:
 
 - **A sender's timestamp on activity.** `at` is the server's clock (`AppendActivityRequestV1`). A sender that replays a backlog after an outage gets the times of receipt, not of the events.
 - **An idempotency key.** Retries are the sender's problem. A retried start creates a second run, and a retried activity is a second entry. A retried state change after a lost response gets 409 `invalid_transition`, which the sender reads as already done. Senders must not retry a start blindly.
@@ -151,7 +151,7 @@ They cannot post or read messages without `messages.post` and `messages.read`, w
 - The events socket: a slow subscriber is closed at 256 queued references, and no writer waits for one.
 - Revoking a credential ends its sessions at once.
 
-**What is unbounded today** (§9): runs per session, open runs per session, and activity entries per run. An external reporter is the likeliest source of a runaway loop, which makes these worth closing (child C3).
+**What is unbounded today** (§9): runs per session, open runs per session, activity entries per run, and session churn (a reporter looping register and `DELETE` writes two audit rows and a roster update to every member's socket per cycle, bounded only by an opt-in `sessions.manage` limit). An external reporter is the likeliest source of a runaway loop, which makes these worth closing (child C3).
 
 **What reaches the audit log.**
 
@@ -168,7 +168,7 @@ Not in the log:
 - Anything the relay refuses before `conchd` sees it.
 - No token, credential or socket path is ever written to the log.
 
-**Compromise.** A stolen reporter credential can show misleading runs, in its granted channels, up to its rate limit, until it is revoked or expires. It cannot do anything else in Conch. Tokens cross the network in the clear unless the operator puts TLS in front of `conchd`, as for every client (README, Known limitations).
+**Compromise.** A stolen reporter credential can show misleading runs, in its granted channels, up to its rate limit, until it is revoked or expires; it can also answer a person's intervention `applied` without acting on it, a false assurance that a run stopped; and a run's `link` is any `https://` host, rendered to members as a link, so a forged run can carry a phishing link. It cannot do anything else in Conch. Tokens cross the network in the clear unless the operator puts TLS in front of `conchd`, as for every client (README, Known limitations).
 
 ## 9. What the code says that the issue assumed otherwise
 
@@ -183,7 +183,7 @@ None of these conflicts with a locked decision in ADR-000.
 
 ## 10. Phasing
 
-The full child issues are written separately; filing them waits for §11.
+The child issues are filed: #386 (F10a), #387 (F10b), #388 (F10c).
 
 1. **C1, S: document and test reporting from outside over the REST contract.** A README recipe and a REST-only end-to-end test of the happy path and every refusal. No change to the server. This alone answers the issue for every sender that can set a header.
 2. **C2, M: the relay mode (§7).** Security-reviewer pass. Blocked by C1.
