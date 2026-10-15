@@ -218,13 +218,32 @@ body {
   margin: 0;
 }
 
-.ag-activity,
-.ag-interventions {
+.ag-activity {
   list-style: none;
   margin: 0;
   padding: 0;
   max-height: 30vh;
   overflow-y: auto;
+}
+
+.ag-offset,
+.ag-gap {
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-iv {
+  font-style: italic;
+}
+
+.ag-data {
+  margin: 0.25rem 0 0.25rem 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ag-activity summary {
+  cursor: pointer;
 }
 
 /* Bodies, reasons and outcomes are shown as written, line breaks included. */

@@ -7,6 +7,7 @@ import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
 import { joinMembers, type Entry } from './join';
+import { RunsList } from './RunsList';
 import type { Agents } from './useAgents';
 
 function SessionRow({ session, runs, now, onOpen }: {
@@ -174,6 +175,7 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
           ))}
         </ul>
       )}
+      <RunsList agents={agents} />
       {state.notice === null ? null : <p role="status">{state.notice}</p>}
     </div>
   );

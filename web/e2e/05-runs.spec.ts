@@ -1,6 +1,6 @@
 // P3-06 and P3-08: a run of a scripted agent as the panel shows it, and the
 // instruction a person can give it.
-import { interventions, post, roster, run, runsIn } from './api';
+import { activityOf, interventions, post, roster, run, runsIn } from './api';
 import { expect, signIn, test } from './fixtures';
 import { errorV0, type ErrorV0 } from '../src/schema/error';
 import { launchWorker } from './agents';
@@ -70,7 +70,7 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
       let last = '';
       new MutationObserver(() => {
         const state = document.querySelector('[data-testid="run-state"]')?.textContent ?? '';
-        const asks = [...document.querySelectorAll('[data-testid^="intervention-"]')].map((e) => e.textContent);
+        const asks = [...document.querySelectorAll('[data-testid^="intervention-"]')].map((e) => /requested…|acknowledged|applied|failed/.exec(e.textContent)?.[0] ?? '');
         const key = JSON.stringify([state, asks]);
         if (key === last) return;
         last = key;
@@ -94,18 +94,58 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     const ask = asks[0];
     expect(ask?.kind).toBe('cancel');
     expect(['acknowledged', 'applied']).toContain(ask?.state);
-    await expect(detail.getByTestId(`intervention-${String(ask?.id)}`)).toHaveText(ask?.state === 'applied' ? 'Applied' : 'Acknowledged');
+    await expect(detail.getByTestId(`intervention-${String(ask?.id)}`)).toHaveText(ask?.state === 'applied' ? `↳ #${String(ask.id)} applied` : `↳ #${String(ask?.id)} acknowledged`);
 
     // Nothing the page showed was ahead of what the API said at that moment.
     await expect.poll(() => changes.some((o) => o.state === 'cancelled'), { message: 'the page was seen to change to cancelled' }).toBe(true);
-    const rank: Record<string, number> = { Requested: 0, requested: 0, Acknowledged: 1, acknowledged: 1, Applied: 2, applied: 2 };
+    const rank: Record<string, number> = { 'requested…': 0, requested: 0, acknowledged: 1, applied: 2 };
     for (const o of changes) {
       if (o.state === 'cancelled') expect(o.apiState, 'the page showed cancelled before the API did').toBe('cancelled');
       o.asks.forEach((word, i) => {
         expect(rank[o.apiAsks[i] ?? ''] ?? -1, `the page showed ${word} before the API did`).toBeGreaterThanOrEqual(rank[word] ?? 99);
       });
     }
-    expect(changes.some((o) => o.asks.some((w) => w === 'Acknowledged' || w === 'Applied'))).toBe(true);
+    expect(changes.some((o) => o.asks.some((w) => w === 'acknowledged' || w === 'applied'))).toBe(true);
+  } finally {
+    await worker.stop();
+  }
+});
+
+test('P3-06 the Runs view lists the run with the API id and state, and its timeline reads the offset the API implies', async ({ meet, world }) => {
+  const worker = await launchWorker(world, 'slow.sh', { sleep: 120 });
+  try {
+    const { page } = await meet();
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const asked = await post(world, world.tokens.nick, 'general', 'p3-06 runs view work for the worker');
+    let seen = 0;
+    await expect
+      .poll(async () => {
+        seen = (await runsIn(world, world.tokens.browser, 'general')).find((r) => r.message_id === asked.id)?.id ?? 0;
+        return seen;
+      }, { message: 'a run answering the message' })
+      .toBeGreaterThan(0);
+    await expect.poll(async () => (await activityOf(world, world.tokens.browser, seen)).length, { message: 'the run reported activity' }).toBeGreaterThan(0);
+    const started = await run(world, world.tokens.browser, seen);
+
+    // The Runs view lists it with the API's id and state; selecting it opens it.
+    const panel = page.getByRole('region', { name: 'Members list' });
+    await expect(panel.getByRole('heading', { name: 'Runs' })).toBeVisible();
+    const row = panel.getByRole('list', { name: 'Channel runs' }).getByRole('button', { name: new RegExp(`^#${String(seen)} · `) });
+    await expect(row).toHaveText(`#${String(seen)} · ${started.state}`);
+    await row.click();
+    const detail = page.getByRole('article', { name: 'Run detail' });
+    await expect(detail.getByRole('heading', { name: `Run #${String(seen)}` })).toBeVisible();
+    await expect(detail.getByTestId('run-state')).toHaveText(started.state);
+
+    // The first timeline line's offset is the API's first entry minus the run's start, to the second.
+    const first = (await activityOf(world, world.tokens.browser, seen))[0];
+    const offset = Math.max(0, Date.parse(first?.at ?? '') - Date.parse(started.started_at));
+    const want = Math.floor(offset / 1000);
+    const line = detail.getByRole('list', { name: 'Timeline' }).getByRole('listitem').first();
+    await expect(line).toContainText(/^\s*\+/);
+    const shown = (await line.textContent())?.match(/\+(\d+)(?:\.\d)?s/);
+    expect(shown, 'an offset in seconds on the first line').not.toBeNull();
+    if (want < 60) expect(Number(shown?.[1])).toBe(want);
   } finally {
     await worker.stop();
   }

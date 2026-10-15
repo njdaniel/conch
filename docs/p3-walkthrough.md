@@ -26,7 +26,9 @@ the runner starts its own server, drives two terminal clients on pseudo-terminal
 and the scripted agents, checks what each row says should appear, and removes
 everything (issue #284). That is what CI runs. P3-13 is not part of it unless you
 add `--real-adapter` and have `claude` on your PATH; it then runs one real reply
-as you, which this walkthrough's last section describes.
+as you, which this walkthrough's last section describes. P3-14, below, is an extra
+row: Claude Code, Codex and a local model at once, run by you; its stubbed twin is
+part of the same automated run.
 
 ## Start it
 
@@ -442,6 +444,43 @@ When you post in `general`, the run's activity lists each command Codex ran as a
 only (never its arguments), then `reply_posted`, and the reply is Codex's final
 message. If `codex` is missing or not signed in, the run fails with that stated;
 nothing falls back to a fixture or to another paid service.
+
+## P3-14 Three runtimes at once, opt-in
+
+The roadmap's P3 success criterion in one sitting: Claude Code, Codex and a
+local model running side by side. Each is a principal of its own, `real-claude`,
+`real-codex` and `real-ollama`, with the manifest of `worker-test` and an
+environment file `real-<runtime>.env`. You need `claude` and `codex` installed
+and signed in, and Ollama running with the model pulled. The models come from
+`CONCH_P3_MODEL_CLAUDE`, `CONCH_P3_MODEL_CODEX` and `CONCH_P3_MODEL_OLLAMA`; the
+runner refuses a runtime whose variable is unset and names it. Read the warning it
+prints first: Claude Code runs with its permission checks off, and `claude` and
+`codex` spend your own quota. The local model only writes text.
+
+`go run ./e2e/p3-local --reset` then
+`CONCH_P3_MODEL_CLAUDE=<model> CONCH_P3_MODEL_CODEX=<model> CONCH_P3_MODEL_OLLAMA=<model> go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama`
+
+(Not fenced, for the reason in P3-13. `--real-adapters` needs `--keep` and takes any
+of the three, in any order.) The runner prints one start command for each, under
+the name `real-claude`, `real-codex` and `real-ollama`: each is
+`set -a; . <root>/real-<runtime>.env; set +a; <root>/bin/conch-adapter`, run in a
+window of its own and in a directory you would let it read. The Ollama adapter
+checks first that Ollama can answer for the model and exits with one line saying
+which of the three things is missing if it cannot; nothing else is tried.
+
+What should appear. Start the three, then post one message in `general`. The
+roster in the TUI and the browser's panel show three agents, each with its
+`model`. Their `runtime` (`claude-code`, `codex`, `ollama`) is shown to operators
+and to the agent itself, not to members, so look at it as the operator (the
+`<root>/operator.env` credential on `GET /v1/sessions?channel=general`) or in the
+adapter's own session; a member sees three models, not three runtimes. Open each
+agent's run in the TUI to read its activity, and send a `message` intervention to
+one of them with `m` in the run's detail. Write down which runtime answered what.
+Record the run, dated, in [the exit record](design/p3-exit-record.md) as a run of
+its own, as P3-13 is.
+
+The same row without any model, with a stub for each program, is part of
+`go run ./e2e/p3-local` (it is listed there as P3-14, "three runtimes at once, with stubs").
 
 ## When you are done
 
