@@ -577,6 +577,79 @@ curl -s -X POST localhost:8080/mcp \
 
 Approvals are requested by agents over MCP and decided by humans with `conch approve` / `conch reject`; the decider is always the logged-in person and must be a member of the approval's channel.
 
+#### Reporting from outside Conch: a CI job or a remote script
+
+A runtime that cannot be run as a subprocess of `conch-adapter` (a CI job, a hosted agent, a script on another machine) can report its work with plain HTTP. The session, run, activity and intervention routes above take an issued agent credential in the `Authorization` header and are held to the agent's manifest, its rate limits and the audit log, like the MCP tools; each body is limited to 1 MiB and decoded strictly (an unknown field is `400`). No other route, listener or process is involved. The test `TestExternalRuntime*` in `internal/server/external_runtime_test.go` drives this sequence and every refusal below.
+
+**Set-up** (the operator, once per sender). Give the sender a principal of its own and a credential that expires; a shared credential shares its 16 live sessions and its rate budget, and revoking a dedicated one ends only its sessions. Put it in one channel and grant the least:
+
+```sh
+# as the operator (CONCH_TOKEN, step 3)
+bin/conch admin principal create --kind agent ci-runner          # say it is id 4
+bin/conch admin member add ops 4
+bin/conch admin credential issue 4 --label "nightly build" --expires-at 2026-12-31T00:00:00Z > ci.token
+bin/conch admin manifest put 4 <<'EOF'
+{
+  "display_name": "ci-runner", "tier": "C",
+  "capabilities": ["sessions.manage","runs.manage"],
+  "channels": [{"channel_id": 1, "permissions": ["post"]}],
+  "rate_limits": [
+    {"capability": "sessions.manage", "max": 12, "window_seconds": 60},
+    {"capability": "runs.manage", "max": 120, "window_seconds": 60}
+  ]
+}
+EOF
+```
+
+A rate limit is opt-in: a capability with no entry is unlimited, so declare both. A heartbeat every 10 seconds spends 6 `sessions.manage` a minute. The sender needs `post` in the channel because a run is shown to the channel's audience, but not `messages.read` or `messages.post`: it cannot read or post messages.
+
+**The sequence** (the sender; `$CONCH_SERVER` is the server's URL, `ci.token` the credential). In a CI job, keep the credential in a masked secret and never run this block under `set -x`, which would print the token into the job log:
+
+```sh
+AUTH="Authorization: Bearer $(cat ci.token)"
+API=${CONCH_SERVER:-http://127.0.0.1:8080}
+
+# 1. register; keep the id
+SESSION=$(curl -sf -X POST "$API/v1/sessions" -H "$AUTH" \
+  -d '{"client":"ci-job","runtime":"github-actions","host":"runner-3"}' | jq .id)
+
+# 2. heartbeat in the background for the life of the job
+( while sleep 10; do curl -sf -X POST "$API/v1/sessions/$SESSION/heartbeat" -H "$AUTH" >/dev/null; done ) &
+HEARTBEAT=$!
+
+# 3. start a run in the channel; keep its id
+RUN=$(curl -sf -X POST "$API/v1/sessions/$SESSION/runs" -H "$AUTH" \
+  -d '{"channel":"ops","task":"nightly build","link":"https://ci.example.com/jobs/7421"}' | jq .id)
+
+# 4. report states and activity
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"starting"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"running"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"command_started","summary":"go test ./..."}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"command_finished","summary":"go test ./...","outcome":"passed","data":{"exit":0}}' >/dev/null
+
+# 5. a terminal state ends the run (activity after that is 409, so post run_ended first)
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"run_ended","summary":"build finished","outcome":"passed"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"completed","outcome":"passed"}' >/dev/null
+
+# 6. stop the heartbeat and end the session
+kill $HEARTBEAT 2>/dev/null; wait $HEARTBEAT 2>/dev/null
+curl -sf -X DELETE "$API/v1/sessions/$SESSION" -H "$AUTH"
+```
+
+A member sees the session, the run and each activity entry live on `GET /v1/events/ws`, and `session_started`, `run_started`, `run_ended` and `session_ended` are in the audit log, without the task. A sender that wants to be told to stop lists the kinds it will answer in `register` (`"interventions":["cancel"]`), polls `GET /v1/sessions/$SESSION/interventions?state=requested` and answers each with `POST /v1/interventions/{id}/ack`; a kind it did not list is refused at once with `409 intervention_unsupported`.
+
+**What is not supported.**
+
+- **No back-dating.** `at` is the server's clock; a sender that replays a backlog gets the time of receipt.
+- **No retries without thought.** There is no idempotency key: a retried start creates a second run and a retried activity a second entry. A retried state change after a lost response gets `409 invalid_transition`, which means it is already done. Do not retry a start blindly.
+- **A run report is not a heartbeat.** Only a heartbeat (or an open events socket with `session=`) keeps a session alive. A sender that reports but never heartbeats shows `stale` after 30 seconds and `offline` after 90, and its open run reads `outcome_unknown`. Heartbeat from the background, as above.
+- **`--auth off` refuses sessions** (`400 sessions_require_auth`), and so does a static `--mcp-token`.
+
+What is refused: a wrong or revoked credential is `401`. Starting a run without `runs.manage`, or in a channel the sender is not in, is `404 channel_not_found` (audited as `access_denied`, with `capability_not_granted` or `not_a_member`); a report on an existing run after `runs.manage` is gone is `403 forbidden`. A body over 1 MiB is `413`; malformed JSON, an unknown field, activity `data` over 8 KiB or an `http://` link is `400`. Over a rate limit is `429` with `Retry-After`, audited as `agent_rate_limited`.
+
 ### 6. Verify your install
 
 ```sh
