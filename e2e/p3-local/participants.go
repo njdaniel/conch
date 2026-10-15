@@ -302,6 +302,9 @@ func (r *runner) printCommands() error {
 	cmd("start again after a reset", r.selfCommand("--keep"))
 	cmd("stop everything and remove "+r.root, r.selfCommand("--reset"))
 	say("")
+	if r.advertise != nil {
+		r.guestCommands(say, cmd)
+	}
 	say("values the walkthrough names:")
 	say("  root %s", r.root)
 	say("  address %s", r.addr)
@@ -320,6 +323,34 @@ func (r *runner) printCommands() error {
 	}
 	fmt.Print(text)
 	return nil
+}
+
+// guestCommands prints what to run on the guest, apart from the commands for
+// this machine. The guest has none of this machine's files: it needs the env
+// files of the participants it plays (they hold the test credentials), the
+// fixture scripts, and conch and conch-adapter built for its own system. Each
+// env file also sets paths inside this machine's root, so the commands
+// override those.
+func (r *runner) guestCommands(say func(string, ...any), cmd func(comment, command string)) {
+	home := `"$HOME"/conch-p3`
+	say("# ---- on the guest ----")
+	say("# Everything above runs on this machine. The commands below run on the guest, which must reach %s.", r.baseURL())
+	say("# Nothing here is started for you, and no credential is printed: the files hold them.")
+	say("# Copy these from %s to ~/conch-p3 on the guest: tui-b.env agent-a.env browser.txt fixtures/", r.root)
+	say("# On the guest, in a checkout of this repository: go build -o ~/conch-p3/bin/ ./cmd/conch ./cmd/conch-adapter")
+	say("# On the guest, the address in these commands is the host; a name for the guest itself would be the guest.")
+	say("# Stop tui-b and agent-a on this machine (ctrl-c) before starting them on the guest: two clients on one credential would be one person twice.")
+	cmd("guest: conch as guest-test (tui-b)",
+		"set -a; . "+home+"/tui-b.env; CONCH_CONFIG_DIR="+home+"/config/tui-b; set +a; "+home+"/bin/conch")
+	say("# guest: the browser. Open %s/app/ in it and paste the credential from this file", r.baseURL())
+	say("cat %s/browser.txt", home)
+	adapter := "set -a; . " + home + "/agent-a.env; CONCH_ADAPTER_LOCK_FILE=" + home + "/agent-a.lock; "
+	if !r.realAdapter {
+		adapter += "CONCH_ADAPTER_CMD=" + home + "/fixtures/echo.sh; "
+	}
+	cmd("guest: conch-adapter as worker-test (agent-a)", adapter+"CONCH_CONFIG_DIR="+home+"/config/agent-a; set +a; "+home+"/bin/conch-adapter")
+	say("# Repeat on the guest: P3-02, P3-05, P3-09, P3-10 (docs/p3-walkthrough.md, \"From a guest\").")
+	say("")
 }
 
 // defaultRoot is where the root is without CONCH_P3_ROOT.
@@ -411,7 +442,7 @@ func (r *runner) checkParticipants() error {
 }
 
 func (r *runner) checkWebApp() error {
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(r.baseURL() + "/app/") // #nosec G107 -- this run's own loopback conchd
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(r.localURL() + "/app/") // #nosec G107 -- this run's own loopback conchd
 	if err != nil {
 		return fmt.Errorf("GET /app/: %w", err)
 	}
@@ -469,7 +500,7 @@ func (r *runner) logTail(path string) string {
 
 // sessions is the roster of channel as the holder of token sees it.
 func (r *runner) sessions(token, channel string) ([]schema.SessionV1, error) {
-	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, r.baseURL()+"/v1/sessions?channel="+url.QueryEscape(channel), nil)
+	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, r.localURL()+"/v1/sessions?channel="+url.QueryEscape(channel), nil)
 	if err != nil {
 		return nil, err
 	}
