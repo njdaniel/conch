@@ -427,3 +427,31 @@ func TestCommandRunnerChildEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestStripControl(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain", "hello, world: ü 日本", "hello, world: ü 日本"},
+		{"empty", "", ""},
+		{"cursor back and erase", "sonne\x1b[13D\x1b[K", "sonne"},
+		{"erase line", "a\x1b[Kb", "ab"},
+		{"colour with parameters", "\x1b[1;31mred\x1b[0m", "red"},
+		{"private csi", "\x1b[?25lx\x1b[?25h", "x"},
+		{"csi with intermediate", "a\x1b[0 qb", "ab"},
+		{"osc title, BEL", "a\x1b]0;title\x07b", "ab"},
+		{"osc title, ST", "a\x1b]0;title\x1b\\b", "ab"},
+		{"unterminated osc", "a\x1b]0;title", "a"},
+		{"truncated csi", "a\x1b[12", "a"},
+		{"bare ESC", "a\x1bb", "ab"},
+		{"trailing ESC", "a\x1b", "a"},
+		{"BEL", "a\x07b", "ab"},
+		{"CR and others", "a\rb\x00c\x08d\x7fe", "abcde"},
+		{"tab kept", "a\tb", "a\tb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripControl(tt.in); got != tt.want {
+				t.Fatalf("stripControl(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
