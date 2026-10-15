@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { VoiceStatus } from './VoiceStatus';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
 
@@ -74,6 +75,7 @@ export function Lobby({
           {conversation}
         </section>
         <aside aria-label="Members panel" className="panel">
+          <VoiceStatus />
           <button
             type="button"
             aria-expanded={panelOpen}
