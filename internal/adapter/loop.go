@@ -22,6 +22,8 @@ type botMCPClient interface {
 	readChannel(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
 	// postMessage posts body with the given audience; nil means channel-wide.
 	postMessage(context.Context, string, string, *schema.Audience) error
+	// members lists the channel's members with their kind, human or agent.
+	members(context.Context, string) ([]schema.ChannelMemberV1, error)
 
 	RegisterSession(context.Context, schema.CreateSessionRequestV1) (schema.SessionV1, error)
 	Heartbeat(context.Context, int64) (schema.SessionV1, error)
@@ -74,6 +76,12 @@ type botLoop struct {
 	// noRunAudiences are the audiences the server would not start a run in,
 	// so that is said once for each.
 	noRunAudiences map[string]bool
+	// kinds is what the channel's members are, by principal id. A kind never
+	// changes, so an id is looked up once; only pollOnce touches it.
+	kinds map[int64]schema.PrincipalKind
+	// unplaced are authors not on the member list (or listed without a
+	// kind), whose messages are therefore not answered; each is said once.
+	unplaced map[int64]bool
 
 	// mu guards recent and clock, which the intervention watcher reaches
 	// while a reply is being made.
@@ -163,6 +171,11 @@ func (b *botLoop) pollOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Who wrote the messages is learned before the cursor moves, so a failed
+	// lookup is retried by the next poll and no message is lost to it.
+	if err := b.learnKinds(ctx, messages); err != nil {
+		return err
+	}
 	// The cursor moves past every message read before any reply is attempted,
 	// so a message is never read again: a refused or failed reply is not
 	// retried by the next poll.
@@ -184,17 +197,73 @@ func (b *botLoop) pollOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// learnKinds looks up the kind of every author in messages that is not yet
+// known, from the channel's member list, which says human or agent for each
+// member. It makes no call when every author is known, or when the adapter
+// answers agents too and so does not need the kinds.
+func (b *botLoop) learnKinds(ctx context.Context, messages []schema.MessageV2) error {
+	if b.cfg.ReplyToAgents {
+		return nil
+	}
+	missing := false
+	for _, message := range messages {
+		if message.AuthorID != b.cfg.PrincipalID && b.kinds[message.AuthorID] == "" {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return nil
+	}
+	members, err := b.mcp.members(ctx, b.cfg.Channel)
+	if err != nil {
+		return fmt.Errorf("list channel members: %w", err)
+	}
+	if b.kinds == nil {
+		b.kinds = map[int64]schema.PrincipalKind{}
+	}
+	for _, m := range members {
+		if m.Kind != "" {
+			b.kinds[m.PrincipalID] = m.Kind
+		}
+	}
+	return nil
+}
+
+// triggers reports whether a message from another author is one to answer:
+// one from a human, or from anyone when ReplyToAgents is set. An author whose
+// kind is not known (no longer a member, say) is not answered: not knowing
+// whether it is an agent is the case that starts a loop.
+func (b *botLoop) triggers(message schema.MessageV2) bool {
+	if b.cfg.ReplyToAgents {
+		return true
+	}
+	kind := b.kinds[message.AuthorID]
+	if kind == "" && !b.unplaced[message.AuthorID] {
+		if b.unplaced == nil {
+			b.unplaced = map[int64]bool{}
+		}
+		b.unplaced[message.AuthorID] = true
+		slog.Warn("conch-adapter: not answering an author the channel's member list does not place as a person or an agent", "author", message.AuthorID)
+	}
+	return kind == schema.PrincipalHuman
+}
+
 // replyTo answers one audience's new messages in that same audience, as one
 // run. A refusal of a scoped reply is logged and dropped; there is no second
-// attempt with a wider or missing audience.
+// attempt with a wider or missing audience. Messages from other agents go in
+// the prompt but, unless ReplyToAgents is set, never start a run on their own:
+// two adapters in a channel would otherwise answer each other without end.
 func (b *botLoop) replyTo(ctx context.Context, g *audienceGroup, history []schema.MessageV2) error {
 	human := make([]schema.MessageV2, 0, len(g.messages))
+	triggered := false
 	for _, message := range g.messages {
 		if message.AuthorID != b.cfg.PrincipalID {
 			human = append(human, message)
+			triggered = triggered || b.triggers(message)
 		}
 	}
-	if len(human) == 0 {
+	if !triggered {
 		return nil
 	}
 	if !b.allowReply() {
