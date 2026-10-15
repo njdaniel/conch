@@ -17,7 +17,9 @@
 //	a named string type            vocab over its schema.Vocabularies entry
 //	[]T                            array(T)
 //	a struct                       that struct's validator, which must be listed
-//	*T, omitempty or omitzero      optional(T)
+//	omitempty or omitzero          optional(T)
+//	*T, with omitempty or omitzero optional(T); a bare *T is refused, as Go
+//	                               writes a nil one as null
 //	json:"-" or unexported         skipped
 //
 // Anything else is refused, with the field it is in, rather than guessed at.
@@ -238,7 +240,7 @@ func plainTables(types []schema.TSType, unions []schema.TSUnion, vocab map[strin
 	}
 	for name, members := range vocab {
 		for _, m := range members {
-			errs = append(errs, plain(m, "Vocabularies["+name+"]"))
+			errs = append(errs, plainKey(m, "Vocabularies["+name+"]"))
 		}
 	}
 	for _, name := range payloads {
@@ -287,6 +289,9 @@ func (g *generator) declare(value any, name string) (*decl, error) {
 func (g *generator) claim(name, owner string) error {
 	if !identifier.MatchString(name) {
 		return fmt.Errorf("%s: %q is not a TypeScript identifier", owner, name)
+	}
+	if reserved[name] {
+		return fmt.Errorf("%s: %q is a reserved word in TypeScript", owner, name)
 	}
 	if other, taken := g.names[name]; taken {
 		return fmt.Errorf("%s: the name %s is already %s's", owner, name, other)
@@ -496,7 +501,7 @@ func (g *generator) fields(t reflect.Type) ([]field, error) {
 		if seen[name] {
 			return nil, fmt.Errorf("%s: json key %q is used twice", where, name)
 		}
-		if err := plain(name, where); err != nil {
+		if err := plainKey(name, where); err != nil {
 			return nil, err
 		}
 		seen[name] = true
@@ -512,7 +517,11 @@ func (g *generator) fields(t reflect.Type) ([]field, error) {
 		}
 		ft := sf.Type
 		if ft.Kind() == reflect.Pointer {
-			f.optional = true
+			// A nil pointer is written as null unless the tag omits it, and
+			// TypeScript's optional key cannot be null.
+			if !f.optional {
+				return nil, fmt.Errorf("%s: a pointer without omitempty or omitzero is null when nil, which is not supported", where)
+			}
 			ft = ft.Elem()
 			f.goType = ft
 		}
@@ -612,6 +621,23 @@ func (g *generator) vocabulary(t reflect.Type, where string) (expr, error) {
 	return expr{ts: name, check: value}, nil
 }
 
+// reserved is every word TypeScript refuses as the name of a constant or a
+// type: JavaScript's reserved words, strict mode's, and TypeScript's own type
+// names. A Go struct Default would otherwise become "export const default".
+var reserved = func() map[string]bool {
+	words := map[string]bool{}
+	for _, w := range strings.Fields(`
+		break case catch class const continue debugger default delete do else
+		enum export extends false finally for function if import in instanceof
+		new null return super switch this throw true try typeof var void while
+		with implements interface let package private protected public static
+		yield await any unknown never object string number boolean symbol
+		bigint undefined`) {
+		words[w] = true
+	}
+	return words
+}()
+
 // maxLine is the length past which a declaration is written one member to a
 // line.
 const maxLine = 100
@@ -626,6 +652,16 @@ var (
 // and the backslash is enough.
 func quote(s string) string {
 	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(s) + "'"
+}
+
+// plainKey is plain for a string written as an object key, which also may
+// not be __proto__: in an object literal that sets the prototype instead of
+// adding a key, so vocab() and object() would never see it.
+func plainKey(s, where string) error {
+	if s == "__proto__" {
+		return fmt.Errorf("%s: __proto__ cannot be an object key", where)
+	}
+	return plain(s, where)
 }
 
 // plain refuses a string from a table or a tag that is not printable ASCII:

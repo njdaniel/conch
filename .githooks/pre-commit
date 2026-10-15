@@ -34,6 +34,13 @@ go test ./...
 echo "pre-commit: schema compatibility"
 ./scripts/schema-compat.sh
 
+# The generated TypeScript wire types (issue #348). Guarded like the Rust leg
+# below: the hook may belong to a newer checkout than the branch committed.
+if [ -f ./scripts/schema-ts-check.sh ]; then
+    echo "pre-commit: generated TypeScript wire types"
+    ./scripts/schema-ts-check.sh
+fi
+
 echo "pre-commit: dependency gate"
 ./scripts/depgate.sh
 

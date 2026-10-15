@@ -221,17 +221,28 @@ export const escalationTargetKind = vocab<EscalationTargetKind>({
   ntfy_topic: true,
 });
 
-// schema.EscalationTarget
-export interface EscalationTarget {
-  kind: EscalationTargetKind;
-  principal_id?: number;
-  topic?: string;
+// schema.EscalationTarget, by kind.
+export type EscalationTarget = PrincipalEscalationTarget | NtfyTopicEscalationTarget;
+
+export interface PrincipalEscalationTarget {
+  kind: 'principal';
+  principal_id: number;
 }
 
-export const escalationTarget = object<EscalationTarget>({
-  kind: escalationTargetKind,
-  principal_id: optional(int),
-  topic: optional(str),
+export interface NtfyTopicEscalationTarget {
+  kind: 'ntfy_topic';
+  topic: string;
+}
+
+export const escalationTarget = tagged<EscalationTarget, 'kind'>('kind', {
+  principal: object<PrincipalEscalationTarget>({
+    kind: vocab<'principal'>({ principal: true }),
+    principal_id: int,
+  }),
+  ntfy_topic: object<NtfyTopicEscalationTarget>({
+    kind: vocab<'ntfy_topic'>({ ntfy_topic: true }),
+    topic: str,
+  }),
 });
 
 // schema.ApprovalState

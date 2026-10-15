@@ -63,7 +63,6 @@ var TSTypes = []TSType{
 
 	// An approval, as a message carries it in its payload.
 	{Value: Option{}, Family: "approval-option-v1"},
-	{Value: EscalationTarget{}},
 	{Value: ApprovalV1{}, Family: "conch-approval-v1"},
 
 	// Nets.
@@ -96,6 +95,16 @@ var TSUnions = []TSUnion{
 		Variants: map[string][]string{
 			string(AudienceKindNet):        {"net_id"},
 			string(AudienceKindPrincipals): {"principal_ids"},
+		},
+	},
+	// Who an approval escalates to: a principal, or an ntfy topic, never
+	// both (EscalationTarget.Validate).
+	{
+		Value: EscalationTarget{},
+		Tag:   "kind",
+		Variants: map[string][]string{
+			string(EscalationTargetPrincipal): {"principal_id"},
+			string(EscalationTargetNtfyTopic): {"topic"},
 		},
 	},
 }

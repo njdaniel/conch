@@ -303,6 +303,7 @@ func TestRealTables(t *testing.T) {
 		"export const messageV2Schema = 'conch.message.v2';",
 		"export interface ErrorV0 {",
 		"export type Audience = NetAudience | PrincipalsAudience;",
+		"export type EscalationTarget = PrincipalEscalationTarget | NtfyTopicEscalationTarget;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -334,6 +335,12 @@ func TestRefused(t *testing.T) {
 	}
 	type PtrPtr struct {
 		P **int64 `json:"p,omitempty"`
+	}
+	type BarePtr struct {
+		P *int64 `json:"p"`
+	}
+	type Proto struct {
+		P string `json:"__proto__"`
 	}
 	type Embedded struct {
 		Inner
@@ -385,6 +392,10 @@ func TestRefused(t *testing.T) {
 		{"an interface", []schema.TSType{{Value: Iface{}}}, nil, "Iface.A: interface {} is not a type"},
 		{"the string option", []schema.TSType{{Value: StringOpt{}}}, nil, `StringOpt.I: the json option "string"`},
 		{"a pointer to a pointer", []schema.TSType{{Value: PtrPtr{}}}, nil, "PtrPtr.P: *int64 is not a type"},
+		{"a pointer without omitempty", []schema.TSType{{Value: BarePtr{}}}, nil, "BarePtr.P: a pointer without omitempty or omitzero is null when nil"},
+		{"__proto__ as a key", []schema.TSType{{Value: Proto{}}}, nil, "Proto.P: __proto__ cannot be an object key"},
+		{"a reserved word as a name", []schema.TSType{{Value: Word{}, Name: "Default"}}, nil, `"default" is a reserved word`},
+		{"a TypeScript type name as a name", []schema.TSType{{Value: Word{}, Name: "String"}}, nil, `"string" is a reserved word`},
 		{"an embedded struct", []schema.TSType{{Value: Embedded{}}}, nil, "Embedded.Inner: an embedded struct"},
 		{"a key used twice", []schema.TSType{{Value: twice, Name: "Twice"}}, nil, `.B: json key "a" is used twice`},
 		{"a struct not listed", []schema.TSType{{Value: Unlisted{}}}, nil, "Unlisted.I: main.Inner is not in schema.TSTypes"},
@@ -416,6 +427,18 @@ func TestRefused(t *testing.T) {
 				t.Errorf("err = %v, want one containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+// A vocabulary member is an object key in vocab({...}), where __proto__
+// would set the prototype instead.
+func TestRefusedVocabulary(t *testing.T) {
+	type Leveled struct {
+		L Level `json:"l"`
+	}
+	_, err := generate([]schema.TSType{{Value: Leveled{}}}, nil, map[string][]string{"Level": {"low", "__proto__"}}, nil)
+	if want := "Vocabularies[Level]: __proto__ cannot be an object key"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("err = %v, want one containing %q", err, want)
 	}
 }
 
