@@ -790,13 +790,21 @@ func TestSessionStatusFromRuns(t *testing.T) {
 			if s := validSession(t, rec); s.Status != tt.want || s.OutcomeUnknown {
 				t.Errorf("after reviving: %+v", s)
 			}
-			// Ending the session changes no run either.
+			// Ending the session fails the runs still open (issue #402) and
+			// leaves the ended ones as they were.
 			if rec := f.do(t, "DELETE", sessionPath(sess, ""), f.botTok, ""); rec.Code != http.StatusNoContent {
 				t.Fatal(rec.Code)
 			}
 			for _, r := range validRunList(t, f.do(t, "GET", "/v1/runs?channel=general", f.botTok, "")).Runs {
-				if states[r.ID] != r.State {
-					t.Errorf("ending the session moved run %d from %s to %s", r.ID, states[r.ID], r.State)
+				want := states[r.ID]
+				if !schema.RunStateTerminal(want) {
+					want = schema.RunStateFailed
+					if r.Outcome != store.RunOutcomeSessionEnded || r.EndedAt == nil {
+						t.Errorf("ending the session left run %d with outcome %q, ended %v", r.ID, r.Outcome, r.EndedAt)
+					}
+				}
+				if want != r.State {
+					t.Errorf("ending the session moved run %d from %s to %s, want %s", r.ID, states[r.ID], r.State, want)
 				}
 			}
 		})

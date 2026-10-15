@@ -731,28 +731,30 @@ func TestSessionRunViews(t *testing.T) {
 		t.Errorf("no reader = %+v", v)
 	}
 
-	// The session goes stale, then offline, then ends: the run is untouched.
+	// The session goes stale, then offline: the run is untouched. Then the
+	// session ends, which fails the run (issue #402), and nothing can move it.
 	if _, err := f.s.SweepSessions(ctx, runT0.Add(40*time.Second), 30*time.Second, 90*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.s.SweepSessions(ctx, runT0.Add(2*time.Minute), 30*time.Second, 90*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	r, err := f.s.RunVisible(ctx, secret, f.agtReader())
+	if err != nil || r.State != schema.RunStateBlocked || r.EndedAt != nil {
+		t.Errorf("run after its session went offline = %+v, %v; want blocked and open", r, err)
+	}
 	if err := f.s.EndSession(ctx, "system", sess.ID, f.agtCred, runT0.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	r, err := f.s.RunVisible(ctx, secret, f.agtReader())
-	if err != nil || r.State != schema.RunStateBlocked || r.EndedAt != nil {
-		t.Errorf("run after its session went offline and ended = %+v, %v; want blocked and open", r, err)
+	r, err = f.s.RunVisible(ctx, secret, f.agtReader())
+	if err != nil || r.State != schema.RunStateFailed || r.EndedAt == nil || r.Outcome != RunOutcomeSessionEnded {
+		t.Errorf("run after its session ended = %+v, %v; want failed with outcome %q", r, err, RunOutcomeSessionEnded)
 	}
-	// An ended session's run is still the owner's to close, though no longer
-	// to move along (issue #392: the session is offline).
-	if _, err := f.s.SetRunState(ctx, "system", secret, f.agtCred, f.agtReader(), schema.RunStateRunning, "", runT0); !errors.Is(err, ErrSessionOffline) {
-		t.Errorf("moving a run on an ended session: err = %v, want ErrSessionOffline", err)
+	if _, err := f.s.SetRunState(ctx, "system", secret, f.agtCred, f.agtReader(), schema.RunStateCancelled, "", runT0); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("moving a run its session's end failed: err = %v, want ErrInvalidTransition", err)
 	}
-	set(secret, schema.RunStateCancelled)
-	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateCancelled}) {
-		t.Errorf("after cancelling = %+v", v)
+	if v := view(f.agtReader()); v != (SessionRuns{LastState: schema.RunStateFailed}) {
+		t.Errorf("after the session ended = %+v", v)
 	}
 }
 

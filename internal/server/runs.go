@@ -197,6 +197,8 @@ func (s *Server) createRun(ctx context.Context, call sessionCall, sessionID int6
 		return schema.RunV1{}, callChannelMissing
 	case errors.Is(err, store.ErrTooManyRuns):
 		return schema.RunV1{}, callTooManyRuns
+	case errors.Is(err, store.ErrTooManyCredentialRuns):
+		return schema.RunV1{}, callTooManyCredRuns
 	case errors.Is(err, store.ErrSessionOffline):
 		return schema.RunV1{}, callSessionOffline
 	case err != nil:

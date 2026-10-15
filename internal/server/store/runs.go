@@ -17,7 +17,8 @@ import (
 // lifecycle of schema.RunTransitionAllowed. Activity is the stream of what the
 // run did. The server records what the agent reports and never invents a
 // state or an outcome: nothing here changes a run when its session goes
-// stale, offline or ends.
+// stale or offline. The one exception is a session that ends, which fails its
+// open runs with outcome "session ended" (sessions.go, issue #402).
 //
 // Who may see a run is decided in audience.go, beside the message rule it is
 // built on, and every read of the runs and run_activity tables is there
@@ -42,6 +43,14 @@ const (
 	// MaxOpenRunsPerSession bounds the runs of one session that have not
 	// ended. Ended runs do not count, so ending one frees a slot.
 	MaxOpenRunsPerSession = 32
+	// MaxOpenRunsPerCredential bounds the runs that have not ended across the
+	// sessions of one credential that have not ended, live or offline: what
+	// the live-session and per-session bounds allow together (issue #402).
+	// Ending a session ends its runs, so ended sessions hold none. New sessions would otherwise each start with a fresh 32.
+	MaxOpenRunsPerCredential = MaxLiveSessionsPerCredential * MaxOpenRunsPerSession
+	// RunOutcomeSessionEnded is the outcome of a run the server failed
+	// because its session ended (issue #402).
+	RunOutcomeSessionEnded = "session ended"
 	// MaxActivityPerRun bounds the activity entries of one run.
 	MaxActivityPerRun = 10000
 )
@@ -63,14 +72,20 @@ var (
 	// ErrTooManyRuns is returned by CreateRun when the session already has
 	// MaxOpenRunsPerSession runs that have not ended. Nothing is written.
 	ErrTooManyRuns = errors.New("store: too many open runs for this session")
+	// ErrTooManyCredentialRuns is returned by CreateRun when the credential
+	// already has MaxOpenRunsPerCredential runs that have not ended, on its
+	// live and offline sessions. Ending a session ends its runs, so ending the
+	// old sessions frees the slots. Nothing is written.
+	ErrTooManyCredentialRuns = errors.New("store: too many open runs for this credential")
 	// ErrSessionOffline is returned by CreateRun, AppendRunActivity and
 	// SetRunState (to a state that is not terminal) when the run's session is
 	// offline (an ended session is offline too). Offline sessions are outside
 	// the credential's live-session bound, so without this each would stay an
 	// uncounted channel for new runs and activity (issue #392). It keeps
-	// reports on the credential's live sessions; it does not bound the runs
-	// already open on offline or ended ones (issue #402). A heartbeat revives
-	// the session; ending a run is always allowed. Nothing is written.
+	// reports on the credential's live sessions; the runs already open on
+	// offline sessions are bounded per credential (ErrTooManyCredentialRuns).
+	// A heartbeat revives the session; ending a run is always allowed.
+	// Nothing is written.
 	ErrSessionOffline = errors.New("store: session is offline")
 	// ErrTooMuchActivity is returned by AppendRunActivity when the run already
 	// holds MaxActivityPerRun entries. Nothing is written.
@@ -142,7 +157,10 @@ func storedTime(t time.Time) time.Time { return time.UnixMilli(t.UnixMilli()) }
 //     by the message rule (ErrRunAnchorNotFound);
 //   - the session must hold fewer than MaxOpenRunsPerSession runs that have
 //     not ended (ErrTooManyRuns). The count and the insert share this
-//     transaction, so concurrent creates cannot pass the bound together.
+//     transaction, so concurrent creates cannot pass the bound together;
+//   - the credential must hold fewer than MaxOpenRunsPerCredential runs that
+//     have not ended, on its live and offline sessions
+//     (ErrTooManyCredentialRuns).
 //
 // reader is the agent itself; the run is then visible to it by RunVisible's
 // rule. A refused run stores nothing.
@@ -186,6 +204,13 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 		}
 		if open >= MaxOpenRunsPerSession {
 			return ErrTooManyRuns
+		}
+		held, err := countOpenRunsOfCredentialTx(ctx, tx, p.CredentialID)
+		if err != nil {
+			return err
+		}
+		if held >= MaxOpenRunsPerCredential {
+			return ErrTooManyCredentialRuns
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO runs (session_id, principal_id, channel_id, message_id, state, task, link, started_at)

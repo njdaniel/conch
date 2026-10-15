@@ -344,7 +344,8 @@ func (s *suite) p315Relay() error {
 	}
 	step("P3-15 a cancel nobody took is answered failed by the relay after %s, and the late answer meets 409", relayTimeout)
 
-	// SIGTERM: the session ends, the run is left as it was, the socket goes.
+	// SIGTERM: the session ends, conchd fails the run it left open (issue #402),
+	// the socket goes.
 	if err := s.stopAgent(a); err != nil {
 		return err
 	}
@@ -355,10 +356,10 @@ func (s *suite) p315Relay() error {
 	if err != nil {
 		return err
 	}
-	if left.State != schema.RunStateRunning || left.EndedAt != nil || left.Outcome != "" {
-		return fmt.Errorf("the relay stopped and run %d is %+v, want it left running with no outcome", open.ID, left)
+	if left.State != schema.RunStateFailed || left.EndedAt == nil || left.Outcome != "session ended" {
+		return fmt.Errorf("the relay stopped and run %d is %+v, want it failed with outcome %q", open.ID, left, "session ended")
 	}
-	step("P3-15 SIGTERM ended the session, took the socket away and left run #%d running, as it was", open.ID)
+	step("P3-15 SIGTERM ended the session, took the socket away and conchd failed run #%d as %q", open.ID, "session ended")
 
 	return s.relayDies()
 }
