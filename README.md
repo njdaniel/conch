@@ -667,9 +667,97 @@ CI runs it on every pull request, since any server change can open a read path.
 
 ### Known limitations
 
-- Tokens travel in the `Authorization` header in the clear unless you put TLS in front of `conchd`; keep it on localhost or a VPN, or behind a TLS-terminating reverse proxy.
+- Tokens travel in the `Authorization` header in the clear unless you put TLS in front of `conchd`; keep it on localhost or a VPN, or behind a TLS-terminating reverse proxy ([recipe](#optional-tls-and-a-reverse-proxy)).
 - `conch login` does not echo a token typed at its prompt. Piping it from a file, as shown, also keeps it out of your clipboard and scrollback.
 - A webhook hook URL is a posting credential. List hooks with `GET /v1/hooks` and revoke one with `DELETE /v1/hooks/{id}` (operator only); only a hash of each token is stored. The database file is created owner-only (0600) and an existing looser one is tightened at startup.
+
+### Optional: TLS and a reverse proxy
+
+`conchd` speaks plain HTTP and WebSocket. It has no TLS of its own, and that is the supported core: `conchd` alone, with no other process, is the dependency-free deployment (ADR-002, rule 1 in [CLAUDE.md](CLAUDE.md)). A reverse proxy is **optional**. Nothing in `conchd` needs one and nothing degrades without one. Plain `http://` is fine on localhost and on a trusted LAN with scoped credentials; put the proxy in front when a token would otherwise cross a network you do not control, or when you want the page and the sockets on `https://` and `wss://`.
+
+The proxy terminates TLS and forwards everything, WebSocket upgrades included, to `conchd` on loopback. Three things matter, and each was checked against `conchd` rather than assumed:
+
+- **Keep the `Host` header the client sent.** A browser's WebSocket upgrade carries an `Origin`, and `conchd` accepts it only when its host equals the request's `Host` (the library's same-origin check; `internal/server/origins.go` adds extra origins only for `--allowed-origins`). If the proxy rewrites `Host` to the backend's address, the upgrade is refused with `403`. Caddy keeps `Host` by default. nginx does not (its default is `$proxy_host`), so the block below sets it. With `Host` kept and one public name for the page and the sockets, the origins match and **`--allowed-origins` is not needed**; leave it unset. (`conch`, `conch-adapter` and `conch-voice` send no `Origin`, so they are not subject to this check; the web page is.)
+- **Bind `conchd` to loopback** (`--listen 127.0.0.1:8080`) so the proxy is the only way in. `conchd` does not read `X-Forwarded-*` headers; it sees every request as coming from the proxy.
+- **Do not let the proxy cut the stream or the upload.** An open stream (`/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) can be silent for long stretches. nginx closes a proxied connection after 60 s without data unless told otherwise, and limits a request body to 1 MiB; `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
+
+Start `conchd` as in step 2, on loopback, optionally with the page:
+
+```sh
+bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080 --web-dir web/dist
+```
+
+#### Caddy
+
+On a LAN there is no public name for a public CA to certify, so use Caddy's own CA with `tls internal`. `/etc/caddy/Caddyfile`:
+
+```caddyfile
+conch.lan {
+    tls internal
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+`reverse_proxy` forwards WebSocket upgrades, keeps `Host` and does not time out an idle stream; nothing else is needed. For a name that is publicly resolvable, drop `tls internal` and Caddy gets a certificate on its own. Caddy's root certificate (for `tls internal`, by default `/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`; `caddy trust` installs it on the host that runs Caddy) is what every other machine must trust, below.
+
+#### nginx
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    server_name conch.lan;
+
+    ssl_certificate     /etc/ssl/conch/conch.lan.crt;   # your certificate for conch.lan
+    ssl_certificate_key /etc/ssl/conch/conch.lan.key;
+
+    client_max_body_size 11m;       # above conchd's 10 MiB upload default; raise both together
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;               # the Host the client sent, port included
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;                          # an open stream may be silent
+        proxy_send_timeout 1h;
+    }
+}
+```
+
+The certificate and key are yours to make: a certificate from your own CA, or one from a public CA for a public name. `openssl` or `mkcert` will make a private CA; the certificate must list `conch.lan` (or the IP you connect to) in its subject alternative names.
+
+#### Clients and `https://`
+
+Point each client at the `https://` address. Each accepts it, and each takes the name from the URL it was given, so the stored login is keyed by that exact address: `conch login --server https://conch.lan` is a different login from `http://...`, and `conch-voice` reads the same file.
+
+| Client | Where `https://` is accepted | What it does with it |
+| --- | --- | --- |
+| `conch` | `cli.NewClient` in `internal/cli/client.go` (and `cli.NormalizeServer` in `internal/cli/credentials.go`, which names the stored login) accept `http` or `https` and refuse anything else | Calls go over HTTPS. Each socket function (`Subscribe`, `SubscribeV2After`, `SubscribeEvents`, `SubscribeVoicePresence` in the same file) turns `http` into `ws` and `https` into `wss` |
+| `conch-adapter` | `loadConfig` in `internal/adapter/adapter.go` takes `CONCH_ADAPTER_SERVER` as is, with no scheme check; `mcpclient.New` in `internal/mcpclient/client.go` posts to `<server>/mcp` with Go's `net/http`, which speaks HTTPS to an `https://` URL | It reaches `conchd` over MCP only (HTTP POST, no WebSocket), so `https://` is all it needs |
+| `conch-voice` | `ServerAddress::parse` in `voice/crates/conch-voice-api/src/server.rs` and `Config::validate` in `voice/crates/conch-voice-control/src/config.rs` accept `http` or `https`; `Client::new` in `voice/crates/conch-voice-api/src/client.rs` builds a `reqwest` client with TLS from `rustls-tls-native-roots` (`voice/crates/conch-voice-api/Cargo.toml`) | REST calls and the presence socket (`presence_stream` in `presence.rs`, made by `reqwest`) go over TLS. It ignores `HTTPS_PROXY` and friends (`no_proxy()`), and it never follows a redirect |
+
+None of the three has a flag for a CA file or for skipping verification. A certificate from a public CA just works. For a private CA (Caddy's `tls internal`, `mkcert`, your own), install its root certificate in the operating system's trust store on every client machine (on Debian and Ubuntu, copy the `.crt` to `/usr/local/share/ca-certificates/` and run `update-ca-certificates`). On Linux, `SSL_CERT_FILE=/path/to/root.crt` points a single process at one instead; that was exercised for `conch` and rests on Go's standard library, which `conch-adapter` shares. `conch-voice` uses the system store through `rustls-native-certs`, and its handling of a private CA was **not** run for this recipe. Without a trusted certificate, `conch` stops with `x509: certificate signed by unknown authority` and sends nothing.
+
+Check it from a client:
+
+```sh
+bin/conch login --server https://conch.lan < alice.token
+bin/conch whoami --server https://conch.lan
+bin/conch tail --server https://conch.lan ops      # a wss:// stream; Ctrl-C to stop
+```
+
+A browser opens `https://conch.lan/` and the page reaches `conchd` on `wss://conch.lan`, because it builds the socket address from `window.location` (`web/src/api.ts`) and its Content-Security-Policy allows `connect-src 'self'`.
+
+**What this does not do yet.** A browser treats an `https://` page, or `http://localhost`, as a *secure context*; a plain `http://` page on a LAN address is not one. Text chat does not need a secure context, which is why `http://` on a LAN is enough for it. Capturing a microphone in the page (`getUserMedia`) will need one, so a browser voice client, if one is built, will need this proxy, or LiveKit's own TLS, in front of the page. There is no browser voice client today (voice is the `conch-voice` binary), so this is roadmap intent, not a feature. The same goes for LiveKit: this section covers `conchd` only. See [Run LiveKit beside `conchd`](#run-livekit-beside-conchd) for its signalling port.
+
+#### What was verified, and what was not
+
+With Caddy and nginx absent from the machine that wrote this recipe, the two configurations above were not run. What was run: `conchd` behind a TLS reverse proxy of the same shape (a small Go program using `httputil.ReverseProxy` with a self-signed certificate) with `Host` preserved and with `Host` rewritten to the backend. `conch login`, `whoami`, `admin channel create`, `send` and `tail` worked over `https://` and `wss://` once the certificate was trusted through `SSL_CERT_FILE`, and failed with an unknown-authority error without it. A WebSocket upgrade carrying `Origin: https://<proxy>` got `101` with `Host` preserved and `403` with `Host` rewritten, which is why the nginx block sets it. `conch-adapter` and `conch-voice` were read, not run, over TLS. Treat the Caddy and nginx text as unrun until you have tried it on your host.
 
 ## Voice (optional)
 
