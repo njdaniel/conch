@@ -151,9 +151,10 @@ describe('lobby', () => {
     expect(status.textContent).toContain('ada');
     expect(status.textContent).toContain(origin);
     expect(status.textContent).toContain('Connected');
-    // Voice is said to be unavailable (UX-04, UX-23) and nothing offers to join it.
-    expect(document.body.textContent).not.toMatch(/join/i);
+    // Voice is said to be unavailable (UX-04, UX-23), only in its own section,
+    // and nothing anywhere else mentions voice or offers to join it.
     const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(document.body.textContent.replace(voice.textContent, '')).not.toMatch(/voice|join/i);
     expect(voice.textContent).toBe('Not in voiceVoice is not available in the browser yet');
     expect(within(voice).queryByRole('button')).toBeNull();
   });

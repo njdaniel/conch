@@ -85,11 +85,13 @@ describe('the socket ticket', () => {
 });
 
 describe('the built bundle', () => {
-  it('never mentions localStorage', async () => {
+  it('never mentions localStorage or a device API', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });
     const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
     const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
     expect(code.length).toBeGreaterThan(1000);
     expect(code).not.toContain('localStorage');
+    // Covers dependencies and the minified output too (#395).
+    expect(code).not.toMatch(/getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/);
   }, 60_000);
 });
