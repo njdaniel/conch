@@ -373,3 +373,57 @@ func TestExitErrorOutcome(t *testing.T) {
 		t.Fatalf("error = %v, want a command ended by a signal", err)
 	}
 }
+
+// The command never sees the agent's Conch credentials or settings, and every
+// other variable reaches it unchanged. The child is a real process printing its
+// environment.
+func TestCommandRunnerChildEnvironment(t *testing.T) {
+	stripped := []string{
+		"CONCH_ADAPTER_TOKEN", "CONCH_BOT_TOKEN", "CONCH_TOKEN",
+		"CONCH_ADAPTER_PRINCIPAL_ID", "CONCH_BOT_CHANNEL", "CONCH_ADAPTER_CMD",
+		"CONCH_ADAPTER_RUNTIME", "CONCH_ADAPTER_WORKDIR", "CONCH_BOT_SERVER",
+	}
+	kept := map[string]string{
+		"CONCH_FOO":     "not an adapter name",
+		"CONCHD_TOKEN":  "different prefix",
+		"FOO":           "bar",
+		"FIXTURE_SLEEP": "1",
+		"CLAUDE_BIN":    "claude",
+		"CODEX_BIN":     "codex",
+	}
+	for _, name := range stripped {
+		t.Setenv(name, "secret-"+name)
+	}
+	for name, value := range kept {
+		t.Setenv(name, value)
+	}
+	runner, _ := scriptRunner(t, "env", false)
+	out, err := runner.Reply(context.Background(), "p", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if name, value, ok := strings.Cut(line, "="); ok {
+			got[name] = value
+		}
+	}
+	for _, name := range stripped {
+		if _, ok := got[name]; ok {
+			t.Errorf("%s reached the command", name)
+		}
+	}
+	if strings.Contains(out, "secret-") {
+		t.Error("a secret value reached the command")
+	}
+	for name, want := range kept {
+		if got[name] != want {
+			t.Errorf("%s = %q, want %q", name, got[name], want)
+		}
+	}
+	for _, name := range []string{"HOME", "PATH"} {
+		if got[name] != os.Getenv(name) {
+			t.Errorf("%s = %q, want %q", name, got[name], os.Getenv(name))
+		}
+	}
+}
