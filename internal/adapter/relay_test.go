@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -954,4 +955,111 @@ func TestRelayLock(t *testing.T) {
 		t.Fatalf("after release: %v", err)
 	}
 	again()
+}
+
+func TestRelayLockRefusesLinksAndOrder(t *testing.T) {
+	t.Run("a link in the lock's place", func(t *testing.T) {
+		dir := shortDir(t)
+		target := filepath.Join(dir, "victim")
+		if err := os.WriteFile(target, []byte("mine"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "r.lock")
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acquireRelayLock(path); err == nil {
+			t.Fatal("a symlinked lock path was taken")
+		}
+		if data, _ := os.ReadFile(target); string(data) != "mine" { // #nosec G304 -- a test file
+			t.Errorf("the link's target changed: %q", data)
+		}
+		// And a dangling one must not be created through.
+		dangling := filepath.Join(dir, "d.lock")
+		if err := os.Symlink(filepath.Join(dir, "created"), dangling); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acquireRelayLock(dangling); err == nil {
+			t.Fatal("a dangling link was taken")
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "created")); err == nil {
+			t.Error("the relay created a file through a link")
+		}
+	})
+	t.Run("a directory is checked before the lock is taken", func(t *testing.T) {
+		dir := shortDir(t)
+		if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- the case under test
+			t.Fatal(err)
+		}
+		cfg := relayConfig("http://unused", dir)
+		cfg.LockFile = cfg.RelaySocket + ".lock"
+		if _, err := takeRelayLock(cfg); err == nil || !strings.Contains(err.Error(), "want 0700") {
+			t.Fatalf("takeRelayLock = %v, want the directory refused", err)
+		}
+		if _, err := os.Lstat(cfg.LockFile); err == nil {
+			t.Error("the lock file was created in a directory that was refused")
+		}
+	})
+}
+
+func TestRelaySocketIsBornPrivate(t *testing.T) {
+	old := syscall.Umask(0)
+	defer syscall.Umask(old)
+	dir := shortDir(t)
+	ln, err := listenRelay(context.Background(), filepath.Join(dir, "r.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	if got := syscall.Umask(0); got != 0 {
+		t.Errorf("the umask was left at %04o", got)
+	}
+}
+
+// A refused answer to an overdue intervention is not asked again for ever.
+func TestRelayExpireRefusals(t *testing.T) {
+	answer := func(status int, retryAfter string) func(http.ResponseWriter, *http.Request) bool {
+		return func(w http.ResponseWriter, req *http.Request) bool {
+			if !strings.HasSuffix(req.URL.Path, "/ack") {
+				return false
+			}
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			fakeJSON(w, status, schema.Error{Code: "x", Message: "no"})
+			return true
+		}
+	}
+	tests := []struct {
+		name     string
+		override func(http.ResponseWriter, *http.Request) bool
+		// waits are advances of the clock, each followed by an expire; want is
+		// the number of answers attempted after each.
+		waits []time.Duration
+		want  []int
+	}{
+		{"401 is given up on", answer(http.StatusUnauthorized, ""), []time.Duration{0, time.Second, time.Second}, []int{1, 1, 1}},
+		{"403 is given up on", answer(http.StatusForbidden, ""), []time.Duration{0, time.Second}, []int{1, 1}},
+		{"429 waits for Retry-After", answer(http.StatusTooManyRequests, "30"), []time.Duration{0, time.Second, 28 * time.Second, 2 * time.Second}, []int{1, 1, 1, 2}},
+		{"429 without Retry-After waits the default", answer(http.StatusTooManyRequests, ""), []time.Duration{0, 4 * time.Second, 2 * time.Second}, []int{1, 1, 2}},
+		{"503 is tried every sweep", answer(http.StatusServiceUnavailable, ""), []time.Duration{0, time.Second, time.Second}, []int{1, 2, 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := startRelay(t, func(c *config) { c.Interventions = []schema.InterventionKind{schema.InterventionKindCancel} })
+			r.fake.request(40)
+			r.discover(r.ctx)
+			r.clk.advance(61 * time.Second)
+			r.fake.mu.Lock()
+			r.fake.override = tt.override
+			r.fake.mu.Unlock()
+			for i, wait := range tt.waits {
+				r.clk.advance(wait)
+				r.expire(r.ctx)
+				if got := len(r.fake.seen("/v1/interventions/40/ack")); got != tt.want[i] {
+					t.Fatalf("after step %d: %d attempts, want %d", i, got, tt.want[i])
+				}
+			}
+		})
+	}
 }

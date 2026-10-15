@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -346,10 +347,44 @@ func (r *relay) expire(ctx context.Context) {
 		case err == nil, errors.As(err, &ref) && (ref.Status == http.StatusConflict || ref.Status == http.StatusNotFound):
 			// Answered, by us or by the runtime a moment before, or gone.
 			r.forget(id)
-		case ctx.Err() == nil:
+		case ctx.Err() != nil:
+		case errors.As(err, &ref) && ref.Status == http.StatusTooManyRequests:
+			// Not before conchd says, so the rate budget is not spent on it.
+			logRelayError("answer an overdue intervention", err)
+			r.retryAt(id, now.Add(retryDelay(ref.RetryAfter)))
+		case errors.As(err, &ref) && ref.Status >= 400 && ref.Status < 500:
+			// A revoked credential or a lost capability will not come back by
+			// asking again: say so once and give up on this one.
+			logRelayError("answer an overdue intervention (given up)", err)
+			r.forget(id)
+		default:
 			logRelayError("answer an overdue intervention", err) // tried again next second
 		}
 	}
+}
+
+// retryAt moves the time an overdue intervention is next tried.
+func (r *relay) retryAt(id int64, at time.Time) {
+	r.mu.Lock()
+	if _, ok := r.due[id]; ok {
+		r.due[id] = at
+	}
+	r.mu.Unlock()
+}
+
+const (
+	defaultRetryDelay = 5 * time.Second
+	maxRetryDelay     = 5 * time.Minute
+)
+
+// retryDelay reads a Retry-After in seconds, capped; anything else is the
+// default.
+func retryDelay(header string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds <= 0 {
+		return defaultRetryDelay
+	}
+	return min(time.Duration(seconds)*time.Second, maxRetryDelay)
 }
 
 func (r *relay) forget(id int64) {
@@ -620,20 +655,27 @@ func listenRelay(ctx context.Context, path string) (net.Listener, error) {
 		return nil, err
 	}
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
-		if conn, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "unix", path); err == nil {
+		conn, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "unix", path)
+		if err == nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("%s is the socket of a process that is running", path)
+		}
+		// Only a refusal means nobody listens. A timeout or anything else may
+		// be a busy relay, which must keep its socket.
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("%s may be the socket of a process that is running: %w", path, err)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("remove the stale socket %s: %w", path, err)
 		}
 	}
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "unix", path)
+	var ln net.Listener
+	var err error
+	privateUmask(func() { ln, err = (&net.ListenConfig{}).Listen(ctx, "unix", path) })
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", path, err)
 	}
-	// The directory is private, so nobody else could reach the socket between
-	// its creation and this; the mode is for the day the directory is not.
+	// Born 0600 under the umask; this makes it certain.
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("set the mode of %s: %w", path, err)

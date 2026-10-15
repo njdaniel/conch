@@ -96,6 +96,8 @@ func (u *upstream) do(ctx context.Context, method, path string, query url.Values
 type refusal struct {
 	Status int
 	Code   string
+	// RetryAfter is conchd's Retry-After header, if it sent one.
+	RetryAfter string
 }
 
 func (r *refusal) Error() string {
@@ -120,7 +122,7 @@ func (u *upstream) call(ctx context.Context, method, path string, query url.Valu
 		return err
 	}
 	if rep.status < 200 || rep.status > 299 {
-		ref := &refusal{Status: rep.status}
+		ref := &refusal{Status: rep.status, RetryAfter: rep.retryAfter}
 		var e schema.Error
 		if json.Unmarshal(rep.body, &e) == nil {
 			ref.Code = e.Code

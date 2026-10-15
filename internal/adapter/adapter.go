@@ -85,7 +85,7 @@ func run() error {
 	}
 	lock := acquireLock
 	if cfg.Mode == modeRelay {
-		lock = acquireRelayLock
+		lock = func(string) (func(), error) { return takeRelayLock(cfg) }
 	}
 	release, err := lock(cfg.LockFile)
 	if err != nil {
@@ -274,4 +274,14 @@ func acquireLock(path string) (func(), error) {
 			slog.Warn("remove lock file", "error", err)
 		}
 	}, nil
+}
+
+// takeRelayLock checks the socket's directory and then takes the relay's lock.
+// The order matters: the lock file lives in that directory, and a directory
+// that is not the relay user's own is not one to create files in.
+func takeRelayLock(cfg config) (func(), error) {
+	if err := checkSocketPath(cfg.RelaySocket); err != nil {
+		return nil, err
+	}
+	return acquireRelayLock(cfg.LockFile)
 }

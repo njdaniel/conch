@@ -26,9 +26,18 @@ func ownedByUs(info os.FileInfo) bool {
 // left in place when the lock is released: removing it would let a second
 // relay lock a new file of the same name while the first still runs.
 func acquireRelayLock(path string) (func(), error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- the operator configures the lock path
+	// Never through a link: in a directory others can write, a planted link
+	// would make the relay create and lock a file of its choosing.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("lock file %s is not a regular file", path)
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600) // #nosec G304 -- the operator configures the lock path
 	if err != nil {
 		return nil, fmt.Errorf("acquire lock %s: %w", path, err)
+	}
+	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock file %s is not a regular file", path)
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { // #nosec G115 -- a file descriptor
 		_ = file.Close()
@@ -42,4 +51,14 @@ func acquireRelayLock(path string) (func(), error) {
 			slog.Warn("close lock file", "error", err)
 		}
 	}, nil
+}
+
+// privateUmask runs f with a umask that leaves a new file readable and
+// writable by its owner alone, so a socket is born mode 0600. The relay starts
+// no process, and f is the only thing making files, so the process-wide umask
+// is safe to change for the call.
+func privateUmask(f func()) {
+	old := syscall.Umask(0o177)
+	defer syscall.Umask(old)
+	f()
 }
