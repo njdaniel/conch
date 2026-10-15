@@ -35,7 +35,7 @@ const (
 type runInput int
 
 const (
-	// inputNone: the keys are the pane's own (m, x, esc, scrolling).
+	// inputNone: the keys are the pane's own (m, x, p, r, esc, scrolling).
 	inputNone runInput = iota
 	// inputMessage: a one-line message is being typed.
 	inputMessage
@@ -519,10 +519,23 @@ func (m Model) declares(kind schema.InterventionKind) bool {
 	return false
 }
 
-// canAsk reports whether the key for kind does anything: the run is open and
-// its session declared the kind.
+// canAsk reports whether the key for kind does anything: the run is open, its
+// session declared the kind, and the run is in a state the kind applies to.
 func (m Model) canAsk(kind schema.InterventionKind) bool {
-	return m.rd.haveRun && !m.rd.terminal() && !m.rd.sending && m.declares(kind)
+	return m.rd.haveRun && !m.rd.terminal() && !m.rd.sending && m.declares(kind) && m.fitsState(kind)
+}
+
+// fitsState reports whether the run's state, as its last frame said it, is one
+// the kind applies to: only a running run is paused, and only a waiting one
+// (a paused run reads waiting) is resumed. Never what a key press assumed.
+func (m Model) fitsState(kind schema.InterventionKind) bool {
+	switch kind {
+	case schema.InterventionKindPause:
+		return m.rd.run.State == schema.RunStateRunning
+	case schema.InterventionKindResume:
+		return m.rd.run.State == schema.RunStateWaiting
+	}
+	return true
 }
 
 // runKey handles a key in run detail.
@@ -562,6 +575,16 @@ func (m Model) runKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		if m.canAsk(schema.InterventionKindCancel) {
 			rd.input, rd.status = inputCancel, ""
+		}
+	case "p":
+		// Reversible, so no question: the run reads waiting only once its
+		// frame says so.
+		if m.canAsk(schema.InterventionKindPause) {
+			return m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause})
+		}
+	case "r":
+		if m.canAsk(schema.InterventionKindResume) {
+			return m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindResume})
 		}
 	case "up":
 		m.moveCursor(1)
@@ -977,7 +1000,9 @@ func (m Model) goToMessage() (tea.Model, tea.Cmd) {
 }
 
 // keyHints is the line of what the keys do: those the session declared, and the
-// rest as unsupported. A run that ended has no keys.
+// rest as unsupported. A declared kind the run's state does not take (pause on a
+// waiting run, resume on a running one) is left out. A run that ended has no
+// keys.
 func (m Model) keyHints(cols int) string {
 	rd := m.rd
 	switch {
@@ -993,16 +1018,22 @@ func (m Model) keyHints(cols int) string {
 	if _, ok := m.runSession(); !ok {
 		return fitCells("interventions unavailable: the session is not in the roster", cols)
 	}
-	hint := func(key string, kind schema.InterventionKind) string {
-		if m.declares(kind) {
-			return key + " " + string(kind)
+	var hints []string
+	for _, k := range []struct {
+		key  string
+		kind schema.InterventionKind
+	}{
+		{"m", schema.InterventionKindMessage}, {"x", schema.InterventionKindCancel},
+		{"p", schema.InterventionKindPause}, {"r", schema.InterventionKindResume},
+	} {
+		switch {
+		case !m.declares(k.kind):
+			hints = append(hints, string(k.kind)+" (unsupported)")
+		case m.fitsState(k.kind):
+			hints = append(hints, k.key+" "+string(k.kind))
 		}
-		return string(kind) + " (unsupported)"
 	}
-	return fitCells(strings.Join([]string{
-		hint("m", schema.InterventionKindMessage), hint("x", schema.InterventionKindCancel),
-		"pause (unsupported)", "resume (unsupported)",
-	}, " · "), cols)
+	return fitCells(strings.Join(hints, " · "), cols)
 }
 
 // runLines is run detail in lines of at most cols cells, exactly rows of them:
