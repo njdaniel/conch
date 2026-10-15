@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -319,6 +320,9 @@ func (h *harness) checkSessionAndRun(asked schema.MessageV1) error {
 	}
 	session := sessions[0]
 	wantKinds := []schema.InterventionKind{schema.InterventionKindMessage, schema.InterventionKindCancel}
+	if runtime.GOOS != "windows" && runtime.GOOS != "plan9" { // where the adapter has process groups, it also declares pause and resume
+		wantKinds = append(wantKinds, schema.InterventionKindPause, schema.InterventionKindResume)
+	}
 	if session.Client != "conch-adapter" || session.PrincipalID != h.botID || session.State != schema.SessionStateOnline ||
 		session.Runtime != "claude-code" || session.Model != "sonnet" || session.Host == "" || !reflect.DeepEqual(session.Interventions, wantKinds) {
 		return fmt.Errorf("the adapter's session = %+v", session)

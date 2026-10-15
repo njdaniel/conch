@@ -352,6 +352,13 @@ func (b *botLoop) run(ctx context.Context) error {
 	if b.sleep == nil {
 		b.sleep = sleepContext
 	}
+	// A runtime that is not there is said so before anything is read, posted
+	// or registered.
+	if b.cfg.Probe != nil {
+		if err := b.cfg.Probe.check(ctx, b.time()); err != nil {
+			return err
+		}
+	}
 	// The cursor is seeded before the session opens: an online session tells a
 	// person (or a check) the adapter will answer what it is sent next. Seeding
 	// after registering would swallow a message sent in between as history.

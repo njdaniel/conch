@@ -26,7 +26,9 @@ the runner starts its own server, drives two terminal clients on pseudo-terminal
 and the scripted agents, checks what each row says should appear, and removes
 everything (issue #284). That is what CI runs. P3-13 is not part of it unless you
 add `--real-adapter` and have `claude` on your PATH; it then runs one real reply
-as you, which this walkthrough's last section describes.
+as you, which this walkthrough's last section describes. P3-14, below, is an extra
+row: Claude Code, Codex and a local model at once, run by you; its stubbed twin is
+part of the same automated run.
 
 ## Start it
 
@@ -262,7 +264,7 @@ was open, the view says `outcome unknown` beside its last reported state; it
 does not invent a result. After step 4 the agent has a new session but is still
 one `worker-test` (or `observer-test`): no duplicate identity.
 
-## P3-08 Instructions and cancel
+## P3-08 Instructions, pause, resume and cancel
 
 1. Stop `agent-a`, start it with the slow script, and send a line in `general`:
    the run now waits 30 seconds before it replies.
@@ -272,18 +274,34 @@ one `worker-test` (or `observer-test`): no duplicate identity.
    ```
 
 2. In a TUI, open the run (agents view, `enter` on the agent, `enter` on the
-   run). Press `m`, type an instruction and press enter. Then press `x` and answer
-   `y` to cancel the run. In the browser's run detail use the `Message` and
-   `Cancel` buttons.
-3. Open the run of `observer-test` or look at what the detail offers for a kind
-   the agent did not declare, such as pause.
+   run). Press `m`, type an instruction and press enter. In the browser's run
+   detail use the `Message` button.
+3. Pause the run. The clients have no key for it yet, so ask the API as
+   `nick-test`, whose credential `tui-a.env` holds (the run id is in the detail), and look at the command's process
+   with `ps -o pid,stat,args --ppid <pid:agent-a>`:
+
+   ```
+   set -a; . <root>/tui-a.env; set +a
+   curl -s -X POST -H "Authorization: Bearer $CONCH_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"kind":"pause"}' "$CONCH_SERVER/v1/runs/<run id>/interventions"
+   ```
+
+   Then the same with `{"kind":"resume"}`.
+4. Press `x` and answer `y` to cancel the run (in the browser, `Cancel`).
+5. Open the run of `observer-test` and look at what the detail offers.
 
 What should appear. The intervention shows `requested…`, then `acknowledged`,
-then `applied` (or `failed: <reason>`), from the agent's own reports. The run
-changes to cancelled only when the run's own update says so, not when you
-press `y`. Kinds the agent does not support are listed as unsupported (TUI:
-`pause (unsupported)`; browser: disabled with `Not supported by this agent`) and
-do nothing.
+then `applied` (or `failed: <reason>`), from the agent's own reports. After the
+pause the run is `waiting` with the outcome `paused` and the command's state in
+`ps` is `T` (stopped); the wait for its reply does not run out while it is
+paused. After the resume the run is `running` again and the state is `S`. A
+second pause says `failed: already paused`, a resume of a run that is not paused
+`failed: not paused`. The run changes to cancelled only when the run's own
+update says so, not when you press `y`, and no process of the command is left.
+An agent that did not declare a kind (an adapter on a platform without process
+groups does not declare `pause` or `resume`) is shown as unsupported (TUI:
+`pause (unsupported)`; browser: disabled with `Not supported by this agent`)
+and the server refuses the request with `409 intervention_unsupported`.
 
 ## P3-09 Drop a connection, then restart the server
 
@@ -426,6 +444,43 @@ When you post in `general`, the run's activity lists each command Codex ran as a
 only (never its arguments), then `reply_posted`, and the reply is Codex's final
 message. If `codex` is missing or not signed in, the run fails with that stated;
 nothing falls back to a fixture or to another paid service.
+
+## P3-14 Three runtimes at once, opt-in
+
+The roadmap's P3 success criterion in one sitting: Claude Code, Codex and a
+local model running side by side. Each is a principal of its own, `real-claude`,
+`real-codex` and `real-ollama`, with the manifest of `worker-test` and an
+environment file `real-<runtime>.env`. You need `claude` and `codex` installed
+and signed in, and Ollama running with the model pulled. The models come from
+`CONCH_P3_MODEL_CLAUDE`, `CONCH_P3_MODEL_CODEX` and `CONCH_P3_MODEL_OLLAMA`; the
+runner refuses a runtime whose variable is unset and names it. Read the warning it
+prints first: Claude Code runs with its permission checks off, and `claude` and
+`codex` spend your own quota. The local model only writes text.
+
+`go run ./e2e/p3-local --reset` then
+`CONCH_P3_MODEL_CLAUDE=<model> CONCH_P3_MODEL_CODEX=<model> CONCH_P3_MODEL_OLLAMA=<model> go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama`
+
+(Not fenced, for the reason in P3-13. `--real-adapters` needs `--keep` and takes any
+of the three, in any order.) The runner prints one start command for each, under
+the name `real-claude`, `real-codex` and `real-ollama`: each is
+`set -a; . <root>/real-<runtime>.env; set +a; <root>/bin/conch-adapter`, run in a
+window of its own and in a directory you would let it read. The Ollama adapter
+checks first that Ollama can answer for the model and exits with one line saying
+which of the three things is missing if it cannot; nothing else is tried.
+
+What should appear. Start the three, then post one message in `general`. The
+roster in the TUI and the browser's panel show three agents, each with its
+`model`. Their `runtime` (`claude-code`, `codex`, `ollama`) is shown to operators
+and to the agent itself, not to members, so look at it as the operator (the
+`<root>/operator.env` credential on `GET /v1/sessions?channel=general`) or in the
+adapter's own session; a member sees three models, not three runtimes. Open each
+agent's run in the TUI to read its activity, and send a `message` intervention to
+one of them with `m` in the run's detail. Write down which runtime answered what.
+Record the run, dated, in [the exit record](design/p3-exit-record.md) as a run of
+its own, as P3-13 is.
+
+The same row without any model, with a stub for each program, is part of
+`go run ./e2e/p3-local` (it is listed there as P3-14, "three runtimes at once, with stubs").
 
 ## When you are done
 

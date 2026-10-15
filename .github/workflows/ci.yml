@@ -129,6 +129,95 @@ jobs:
       - name: web check
         run: make web-check
 
+  web-embedded:
+    # The web client built into conchd (issue #347): make build-web-embedded
+    # builds bin/conchd with -tags conchweb, and this job starts it with no
+    # --web-dir and checks what an operator who downloaded a release binary
+    # gets: /app/ with the security headers and no-store on the index, a
+    # hashed asset as immutable, `conchd version` saying so, and --no-web
+    # turning it off. The untagged build is what the check job tests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build
+        run: make build-web-embedded
+
+      - name: version says embedded
+        run: |
+          bin/conchd version | tee /dev/stderr | grep -qx 'web: embedded'
+
+      - name: serve /app/ from the binary
+        run: |
+          set -eu
+          data=$(mktemp -d)
+          log=$(mktemp)
+          bin/conchd serve --data "$data" --listen 127.0.0.1:0 > "$log" 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          addr=""
+          for _ in $(seq 1 50); do
+            addr=$(sed -n 's/^conchd .* listening on \(127\.0\.0\.1:[0-9]*\) .*/\1/p' "$log")
+            [ -n "$addr" ] && break
+            sleep 0.2
+          done
+          [ -n "$addr" ] || { echo "conchd did not start"; cat "$log"; exit 1; }
+          grep -qx 'conchd web: embedded' "$log"
+
+          # headers <path> <status>: writes the response headers to $hdr.
+          hdr=$(mktemp)
+          check() { # path want-status header-regex...
+            path=$1; want=$2; shift 2
+            got=$(curl -s -o /dev/null -D "$hdr" -w '%{http_code}' "http://$addr$path")
+            [ "$got" = "$want" ] || { echo "GET $path = $got, want $want"; exit 1; }
+            for re in "$@"; do
+              grep -iq "$re" "$hdr" || { echo "GET $path: no header matching $re"; cat "$hdr"; exit 1; }
+            done
+          }
+          check /app/ 200 \
+            "^content-security-policy: default-src 'self'" \
+            '^cache-control: no-store' \
+            '^x-content-type-options: nosniff' \
+            '^referrer-policy: no-referrer'
+          asset=$(ls internal/web/dist/assets | head -n 1)
+          [ -n "$asset" ] || { echo "the build has no hashed asset"; exit 1; }
+          check "/app/assets/$asset" 200 '^cache-control: public, max-age=31536000, immutable'
+          check /app/assets/missing.js 404
+          check / 302 '^location: /app/'
+
+      - name: --no-web turns it off
+        run: |
+          set -eu
+          data=$(mktemp -d)
+          log=$(mktemp)
+          bin/conchd serve --no-web --data "$data" --listen 127.0.0.1:0 > "$log" 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          addr=""
+          for _ in $(seq 1 50); do
+            addr=$(sed -n 's/^conchd .* listening on \(127\.0\.0\.1:[0-9]*\) .*/\1/p' "$log")
+            [ -n "$addr" ] && break
+            sleep 0.2
+          done
+          [ -n "$addr" ] || { echo "conchd did not start"; cat "$log"; exit 1; }
+          # Authentication is on, so a route that does not exist answers 401
+          # (nothing is exempt); what matters is that it is not 200 or 302.
+          for p in /app/ /; do
+            got=$(curl -s -o /dev/null -w '%{http_code}' "http://$addr$p")
+            case "$got" in 200|301|302) echo "GET $p = $got with --no-web"; exit 1;; esac
+          done
+
   rust-advisories:
     # Known advisories against the crates conch-voice links (RustSec). A job of
     # its own and not part of check: it reads a database on the network, and a

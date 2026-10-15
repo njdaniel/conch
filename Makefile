@@ -4,7 +4,7 @@ GO      ?= go
 # CI installs; scripts/lint-version.sh fails the lint target otherwise.
 LINT    = golangci-lint
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate rust-check rust-build web-node web-check web-build web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -58,7 +58,7 @@ WEB_NODE = $(shell cat web/.nvmrc)
 # When nvm has the pinned Node, the web targets use it, whatever node a shell
 # profile puts first on PATH; otherwise the node on PATH, checked below.
 WEB_NODE_BIN = $(HOME)/.nvm/versions/node/v$(WEB_NODE)/bin
-web-node web-check web-build web-e2e: export PATH := $(if $(wildcard $(WEB_NODE_BIN)/node),$(WEB_NODE_BIN):)$(PATH)
+web-node web-check web-build web-embed web-e2e: export PATH := $(if $(wildcard $(WEB_NODE_BIN)/node),$(WEB_NODE_BIN):)$(PATH)
 
 web-node:
 	@v=$$(node --version 2>/dev/null) || { echo "web: FAIL: Node.js is not installed; install Node $(WEB_NODE) (web/.nvmrc)"; exit 1; }; \
@@ -99,6 +99,20 @@ p3-reset:
 # Not part of `build`: conchd and conch need no Node.
 web-build: web-node
 	cd web && npm ci --no-audit && npm run build
+
+# Copies the build into internal/web/dist, which a conchd built with
+# -tags conchweb embeds. internal/web/dist is git-ignored. Not part of `build`.
+web-embed: web-build
+	rm -rf internal/web/dist
+	mkdir -p internal/web
+	cp -r web/dist internal/web/dist
+
+# bin/conchd with the web client inside it, served at /app/ with no --web-dir.
+# It needs Node (web-build); `make build` does not. Without the tag a binary
+# has no client, and with the tag but no internal/web/dist the compile fails,
+# which is intended.
+build-web-embedded: web-embed
+	$(GO) build -tags conchweb -o bin/conchd ./cmd/conchd
 
 schema-compat:
 	./scripts/schema-compat.sh

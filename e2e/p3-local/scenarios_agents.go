@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -421,14 +422,11 @@ func (s *suite) p308Interventions() error {
 	}
 	runPath := "/v1/runs/" + id(run.ID)
 
-	// Who may ask. An agent never does, and a kind the agent did not declare
-	// is refused whoever asks.
+	// Who may ask. An agent never does. (Every kind in the vocabulary is
+	// declared by this adapter on Linux, so there is no undeclared kind to
+	// be refused for; the server's refusal is the server tests' row.)
 	if err := s.as(partObserver).refused("an agent asking", http.MethodPost, runPath+"/interventions",
 		schema.CreateInterventionRequestV1{Kind: schema.InterventionKindMessage, Body: "p308 from an agent"}, http.StatusForbidden, schema.ErrorCodeHumanRequired); err != nil {
-		return err
-	}
-	if err := s.as(partNick).refused("a kind the agent did not declare", http.MethodPost, runPath+"/interventions",
-		schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause}, http.StatusConflict, schema.ErrorCodeInterventionUnsupported); err != nil {
 		return err
 	}
 
@@ -474,13 +472,20 @@ func (s *suite) p308Interventions() error {
 	if err := t.waitFor("the instruction applied", 30*time.Second, func(r []string) bool { return showing(r, "↳ #", "applied") }); err != nil {
 		return err
 	}
-	ivs, err := s.interventionsOf(partNick, run.ID)
+	ivs, err := s.interventionsOf(run.ID)
 	if err != nil {
 		return err
 	}
 	if len(ivs) != 1 || ivs[0].Kind != schema.InterventionKindMessage || ivs[0].State != schema.InterventionStateApplied ||
 		ivs[0].Body != "p308 take note" || ivs[0].RequestedBy != s.pid("nick-test") || ivs[0].AnsweredAt == nil {
 		return fmt.Errorf("the run's interventions are %+v, want one message applied for nick-test", ivs)
+	}
+
+	// Pause and resume. The people's keys for them are F2b (#346); the API is
+	// the same. The command stops, the run is waiting with the outcome paused
+	// only once the adapter says so, and resume lets the command go on.
+	if err := s.pauseAndResume(run.ID, runPath); err != nil {
+		return err
 	}
 
 	// Cancel: asked with x and answered y. The run is cancelled when the
@@ -496,9 +501,9 @@ func (s *suite) p308Interventions() error {
 		return err
 	}
 	if err := t.waitFor("the cancel applied and the run cancelled", 30*time.Second, func(r []string) bool {
-		// The timeline has an answer line for each intervention: the message's
-		// and now the cancel's.
-		return countRows(r, "↳ #", "applied") >= 2 && showing(r, "cancelled")
+		// The timeline has an answer line for each intervention: the message's,
+		// the pause's, the resume's and now the cancel's.
+		return countRows(r, "↳ #", "applied") >= 4 && showing(r, "cancelled")
 	}); err != nil {
 		return err
 	}
@@ -506,13 +511,13 @@ func (s *suite) p308Interventions() error {
 	if err != nil {
 		return err
 	}
-	if ivs, err = s.interventionsOf(partNick, run.ID); err != nil {
+	if ivs, err = s.interventionsOf(run.ID); err != nil {
 		return err
 	}
-	if len(ivs) != 2 {
-		return fmt.Errorf("the run has %d interventions, want 2", len(ivs))
+	if len(ivs) != 6 {
+		return fmt.Errorf("the run has %d interventions, want 6 (message, a resume that fails, pause, a pause that fails, resume, cancel)", len(ivs))
 	}
-	cancel := ivs[1]
+	cancel := ivs[5]
 	if cancel.Kind != schema.InterventionKindCancel || cancel.State != schema.InterventionStateApplied || cancel.AnsweredAt == nil || ended.EndedAt == nil {
 		return fmt.Errorf("the cancel is %q %q, answered %v; the run ended %v", cancel.Kind, cancel.State, cancel.AnsweredAt != nil, ended.EndedAt != nil)
 	}
@@ -544,6 +549,142 @@ func (s *suite) p308Interventions() error {
 	}
 
 	return s.privateRunIsOffLimits()
+}
+
+// pauseAndResume pauses the open run through the API, checks that the
+// adapter's command and what it started are stopped and the run waiting with the outcome paused,
+// refuses nothing it should accept and accepts nothing it should refuse, and
+// resumes it.
+func (s *suite) pauseAndResume(runID int64, runPath string) error {
+	ask := func(kind schema.InterventionKind) (schema.InterventionV1, error) {
+		var iv schema.InterventionV1
+		err := s.as(partNick).call(http.MethodPost, runPath+"/interventions", schema.CreateInterventionRequestV1{Kind: kind}, &iv)
+		return iv, err
+	}
+	answered := func(iv schema.InterventionV1, state schema.InterventionState, reason string) error {
+		return s.until(fmt.Sprintf("intervention %d to be %s", iv.ID, state), 30*time.Second, func() (bool, error) {
+			ivs, err := s.interventionsOf(runID)
+			if err != nil {
+				return false, err
+			}
+			for _, got := range ivs {
+				if got.ID == iv.ID {
+					if got.State == state && (reason == "" || got.Reason == reason) {
+						return true, nil
+					}
+					if (got.State == schema.InterventionStateApplied || got.State == schema.InterventionStateFailed) && got.State != state {
+						return false, fmt.Errorf("intervention %d is %q (%q), want %q", iv.ID, got.State, got.Reason, state)
+					}
+				}
+			}
+			return false, nil
+		})
+	}
+
+	// A resume of a run that is not paused fails and changes nothing.
+	early, err := ask(schema.InterventionKindResume)
+	if err != nil {
+		return err
+	}
+	if err := answered(early, schema.InterventionStateFailed, "not paused"); err != nil {
+		return err
+	}
+	r, err := s.getRun(runID)
+	if err != nil {
+		return err
+	}
+	if r.State != schema.RunStateRunning {
+		return fmt.Errorf("after a resume of a run not paused the run is %q, want running", r.State)
+	}
+
+	paused, err := ask(schema.InterventionKindPause)
+	if err != nil {
+		return err
+	}
+	if err := answered(paused, schema.InterventionStateApplied, ""); err != nil {
+		return err
+	}
+	r, err = s.waitRunState(runID, schema.RunStateWaiting, 15*time.Second)
+	if err != nil {
+		return err
+	}
+	if r.Outcome != "paused" {
+		return fmt.Errorf("the paused run has outcome %q, want paused", r.Outcome)
+	}
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.Join(states, "") != strings.Repeat("T", len(states)) {
+		return fmt.Errorf("the command's process states after the pause are %v, want all T", states)
+	}
+	// A second pause fails and changes nothing.
+	again, err := ask(schema.InterventionKindPause)
+	if err != nil {
+		return err
+	}
+	if err := answered(again, schema.InterventionStateFailed, "already paused"); err != nil {
+		return err
+	}
+
+	resumed, err := ask(schema.InterventionKindResume)
+	if err != nil {
+		return err
+	}
+	if err := answered(resumed, schema.InterventionStateApplied, ""); err != nil {
+		return err
+	}
+	if _, err := s.waitRunState(runID, schema.RunStateRunning, 15*time.Second); err != nil {
+		return err
+	}
+	if states := childStatesOf(s.worker.c.pid()); len(states) < 2 || strings.ContainsRune(strings.Join(states, ""), 'T') {
+		return fmt.Errorf("the command's process states after the resume are %v, want none T", states)
+	}
+	return nil
+}
+
+// childStatesOf is the /proc state letter of every live descendant of pid
+// (its children, theirs, and so on): a pause must reach what the command
+// started, not only the command.
+func childStatesOf(pid int) []string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	type proc struct {
+		ppid  int
+		state string
+	}
+	procs := map[int]proc{}
+	for _, e := range entries {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat") // #nosec G304 -- a /proc path built from a number
+		if err != nil {
+			continue
+		}
+		i := strings.LastIndexByte(string(stat), ')')
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(string(stat)[i+1:])
+		if len(fields) < 2 || fields[0] == "Z" {
+			continue
+		}
+		ppid, _ := strconv.Atoi(fields[1])
+		procs[n] = proc{ppid: ppid, state: fields[0]}
+	}
+	var out []string
+	frontier := []int{pid}
+	for len(frontier) > 0 {
+		var next []int
+		for n, p := range procs {
+			if slices.Contains(frontier, p.ppid) {
+				out = append(out, p.state)
+				next = append(next, n)
+			}
+		}
+		frontier = next
+	}
+	return out
 }
 
 // processesOfRun lists the live processes of this run (the ones whose
@@ -580,9 +721,9 @@ func atoi(s string) int {
 	return n
 }
 
-// interventionsOf lists the interventions of a run as part sees them.
-func (s *suite) interventionsOf(part string, run int64) ([]schema.InterventionV1, error) {
-	c, err := s.r.client(s.token(part))
+// interventionsOf lists the interventions of a run as nick-test sees them.
+func (s *suite) interventionsOf(run int64) ([]schema.InterventionV1, error) {
+	c, err := s.r.client(s.token(partNick))
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +765,7 @@ func (s *suite) privateRunIsOffLimits() error {
 			return err
 		}
 	}
-	ivs, err := s.interventionsOf(partNick, run.ID)
+	ivs, err := s.interventionsOf(run.ID)
 	if err != nil {
 		return err
 	}
@@ -747,5 +888,132 @@ func (s *suite) p313Real() error {
 	// A run that failed (the program not signed in, say) is an answer too: it says
 	// so in the outcome, and nothing falls back to anything else.
 	fmt.Printf("P3-13 runtime=%s model=%s outcome=%q state=%s\n", session.Runtime, session.Model, ended.Outcome, ended.State)
+	return nil
+}
+
+// ---------------------------------------------------------------- P3-14
+
+// threeRuntimes are the adapters of P3-14: one per runtime the roadmap names,
+// each with a stub in place of the program. The profile decides how the output
+// is read, so the codex stub prints Codex's events and the others plain text.
+var threeRuntimes = []struct{ runtime, model, script, tag string }{
+	{"claude-code", "stub-claude", "claude-stub.sh", "claude-stub: "},
+	{"codex", "stub-codex", "codex-stub.sh", "codex-stub: "},
+	{"ollama", "stub-ollama", "ollama-stub.sh", "ollama-stub: "},
+}
+
+// p314Three runs three adapters at once against one server, one for each
+// runtime, with stubs for the programs, and checks that the roster shows three
+// sessions with three runtimes, that each answers one message with a run of its
+// own, and that the events socket delivers the activity of all three runs. No
+// model is involved; the walkthrough's P3-14 is the same with real ones.
+func (s *suite) p314Three() error {
+	if err := s.stopAgent(s.worker); err != nil {
+		return err
+	}
+	s.worker = nil
+	feed, err := s.followEvents(partNick, chGeneral)
+	if err != nil {
+		return err
+	}
+	var started []*agent
+	defer func() {
+		for _, a := range started {
+			_ = s.stopAgent(a)
+		}
+	}()
+	sessions := map[int64]string{} // session id -> runtime
+	for _, rt := range threeRuntimes {
+		a, err := s.launchAgent(agentSpec{part: partWorker, script: rt.script, env: []string{
+			"CONCH_ADAPTER_RUNTIME=" + rt.runtime,
+			"CONCH_ADAPTER_MODEL=" + rt.model,
+			"CONCH_ADAPTER_FIXTURE=0",
+			"CONCH_ADAPTER_LOCK_FILE=" + s.r.path("p314-"+rt.runtime+".lock"),
+		}})
+		if err != nil {
+			return fmt.Errorf("the %s adapter: %w", rt.runtime, err)
+		}
+		started = append(started, a)
+		sessions[a.session] = rt.runtime
+	}
+
+	// The roster: three sessions, three runtimes. The runtime is for the
+	// operator and for the agent itself; a member sees the model.
+	roster, err := s.roster(partWorker, chGeneral)
+	if err != nil {
+		return err
+	}
+	for id, runtime := range sessions {
+		sess, ok := sessionOf(roster, id)
+		if !ok || sess.Runtime != runtime || sess.Status == schema.SessionStatusOffline {
+			return fmt.Errorf("session #%d should be a live %s session in the roster; it is %+v", id, runtime, sess)
+		}
+	}
+	member, err := s.roster(partNick, chGeneral)
+	if err != nil {
+		return err
+	}
+	for id, runtime := range sessions {
+		sess, ok := sessionOf(member, id)
+		if !ok || sess.Model == "" || sess.Runtime != "" {
+			return fmt.Errorf("nick-test should see a model and no runtime for the %s session #%d; it sees %+v", runtime, id, sess)
+		}
+	}
+	step("P3-14 the roster shows three sessions: claude-code, codex and ollama; a member sees their models")
+
+	if err := s.say(chGeneral, "p314 three runtimes, answer please"); err != nil {
+		return err
+	}
+	msg, err := s.waitMessage(partNick, chGeneral, "p314 three runtimes")
+	if err != nil {
+		return err
+	}
+	runs := map[int64]schema.RunV1{} // by session
+	if err := s.until("one completed run from each of the three sessions", 40*time.Second, func() (bool, error) {
+		all, err := s.runsOf(partNick, chGeneral)
+		if err != nil {
+			return false, err
+		}
+		for _, r := range all {
+			if _, ours := sessions[r.SessionID]; ours && r.MessageID == msg.ID && r.State == schema.RunStateCompleted {
+				runs[r.SessionID] = r
+			}
+		}
+		return len(runs) == len(sessions), nil
+	}); err != nil {
+		return err
+	}
+	// Each runtime answered in its own words.
+	history, err := s.history(partNick, chGeneral, msg.ID)
+	if err != nil {
+		return err
+	}
+	for _, rt := range threeRuntimes {
+		// A stub answers with the last line of the prompt, which is the
+		// message behind its author's id.
+		if !slices.ContainsFunc(history, func(m schema.MessageV2) bool {
+			return m.AuthorID == s.pid("worker-test") && strings.HasPrefix(m.Body, rt.tag) && strings.Contains(m.Body, "p314 three runtimes")
+		}) {
+			return fmt.Errorf("no reply from the %s adapter's stub: want one starting %q", rt.runtime, rt.tag)
+		}
+	}
+	// The events socket delivered the activity of all three runs.
+	if err := s.until("the activity of all three runs on the events socket", 20*time.Second, func() (bool, error) {
+		for _, run := range runs {
+			kinds := map[schema.ActivityKind]bool{}
+			for _, a := range feed.activitySeen() {
+				if a.RunID == run.ID {
+					kinds[a.Kind] = true
+				}
+			}
+			if !kinds[schema.ActivityKindCommandStarted] || !kinds[schema.ActivityKindReplyPosted] {
+				return false, nil
+			}
+		}
+		return true, nil
+	}); err != nil {
+		return err
+	}
+	step("P3-14 each of the three adapters answered with a run of its own, and the events socket carried the activity of all three")
 	return nil
 }

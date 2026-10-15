@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,6 +32,12 @@ const (
 // errReplyTimeout is what a runner returns when the command, or a fixture
 // marker's wait, outlasted the reply timeout. The command has been killed.
 var errReplyTimeout = errors.New("reply timed out")
+
+// pausedTooLongError is what a runner returns when the command was paused for
+// longer than the bound. The command has been killed.
+type pausedTooLongError struct{ limit time.Duration }
+
+func (e *pausedTooLongError) Error() string { return "paused longer than " + e.limit.String() }
 
 // errOutputTooLarge is returned when the command wrote more than maxReplyBytes.
 var errOutputTooLarge = errors.New("command output too large")
@@ -182,6 +189,137 @@ type fixtureHandler interface {
 	approval(ctx context.Context, title string) error
 }
 
+// processControl is what an intervention can do to the command of a run.
+type processControl interface {
+	// pause freezes the command and everything it started; resume lets them
+	// go on. They answer errNotRunning, errAlreadyPaused or errNotPaused when
+	// there is nothing to do.
+	pause() error
+	resume() error
+}
+
+// commandHolder is a fixtureHandler that wants to know about the command's
+// process once it is started: the run, so that an intervention can reach it.
+type commandHolder interface {
+	commandStarted(processControl)
+}
+
+var (
+	errNotRunning    = errors.New("command is not running")
+	errAlreadyPaused = errors.New("command is already paused")
+	errNotPaused     = errors.New("command is not paused")
+)
+
+// commandControl owns the reply timeout of one command and the command's
+// pause. Time spent paused does not count against the reply timeout: pausing
+// stops its timer, resuming starts it again with what was left. A command
+// paused for longer than maxPause, all its pauses together, is killed.
+type commandControl struct {
+	// kill ends the command, saying why; it is the cancel of the reply context.
+	kill     func(cause error)
+	maxPause time.Duration
+
+	mu          sync.Mutex
+	pid         int // 0 until the command is started
+	ended       bool
+	paused      bool
+	pausedAt    time.Time     // when the current pause began
+	pausedTotal time.Duration // of the pauses already resumed
+	deadline    time.Time
+	remaining   time.Duration // of the timeout, while paused
+	timeout     *time.Timer
+	pauseTimer  *time.Timer
+}
+
+func newCommandControl(timeout, maxPause time.Duration, kill func(error)) *commandControl {
+	if maxPause <= 0 {
+		maxPause = timeout
+	}
+	c := &commandControl{kill: kill, maxPause: maxPause, deadline: time.Now().Add(timeout)}
+	c.timeout = time.AfterFunc(timeout, func() { kill(errReplyTimeout) })
+	return c
+}
+
+// started records the command's process; before that nothing can be paused.
+func (c *commandControl) started(pid int) {
+	c.mu.Lock()
+	c.pid = pid
+	c.mu.Unlock()
+}
+
+// end stops the timers. After it nothing is signalled: the group's id may be
+// given to another process once the command has been reaped.
+func (c *commandControl) end() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ended = true
+	c.timeout.Stop()
+	if c.pauseTimer != nil {
+		c.pauseTimer.Stop()
+	}
+}
+
+func (c *commandControl) pause() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.pid == 0 || c.ended:
+		return errNotRunning
+	case c.paused:
+		return errAlreadyPaused
+	}
+	if err := stopGroup(c.pid); err != nil {
+		if errors.Is(err, errNotRunning) {
+			return err
+		}
+		return fmt.Errorf("stop command: %w", err)
+	}
+	c.paused = true
+	// A timer that already fired has killed the command; remaining is then
+	// zero and resuming changes nothing.
+	c.remaining = 0
+	if c.timeout.Stop() {
+		c.remaining = max(time.Until(c.deadline), 0)
+	}
+	// The bound is for the run, not for each pause: cycling pause and resume
+	// must not stretch a reply for ever.
+	c.pausedAt = time.Now()
+	limit := c.maxPause
+	tooLong := &pausedTooLongError{limit: limit}
+	left := limit - c.pausedTotal
+	if left <= 0 {
+		c.kill(tooLong)
+		return nil
+	}
+	c.pauseTimer = time.AfterFunc(left, func() { c.kill(tooLong) })
+	return nil
+}
+
+func (c *commandControl) resume() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.pid == 0 || c.ended:
+		return errNotRunning
+	case !c.paused:
+		return errNotPaused
+	}
+	if err := continueGroup(c.pid); err != nil {
+		if errors.Is(err, errNotRunning) {
+			return err
+		}
+		return fmt.Errorf("continue command: %w", err)
+	}
+	c.paused = false
+	c.pausedTotal += time.Since(c.pausedAt)
+	if c.pauseTimer != nil {
+		c.pauseTimer.Stop()
+	}
+	c.deadline = time.Now().Add(c.remaining)
+	c.timeout.Reset(c.remaining)
+	return nil
+}
+
 // ClaudeRunner runs the command for one reply.
 type ClaudeRunner interface {
 	// Reply runs the command with prompt and returns what it wrote. fx is the
@@ -205,11 +343,17 @@ type commandRunner struct {
 	reader readerKind
 	// dir is the command's working directory; empty means the adapter's own.
 	dir string
+	// maxPause is how long a paused command may stay paused; zero means the
+	// reply timeout.
+	maxPause time.Duration
 }
 
 func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandler) (string, error) {
-	replyCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	replyCtx, cancelReply := context.WithCancelCause(ctx)
+	cancel := func() { cancelReply(nil) }
 	defer cancel()
+	ctl := newCommandControl(c.timeout, c.maxPause, cancelReply)
+	defer ctl.end()
 	argv := c.spec.argv(prompt, c.model)
 	cmd := exec.CommandContext(replyCtx, argv[0], argv[1:]...) // #nosec G204 -- the operator explicitly configures the command; it is split without a shell
 	ownProcessGroup(cmd)
@@ -228,6 +372,10 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start command: %w", err)
 	}
+	ctl.started(cmd.Process.Pid)
+	if holder, ok := fx.(commandHolder); ok {
+		holder.commandStarted(ctl)
+	}
 	// When the reply context ends, the group is killed (cmd.Cancel); close the
 	// read end as well. A process that escaped the group and kept the pipe open
 	// would otherwise hold the scan below for as long as it lives.
@@ -242,15 +390,21 @@ func (c commandRunner) Reply(ctx context.Context, prompt string, fx fixtureHandl
 		cancel()
 	}
 	waitErr := cmd.Wait()
+	// The command is reaped: its group id is no longer ours to signal.
+	ctl.end()
 	if replyCtx.Err() != nil {
 		// The group was killed. Wait has reaped the command; make sure what it
 		// started is gone too before anyone reports the run over.
 		waitGroupGone(cmd.Process.Pid, 2*time.Second)
 	}
+	cause := context.Cause(replyCtx)
+	var tooLong *pausedTooLongError
 	switch {
 	case ctx.Err() != nil:
 		return "", ctx.Err()
-	case errors.Is(replyCtx.Err(), context.DeadlineExceeded), errors.Is(readErr, context.DeadlineExceeded):
+	case errors.As(cause, &tooLong):
+		return "", tooLong
+	case errors.Is(cause, errReplyTimeout), errors.Is(readErr, context.DeadlineExceeded):
 		return "", errReplyTimeout
 	case readErr != nil:
 		return "", readErr

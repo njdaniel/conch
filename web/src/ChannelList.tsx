@@ -1,5 +1,21 @@
 import { useRef, type KeyboardEvent } from 'react';
 import type { ChannelV0 } from './schema/channel';
+import { badgeText } from './useReadState';
+
+const badgeId = (channel: number) => `unread-${String(channel)}`;
+
+// The count after a channel's name, with a name of its own ("3 unread") that the
+// channel's button is described by. It sits beside the button, not in it, so the
+// button keeps its name, the channel's.
+function UnreadBadge({ id, count }: { readonly id: number; readonly count: number }) {
+  const text = badgeText(count);
+  if (text === null) return null;
+  return (
+    <span id={badgeId(id)} className="unread" role="img" aria-label={`${text} unread`}>
+      {text}
+    </span>
+  );
+}
 
 // The channels as a list of buttons. Tab reaches the list once; the arrow keys
 // move between channels (Home and End jump), Enter or Space opens the one
@@ -7,10 +23,13 @@ import type { ChannelV0 } from './schema/channel';
 export function ChannelList({
   channels,
   selected,
+  unread,
   onOpen,
 }: {
   readonly channels: readonly ChannelV0[];
   readonly selected: string | null;
+  // Each channel's unread count by name; a channel at 0 has no entry.
+  readonly unread: ReadonlyMap<string, number>;
   readonly onOpen: (name: string) => void;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
@@ -45,6 +64,7 @@ export function ChannelList({
               else buttons.current.set(channel.name, el);
             }}
             tabIndex={channel.name === stop ? 0 : -1}
+            aria-describedby={(unread.get(channel.name) ?? 0) > 0 ? badgeId(channel.id) : undefined}
             aria-current={channel.name === selected ? 'true' : undefined}
             onClick={() => {
               onOpen(channel.name);
@@ -55,6 +75,7 @@ export function ChannelList({
           >
             {channel.name}
           </button>
+          <UnreadBadge id={channel.id} count={unread.get(channel.name) ?? 0} />
         </li>
       ))}
     </ul>

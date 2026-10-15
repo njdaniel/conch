@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -27,7 +28,9 @@ type config struct {
 	ContextMessages int
 	Model           string
 	ReplyTimeout    time.Duration
-	LockFile        string
+	// MaxPause is how long a run may stay paused before it is failed.
+	MaxPause time.Duration
+	LockFile string
 	// Command is the command that makes a reply, split, with CLAUDE_BIN
 	// already in place of its first word.
 	Command             commandSpec
@@ -44,6 +47,9 @@ type config struct {
 	StreamsActivity bool
 	// WorkDir is the command's working directory; empty means the adapter's.
 	WorkDir string
+	// Probe is the check made before the session opens, from the runtime's
+	// profile; nil for none. Only the profile's own command is probed.
+	Probe *probeSpec
 }
 
 // Main is the program: cmd/conch-adapter, and cmd/conch-bot under its old
@@ -75,7 +81,7 @@ func run() error {
 	if err := client.Initialize(ctx, "conch-adapter"); err != nil {
 		return fmt.Errorf("initialize MCP: %w", err)
 	}
-	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir}
+	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: cfg.ReplyTimeout, fixture: cfg.Fixture, sleep: sleepContext, reader: cfg.Reader, dir: cfg.WorkDir, maxPause: cfg.MaxPause}
 	loop := &botLoop{cfg: cfg, mcp: mcpAdapter{client}, claude: runner}
 	return loop.run(ctx)
 }
@@ -154,7 +160,15 @@ func loadConfig(lookup envLookup) (config, error) {
 	if cfg.Model = get("CONCH_ADAPTER_MODEL", "CONCH_BOT_MODEL", profile.model); cfg.Model == "" {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL (or CONCH_BOT_MODEL) is required when CONCH_ADAPTER_RUNTIME is %s", profile.name)
 	}
+	// The model becomes one argument of the command; a leading dash would be
+	// read by the program as a flag (`ollama show --help` exits 0).
+	if strings.HasPrefix(cfg.Model, "-") || strings.IndexFunc(cfg.Model, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return config{}, fmt.Errorf("CONCH_ADAPTER_MODEL must not start with '-' or contain whitespace or control characters")
+	}
 	if cfg.ReplyTimeout, err = parseDuration(get("CONCH_ADAPTER_REPLY_TIMEOUT", "CONCH_BOT_REPLY_TIMEOUT", "120s"), "CONCH_ADAPTER_REPLY_TIMEOUT"); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxPause, err = parseDuration(get("CONCH_ADAPTER_MAX_PAUSE", "", cfg.ReplyTimeout.String()), "CONCH_ADAPTER_MAX_PAUSE"); err != nil {
 		return config{}, err
 	}
 	cfg.LockFile = get("CONCH_ADAPTER_LOCK_FILE", "CONCH_BOT_LOCK_FILE", filepath.Join(os.TempDir(), "conch-adapter.lock"))
@@ -184,6 +198,9 @@ func loadConfig(lookup envLookup) (config, error) {
 	}
 	if cfg.Command, err = parseCommand(line, binary); err != nil {
 		return config{}, fmt.Errorf("CONCH_ADAPTER_CMD: %w", err)
+	}
+	if isDefault && profile.probe {
+		cfg.Probe = &probeSpec{bin: cfg.Command.args[0], model: cfg.Model}
 	}
 	if isDefault && cfg.WorkDir != "" && profile.workdirFlag != "" {
 		cfg.Command.args = append(cfg.Command.args, profile.workdirFlag, cfg.WorkDir)

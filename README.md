@@ -181,6 +181,7 @@ Without that toolchain `make check` fails and names the script; it does not skip
 ```sh
 make web-check   # gates (direct dependencies, exact versions, licences), typecheck, lint, unit tests; part of make check
 make web-build   # builds web/dist, for conchd serve --web-dir web/dist (served at /app/)
+make build-web-embedded   # web-build, then bin/conchd with the client inside it (-tags conchweb)
 ```
 
 Without that Node `make check` fails and names the version to install; it does not skip the web leg. `make build` is unaffected, and `conchd` never needs Node: it serves the built `web/dist` as plain files.
@@ -201,7 +202,8 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 - `--listen` (or `CONCHD_LISTEN`) defaults to `:8080`, which is every interface; the example binds to localhost.
 - `--auth` (or `CONCHD_AUTH`) is `required` by default. `--auth off` opens every endpoint to anyone who can reach the port and trusts request bodies for identity; it is for local development only, and `conchd` says so at startup.
 - `--max-upload-bytes` (or `CONCHD_MAX_UPLOAD_BYTES`) is the largest file an upload may carry (default 10 MiB; `0` disables uploads). See [Files](#files).
-- `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. The build is not embedded in the binary. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
+- `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, `conchd` serves the web client built into the binary, if there is one, and otherwise there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
+- Release binaries have the web client built in, so `/app/` works with no Node and no `--web-dir`; `conchd version` prints `web: embedded` or `web: none`, and the start-up output names the source (`conchd web: embedded`, `dir <path>` or `none`). A plain `go build` or `make build` has none (it needs no Node); `make build-web-embedded` builds one that has, and fails to compile if `internal/web/dist` is empty. `--web-dir` wins over the built-in client. `--no-web` (or `CONCHD_NO_WEB` set to a boolean such as `1` or `true`; any other value is refused at start) turns `/app/` off even when a client is built in, and `/` is then not redirected; it is refused together with `--web-dir`.
 - `--allowed-origins` (or `CONCHD_ALLOWED_ORIGINS`) is a comma-separated list of extra `Origin`s the WebSocket upgrade accepts, such as `http://localhost:5173`. It exists only so a Vite dev server on another port can connect. Each entry is one exact origin (`http` or `https`, a host, an optional port); wildcards are refused at start-up, and so are empty entries. Unset, the same-origin check is unchanged.
 - `--session-stale` (or `CONCHD_SESSION_STALE`, default `30s`) and `--session-offline` (or `CONCHD_SESSION_OFFLINE`, default `90s`) are how long a session may go without a heartbeat before it shows as `stale` and then as `offline`; `conchd` refuses to start unless stale is shorter than offline. A session is one live client or runtime of a principal (a TUI, a browser tab, an adapter): `POST /v1/sessions` creates one (any caller with a credential; an agent needs `sessions.manage`; at most 16 online or stale per credential, then `429 too_many_sessions`; offline ones do not count, and reviving one is held to the same bound), `POST /v1/sessions/{id}/heartbeat` keeps it alive and revives a stale or offline one, `DELETE /v1/sessions/{id}` ends it, and `GET /v1/sessions?channel=<name>` lists the sessions of the channel's members, for members only (a non-member, an operator who is not a member and an unknown channel all get the same `404 channel_not_found`). A session belongs to the credential that created it: anyone else, another credential of the same principal and operators included, gets `404 session_not_found`. Revoking, rotating or revoking all of a credential, or disabling a principal, ends its sessions, and so does a credential's expiry (at the next sweep, with cause `credential_expired`). Rows are never deleted. Sessions need authentication: with `--auth off` the routes answer `400 sessions_require_auth`. A roster shows `runtime` and `host` only to an operator and to the session's own principal.
 
@@ -273,7 +275,7 @@ bin/conch
 
 Neither process reads or writes the other's file. `CONCH_TOKEN` still wins over the file in whichever directory is in use.
 
-Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
+Then `conch` with no arguments launches the TUI (needs a real terminal). It lists the channels you are a member of and shows who you are signed in as. Each channel shows how many messages you have not read after its name (`general 3`; nothing at 0, `999+` at the server's cap of 1000): the TUI reads the counts from `GET /v1/read-state` on start, after a reconnect and when a message arrives in another channel (at most every 2 seconds; between reads it adds one locally), and moves your read mark with `PUT /v1/channels/{channel}/read-state` to the newest message on screen when you open a channel and as messages arrive while you are at the bottom of it, at most once every 2 seconds per channel. Scrolled up, the mark does not move; it moves when the newest message comes back into view (you scroll down to it, or return to the channels view). The mark is yours, shared by all your clients. With `--auth off`, or signed in as an agent, there is no read state, and the TUI shows no counts and says nothing. The TUI must be the terminal's foreground job: started in the background (`conch &`, `timeout` without `--foreground`, a supervisor that does not hand over the terminal) it refuses with one line and a non-zero exit instead of being stopped silently by the kernel — use a plain subcommand there instead.
 
 ```sh
 bin/conch
@@ -443,6 +445,15 @@ interventions. A `message` is answered `applied` and its text goes into the
 prompt of the next replies to the same audience, and only that audience (the
 last five are kept). A `cancel` kills the command and everything it started,
 reports the run `cancelled` once they are gone, and then answers `applied`.
+On Unix a `pause` stops the command and everything it started (`SIGSTOP` to its
+process group), answers `applied` and reports the run `waiting` with the outcome
+`paused`; a `resume` continues them (`SIGCONT`), reports the run `running` and
+answers `applied`. A `pause` of a run already paused, or of one whose command has
+not started, and a `resume` of a run not paused, are answered `failed`. A `cancel`
+still works on a paused run. Time spent paused does not count against the reply
+timeout, and a run paused, over all its pauses, for longer than `CONCH_ADAPTER_MAX_PAUSE` has its
+command killed and fails with the outcome `paused longer than <duration>`. Where
+there are no process groups the adapter does not declare `pause` and `resume`.
 Anything else is answered `failed`. On SIGTERM or SIGINT it stops the
 command, reports an open run `cancelled` with the outcome `adapter stopped`,
 ends its session and releases the lock file.
@@ -461,6 +472,8 @@ new name wins when both are set. Also:
 - `CONCH_ADAPTER_RUNTIME` (default `claude-code`): the runtime profile (below) and the label shown for the runtime. A value that names no profile (`claude-code`, `codex`) is refused unless `CONCH_ADAPTER_CMD` is set, in which case it is only a label with plain-text output: a misspelt name never falls back to the Claude default command.
 - `CONCH_ADAPTER_WORKDIR`: the directory the command runs in; default the adapter's own. With the default Codex command it is also given to Codex with `-C`.
 - `CONCH_ADAPTER_HEARTBEAT` (default `10s`).
+- `CONCH_ADAPTER_MAX_PAUSE` (default: the reply timeout): how long a run may be paused, all its pauses
+  together, before its command is killed and the run fails.
 - `CONCH_ADAPTER_MAX_REPLIES_PER_MINUTE` (default `10`): over it, a reply is
   dropped with a log line. It is what stops two adapters from answering each
   other for ever.
@@ -482,7 +495,26 @@ a model name) and the adapter exits with one line naming it if it is missing.
 `CLAUDE_BIN` does for Claude Code (both must be a bare program name or an absolute path); a `CONCH_ADAPTER_CMD` you set is run as
 written, but is still read as the profile reads.
 
-**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
+`ollama` is the local-model profile. It runs `ollama run {model}` with the
+prompt on standard input and reads the printed text as the reply, so a run
+reports the process as one `command_started` and `command_finished` pair, as
+`claude-code` does (and, as there, `CONCH_ADAPTER_FIXTURE=1` must never be set
+with a real model). `CONCH_ADAPTER_MODEL` is
+required and nothing is invented (for example `llama3.1:8b`; pull it first with
+`ollama pull`). `OLLAMA_BIN`, if set, replaces `ollama` in the default command
+and in the probe, under the same rule as `CLAUDE_BIN`. **The probe:** before the
+adapter reads the channel or registers a session, it runs `ollama show {model}`
+and waits at most 10 seconds for exit status 0. If it does not get it, the
+adapter exits with status 1 and one line, and posts nothing: `ollama: not on PATH`,
+`ollama: daemon not reachable` (also printed when the daemon does not answer in
+10 seconds), or `ollama: model X is not pulled; run: ollama pull X`. The adapter
+never switches to another runtime or model; no paid service is reached. A run
+whose command later exits non-zero is `failed` with that exit status, as for the
+other profiles. The probe is made only for the default command: a
+`CONCH_ADAPTER_CMD` you set is run as written, unprobed. The model only writes
+text; it has no tools here.
+
+**Cancel.** A cancel kills the command's process group. If Codex's own sandbox helper starts commands in a new session or process group, that kill (and a pause's `SIGSTOP`) may not reach them. The reader also stops reporting after 256 commands in one run and fails the run (`too much activity`).
 
 **Sandbox.** Unlike `claude -p`, Codex has a sandbox, and the default command
 uses it read-only: the agent can read files and run commands that do not
@@ -555,6 +587,79 @@ curl -s -X POST localhost:8080/mcp \
 ```
 
 Approvals are requested by agents over MCP and decided by humans with `conch approve` / `conch reject`; the decider is always the logged-in person and must be a member of the approval's channel.
+
+#### Reporting from outside Conch: a CI job or a remote script
+
+A runtime that cannot be run as a subprocess of `conch-adapter` (a CI job, a hosted agent, a script on another machine) can report its work with plain HTTP. The session, run, activity and intervention routes above take an issued agent credential in the `Authorization` header and are held to the agent's manifest, its rate limits and the audit log, like the MCP tools; each body is limited to 1 MiB and decoded strictly (an unknown field is `400`). No other route, listener or process is involved. The test `TestExternalRuntime*` in `internal/server/external_runtime_test.go` drives this sequence and every refusal below.
+
+**Set-up** (the operator, once per sender). Give the sender a principal of its own and a credential that expires; a shared credential shares its 16 live sessions and its rate budget, and revoking a dedicated one ends only its sessions. Put it in one channel and grant the least:
+
+```sh
+# as the operator (CONCH_TOKEN, step 3)
+bin/conch admin principal create --kind agent ci-runner          # say it is id 4
+bin/conch admin member add ops 4
+bin/conch admin credential issue 4 --label "nightly build" --expires-at 2026-12-31T00:00:00Z > ci.token
+bin/conch admin manifest put 4 <<'EOF'
+{
+  "display_name": "ci-runner", "tier": "C",
+  "capabilities": ["sessions.manage","runs.manage"],
+  "channels": [{"channel_id": 1, "permissions": ["post"]}],
+  "rate_limits": [
+    {"capability": "sessions.manage", "max": 12, "window_seconds": 60},
+    {"capability": "runs.manage", "max": 120, "window_seconds": 60}
+  ]
+}
+EOF
+```
+
+A rate limit is opt-in: a capability with no entry is unlimited, so declare both. A heartbeat every 10 seconds spends 6 `sessions.manage` a minute. The sender needs `post` in the channel because a run is shown to the channel's audience, but not `messages.read` or `messages.post`: it cannot read or post messages.
+
+**The sequence** (the sender; `$CONCH_SERVER` is the server's URL, `ci.token` the credential). In a CI job, keep the credential in a masked secret and never run this block under `set -x`, which would print the token into the job log:
+
+```sh
+AUTH="Authorization: Bearer $(cat ci.token)"
+API=${CONCH_SERVER:-http://127.0.0.1:8080}
+
+# 1. register; keep the id
+SESSION=$(curl -sf -X POST "$API/v1/sessions" -H "$AUTH" \
+  -d '{"client":"ci-job","runtime":"github-actions","host":"runner-3"}' | jq .id)
+
+# 2. heartbeat in the background for the life of the job
+( while sleep 10; do curl -sf -X POST "$API/v1/sessions/$SESSION/heartbeat" -H "$AUTH" >/dev/null; done ) &
+HEARTBEAT=$!
+
+# 3. start a run in the channel; keep its id
+RUN=$(curl -sf -X POST "$API/v1/sessions/$SESSION/runs" -H "$AUTH" \
+  -d '{"channel":"ops","task":"nightly build","link":"https://ci.example.com/jobs/7421"}' | jq .id)
+
+# 4. report states and activity
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"starting"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"running"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"command_started","summary":"go test ./..."}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"command_finished","summary":"go test ./...","outcome":"passed","data":{"exit":0}}' >/dev/null
+
+# 5. a terminal state ends the run (activity after that is 409, so post run_ended first)
+curl -sf -X POST "$API/v1/runs/$RUN/activity" -H "$AUTH" \
+  -d '{"kind":"run_ended","summary":"build finished","outcome":"passed"}' >/dev/null
+curl -sf -X POST "$API/v1/runs/$RUN/state" -H "$AUTH" -d '{"state":"completed","outcome":"passed"}' >/dev/null
+
+# 6. stop the heartbeat and end the session
+kill $HEARTBEAT 2>/dev/null; wait $HEARTBEAT 2>/dev/null
+curl -sf -X DELETE "$API/v1/sessions/$SESSION" -H "$AUTH"
+```
+
+A member sees the session, the run and each activity entry live on `GET /v1/events/ws`, and `session_started`, `run_started`, `run_ended` and `session_ended` are in the audit log, without the task. A sender that wants to be told to stop lists the kinds it will answer in `register` (`"interventions":["cancel"]`), polls `GET /v1/sessions/$SESSION/interventions?state=requested` and answers each with `POST /v1/interventions/{id}/ack`; a kind it did not list is refused at once with `409 intervention_unsupported`.
+
+**What is not supported.**
+
+- **No back-dating.** `at` is the server's clock; a sender that replays a backlog gets the time of receipt.
+- **No retries without thought.** There is no idempotency key: a retried start creates a second run and a retried activity a second entry. A retried state change after a lost response gets `409 invalid_transition`, which means it is already done. Do not retry a start blindly.
+- **A run report is not a heartbeat.** Only a heartbeat (or an open events socket with `session=`) keeps a session alive. A sender that reports but never heartbeats shows `stale` after 30 seconds and `offline` after 90, and its open run reads `outcome_unknown`. Heartbeat from the background, as above.
+- **`--auth off` refuses sessions** (`400 sessions_require_auth`), and so does a static `--mcp-token`.
+
+What is refused: a wrong or revoked credential is `401`. Starting a run without `runs.manage`, or in a channel the sender is not in, is `404 channel_not_found` (audited as `access_denied`, with `capability_not_granted` or `not_a_member`); a report on an existing run after `runs.manage` is gone is `403 forbidden`. A body over 1 MiB is `413`; malformed JSON, an unknown field, activity `data` over 8 KiB or an `http://` link is `400`. Over a rate limit is `429` with `Retry-After`, audited as `agent_rate_limited`.
 
 ### 6. Verify your install
 
