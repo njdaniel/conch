@@ -10,8 +10,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/njdaniel/conch/internal/server/livekit"
 )
 
 // Voice rooms (issue #126, docs/design/voice-control-plane.md §3). conchd, not
@@ -73,7 +71,31 @@ const (
 	VoiceRotateNotHuman          = "not_human"
 )
 
-// A room name is a prefix (livekit.DefaultRoomPrefix unless
+// DefaultVoiceRoomPrefix starts every room name when --livekit-room-prefix is not
+// given.
+const DefaultVoiceRoomPrefix = "conch-"
+
+// maxVoiceRoomPrefix is the longest room-name prefix, in bytes.
+const maxVoiceRoomPrefix = 32
+
+// ValidateVoiceRoomPrefix checks a room-name prefix: lower-case letters, digits and
+// "-", at most 32 characters, ending in "-". The trailing "-" keeps one
+// server's prefix from running into the random part of its names. The error
+// states the rule in one line.
+func ValidateVoiceRoomPrefix(p string) error {
+	const rule = "invalid room prefix: must be lower-case letters, digits and '-', at most 32 characters, and end with '-'"
+	if p == "" || len(p) > maxVoiceRoomPrefix || p[len(p)-1] != '-' {
+		return errors.New(rule)
+	}
+	for _, c := range []byte(p) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+			return errors.New(rule)
+		}
+	}
+	return nil
+}
+
+// A room name is a prefix (DefaultVoiceRoomPrefix unless
 // SetVoiceRoomPrefix chose another) and 128 random bits, never derived from a
 // channel or net name. Stored names are never rewritten: a room's prefix is
 // whatever the server used when it created the room.
@@ -83,7 +105,7 @@ const (
 // refused and the earlier one stays. Call it before the store is used from
 // more than one goroutine.
 func (s *Store) SetVoiceRoomPrefix(prefix string) error {
-	if err := livekit.ValidateRoomPrefix(prefix); err != nil {
+	if err := ValidateVoiceRoomPrefix(prefix); err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 	s.voiceRoomPrefix = prefix
@@ -93,7 +115,7 @@ func (s *Store) SetVoiceRoomPrefix(prefix string) error {
 // roomPrefix is the prefix for a new room name.
 func (s *Store) roomPrefix() string {
 	if s.voiceRoomPrefix == "" {
-		return livekit.DefaultRoomPrefix
+		return DefaultVoiceRoomPrefix
 	}
 	return s.voiceRoomPrefix
 }

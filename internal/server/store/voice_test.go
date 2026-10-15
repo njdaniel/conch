@@ -1013,3 +1013,37 @@ func TestSeenRetiredVoiceRooms(t *testing.T) {
 		t.Errorf("with no rooms: %v", err)
 	}
 }
+
+func TestValidateVoiceRoomPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		ok     bool
+	}{
+		{"default", DefaultVoiceRoomPrefix, true},
+		{"letters digits and dash", "alpha-2-", true},
+		{"just a dash", "-", true},
+		{"exactly 32", strings.Repeat("a", 31) + "-", true},
+		{"33 characters", strings.Repeat("a", 32) + "-", false},
+		{"empty", "", false},
+		{"no trailing dash", "conch", false},
+		{"upper case", "Conch-", false},
+		{"underscore", "con_ch-", false},
+		{"dot", "conch.-", false},
+		{"slash", "a/b-", false},
+		{"space", "a b-", false},
+		{"non-ASCII", "cönch-", false},
+		{"newline", "conch-\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateVoiceRoomPrefix(tt.prefix)
+			if (err == nil) != tt.ok {
+				t.Fatalf("ValidateVoiceRoomPrefix(%q) = %v, want ok=%v", tt.prefix, err, tt.ok)
+			}
+			if err != nil && strings.Contains(err.Error(), "\n") {
+				t.Errorf("error is more than one line: %q", err)
+			}
+		})
+	}
+}

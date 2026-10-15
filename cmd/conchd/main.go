@@ -161,7 +161,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
-	livekitRoomPrefix := fs.String("livekit-room-prefix", envOr(livekit.EnvRoomPrefix, livekit.DefaultRoomPrefix), "start of the name of every new voice room")
+	livekitRoomPrefix := fs.String("livekit-room-prefix", envOr(livekit.EnvRoomPrefix, store.DefaultVoiceRoomPrefix), "start of the name of every new voice room")
 	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
 	// An off switch that is set to something it cannot read must not be
 	// taken as unset: that would serve the client the operator meant to
@@ -219,7 +219,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
-	if err := livekit.ValidateRoomPrefix(*livekitRoomPrefix); err != nil {
+	if err := store.ValidateVoiceRoomPrefix(*livekitRoomPrefix); err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --livekit-room-prefix: %w", err)
 	}
 	origins, err := server.ParseAllowedOrigins(*originsRaw)
