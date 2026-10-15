@@ -133,7 +133,10 @@ export function useReadState({
       // already marked is not unread.
       if (current !== null && now && (marks.current.marked.get(current) ?? 0) > 0) next.delete(current);
       // A channel just opened, whose newest message is not yet known, is about
-      // to be read: its count is not shown in the meantime.
+      // to be read: its count is dropped while its history loads, so that it
+      // does not flicker. The trade-off: if it turns out not to be read (the
+      // reader is scrolled up, say), the count comes back only with the next
+      // read.
       if (current !== null && !held) next.delete(current);
       setCounts(next);
     });
@@ -222,12 +225,8 @@ export function useReadState({
     if (!signedIn || !loaded) return;
     if (status === 'open' && before.status === 'reconnecting') {
       read();
-      // The mark held back while the server was out of reach goes now.
-      const m = marks.current;
-      const id = open === null ? 0 : (m.pending.get(open) ?? 0);
-      if (open !== null && id > (m.marked.get(open) ?? 0) && latest.current.reading) send(open, id);
     } else if (open !== null && before.open !== null && open !== before.open) readSoon();
-  }, [signedIn, loaded, status, open, read, readSoon, send]);
+  }, [signedIn, loaded, status, open, read, readSoon]);
 
   // A message that arrives while it is not being read is a local +1. Your own
   // messages are not unread.

@@ -68,13 +68,15 @@ interface Server {
   read: () => unknown[];
   refusal: { status: number; code: string } | null;
   gets: number;
+  // Set to make a mark request fail with no answer at all.
+  putsDown: boolean;
   puts: { channel: string; id: number; url: string }[];
 }
 
 let server: Server;
 
 function install() {
-  server = { history: [], read: () => [], refusal: null, gets: 0, puts: [] };
+  server = { history: [], read: () => [], refusal: null, gets: 0, putsDown: false, puts: [] };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
     'fetch',
@@ -95,6 +97,7 @@ function install() {
         const channel = decodeURIComponent(put[1]);
         const id = (JSON.parse(init.body as string) as { last_read_id: number }).last_read_id;
         server.puts.push({ channel, id, url: url.href });
+        if (server.putsDown) return Promise.reject(new TypeError('connection refused'));
         if (server.refusal !== null) return Promise.resolve(json({ code: server.refusal.code, message: 'no' }, server.refusal.status));
         return Promise.resolve(json(state(channel === 'general' ? 7 : 8, 0, id)));
       }
@@ -484,5 +487,31 @@ describe('after review', () => {
     await waitFor(() => {
       expect(screen.queryByRole('img', { name: /unread/ })).toBeNull();
     });
+  });
+
+  it('takes back a mark that got no answer while the socket still reads open, and sends it again after reconnect (the rollback)', async () => {
+    fake();
+    server.history = [message(1)];
+    const socket = await openChat();
+    await waitFor(() => {
+      expect(server.puts).toHaveLength(1);
+    });
+    await advance(markInterval);
+    server.putsDown = true;
+    socket.send(message(2));
+    await waitFor(() => {
+      expect(server.puts.map((p) => p.id)).toEqual([1, 2]);
+    });
+    // The server comes back, but the socket has not noticed yet.
+    server.putsDown = false;
+    await advance(markInterval * 2);
+    socket.drop(1006);
+    await screen.findByText('This conversation may be out of date');
+    await reconnect(2);
+    await waitFor(() => {
+      expect(server.puts.map((p) => p.id)).toEqual([1, 2, 2]);
+    });
+    await advance(markInterval * 3);
+    expect(server.puts).toHaveLength(3);
   });
 });
