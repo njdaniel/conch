@@ -76,7 +76,9 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 	}
 	now := credentialNow().Truncate(time.Millisecond)
 	var res BootstrapResult
+	var runs []EndedRun
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
 		var one int
 		switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM principals WHERE role = 'operator' LIMIT 1").Scan(&one); {
 		case err == nil:
@@ -99,7 +101,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		}
 		res.Principal = Principal{ID: id, Kind: PrincipalHuman, Name: name, Role: RoleOperator, CreatedAt: now}
 		if !opts.KeepExistingCredentials {
-			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now); err != nil {
+			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now, &runs); err != nil {
 				return err
 			}
 			if res.RevokedHooks, err = deleteHooksTx(ctx, tx, now); err != nil {
@@ -121,6 +123,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	s.announceRunsEnded(runs)
 	res.Token = token
 	return res, nil
 }
@@ -128,7 +131,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 // revokeLiveCredentialsTx revokes every credential that is neither revoked nor
 // expired at now, writing one credential_revoked event each, and returns how
 // many it revoked.
-func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int, error) {
+func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time, ended *[]EndedRun) (int, error) {
 	type live struct {
 		id, principalID int64
 		label           string
@@ -170,7 +173,7 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int
 			return 0, err
 		}
 		// Its sessions end with it, as on every other revocation (issue #265).
-		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now); err != nil {
+		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now, ended); err != nil {
 			return 0, err
 		}
 	}

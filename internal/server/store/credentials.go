@@ -225,7 +225,9 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		return schema.CredentialV1{}, "", err
 	}
 	var out schema.CredentialV1
+	var runs []EndedRun
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
 		var (
 			principalID          int64
 			label                string
@@ -282,11 +284,12 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		// The old credential is dead as of this transaction, and so are its
 		// sessions; they are not carried over to the new one.
-		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now)
+		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs)
 	})
 	if err != nil {
 		return schema.CredentialV1{}, "", err
 	}
+	s.announceRunsEnded(runs)
 	return out, token, nil
 }
 
@@ -296,7 +299,9 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 // audit event is appended in the same transaction as the first revocation.
 // It returns ErrCredentialNotFound for an unknown id.
 func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
+	var runs []EndedRun
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
 		var (
 			principalID int64
 			label       string
@@ -345,6 +350,11 @@ func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		// Its sessions end with it, in this transaction (issue #265).
-		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now)
+		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs)
 	})
+	if err != nil {
+		return err
+	}
+	s.announceRunsEnded(runs)
+	return nil
 }

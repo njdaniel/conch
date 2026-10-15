@@ -524,6 +524,30 @@ type Store struct {
 	// it to a statement that fails, to exercise the path where a transaction
 	// cannot be ended and the connection must be discarded.
 	rollbackSQL string
+	// runsEnded, when set, is told which runs a committed transaction failed
+	// because their session ended (issue #405).
+	runsEnded func([]EndedRun)
+}
+
+// EndedRun names a run that ended with its session: the store changed it
+// without SetRunState, so the server must be told to push it.
+type EndedRun struct {
+	ID, ChannelID int64
+}
+
+// OnRunsEnded sets the function the store calls, after the commit and never
+// inside a transaction, with the runs a session-ending call failed. Set it
+// before the store is used from more than one goroutine. There is one such
+// function: a later call replaces the earlier one, so one store serves one
+// Server.
+func (s *Store) OnRunsEnded(fn func([]EndedRun)) { s.runsEnded = fn }
+
+// announceRunsEnded tells the OnRunsEnded function about runs, if there are
+// any. Callers reach it only after their transaction has committed.
+func (s *Store) announceRunsEnded(runs []EndedRun) {
+	if len(runs) > 0 && s.runsEnded != nil {
+		s.runsEnded(runs)
+	}
 }
 
 // Open opens (creating if necessary) the database at path, enables WAL mode

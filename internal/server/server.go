@@ -182,6 +182,13 @@ func New(cfg Config, st *store.Store) *Server {
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	// Runs that end with their session change without SetRunState, so the
+	// store reports them here, after its commit (issue #405).
+	st.OnRunsEnded(func(runs []store.EndedRun) {
+		for _, r := range runs {
+			s.events.notifyRun(r.ChannelID, r.ID)
+		}
+	})
 	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
