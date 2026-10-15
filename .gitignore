@@ -14,6 +14,10 @@
 /web/node_modules/
 /web/dist/
 
+# The copy of web/dist that conchd embeds (-tags conchweb); `make web-embed`
+# makes it.
+/internal/web/dist/
+
 # Go
 *.test
 *.out

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -51,8 +52,11 @@ type Config struct {
 	// it to DefaultMaxUploadBytes; the zero value here is off.
 	MaxUploadBytes int64
 	// WebDir, when set, is a built web client served at /app/ (see
-	// static.go). Empty means no /app/ routes exist.
+	// static.go). It wins over WebFS. With neither, no /app/ routes exist.
 	WebDir string
+	// WebFS, when set and WebDir is not, is the web client embedded in the
+	// binary (internal/web), rooted at the directory holding index.html.
+	WebFS fs.FS
 	// AllowedOrigins are extra origins the WebSocket upgrade accepts besides
 	// the server's own, so a dev server on another port can connect. Empty
 	// keeps the same-origin check. See ParseAllowedOrigins.
