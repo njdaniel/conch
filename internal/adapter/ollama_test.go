@@ -31,10 +31,10 @@ func TestOllamaProfile(t *testing.T) {
 		wantArgs  []string
 		wantProbe string // the program probed; empty means no probe
 	}{
-		{"default", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1"}, "", []string{"ollama", "run", "m1"}, "ollama"},
-		{"OLLAMA_BIN", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "OLLAMA_BIN": "/x/ollama"}, "", []string{"/x/ollama", "run", "m1"}, "/x/ollama"},
+		{"default", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1"}, "", []string{"ollama", "run", "--nowordwrap", "m1"}, "ollama"},
+		{"OLLAMA_BIN", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "OLLAMA_BIN": "/x/ollama"}, "", []string{"/x/ollama", "run", "--nowordwrap", "m1"}, "/x/ollama"},
 		{"OLLAMA_BIN relative", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "OLLAMA_BIN": "x/ollama"}, "OLLAMA_BIN", nil, ""},
-		{"CLAUDE_BIN is not its", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "CLAUDE_BIN": "/x/claude"}, "", []string{"ollama", "run", "m1"}, "ollama"},
+		{"CLAUDE_BIN is not its", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "CLAUDE_BIN": "/x/claude"}, "", []string{"ollama", "run", "--nowordwrap", "m1"}, "ollama"},
 		{"no model", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama"}, "CONCH_ADAPTER_MODEL", nil, ""},
 		// A command someone configured is run as written and not probed.
 		{"with a command", map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1", "CONCH_ADAPTER_CMD": "/x/stub.sh", "OLLAMA_BIN": "/x/ollama"}, "", []string{"/x/stub.sh"}, ""},
@@ -192,5 +192,25 @@ func TestModelIsRefusedUnlessOneWord(t *testing.T) {
 				t.Fatalf("error = %v, want one line naming CONCH_ADAPTER_MODEL", err)
 			}
 		})
+	}
+}
+
+// A reply with terminal control sequences in it is posted without them, with
+// its newlines and tabs, whatever the program that wrote it.
+func TestOllamaReplyIsPostedWithoutControlSequences(t *testing.T) {
+	fakeOllama(t, `cat >/dev/null; printf 'running (claude-sonne\033[13D\033[K\n(claude-sonnet-5-5).\n\ttabbed\033]0;title\007 end\n'`)
+	cfg, err := loadConfig(withEnv(map[string]string{"CONCH_ADAPTER_RUNTIME": "ollama", "CONCH_ADAPTER_MODEL": "m1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcp := &fakeMCP{}
+	runner := commandRunner{spec: cfg.Command, model: cfg.Model, timeout: 10 * time.Second, reader: cfg.Reader, sleep: sleepContext}
+	loop := loopWithSession(mcp, runner, newFakeClock())
+	if err := answer(t, loop, message(1, 2, "ping")); err != nil {
+		t.Fatal(err)
+	}
+	want := "running (claude-sonne\n(claude-sonnet-5-5).\n\ttabbed end"
+	if len(mcp.posts) != 1 || mcp.posts[0] != want {
+		t.Fatalf("posts = %q, want [%q]", mcp.posts, want)
 	}
 }
