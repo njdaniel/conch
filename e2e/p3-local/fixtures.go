@@ -192,7 +192,7 @@ func newFixtures(operatorToken string) *fixtures {
 func (r *runner) operatorEnv() []string {
 	return r.isolatedEnv(
 		"CONCH_CONFIG_DIR="+filepath.Join(r.root, "config", "operator"),
-		"CONCH_SERVER="+r.baseURL(),
+		"CONCH_SERVER="+r.localURL(),
 		"CONCH_TOKEN="+r.fx.operatorToken)
 }
 
@@ -284,7 +284,7 @@ func id(n int64) string { return strconv.FormatInt(n, 10) }
 
 // client returns an API client for token.
 func (r *runner) client(token string) (*cli.Client, error) {
-	c, err := cli.NewClient(r.baseURL(), &http.Client{Timeout: 30 * time.Second, Transport: newLoggingTransport()})
+	c, err := cli.NewClient(r.localURL(), &http.Client{Timeout: 30 * time.Second, Transport: newLoggingTransport()})
 	if err != nil {
 		return nil, err
 	}

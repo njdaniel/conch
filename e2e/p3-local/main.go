@@ -5,6 +5,7 @@
 //
 //	go run ./e2e/p3-local [--keep] [--reset] [--real-adapter [--runtime claude|codex]]
 //	go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama
+//	go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>
 //
 // It builds conchd, conch and conch-adapter into <root>/bin, starts conchd on
 // a loopback port of its own choosing, provisions the community through
@@ -17,7 +18,10 @@
 // pseudo-terminals, the scripted agents as conch-adapter processes, and the API
 // to look at what the server shows), and tears everything down. --reset stops
 // what an earlier run started and removes its root. docs/p3-walkthrough.md is
-// what to do with a kept community. CONCH_P3_ROWS=P3-06,P3-07 limits the suite
+// what to do with a kept community. With --keep --advertise the server binds to
+// that address of this machine instead of loopback, every file names it, and
+// the commands for a guest (a VM) are printed apart; the guest's credentials
+// then travel in clear text over http://, which the run says first (issue #379). CONCH_P3_ROWS=P3-06,P3-07 limits the suite
 // to those rows (and P3-01, which starts everyone) while working on them.
 //
 // The root is $CONCH_P3_ROOT, else $XDG_STATE_HOME/conch-p3, else
@@ -72,12 +76,14 @@ func main() {
 	realAdapter := flag.Bool("real-adapter", false, "write agent-a.env for the real Claude Code command instead of a fixture (it runs as you; see the warning)")
 	runtimeName := flag.String("runtime", "claude", "with --real-adapter, which real command agent-a.env names: claude or codex")
 	realList := flag.String("real-adapters", "", "with --keep, add an agent real-<runtime> for each of claude, codex, ollama (comma-separated); each model comes from CONCH_P3_MODEL_<RUNTIME>")
+	advertiseURL := flag.String("advertise", "", "with --keep, bind conchd to this address of this machine (http://<ip>:<port>) and write it into every file, for a guest on the LAN")
 	flag.Parse()
 	runtimeSet := false
 	flag.Visit(func(f *flag.Flag) { runtimeSet = runtimeSet || f.Name == "runtime" })
 	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) {
 		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep] [--real-adapter [--runtime claude|codex]] | --reset")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama")
+		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>")
 		os.Exit(2)
 	}
 	// Before anything is built or started: a runtime without its model is
@@ -87,11 +93,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
 		os.Exit(2)
 	}
+	adv, err := parseAdvertise(*advertiseURL, *keep, *reset, hostHasIP)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
+		os.Exit(2)
+	}
+	if adv != nil {
+		// First of everything the run prints, and before anything is built.
+		fmt.Println(adv.warning())
+		fmt.Println()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	runCtx = ctx
 
-	r, err := newRunner(*realAdapter, *runtimeName, realNames, models)
+	r, err := newRunner(*realAdapter, *runtimeName, realNames, models, adv)
 	if err != nil {
 		stop()
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
@@ -154,6 +170,9 @@ type runner struct {
 	// wait, interruptible, at that stage, so a test can interrupt it exactly
 	// there.
 	hold string
+	// advertise is set by --advertise: conchd binds to its address and every
+	// file and printed command names its URL.
+	advertise *advertise
 	// webDir is the built web client conchd serves; CONCH_P3_WEB_DIR names one
 	// that is not repo/web/dist, and then nothing is built for it.
 	webDir    string
@@ -178,7 +197,7 @@ type runner struct {
 
 type binaries struct{ conchd, conch, adapter string }
 
-func newRunner(realAdapter bool, runtimeName string, realNames []string, models map[string]string) (*runner, error) {
+func newRunner(realAdapter bool, runtimeName string, realNames []string, models map[string]string, adv *advertise) (*runner, error) {
 	repo, err := moduleRoot()
 	if err != nil {
 		return nil, err
@@ -191,7 +210,7 @@ func newRunner(realAdapter bool, runtimeName string, realNames []string, models 
 	if _, err := rand.Read(id); err != nil {
 		return nil, err
 	}
-	r := &runner{repo: repo, root: root, runID: hex.EncodeToString(id), realAdapter: realAdapter, runtime: runtimeName, realAgents: realNames, models: models, hold: os.Getenv("CONCH_P3_HOLD")}
+	r := &runner{repo: repo, root: root, runID: hex.EncodeToString(id), realAdapter: realAdapter, runtime: runtimeName, realAgents: realNames, models: models, advertise: adv, hold: os.Getenv("CONCH_P3_HOLD")}
 	r.webDir, r.ownWebDir = filepath.Join(repo, "web", "dist"), true
 	if dir := os.Getenv("CONCH_P3_WEB_DIR"); dir != "" {
 		if !filepath.IsAbs(dir) {
@@ -710,13 +729,15 @@ func webStale(dist, src string) (bool, error) {
 
 // ----------------------------------------------------------------- server
 
-// listeningOn is the line conchd prints once it has its port.
-var listeningOn = regexp.MustCompile(`(?m)^conchd \S+ listening on (127\.0\.0\.1:\d+) `)
+// listeningOn is the line conchd prints once it has its port: the loopback
+// one it chose, or the address --advertise asked for.
+var listeningOn = regexp.MustCompile(`(?m)^conchd \S+ listening on (\S+:\d+) `)
 
 // startServer bootstraps the operator into a fresh data directory and starts
-// conchd on a loopback port it chooses itself. conchd is asked for port 0 and
-// says which port it got: choosing a free port here and handing it over would
-// leave a moment in which something else could take it.
+// conchd on a loopback port it chooses itself, or, with --advertise, on the
+// address given. conchd is asked for port 0 and says which port it got:
+// choosing a free port here and handing it over would leave a moment in which
+// something else could take it.
 func (r *runner) startServer() error {
 	data := filepath.Join(r.root, "data")
 	out, err := r.output("", r.repo, r.isolatedEnv(), r.bin.conchd, "bootstrap-operator", "--data", data, "--name", "p3-operator")
@@ -730,7 +751,11 @@ func (r *runner) startServer() error {
 	r.secret(token)
 	r.fx = newFixtures(token)
 
-	c, err := r.spawn("conchd", r.bin.conchd, r.serveArgs("127.0.0.1:0"), r.isolatedEnv())
+	listen := "127.0.0.1:0"
+	if r.advertise != nil {
+		listen = r.advertise.bind
+	}
+	c, err := r.spawn("conchd", r.bin.conchd, r.serveArgs(listen), r.isolatedEnv())
 	if err != nil {
 		return err
 	}
@@ -744,6 +769,9 @@ func (r *runner) startServer() error {
 			if log, err := os.ReadFile(c.log); err == nil {
 				if m := listeningOn.FindSubmatch(log); m != nil {
 					r.addr = string(m[1])
+					if r.advertise != nil && r.addr != r.advertise.bind {
+						return fmt.Errorf("conchd listens on %s, not on the advertised %s", r.addr, r.advertise.bind)
+					}
 				}
 			}
 		}
@@ -790,7 +818,18 @@ func pause(d time.Duration) error {
 	}
 }
 
-func (r *runner) baseURL() string { return "http://" + r.addr }
+// localURL is where this program itself reaches conchd: always plain http on
+// the address conchd bound, even when an https:// address is advertised.
+func (r *runner) localURL() string { return "http://" + r.addr }
+
+// baseURL is the server's address as a client types it: the advertised URL
+// when there is one, else the loopback address conchd chose.
+func (r *runner) baseURL() string {
+	if r.advertise != nil {
+		return r.advertise.url
+	}
+	return "http://" + r.addr
+}
 
 // showServerLog prints the end of the server's log, credentials hidden.
 func (r *runner) showServerLog() {
