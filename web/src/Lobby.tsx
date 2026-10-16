@@ -23,6 +23,7 @@ export function Lobby({
   conversation,
   panel,
   voice,
+  invites,
   account,
   onOpen,
   onRetry,
@@ -39,6 +40,8 @@ export function Lobby({
   readonly panel: ReactNode;
   // The voice section: kept by the caller, which owns the voice client.
   readonly voice: ReactNode;
+  // "Invite someone" (issue #440), or null for a person who may not invite.
+  readonly invites: ReactNode;
   // The caller's own account: changing their name (issue #441). There is no
   // settings page yet, so it sits in the header.
   readonly account?: ReactNode;
@@ -98,6 +101,7 @@ export function Lobby({
         </section>
         <aside aria-label="Members panel" className="panel">
           {voice}
+          {invites}
           <button
             type="button"
             aria-expanded={panelOpen}

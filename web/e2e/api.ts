@@ -3,6 +3,7 @@
 // against pkg/schema's golden fixtures.
 import { listActivityResponseV1, type AgentActivityV1 } from '../src/schema/activity';
 import { listInterventionsResponseV1, type InterventionV1 } from '../src/schema/intervention';
+import { createInviteResponseV1, listInvitesResponseV1, type CreateInviteRequestV1, type CreateInviteResponseV1, type InviteV1 } from '../src/schema/invite';
 import { listMessagesResponseV2, postMessageResponseV2, type MessageV2 } from '../src/schema/message';
 import { listReadStateResponseV1, type ReadStateV1 } from '../src/schema/readstate';
 import { listRunsResponseV1, runV1, type RunV1 } from '../src/schema/run';
@@ -56,6 +57,17 @@ export async function interventions(world: World, token: string, runId: number):
 
 export async function activityOf(world: World, token: string, runId: number): Promise<AgentActivityV1[]> {
   return (await ok(world, token, 'GET', `/v1/runs/${String(runId)}/activity?after=0&limit=100`, listActivityResponseV1)).activity;
+}
+
+// makeInvite has the holder of token make an invite (issue #440), as an
+// operator does with curl or conch: the answer carries its code, once.
+export function makeInvite(world: World, token: string, request: CreateInviteRequestV1): Promise<CreateInviteResponseV1> {
+  return ok(world, token, 'POST', '/v1/invites', createInviteResponseV1, request);
+}
+
+// invitesOf is the invites the holder of token may see, newest first.
+export async function invitesOf(world: World, token: string): Promise<InviteV1[]> {
+  return (await ok(world, token, 'GET', '/v1/invites', listInvitesResponseV1)).invites;
 }
 
 // readState is the caller's mark and unread count in every channel they are in.

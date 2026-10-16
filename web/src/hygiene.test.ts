@@ -38,9 +38,10 @@ describe('credential handling', () => {
     // one that happens to be stored.
     expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(3);
     expect(code).not.toMatch(/export\s+(async\s+)?function\s+((read|write|drop)Token|sendAs|current|forget)\b/);
-    // The pin is set in three places only: signIn, continueAsOperator and
-    // restore.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(3);
+    // The pin is set in four places only: signIn, continueAsOperator,
+    // restore, and redeemInvite (issue #440), which keeps the credential an
+    // invite gives as signIn keeps a member's.
+    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(4);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
@@ -181,11 +182,161 @@ describe('the socket ticket', () => {
       .filter(([, code]) => /\bWebSocket\s*\(|ws-tickets/.test(code))
       .map(([path]) => path);
     expect(touching).toEqual(['./api.ts']);
-    // Only the hash names the channel; nothing else may write the address bar.
+    // Only the hash names the channel; nothing else may write the address
+    // bar, but for the one history call that takes an invite code out of it.
     const navigating = Object.entries(sources)
-      .filter(([, code]) => /location\.(href|search|pathname)\s*=|location\.(assign|replace)\(|history\.(push|replace)State/.test(code))
+      .filter(([path, code]) => navigates(path, code))
       .map(([path]) => path);
     expect(navigating).toEqual([]);
+  });
+});
+
+// What writes the address bar or the history, or moves the page: either
+// history write by any route to it (an alias, an index), an assignment to
+// location itself or to any of its parts but the hash (which names the
+// channel), and assign, replace, reload, go, back and forward.
+const navigation: readonly RegExp[] = [
+  /\b(push|replace)State\b/,
+  /\blocation\s*=(?!=)/,
+  /location\.(?!hash\b)\w+\s*\+?=(?!=)/,
+  /location\s*\.\s*(assign|replace|reload)\b/,
+  /history\s*\.\s*(go|back|forward)\b/,
+];
+
+// The one exception (issue #440): route.ts, once, replaces the history entry
+// with the address without its fragment, so an invite code read from the hash
+// is in neither the address bar nor the back history.
+const inviteReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location))";
+
+// navigates says whether a source writes the address bar other than through
+// the hash. Comments are left out first; then the exception is taken out
+// (from route.ts only, and only once).
+function navigates(path: string, code: string): boolean {
+  const bare = withoutComments(code);
+  const checked = path === './route.ts' ? bare.replace(inviteReplace, '') : bare;
+  return navigation.some((rule) => rule.test(checked));
+}
+
+describe('the history exception', () => {
+  it('is one call in src/route.ts, given the address without its fragment', () => {
+    const code = sources['./route.ts'] ?? '';
+    expect(code.split(inviteReplace)).toHaveLength(2);
+    // That address is origin, path and query, and nothing else: no hash.
+    const built = /export function addressWithoutFragment\([^)]*\): string \{\n\s*return (.*);\n\}/.exec(code)?.[1];
+    expect(built).toBe('`${location.origin}${location.pathname}${location.search}`');
+  });
+
+  it('still catches every forbidden form: a failing example of each', () => {
+    for (const example of [
+      'window.location.href = next;',
+      'location.search = "?a=1";',
+      'location.pathname = p;',
+      'window.location.assign(u);',
+      'location.replace(u);',
+      'history.pushState(null, "", u);',
+      "window.history.replaceState(null, '', u);",
+      // The exception's own words, outside route.ts.
+      inviteReplace,
+      // Forms the first rule of #440 let through (security review).
+      'window.location = u;',
+      'location = u;',
+      'location.href += u;',
+      'window.location.host = h;',
+      'window.location.search += "&a=1";',
+      'const h = window.history;\nh.replaceState(null, "", u);',
+      "history['replaceState'](null, '', u);",
+      'history.go(-1);',
+      'window.history.back();',
+      'history.forward();',
+      'location.reload();',
+      'window.location.reload(true);',
+      // A comment does not hide code after it on the same line.
+      'x(); // note\nlocation.reload();',
+    ]) {
+      expect(navigates('./App.tsx', example), example).toBe(true);
+    }
+    // In route.ts: any other history call, the exception with another
+    // address, and the exception a second time.
+    for (const example of [
+      'history.pushState(null, "", u);',
+      "window.history.replaceState(null, '', window.location.href);",
+      "window.history.replaceState(null, '', addressWithoutFragment(window.location) + window.location.hash);",
+      'location.replace(u);',
+      `${inviteReplace};\n${inviteReplace};`,
+    ]) {
+      expect(navigates('./route.ts', example), example).toBe(true);
+    }
+    expect(navigates('./route.ts', `${inviteReplace};`)).toBe(false);
+    // Allowed: setting the hash, reading location, comparing it, and saying
+    // in a comment what the code does not do.
+    for (const example of [
+      'window.location.hash = hash;',
+      "const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';",
+      'if (window.location.hash !== hash) window.location.hash = hash;',
+      'const at = location == null;',
+      '// replaceState fires no hashchange, and location.reload() is never called',
+    ]) {
+      expect(navigates('./App.tsx', example), example).toBe(false);
+    }
+  });
+});
+
+// The invite code (issue #440) is handled like a credential. It is held under
+// the name inviteCode, in the modules that must hold it, and nowhere else: it
+// is never stored, logged (no module logs at all), put in a URL other than the
+// creator's link, or rendered.
+const inviteHolders = ['./App.tsx', './Invite.tsx', './api.ts', './route.ts'];
+const inviteStored = /(setItem|getItem|removeItem)\([^)]*\binviteCode\b/;
+// A template literal's ${...} that holds the code: how a URL would be built.
+const inviteInTemplate = /\$\{[^}]*\binviteCode\b[^}]*\}/g;
+// In a .tsx file: a JSX child ({inviteCode} after a tag, not an arrow's =>),
+// or an attribute other than the one that hands it to the landing page.
+const inviteRendered = /(?<!=)>\s*\{[^}]*\binviteCode\b|\b(?!inviteCode=)[\w-]+=\{[^}]*\binviteCode\b/;
+
+describe('the invite code', () => {
+  it('is held only by src/api.ts, src/route.ts, App and the landing page', () => {
+    const holding = Object.entries(sources)
+      .filter(([, code]) => /\binviteCode\b/.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(holding).toEqual(inviteHolders);
+  });
+
+  it('goes to the server from src/api.ts alone', () => {
+    const calling = Object.entries(sources)
+      .filter(([, code]) => /\/v1\/invites/.test(code))
+      .map(([path]) => path);
+    expect(calling).toEqual(['./api.ts']);
+  });
+
+  it('is never stored, put in a URL or rendered', () => {
+    for (const [path, code] of Object.entries(sources)) {
+      expect(inviteStored.test(code), path).toBe(false);
+      // Only a .tsx file renders (in a .ts file, `Promise<T> {` is a type).
+      if (path.endsWith('.tsx')) expect(inviteRendered.test(code), path).toBe(false);
+      // The one URL that holds it is the link shown to its creator.
+      expect(code.match(inviteInTemplate) ?? [], path).toEqual(path === './route.ts' ? ['${encodeURIComponent(inviteCode)}'] : []);
+    }
+    expect(sources['./route.ts']).toContain('return `${origin}/app/#/invite/${encodeURIComponent(inviteCode)}`;');
+    // A creator's new code goes straight into that link, in the panel alone.
+    const reading = Object.entries(sources)
+      .filter(([, code]) => /\.value\.code\b/.test(code))
+      .map(([path, code]) => [path, code.match(/[\w.]*\(?[^()\n]*\.value\.code\b\)?/g)]);
+    expect(reading).toEqual([['./InvitePanel.tsx', ['inviteLink(origin, result.value.code)']]]);
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    for (const example of ['sessionStorage.setItem(key, inviteCode)', 'window.localStorage.getItem(inviteCode)']) {
+      expect(inviteStored.test(example), example).toBe(true);
+    }
+    for (const example of ['<p>{inviteCode}</p>', '<p>\n  {inviteCode}\n</p>', '<b>x</b>{inviteCode}', '<input value={inviteCode} />', '<li key={inviteCode}>', '<a title={`#/invite/${inviteCode}`}>']) {
+      expect(inviteRendered.test(example), example).toBe(true);
+    }
+    expect('fetch(`/v1/invites/${inviteCode}`)'.match(inviteInTemplate)).toHaveLength(1);
+    // Not rendering it: handing it to the landing page, and using it in code.
+    for (const example of ['<Invite inviteCode={inviteCode} />', 'useEffect(() => {\n  void api.previewInvite(inviteCode);\n}, [inviteCode]);', 'if (inviteCode !== null) {']) {
+      expect(inviteRendered.test(example), example).toBe(false);
+    }
   });
 });
 

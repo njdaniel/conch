@@ -339,3 +339,100 @@ body {
   font-size: 0.8rem;
   text-align: center;
 }
+
+/* An invite link's landing page (issue #440): one column, which fits a phone. */
+.invite {
+  max-width: 36rem;
+  overflow-wrap: anywhere;
+}
+
+.invite-preview {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.invite-preview dt {
+  font-weight: bold;
+}
+
+.invite-preview dd {
+  margin: 0;
+}
+
+.invite-channels {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.invite input[type='text'] {
+  font: inherit;
+  padding: 0.4rem;
+}
+
+.invite button {
+  min-height: 2.5rem;
+}
+
+@media (max-width: 480px) {
+  .invite-preview {
+    grid-template-columns: 1fr;
+  }
+
+  .invite-preview dd {
+    margin-bottom: 0.4rem;
+  }
+}
+
+/* "Invite someone", in the lobby's right panel. */
+.invites {
+  margin: 0.5rem 0;
+}
+
+.invite-form {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.invite-form fieldset {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+.invite-link {
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.invite-link p {
+  margin: 0 0 0.5rem;
+}
+
+.invite-link input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.invite-link .actions {
+  margin-top: 0.5rem;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.invite-list li {
+  padding: 0.15rem 0;
+}
+
+.invite-state {
+  font-weight: bold;
+}

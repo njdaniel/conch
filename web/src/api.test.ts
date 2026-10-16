@@ -1,5 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { continueAsOperator, hasToken, listChannels, onSignedOutElsewhere, openSocket, postMessage, restore, signIn, signOut, signOutEverywhere, whoAmI } from './api';
+import {
+  closeInvite,
+  continueAsOperator,
+  createInvite,
+  hasToken,
+  heldElsewhere,
+  listChannels,
+  listInvites,
+  onSignedOutElsewhere,
+  openSocket,
+  postMessage,
+  previewInvite,
+  redeemInvite,
+  restore,
+  signIn,
+  signOut,
+  signOutEverywhere,
+  whoAmI,
+} from './api';
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -290,5 +308,214 @@ describe('onSignedOutElsewhere', () => {
     window.dispatchEvent(event({ key, oldValue: memberToken, newValue: null }));
     expect(callback).not.toHaveBeenCalled();
     stop();
+  });
+});
+
+// Invites (issue #440): the code goes in a POST body only, and the credential
+// an invite gives is kept as a member's is.
+describe('invites', () => {
+  const inviteCode = `conch_inv_${'Z'.repeat(43)}`;
+  const joinerToken = 'conch_joiner_secret';
+  const joiner = { id: 9, kind: 'human', name: 'wren', role: 'member' };
+  const at = '2026-10-16T00:00:00Z';
+  const redeemed = {
+    principal: { id: 9, kind: 'human', name: 'wren', created_at: at },
+    credential: { id: 30, principal_id: 9, label: 'invite', created_at: at },
+    token: joinerToken,
+  };
+  const preview = { kind: 'open', inviter: 'nick', channels: ['red'], voice: false, expires_at: at };
+
+  // sentBodies records the JSON body of each call, by path, on top of serve.
+  function sentBodies(): Map<string, unknown> {
+    const sent = new Map<string, unknown>();
+    const inner = fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof input === 'string' && typeof init?.body === 'string') sent.set(input, JSON.parse(init.body));
+        return inner(input, init);
+      }),
+    );
+    return sent;
+  }
+
+  it('previews and redeems with no credential, the code in the body alone, and keeps the new credential to last', async () => {
+    const calls = serve((c) =>
+      c.path === '/v1/invites/preview'
+        ? json(preview)
+        : c.path === '/v1/invites/redeem'
+          ? json(redeemed, 201)
+          : c.auth === `Bearer ${joinerToken}`
+            ? json(joiner)
+            : json({}, 401),
+    );
+    const sent = sentBodies();
+    expect(await previewInvite(inviteCode)).toEqual({ ok: true, value: preview });
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: true, value: joiner });
+    expect(sent.get('/v1/invites/preview')).toEqual({ code: inviteCode });
+    expect(sent.get('/v1/invites/redeem')).toEqual({ code: inviteCode, name: 'wren' });
+    expect(calls.map((c) => [c.method, c.path, c.auth])).toEqual([
+      ['POST', '/v1/invites/preview', null],
+      ['POST', '/v1/invites/redeem', null],
+      ['GET', '/v1/whoami', `Bearer ${joinerToken}`],
+    ]);
+    expect(calls.some((c) => c.path.includes(inviteCode))).toBe(false);
+    expect(window.localStorage.getItem(key)).toBe(joinerToken);
+    expect(window.sessionStorage.length).toBe(0);
+    // Pinned: calls from now on carry it.
+    await whoAmI();
+    expect(calls.at(-1)?.auth).toBe(`Bearer ${joinerToken}`);
+  });
+
+  it('will not redeem while someone is signed in: they are signed out first', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    expect(heldElsewhere()).toBe(true);
+    const calls = serve(() => json(redeemed, 201));
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(calls).toEqual([]);
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+  });
+
+  // Security review of #440, item 1: a credential that restore could not
+  // check (no answer) is neither pinned nor dropped. Redeeming must not write
+  // over it or beside it.
+  it.each([
+    // A: an operator's tab credential would win over the joiner's at the next load.
+    { scenario: 'A, an operator tab credential', storage: () => window.sessionStorage, token: operatorToken },
+    // B: a member's lasting credential would be overwritten, never revoked.
+    { scenario: 'B, a member lasting credential', storage: () => window.localStorage, token: memberToken },
+  ])('will not redeem over a sign-in that could not be checked: $scenario', async ({ storage, token }) => {
+    storage().setItem(key, token);
+    serve((): Response => {
+      throw new TypeError('Failed to fetch');
+    });
+    expect(await restore()).toEqual({ ok: false, failure: 'network' });
+    // The server is back, but this page never checked the stored credential.
+    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json(joiner)));
+    expect(heldElsewhere()).toBe(true);
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(calls).toEqual([]);
+    expect(storage().getItem(key)).toBe(token);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(1);
+  });
+
+  it('will not redeem while an operator credential waits behind the warning', async () => {
+    serve(whoami);
+    await signIn(operatorToken);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+    const calls = serve(() => json(redeemed, 201));
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(calls).toEqual([]);
+    // Signing out of the warning lets it go ahead.
+    expect(await signOut()).toBe(true);
+    expect(heldElsewhere()).toBe(false);
+  });
+
+  it.each([
+    {
+      name: 'an invalid invite',
+      answer: () => json({ code: 'invite_invalid', message: 'this invite is not valid' }, 404),
+      want: { ok: false, failure: 'invalid', code: 'invite_invalid', message: 'this invite is not valid' },
+    },
+    {
+      name: 'a taken name',
+      answer: () => json({ code: 'principal_exists', message: 'that name is taken; choose another' }, 409),
+      want: { ok: false, failure: 'invalid', code: 'principal_exists', message: 'that name is taken; choose another' },
+    },
+    {
+      name: 'a rate limit',
+      answer: () => new Response(JSON.stringify({ code: 'rate_limited', message: 'too many' }), { status: 429, headers: { 'Retry-After': '42' } }),
+      want: { ok: false, failure: 'invalid', code: 'rate_limited', message: 'too many', retryAfter: 42 },
+    },
+    { name: 'no answer', answer: (): Response => { throw new TypeError('Failed to fetch'); }, want: { ok: false, failure: 'network' } },
+    { name: 'a body of another shape', answer: () => json({ token: joinerToken }, 201), want: { ok: false, failure: 'invalid' } },
+  ])('keeps nothing after $name', async ({ answer, want }) => {
+    serve(answer);
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual(want);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+    expect(hasToken()).toBe(false);
+  });
+
+  it('revokes the new credential, then says the account was made but not kept, when the browser refuses storage', async () => {
+    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : new Response(null, { status: 204 })));
+    const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError');
+    });
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unkept' });
+    blocked.mockRestore();
+    expect(calls).toEqual([
+      { path: '/v1/invites/redeem', method: 'POST', auth: null },
+      { path: '/v1/credentials/current', method: 'DELETE', auth: `Bearer ${joinerToken}` },
+    ]);
+    expect(hasToken()).toBe(false);
+    // Nothing is pinned: no call goes out with it.
+    expect(await whoAmI()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('still says unkept when the revocation gets no answer', async () => {
+    serve((c): Response => {
+      if (c.path === '/v1/invites/redeem') return json(redeemed, 201);
+      throw new TypeError('Failed to fetch');
+    });
+    const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError');
+    });
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unkept' });
+    blocked.mockRestore();
+  });
+
+  it('never leaves an operator credential to last: whoami saying operator drops it', async () => {
+    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json(operator)));
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'invalid' });
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+    expect(hasToken()).toBe(false);
+    expect(await listChannels()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(calls.map((c) => c.path)).toEqual(['/v1/invites/redeem', '/v1/whoami']);
+  });
+
+  it('keeps the credential when whoami does not answer after redeeming', async () => {
+    serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json({}, 503)));
+    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unchecked' });
+    expect(window.localStorage.getItem(key)).toBe(joinerToken);
+  });
+
+  it('makes, lists and closes invites with the signed-in credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const invite = {
+      id: 4,
+      kind: 'personal',
+      created_by: 2,
+      created_at: at,
+      expires_at: at,
+      max_uses: 1,
+      uses: 0,
+      channels: [{ id: 1, name: 'red' }],
+      voice: false,
+      may_invite: false,
+      credential_lifetime_seconds: 60,
+    };
+    const calls = serve((c) =>
+      c.method === 'POST' ? json({ invite, code: inviteCode }, 201) : c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
+    );
+    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({ ok: true, value: { invite, code: inviteCode } });
+    expect(await listInvites()).toEqual({ ok: true, value: [invite] });
+    expect(await closeInvite(4)).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { path: '/v1/invites', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/invites', method: 'GET', auth: `Bearer ${memberToken}` },
+      { path: '/v1/invites/4', method: 'DELETE', auth: `Bearer ${memberToken}` },
+    ]);
+  });
+
+  it("answers a refused invite with the server's code and line", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'invite_allowance_exceeded', message: 'you already have as many open personal invites as you may' }, 403));
+    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({
+      ok: false,
+      failure: 'invalid',
+      code: 'invite_allowance_exceeded',
+      message: 'you already have as many open personal invites as you may',
+    });
   });
 });
