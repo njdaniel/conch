@@ -88,6 +88,20 @@ var TSTypes = []TSType{
 	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
 	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
 
+	// Invites: the way in (ADR-008 §4). The code is in the create response
+	// alone; the new principal is in the redeem response.
+	{Value: PrincipalV0{}, Family: "principal-v0"},
+	{Value: CredentialV1{}, Family: "credential-v1"},
+	{Value: InviteChannelV1{}},
+	{Value: InviteV1{}, Family: "invite-v1"},
+	{Value: CreateInviteRequestV1{}, Family: "create-invite-request-v1"},
+	{Value: CreateInviteResponseV1{}, Family: "create-invite-response-v1"},
+	{Value: InvitePreviewRequestV1{}, Family: "invite-preview-request-v1"},
+	{Value: InvitePreviewV1{}, Family: "invite-preview-v1"},
+	{Value: RedeemInviteRequestV1{}, Family: "redeem-invite-request-v1"},
+	{Value: RedeemInviteResponseV1{}, Family: "redeem-invite-response-v1"},
+	{Value: ListInvitesResponseV1{}, Family: "list-invites-response-v1"},
+
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.
 	{Value: Health{}},

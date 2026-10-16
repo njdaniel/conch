@@ -52,6 +52,11 @@ today; simultaneous voice listening and per-net PTT are planned.
 See the [quickstart](#quickstart), [text-net example](#7-nets-and-whispers-the-squad-layout),
 and [voice setup](#voice-optional) for the implemented surfaces.
 
+What comes next is the [private communications alpha](docs/design/private-alpha.md)
+([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)), and the work is tracked on the
+[Conch project board](https://github.com/users/njdaniel/projects/14) (private for now). Found a problem or have an
+idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose).
+
 ## Client design and P3 planning
 
 The [client experience specification](docs/design/client-experience.md) describes

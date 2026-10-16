@@ -99,7 +99,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		if err != nil {
 			return fmt.Errorf("store: bootstrap operator %q: %w", name, err)
 		}
-		res.Principal = Principal{ID: id, Kind: PrincipalHuman, Name: name, Role: RoleOperator, CreatedAt: now}
+		res.Principal = Principal{ID: id, Kind: PrincipalHuman, Name: name, Role: RoleOperator, CreatedAt: now, VoiceAllowed: true}
 		if !opts.KeepExistingCredentials {
 			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now, &runs); err != nil {
 				return err

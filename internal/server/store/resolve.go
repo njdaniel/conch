@@ -35,15 +35,18 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 		credID                         int64
 		storedHash                     string
 		expiresAt, revokedAt, disabled sql.NullInt64
+		invitedBy, inviteID            sql.NullInt64
 		p                              Principal
 		kind, role                     string
 		createdAt                      int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at
+		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at,
+		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
-	).Scan(&credID, &storedHash, &expiresAt, &revokedAt, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt)
+	).Scan(&credID, &storedHash, &expiresAt, &revokedAt, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
+		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
@@ -62,6 +65,8 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	p.Kind = PrincipalKind(kind)
 	p.Role = Role(role)
 	p.CreatedAt = time.UnixMilli(createdAt)
+	p.InvitedBy = invitedBy.Int64
+	p.InviteID = inviteID.Int64
 	return p, credID, nil
 }
 

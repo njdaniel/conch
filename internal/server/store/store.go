@@ -508,6 +508,54 @@ END`,
 	PRIMARY KEY (principal_id, channel_id)
 )`,
 	},
+	// 24: Invites (issue #436, ADR-008 §4). An invite is a second way to get
+	// a credential: whoever holds its code joins as a new human principal
+	// with the channels and grants the invite names. Only the SHA-256 of the
+	// code is stored, as for credentials. max_uses NULL means uncapped (an
+	// open link's default); a personal invite always has max_uses 1. The
+	// invite row stays after it is used up, closed or expired: the account
+	// records which invite and inviter it came through.
+	//
+	// principals gains the invite that made it and its maker, the right to
+	// invite (nobody holds it until granted; operators can always invite) and
+	// voice_allowed (every existing principal keeps voice, as today). The new
+	// columns reference rows that may not exist yet, so they are nullable and
+	// ADD COLUMN-safe. server_settings holds switches an operator flips at
+	// runtime; invites_paused is the first.
+	{
+		`CREATE TABLE invites (
+	id                     INTEGER PRIMARY KEY,
+	kind                   TEXT    NOT NULL CHECK (kind IN ('personal', 'open')),
+	code_hash              TEXT    NOT NULL UNIQUE,
+	created_by             INTEGER NOT NULL REFERENCES principals (id),
+	created_at             INTEGER NOT NULL,
+	expires_at             INTEGER NOT NULL,
+	max_uses               INTEGER CHECK (max_uses IS NULL OR max_uses >= 1),
+	uses                   INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+	closed_at              INTEGER,
+	closed_by              INTEGER REFERENCES principals (id),
+	voice                  INTEGER NOT NULL DEFAULT 0 CHECK (voice IN (0, 1)),
+	may_invite             INTEGER NOT NULL DEFAULT 0 CHECK (may_invite IN (0, 1)),
+	credential_lifetime_ms INTEGER NOT NULL CHECK (credential_lifetime_ms > 0),
+	CHECK (kind = 'open' OR COALESCE(max_uses, 0) = 1)
+)`,
+		`CREATE INDEX invites_by_creator ON invites (created_by, kind)`,
+		`CREATE TABLE invite_channels (
+	invite_id  INTEGER NOT NULL REFERENCES invites (id),
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	PRIMARY KEY (invite_id, channel_id)
+)`,
+		`ALTER TABLE principals ADD COLUMN invited_by INTEGER REFERENCES principals (id)`,
+		`ALTER TABLE principals ADD COLUMN invite_id INTEGER REFERENCES invites (id)`,
+		`ALTER TABLE principals ADD COLUMN may_invite INTEGER NOT NULL DEFAULT 0 CHECK (may_invite IN (0, 1))`,
+		`ALTER TABLE principals ADD COLUMN voice_allowed INTEGER NOT NULL DEFAULT 1 CHECK (voice_allowed IN (0, 1))`,
+		`CREATE INDEX principals_by_invite ON principals (invite_id) WHERE invite_id IS NOT NULL`,
+		`CREATE TABLE server_settings (
+	key        TEXT    PRIMARY KEY,
+	value      TEXT    NOT NULL,
+	updated_at INTEGER NOT NULL
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
