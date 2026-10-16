@@ -53,6 +53,17 @@ type Principal struct {
 	// DisabledAt is when the principal was disabled (issue #101); nil means
 	// enabled. A disabled principal cannot authenticate.
 	DisabledAt *time.Time
+	// InvitedBy and InviteID are the principal and the invite this account
+	// came through (issue #436); zero for an account no invite made.
+	InvitedBy int64
+	InviteID  int64
+	// MayInvite is the right to make personal invites. Operators may always
+	// invite whatever this says; nobody else holds it until granted.
+	MayInvite bool
+	// VoiceAllowed is whether the principal may use voice. True for every
+	// account unless an invite made without it. Voice routes enforce it in a
+	// later slice (A6b).
+	VoiceAllowed bool
 }
 
 // Channel is a named message stream.
@@ -115,7 +126,7 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	if err != nil {
 		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
 	}
-	return Principal{ID: id, Kind: kind, Name: name, Role: RoleMember, CreatedAt: now}, nil
+	return Principal{ID: id, Kind: kind, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: true}, nil
 }
 
 // CreateChannel creates a named channel. Names are unique.
@@ -206,10 +217,11 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 	var p Principal
 	var kind, role string
 	var createdAt int64
-	var disabledAt sql.NullInt64
+	var disabledAt, invitedBy, inviteID sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT id, kind, name, role, created_at, disabled_at FROM principals WHERE id = ?", id,
-	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt)
+		`SELECT id, kind, name, role, created_at, disabled_at, invited_by, invite_id, may_invite, voice_allowed
+		 FROM principals WHERE id = ?`, id,
+	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
 	}
@@ -219,6 +231,8 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 	p.Kind = PrincipalKind(kind)
 	p.Role = Role(role)
 	p.CreatedAt = time.UnixMilli(createdAt)
+	p.InvitedBy = invitedBy.Int64
+	p.InviteID = inviteID.Int64
 	if disabledAt.Valid {
 		t := time.UnixMilli(disabledAt.Int64)
 		p.DisabledAt = &t

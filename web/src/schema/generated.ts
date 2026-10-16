@@ -24,6 +24,7 @@ export interface WhoAmIResponseV1 {
   name: string;
   role: PrincipalRole;
   server_version?: string;
+  may_invite?: boolean;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -32,6 +33,7 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   name: str,
   role: principalRole,
   server_version: optional(str),
+  may_invite: optional(bool),
 });
 
 // schema.ChannelV0
@@ -678,6 +680,178 @@ export interface ListReadStateResponseV1 {
 
 export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
   read_state: array(readStateV1),
+});
+
+// schema.PrincipalV0
+export interface PrincipalV0 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  created_at: string;
+}
+
+export const principalV0 = object<PrincipalV0>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  created_at: timestamp,
+});
+
+// schema.CredentialV1
+export interface CredentialV1 {
+  id: number;
+  principal_id: number;
+  label: string;
+  created_at: string;
+  expires_at?: string;
+  revoked_at?: string;
+}
+
+export const credentialV1 = object<CredentialV1>({
+  id: int,
+  principal_id: int,
+  label: str,
+  created_at: timestamp,
+  expires_at: optional(timestamp),
+  revoked_at: optional(timestamp),
+});
+
+// schema.InviteChannelV1
+export interface InviteChannelV1 {
+  id: number;
+  name: string;
+}
+
+export const inviteChannelV1 = object<InviteChannelV1>({
+  id: int,
+  name: str,
+});
+
+// schema.InviteKind
+export type InviteKind = 'personal' | 'open';
+
+export const inviteKind = vocab<InviteKind>({ personal: true, open: true });
+
+// schema.InviteV1
+export interface InviteV1 {
+  id: number;
+  kind: InviteKind;
+  created_by: number;
+  created_at: string;
+  expires_at: string;
+  max_uses?: number;
+  uses: number;
+  closed_at?: string;
+  channels: InviteChannelV1[];
+  voice: boolean;
+  may_invite: boolean;
+  credential_lifetime_seconds: number;
+}
+
+export const inviteV1 = object<InviteV1>({
+  id: int,
+  kind: inviteKind,
+  created_by: int,
+  created_at: timestamp,
+  expires_at: timestamp,
+  max_uses: optional(int),
+  uses: int,
+  closed_at: optional(timestamp),
+  channels: array(inviteChannelV1),
+  voice: bool,
+  may_invite: bool,
+  credential_lifetime_seconds: int,
+});
+
+// schema.CreateInviteRequestV1
+export interface CreateInviteRequestV1 {
+  kind: InviteKind;
+  channels: string[];
+  expires_at?: string;
+  max_uses?: number;
+  voice: boolean;
+  may_invite?: boolean;
+  credential_lifetime_seconds?: number;
+}
+
+export const createInviteRequestV1 = object<CreateInviteRequestV1>({
+  kind: inviteKind,
+  channels: array(str),
+  expires_at: optional(timestamp),
+  max_uses: optional(int),
+  voice: bool,
+  may_invite: optional(bool),
+  credential_lifetime_seconds: optional(int),
+});
+
+// schema.CreateInviteResponseV1
+export interface CreateInviteResponseV1 {
+  invite: InviteV1;
+  code: string;
+}
+
+export const createInviteResponseV1 = object<CreateInviteResponseV1>({
+  invite: inviteV1,
+  code: str,
+});
+
+// schema.InvitePreviewRequestV1
+export interface InvitePreviewRequestV1 {
+  code: string;
+}
+
+export const invitePreviewRequestV1 = object<InvitePreviewRequestV1>({
+  code: str,
+});
+
+// schema.InvitePreviewV1
+export interface InvitePreviewV1 {
+  kind: InviteKind;
+  inviter: string;
+  channels: string[];
+  voice: boolean;
+  expires_at: string;
+}
+
+export const invitePreviewV1 = object<InvitePreviewV1>({
+  kind: inviteKind,
+  inviter: str,
+  channels: array(str),
+  voice: bool,
+  expires_at: timestamp,
+});
+
+// schema.RedeemInviteRequestV1
+export interface RedeemInviteRequestV1 {
+  code: string;
+  name: string;
+}
+
+export const redeemInviteRequestV1 = object<RedeemInviteRequestV1>({
+  code: str,
+  name: str,
+});
+
+// schema.RedeemInviteResponseV1
+export interface RedeemInviteResponseV1 {
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+}
+
+export const redeemInviteResponseV1 = object<RedeemInviteResponseV1>({
+  principal: principalV0,
+  credential: credentialV1,
+  token: str,
+});
+
+// schema.ListInvitesResponseV1
+export interface ListInvitesResponseV1 {
+  invites: InviteV1[];
+}
+
+export const listInvitesResponseV1 = object<ListInvitesResponseV1>({
+  invites: array(inviteV1),
 });
 
 // schema.Health
