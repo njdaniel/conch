@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -116,13 +119,23 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		return
 	}
 	resp := schema.ListChannelMembersResponseV1{Members: make([]schema.ChannelMemberV1, 0, len(members))}
+	// Who holds the right to decide approvals is shown to operators, and to
+	// each member about themselves: listing every approver to every member
+	// would tell someone whom to press for a decision (issue #450).
+	caller, authed := callerFrom(ctx)
+	seesRight := func(id int64) bool { return !authed || isOperator(caller) || caller.ID == id }
 	for _, m := range members {
+		var canDecide *bool
+		if seesRight(m.PrincipalID) {
+			canDecide = canDecideField(m)
+		}
 		resp.Members = append(resp.Members, schema.ChannelMemberV1{
 			PrincipalID: m.PrincipalID,
 			AddedBy:     m.AddedBy,
 			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
 			Name:        m.Name,
 			Kind:        schema.PrincipalKind(m.Kind),
+			CanDecide:   canDecide,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -146,11 +159,15 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	req, ok := decodeOptionalMemberBody(w, r)
+	if !ok {
+		return
+	}
 	var addedBy int64
 	if caller, ok := callerFrom(ctx); ok {
 		addedBy = caller.ID
 	}
-	_, err = s.store.AddChannelMember(ctx, auditActor(ctx), channel.ID, principalID, addedBy)
+	_, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, addedBy, req.CanDecide)
 	if s.writeMemberError(w, r, err) {
 		return
 	}
@@ -212,4 +229,40 @@ func (s *Server) writeMemberError(w http.ResponseWriter, r *http.Request, err er
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
 	return true
+}
+
+// maxMemberBodyBytes bounds PUT member's optional body, a one-field object.
+const maxMemberBodyBytes = 1 << 10
+
+// decodeOptionalMemberBody reads PUT member's body, which may be empty (the
+// request as it has always been made) or a PutChannelMemberRequestV1 (issue
+// #450). It writes a 400 and returns false for anything else.
+func decodeOptionalMemberBody(w http.ResponseWriter, r *http.Request) (schema.PutChannelMemberRequestV1, bool) {
+	var req schema.PutChannelMemberRequestV1
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMemberBodyBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is too large or unreadable")
+		return req, false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return req, true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var extra any
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || decoder.Decode(&req) != nil || !errors.Is(decoder.Decode(&extra), io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one JSON object with only can_decide")
+		return req, false
+	}
+	return req, true
+}
+
+// canDecideField is the member list's can_decide: set for a person, absent
+// for an agent, which never decides.
+func canDecideField(m store.ChannelMember) *bool {
+	if m.Kind != store.PrincipalHuman {
+		return nil
+	}
+	can := m.CanDecide
+	return &can
 }

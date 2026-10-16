@@ -65,6 +65,7 @@ export interface ChannelMemberV1 {
   created_at: string;
   name?: string;
   kind?: PrincipalKind;
+  can_decide?: boolean;
 }
 
 export const channelMemberV1 = object<ChannelMemberV1>({
@@ -73,6 +74,7 @@ export const channelMemberV1 = object<ChannelMemberV1>({
   created_at: timestamp,
   name: optional(str),
   kind: optional(principalKind),
+  can_decide: optional(bool),
 });
 
 // schema.ListChannelMembersResponseV1

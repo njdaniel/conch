@@ -117,6 +117,7 @@ func (s *Server) handleCreateApproval(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListOpenApprovals(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	open, err := s.store.ListOpenApprovals(ctx)
+	var readOnly []int64
 	if err != nil {
 		slog.ErrorContext(ctx, "approvals: list open failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -140,12 +141,25 @@ func (s *Server) handleListOpenApprovals(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		open = visible
+		// Approvals the caller may see but not decide are marked, so a
+		// client can show them read-only (issue #450).
+		deciding, err := s.store.DecidingChannels(ctx, caller.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "approvals: list deciding channels failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		for _, a := range open {
+			if !deciding[a.ChannelID] {
+				readOnly = append(readOnly, a.ID)
+			}
+		}
 	}
 	list := make([]schema.ApprovalV1, len(open))
 	for i, a := range open {
 		list[i] = a.ToSchema()
 	}
-	writeJSON(w, http.StatusOK, schema.ListApprovalsResponseV1{Approvals: list})
+	writeJSON(w, http.StatusOK, schema.ListApprovalsResponseV1{Approvals: list, ReadOnly: readOnly})
 }
 
 // handleGetApproval serves GET /v1/approvals/{id}: one approval in any state,
@@ -247,7 +261,7 @@ func (s *Server) handleCastDecision(w http.ResponseWriter, r *http.Request) {
 	// With a caller, the decider must be a member of the approval's channel.
 	// An unknown approval and one in a channel the caller is not in get the
 	// same answer, so approval ids cannot be probed.
-	if _, ok := callerFrom(ctx); ok {
+	if caller, ok := callerFrom(ctx); ok {
 		target, err := s.store.ApprovalByID(ctx, approvalID)
 		if errors.Is(err, store.ErrNotFound) {
 			writeApprovalNotFound(w)
@@ -264,6 +278,17 @@ func (s *Server) handleCastDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if !member {
 			writeApprovalNotFound(w)
+			return
+		}
+		// A member must also hold the right to decide this channel's
+		// approvals (issue #450): someone who joined through an invite can
+		// see an approval but not decide it. The refusal is audited.
+		if can, err := s.store.CanDecideApprovals(ctx, target.ChannelID, req.PrincipalID); err != nil {
+			slog.ErrorContext(ctx, "approvals: check decide right failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		} else if !can {
+			s.denyForbidden(w, r, caller, schema.ErrorCodeDecisionNotPermitted, "you may see this approval but not decide it; an operator can grant you the right")
 			return
 		}
 	}

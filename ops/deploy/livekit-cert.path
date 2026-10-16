@@ -1,0 +1,12 @@
+# Restarts LiveKit when Caddy renews the TURN certificate. LiveKit reads the
+# certificate once, at start; without this a renewed certificate would reach it
+# only at the next restart, and TURN/TLS would fail after the old one expired.
+# Edit turn.example.com in the path to your TURN name.
+[Unit]
+Description=Watch the TURN certificate Caddy renews
+
+[Path]
+PathChanged=/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.example.com/turn.example.com.crt
+
+[Install]
+WantedBy=multi-user.target

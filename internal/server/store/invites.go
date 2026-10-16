@@ -600,12 +600,11 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		}
 
 		for _, c := range kept {
-			// #450 (PR #451) adds channel_members.can_decide with a default of
-			// 1. A member who joins through an invite must NOT get the right to
-			// decide approvals: when #451 lands, this insert names can_decide
-			// and sets it to 0, with a test that such a joiner is refused.
+			// A member who joins through an invite never gets the right to
+			// decide the channel's approvals (issue #450): the column's
+			// default of 1 is for members an operator adds.
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (?, ?, ?, ?)",
+				"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, 0)",
 				c.ID, pid, r.createdBy, now.UnixMilli()); err != nil {
 				return fmt.Errorf("store: redeem invite: add member: %w", err)
 			}

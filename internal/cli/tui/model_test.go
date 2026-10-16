@@ -2718,3 +2718,35 @@ func TestMembersDoNotChangeMessageMerging(t *testing.T) {
 		t.Errorf("messages = %+v", got)
 	}
 }
+
+// An approval this person may see but not decide (issue #450) carries a
+// [view] badge and cannot be opened for a decision; another one can.
+func TestViewOnlyApprovalCannotBeDecided(t *testing.T) {
+	mk := func(id int64, title string) schema.ApprovalV1 {
+		return schema.ApprovalV1{
+			ID: id, RequesterID: 42, Title: title, Quorum: 1, State: schema.ApprovalStatePending,
+			Deadline:  schema.NewTimestamp(time.Now().Add(time.Hour)),
+			CreatedAt: schema.NewTimestamp(time.Now()),
+			Options:   []schema.Option{{ID: "approve", Label: "Approve", Kind: schema.OptionKindApprove}},
+		}
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.width, m.height = 80, 24
+	m.mode = modeInbox
+	next, _ := m.Update(approvalsLoaded{approvals: []schema.ApprovalV1{mk(1, "theirs"), mk(2, "mine")}, readOnly: []int64{1}})
+	m = next.(Model)
+	if v := m.View(); !strings.Contains(v, "[view]") || strings.Count(v, "[view]") != 1 {
+		t.Errorf("want one [view] badge:\n%s", v)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.mode != modeInbox || m.inboxStatus != "view only: you may not decide this" {
+		t.Fatalf("enter on a view-only approval: mode %v, status %q", m.mode, m.inboxStatus)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if next.(Model).mode != modeDecision {
+		t.Errorf("enter on a decidable approval: mode %v, want decision", next.(Model).mode)
+	}
+}
