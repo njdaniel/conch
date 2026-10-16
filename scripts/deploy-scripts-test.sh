@@ -15,9 +15,11 @@
 #   conch-upgrade.sh  upgrade, rollback without a migration (data kept) and
 #                     rollback with one (pre-upgrade backup restored, the kept
 #                     directory named), with a stand-in systemctl that runs the
-#                     instance as a child; a missing or corrupt pre-upgrade
-#                     backup stops the upgrade, and the rollback, before any
-#                     instance is stopped
+#                     instance as a child; a missing, corrupt or symlinked
+#                     pre-upgrade backup stops the upgrade, and the rollback,
+#                     before any instance is stopped; a crafted archive path
+#                     from the backup step, and a rollback record with an
+#                     injected line, are refused and nothing in them runs
 #
 # It runs as one user, so the split between root, conch-<instance> and
 # conch-backup (docs/deploy.md) is not exercised here: run as a user other
@@ -300,13 +302,14 @@ cat >"$work/nobackup.sh" <<'STANDIN'
 # stand-in for conch-backup.sh that says it backed up and wrote nothing
 echo "conch-backup: pre-upgrade backup, kept on this host only"
 STANDIN
+badsum_archive=$work/upbackups/beta/pre-upgrade-v0.0.2-beta-20000101T000000Z.tar.gz
 cat >"$work/badsum.sh" <<STANDIN
 #!/bin/sh
 # stand-in for conch-backup.sh whose archive does not match its .sha256
-mkdir -p "$work/badsum"
-printf 'not an archive' >"$work/badsum/pre-upgrade-x.tar.gz"
-echo "0000000000000000000000000000000000000000000000000000000000000000  pre-upgrade-x.tar.gz" >"$work/badsum/pre-upgrade-x.tar.gz.sha256"
-echo "conch-backup: wrote $work/badsum/pre-upgrade-x.tar.gz (14 bytes)"
+mkdir -p "$work/upbackups/beta"
+printf 'not an archive' >"$badsum_archive"
+echo "0000000000000000000000000000000000000000000000000000000000000000  \$(basename "$badsum_archive")" >"$badsum_archive.sha256"
+echo "conch-backup: wrote $badsum_archive (14 bytes)"
 STANDIN
 chmod +x "$work/nobackup.sh" "$work/badsum.sh"
 bpid=$(cat "$work/pids/beta")
@@ -315,7 +318,11 @@ for stand_in in nobackup badsum; do
     if CONCH_BACKUP_SCRIPT=$work/$stand_in.sh up v0.0.2 beta >"$work/$stand_in.out" 2>&1; then
         fail "$stand_in: an upgrade without a good pre-upgrade backup went ahead"
     fi
-    grep -q 'missing or does not match its .sha256' "$work/$stand_in.out" || fail "$stand_in: wrong reason: $(cat "$work/$stand_in.out")"
+    case $stand_in in
+        nobackup) reason='named no archive, which is not' ;;
+        badsum) reason='does not match its .sha256' ;;
+    esac
+    grep -q "$reason" "$work/$stand_in.out" || fail "$stand_in: wrong reason: $(cat "$work/$stand_in.out")"
     grep -q 'Nothing was stopped' "$work/$stand_in.out" && grep -q 'run this upgrade again' "$work/$stand_in.out" ||
         fail "$stand_in: the error does not say what to do: $(cat "$work/$stand_in.out")"
     [ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] || fail "$stand_in: systemctl was called: $(tail -n 2 "$work/systemctl.calls")"
@@ -323,7 +330,71 @@ for stand_in in nobackup badsum; do
     [ "$(readlink "$opt/current")" = "$opt/releases/v0.0.1" ] && [ "$(version)" = v0.0.1 ] || fail "$stand_in: the install changed"
     [ ! -e "$opt/state/beta" ] || fail "$stand_in: a rollback state was written"
 done
+rm -f "$badsum_archive" "$badsum_archive.sha256"
 ok "upgrade: a missing or corrupt pre-upgrade backup stops it before anything is stopped"
+
+# The archive path comes from the conch-backup user, who can write anything
+# there and a matching .sha256 beside it. A path that is not exactly this
+# instance's pre-upgrade archive for this tag, in the backup directory, stops
+# the upgrade before anything is stopped, and nothing in it ever runs: the
+# rollback record was once sourced by root, so a name holding $(...) or ';'
+# ran as root. So does a symlink in place of the archive. PWN is a file the
+# payloads would create.
+export PWN=$work/pwned
+cat >"$work/crafted.sh" <<'STANDIN'
+#!/usr/bin/env bash
+# stand-in for conch-backup.sh: writes CRAFTED (a symlink to a real file when
+# CRAFTED_TARGET is set) with a matching .sha256, and says it wrote it.
+set -eu
+dir=$(dirname "$CRAFTED") name=$(basename "$CRAFTED")
+mkdir -p "$dir"
+if [ -n "${CRAFTED_TARGET:-}" ]; then
+    mkdir -p "$(dirname "$CRAFTED_TARGET")"
+    printf 'an archive' >"$CRAFTED_TARGET"
+    ln -sfn "$CRAFTED_TARGET" "$CRAFTED"
+else
+    printf 'an archive' >"$CRAFTED"
+fi
+(cd "$dir" && printf '%s  %s\n' "$(sha256sum <"$name" | cut -d' ' -f1)" "$name" >"$name.sha256")
+# Escape sequences (clear the screen, set the title), which must not reach
+# root's terminal.
+printf 'conch-backup: \033[2J\033]0;title\007 on the terminal\n'
+echo "conch-backup: wrote $CRAFTED (10 bytes)"
+STANDIN
+chmod +x "$work/crafted.sh"
+good_name="pre-upgrade-v0.0.2-beta-20260101T000000Z.tar.gz"
+crafted_cases=(
+    "subst|$work/upbackups/beta/pre-upgrade-v0.0.2-beta-x\$(touch \"\$PWN\").tar.gz|"
+    "semicolon|$work/upbackups/beta/$good_name;touch \"\$PWN\"|"
+    "outside|$work/elsewhere/$good_name|"
+    "symlink|$work/upbackups/beta/$good_name|$work/elsewhere/real.tar.gz"
+)
+for c in "${crafted_cases[@]}"; do
+    IFS='|' read -r name path target <<<"$c"
+    calls=$(wc -l <"$work/systemctl.calls")
+    if CRAFTED=$path CRAFTED_TARGET=$target CONCH_BACKUP_SCRIPT=$work/crafted.sh up v0.0.2 beta >"$work/crafted-$name.out" 2>&1; then
+        fail "crafted $name: the upgrade accepted $path"
+    fi
+    case $name in
+        symlink) reason='is a symlink' ;;
+        *) reason='which is not' ;;
+    esac
+    grep -q "$reason" "$work/crafted-$name.out" || fail "crafted $name: wrong reason: $(cat "$work/crafted-$name.out")"
+    [ ! -e "$PWN" ] || fail "crafted $name: the payload in the archive name ran"
+    grep -q 'on the terminal' "$work/crafted-$name.out" || fail "crafted $name: the backup step's output was not shown"
+    if LC_ALL=C grep -q $'[\x01-\x08\x0b-\x1f\x7f]' "$work/crafted-$name.out"; then
+        fail "crafted $name: a control character from the backup step reached the terminal"
+    fi
+    [ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] || fail "crafted $name: systemctl was called"
+    [ "$(cat "$work/pids/beta")" = "$bpid" ] && kill -0 "$bpid" || fail "crafted $name: the instance was stopped"
+    [ ! -e "$opt/state/beta" ] || fail "crafted $name: a rollback state was written"
+    rm -f "$path" "$path.sha256"
+done
+rm -rf "${work:?}/elsewhere"
+for f in "$work"/upbackups/beta/* "$work"/upbackups/beta/.[!.]*; do
+    [ ! -e "$f" ] && [ ! -L "$f" ] || fail "the crafted cases left $f behind"
+done
+ok "upgrade: a crafted archive path (\$(...), ';', outside the backup directory) or a symlinked archive is refused, nothing in it runs, and the step's escape sequences are stripped"
 
 # Pre-upgrade backups are kept by count (3), whatever their age, and the
 # nightly retention by age does not touch them.
@@ -347,6 +418,33 @@ CONCH_DATA_ROOT=$up_data CONCH_BACKUP_DIR=$work/upbackups "$deploy/conch-backup.
 [ -e "$work/upbackups/beta/pre-upgrade-v0.0.0-beta-19990102T000000Z.tar.gz" ] || fail "the nightly retention removed a pre-upgrade backup"
 ok "pre-upgrade backup: its own name, kept by count, untouched by the nightly retention"
 
+# The rollback record is parsed, never sourced: a line it does not write, a
+# value that is not what the upgrade wrote, or a key twice is refused before
+# anything is stopped, and nothing in it runs.
+cp "$opt/state/beta" "$work/state.good"
+grep -qx 'upgrade_tag=v0.0.2' "$work/state.good" || fail "the rollback state does not name the tag: $(cat "$work/state.good")"
+# shellcheck disable=SC2016 # the payloads are literal
+inject() { # <case>: write an altered rollback record for beta
+    case $1 in
+        extra-line) { cat "$work/state.good"; printf '%s\n' 'x=$(touch "$PWN")'; } ;;
+        bare-command) { cat "$work/state.good"; printf '%s\n' 'touch "$PWN"'; } ;;
+        value-subst) sed 's/^backup_before=\(.*\)$/backup_before=\1$(touch "$PWN")/' "$work/state.good" ;;
+        value-semicolon) sed 's/^previous_tag=\(.*\)$/previous_tag=\1;touch "$PWN"/' "$work/state.good" ;;
+        other-archive) sed "s|^backup_before=.*|backup_before=$work/elsewhere/pre-upgrade-v0.0.2-beta-20260101T000000Z.tar.gz|" "$work/state.good" ;;
+        twice) { cat "$work/state.good"; grep '^previous_tag=' "$work/state.good"; } ;;
+    esac >"$opt/state/beta"
+}
+for c in extra-line bare-command value-subst value-semicolon other-archive twice; do
+    inject "$c"
+    calls=$(wc -l <"$work/systemctl.calls")
+    if up --rollback beta >"$work/inject-$c.out" 2>&1; then fail "injected state ($c): the rollback went ahead"; fi
+    grep -q 'refusing it. Nothing was stopped.' "$work/inject-$c.out" || fail "injected state ($c): wrong reason: $(cat "$work/inject-$c.out")"
+    [ ! -e "$PWN" ] || fail "injected state ($c): a command in the rollback record ran"
+    [ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] && [ "$(version)" = v0.0.2 ] || fail "injected state ($c): the instance was stopped or changed"
+done
+cp "$work/state.good" "$opt/state/beta"
+ok "rollback: a rollback record with an injected line or value is refused, and nothing in it runs"
+
 post "after upgrade, no migration"
 up --rollback beta >"$work/rb1.out" 2>&1 || { cat "$work/rb1.out" >&2; fail "rollback failed"; }
 [ "$(version)" = v0.0.1 ] || fail "after the rollback /healthz says $(version)"
@@ -367,8 +465,16 @@ calls=$(wc -l <"$work/systemctl.calls")
 if up --rollback beta >"$work/rb-missing.out" 2>&1; then fail "a rollback went ahead without the backup it needs"; fi
 grep -q 'Nothing was stopped' "$work/rb-missing.out" || fail "rollback without its backup: wrong reason: $(cat "$work/rb-missing.out")"
 [ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] && [ "$(version)" = v0.0.2 ] || fail "a refused rollback stopped or changed the instance"
+# A symlink in place of the archive, even to the archive itself, is refused.
+ln -s "$work/held.tar.gz" "$pre"
+calls=$(wc -l <"$work/systemctl.calls")
+if up --rollback beta >"$work/rb-symlink.out" 2>&1; then fail "a rollback went ahead from a symlinked archive"; fi
+grep -q 'is a symlink' "$work/rb-symlink.out" && grep -q 'Nothing was stopped' "$work/rb-symlink.out" ||
+    fail "rollback from a symlinked archive: wrong reason: $(cat "$work/rb-symlink.out")"
+[ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] && [ "$(version)" = v0.0.2 ] || fail "a refused rollback stopped or changed the instance"
+rm -f "$pre"
 mv "$work/held.tar.gz" "$pre"
-ok "rollback: a missing pre-upgrade backup is found before anything is stopped"
+ok "rollback: a missing or symlinked pre-upgrade backup is found before anything is stopped"
 
 up --rollback beta >"$work/rb2.out" 2>&1 || { cat "$work/rb2.out" >&2; fail "rollback after a migration failed"; }
 [ "$(version)" = v0.0.1 ] || fail "after the second rollback /healthz says $(version)"

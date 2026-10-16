@@ -10,23 +10,24 @@ One droplet runs three things:
 
 Everything is parameterised by an **instance name** (`alpha` below) and a **domain** (`example.com` below, a placeholder: replace it everywhere). A second server is the steps in [A second instance](#a-second-instance), not a new design.
 
-**Status.** The scripts, the units and the backup, restore, upgrade and rollback paths are exercised by `scripts/deploy-scripts-test.sh` (run by `make deploy-test` and in CI) against a real `conchd`, with a stand-in for `systemctl`. That test runs as one ordinary user, so the split between root, the instance users and `conch-backup` described below is not part of it. The Caddyfile, LiveKit's TURN/TLS settings, the firewall and the units under a real systemd were **not** run on a droplet when this was written: the first run on the real droplet (issues A15 and A16) is where they are proved, and this page should be corrected from what that finds.
+**Status.** The scripts, the units and the backup, restore, upgrade and rollback paths are exercised by `scripts/deploy-scripts-test.sh` (run by `make deploy-test` and in CI) against a real `conchd`, with a stand-in for `systemctl`. That test runs as one ordinary user, so the split between root, the instance users and `conch-backup` described below (`runuser`, `setpriv`, the cleared environment) is not part of it; the parsing of the rollback record, the check of the archive path, the refusal of a symlinked archive, the stripping of control characters and `setsid` are. The Caddyfile, LiveKit's TURN/TLS settings, the firewall and the units under a real systemd were **not** run on a droplet when this was written: the first run on the real droplet (issues A15 and A16) is where they are proved, and this page should be corrected from what that finds.
 
 ## Users and who can read what
 
 | User | Runs | Can read |
 | --- | --- | --- |
 | `conch-<instance>` (one per instance) | `conchd@<instance>`, and the snapshot step of that instance's backup | its own data directory, `/var/lib/conch/<instance>`, only. `conchd` keeps its database and uploads at mode 0600, and the unit hides `/etc/conch`, `/var/backups/conch`, Caddy's state and every other instance's directory from it. |
-| `conch-backup` | the archive, retention and off-site steps of every backup; the restore drill | `/var/backups/conch`, and the off-site settings and credentials (`/etc/conch/backup.env`, `/etc/conch/rclone.conf`), which it alone owns. It cannot read any instance's live data. |
-| root | the backup unit (only to hand the snapshot from the instance user to `conch-backup`), the upgrade script, the steps below | everything. The env files (`/etc/conch/<instance>.env`) and LiveKit's keys are root's, mode 0600. |
+| `conch-backup` | the archive, retention and off-site steps of every backup | `/var/backups/conch`, and the off-site settings and credentials (`/etc/conch/backup.env`, `/etc/conch/rclone.conf`), which it alone owns. It cannot read any instance's live data. |
+| `conch-drill` | the restore drill (step 9), in a scratch directory of its own | only what it is handed for one drill. It owns no other file and holds no credential. |
+| root | the backup unit (only to hand the snapshot from the instance user to `conch-backup`), the upgrade script, the steps below | everything, but the scripts and the steps below never open a file `conch-backup` owns: the archives are checked and read as `conch-backup`, and handed on as a stream. The env files (`/etc/conch/<instance>.env`) and LiveKit's keys are root's, mode 0600. |
 
-So a compromised `conchd` cannot read another instance, the backups or the off-site credentials, and a leaked off-site credential does not open the live data.
+So a compromised `conchd` cannot read another instance, the backups or the off-site credentials, and a leaked off-site credential does not open the live data. Every step the scripts run as one of these users runs in its own session, so it never has root's terminal as its controlling terminal, with none of root's environment, and what it prints is stripped of control characters before it reaches root's terminal.
 
 ## What you need
 
 - A DigitalOcean droplet, Ubuntu 24.04, **4 GB RAM / 2 vCPU to start** (decision O7; the final size follows the measurement in A15), with IPv4.
 - A domain you control, and permission to add DNS records.
-- A DigitalOcean Space (or any S3-compatible bucket) for off-site backups, with **versioning** turned on (step 8), and an access key for it.
+- A DigitalOcean Space (or any S3-compatible bucket) for off-site backups, with **versioning** turned on (step 8), and two access keys: a full-access one that stays on your workstation, and a limited one for that bucket only, for the droplet.
 - A workstation with `ssh`, and somewhere safe (a password manager) for the operator token and the backup encryption passwords.
 
 ## 1. DNS
@@ -51,6 +52,7 @@ apt update && apt install -y sqlite3 curl ufw docker.io
 # https://caddyserver.com/docs/install#debian-ubuntu-raspbian
 
 useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin conch-backup
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin conch-drill
 install -d -m 0755 /opt/conch/releases /opt/conch/bin /etc/conch /var/lib/conch
 install -d -m 0700 -o conch-backup -g conch-backup /var/backups/conch
 ```
@@ -174,10 +176,11 @@ systemctl daemon-reload
 /opt/conch/bin/firewall.sh --dry-run
 /opt/conch/bin/firewall.sh
 
-# Caddy: edit the domain and the email, then validate and reload.
+# Caddy: edit the domain and the email, then validate. The first time,
+# restart rather than reload (below).
 sed 's/example\.com/your.domain/g' Caddyfile > /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile
-systemctl reload caddy
+systemctl restart caddy
 
 systemctl enable --now conchd@alpha
 curl -fsS https://alpha.your.domain/healthz     # {"status":"ok","version":"v0.1.0","db":"ok"}
@@ -185,7 +188,9 @@ curl -fsS https://alpha.your.domain/healthz     # {"status":"ok","version":"v0.1
 
 Also put a **DigitalOcean Cloud Firewall** on the droplet with the same inbound rules, and SSH only from the addresses you administer from. It filters before traffic reaches the droplet, and it still holds if `ufw` is disabled or flushed by mistake.
 
-**Caddy's admin API** listens on a unix socket in its own state directory (`admin unix//var/lib/caddy/admin.sock` in the Caddyfile), not on `localhost:2019`, so `conchd` and LiveKit cannot reach it; it has no authentication of its own. `systemctl reload caddy` still works: the packaged unit runs `caddy reload --config /etc/caddy/Caddyfile --force`, which reads the admin address from the Caddyfile. (Checked with Caddy 2.10.2: the reload succeeds over the socket, and nothing answers on port 2019.) If you ever start Caddy from a Caddyfile without that line, it listens on 2019 again.
+**Caddy's admin API** listens on a unix socket in its own state directory (`admin unix//var/lib/caddy/admin.sock` in the Caddyfile), not on `localhost:2019`, so `conchd` and LiveKit cannot reach it; it has no authentication of its own. The packaged unit's reload runs `caddy reload --config /etc/caddy/Caddyfile --force`, which sends the new configuration to the admin address it reads from that file. (Checked with Caddy 2.10.2: once Caddy runs with this Caddyfile, the reload succeeds over the socket, and nothing answers on port 2019.) If you ever start Caddy from a Caddyfile without that line, it listens on 2019 again.
+
+**Restart the first time, reload after.** The Caddy the package started runs its default configuration, with the admin API on `localhost:2019`. The first `systemctl reload caddy` after installing this Caddyfile looks for the socket the new file names, where nothing listens yet, and fails. `systemctl restart caddy` starts Caddy on the new file, which opens the socket. Every later change (a second instance, a new name) is a `systemctl reload caddy`, which then finds it and does not drop open connections.
 
 The instance blocks send `Strict-Transport-Security` for a year: once a browser has seen it, it will not use plain HTTP for that name. Keep HTTPS working on every instance name.
 
@@ -219,7 +224,26 @@ A `.sha256` file sits beside it. `conch-backup@<instance>.timer` runs it nightly
 
 The default, and the only path this runbook supports end to end, is `rclone` with a **`crypt` remote** wrapped around the Space: the archives are encrypted on the droplet before they leave it, so the storage provider, and anyone holding only the Space key, sees ciphertext and encrypted names.
 
-1. **Turn on versioning on the bucket. This is required.** With it, an overwrite or a delete made with the droplet's key leaves the earlier version in place, so a compromised droplet cannot quietly destroy the backups. Give the Space key access to that bucket only, and without delete permission if your provider offers that. Add a lifecycle rule that expires non-current versions after a period you choose (90 days, say), or old versions are kept forever.
+1. **On your workstation, with the full-access key, turn on versioning and a lifecycle rule. This is required.** That key never goes on the droplet, so nothing on the droplet can turn versioning off or change the rule. Spaces turns versioning on only through its S3 API (the control panel shows the status), so use the AWS CLI with the full-access key:
+
+   ```sh
+   # On your workstation. The regional endpoint, not the bucket's own.
+   ep=https://nyc3.digitaloceanspaces.com
+   aws s3api put-bucket-versioning --endpoint-url "$ep" --bucket your-bucket --versioning-configuration Status=Enabled
+   aws s3api get-bucket-versioning --endpoint-url "$ep" --bucket your-bucket     # "Status": "Enabled"
+   cat > lifecycle.json <<'EOF'
+   {"Rules": [{"ID": "expire-old-versions", "Status": "Enabled", "Filter": {"Prefix": ""},
+               "NoncurrentVersionExpiration": {"NoncurrentDays": 90}}]}
+   EOF
+   aws s3api put-bucket-lifecycle-configuration --endpoint-url "$ep" --bucket your-bucket --lifecycle-configuration file://lifecycle.json
+   aws s3api get-bucket-lifecycle-configuration --endpoint-url "$ep" --bucket your-bucket   # must show the rule
+   ```
+
+   The rule expires a version 90 days after it stopped being the current one; without one, old versions are kept forever. DigitalOcean's lifecycle documentation names only the expiry of objects and of unfinished uploads, not of old versions, so check that the rule reads back. If Spaces refuses it, old versions stay until you delete them, and the bucket grows by one archive per instance per night.
+
+   **For the droplet, a limited key.** In the control panel's Spaces access keys, create a key with **Limited access**, granting **Read/Write/Delete** on this bucket only. Spaces has no write-without-delete permission, so this is the narrowest key a backup can use; its documentation lists bucket configuration (versioning, lifecycle rules) under full access only.
+
+   **What versioning gives.** An overwrite or a plain delete made with the droplet's key, by a mistake, a broken script or an intruder who does not look further, leaves the earlier version in place. It does **not** stop someone who holds that key and deletes the old versions by their version IDs: DigitalOcean does not document whether a limited key's Delete covers that, so assume it does. For a copy the droplet cannot touch at all, pull the bucket to another machine on a schedule with a third, **Read**-only limited key, for example weekly from your workstation: `rclone copy spaces-ro:your-bucket /path/to/conch-offsite` (the files stay encrypted; the crypt remote over that copy reads them).
 2. **Make the two crypt passwords on your workstation**, not on the droplet (`openssl rand -base64 32`, twice), and store both in your password manager. That copy is the one that matters: the droplet's copy is lost with the droplet, and **if both are lost, the backups cannot be decrypted by anyone**. The droplet has to hold them too, to encrypt each night; `rclone` keeps them in `rclone.conf` obscured, which is not encryption, so that file is mode 0600 and owned by `conch-backup` alone. The crypt remote protects the off-site copies, not the droplet: root on the droplet can read the live data anyway.
 3. Write the configuration, as root, entering the passwords at the prompts (they do not land in your shell history or on a command line):
 
@@ -248,14 +272,11 @@ cat > /etc/conch/backup.env <<'EOF'
 RCLONE_CONFIG=/etc/conch/rclone.conf
 CONCH_BACKUP_RCLONE_DEST=conch-crypt:conch
 EOF
-# Versioning, from the same configuration (rclone 1.59 or later):
-sudo -u conch-backup env RCLONE_CONFIG=/etc/conch/rclone.conf rclone backend versioning spaces:your-bucket Enabled
-sudo -u conch-backup env RCLONE_CONFIG=/etc/conch/rclone.conf rclone backend versioning spaces:your-bucket   # must print Enabled
 ```
 
-Replace the placeholders. The files keep the owner and mode `install` gave them. The script refuses a `backup.env` that is not mode 0600, or that is owned by anyone but root or the user running it.
+Replace the placeholders; `YOUR_ACCESS_KEY` and `YOUR_SECRET_KEY` are the droplet's limited key. The files keep the owner and mode `install` gave them. The script refuses a `backup.env` that is not mode 0600, or that is owned by anyone but root or the user running it.
 
-`s3cmd` also works (`CONCH_BACKUP_S3CMD_DEST=s3://your-bucket/conch`, with `S3CMD_CONFIG=/etc/conch/s3cfg` in `backup.env`, owned by `conch-backup`), but it uploads in the clear unless you set up its own GPG encryption, and the same versioning requirement applies. Prefer the crypt remote.
+`s3cmd` also works (`CONCH_BACKUP_S3CMD_DEST=s3://your-bucket/conch`, with `S3CMD_CONFIG=/etc/conch/s3cfg` in `backup.env`, owned by `conch-backup`), but it uploads in the clear unless you set up its own GPG encryption, and the same versioning, key and lifecycle steps apply. Prefer the crypt remote.
 
 Run it once by hand, as the timer would, and look:
 
@@ -267,44 +288,79 @@ systemctl list-timers 'conch-backup@*'
 
 ## 9. The restore drill (before testers join)
 
-A backup that has never been restored is a guess. Before anyone else is invited, restore the latest archive into a scratch directory, as `conch-backup`, with the live instance left alone:
+A backup that has never been restored is a guess. Before anyone else is invited, restore the latest archive into a scratch directory, with the live instance left alone.
+
+The drill runs as `conch-drill` (step 2), in a scratch directory of its own. It unpacks an archive and opens the database in it, so it does not run as root, nor as `conch-backup`, which holds every archive and `rclone.conf`. `conch-backup` only reads the archive out to it, and root opens neither file.
+
+Paste these helpers into root's shell; step 10 uses them too:
 
 ```sh
-latest=$(ls -1t /var/backups/conch/alpha/conch-alpha-*.tar.gz | head -n 1)
-drill=$(sudo -u conch-backup mktemp -d)
-sudo -u conch-backup /opt/conch/bin/conch-restore.sh "$latest" "$drill"
-rm -rf "$drill"
+clean() { LC_ALL=C tr -cd '\011\012\040-\176'; }
+# as <user> <command>...: as that user, in its own session (so root's terminal
+# is not its controlling terminal), with none of root's environment, and its
+# error output stripped of control characters. Give it stdin from /dev/null or
+# a pipe, and pipe what it prints to the terminal through clean.
+as() {
+  local -; set -o pipefail
+  local u=$1; shift
+  { setsid -w runuser -u "$u" -- env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$@" 2>&1 1>&3 3>&- | clean >&2; } 3>&1
+}
+# drill <directory> <archive name>: conch-backup copies the archive and its
+# .sha256 into a fresh scratch directory owned by conch-drill, which runs the
+# drill there. The scratch directory is removed afterwards.
+drill() (
+  set -euo pipefail
+  cd /
+  d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
+  chown conch-drill: "$d"
+  for f in "$2" "$2.sha256"; do
+    as conch-backup cat -- "$1/$f" </dev/null | as conch-drill sh -c 'cat >"$1"' sh "$d/$f"
+  done
+  as conch-drill /opt/conch/bin/conch-restore.sh "$d/$2" "$d/out" </dev/null | clean
+)
+```
+
+Then, from the local copy:
+
+```sh
+latest=$(as conch-backup sh -c 'ls -1t /var/backups/conch/alpha/conch-alpha-*.tar.gz | head -n 1' </dev/null | clean)
+drill /var/backups/conch/alpha "${latest##*/}"
 ```
 
 It checks the archive's SHA-256, unpacks it, runs `PRAGMA integrity_check`, checks that every uploaded file the database names is present with its stored SHA-256, starts `conchd` on the copy (loopback, a spare port, no web client, no LiveKit) and requires `/healthz` to say `"status":"ok","db":"ok"`, then stops it and prints the schema version, the message count and the number of files.
 
-Do it also from the **off-site** copy once, since that is the copy that would be needed. `rclone` decrypts on the way down:
+Do it also from the **off-site** copy once, since that is the copy that would be needed. `conch-backup` downloads it, and `rclone` decrypts on the way down:
 
 ```sh
-drill=$(sudo -u conch-backup mktemp -d)
-sudo -u conch-backup env RCLONE_CONFIG=/etc/conch/rclone.conf rclone copy conch-crypt:conch/alpha/ "$drill/in" --include "$(basename "$latest")*"
-sudo -u conch-backup /opt/conch/bin/conch-restore.sh "$drill/in/$(basename "$latest")" "$drill/out"
-rm -rf "$drill"
+dl=$(as conch-backup mktemp -d </dev/null | clean)
+as conch-backup env RCLONE_CONFIG=/etc/conch/rclone.conf rclone copy conch-crypt:conch/alpha/ "$dl" --include "${latest##*/}*" </dev/null | clean
+drill "$dl" "${latest##*/}"
+rm -rf "$dl"
 ```
 
-Once, also check that the crypt passwords in your password manager are the right ones: on your workstation, with a `rclone.conf` made from them and a read-only Space key, list `conch-crypt:conch/alpha/`. Names that decrypt mean the passwords are right.
+Once, also check that the crypt passwords in your password manager are the right ones: on your workstation, with a `rclone.conf` made from them and the read-only key (step 8), list `conch-crypt:conch/alpha/`. Names that decrypt mean the passwords are right.
 
 ## 10. Restoring for real
 
-Use this when the data is lost or corrupt. The archive's `conch.db` and `files/` go back as the instance's data directory, unpacked by the instance's user so that every file is its own:
+Use this when the data is lost or corrupt. The archive's `conch.db` and `files/` go back as the instance's data directory. With the helpers from step 9 in root's shell:
 
 ```sh
-cd /var/backups/conch/alpha && sha256sum -c conch-alpha-<time>.tar.gz.sha256 && cd / &&
-systemctl stop conchd@alpha &&
-mv /var/lib/conch/alpha /var/lib/conch/alpha.broken-$(date -u +%Y%m%dT%H%M%SZ) &&
-install -d -m 0700 -o conch-alpha -g conch-alpha /var/lib/conch/alpha &&
-runuser -u conch-alpha -- tar --no-same-owner --no-same-permissions -xzf - -C /var/lib/conch/alpha \
-  < /var/backups/conch/alpha/conch-alpha-<time>.tar.gz &&
-systemctl start conchd@alpha &&
-curl -fsS https://alpha.your.domain/healthz
+(
+  set -euo pipefail
+  cd /
+  a=conch-alpha-YYYYMMDDTHHMMSSZ.tar.gz    # the archive to restore
+  as conch-backup sh -c 'cd /var/backups/conch/alpha && sha256sum -c -- "$1.sha256"' sh "$a" </dev/null | clean
+  systemctl stop conchd@alpha
+  mv /var/lib/conch/alpha "/var/lib/conch/alpha.broken-$(date -u +%Y%m%dT%H%M%SZ)"
+  install -d -m 0700 -o conch-alpha -g conch-alpha /var/lib/conch/alpha
+  as conch-backup cat -- "/var/backups/conch/alpha/$a" </dev/null |
+    as conch-alpha tar --no-same-owner --no-same-permissions -xzf - -C /var/lib/conch/alpha
+  systemctl start conchd@alpha
+  curl -fsS https://alpha.your.domain/healthz
+)
 ```
 
-Root opens the archive and the instance's user unpacks it from that stream, so no owner or mode is taken from the archive and nothing needs a `chown` afterwards. Everything written after the archive was made is gone: say so to the people using it. Run the drill on the archive first if there is any doubt about it. Keep the `.broken-*` directory until you are sure; the service cannot see it.
+`conch-backup` checks and reads the archive and the instance's user unpacks it from that stream, so root opens no file `conch-backup` owns, no owner or mode is taken from the archive, and nothing needs a `chown` afterwards. Everything written after the archive was made is gone: say so to the people using it. Run the drill on the archive first if there is any doubt about it. Keep the `.broken-*` directory until you are sure; the service cannot see it.
 
 ## 11. Upgrading and rolling back
 
@@ -312,8 +368,8 @@ Releases are tagged, built by `.github/workflows/release.yml`, and name themselv
 
 1. downloads `conchd_<tag>_linux_<arch>` and `checksums.txt`, and refuses unless they match (the same limit as step 3: corruption, not tampering);
 2. unpacks it to `/opt/conch/releases/<tag>/`;
-3. takes a pre-upgrade backup of each instance (`pre-upgrade-<tag>-<instance>-<time>.tar.gz`, see [Retention](#8-backups)), and checks **every** one exists and matches its `.sha256` **before stopping anything**. If one does not, it stops there, says that nothing was stopped, and tells you what to check;
-4. records each instance's schema version (`PRAGMA user_version`), stops the instances, repoints `/opt/conch/current`, starts them;
+3. takes a pre-upgrade backup of each instance (`pre-upgrade-<tag>-<instance>-<time>.tar.gz`, see [Retention](#8-backups)), and checks **every** one **before stopping anything**: the path the backup names must be exactly that name in `/var/backups/conch/<instance>/`, and the archive, checked as `conch-backup`, must be a regular file (not a symlink) matching its `.sha256`. If one is not, it stops there, says that nothing was stopped, and tells you what to check;
+4. records each instance's schema version (`PRAGMA user_version`) in `/opt/conch/state/<instance>`, stops the instances, repoints `/opt/conch/current`, starts them. That record is never sourced: `--rollback` parses it, accepts only the keys the upgrade writes, checks every value as the upgrade did, and refuses anything else before stopping anything;
 5. checks each `/healthz` answers `ok` and reports `<tag>`, and otherwise stops and tells you the rollback command.
 
 ```sh

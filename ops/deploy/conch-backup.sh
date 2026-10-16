@@ -25,6 +25,10 @@
 #                     (backup.env, rclone.conf) and never reads the live data.
 #   root              only hands the snapshot from one to the other, and reads
 #                     no file either of them owns.
+# Each step runs in its own session with no terminal and none of root's
+# environment (only PATH, CONCH_DATA_ROOT, CONCH_BACKUP_DIR and
+# CONCH_BACKUP_ENV are passed), and what it prints is stripped of control
+# characters before it reaches root's terminal or the journal.
 # Run as any other user, both steps run as that user (the tests do this).
 #
 # Without an off-site destination the archive is still made, but the script
@@ -37,9 +41,9 @@
 # count instead: the newest CONCH_BACKUP_KEEP_PRE_UPGRADE (default 3) of each
 # instance, so the one a rollback needs is never aged out.
 #
-# Settings, read by the conch-backup step from the environment or from
-# /etc/conch/backup.env (mode 0600, owned by root or by the user running the
-# step; see docs/deploy.md):
+# Settings, read by the conch-backup step from /etc/conch/backup.env (mode
+# 0600, owned by root or by the user running the step; see docs/deploy.md),
+# or from the environment (run as root, only CONCH_BACKUP_DIR reaches it):
 #   CONCH_BACKUP_DIR        default /var/backups/conch
 #   CONCH_BACKUP_KEEP_DAYS  default 14
 #   CONCH_BACKUP_KEEP_PRE_UPGRADE  default 3
@@ -198,21 +202,48 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 snap=$work/snapshot.tar.gz
 
+# clean: only printable ASCII, tab and newline, so a step cannot send escape
+# sequences to whoever reads this output.
+clean() { LC_ALL=C tr -cd '\011\012\040-\176'; }
+
+# guarded <command>...: run it holding no terminal. Its own session (setsid),
+# so the terminal is not its controlling one; stdin from /dev/null if it is a
+# terminal; stdout through clean if it is a terminal; stderr always through
+# clean. A file or a pipe on stdin or stdout is passed as it is.
+guarded() {
+    if [ -t 0 ]; then
+        guarded "$@" </dev/null
+        return
+    fi
+    if [ -t 1 ]; then
+        guarded "$@" | clean
+        return
+    fi
+    { setsid -w "$@" 2>&1 1>&3 3>&- | clean >&2; } 3>&1
+}
+
 if [ "$(id -u)" = 0 ]; then
     for u in "conch-$instance" conch-backup; do
         id "$u" >/dev/null 2>&1 || die "run as root, this needs the users conch-$instance and conch-backup; $u does not exist (docs/deploy.md)" 2
     done
-    # as <user> <command>...: drop to that user, its groups and no capability.
-    # setpriv, not runuser: no PAM session, which a sandboxed unit may not allow.
+    # Only these reach a step from root's environment.
+    step_env=(PATH=/usr/sbin:/usr/bin:/sbin:/bin)
+    for v in CONCH_DATA_ROOT CONCH_BACKUP_DIR CONCH_BACKUP_ENV; do
+        [ -z "${!v:-}" ] || step_env+=("$v=${!v}")
+    done
+    # as <user> <command>...: drop to that user, its groups and no capability,
+    # with none of root's environment and no terminal. setpriv, not runuser:
+    # no PAM session, which a sandboxed unit may not allow.
     as() {
         local u=$1
         shift
-        setpriv --reuid="$u" --regid="$(id -g "$u")" --init-groups --inh-caps=-all -- "$@"
+        guarded setpriv --reuid="$u" --regid="$(id -g "$u")" --init-groups --inh-caps=-all -- \
+            env -i "${step_env[@]}" "$@"
     }
     cd /
-    as "conch-$instance" "$self" "$instance" --step=snapshot >"$snap"
+    as "conch-$instance" "$self" "$instance" --step=snapshot >"$snap" </dev/null
     as conch-backup "$self" "${store_args[@]}" <"$snap"
 else
-    "$self" "$instance" --step=snapshot >"$snap"
-    "$self" "${store_args[@]}" <"$snap"
+    guarded "$self" "$instance" --step=snapshot >"$snap" </dev/null
+    guarded "$self" "${store_args[@]}" <"$snap"
 fi

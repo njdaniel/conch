@@ -7,7 +7,11 @@
 # example.com is a placeholder. Replace it everywhere before use:
 #   sed -i 's/example\.com/your.domain/g' /etc/caddy/Caddyfile
 # Check it with: caddy validate --config /etc/caddy/Caddyfile
-# Apply it with: systemctl reload caddy
+# Apply it the first time with: systemctl restart caddy
+# and after that with:          systemctl reload caddy
+# The first time it must be a restart: the running Caddy still has its admin
+# API on localhost:2019, and a reload looks for it where this file says, the
+# unix socket below, which only a Caddy started from this file listens on.
 
 {
 	# Where Let's Encrypt writes if a certificate cannot be renewed.
@@ -18,7 +22,8 @@
 	# rewrite the proxy configuration. A unix socket in Caddy's own state
 	# directory is reachable only by the caddy user (and root). The packaged
 	# `systemctl reload caddy` (`caddy reload --config ... --force`) reads this
-	# address from the Caddyfile, so reloading still works.
+	# address from the Caddyfile, so reloading works once Caddy has been
+	# restarted with this file (see the top of this file).
 	admin unix//var/lib/caddy/admin.sock
 }
 
