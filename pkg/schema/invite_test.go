@@ -148,7 +148,7 @@ func TestCreateInviteRequestV1Effective(t *testing.T) {
 		wantMayInv   bool
 		wantLifetime time.Duration
 	}{
-		{"personal defaults", CreateInviteRequestV1{Kind: InviteKindPersonal}, now.Add(7 * 24 * time.Hour), true, 90 * 24 * time.Hour},
+		{"personal defaults", CreateInviteRequestV1{Kind: InviteKindPersonal}, now.Add(7 * 24 * time.Hour), false, 90 * 24 * time.Hour},
 		{"open defaults", CreateInviteRequestV1{Kind: InviteKindOpen}, now.Add(24 * time.Hour), false, 90 * 24 * time.Hour},
 		{"personal says no", CreateInviteRequestV1{Kind: InviteKindPersonal, MayInvite: &no}, now.Add(7 * 24 * time.Hour), false, 90 * 24 * time.Hour},
 		{"open says yes", CreateInviteRequestV1{Kind: InviteKindOpen, MayInvite: &yes}, now.Add(24 * time.Hour), true, 90 * 24 * time.Hour},

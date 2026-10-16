@@ -144,16 +144,18 @@ func TestCreateInviteRules(t *testing.T) {
 			r.Voice = true
 			return r
 		}(), nil, nil},
-		{"right to invite taken away", func(f *inviteFixture) Principal { return f.alice }, func() schema.CreateInviteRequestV1 {
-			r := personal("general")
-			r.MayInvite = &yes
-			return r
-		}(), func(f *inviteFixture) {
+		{"right to invite taken away", func(f *inviteFixture) Principal { return f.alice }, personal("general"), func(f *inviteFixture) {
 			if _, err := f.s.SetMayInvite(f.ctx, "system", f.alice.ID, false); err != nil {
 				f.t.Fatal(err)
 			}
 		}, ErrInviteNotAllowed},
-		{"may_invite the creator holds", func(f *inviteFixture) Principal { return f.alice }, func() schema.CreateInviteRequestV1 {
+		// A tester who may invite still cannot pass the right on (#457).
+		{"a tester cannot grant the right to invite", func(f *inviteFixture) Principal { return f.alice }, func() schema.CreateInviteRequestV1 {
+			r := personal("general")
+			r.MayInvite = &yes
+			return r
+		}(), nil, ErrInviteGrantExceedsInviter},
+		{"an operator grants the right to invite", func(f *inviteFixture) Principal { return f.op }, func() schema.CreateInviteRequestV1 {
 			r := personal("general")
 			r.MayInvite = &yes
 			return r
@@ -225,8 +227,8 @@ func TestCreateInviteDefaultsAndStorage(t *testing.T) {
 	if p.Invite.MaxUses == nil || *p.Invite.MaxUses != 1 {
 		t.Errorf("personal max_uses = %v, want 1", p.Invite.MaxUses)
 	}
-	if !p.Invite.MayInvite || p.Invite.Voice {
-		t.Errorf("personal grants = voice %v may_invite %v, want false/true", p.Invite.Voice, p.Invite.MayInvite)
+	if p.Invite.MayInvite || p.Invite.Voice {
+		t.Errorf("personal grants = voice %v may_invite %v, want false/false (#457)", p.Invite.Voice, p.Invite.MayInvite)
 	}
 	if got, want := p.Invite.ExpiresAt.Time(), f.now.Add(7*24*time.Hour); !got.Equal(want) {
 		t.Errorf("personal expiry = %v, want %v", got, want)
@@ -368,11 +370,11 @@ func TestRedeemInviteCreatesAccount(t *testing.T) {
 	if p.Kind != PrincipalHuman || p.Role != RoleMember || p.Name != "river" || p.InvitedBy != f.alice.ID || p.InviteID != inv.Invite.ID {
 		t.Errorf("principal = %+v", p)
 	}
-	if !p.MayInvite || !p.VoiceAllowed {
-		t.Errorf("grants = may_invite %v voice %v, want both", p.MayInvite, p.VoiceAllowed)
+	if p.MayInvite || !p.VoiceAllowed {
+		t.Errorf("grants = may_invite %v voice %v, want no right to invite (#457) and voice", p.MayInvite, p.VoiceAllowed)
 	}
 	stored, err := f.s.PrincipalByID(f.ctx, p.ID)
-	if err != nil || stored.InvitedBy != f.alice.ID || stored.InviteID != inv.Invite.ID || stored.Role != RoleMember || !stored.MayInvite || !stored.VoiceAllowed {
+	if err != nil || stored.InvitedBy != f.alice.ID || stored.InviteID != inv.Invite.ID || stored.Role != RoleMember || stored.MayInvite || !stored.VoiceAllowed {
 		t.Errorf("stored principal = %+v, %v", stored, err)
 	}
 	if n := f.count("SELECT COUNT(*) FROM principals WHERE invite_id = ?", inv.Invite.ID); n != 1 {
@@ -389,7 +391,7 @@ func TestRedeemInviteCreatesAccount(t *testing.T) {
 		t.Errorf("credential = %+v", got.Credential)
 	}
 	resolved, err := f.s.ResolveCredential(f.ctx, got.Token)
-	if err != nil || resolved.ID != p.ID || resolved.InvitedBy != f.alice.ID || !resolved.MayInvite {
+	if err != nil || resolved.ID != p.ID || resolved.InvitedBy != f.alice.ID || resolved.MayInvite {
 		t.Errorf("ResolveCredential = %+v, %v", resolved, err)
 	}
 	if n := f.count("SELECT uses FROM invites WHERE id = ?", inv.Invite.ID); n != 1 {
@@ -425,9 +427,11 @@ func TestRedeemInviteGrants(t *testing.T) {
 		wantMay   bool
 		wantVoice bool
 	}{
-		{"personal default", personal("general"), func(f *inviteFixture) Principal { return f.alice }, true, false},
+		// Nobody who joins may invite unless an operator grants it (#457).
+		{"personal default", personal("general"), func(f *inviteFixture) Principal { return f.alice }, false, false},
 		{"personal without the right to invite", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &no; return r }(), func(f *inviteFixture) Principal { return f.alice }, false, false},
-		{"personal with voice", func() schema.CreateInviteRequestV1 { r := personal("general"); r.Voice = true; return r }(), func(f *inviteFixture) Principal { return f.alice }, true, true},
+		{"personal with voice", func() schema.CreateInviteRequestV1 { r := personal("general"); r.Voice = true; return r }(), func(f *inviteFixture) Principal { return f.alice }, false, true},
+		{"an operator's personal invite grants the right", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, false},
 		{"open default", open("general"), func(f *inviteFixture) Principal { return f.op }, false, false},
 		{"open that lets the joiner invite", func() schema.CreateInviteRequestV1 { r := open("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, false},
 	}
@@ -1103,5 +1107,29 @@ func TestInvitesPausedFailsClosed(t *testing.T) {
 		if got != tt.paused {
 			t.Errorf("stored %q: paused = %v, want %v", tt.value, got, tt.paused)
 		}
+	}
+}
+
+// Redemption checks the maker again: an invite row that carries the right to
+// invite but was made by someone who is not an operator gives the joiner no
+// such right, however the row came to be (issue #457).
+func TestRedeemDoesNotTrustAStoredMayInvite(t *testing.T) {
+	f := newInviteFixture(t)
+	inv := f.mustCreate(f.alice, personal("general"))
+	if _, err := f.s.db.ExecContext(f.ctx, "UPDATE invites SET may_invite = 1 WHERE id = ?", inv.Invite.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.redeem(inv.Code, "joiner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Principal.MayInvite {
+		t.Error("the joiner holds the right to invite from a tester's invite")
+	}
+	if stored, err := f.s.PrincipalByID(f.ctx, got.Principal.ID); err != nil || stored.MayInvite {
+		t.Errorf("stored principal = %+v, %v; want no right to invite", stored, err)
+	}
+	if resolved, err := f.s.ResolveCredential(f.ctx, got.Token); err != nil || resolved.MayInvite {
+		t.Errorf("ResolveCredential = %+v, %v; want no right to invite", resolved, err)
 	}
 }
