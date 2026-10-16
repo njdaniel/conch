@@ -577,9 +577,18 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 
 	_, _ = fmt.Fprintf(stdout, "%-6s | %-12s | %-20s | %-20s | %s\n", "ID", "STATE", "DEADLINE", "REQUESTER", "TITLE")
 	_, _ = fmt.Fprintln(stdout, strings.Repeat("-", 90))
+	readOnly := make(map[int64]bool, len(resp.ReadOnly))
+	for _, id := range resp.ReadOnly {
+		readOnly[id] = true
+	}
 	for _, a := range resp.Approvals {
 		deadline := a.Deadline.Time().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, safeLine(string(a.State)), deadline, a.RequesterID, safeLine(a.Title))
+		title := safeLine(a.Title)
+		if readOnly[a.ID] {
+			// Issue #450: listed for this person to see, not to decide.
+			title += "  (view only: you may not decide this)"
+		}
+		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, safeLine(string(a.State)), deadline, a.RequesterID, title)
 	}
 	return nil
 }

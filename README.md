@@ -248,7 +248,7 @@ bin/conch admin member add ops 3
 
 `conch admin` is a plain client of the REST API (every command names one route), so everything it does can still be done with `curl`. `--json` prints the server's response document instead of the one-line result. The token files are only as private as the `umask 077` at the top of that block makes them, and it has to be run in this shell, not only in the one that started `conchd`; never write a token anywhere other users can read.
 
-A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. The other `conch admin` commands: `credential list <principal-id>`, `credential revoke <credential-id>`, `principal disable|enable <id>` (switch a principal off entirely, and back on), and `member remove <channel> <principal-id>`. Rotating a credential (`POST /v1/credentials/{id}/rotate`) is REST only.
+A principal who is not a member of a channel cannot read it, post to it, subscribe to it, or see it listed; to them it does not exist. Operators manage membership but get no exemption. The other `conch admin` commands: `credential list <principal-id>`, `credential revoke <credential-id>`, `principal disable|enable <id>` (switch a principal off entirely, and back on), `member remove <channel> <principal-id>`, and `member decide [--off] <channel> <principal-id>` (who may decide the channel's approvals; see Approvals). Rotating a credential (`POST /v1/credentials/{id}/rotate`) is REST only.
 
 Later steps sign in as someone else, so `unset CONCH_TOKEN` when you are done administering (it overrides a stored login).
 
@@ -600,7 +600,7 @@ curl -s -X POST localhost:8080/mcp \
         "name":"post_message","arguments":{"channel":"ops","body":"release 42 is built"}}}'
 ```
 
-Approvals are requested by agents over MCP and decided by humans with `conch approve` / `conch reject`; the decider is always the logged-in person and must be a member of the approval's channel.
+Approvals are requested by agents over MCP and decided by humans with `conch approve` / `conch reject`; the decider is always the logged-in person and must be a member of the approval's channel who holds its right to decide. Every member an operator adds holds it, unless added with `conch admin member add --no-decide`. A person who joins through an invite never does. `conch admin member decide [--off] <channel> <principal-id>` grants it or takes it away. A member without it sees the channel's approvals marked view-only, and a decision is refused with `403 decision_not_permitted`.
 
 #### Reporting from outside Conch: a CI job or a remote script
 
