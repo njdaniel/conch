@@ -389,8 +389,10 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		if req.Voice && !creatorVoice {
 			return fmt.Errorf("%w: you do not hold voice", ErrInviteGrantExceedsInviter)
 		}
-		if mayInvite && !isOperator && !creatorMay {
-			return fmt.Errorf("%w: you do not hold the right to invite", ErrInviteGrantExceedsInviter)
+		// Only an operator grants the right to invite (issue #457): a tester
+		// who may invite still cannot pass the right on.
+		if mayInvite && !isOperator {
+			return fmt.Errorf("%w: only an operator grants the right to invite", ErrInviteGrantExceedsInviter)
 		}
 
 		channelIDs := make([]int64, 0, len(req.Channels))

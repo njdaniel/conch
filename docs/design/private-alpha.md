@@ -57,7 +57,7 @@ A talk key that works while a game has focus needs a desktop app. That is Electr
 **Adopted by this plan** from the recommendations on #420, under Nick's standing "use your recommendations". He can overrule any of them at review:
 - **"Deleting" an account means disable plus hide.** The account leaves rosters and member lists, and stays in the audit trail. Operators get bulk cleanup: everyone from one link, or by name prefix.
 - **Agents are never created by invites.** Testers bringing their own agents would be a separate invite kind, not planned.
-- **Inviting is a per-person permission,** on by default for alpha testers, with:
+- **Inviting is a per-person permission that only an operator grants** (Nick, 2026-10-16, #457). Nobody who joins through an invite may invite unless an operator grants it, directly or through an operator's invite. Those who hold it have:
   - a small allowance of outstanding personal invites (default 5);
   - single-use personal invites (default 7-day expiry);
   - an operator option to revoke an inviter's invitees too (off by default).
