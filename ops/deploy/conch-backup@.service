@@ -1,0 +1,30 @@
+# Nightly backup of one instance (conch-backup@<instance>.timer starts it).
+# Exits non-zero, and so shows as failed, when no off-site copy was made.
+[Unit]
+Description=Back up Conch instance %i
+Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
+After=conchd@%i.service
+
+[Service]
+Type=oneshot
+User=conch
+Group=conch
+ExecStart=/opt/conch/bin/conch-backup.sh %i
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# sqlite3 opens the live database, which may create its -wal and -shm files,
+# so the data directory is writable; the archives go to /var/backups/conch.
+ReadWritePaths=/var/lib/conch/%i /var/backups/conch
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=

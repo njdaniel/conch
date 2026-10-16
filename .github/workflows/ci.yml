@@ -77,6 +77,16 @@ jobs:
       - name: dependency gate
         run: ./scripts/depgate.sh
 
+      # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
+      # verify, and the backup, restore, upgrade and rollback scripts against
+      # a real conchd. sqlite3 is a host prerequisite of those scripts; the
+      # runner image has shellcheck and systemd-analyze, and with CI set the
+      # test fails rather than skips when one is missing.
+      - name: deployment scripts
+        run: |
+          sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
+          ./scripts/deploy-scripts-test.sh
+
       # The Rust voice client under voice/ (ADR-006). The toolchain script
       # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
       # against the SHA-256 in scripts/voice-pins.sh, which is therefore the

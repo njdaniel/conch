@@ -1,0 +1,45 @@
+# One conchd instance. %i is the instance name: the data lives in
+# /var/lib/conch/%i and the settings in /etc/conch/%i.env (mode 0600, see
+# instance.env.example). Every setting comes from that file, so a second
+# instance is a second env file and `systemctl enable --now conchd@<name>`.
+[Unit]
+Description=Conch server (%i)
+Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=conch
+Group=conch
+EnvironmentFile=/etc/conch/%i.env
+ExecStart=/opt/conch/current/conchd serve
+Restart=on-failure
+RestartSec=2s
+
+# systemd creates /var/lib/conch/%i, owned by the service user.
+StateDirectory=conch/%i
+StateDirectoryMode=0700
+UMask=0077
+
+# The service may write its own state directory and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/conch/%i
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

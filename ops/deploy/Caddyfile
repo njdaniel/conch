@@ -1,0 +1,38 @@
+# Public TLS for a Conch droplet. Caddy gets and renews a certificate for
+# every name below on its own (ports 80 and 443 must be open, and each name
+# must already resolve to this host). `reverse_proxy` keeps the Host header
+# the client sent and passes WebSocket upgrades, which is what conchd's
+# same-origin check needs (README, "Optional: TLS and a reverse proxy").
+#
+# example.com is a placeholder. Replace it everywhere before use:
+#   sed -i 's/example\.com/your.domain/g' /etc/caddy/Caddyfile
+# Check it with: caddy validate --config /etc/caddy/Caddyfile
+
+{
+	# Where Let's Encrypt writes if a certificate cannot be renewed.
+	email admin@example.com
+}
+
+# One block per instance: <instance>.<domain> -> that instance's loopback
+# port (CONCHD_LISTEN in /etc/conch/<instance>.env).
+alpha.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# A second instance is one more block:
+# beta.example.com {
+# 	reverse_proxy 127.0.0.1:8081
+# }
+
+# LiveKit signalling (its port 7880 stays on loopback).
+livekit.example.com {
+	reverse_proxy 127.0.0.1:7880
+}
+
+# The name LiveKit's TURN server answers on. LiveKit speaks TURN/TLS itself
+# on its own port; this block exists so Caddy obtains and renews the
+# certificate for the name. LiveKit reads it from Caddy's storage
+# (livekit.service, livekit-cert.path).
+turn.example.com {
+	respond "" 204
+}

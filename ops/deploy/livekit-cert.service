@@ -1,0 +1,7 @@
+# Run by livekit-cert.path: restart LiveKit so it loads the renewed certificate.
+[Unit]
+Description=Restart LiveKit for a renewed TURN certificate
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl try-restart livekit.service

@@ -1,0 +1,31 @@
+# LiveKit, in Docker, from the image README.md pins by digest (change the
+# version in one place: here and in README.md together). Installed beside
+# conchd; docs/deploy.md has the steps.
+#
+# Files it reads, all created by the operator:
+#   /etc/conch/livekit.yaml   settings, no secret (livekit.yaml in this directory)
+#   /etc/conch/livekit-keys   the key pairs, one "<key>: <secret>" line each, mode 0600
+# The TURN certificate is Caddy's own copy, mounted read-only. Edit the
+# turn.example.com in the paths below to your TURN name.
+[Unit]
+Description=LiveKit server
+Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3s
+ExecStartPre=-/usr/bin/docker rm -f livekit
+ExecStart=/usr/bin/docker run --rm --name livekit --network host \
+  -v /etc/conch/livekit.yaml:/etc/livekit.yaml:ro \
+  -v /etc/conch/livekit-keys:/etc/livekit-keys:ro \
+  -v /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.example.com:/certs:ro \
+  livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3 \
+  --config /etc/livekit.yaml --key-file /etc/livekit-keys
+ExecStop=/usr/bin/docker stop livekit
+
+[Install]
+WantedBy=multi-user.target
