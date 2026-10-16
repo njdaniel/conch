@@ -107,6 +107,17 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
 		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),
+		// Invites (issue #437). Making, listing and closing one's own are for
+		// people (an agent gets 403 human_required, in the handler). Preview
+		// and redeem are exempt: whoever holds a code may ask what it grants
+		// and use it. They carry the code in the body only, are rate-limited
+		// per client address before any store work, and the store decides
+		// everything else. See invites.go.
+		rt("POST /v1/invites", accessAuthenticated, hf(s.handleCreateInvite)),
+		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
+		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
+		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
+		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust

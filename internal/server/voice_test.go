@@ -980,3 +980,74 @@ func TestVoiceSessionRecordsNoHolderForACallerAlreadyGone(t *testing.T) {
 		})
 	}
 }
+
+// joinWithoutVoice adds a person "vic" to the fixture through an operator's
+// invite to ops that does not grant voice, so vic is a member of ops with
+// voice_allowed = 0 (issue #437), and of nothing else.
+func (f *voiceFixture) joinWithoutVoice(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	inv, err := f.srv.store.CreateInvite(ctx, "system", f.root.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"ops"}}, store.InviteOptions{}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined, err := f.srv.store.RedeemInvite(ctx, store.HashInviteCode(inv.Code), "vic", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined.Principal.VoiceAllowed {
+		t.Fatal("the joiner holds voice")
+	}
+	f.tokens["vic"], f.ids["vic"] = joined.Token, joined.Principal.ID
+}
+
+// TestVoiceNotAllowed: a member whose invite did not grant voice is refused
+// with 403 voice_not_allowed by the session, transmit, presence and socket
+// routes, after membership (a channel they are not in is still the
+// unknown-channel 404, byte for byte) and before whether voice is configured.
+// Nothing reaches LiveKit and no room is made.
+func TestVoiceNotAllowed(t *testing.T) {
+	routes := []struct {
+		name, method, path, body string
+	}{
+		{"session", http.MethodPost, "/v1/channels/%s/voice/session", ""},
+		{"transmit", http.MethodPost, "/v1/channels/%s/voice/transmit", `{"state":"started"}`},
+		{"presence", http.MethodGet, "/v1/channels/%s/voice", ""},
+		{"socket", http.MethodGet, "/v1/voice/ws?channel=%s", ""},
+	}
+	for _, configured := range []bool{true, false} {
+		f := newVoiceFixture(t, voiceOpts{auth: AuthRequired, configured: configured})
+		f.joinWithoutVoice(t)
+		for _, rt := range routes {
+			t.Run(fmt.Sprintf("configured=%v/%s", configured, rt.name), func(t *testing.T) {
+				call := func(who, channel string) wireResult {
+					return f.callREST(t, rt.method, fmt.Sprintf(rt.path, channel), f.tokens[who], rt.body)
+				}
+				res := call("vic", "ops")
+				if res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodeVoiceNotAllowed {
+					t.Errorf("member without voice: %d %s, want 403 %s", res.status, res.body, schema.ErrorCodeVoiceNotAllowed)
+				}
+				unknown := call("ann", "nosuch")
+				if got := call("vic", "ops2"); got != unknown || got.status != http.StatusNotFound {
+					t.Errorf("non-member without voice: %+v, want the unknown-channel answer %+v", got, unknown)
+				}
+			})
+		}
+		if calls, _ := f.lk.requests(); calls != 0 {
+			t.Errorf("configured=%v: %d requests reached LiveKit", configured, calls)
+		}
+		if f.rowCount(t) != 0 {
+			t.Errorf("configured=%v: a room row was made", configured)
+		}
+		denied := 0
+		for _, e := range f.audits(t, "access_denied") {
+			if e.Actor == fmt.Sprintf("principal:%d", f.ids["vic"]) && strings.Contains(e.Detail, schema.ErrorCodeVoiceNotAllowed) {
+				denied++
+			}
+		}
+		if denied == 0 {
+			t.Errorf("configured=%v: the refusals were not audited", configured)
+		}
+	}
+}

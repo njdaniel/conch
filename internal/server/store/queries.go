@@ -61,8 +61,8 @@ type Principal struct {
 	// invite whatever this says; nobody else holds it until granted.
 	MayInvite bool
 	// VoiceAllowed is whether the principal may use voice. True for every
-	// account unless an invite made without it. Voice routes enforce it in a
-	// later slice (A6b).
+	// account unless an invite made without it. Every voice route refuses a
+	// person without it (voicePresenceChannel, internal/server/voice.go).
 	VoiceAllowed bool
 }
 

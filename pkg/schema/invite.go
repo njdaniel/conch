@@ -86,6 +86,14 @@ const (
 	ErrorCodeInviteGrantExceedsInviter = "invite_grant_exceeds_inviter"
 	// ErrorCodeInviteNotAllowed: the caller may not make this kind of invite.
 	ErrorCodeInviteNotAllowed = "invite_not_allowed"
+	// ErrorCodeInviteNotFound: no invite the caller may close has that id
+	// (HTTP 404). Someone else's invite gets the same answer as one that does
+	// not exist, so an id reveals nothing (issue #437).
+	ErrorCodeInviteNotFound = "invite_not_found"
+	// ErrorCodePrincipalExists: the name asked for is already taken (HTTP
+	// 409). Redeeming an invite answers with it and does not use the invite
+	// up; it is the code POST /v0/principals has always answered with.
+	ErrorCodePrincipalExists = "principal_exists"
 )
 
 // InviteChannelV1 names one channel an invite adds its joiner to.

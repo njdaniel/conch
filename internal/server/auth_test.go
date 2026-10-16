@@ -242,12 +242,29 @@ var routeExpectations = map[string]routeExpectation{
 	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
 	// (special-cased below). Issuing one writes no audit row.
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
+	// Invites (issue #437). Chosen to change and audit nothing: an empty
+	// create is a 400, the close names an invite that does not exist, and
+	// preview and redeem send no code, which is the invite_invalid 404 before
+	// anything is looked up or audited. People only: an agent gets 403 and
+	// AuthOff 401 on the three authenticated routes (both special-cased
+	// below).
+	"POST /v1/invites":         {classAuth, "/v1/invites", `{}`, 400},
+	"GET /v1/invites":          {classAuth, "/v1/invites", "", 200},
+	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
+	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
+	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
 // which are humans-only and never anonymous.
 func isFileRoute(pattern string) bool {
 	return strings.Contains(pattern, "/v2/files/") || strings.HasSuffix(pattern, "/files")
+}
+
+// isInviteRoute reports whether pattern is one of the authenticated invite
+// routes (issue #437); preview and redeem are exempt and not among them.
+func isInviteRoute(pattern string) bool {
+	return pattern == "POST /v1/invites" || pattern == "GET /v1/invites" || pattern == "DELETE /v1/invites/{id}"
 }
 
 func routeMethod(pattern string) string {
@@ -302,7 +319,8 @@ func TestRouteTable(t *testing.T) {
 // route not on the explicit exempt list answers 401 without a credential.
 func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
-	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true}
+	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
+		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true}
 
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]
@@ -370,6 +388,10 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") {
 				agentWant = http.StatusForbidden
 			}
+			// Invites are for people (issue #437).
+			if isInviteRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -417,6 +439,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential
+				}
+				if isInviteRoute(rt.pattern) {
+					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
@@ -680,7 +705,9 @@ func TestWhoAmI(t *testing.T) {
 		token string
 		want  schema.WhoAmIResponseV1
 	}{
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test"}},
+		// An operator may always invite (issue #437); a member may not until
+		// granted the right, and an agent never.
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true}},
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
 		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
 	}

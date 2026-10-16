@@ -54,6 +54,7 @@ func TestVoiceErrorCodes(t *testing.T) {
 		{ErrorCodeVoiceRequiresAuth, "voice_requires_auth"},
 		{ErrorCodeVoiceNoSession, "voice_no_session"},
 		{ErrorCodeVoiceReportRateLimited, "voice_report_rate_limited"},
+		{ErrorCodeVoiceNotAllowed, "voice_not_allowed"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {

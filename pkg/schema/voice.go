@@ -56,6 +56,11 @@ const (
 	// the server had a rate-limit code before this one, so it is named for
 	// the one endpoint that has a bound rather than as a general code.
 	ErrorCodeVoiceReportRateLimited = "voice_report_rate_limited"
+	// ErrorCodeVoiceNotAllowed: the caller is a member of the channel but
+	// holds no voice, because the invite it joined through did not grant it
+	// (HTTP 403, issue #437). A non-member gets the unknown-channel 404
+	// instead, so this answer reveals nothing to someone outside.
+	ErrorCodeVoiceNotAllowed = "voice_not_allowed"
 )
 
 // VoiceRoomGrant is one room a voice session may join: the LiveKit room name,

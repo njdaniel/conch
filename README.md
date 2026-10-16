@@ -218,6 +218,8 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 
   Read state (issue #351) is how a client shows unread counts. `GET /v1/read-state` answers `{"read_state":[…]}`: one `conch.read_state.v1` per channel the caller is a member of, with `last_read_id` (0 when the person never marked it), `unread` and, once marked, `updated_at`. `unread` counts only the messages after the mark that this person may see (channel-wide ones, their nets', whispers they are in: the same rule as the message list, so a hidden message is never counted and never moves anything) and stops at 1000, so a client shows `1000+`. `PUT /v1/channels/{channel}/read-state` with `{"last_read_id":<id>}` moves the mark and answers the new state: it only moves forward (a lower id leaves it and answers the stored state), and an id past the newest message the caller may see is taken as that message. The mark belongs to the person, not to a credential or a session, so a person's clients share it. A non-member and an unknown channel get the same `404 channel_not_found`; both routes are for people (an agent gets `403 human_required`) and need authentication (`--auth off` answers `400 read_state_require_auth`). Marking is not audited, and there is no events frame: poll `GET /v1/read-state` on switching channel and every 30 seconds. A mark outlives membership, so leaving and rejoining a channel keeps it.
   `GET /v1/events/ws?channel=<name>[&session=<id>]` is how a client follows all of this live, without polling. It takes a bearer or a ticket, and sends one `pkg/schema` document per text frame, told apart by `schema`: a `SessionRosterV1` for the channel on connect and again whenever a session of a member is created, ended, changes state or status, or the channel's membership changes (including the sweeper marking a session `stale` or `offline`; a roster identical to the last one sent is not sent again); a `RunV1` when a run in the channel that you may see is created or changes state; an `AgentActivityV1` when one is appended to such a run; and an `InterventionV1` when one on such a run is created or answered. Every frame is built for you when it is sent, by what the REST routes use, so you are never sent a document you could not fetch now: a channel member outside a whisper gets no frame about a run that answers it, and its roster shows no `current_run` or `task` for it. The upgrade asks what `GET /v1/sessions?channel=` asks (a non-member and an unknown channel get the same `404 channel_not_found`; an agent needs `messages.read` and `read` in the channel, spent once, as for `/v2/ws`, and asked again without spending before every batch of frames), and `--auth off` answers `400 sessions_require_auth`. With `&session=<id>` the session must be your credential's and not ended, otherwise `404 session_not_found` (an agent also needs `sessions.manage`); the server then refreshes its `last_seen_at` every 10 seconds while the socket is open, as a heartbeat would, so a TUI or a browser tab stays `online` without calling one. If that session is ended while the socket is open (`DELETE /v1/sessions/{id}`, or the sweeper ending an expired credential's), the next refresh, within 10 seconds, closes the socket with 1008 `session ended`, and a reconnect with that `session` is refused `404 session_not_found`; a socket without `&session=` is not affected. Membership or credential loss closes the socket with 1008 (at once for removal from the channel, a disable, a revoke-all and a new manifest, within the 30 s re-check otherwise); a reader too slow to keep up is closed with 1008 `subscriber too slow` and reconnects to get a fresh roster. One socket rebuilds its roster at most every 250 ms: changes in between are sent together, as the roster after them, so a `RunV1` may arrive up to 250 ms before the roster showing its status. There is no replay: after a reconnect, take the roster and read runs over REST.
+- `--trusted-proxies` (or `CONCHD_TRUSTED_PROXIES`) is a comma-separated list of CIDRs, such as `127.0.0.1/32,::1/128`, of reverse proxies whose `X-Forwarded-For` `conchd` believes. Default: none, and the header is never read. The client address is used for one thing only, the [invite](#invites) routes' per-address rate limits; see [the proxy section](#optional-tls-and-a-reverse-proxy).
+- `--invite-allowance` (or `CONCHD_INVITE_ALLOWANCE`, default `5`) is how many open personal invites one person who may invite can hold at once. Operators have no allowance. See [Invites](#invites).
 - `--ntfy-server`/`--ntfy-topic`/`--ntfy-urgent-topic` (or `CONCHD_NTFY_*`) are optional. Set both topics with the server: a new approval and its resolution are pushed to `--ntfy-topic`, an escalation to `--ntfy-urgent-topic`. With a topic left empty the notifications that use it are not sent; `conchd` warns once at start and records each in the audit log as `notify_failed`, not attempted. ntfy is a push-notification integration, not a dependency: `conchd` runs, and approvals still resolve, with no ntfy server reachable — the deployment invariant (ADR-002) requires no other external process for core function.
 
 ### 3. Create a channel, people, and an agent
@@ -824,7 +826,7 @@ For a public server on a droplet, with Caddy, LiveKit, systemd, backups and a re
 The proxy terminates TLS and forwards everything, WebSocket upgrades included, to `conchd` on loopback. Three things matter, and each was checked against `conchd` rather than assumed:
 
 - **Keep the `Host` header the client sent.** A browser's WebSocket upgrade carries an `Origin`, and `conchd` accepts it only when its host equals the request's `Host` (the library's same-origin check; `internal/server/origins.go` adds extra origins only for `--allowed-origins`). If the proxy rewrites `Host` to the backend's address, the upgrade is refused with `403`. Caddy keeps `Host` by default. nginx does not (its default is `$proxy_host`), so the block below sets it. With `Host` kept and one public name for the page and the sockets, the origins match and **`--allowed-origins` is not needed**; leave it unset. (`conch`, `conch-adapter` and `conch-voice` send no `Origin`, so they are not subject to this check; the web page is.)
-- **Bind `conchd` to loopback** (`--listen 127.0.0.1:8080`) so the proxy is the only way in. `conchd` does not read `X-Forwarded-*` headers; it sees every request as coming from the proxy.
+- **Bind `conchd` to loopback** (`--listen 127.0.0.1:8080`) so the proxy is the only way in, and **tell `conchd` the proxy is trusted** with `--trusted-proxies 127.0.0.1/32,::1/128`. Without it every request seems to come from the proxy, so the [invite](#invites) routes' per-address rate limits become one limit shared by everybody. With it, for a request whose connection comes from a trusted address, `conchd` walks `X-Forwarded-For` from the right and takes the first address that is not a trusted proxy as the client; if there is none, or an entry it reaches is not an address, it uses the connection's own address. A connection from anywhere else never has the header read, so a client cannot pick its own address by sending one. `Forwarded` is not read, and nothing but the invite limits uses the address. It is personal data, so it is never written to the audit trail; a log line carries at most its IPv4 /24 or IPv6 /48. Caddy sets `X-Forwarded-For` by default; nginx needs `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` (in the block below). Trust only proxies you run, each by its own address (a `/32` or `/128`): a trusted address can claim to be any client, and a client inside a trusted range is skipped as if it were a proxy, so it picks its own address.
 - **The stream needs no long idle timeout, but the upload needs the body limit raised.** `conchd` pings every open stream (`/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) every 25 s and closes one whose peer does not answer within 10 s, so a proxy's idle timer never runs out on a healthy connection and a dead one is dropped in about 35 s. `/v1/events/ws` and, for a client that asks with `?heartbeat=1`, `/v2/ws` also carry a small `conch.heartbeat.v1` frame at the same rate, which is how the web page (a browser cannot see pings) tells that the connection is alive; it reconnects after 60 s without a frame. `conch tail` and the TUI send their own pings every 20 s and reconnect (the TUI) or exit (`conch tail`) within about 30 s of a connection that went silent. Any proxy read timeout over about 30 s therefore works: nginx's 60 s default is enough. nginx limits a request body to 1 MiB (the block below sets 11m); `conchd` allows uploads of 10 MiB by default (`--max-upload-bytes`). Caddy has neither limit.
 
 Start `conchd` as in step 2, on loopback, optionally with the page:
@@ -868,6 +870,7 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $http_host;               # the Host the client sent, port included
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;   # for --trusted-proxies
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 120s;                        # conchd pings every 25 s; this only has to be longer than that
@@ -906,6 +909,65 @@ A browser opens `https://conch.lan/` and the page reaches `conchd` on `wss://con
 #### What was verified, and what was not
 
 With Caddy and nginx absent from the machine that wrote this recipe, the two configurations above were not run. What was run: `conchd` behind a TLS reverse proxy of the same shape (a small Go program using `httputil.ReverseProxy` with a self-signed certificate) with `Host` preserved and with `Host` rewritten to the backend. `conch login`, `whoami`, `admin channel create`, `send` and `tail` worked over `https://` and `wss://` once the certificate was trusted through `SSL_CERT_FILE`, and failed with an unknown-authority error without it. A WebSocket upgrade carrying `Origin: https://<proxy>` got `101` with `Host` preserved and `403` with `Host` rewritten, which is why the nginx block sets it. `conch-adapter` and `conch-voice` were read, not run, over TLS. Treat the Caddy and nginx text as unrun until you have tried it on your host.
+
+## Invites
+
+An invite is the second way into a server, beside an operator issuing a credential (ADR-008 §4). Whoever holds its code joins as a new human member, with the channels and the grants the invite names, and gets their first credential. There is no public signup.
+
+- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time.
+- **Open links** are for operators only: anyone with the link may join until it expires (default 24 hours, at most 7 days) or is closed, with an optional cap on uses (`max_uses`; none by default).
+- **An invite grants only what its maker holds:** a person may name only channels they are in, and grant voice only if they have it. Only an operator grants the right to invite in turn (`"may_invite": true` on the invite), so nobody who joins can make accounts that make accounts unless an operator chose that. An invite is never an operator and never an agent.
+- **Joiners do not decide approvals.** A membership made by an invite does not carry the right to decide the channel's approvals; the joiner sees them read-only, and is refused `403 decision_not_permitted` if they try. An operator grants it per member with `conch admin member decide <channel> <principal-id>` (`PUT /v1/channels/{channel}/members/{principal_id}` with `{"can_decide":true}`).
+- **Voice is a grant.** A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
+
+The flow, with `curl` (an operator's token in `$TOKEN`; preview and redeem need none):
+
+```sh
+# Make an open link for two channels. The code is in this response and nowhere else.
+curl -s -X POST http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKEN" \
+     -d '{"kind":"open","channels":["red","blue"],"voice":true}'
+# {"invite":{"id":1,"kind":"open",...},"code":"conch_inv_..."}
+
+# What the code grants, without using it: who made it, the channel names, voice, kind and expiry.
+curl -s -X POST http://127.0.0.1:8080/v1/invites/preview -d '{"code":"conch_inv_..."}'
+
+# Use it: a new human member called wren, and their first credential (shown once).
+curl -s -X POST http://127.0.0.1:8080/v1/invites/redeem -d '{"code":"conch_inv_...","name":"wren"}'
+# {"principal":{"id":5,"kind":"human","name":"wren",...},"credential":{...},"token":"conch_..."}
+
+# Your own invites, and closing one (uses already made stand).
+curl -s http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKEN"
+curl -s -X DELETE http://127.0.0.1:8080/v1/invites/1 -H "Authorization: Bearer $TOKEN"
+```
+
+The link a client hands out is `https://<host>/app/#/invite/<code>`. The code is in the fragment, which a browser never sends to any server, and the API takes it only in a `POST` body, never in a path or query, so it does not reach an access log.
+
+What the routes answer:
+
+| Route | Who | Success | Refusals |
+| --- | --- | --- | --- |
+| `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `503 invites_paused`; `429 rate_limited` |
+| `GET /v1/invites` | people | `200`, the caller's own invites, newest first | |
+| `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
+| `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
+| `POST /v1/invites/redeem` | anyone | `201` with the principal, its credential and the token, `Cache-Control: no-store` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name that is not acceptable; `503 invites_paused`; `429 rate_limited` |
+
+A code that is unknown, malformed, expired, used up or closed, or whose maker has been disabled or has lost the right to invite, gets one answer, byte for byte: `404 invite_invalid`. While an operator has invites paused, preview and redeem answer `503 invites_paused` whatever the code. Bodies are limited to 4 KiB. No error message quotes the code or the name, and neither does the log or the audit trail.
+
+**Rate limits.** In memory, so a restart resets them. Past one, the answer is `429 rate_limited` with `Retry-After` in whole seconds.
+
+| Limit | Default |
+| --- | --- |
+| Redeem attempts, per client address | 10 per 10 minutes |
+| Preview attempts, per client address | 30 per 10 minutes |
+| Successful redemptions, server-wide | 20 per minute |
+| Invites made, per principal (operators too) | 20 per hour |
+
+Each is a bucket that refills evenly, and failed attempts count the same as successful ones (the server-wide limit counts only redemptions that succeed). An IPv6 client is counted by its /64. Each limit keeps buckets for at most 65,536 clients at once; past that, a new client shares a bucket with its IPv4 /16 or IPv6 /32 until idle buckets are dropped, so a flood from one network cannot use up everyone else's attempts. Behind a reverse proxy the per-address limits need `--trusted-proxies` (see [the proxy section](#optional-tls-and-a-reverse-proxy)); without it, everyone behind the proxy shares one bucket.
+
+Anyone holding a valid code can learn whether a name is taken, from the `409`, within the redeem limit, and without using the invite up. A link that leaks lets whoever finds it test names that way, so close a leaked link.
+
+**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address.
 
 ## Voice (optional)
 
