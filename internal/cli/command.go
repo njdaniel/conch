@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -68,6 +69,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runLogout(args[1:], stderr)
 	case "whoami":
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
+	case "rename":
+		return runRename(ctx, args[1:], stdout, stderr)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -99,6 +102,7 @@ Usage:
   conch admin channel create [--server <url>] [--json] <name>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
+  conch admin principal rename [--server <url>] [--json] <id> <name>
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
   conch admin credential revoke [--server <url>] [--json] <credential-id>
@@ -120,6 +124,7 @@ Usage:
   conch login [--server <url>]     (reads the token from stdin: conch login < tokenfile)
   conch logout [--server <url>]
   conch whoami [--server <url>]
+  conch rename [--server <url>] [--json] <name>
   conch version
 
 Scope:
@@ -175,6 +180,16 @@ Scope:
     <id> <active|revoked> <created> <expires|-> <label>
   manifest put reads a PutAgentManifest JSON body from standard input or
   --file, refuses unknown fields, and checks it locally before sending.
+
+  rename changes your own name; admin principal rename changes anyone's
+  (operators only). A name is unique by how it reads, not how it is spelt:
+  one that differs from another only by case, by look-alike letters (a
+  Latin a and a Cyrillic one, a capital I for an l, a zero for an o, a
+  ligature and its letters) or by spacing is taken. A person may rename
+  themselves five times a day and try twenty times a day (a name refused as
+  taken counts as a try); an operator's rename of someone else counts toward
+  neither. An agent's name is set by an operator. Each prints "renamed
+  principal <id> to <name>", or with --json the response document.
 
   audit export (operators only) writes the audit trail to standard output as
   JSON Lines, one conch.audit_event.v1 object per line in ascending id order,
@@ -865,6 +880,51 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion))
+	return err
+}
+
+// runRename changes the caller's own name (issue #441): whoami says who the
+// caller is, then PUT /v1/principals/{id}/name. The name is checked as the
+// server checks it first, so a name it would refuse costs no request.
+func runRename(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("rename", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	asJSON := fs.Bool("json", false, "print the server's response document")
+	// Flags may follow the name, as they may for admin.
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: rename: %w", err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(pos) != 1 {
+		return errors.New("cli: rename: usage: conch rename [--server <url>] [--json] <name>")
+	}
+	req := schema.RenamePrincipalRequestV1{Name: pos[0]}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("cli: rename: %w", err)
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	who, err := client.WhoAmI(ctx)
+	if err != nil {
+		return err
+	}
+	p, err := client.RenamePrincipal(ctx, who.ID, req.Name)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(stdout).Encode(schema.RenamePrincipalResponseV1{Principal: p})
+	}
+	_, err = fmt.Fprintf(stdout, "renamed principal %d to %s\n", p.ID, safeLine(p.Name))
 	return err
 }
 

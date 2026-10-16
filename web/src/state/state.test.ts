@@ -35,6 +35,8 @@ describe('authReducer', () => {
     { name: 'signed out in another tab', from: { phase: 'signedIn', principal: member }, action: { type: 'signOut', notice: 'elsewhere' }, to: { phase: 'signedOut', notice: 'elsewhere' } },
     { name: '401 mid-session', from: { phase: 'signedIn', principal: member }, action: { type: 'unauthorized' }, to: { phase: 'signedOut', notice: 'expired' } },
     { name: '401 when already signed out changes nothing', from: { phase: 'signedOut', notice: null }, action: { type: 'unauthorized' }, to: { phase: 'signedOut', notice: null } },
+    { name: 'a rename changes the name only', from: { phase: 'signedIn', principal: member }, action: { type: 'renamed', name: 'Ada L' }, to: { phase: 'signedIn', principal: { ...member, name: 'Ada L' } } },
+    { name: 'a rename when signed out is ignored', from: { phase: 'signedOut', notice: null }, action: { type: 'renamed', name: 'Ada L' }, to: { phase: 'signedOut', notice: null } },
   ];
   it.each(cases)('$name', ({ from, action, to }) => {
     expect(authReducer(from, action)).toEqual(to);

@@ -78,6 +78,7 @@ var adminCommands = []adminCommand{
 		run:  adminPrincipalCreate},
 	{group: "principal", verb: "disable", args: []string{"id"}, idAt: 1, run: adminPrincipalDisable},
 	{group: "principal", verb: "enable", args: []string{"id"}, idAt: 1, run: adminPrincipalEnable},
+	{group: "principal", verb: "rename", args: []string{"id", "name"}, idAt: 1, run: adminPrincipalRename},
 	{group: "credential", verb: "issue", args: []string{"principal-id"}, idAt: 1, flags: "--label <label> [--expires-at <RFC3339> | --renew-days <N>] ", required: []string{"label"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.StringVar(&o.label, "label", "", "what the credential is for")
@@ -245,6 +246,23 @@ func adminPrincipalCreate(ctx context.Context, r *adminRun) error {
 	}
 	_, err = fmt.Fprintf(r.stdout, "created %s %s (id %d)\n", safeLine(string(p.Kind)), safeLine(p.Name), p.ID)
 	return err
+}
+
+// adminPrincipalRename renames any principal (issue #441). The name is checked
+// as the server checks it first, so a name it would refuse costs no request.
+func adminPrincipalRename(ctx context.Context, r *adminRun) error {
+	req := schema.RenamePrincipalRequestV1{Name: r.pos[1]}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("cli: admin principal rename: %w", err)
+	}
+	p, err := r.client.RenamePrincipal(ctx, r.id, req.Name)
+	if err != nil {
+		return err
+	}
+	if r.opts.asJSON {
+		return r.printJSON(schema.RenamePrincipalResponseV1{Principal: p})
+	}
+	return r.say("renamed principal %d to %s\n", p.ID, safeLine(p.Name))
 }
 
 // The commands that answer 204 have no response document, so --json prints

@@ -26,6 +26,9 @@ func (s *Server) routeTable() []route {
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
 		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
+		// Renaming (issue #441): operators rename anyone, a person themselves
+		// (checked in the handler).
+		rt("PUT /v1/principals/{id}/name", accessOperatorOrSelf, hf(s.handleRenamePrincipal)),
 		rt("POST /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessage)),
 		rt("GET /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessages)),
 		rt("POST /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV1)),

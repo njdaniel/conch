@@ -23,6 +23,7 @@ export function Lobby({
   conversation,
   panel,
   voice,
+  account,
   onOpen,
   onRetry,
   onSignOut,
@@ -38,6 +39,9 @@ export function Lobby({
   readonly panel: ReactNode;
   // The voice section: kept by the caller, which owns the voice client.
   readonly voice: ReactNode;
+  // The caller's own account: changing their name (issue #441). There is no
+  // settings page yet, so it sits in the header.
+  readonly account?: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -52,6 +56,7 @@ export function Lobby({
     <div className="lobby">
       <header>
         <h1>Conch</h1>
+        {account}
         <div className="signout">
           <button type="button" onClick={onSignOut} aria-describedby="signout-note">
             Sign out

@@ -53,8 +53,9 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // the only code path that creates an operator.
 //
 // Everything happens in one write transaction. If any operator exists it
-// returns ErrOperatorExists, and if name is taken (by a member) it returns
-// ErrDuplicate; in both cases nothing is written, including no revocations.
+// returns ErrOperatorExists, and if name is taken (by a member), or clashes
+// with a member's by case or look-alike characters, it returns ErrDuplicate;
+// in both cases nothing is written, including no revocations.
 //
 // Unless opts.KeepExistingCredentials is set, every live credential (not
 // revoked, not expired) is revoked first, because until an operator exists the
@@ -86,9 +87,13 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("store: bootstrap operator: check operators: %w", err)
 		}
+		keys, err := claimNameTx(ctx, tx, name, 0)
+		if err != nil {
+			return fmt.Errorf("store: bootstrap operator: %w", err)
+		}
 		ins, err := tx.ExecContext(ctx,
-			"INSERT INTO principals (kind, name, role, created_at) VALUES ('human', ?, 'operator', ?)",
-			name, now.UnixMilli())
+			"INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', ?, ?, ?, 'operator', ?)",
+			name, keys.Folded, keys.Skeletal, now.UnixMilli())
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: bootstrap operator %q: %w", name, ErrDuplicate)
 		}

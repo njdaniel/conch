@@ -595,10 +595,16 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		// again here, against the maker as they are now, so the rule does not
 		// rest on what an invite row says.
 		mayInvite := r.mayInvite && r.creatorRole == RoleOperator
+		// A name that clashes with another by case or look-alike
+		// characters is taken (issue #441).
+		keys, err := claimNameTx(ctx, tx, name, 0)
+		if err != nil {
+			return fmt.Errorf("store: redeem invite: %w", err)
+		}
 		res, err = tx.ExecContext(ctx,
-			`INSERT INTO principals (kind, name, role, created_at, invited_by, invite_id, may_invite, voice_allowed)
-			 VALUES ('human', ?, 'member', ?, ?, ?, ?, ?)`,
-			name, now.UnixMilli(), r.createdBy, r.id, boolInt(mayInvite), boolInt(voice))
+			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, invited_by, invite_id, may_invite, voice_allowed)
+			 VALUES ('human', ?, ?, ?, 'member', ?, ?, ?, ?, ?)`,
+			name, keys.Folded, keys.Skeletal, now.UnixMilli(), r.createdBy, r.id, boolInt(mayInvite), boolInt(voice))
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: redeem invite: create principal %q: %w", name, ErrDuplicate)
 		}

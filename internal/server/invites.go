@@ -319,7 +319,9 @@ func (s *Server) handleRedeemInvite(w http.ResponseWriter, r *http.Request) {
 		// The store found the name taken only after the code proved good, and
 		// rolled back: the invite is not used up.
 		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, "that name is taken; choose another")
-	case errors.Is(err, store.ErrInviteRequestInvalid):
+	case errors.Is(err, store.ErrInviteRequestInvalid), errors.Is(err, store.ErrNameInvalid):
+		// ErrNameInvalid: a name of nothing a reader can see (issue #441),
+		// found, like a taken one, after the code proved good.
 		writeError(w, http.StatusBadRequest, "invalid_request", "the name is not acceptable")
 	case err != nil:
 		// The store's errors carry no code, hash or token; the only one that

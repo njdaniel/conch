@@ -49,3 +49,25 @@ func (r CreatePrincipalRequest) Validate() error {
 type CreatePrincipalResponse struct {
 	Principal PrincipalV0 `json:"principal"`
 }
+
+// RenamePrincipalRequestV1 is the body of PUT /v1/principals/{id}/name: the
+// principal's new name (issue #441).
+type RenamePrincipalRequestV1 struct {
+	Name string `json:"name"`
+}
+
+// Validate reports whether the new name is acceptable: the rule a name meets
+// on creation. That it does not clash with another principal's name is the
+// server's to decide.
+func (r RenamePrincipalRequestV1) Validate() error {
+	if strings.TrimSpace(r.Name) == "" {
+		return errors.New("schema: principal name must not be empty")
+	}
+	return ValidateDisplayName("principal name", r.Name, MaxPrincipalNameLength)
+}
+
+// RenamePrincipalResponseV1 is the response to a rename: the principal as it
+// now is.
+type RenamePrincipalResponseV1 struct {
+	Principal PrincipalV0 `json:"principal"`
+}
