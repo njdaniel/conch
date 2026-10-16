@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { Page } from '@playwright/test';
 import { channelButton, expect, signIn, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
+import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
@@ -90,15 +90,53 @@ test.describe('with LiveKit', () => {
   async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob') {
     const context = await browser.newContext();
     const page = await context.newPage();
-    const csp: string[] = [];
-    page.on('console', (m) => {
-      if (/Content Security Policy|Refused to/.test(m.text())) csp.push(m.text());
-    });
+    const watch = watchPage(page, vw);
     await page.addInitScript(countBytes);
     const m = vw[who];
     await signIn(page, vw, m.token, m.name);
     await channelButton(page, vw.channel).click();
-    return { context, page, csp };
+    return { context, page, watch, member: m };
+  }
+
+  // No secret of the world, and no join token or room name the page was given,
+  // in anything the page said or kept: its console, its DOM and address, its
+  // storage and cookies, and (unless timing is false) its resource timing
+  // entries. And no policy violation in the console.
+  //
+  // The one secret a page keeps by design is its own credential, in
+  // sessionStorage under conch.web.token (A7): it must be exactly the signed-in
+  // member's, and the rest of storage is checked without it.
+  //
+  // timing is false after LiveKit was down: on a failed connection the SDK
+  // puts the join token in its /rtc/validate request, which the page's
+  // resource timing records (README, "Voice in the browser").
+  async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }, timing = true): Promise<void> {
+    await p.watch.settled();
+    const { kept, credential } = await p.page.evaluate((withTiming) => {
+      const session: Record<string, string | null> = {};
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key !== null && key !== 'conch.web.token') session[key] = sessionStorage.getItem(key);
+      }
+      return {
+        credential: sessionStorage.getItem('conch.web.token'),
+        kept: [
+          document.documentElement.outerHTML,
+          location.href,
+          JSON.stringify(session),
+          JSON.stringify(localStorage),
+          document.cookie,
+          withTiming ? JSON.stringify(performance.getEntries().map((e) => e.name)) : '',
+        ].join('\n'),
+      };
+    }, timing);
+    expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
+    const said = p.watch.console.join('\n');
+    for (const s of vw.secrets) {
+      expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);
+      expect(said, 'a secret in the console').not.toContain(s);
+    }
+    expect(p.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
   }
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
@@ -132,16 +170,17 @@ test.describe('with LiveKit', () => {
       await expect
         .poll(async () => (await vw.audit()).filter((e) => e.actor === `principal:${String(vw.alice.id)}` && e.action.startsWith('voice_transmit')).map((e) => e.action), { timeout: 15_000 })
         .toEqual(['voice_transmit_started', 'voice_transmit_stopped']);
+      // Every join token and room name the pages were given is a secret from here.
+      for (const p of [a, b]) await p.watch.settled();
+      expect(vw.sessionSecrets(), 'join tokens and room names captured from the session answers').toBeGreaterThanOrEqual(3);
       const trail = await vw.audit();
       expect(trail.filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
       for (const e of trail) for (const s of vw.secrets) expect(`${e.actor} ${e.subject} ${e.detail}`).not.toContain(s);
 
-      // No policy violation, and nothing secret on the page or in its addresses.
-      expect(a.csp.concat(b.csp)).toEqual([]);
-      for (const p of [a, b]) {
-        const html = await p.page.evaluate(() => document.documentElement.outerHTML + JSON.stringify(performance.getEntries().map((e) => e.name)) + location.href);
-        for (const s of vw.secrets) expect(html).not.toContain(s);
-      }
+      // No policy violation, and nothing secret on the page, in its console,
+      // its addresses, its storage or its cookies; each page's join token and
+      // room name included.
+      for (const p of [a, b]) await expectClean(p);
     } finally {
       await a.context.close();
       await b.context.close();
@@ -190,6 +229,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Not transmitting', { timeout: 5000 });
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await expectClean(a);
     } finally {
       await a.context.close();
     }
@@ -204,6 +244,7 @@ test.describe('with LiveKit', () => {
       await vw.removeFromChannel(vw.bob);
       await expect(voice).toContainText('Voice stopped', { timeout: 60_000 });
       await expect(voice).toContainText('not a member');
+      await expectClean(b);
     } finally {
       await b.context.close();
     }
@@ -219,6 +260,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).not.toContainText('Connected in', { timeout: 60_000 });
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
+      await expectClean(a, false);
     } finally {
       await a.context.close();
     }

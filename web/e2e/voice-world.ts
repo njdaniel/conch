@@ -11,6 +11,7 @@ import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } fr
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Page } from '@playwright/test';
 import { repoRoot, safePath, type World } from './world';
 
 // The same image, by version and digest, as e2e/voice/harness.go.
@@ -59,8 +60,13 @@ export interface VoiceWorld {
   readonly channel: string;
   readonly alice: Member;
   readonly bob: Member;
-  // Every secret of this world, for the check that none shows on a page.
+  // Every secret of this world, for the check that none shows on a page: the
+  // credentials and the LiveKit secret, and every join token and room name a
+  // page was given (added by watchPage as the sessions are answered).
   readonly secrets: readonly string[];
+  // How many join tokens and room names watchPage has added.
+  readonly sessionSecrets: () => number;
+  addSecret: (value: string) => void;
   api: (token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) => Promise<{ status: number; text: string }>;
   // The audit trail as the operator exports it: one line per event.
   audit: () => Promise<{ actor: string; action: string; subject: string; detail: string }[]>;
@@ -166,6 +172,8 @@ room:
     };
     const alice = await member('alice');
     const bob = await member('bob');
+    const secrets = [operator, alice.token, bob.token, secret];
+    let fromSessions = 0;
 
     return {
       origin,
@@ -174,7 +182,13 @@ room:
       channel,
       alice,
       bob,
-      secrets: [operator, alice.token, bob.token, secret],
+      secrets,
+      sessionSecrets: () => fromSessions,
+      addSecret: (value) => {
+        if (value === '' || secrets.includes(value)) return;
+        secrets.push(value);
+        fromSessions++;
+      },
       api,
       audit: async () => {
         const r = await api(operator, 'GET', '/v1/audit');
@@ -201,4 +215,49 @@ room:
     stop();
     throw err;
   }
+}
+
+// What a page said and was given, for the checks that no secret shows.
+export interface Watch {
+  // Every console message and uncaught error of the page, in order.
+  readonly console: readonly string[];
+  // Resolves once every voice session answer seen so far has been read and
+  // its join tokens and room names added to the world's secrets.
+  settled: () => Promise<void>;
+}
+
+// watchPage records everything page writes to its console, and adds the join
+// token and room name of every voice session conchd answers it with to vw's
+// secrets. Call it before the page loads.
+export function watchPage(page: Page, vw: VoiceWorld): Watch {
+  const lines: string[] = [];
+  const reads: Promise<void>[] = [];
+  page.on('console', (m) => {
+    lines.push(`${m.type()}: ${m.text()}`);
+  });
+  page.on('pageerror', (err) => {
+    lines.push(`pageerror: ${err.message}`);
+  });
+  page.on('response', (res) => {
+    if (!new URL(res.url()).pathname.endsWith('/voice/session')) return;
+    reads.push(
+      res.json().then(
+        (body: unknown) => {
+          const rooms = (body as { rooms?: unknown }).rooms;
+          if (!Array.isArray(rooms)) return;
+          for (const g of rooms as { token?: unknown; room?: unknown }[]) {
+            if (typeof g.token === 'string') vw.addSecret(g.token);
+            if (typeof g.room === 'string') vw.addSecret(g.room);
+          }
+        },
+        () => undefined,
+      ),
+    );
+  });
+  return {
+    console: lines,
+    settled: async () => {
+      await Promise.all(reads);
+    },
+  };
 }

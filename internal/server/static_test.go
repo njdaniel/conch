@@ -632,6 +632,14 @@ func TestStaticCSPWithVoice(t *testing.T) {
 		{"a path is not part of the origin", "wss://lk.example.net/rtc?x=1", " wss://lk.example.net https://lk.example.net"},
 		{"an unusable scheme adds nothing", "http://lk.example.net", ""},
 		{"an unparseable url adds nothing", "wss://[bad", ""},
+		{"a valid host and port", "wss://lk-1.example.net:443", " wss://lk-1.example.net:443 https://lk-1.example.net:443"},
+		{"an IPv4 address", "ws://127.0.0.1:7880", " ws://127.0.0.1:7880 http://127.0.0.1:7880"},
+		{"a wildcard host adds nothing", "wss://*.example.net", ""},
+		{"a wildcard alone adds nothing", "wss://*", ""},
+		{"a semicolon in the host adds nothing", "wss://lk.example.net;script-src", ""},
+		{"a semicolon that would start a directive adds nothing", "wss://a;script-src", ""},
+		{"an IPv6 literal adds nothing", "wss://[::1]:7880", ""},
+		{"an empty host name adds nothing", "wss://:7880", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

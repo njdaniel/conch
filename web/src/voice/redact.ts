@@ -9,21 +9,32 @@ export const placeholder = '[redacted]';
 const signedToken = /eyJ[\w-]+\.[\w-]+\.[\w-]*/g;
 
 export class Redactor {
-  private secrets: string[] = [];
+  // The values to hide, by the connection that registered them. Each
+  // connection releases only its own, so a late release by an old connection
+  // cannot unhide a new one's.
+  private readonly held = new Map<object, readonly string[]>();
 
-  // hold registers values to hide; a value shorter than 4 characters is not
+  // hold registers values to hide for owner, adding to what owner and every
+  // other owner already hold. A value shorter than 4 characters is not
   // registered, since replacing it would mangle ordinary text.
-  hold(...values: string[]): void {
-    this.secrets = values.filter((v) => v.length >= 4);
+  hold(owner: object, ...values: string[]): void {
+    const mine = this.held.get(owner) ?? [];
+    this.held.set(owner, [...mine, ...values.filter((v) => v.length >= 4)]);
   }
 
-  clear(): void {
-    this.secrets = [];
+  // release forgets the values owner registered, and no one else's.
+  release(owner: object): void {
+    this.held.delete(owner);
+  }
+
+  // The longest first, so a value that contains another is hidden whole.
+  private secrets(): string[] {
+    return [...new Set([...this.held.values()].flat())].sort((a, b) => b.length - a.length);
   }
 
   text(input: string): string {
     let out = input.replace(signedToken, placeholder);
-    for (const s of this.secrets) out = out.split(s).join(placeholder);
+    for (const s of this.secrets()) out = out.split(s).join(placeholder);
     return out;
   }
 

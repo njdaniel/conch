@@ -61,23 +61,22 @@ describe('rendering hygiene', () => {
   });
 });
 
-// Browser voice (#442): the microphone is reached only from src/voice/, and the
-// LiveKit SDK is imported only there. Everywhere else the page asks for no
-// device, as before (#395).
+// Browser voice (#442): the LiveKit SDK is imported only from src/voice/sdk.ts,
+// and it alone reaches for the microphone. No source of ours calls a device
+// API, not even under src/voice/, so the ban of #395 stays as it was, for
+// every file.
 const deviceApi = /getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/;
 const notVoice = (path: string) => !path.startsWith('./voice/');
 
-describe('media devices', () => {
-  it('are reached for only under src/voice/', () => {
-    const hits = Object.entries(sources)
-      .filter(([path, code]) => notVoice(path) && deviceApi.test(code))
-      .map(([path]) => path);
-    expect(hits).toEqual([]);
-  });
+// Where the join token of a voice grant may be read: a property read
+// (grant.token, x.token), an index into rooms, or a destructuring that names
+// token (const { token } = grant; const { token: t } = grant).
+const tokenRead = /\.token\b|rooms\[|\{[^{}]*\btoken\b[^{}]*\}\s*=[^=>]/;
 
-  it('are never used for the screen: no getDisplayMedia anywhere in the sources (A11b)', () => {
+describe('media devices', () => {
+  it('are never reached for by our code: no getUserMedia, no navigator.mediaDevices, anywhere', () => {
     const hits = Object.entries(sources)
-      .filter(([, code]) => /getDisplayMedia/.test(code))
+      .filter(([, code]) => deviceApi.test(code))
       .map(([path]) => path);
     expect(hits).toEqual([]);
   });
@@ -91,16 +90,33 @@ describe('media devices', () => {
 
   it('the join token is in src/api.ts and src/voice/ only, and never logged', () => {
     const touching = Object.entries(sources)
-      .filter(([, code]) => /\.token\b|grant\.token|rooms\[/.test(code))
+      .filter(([, code]) => tokenRead.test(code))
       .map(([path]) => path)
       .filter((path) => path !== './api.ts' && notVoice(path));
     expect(touching).toEqual([]);
   });
 
-  it('are not mentioned by a pattern the rule would miss: a bare test of the rule', () => {
-    // Still forbidden outside src/voice/: each of these would be caught.
+  it('are not mentioned by a pattern the rule would miss: a bare test of each rule', () => {
+    // Still forbidden in every file, src/voice/ included.
     for (const example of ['navigator.mediaDevices.getUserMedia({audio:true})', 'x.enumerateDevices()', 'getDisplayMedia()']) {
       expect(deviceApi.test(example)).toBe(true);
+    }
+    // Ways to read the token outside src/api.ts and src/voice/, each caught.
+    for (const example of [
+      'const t = grant.token;',
+      'send(session.rooms[0])',
+      'const { token } = grant;',
+      'const { room, token } = grant;',
+      'const { token: t } = grant;',
+      'let { token } = rooms;',
+      '({ token } = grant);',
+      'const {\n  token,\n} = grant;',
+    ]) {
+      expect(tokenRead.test(example), example).toBe(true);
+    }
+    // Not reads of a token: a type with a token field, an arrow taking one.
+    for (const example of ['type T = { token: string };', 'const f = ({ token }: T) => token.length']) {
+      expect(tokenRead.test(example), example).toBe(false);
     }
     expect(notVoice('./Composer.tsx')).toBe(true);
     expect(notVoice('./voice/sdk.ts')).toBe(false);
@@ -131,9 +147,12 @@ describe('the built bundle', () => {
     // not ours until A11b: the token is microphone-only, so the SDK's screen
     // share could not publish anyway; its mentions are listed so a new one shows.
     expect(screenMentions(code)).toBeLessThanOrEqual(maxScreenMentions);
-    // localStorage: only the SDK's logger (loglevel) mentions it, to remember
-    // a log level; the client persists nothing (setLevel is called with
-    // persist=false) and never touches it itself.
+    // localStorage: only the SDK's logger (loglevel) mentions it. loglevel
+    // reads localStorage and cookies when a logger is created, for a level
+    // remembered there, and writes them only when a level is set with persist
+    // on; the client never does (setLevel is called with persist=false and the
+    // SDK's setLogLevel, which persists, is never called; sdk.storage.test.ts),
+    // and never touches either itself.
     for (const at of allIndexes(code, 'localStorage')) {
       expect(code.slice(Math.max(0, at - 600), at + 600)).toMatch(/loglevel|storageKey/);
     }

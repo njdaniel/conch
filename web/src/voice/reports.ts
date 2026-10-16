@@ -5,6 +5,9 @@
 // A failed report is retried briefly in place. When it is given up on, the
 // owner drops the connection, so a request cannot be delivered late. 409
 // (no_session) is not retried: the owner goes back to conchd. 429 is shown.
+// An attempt that has no answer after reportTimeout is aborted and counts as
+// failed, so a report that never answers is retried and then given up on, and
+// the queue is never stuck behind it.
 import type { TransmitAnswer } from '../api';
 import type { Clock } from '../state/feed';
 import type { VoiceTransmitState } from '../schema/voice';
@@ -21,6 +24,9 @@ export interface ReportQueueOptions {
 
 export const defaultRetryDelays: readonly number[] = [250, 750];
 
+// How long one attempt may take, on the injected clock.
+export const reportTimeout = 4000;
+
 export class ReportQueue {
   private readonly options: ReportQueueOptions;
   private queue: VoiceTransmitState[] = [];
@@ -28,6 +34,7 @@ export class ReportQueue {
   private generation = 0;
   private controller: AbortController | null = null;
   private timer: unknown = null;
+  private deadline: unknown = null;
   private waiters: (() => void)[] = [];
 
   constructor(options: ReportQueueOptions) {
@@ -46,6 +53,8 @@ export class ReportQueue {
     this.busy = false;
     if (this.timer !== null) this.options.clock.clearTimeout(this.timer);
     this.timer = null;
+    if (this.deadline !== null) this.options.clock.clearTimeout(this.deadline);
+    this.deadline = null;
     this.controller?.abort();
     this.controller = null;
     this.release();
@@ -80,6 +89,30 @@ export class ReportQueue {
     });
   }
 
+  // attempt sends once. It answers 'failed' if the send has not answered
+  // within reportTimeout, aborting the request, or if the send throws.
+  private attempt(state: VoiceTransmitState, controller: AbortController): Promise<TransmitAnswer> {
+    const clock = this.options.clock;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (answer: TransmitAnswer) => {
+        if (settled) return;
+        settled = true;
+        if (this.deadline === handle) this.deadline = null;
+        clock.clearTimeout(handle);
+        resolve(answer);
+      };
+      const handle = clock.setTimeout(() => {
+        controller.abort();
+        finish('failed');
+      }, reportTimeout);
+      this.deadline = handle;
+      this.options.send(state, controller.signal).then(finish, () => {
+        finish('failed');
+      });
+    });
+  }
+
   private async pump(): Promise<void> {
     const mine = this.generation;
     this.busy = true;
@@ -91,7 +124,7 @@ export class ReportQueue {
       for (let attempt = 0; attempt <= delays.length; attempt++) {
         const controller = new AbortController();
         this.controller = controller;
-        answer = await this.options.send(state, controller.signal);
+        answer = await this.attempt(state, controller);
         if (mine !== this.generation) return;
         if (answer !== 'failed') break;
         const delay = delays[attempt];

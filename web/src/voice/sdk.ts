@@ -6,7 +6,12 @@
 // conch-voice.md section 3 does: the SDK enables a track when it publishes it,
 // and again when it republishes after a long interruption, so the track is
 // muted after each unless the gate is open. The client counts as connected only
-// after that mute.
+// after that mute. A remote unmute (LiveKit's room API can ask for one) is
+// undone the same way while the gate is shut.
+//
+// Leave can come at any point of a connection. Once the adapter is closed,
+// every step that resumes after an await stops, and a microphone captured or
+// published after the close is stopped, so nothing keeps the device open.
 import {
   DisconnectReason,
   LocalAudioTrack,
@@ -17,10 +22,10 @@ import {
   Track,
   createLocalAudioTrack,
   getLogger,
-  setLogLevel,
   type LocalTrackPublication,
   type Participant,
   type RemoteTrack,
+  type TrackPublication,
 } from 'livekit-client';
 import type { DisconnectCause } from './disconnect';
 import type { Room, RoomEvents } from './connection';
@@ -33,7 +38,12 @@ export const sdkLog = new LogRing(redactor);
 let logging = false;
 
 // quietSdk sets every SDK logger to warn and sends its records, redacted, to
-// the ring instead of the browser log. The level is not persisted.
+// the ring instead of the browser log. It runs when this module loads, so the
+// SDK says nothing to the console before the first connection either.
+//
+// The level is not persisted: setLevel is called with persist=false, and the
+// SDK's setLogLevel is not called at all, since it persists the level through
+// loglevel to localStorage, or to a cookie where that is unavailable.
 export function quietSdk(): void {
   if (logging) return;
   logging = true;
@@ -45,7 +55,15 @@ export function quietSdk(): void {
     };
     logger.setLevel(LogLevel.warn, false);
   }
-  setLogLevel(LogLevel.warn);
+}
+
+quietSdk();
+
+// Thrown by a connection step that resumes after the adapter was closed.
+class ClosedError extends Error {
+  constructor() {
+    super('voice connection closed');
+  }
 }
 
 function causeOf(reason: DisconnectReason | undefined): DisconnectCause {
@@ -71,6 +89,9 @@ export function principalOf(identity: string): number | null {
 
 class LiveKitAdapter implements Room {
   private readonly room = new LiveKitRoom({ adaptiveStream: false, dynacast: false });
+  // Set by close(); every step after an await checks it.
+  private closed = false;
+  private track: LocalAudioTrack | null = null;
   private publication: LocalTrackPublication | null = null;
   private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack } | null = null;
   private wantSending = false;
@@ -79,8 +100,10 @@ class LiveKitAdapter implements Room {
   private readonly buffer = new Uint8Array(1024);
 
   async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents): Promise<void> {
-    quietSdk();
-    redactor.hold(token, roomName);
+    this.ensureOpen();
+    // Held for this adapter alone: its close() releases these and no other
+    // connection's.
+    redactor.hold(this, token, roomName);
     const room = this.room;
     room
       .on(RoomEvent.Reconnecting, events.onReconnecting)
@@ -95,7 +118,8 @@ class LiveKitAdapter implements Room {
         events.onSpeakers(ids);
       })
       .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-        if (track.kind !== Track.Kind.Audio) return;
+        // Nothing is played, or left in the page, after a close.
+        if (track.kind !== Track.Kind.Audio || this.closed) return;
         const el = track.attach();
         el.muted = this.deafened;
         this.elements.set(track.sid ?? '', el);
@@ -107,20 +131,46 @@ class LiveKitAdapter implements Room {
       })
       .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
         // Published again by the SDK after a full reconnect: muted again.
-        if (pub.source === Track.Source.Microphone && !this.wantSending) void pub.mute();
+        if (pub.source === Track.Source.Microphone && !this.wantSending) void pub.mute().catch(() => undefined);
+      })
+      .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
+        // Unmuted by someone else (the room API) while the gate is shut: muted
+        // again. An unmute of our own comes with the gate open.
+        if (participant !== room.localParticipant || pub.source !== Track.Source.Microphone || this.wantSending) return;
+        void (pub as LocalTrackPublication).mute().catch(() => undefined);
       });
     await room.connect(url, token, { autoSubscribe: true });
+    this.ensureOpen();
     if (!publish) return;
     const track = await createLocalAudioTrack({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
-    this.publication = await room.localParticipant.publishTrack(track, { source: Track.Source.Microphone });
-    await this.publication.mute();
+    // From here the microphone is open: any failure, or a close that came
+    // while a step was pending, stops it before the error goes on.
+    try {
+      this.ensureOpen();
+      this.track = track;
+      const publication = await room.localParticipant.publishTrack(track, { source: Track.Source.Microphone });
+      this.ensureOpen();
+      this.publication = publication;
+      await publication.mute();
+      this.ensureOpen();
+    } catch (err) {
+      this.track = null;
+      this.publication = null;
+      track.stop();
+      throw err;
+    }
     this.listen(track);
+  }
+
+  private ensureOpen(): void {
+    if (this.closed) throw new ClosedError();
   }
 
   // listen taps a clone of the microphone for the level meter and the voice
   // detection: the published track is muted while the gate is shut, and a
   // muted track carries silence.
   private listen(track: LocalAudioTrack): void {
+    if (this.closed) return;
     const clone = track.mediaStreamTrack.clone();
     // A clone copies the track's enabled flag, and the track was muted just
     // before this: the tap must hear the room whatever the published track does.
@@ -162,6 +212,8 @@ class LiveKitAdapter implements Room {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     this.wantSending = false;
     for (const el of this.elements.values()) el.remove();
     this.elements.clear();
@@ -171,8 +223,17 @@ class LiveKitAdapter implements Room {
       tap.clone.stop();
       await tap.context.close().catch(() => undefined);
     }
-    await this.room.disconnect(true);
-    redactor.clear();
+    const track = this.track;
+    this.track = null;
+    this.publication = null;
+    // disconnect(true) stops published tracks; this one may not have been
+    // published yet.
+    track?.stop();
+    try {
+      await this.room.disconnect(true);
+    } finally {
+      redactor.release(this);
+    }
   }
 }
 

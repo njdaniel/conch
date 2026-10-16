@@ -149,6 +149,9 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
     window.addEventListener('pagehide', away);
     document.addEventListener('visibilitychange', hidden);
     return () => {
+      // A key held while the key, capture or sign-in changes would never see
+      // its keyup here: let go of it.
+      client.release();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', away);

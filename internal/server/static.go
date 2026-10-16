@@ -11,6 +11,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/njdaniel/conch/internal/server/livekit"
 )
 
 // webCSP is the Content-Security-Policy of every /app/ response. The page and
@@ -28,7 +30,8 @@ const webPermissionsPolicy = "microphone=(self), camera=(), display-capture=()"
 // configured (an empty or unusable URL) it is webCSP unchanged. Otherwise
 // connect-src also names the LiveKit origin, as ws(s):// for the signalling
 // socket and http(s):// for the requests the SDK makes to the same host when a
-// connection fails. Only the origin is named, never a path.
+// connection fails. Only the origin is named, never a path. An address whose
+// host or port livekit.CheckCSPHost refuses adds nothing.
 func webCSPFor(livekitURL string) string {
 	if livekitURL == "" {
 		return webCSP
@@ -36,6 +39,16 @@ func webCSPFor(livekitURL string) string {
 	u, err := url.Parse(livekitURL)
 	if err != nil || u.Host == "" {
 		return webCSP
+	}
+	// ParseConfig has refused such an address at startup; should one reach
+	// here anyway, the page gets the plain policy rather than whatever the
+	// address would write into it.
+	if livekit.CheckCSPHost(u) != nil {
+		return webCSP
+	}
+	host := u.Hostname()
+	if port := u.Port(); port != "" {
+		host += ":" + port
 	}
 	var httpScheme string
 	switch u.Scheme {
@@ -46,7 +59,7 @@ func webCSPFor(livekitURL string) string {
 	default:
 		return webCSP
 	}
-	extra := u.Scheme + "://" + u.Host + " " + httpScheme + "://" + u.Host
+	extra := u.Scheme + "://" + host + " " + httpScheme + "://" + host
 	return strings.Replace(webCSP, "connect-src 'self';", "connect-src 'self' "+extra+";", 1)
 }
 

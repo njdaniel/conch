@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TransmitAnswer } from '../api';
 import { FakeClock, settle } from './fakes';
-import { ReportQueue, type ReportEvent } from './reports';
+import { ReportQueue, reportTimeout, type ReportEvent } from './reports';
 
 function setup(answers: TransmitAnswer[]) {
   const clock = new FakeClock();
@@ -97,5 +97,76 @@ describe('reports', () => {
     });
     await settle();
     expect(done).toBe(true);
+  });
+
+  it('a report that never answers is aborted after the time limit, retried, given up on, and the queue moves on', async () => {
+    const clock = new FakeClock();
+    const events: ReportEvent[] = [];
+    const sent: string[] = [];
+    const signals: AbortSignal[] = [];
+    let answering = false;
+    const queue = new ReportQueue({
+      clock,
+      onEvent: (e) => events.push(e),
+      send: (state, signal) => {
+        sent.push(state);
+        signals.push(signal);
+        // Never answers, and ignores the signal, until answering is set.
+        return answering ? Promise.resolve('ok') : new Promise<TransmitAnswer>(() => undefined);
+      },
+    });
+    queue.push('started');
+    queue.push('stopped');
+    await settle();
+    expect(sent).toEqual(['started']);
+    clock.advance(reportTimeout - 1);
+    await settle();
+    expect(signals[0]?.aborted).toBe(false);
+    clock.advance(1);
+    await settle();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(events).toEqual(['retrying']);
+    clock.advance(250);
+    await settle();
+    expect(sent).toEqual(['started', 'started']);
+    clock.advance(reportTimeout);
+    await settle();
+    clock.advance(750);
+    await settle();
+    expect(sent).toEqual(['started', 'started', 'started']);
+    clock.advance(reportTimeout);
+    await settle();
+    expect(signals.every((s) => s.aborted)).toBe(true);
+    expect(events).toEqual(['retrying', 'retrying', 'gave_up']);
+    // The unsent 'stopped' was dropped with the connection, and nothing waits
+    // on a timer any more.
+    expect(clock.pending).toBe(0);
+    // The queue is not stuck: the next report goes out.
+    answering = true;
+    queue.push('started');
+    await settle();
+    expect(sent).toEqual(['started', 'started', 'started', 'started']);
+    expect(events.at(-1)).toBe('ok');
+  });
+
+  it('a send that throws counts as failed and is retried', async () => {
+    const clock = new FakeClock();
+    const events: ReportEvent[] = [];
+    let calls = 0;
+    const queue = new ReportQueue({
+      clock,
+      onEvent: (e) => events.push(e),
+      send: () => {
+        calls++;
+        return calls === 1 ? Promise.reject(new Error('boom')) : Promise.resolve('ok');
+      },
+    });
+    queue.push('started');
+    await settle();
+    clock.advance(250);
+    await settle();
+    expect(calls).toBe(2);
+    expect(events).toEqual(['retrying', 'ok']);
+    expect(clock.pending).toBe(0);
   });
 });
