@@ -10,7 +10,7 @@ import { messageV2, type Audience, type MessageV2 } from '../schema/message';
 export const maxHeld = 2000;
 
 // The size of a page of history; see api.historyLimit.
-const pageSize = 100;
+export const pageSize = 100;
 
 // The state of one message this tab is sending. A message becomes `Sent` by
 // leaving this list: the server's copy is in `byId` and its id in `sentIds`.
