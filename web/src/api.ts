@@ -15,6 +15,7 @@ import { listNetsResponseV1, type NetV1 } from './schema/net';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import { whoAmIResponseV1, type WhoAmIResponseV1 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
+import { voicePresenceV1, voiceSessionResponseV1, type VoicePresenceV1, type VoiceSessionResponseV1, type VoiceTransmitReportV1, type VoiceTransmitState } from './schema/voice';
 import type { Validator } from './schema/validate';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 
@@ -120,7 +121,7 @@ type PostReply =
   | { readonly kind: 'none' }
   | { readonly kind: 'unauthorized' };
 
-async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false): Promise<PostReply> {
+async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
   const token = readToken();
   if (token === null) return { kind: 'unauthorized' };
   let res: Response;
@@ -136,6 +137,7 @@ async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?
       cache: 'no-store',
       credentials: 'omit',
       keepalive,
+      ...(signal === undefined ? {} : { signal }),
     });
   } catch {
     return { kind: 'none' };
@@ -487,4 +489,67 @@ export async function createIntervention(run: number, request: CreateInterventio
     // Fall through.
   }
   return { ok: false, failure: 'invalid' };
+}
+
+// Voice (issue #442). The join token in a session is handed to the caller and
+// kept nowhere here: not stored, not logged, not put in the DOM.
+
+// A refused session carries the status and the server's code, so the voice
+// client can tell "stop" from "try again" (conch-voice.md section 5).
+export type VoiceSessionResult =
+  | { readonly ok: true; readonly value: VoiceSessionResponseV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// createVoiceSession asks for the session that admits the caller to a
+// channel's voice room. It is asked for before every connection attempt.
+export async function createVoiceSession(channel: string): Promise<VoiceSessionResult> {
+  const reply = await authedPost(`${channelPath(channel)}/voice/session`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceSessionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// getVoicePresence reads who is in a channel's voice, once. The presence
+// socket takes over while the caller is in voice.
+export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
+  return authed(`${channelPath(channel)}/voice`, voicePresenceV1);
+}
+
+// How a transmit report was answered. no_session is "go back to conchd" (409
+// voice_no_session, or a refusal that says the caller is not entitled any
+// more); rate_limited is 429; failed is no answer or a 5xx, which may be
+// retried.
+export type TransmitAnswer = 'ok' | 'no_session' | 'rate_limited' | 'unauthorized' | 'failed';
+
+// reportVoiceTransmit sends one press or release. It never repeats itself; the
+// caller sends reports one at a time and decides about a retry. The signal
+// ends a request that has outlived its usefulness, so it cannot be delivered
+// late.
+export async function reportVoiceTransmit(channel: string, state: VoiceTransmitState, signal: AbortSignal): Promise<TransmitAnswer> {
+  const report: VoiceTransmitReportV1 = { state };
+  const reply = await authedSend('POST', `${channelPath(channel)}/voice/transmit`, report, false, signal);
+  if (reply.kind === 'none') return 'failed';
+  if (reply.kind === 'unauthorized') return 'unauthorized';
+  const status = reply.res.status;
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 429) return 'rate_limited';
+  if (status >= 500) return 'failed';
+  return 'no_session';
+}
+
+// openVoiceSocket opens the presence stream of a channel's voice with a ticket:
+// the roster, and who is transmitting.
+export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  return connect((ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
 }

@@ -27,3 +27,8 @@ BSD-2-Clause
 MIT-0
 BlueOak-1.0.0
 CC0-1.0
+
+# Proposed in the pull request for #442, for Nick's sign-off there.
+#   0BSD  tslib (a runtime dependency of livekit-client, so in the built page;
+#         a public-domain-equivalent licence, more permissive than MIT)
+0BSD

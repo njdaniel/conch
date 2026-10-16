@@ -28,6 +28,9 @@ import {
   runV1,
   sessionRosterV1,
   sessionV1,
+  voicePresenceV1,
+  voiceSessionResponseV1,
+  voiceTransmitReportV1,
   whoAmIResponseV1,
   wsTicketV1,
 } from './generated';
@@ -63,5 +66,8 @@ export const families: [string, Validator<unknown>][] = [
   ['read-state-v1', readStateV1],
   ['mark-read-request-v1', markReadRequestV1],
   ['list-read-state-response-v1', listReadStateResponseV1],
+  ['voice-session-response-v1', voiceSessionResponseV1],
+  ['voice-presence-v1', voicePresenceV1],
+  ['voice-transmit-report-v1', voiceTransmitReportV1],
   ['error', errorV0],
 ];

@@ -277,6 +277,35 @@ body {
   margin: 0;
 }
 
+.voice-controls,
+.voice-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.voice .talk {
+  min-height: 3rem;
+  min-width: 8rem;
+  touch-action: none;
+  user-select: none;
+}
+
+.voice .talk[aria-pressed='true'] {
+  outline: 3px solid #0a6;
+}
+
+.voice-roster {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+
+.voice-roster .speaking {
+  font-weight: bold;
+}
+
 .channel-list li {
   display: flex;
   align-items: center;

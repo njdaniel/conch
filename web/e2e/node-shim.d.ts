@@ -10,6 +10,8 @@ declare module 'node:fs' {
   export function rmSync(path: string, options: { recursive: boolean; force: boolean }): void;
   export function openSync(path: string, flags: 'a'): number;
   export function closeSync(fd: number): void;
+  export function mkdirSync(path: string, options: { recursive: boolean }): void;
+  export function writeFileSync(path: string, data: Uint8Array | string): void;
 }
 
 declare module 'node:os' {
@@ -33,6 +35,7 @@ declare module 'node:child_process' {
     cwd?: string;
     env?: Record<string, string | undefined>;
     stdio?: 'ignore' | ('ignore' | number)[];
+    timeout?: number;
     detached?: boolean;
   }
   export interface SpawnSyncResult {

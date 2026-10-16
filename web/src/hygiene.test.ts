@@ -1,5 +1,6 @@
 // Checks on the source and on the build, not on behaviour: where the credential
-// may be touched, and that the shipped bundle never reaches for localStorage.
+// may be touched, where the microphone and the SDK may be, and what the shipped
+// bundle may mention.
 import { build } from 'vite';
 import { describe, expect, it } from 'vitest';
 
@@ -60,13 +61,49 @@ describe('rendering hygiene', () => {
   });
 });
 
-// The browser has no voice (#395): no device permission is ever asked for.
+// Browser voice (#442): the microphone is reached only from src/voice/, and the
+// LiveKit SDK is imported only there. Everywhere else the page asks for no
+// device, as before (#395).
+const deviceApi = /getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/;
+const notVoice = (path: string) => !path.startsWith('./voice/');
+
 describe('media devices', () => {
-  it('are never reached for: no getUserMedia, no navigator.mediaDevices', () => {
+  it('are reached for only under src/voice/', () => {
     const hits = Object.entries(sources)
-      .filter(([, code]) => /getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/.test(code))
+      .filter(([path, code]) => notVoice(path) && deviceApi.test(code))
       .map(([path]) => path);
     expect(hits).toEqual([]);
+  });
+
+  it('are never used for the screen: no getDisplayMedia anywhere in the sources (A11b)', () => {
+    const hits = Object.entries(sources)
+      .filter(([, code]) => /getDisplayMedia/.test(code))
+      .map(([path]) => path);
+    expect(hits).toEqual([]);
+  });
+
+  it('the LiveKit SDK is imported only from src/voice/sdk.ts', () => {
+    const hits = Object.entries(sources)
+      .filter(([, code]) => /from\s+['"]livekit-client['"]/.test(code))
+      .map(([path]) => path);
+    expect(hits).toEqual(['./voice/sdk.ts']);
+  });
+
+  it('the join token is in src/api.ts and src/voice/ only, and never logged', () => {
+    const touching = Object.entries(sources)
+      .filter(([, code]) => /\.token\b|grant\.token|rooms\[/.test(code))
+      .map(([path]) => path)
+      .filter((path) => path !== './api.ts' && notVoice(path));
+    expect(touching).toEqual([]);
+  });
+
+  it('are not mentioned by a pattern the rule would miss: a bare test of the rule', () => {
+    // Still forbidden outside src/voice/: each of these would be caught.
+    for (const example of ['navigator.mediaDevices.getUserMedia({audio:true})', 'x.enumerateDevices()', 'getDisplayMedia()']) {
+      expect(deviceApi.test(example)).toBe(true);
+    }
+    expect(notVoice('./Composer.tsx')).toBe(true);
+    expect(notVoice('./voice/sdk.ts')).toBe(false);
   });
 });
 
@@ -85,13 +122,36 @@ describe('the socket ticket', () => {
 });
 
 describe('the built bundle', () => {
-  it('never mentions localStorage or a device API', async () => {
+  it('uses the screen and storage APIs only as the SDK does', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });
     const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
     const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
     expect(code.length).toBeGreaterThan(1000);
-    expect(code).not.toContain('localStorage');
-    // Covers dependencies and the minified output too (#395).
-    expect(code).not.toMatch(/getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/);
+    // The SDK reaches for the microphone (allowed since #442). The screen is
+    // not ours until A11b: the token is microphone-only, so the SDK's screen
+    // share could not publish anyway; its mentions are listed so a new one shows.
+    expect(screenMentions(code)).toBeLessThanOrEqual(maxScreenMentions);
+    // localStorage: only the SDK's logger (loglevel) mentions it, to remember
+    // a log level; the client persists nothing (setLevel is called with
+    // persist=false) and never touches it itself.
+    for (const at of allIndexes(code, 'localStorage')) {
+      expect(code.slice(Math.max(0, at - 600), at + 600)).toMatch(/loglevel|storageKey/);
+    }
   }, 60_000);
 });
+
+// How many times the SDK's own code names getDisplayMedia (its screen-share methods
+// are not tree-shaken away), measured on
+// the pinned version (livekit-client 2.22.3). A bump that adds one fails here
+// and is looked at.
+const maxScreenMentions = 6;
+
+function screenMentions(code: string): number {
+  return allIndexes(code, 'getDisplayMedia').length;
+}
+
+function allIndexes(code: string, needle: string): number[] {
+  const found: number[] = [];
+  for (let i = code.indexOf(needle); i !== -1; i = code.indexOf(needle, i + 1)) found.push(i);
+  return found;
+}

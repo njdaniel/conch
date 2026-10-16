@@ -892,9 +892,9 @@ bin/conch whoami --server https://conch.lan
 bin/conch tail --server https://conch.lan ops      # a wss:// stream; Ctrl-C to stop
 ```
 
-A browser opens `https://conch.lan/` and the page reaches `conchd` on `wss://conch.lan`, because it builds the socket address from `window.location` (`web/src/api.ts`) and its Content-Security-Policy allows `connect-src 'self'`.
+A browser opens `https://conch.lan/` and the page reaches `conchd` on `wss://conch.lan`, because it builds the socket address from `window.location` (`web/src/api.ts`) and its Content-Security-Policy allows `connect-src 'self'` (plus the LiveKit origin when voice is configured, see [Voice in the browser](#voice-in-the-browser)).
 
-**What this does not do yet.** A browser treats an `https://` page, or `http://localhost`, as a *secure context*; a plain `http://` page on a LAN address is not one. Text chat does not need a secure context, which is why `http://` on a LAN is enough for it. Capturing a microphone in the page (`getUserMedia`) will need one, so a browser voice client, if one is built, will need this proxy, or LiveKit's own TLS, in front of the page. There is no browser voice client today (voice is the `conch-voice` binary), so this is roadmap intent, not a feature. The same goes for LiveKit: this section covers `conchd` only. See [Run LiveKit beside `conchd`](#run-livekit-beside-conchd) for its signalling port.
+**Secure context.** A browser treats an `https://` page, or `http://localhost`, as a *secure context*; a plain `http://` page on a LAN address is not one. Text chat does not need a secure context, which is why `http://` on a LAN is enough for it. Capturing a microphone in the page does: the browser voice client (see [Voice in the browser](#voice-in-the-browser)) shows "Voice needs a secure page" and offers no join on a plain `http://` page, so put this proxy, or LiveKit's own TLS, in front of the page. Behind `https://`, LiveKit's signalling address must be `wss://` too: a page served over `https://` may not open a `ws://` socket. See [Run LiveKit beside `conchd`](#run-livekit-beside-conchd) for its signalling port.
 
 #### What was verified, and what was not
 
@@ -957,6 +957,29 @@ bin/conch voice status ops
 ```
 
 `alice.header` holds the line `Authorization: Bearer <alice's token>` (as in step 3, kept in a private file so the token is not in the process list). If you run `conch voice status` within a second or two of starting `conchd` and LiveKit together, it can say "voice is unavailable" until `conchd` has looked at LiveKit once; run it again. Joining is a client's job; until `conch-voice` exists, `go run ./e2e/voice` joins a headless participant. Stop LiveKit with `docker rm -f livekit` and the same two commands print `503` (the body says `voice_unavailable`) and "voice is unavailable", the second exiting nonzero. If a `go run ./e2e/voice` is killed before it can clean up, remove what it left with `docker ps -aq --filter label=conch-voice-check | xargs -r docker rm -f`; that removes every voice-check container on the host, so do not run it where another run is in progress.
+
+### Voice in the browser
+
+The web page at `/app/` joins a channel's voice with the LiveKit JavaScript SDK, in the same room and under the same rules as `conch-voice`: `conchd` issues the session, the join token allows publishing a microphone and nothing else, and the poller checks what the page reports. One identity is allowed per person per room, so the browser and `conch-voice` displace each other: the one that joined later stays, and the other says another device took over.
+
+- **Join and leave** are in the Voice section beside the member list. Mute and deafen are shown. Deafen also mutes everything you hear and shuts your microphone.
+- **Two ways to open the microphone.** *Push to talk* opens it while you hold the talk key (a backtick by default; the page lets you change it) or the Hold to talk button, which also works by touch, and shuts it 100 ms after you let go. *Open microphone* opens it when you speak, using a level you set with a meter, and shuts it after a short pause. Echo cancellation, noise suppression and automatic gain are on in both.
+- **The talk key works only while this tab has focus**, and only when focus is not in a text box. Losing focus or switching tab counts as letting go. A key that works while a game has another window in front needs a desktop app; on Linux, `conch-voice` has a global talk key.
+- **On a phone, audio continues only while the page is open on screen.**
+- **Secure context.** A microphone needs `https://` or `http://localhost` (see [Clients and `https://`](#clients-and-https) above). On any other page the Join button is off and says why.
+- **The Content-Security-Policy changes only when voice is configured.** With LiveKit settings, `connect-src` also names the LiveKit address's origin: `wss://host[:port]` and the same host over `https://` (the SDK makes plain requests to it when a connection fails). With none, the policy is what it was. Pages also carry `Permissions-Policy: microphone=(self), camera=(), display-capture=()`. No `media-src` is needed: playback from a stream is not governed by it (checked in Chromium, where the browser suite saw no policy violation).
+- **When it stops.** If the room is deleted or you are removed, the page asks `conchd` again, which either issues a new session or says why not (for example that you are no longer a member). If LiveKit is down the page says voice is unavailable and tries again, 1 s doubling to 30 s; chat is unaffected. The SDK's own reconnect is allowed for 20 s, then the page goes back to `conchd`.
+- **Reports.** Every time the microphone opens or closes the page tells `conchd`, one report at a time and in order, so the audit log has a `voice_transmit_started` and `voice_transmit_stopped` pair for each talk. Audio never waits for a report. A browser that does not report would get a `voice_transmit_unreported` row for every transmission.
+- **No token or room name** is stored, logged, shown or put in the page; the SDK's own log is set to warnings, redacted, and kept in memory (the page makes no console call).
+
+| Browser | Voice | Talk key |
+| --- | --- | --- |
+| Chrome or Edge on Windows, macOS, Linux | expected | tab focused |
+| Firefox or Safari, desktop | expected | tab focused |
+| iPhone or iPad | expected | while open on screen |
+| Android, Chrome | expected | while open on screen |
+
+"Expected" means what the browsers document: Chromium was tried here against a real LiveKit with a fake microphone (`make web-e2e`); the other cells have not been tried by hand yet.
 
 ### Verify voice
 

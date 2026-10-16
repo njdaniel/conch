@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ServerVersion } from './ServerVersion';
-import { VoiceStatus } from './VoiceStatus';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
 
@@ -23,6 +22,7 @@ export function Lobby({
   connection,
   conversation,
   panel,
+  voice,
   onOpen,
   onRetry,
   onSignOut,
@@ -34,6 +34,8 @@ export function Lobby({
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
+  // The voice section: kept by the caller, which owns the voice client.
+  readonly voice: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -76,7 +78,7 @@ export function Lobby({
           {conversation}
         </section>
         <aside aria-label="Members panel" className="panel">
-          <VoiceStatus />
+          {voice}
           <button
             type="button"
             aria-expanded={panelOpen}
