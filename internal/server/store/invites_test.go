@@ -144,11 +144,7 @@ func TestCreateInviteRules(t *testing.T) {
 			r.Voice = true
 			return r
 		}(), nil, nil},
-		{"right to invite taken away", func(f *inviteFixture) Principal { return f.alice }, func() schema.CreateInviteRequestV1 {
-			r := personal("general")
-			r.MayInvite = &yes
-			return r
-		}(), func(f *inviteFixture) {
+		{"right to invite taken away", func(f *inviteFixture) Principal { return f.alice }, personal("general"), func(f *inviteFixture) {
 			if _, err := f.s.SetMayInvite(f.ctx, "system", f.alice.ID, false); err != nil {
 				f.t.Fatal(err)
 			}
@@ -1111,5 +1107,29 @@ func TestInvitesPausedFailsClosed(t *testing.T) {
 		if got != tt.paused {
 			t.Errorf("stored %q: paused = %v, want %v", tt.value, got, tt.paused)
 		}
+	}
+}
+
+// Redemption checks the maker again: an invite row that carries the right to
+// invite but was made by someone who is not an operator gives the joiner no
+// such right, however the row came to be (issue #457).
+func TestRedeemDoesNotTrustAStoredMayInvite(t *testing.T) {
+	f := newInviteFixture(t)
+	inv := f.mustCreate(f.alice, personal("general"))
+	if _, err := f.s.db.ExecContext(f.ctx, "UPDATE invites SET may_invite = 1 WHERE id = ?", inv.Invite.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.redeem(inv.Code, "joiner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Principal.MayInvite {
+		t.Error("the joiner holds the right to invite from a tester's invite")
+	}
+	if stored, err := f.s.PrincipalByID(f.ctx, got.Principal.ID); err != nil || stored.MayInvite {
+		t.Errorf("stored principal = %+v, %v; want no right to invite", stored, err)
+	}
+	if resolved, err := f.s.ResolveCredential(f.ctx, got.Token); err != nil || resolved.MayInvite {
+		t.Errorf("ResolveCredential = %+v, %v; want no right to invite", resolved, err)
 	}
 }

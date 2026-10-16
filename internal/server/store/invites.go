@@ -57,8 +57,9 @@ var (
 	// ErrInviteAllowanceExceeded is returned when the inviter already has as
 	// many outstanding personal invites as the allowance permits.
 	ErrInviteAllowanceExceeded = errors.New("store: invite allowance exceeded")
-	// ErrInviteGrantExceedsInviter is returned when an invite names a channel,
-	// voice or the right to invite that its maker does not hold.
+	// ErrInviteGrantExceedsInviter is returned when an invite names a channel
+	// or voice its maker does not hold, or asks for the right to invite from a
+	// maker who is not an operator (only operators grant it, issue #457).
 	ErrInviteGrantExceedsInviter = errors.New("store: invite grants more than its maker holds")
 	// ErrInviteNotAllowed is returned when the caller may not make or close
 	// this invite, or may not hold the right to invite.
@@ -326,8 +327,9 @@ func usableInviteTx(ctx context.Context, tx execer, codeHash string, now time.Ti
 //     invite needs an operator or the right to invite, an open link needs an
 //     operator (ErrInviteNotAllowed);
 //   - an invite grants only what its maker holds: a non-operator must be a
-//     member of every channel named, may grant voice only with voice_allowed,
-//     and the right to invite only with that right (ErrInviteGrantExceedsInviter;
+//     member of every channel named and may grant voice only with
+//     voice_allowed; only an operator grants the right to invite, issue #457
+//     (ErrInviteGrantExceedsInviter;
 //     a channel that does not exist is the same answer for a non-operator, and
 //     ErrNotFound for an operator);
 //   - a non-operator has fewer outstanding personal invites than the
@@ -574,10 +576,14 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		}
 
 		voice := r.voice && r.creatorVoice
+		// Only an operator grants the right to invite (issue #457). Checked
+		// again here, against the maker as they are now, so the rule does not
+		// rest on what an invite row says.
+		mayInvite := r.mayInvite && r.creatorRole == RoleOperator
 		res, err = tx.ExecContext(ctx,
 			`INSERT INTO principals (kind, name, role, created_at, invited_by, invite_id, may_invite, voice_allowed)
 			 VALUES ('human', ?, 'member', ?, ?, ?, ?, ?)`,
-			name, now.UnixMilli(), r.createdBy, r.id, boolInt(r.mayInvite), boolInt(voice))
+			name, now.UnixMilli(), r.createdBy, r.id, boolInt(mayInvite), boolInt(voice))
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: redeem invite: create principal %q: %w", name, ErrDuplicate)
 		}
@@ -590,7 +596,7 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		}
 		out.Principal = Principal{
 			ID: pid, Kind: PrincipalHuman, Name: name, Role: RoleMember, CreatedAt: now,
-			InvitedBy: r.createdBy, InviteID: r.id, MayInvite: r.mayInvite, VoiceAllowed: voice,
+			InvitedBy: r.createdBy, InviteID: r.id, MayInvite: mayInvite, VoiceAllowed: voice,
 		}
 
 		for _, c := range kept {

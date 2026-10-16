@@ -80,8 +80,9 @@ const (
 	// ErrorCodeInviteAllowanceExceeded: the inviter already has as many
 	// outstanding personal invites as the allowance permits.
 	ErrorCodeInviteAllowanceExceeded = "invite_allowance_exceeded"
-	// ErrorCodeInviteGrantExceedsInviter: the invite names a channel, voice or
-	// invite right its maker does not hold.
+	// ErrorCodeInviteGrantExceedsInviter: the invite names a channel or voice
+	// its maker does not hold, or asks for the right to invite from a maker who
+	// is not an operator (only operators grant it).
 	ErrorCodeInviteGrantExceedsInviter = "invite_grant_exceeds_inviter"
 	// ErrorCodeInviteNotAllowed: the caller may not make this kind of invite.
 	ErrorCodeInviteNotAllowed = "invite_not_allowed"
