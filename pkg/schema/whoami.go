@@ -18,4 +18,8 @@ type WhoAmIResponseV1 struct {
 	Kind PrincipalKind `json:"kind"`
 	Name string        `json:"name"`
 	Role PrincipalRole `json:"role"`
+	// ServerVersion is the build version of the conchd that answered, the same
+	// value /healthz reports (issue #425). Added after the first release of
+	// this shape, so it is optional: a server that predates it omits it.
+	ServerVersion string `json:"server_version,omitempty"`
 }

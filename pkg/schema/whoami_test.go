@@ -38,3 +38,17 @@ func TestWhoAmIResponseV1Keys(t *testing.T) {
 		t.Errorf("keys = %v, want exactly id, kind, name, role", keys)
 	}
 }
+
+func TestWhoAmIResponseV1ServerVersionKey(t *testing.T) {
+	raw, err := json.Marshal(WhoAmIResponseV1{ID: 2, Kind: PrincipalAgent, Name: "bot", Role: RoleMember, ServerVersion: "v0.1.0-alpha.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if keys["server_version"] != "v0.1.0-alpha.1" || len(keys) != 5 {
+		t.Errorf("keys = %v, want the four old keys and server_version", keys)
+	}
+}

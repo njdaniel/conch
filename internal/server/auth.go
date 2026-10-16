@@ -279,9 +279,10 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, schema.WhoAmIResponseV1{
-		ID:   caller.ID,
-		Kind: schema.PrincipalKind(caller.Kind),
-		Name: caller.Name,
-		Role: schema.PrincipalRole(caller.Role),
+		ID:            caller.ID,
+		Kind:          schema.PrincipalKind(caller.Kind),
+		Name:          caller.Name,
+		Role:          schema.PrincipalRole(caller.Role),
+		ServerVersion: s.cfg.Version,
 	})
 }

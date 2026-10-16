@@ -11,12 +11,18 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/njdaniel/conch/internal/buildinfo"
 	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/internal/cli/termquiet"
 	"github.com/njdaniel/conch/internal/cli/tui"
 )
 
-var version = "v0.0.0-dev"
+// version is set by the linker (-X main.version=...) and is empty in a build
+// that was not stamped; buildVersion is what the binary reports.
+var version string
+
+// buildVersion is the stamped version, or the commit the binary was built from.
+func buildVersion() string { return buildinfo.Version(version) }
 
 // tuiBackgroundError is the whole of what the TUI says when it refuses a
 // background start (issue #214); main adds the "conch: " prefix.
@@ -30,7 +36,7 @@ func main() {
 	if len(os.Args) <= 1 { // an empty argument list is possible, and is not a command
 		err = runTUI(ctx)
 	} else {
-		err = cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, version)
+		err = cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, buildVersion())
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "conch:", cli.ErrorLine(err))

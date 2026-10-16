@@ -1,12 +1,12 @@
 ---
 name: release
-description: The gated release procedure — preconditions, version choice, CHANGELOG, Nick-signed tag, draft GitHub release via release.yml. Use for any tagged release; releases are Tier-H (Nick signs off, per ADR-000).
+description: The gated release procedure — preconditions, version choice, CHANGELOG, Nick-signed tag, GitHub release via release.yml (a draft for a plain tag, a published pre-release for a -suffix tag). Use for any tagged release; releases are Tier-H (Nick signs off, per ADR-000).
 ---
 
 # release
 
 Releases are Tier-H: Nick signs off, always (ADR-000). The tag push is the
-sign-off act; `release.yml` turns a `v*` tag into a draft GitHub release.
+sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, and a tag with a pre-release suffix (`v0.1.0-alpha.1`) into a published pre-release for testers.
 
 ## Preconditions — all four, verified fresh, before any tag
 
@@ -35,10 +35,10 @@ sign-off act; `release.yml` turns a `v*` tag into a draft GitHub release.
    under his explicit, recorded authorization for this release.
 4. Verify the `release.yml` run: `make check`, dogfood-check and
    p2-hardening-check re-ran green, binaries built for all three platforms,
-   draft release created.
+   the release created (a draft, or for a pre-release tag a published pre-release).
 5. Sanity-check the artifacts (download one, `--version`, run against a temp
    db), note the dogfood-check run in the release notes, hand the draft to
-   Nick to publish.
+   Nick to publish (a pre-release is already published: check its notes and tester checklist).
 
 ## Never
 
