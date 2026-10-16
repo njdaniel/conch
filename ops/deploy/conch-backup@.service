@@ -1,0 +1,43 @@
+# Nightly backup of one instance (conch-backup@<instance>.timer starts it).
+# Exits non-zero, and so shows as failed, when no off-site copy was made.
+#
+# It starts as root only to hand each step to the user that should do it
+# (conch-backup.sh explains): the snapshot runs as conch-%i, which alone can
+# read the instance's data, and the archive and the off-site copy run as
+# conch-backup, which alone holds the off-site credentials. Root keeps only
+# the capabilities to switch to those two users.
+[Unit]
+Description=Back up Conch instance %i
+Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
+After=conchd@%i.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/conch/bin/conch-backup.sh %i
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Of /var/lib/conch, only this instance. sqlite3 opens the live database,
+# which may create its -wal and -shm files (as conch-%i, the owner), so the
+# directory is writable; the archives go to /var/backups/conch.
+TemporaryFileSystem=/var/lib/conch:ro
+BindPaths=/var/lib/conch/%i
+ReadWritePaths=/var/lib/conch/%i /var/backups/conch
+InaccessiblePaths=-/var/lib/caddy
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+# rclone and s3cmd need the network; AF_UNIX for name lookups and logging.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes

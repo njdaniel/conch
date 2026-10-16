@@ -10,7 +10,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -35,7 +35,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate rust-check web-check
+check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate deploy-test rust-check web-check
 
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
@@ -133,6 +133,12 @@ schema-ts:
 
 depgate:
 	./scripts/depgate.sh
+
+# The deployment files in ops/deploy (issue #435): shellcheck, systemd-analyze
+# verify, and the backup, restore, upgrade and rollback scripts run against a
+# real conchd. Needs no droplet. sqlite3 is a host prerequisite of the scripts.
+deploy-test:
+	./scripts/deploy-scripts-test.sh
 
 hooks-install:
 	git config core.hooksPath .githooks

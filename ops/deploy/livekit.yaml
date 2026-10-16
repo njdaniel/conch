@@ -1,0 +1,33 @@
+# LiveKit for a Conch droplet. No secret is in this file: the key pairs are in
+# /etc/conch/livekit-keys (mode 0600), given to LiveKit with --key-file by
+# livekit.service. Replace example.com with your domain.
+
+# Signalling stays on loopback; Caddy serves it publicly over TLS.
+port: 7880
+bind_addresses: ["127.0.0.1"]
+
+rtc:
+  # Advertise this host's public address to clients.
+  use_external_ip: true
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+
+room:
+  # Required. conchd creates a channel's room itself and deletes it when
+  # someone loses access; with automatic creation on, a stale token would
+  # recreate the room (README, "Run LiveKit beside conchd").
+  auto_create: false
+
+# TURN over TLS, for networks that block UDP. The certificate is the one
+# Caddy obtains for turn.example.com, mounted read-only at /certs by
+# livekit.service. LiveKit's TURN refuses private and loopback peers by
+# default but relays to any public address for a client holding a valid voice
+# token; turn.deny_peer_cidrs narrows that (docs/deploy.md, step 4).
+turn:
+  enabled: true
+  domain: turn.example.com
+  tls_port: 5349
+  udp_port: 3478
+  cert_file: /certs/turn.example.com.crt
+  key_file: /certs/turn.example.com.key

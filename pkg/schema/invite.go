@@ -80,8 +80,9 @@ const (
 	// ErrorCodeInviteAllowanceExceeded: the inviter already has as many
 	// outstanding personal invites as the allowance permits.
 	ErrorCodeInviteAllowanceExceeded = "invite_allowance_exceeded"
-	// ErrorCodeInviteGrantExceedsInviter: the invite names a channel, voice or
-	// invite right its maker does not hold.
+	// ErrorCodeInviteGrantExceedsInviter: the invite names a channel or voice
+	// its maker does not hold, or asks for the right to invite from a maker who
+	// is not an operator (only operators grant it).
 	ErrorCodeInviteGrantExceedsInviter = "invite_grant_exceeds_inviter"
 	// ErrorCodeInviteNotAllowed: the caller may not make this kind of invite.
 	ErrorCodeInviteNotAllowed = "invite_not_allowed"
@@ -139,12 +140,11 @@ func (r CreateInviteRequestV1) EffectiveExpiry(now time.Time) time.Time {
 }
 
 // EffectiveMayInvite is whether the joiner may invite in turn: the requested
-// value, or true for a personal invite and false for an open link.
+// value, or false. Nobody who joins through an invite may invite unless an
+// operator grants it (Nick, #420; issue #457), so that one tester cannot
+// mint accounts that mint accounts.
 func (r CreateInviteRequestV1) EffectiveMayInvite() bool {
-	if r.MayInvite != nil {
-		return *r.MayInvite
-	}
-	return r.Kind == InviteKindPersonal
+	return r.MayInvite != nil && *r.MayInvite
 }
 
 // EffectiveCredentialLifetime is how long the joiner's first credential lives.

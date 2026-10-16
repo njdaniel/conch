@@ -1,0 +1,45 @@
+# LiveKit, in Docker, from the image README.md pins by digest (change the
+# version in one place: here and in README.md together). Installed beside
+# conchd; docs/deploy.md has the steps.
+#
+# Files it reads, all created by the operator:
+#   /etc/conch/livekit.yaml   settings, no secret (livekit.yaml in this directory)
+#   /etc/conch/livekit-keys   the key pairs, one "<key>: <secret>" line each, mode 0600
+# The TURN certificate is Caddy's own copy, mounted read-only. Edit the
+# turn.example.com in the paths below to your TURN name.
+#
+# The certificate directory is a --mount, not a -v: if it does not exist yet
+# (Caddy has not obtained the certificate), -v would create it as root and
+# Caddy could then not write the certificate there. --mount refuses to start
+# instead, and so does the test -f below; docs/deploy.md step 7 waits for the
+# certificate before starting this unit.
+#
+# The container runs as its root user with every capability dropped except
+# DAC_OVERRIDE, which it needs to read Caddy's key (mode 0600, owned by the
+# caddy user). Its file system is read-only apart from a /tmp in memory.
+[Unit]
+Description=LiveKit server
+Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
+After=network-online.target docker.service caddy.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=3s
+ExecStartPre=/usr/bin/test -f /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.example.com/turn.example.com.crt
+ExecStartPre=-/usr/bin/docker rm -f livekit
+ExecStart=/usr/bin/docker run --rm --name livekit --network host \
+  --cap-drop ALL --cap-add DAC_OVERRIDE \
+  --security-opt no-new-privileges \
+  --read-only --tmpfs /tmp \
+  --mount type=bind,source=/etc/conch/livekit.yaml,target=/etc/livekit.yaml,readonly \
+  --mount type=bind,source=/etc/conch/livekit-keys,target=/etc/livekit-keys,readonly \
+  --mount type=bind,source=/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/turn.example.com,target=/certs,readonly \
+  livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3 \
+  --config /etc/livekit.yaml --key-file /etc/livekit-keys
+ExecStop=/usr/bin/docker stop livekit
+
+[Install]
+WantedBy=multi-user.target
