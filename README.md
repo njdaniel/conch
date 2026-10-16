@@ -54,7 +54,7 @@ and [voice setup](#voice-optional) for the implemented surfaces.
 
 What comes next is the [private communications alpha](docs/design/private-alpha.md)
 ([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)), and the work is tracked on the
-[Conch project board](https://github.com/users/njdaniel/projects/14). Found a problem or have an
+[Conch project board](https://github.com/users/njdaniel/projects/14) (private for now). Found a problem or have an
 idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose).
 
 ## Client design and P3 planning
