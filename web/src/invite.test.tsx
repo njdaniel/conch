@@ -423,7 +423,7 @@ describe('invite someone', () => {
     expect(make.hasAttribute('disabled')).toBe(true);
     await within(panel).findByText('Used');
 
-    fireEvent.click(within(panel).getByRole('checkbox', { name: '#general' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
     fireEvent.click(make);
     const link = await within(panel).findByRole<HTMLInputElement>('textbox', { name: 'Invite link' });
     expect(link.value).toBe(`${origin}/app/#/invite/${newCode}`);
@@ -471,7 +471,7 @@ describe('invite someone', () => {
     render(<App origin={origin} />);
     const panel = await openPanel();
     fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice (only if you have it)' }));
-    fireEvent.click(within(panel).getByRole('checkbox', { name: '#general' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
     fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
     expect(await within(panel).findByText(line)).toBeDefined();
     expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
@@ -495,7 +495,7 @@ describe('invite someone', () => {
     const mayInvite = within(panel).getByRole<HTMLInputElement>('checkbox', { name: 'Joiners may invite others' });
     expect(capped.checked).toBe(false);
     expect(mayInvite.checked).toBe(false);
-    fireEvent.click(within(panel).getByRole('checkbox', { name: '#general' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
     fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
     await within(panel).findByRole('textbox', { name: 'Invite link' });
     expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'open', channels: ['general'], voice: false });
@@ -515,7 +515,7 @@ describe('invite someone', () => {
     fireEvent.click(within(panel).getByRole('checkbox', { name: 'Limit the number of people' }));
     const make = within(panel).getByRole('button', { name: 'Make invite' });
     fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '0' } });
-    fireEvent.click(within(panel).getByRole('checkbox', { name: '#ops' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#ops' }));
     // A cap that is not a number of people is not sent as no cap.
     expect(make.hasAttribute('disabled')).toBe(true);
     fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '12' } });
