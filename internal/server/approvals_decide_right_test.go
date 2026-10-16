@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -194,14 +195,91 @@ func TestDecideRightIsGrantedAndRevokedByTheOperator(t *testing.T) {
 		})
 	}
 
-	// The member list carries the right for people and not for agents.
-	members := decodeBody[schema.ListChannelMembersResponseV1](t, f.do(t, "GET", "/v1/channels/general/members", f.aliceTok, ""))
-	for _, m := range members.Members {
-		switch {
-		case m.Kind == schema.PrincipalAgent && m.CanDecide != nil:
-			t.Errorf("agent %d carries can_decide", m.PrincipalID)
-		case m.Kind == schema.PrincipalHuman && (m.CanDecide == nil || !*m.CanDecide):
-			t.Errorf("person %d can_decide = %v, want true", m.PrincipalID, m.CanDecide)
+	// The member list carries the right for people and not for agents, and
+	// shows it to the operator for everyone but to a member only about
+	// themselves.
+	for _, viewer := range []struct {
+		name  string
+		token string
+		self  int64
+		all   bool
+	}{{"operator", f.rootTok, f.root.ID, true}, {"member", f.aliceTok, f.alice.ID, false}} {
+		members := decodeBody[schema.ListChannelMembersResponseV1](t, f.do(t, "GET", "/v1/channels/general/members", viewer.token, ""))
+		for _, m := range members.Members {
+			shown := viewer.all || m.PrincipalID == viewer.self
+			switch {
+			case m.Kind == schema.PrincipalAgent && m.CanDecide != nil:
+				t.Errorf("%s sees agent %d carry can_decide", viewer.name, m.PrincipalID)
+			case m.Kind == schema.PrincipalHuman && shown && (m.CanDecide == nil || !*m.CanDecide):
+				t.Errorf("%s sees person %d can_decide = %v, want true", viewer.name, m.PrincipalID, m.CanDecide)
+			case m.Kind == schema.PrincipalHuman && !shown && m.CanDecide != nil:
+				t.Errorf("%s sees another member's (%d) can_decide", viewer.name, m.PrincipalID)
+			}
 		}
+	}
+
+	// Adding someone without the right says so in the audit trail.
+	ghost, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "newcomer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", ghost.ID), f.rootTok, `{"can_decide":false}`).Code; code != http.StatusNoContent {
+		t.Fatalf("add ghost without the right = %d", code)
+	}
+	found := false
+	for _, e := range f.audit(t) {
+		if e.Action == store.AuditMemberAdded && e.Detail == fmt.Sprintf("principal=%d can_decide=0", ghost.ID) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the add without the right is not marked can_decide=0 in the audit trail")
+	}
+
+	// A body that is not exactly one object is refused.
+	for _, body := range []string{`null`, `{"can_decide":true}}`, `{"can_decide":true} {}`} {
+		if code := put(f.rootTok, body); code != http.StatusBadRequest {
+			t.Errorf("PUT %s = %d, want 400", body, code)
+		}
+	}
+}
+
+// A revoke is not retroactive (approval-object.md §3; changing that is
+// #453): under a quorum of two, a decision cast before the decider's right
+// was revoked still counts when another member concurs.
+func TestRevokeDoesNotRetractACastDecision(t *testing.T) {
+	ctx := context.Background()
+	f := newAuthFixture(t, AuthRequired)
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req schema.CreateApprovalRequestV1
+	if err := json.Unmarshal([]byte(createApprovalBody(general.ID, 0)), &req); err != nil {
+		t.Fatal(err)
+	}
+	req.Quorum = 2
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(t, "POST", "/v1/approvals", f.aliceTok, string(raw))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	id := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval.ID
+	path := fmt.Sprintf("/v1/approvals/%d/decisions", id)
+	if code := f.do(t, "POST", path, f.aliceTok, decisionBody(0)).Code; code != http.StatusOK {
+		t.Fatalf("alice's decision = %d", code)
+	}
+	if code := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", f.alice.ID), f.rootTok, `{"can_decide":false}`).Code; code != http.StatusNoContent {
+		t.Fatalf("revoke = %d", code)
+	}
+	rec = f.do(t, "POST", path, f.rootTok, decisionBody(0))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator's decision = %d %s", rec.Code, rec.Body)
+	}
+	if state := decodeBody[schema.CastDecisionResponseV1](t, rec).State; state != schema.ApprovalStateResolved {
+		t.Errorf("state = %s; today the revoked member's earlier decision still counts, so want resolved", state)
 	}
 }

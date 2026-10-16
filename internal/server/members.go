@@ -119,14 +119,23 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		return
 	}
 	resp := schema.ListChannelMembersResponseV1{Members: make([]schema.ChannelMemberV1, 0, len(members))}
+	// Who holds the right to decide approvals is shown to operators, and to
+	// each member about themselves: listing every approver to every member
+	// would tell someone whom to press for a decision (issue #450).
+	caller, authed := callerFrom(ctx)
+	seesRight := func(id int64) bool { return !authed || isOperator(caller) || caller.ID == id }
 	for _, m := range members {
+		var canDecide *bool
+		if seesRight(m.PrincipalID) {
+			canDecide = canDecideField(m)
+		}
 		resp.Members = append(resp.Members, schema.ChannelMemberV1{
 			PrincipalID: m.PrincipalID,
 			AddedBy:     m.AddedBy,
 			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
 			Name:        m.Name,
 			Kind:        schema.PrincipalKind(m.Kind),
-			CanDecide:   canDecideField(m),
+			CanDecide:   canDecide,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -240,7 +249,8 @@ func decodeOptionalMemberBody(w http.ResponseWriter, r *http.Request) (schema.Pu
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil || decoder.More() {
+	var extra any
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || decoder.Decode(&req) != nil || !errors.Is(decoder.Decode(&extra), io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one JSON object with only can_decide")
 		return req, false
 	}

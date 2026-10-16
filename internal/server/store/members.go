@@ -150,7 +150,12 @@ func (s *Store) PutChannelMember(ctx context.Context, actor string, channelID, p
 			return err
 		}
 		added = true
-		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(principalID), now)
+		detail := memberDetail(principalID)
+		if !decide {
+			// Recorded, so the audit trail says who held the right when.
+			detail += " can_decide=0"
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), detail, now)
 	})
 	if err != nil {
 		return false, err
