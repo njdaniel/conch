@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageV2 } from '../schema/message';
-import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
+import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, pageSize, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
 
 const msg = (id: number, body = `m${String(id)}`): MessageV2 => ({
   schema: 'conch.message.v2',
@@ -97,6 +97,14 @@ describe('the message store', () => {
     expect(ids(state)).toEqual([3, 4, 5, 6]);
     expect(oldestId(chatFor(state, 'ops'))).toBe(3);
     expect(canLoadOlder(chatFor(state, 'ops'))).toBe(false);
+  });
+
+  it('offers another older page exactly while it fits within maxHeld', () => {
+    const holding = (n: number) =>
+      chatFor(run({ type: 'historyLoaded', channel: 'ops', messages: Array.from({ length: n }, (_, i) => msg(i + 1)), more: true }), 'ops');
+    expect(canLoadOlder(holding(maxHeld - pageSize))).toBe(true);
+    expect(canLoadOlder(holding(maxHeld - pageSize + 1))).toBe(false);
+    expect(canLoadOlder(holding(maxHeld))).toBe(false);
   });
 
   it('counts a dropped frame', () => {

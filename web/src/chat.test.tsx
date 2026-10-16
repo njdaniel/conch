@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { clock } from './Conversation';
+import { maxHeld, pageSize } from './state/messages';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -79,6 +80,10 @@ interface Server {
   channels: { id: number; name: string; created_at: string }[];
   historyRequests: URL[];
   whoamiCalls: number;
+  // firstPage, when set, is how many messages the first history read
+  // returns whatever limit it asked for: a test that needs a nearly full
+  // channel gets there without one render per page (#459).
+  firstPage?: number;
 }
 
 let server: Server;
@@ -127,7 +132,8 @@ function install() {
       // The server's read: ids below `before`, newest first, at most `limit`.
       server.historyRequests.push(url);
       const before = url.searchParams.get('before');
-      const limit = Number(url.searchParams.get('limit'));
+      const asked = Number(url.searchParams.get('limit'));
+      const limit = server.firstPage !== undefined && server.historyRequests.length === 1 ? server.firstPage : asked;
       const visible = (server.history[channel] ?? []).filter((x) => before === null || (x as { id: number }).id < Number(before));
       return Promise.resolve(json({ messages: visible.slice(-limit).reverse() }));
     }),
@@ -919,21 +925,25 @@ describe('a long channel', () => {
     expect(screen.queryByText('m301')).toBeNull();
   });
 
+  // The exact rule (another page only while it fits within maxHeld) is in
+  // state/messages.test.ts. This shows what the reader sees at the cap: the
+  // channel starts nearly full, so it takes two pages and not nineteen (#459).
   it('stops offering older pages when another would not fit within maxHeld, and says so', async () => {
-    server.history.general = Array.from({ length: 2100 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+    server.history.general = Array.from({ length: maxHeld + 100 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+    server.firstPage = maxHeld - 2 * pageSize;
     await openChat();
-    await screen.findByText('m2100');
-    for (let held = 100; held < 2000; held += 100) {
+    await screen.findByText(`m${String(maxHeld + 100)}`);
+    for (const held of [maxHeld - pageSize, maxHeld]) {
       fireEvent.click(await screen.findByRole('button', { name: 'Load older messages' }));
       await waitFor(() => {
-        expect(lines()).toHaveLength(held + 100);
+        expect(lines()).toHaveLength(held);
       });
     }
     expect(olderButton()).toBeNull();
     expect(screen.getByText('older history is not loaded')).toBeDefined();
-    expect(screen.getByText('m2100')).toBeDefined();
-    expect(server.historyRequests).toHaveLength(20);
-  }, 30000);
+    expect(screen.getByText(`m${String(maxHeld + 100)}`)).toBeDefined();
+    expect(server.historyRequests).toHaveLength(3);
+  });
 });
 
 describe('the address bar', () => {
