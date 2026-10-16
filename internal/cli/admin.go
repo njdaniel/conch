@@ -35,6 +35,9 @@ type adminOpts struct {
 	// revokes it (issue #450).
 	noDecide bool
 	off      bool
+	// invite holds the flags of `invite` and of the principal commands that
+	// administer invites (issue #438).
+	invite inviteOpts
 }
 
 // adminRun is what a command's run function gets once its arguments are
@@ -109,9 +112,24 @@ var adminCommands = []adminCommand{
 		},
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
+	// Invites and their administration (issue #438), in admin_invite.go.
+	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] ",
+		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
+	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
+		bind: bindInviteList, run: adminInviteList},
+	{group: "invite", verb: "close", args: []string{"id"}, idAt: 1, run: adminInviteClose},
+	{group: "invite", verb: "joiners", args: []string{"id"}, idAt: 1, run: adminInviteJoiners},
+	{group: "invite", verb: "disable-joiners", args: []string{"id"}, idAt: 1, flags: "[--yes] ",
+		bind: bindYes, run: adminInviteDisableJoiners},
+	{group: "invite", verb: "pause", run: adminInvitePause},
+	{group: "invite", verb: "resume", run: adminInviteResume},
+	{group: "invite", verb: "status", run: adminInviteStatus},
+	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
+	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
+		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest"
+const adminGroups = "channel|principal|credential|member|manifest|invite"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {

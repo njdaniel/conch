@@ -953,7 +953,7 @@ What the routes answer:
 | Route | Who | Success | Refusals |
 | --- | --- | --- | --- |
 | `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `503 invites_paused`; `429 rate_limited` |
-| `GET /v1/invites` | people | `200`, the caller's own invites, newest first | |
+| `GET /v1/invites` | people | `200`, newest first: every invite for an operator, the caller's own for anyone else. `?kind=personal\|open`, `?state=open\|used\|expired\|closed` and, for an operator, `?created_by=<id>` narrow it | `400 invalid_request` for a filter value it does not know |
 | `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
 | `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
 | `POST /v1/invites/redeem` | anyone | `201` with the principal, its credential and the token, `Cache-Control: no-store` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name that is not acceptable; `503 invites_paused`; `429 rate_limited` |
@@ -973,7 +973,50 @@ Each is a bucket that refills evenly, and failed attempts count the same as succ
 
 Anyone holding a valid code can learn whether a name is taken, from the `409`, within the redeem limit, and without using the invite up. A link that leaks lets whoever finds it test names that way, so close a leaked link.
 
-**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address.
+### Administering invites
+
+An operator sees every invite, closes any of them, and has these routes besides (each refuses anyone else with `403 forbidden`, audited as `access_denied`; with authentication off they answer `401`):
+
+| Route | Body | Success |
+| --- | --- | --- |
+| `GET /v1/invites/{id}/principals` | | `200`, everyone who joined through it: id, name, when, and whether disabled |
+| `POST /v1/invites/{id}/disable-joiners` | `{"dry_run":bool,"close":bool}` | `200`, `{"dry_run":…,"count":N,"principal_ids":[…]}`. Disables every enabled joiner the way `POST /v1/principals/{id}/disable` does: credentials revoked, sockets closed, out of voice. `close` (default `true`) closes the invite first. `dry_run` changes nothing and only counts |
+| `POST /v1/principals/{id}/disable-invitees` | `{"dry_run":bool,"depth":"1"\|"all"}` | `200`, the same shape: the people this person invited (`"1"`, the default), or everyone under them (`"all"`). The person themselves is left alone, and plain `disable` never follows the tree |
+| `PUT /v1/principals/{id}/invite-permission` | `{"may_invite":bool}` | `204`. Only an operator grants the right to invite. Taking it away closes the person's open personal invites; giving it back does not reopen them |
+| `GET /v1/invites/settings`, `PUT /v1/invites/settings` | `{"paused":bool}` | `200` with the setting. Paused refuses making, previewing and redeeming any invite. It is stored, so it survives a restart |
+
+The two bulk disables never disable an operator or the caller, and the last operator is never disabled by anything. Disabling a person, however it is done, closes every invite they made that could still be used.
+
+`conch admin` covers all of it:
+
+```sh
+LINK=$(bin/conch admin invite create --open --channel red --channel blue --expires 24h --voice)   # the link, alone on stdout
+bin/conch admin invite create --personal --channel red --expires 7d
+bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] expires <time> by <id> channels <names>
+bin/conch admin invite close 3
+bin/conch admin invite joiners 1                    # <id> <enabled|disabled> <joined> <name>
+bin/conch admin invite disable-joiners 1            # a dry run: how many it would disable
+bin/conch admin invite disable-joiners 1 --yes      # disable them and close the link
+bin/conch admin invite pause                        # resume, status
+bin/conch admin principal invite-permission 5 on    # or off
+bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
+```
+
+`invite create` prints the link and nothing else on standard output; its id and expiry go to standard error. The code appears in no other output.
+
+**When a link leaks.**
+
+1. `conch admin invite pause`: nobody can join through any invite while you work.
+2. `conch admin invite joiners <id>`: who came in through it.
+3. `conch admin invite disable-joiners <id>` to see how many, then again with `--yes`. Each of them is disabled at once, sockets and voice included, and the link is closed.
+4. `conch admin invite list --state open` to check that nothing else needs closing (`conch admin invite close <id>`).
+5. `conch admin invite resume`.
+
+Someone who joined through the link and should stay can be enabled again (`conch admin principal enable <id>`) and issued a new credential.
+
+Removing a person and everyone they invited (`conch admin principal disable-invitees <id> --all`) works the same way: pause first. The tree is read once, before anyone is disabled, and each person's own invites close only when they are disabled, so someone who joins through one of them in between is not in the list.
+
+**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. `invite_closed` says why: `reason=creator` (its maker), `operator` (an operator who did not make it), `creator_disabled` (its maker was disabled) or `permission_revoked` (its maker lost the right to invite). An operator's administration adds `invites_paused`, `invites_resumed`, `invite_permission_changed`, and one summary row per bulk disable, `joiners_disabled` (the invite, the count, whether it was closed) or `invitees_disabled` (the person, the depth, the count), beside each person's own `principal_disabled`. A dry run writes nothing. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address.
 
 ## Voice (optional)
 

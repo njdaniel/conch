@@ -127,6 +127,16 @@ func (s *Server) routeTable() []route {
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
 		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
+		// Operator administration of invites (issue #438): who joined through
+		// an invite, disabling them or everyone a person invited, the right to
+		// invite, and the pause switch. Operators only; GET /v1/invites and
+		// DELETE /v1/invites/{id} above serve operators everyone's invites.
+		rt("GET /v1/invites/{id}/principals", accessOperator, hf(s.handleInviteJoiners)),
+		rt("POST /v1/invites/{id}/disable-joiners", accessOperator, hf(s.handleDisableJoiners)),
+		rt("POST /v1/principals/{id}/disable-invitees", accessOperator, hf(s.handleDisableInvitees)),
+		rt("PUT /v1/principals/{id}/invite-permission", accessOperator, hf(s.handleInvitePermission)),
+		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
+		rt("PUT /v1/invites/settings", accessOperator, hf(s.handlePutInviteSettings)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust

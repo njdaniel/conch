@@ -239,13 +239,18 @@ func TestListAndCloseOwnInvites(t *testing.T) {
 	rootInv := f.createInvite(t, f.rootTok, openLink("blue")).Invite
 	aliceInv := f.createInvite(t, f.aliceTok, personal("red")).Invite
 
+	// A member sees their own; an operator sees every invite (issue #438).
 	for _, c := range []struct {
 		tok  string
-		want int64
-	}{{f.rootTok, rootInv.ID}, {f.aliceTok, aliceInv.ID}} {
+		want []int64
+	}{{f.rootTok, []int64{aliceInv.ID, rootInv.ID}}, {f.aliceTok, []int64{aliceInv.ID}}} {
 		got := decodeBody[schema.ListInvitesResponseV1](t, f.send(t, "GET", "/v1/invites", c.tok, "", ""))
-		if len(got.Invites) != 1 || got.Invites[0].ID != c.want {
-			t.Errorf("list = %+v, want only invite %d", got.Invites, c.want)
+		var ids []int64
+		for _, inv := range got.Invites {
+			ids = append(ids, inv.ID)
+		}
+		if !slices.Equal(ids, c.want) {
+			t.Errorf("list = %v, want %v", ids, c.want)
 		}
 	}
 	// A list with nothing in it is [], not null.

@@ -109,6 +109,13 @@ Usage:
   conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
+  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>]
+  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
+  conch admin invite close|joiners [--server <url>] [--json] <id>
+  conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
+  conch admin invite pause|resume|status [--server <url>] [--json]
+  conch admin principal invite-permission [--server <url>] [--json] <id> on|off
+  conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
   conch voice status [--server <url>] [--watch] <channel>
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]

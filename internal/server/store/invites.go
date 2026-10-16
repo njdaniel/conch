@@ -33,9 +33,24 @@ const (
 	AuditInvitesPaused           = "invites_paused"
 	AuditInvitesResumed          = "invites_resumed"
 	AuditInvitePermissionChanged = "invite_permission_changed"
+	// AuditJoinersDisabled and AuditInviteesDisabled summarise an operator's
+	// bulk disable (issue #438); each principal it disabled has its own
+	// principal_disabled row as well.
+	AuditJoinersDisabled  = "joiners_disabled"
+	AuditInviteesDisabled = "invitees_disabled"
 	// AuditPrincipalCreated records that a principal was created. Invites
 	// write it for a joiner; operator-created principals use it too (A12).
 	AuditPrincipalCreated = "principal_created"
+)
+
+// Why an invite was closed, the reason= of its invite_closed row (issue
+// #438): by an operator who did not make it, by its maker, because its maker
+// was disabled, or because its maker lost the right to invite.
+const (
+	InviteCloseOperator          = "operator"
+	InviteCloseCreator           = "creator"
+	InviteCloseCreatorDisabled   = "creator_disabled"
+	InviteClosePermissionRevoked = "permission_revoked"
 )
 
 // DefaultPersonalInviteAllowance is how many outstanding personal invites one
@@ -695,13 +710,73 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 			return fmt.Errorf("store: close invite: %w", err)
 		}
 		changed = true
+		reason := InviteCloseCreator
+		if closerID != r.createdBy {
+			reason = InviteCloseOperator
+		}
 		return appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(inviteID),
-			fmt.Sprintf("invite=%d kind=%s uses=%d", inviteID, r.kind, r.uses), now)
+			inviteClosedDetail(inviteID, r.kind, r.uses, reason), now)
 	})
 	if err != nil {
 		return false, err
 	}
 	return changed, nil
+}
+
+func inviteClosedDetail(id int64, kind schema.InviteKind, uses int64, reason string) string {
+	return fmt.Sprintf("invite=%d kind=%s uses=%d reason=%s", id, kind, uses, reason)
+}
+
+// closeCreatorInvitesTx closes every open invite creatorID made, of kind (or
+// of every kind when kind is empty), writing one invite_closed row each with
+// reason. Open means usable at now: not closed, not used up and not expired;
+// the others need no closing. closed_by is left empty, since no principal
+// closed them by hand. The caller holds the write lock.
+func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creatorID int64, kind schema.InviteKind, reason string, now time.Time) error {
+	q := `SELECT id, kind, uses FROM invites
+		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
+	args := []any{creatorID, now.UnixMilli()}
+	if kind != "" {
+		q += " AND kind = ?"
+		args = append(args, string(kind))
+	}
+	rows, err := tx.QueryContext(ctx, q+" ORDER BY id", args...)
+	if err != nil {
+		return fmt.Errorf("store: list open invites: %w", err)
+	}
+	type open struct {
+		id   int64
+		kind schema.InviteKind
+		uses int64
+	}
+	var found []open
+	for rows.Next() {
+		var o open
+		var k string
+		if err := rows.Scan(&o.id, &k, &o.uses); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: list open invites: scan: %w", err)
+		}
+		o.kind = schema.InviteKind(k)
+		found = append(found, o)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: list open invites: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: list open invites: %w", err)
+	}
+	for _, o := range found {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE invites SET closed_at = ? WHERE id = ? AND closed_at IS NULL", now.UnixMilli(), o.id); err != nil {
+			return fmt.Errorf("store: close invite %d: %w", o.id, err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(o.id),
+			inviteClosedDetail(o.id, o.kind, o.uses, reason), now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListInvites returns the invites matching f, newest first (ties by id
@@ -788,6 +863,77 @@ func (s *Store) InviteJoiners(ctx context.Context, inviteID int64) ([]Principal,
 	return out, nil
 }
 
+// Invitees returns the principals rootID invited, by following
+// principals.invited_by down from it, in the order the walk meets them (by
+// generation, then by id). depth 1 is the people rootID invited themselves;
+// depth 0 or less is everyone under them, however deep. rootID itself is never
+// in the result. The result is never nil. An unknown rootID is
+// ErrPrincipalNotFound.
+//
+// No cycle should exist, since an invite always makes a new principal; the
+// walk still keeps a visited set, so a cycle written some other way ends it
+// rather than looping, and no principal is returned twice.
+func (s *Store) Invitees(ctx context.Context, rootID int64, depth int) ([]Principal, error) {
+	var one int
+	switch err := s.db.QueryRowContext(ctx, "SELECT 1 FROM principals WHERE id = ?", rootID).Scan(&one); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrPrincipalNotFound
+	case err != nil:
+		return nil, fmt.Errorf("store: invitees: find root: %w", err)
+	}
+	visited := map[int64]bool{rootID: true}
+	var ids []int64
+	frontier := []int64{rootID}
+	for level := 1; len(frontier) > 0 && (depth <= 0 || level <= depth); level++ {
+		var next []int64
+		for _, parent := range frontier {
+			children, err := s.invitedBy(ctx, parent)
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range children {
+				if visited[id] {
+					continue
+				}
+				visited[id] = true
+				next = append(next, id)
+			}
+		}
+		ids = append(ids, next...)
+		frontier = next
+	}
+	out := []Principal{}
+	for _, id := range ids {
+		p, err := s.PrincipalByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// invitedBy returns the ids of the principals whose invited_by is parent.
+func (s *Store) invitedBy(ctx context.Context, parent int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id FROM principals WHERE invited_by = ? ORDER BY id", parent)
+	if err != nil {
+		return nil, fmt.Errorf("store: invitees: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: invitees: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: invitees: %w", err)
+	}
+	return ids, nil
+}
+
 // InvitesPaused reports whether an operator has paused invites.
 func (s *Store) InvitesPaused(ctx context.Context) (bool, error) {
 	return invitesPausedTx(ctx, s.db)
@@ -831,18 +977,19 @@ func (s *Store) SetInvitesPaused(ctx context.Context, actor string, paused bool)
 // Operators can always invite whatever it says. An agent cannot hold it
 // (ErrInviteNotAllowed). It audits invite_permission_changed in the same
 // transaction and does nothing when the value already stands. Taking the right
-// away suspends the invites the person left outstanding: they cannot be
-// redeemed while the right is gone (see makerStillAllowed), and work again if
-// it is given back before they expire. It returns ErrPrincipalNotFound for an unknown id.
+// away from someone who is not an operator also closes the personal invites
+// they left open, in the same transaction, each audited as invite_closed with
+// reason=permission_revoked (issue #438): giving the right back does not
+// revive them. It returns ErrPrincipalNotFound for an unknown id.
 func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int64, may bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
 		var (
-			kind string
-			cur  bool
+			kind, role string
+			cur        bool
 		)
-		switch err := tx.QueryRowContext(ctx, "SELECT kind, may_invite FROM principals WHERE id = ?", principalID).Scan(&kind, &cur); {
+		switch err := tx.QueryRowContext(ctx, "SELECT kind, role, may_invite FROM principals WHERE id = ?", principalID).Scan(&kind, &role, &cur); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrPrincipalNotFound
 		case err != nil:
@@ -858,8 +1005,15 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 			return fmt.Errorf("store: set may_invite: %w", err)
 		}
 		changed = true
-		return appendAuditEventTx(ctx, tx, actor, AuditInvitePermissionChanged, principalActor(principalID),
-			fmt.Sprintf("may_invite=%t", may), now)
+		if err := appendAuditEventTx(ctx, tx, actor, AuditInvitePermissionChanged, principalActor(principalID),
+			fmt.Sprintf("may_invite=%t", may), now); err != nil {
+			return err
+		}
+		// An operator invites by role, not by this flag, so their invites stand.
+		if may || Role(role) == RoleOperator {
+			return nil
+		}
+		return closeCreatorInvitesTx(ctx, tx, actor, principalID, schema.InviteKindPersonal, InviteClosePermissionRevoked, now)
 	})
 	if err != nil {
 		return false, err
