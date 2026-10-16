@@ -720,6 +720,8 @@ export interface VoiceParticipant {
   can_publish: boolean;
   transmitting: boolean;
   joined_at: string;
+  sharing?: boolean;
+  sharing_audio?: boolean;
 }
 
 export const voiceParticipant = object<VoiceParticipant>({
@@ -727,6 +729,8 @@ export const voiceParticipant = object<VoiceParticipant>({
   can_publish: bool,
   transmitting: bool,
   joined_at: timestamp,
+  sharing: optional(bool),
+  sharing_audio: optional(bool),
 });
 
 // schema.VoicePresenceRoom
@@ -773,6 +777,19 @@ export interface VoiceTransmitReportV1 {
 export const voiceTransmitReportV1 = object<VoiceTransmitReportV1>({
   state: voiceTransmitState,
   audience: optional(audience),
+});
+
+// schema.VoiceShareV1
+export interface VoiceShareV1 {
+  principal_id: number;
+  started_at: string;
+  audio: boolean;
+}
+
+export const voiceShareV1 = object<VoiceShareV1>({
+  principal_id: int,
+  started_at: timestamp,
+  audio: bool,
 });
 
 // schema.PrincipalV0

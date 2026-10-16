@@ -114,6 +114,16 @@ const (
 	voiceReasonMemberRemoved    = "member_removed"
 	voiceReasonPrincipalOff     = "principal_disabled"
 	voiceReasonCredsRevoked     = "credentials_revoked"
+	// voiceReasonShareUnclaimed: a participant published a screen share
+	// without holding the room's share, and its sources could not be
+	// withdrawn (voice_share.go).
+	voiceReasonShareUnclaimed = "share_unclaimed"
+	// voiceReasonShareNotWithdrawn: a share that ended (stopped, gone idle)
+	// was still published and its sources could not be withdrawn.
+	voiceReasonShareNotWithdrawn = "share_not_withdrawn"
+	// voiceReasonVoiceOff: the principal no longer holds voice (issue #437's
+	// voice_allowed).
+	voiceReasonVoiceOff = "voice_not_allowed"
 )
 
 // voiceSeen is what the poller last observed about one connected principal.
@@ -172,6 +182,24 @@ type voiceRoomState struct {
 	// Like everything here it is in memory only and goes with the room,
 	// after forgetRoom has closed what is open.
 	transmit transmitLedger
+	// share is the room's screen share, or nil (voice_share.go). It is
+	// changed only under order as well as voicePoller.mu.
+	share *voiceShare
+	// withdrawing holds principals whose screen-share sources are being
+	// taken away: their share ended, a claim of theirs failed, or a pass
+	// found them with sources they do not hold the share for. The value is 0
+	// while the withdrawal is owed, and the eviction count (seq) at which
+	// LiveKit confirmed it once it has (withdrawConfirmed). A pass that finds
+	// one of them with a source withdraws it again; it audits a published
+	// share only if the withdrawal was confirmed before the pass listed the
+	// room, which makes it a new share. The entry goes once a pass finds
+	// nothing left to withdraw.
+	withdrawing map[int64]uint64
+	// claims puts the room's share claims, stops and withdrawals in one
+	// order, so that none takes away a grant another has just made. It is
+	// held across the LiveKit call that grants or withdraws, and is taken
+	// before order.
+	claims sync.Mutex
 }
 
 // inUse reports whether a pass polls the room. A room with something the
@@ -179,9 +207,11 @@ type voiceRoomState struct {
 // transmission, a pass not yet judged) is in use until a pass settles it:
 // that is what makes a report from a holder who is not in the room be looked
 // at, and what guarantees every opening row its closing row
-// (docs/design/conch-voice.md §6).
+// (docs/design/conch-voice.md §6). So is a room with a screen share, or
+// sources still to withdraw: only a pass ends a share that has gone idle.
 func (r *voiceRoomState) inUse(now time.Time) bool {
 	return r.marked || len(r.participants) > 0 || r.transmit.unsettled() ||
+		r.share != nil || len(r.withdrawing) > 0 ||
 		(!r.lastSession.IsZero() && now.Sub(r.lastSession) < voiceSessionRecent)
 }
 
@@ -324,7 +354,7 @@ func parseVoiceIdentity(identity string) (int64, bool) {
 
 // voiceEntitlement is the one question the poller asks of a participant: is
 // this identity a current, enabled, human member of the channel the room
-// belongs to? It returns the principal id when the identity names one, and an
+// belongs to, who holds voice? It returns the principal id when the identity names one, and an
 // empty reason when the participant is entitled; otherwise the reason says
 // why not. A store failure is returned as err and means "could not decide":
 // the caller neither shows nor removes the participant on that pass.
@@ -345,6 +375,11 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		return id, voiceReasonDisabled, nil
 	case p.Kind != store.PrincipalHuman:
 		return id, voiceReasonNotHuman, nil
+	case !p.VoiceAllowed:
+		// Checked by every voice route on the way in (voicePresenceChannel);
+		// checked here too so that a person whose voice is taken away later
+		// loses the room, and a share of theirs, at the next pass.
+		return id, voiceReasonVoiceOff, nil
 	}
 	member, err := s.store.IsChannelMember(ctx, channelID, id)
 	switch {
@@ -524,7 +559,7 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 	r := p.rooms[room.RoomName]
 	if r == nil {
-		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}, reports: make(chan struct{}, 1)}
+		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}, reports: make(chan struct{}, 1), withdrawing: map[int64]uint64{}}
 		p.rooms[room.RoomName] = r
 	}
 	return r
@@ -735,6 +770,9 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 	seen := make(map[int64]livekit.Participant, len(parts))
 	// undecided holds the principals whose entitlement could not be read.
 	undecided := make(map[int64]struct{})
+	// lost holds the principals this pass found no longer entitled: a share
+	// of theirs ends with reason=access_lost.
+	lost := make(map[int64]bool)
 	// again is set when this pass left someone in the room it could not deal
 	// with: a removal that failed, or an entitlement it could not read. The
 	// room is then polled on the next pass whatever its state says, instead
@@ -757,6 +795,9 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 			continue
 		}
 		if reason != "" {
+			if pid > 0 {
+				lost[pid] = true
+			}
 			if !p.removeObserved(ctx, r, part, pid, reason) {
 				again = true
 			}
@@ -764,7 +805,14 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 		}
 		seen[pid] = part
 	}
-	p.applyRoom(ctx, r, seen, undecided, again, since)
+	withdraw := p.applyRoom(ctx, r, seen, undecided, lost, again, since)
+	// Screen-share sources nobody holds the share for are taken away after
+	// the pass is applied, outside its locks: it is a LiveKit call.
+	if p.withdrawShares(ctx, r, withdraw) {
+		p.mu.Lock()
+		r.marked = true
+		p.mu.Unlock()
+	}
 	return nil
 }
 
@@ -826,8 +874,14 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string) voiceEve
 // not added. The transmit rule is told nothing about them on this pass.
 // again keeps the room marked for the next pass. since is the room's eviction
 // count when the pass asked LiveKit: anyone evicted after that is left out,
-// because what the pass saw of them is older than their removal.
-func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, keep map[int64]struct{}, again bool, since uint64) {
+// because what the pass saw of them is older than their removal. lost names
+// those the pass found no longer entitled.
+//
+// The screen share is judged here too (judgeShareLocked), at the same instant
+// and under the same locks, and its rows are written with the pass's. What it
+// returns are the screen-share sources to withdraw, for the caller to ask
+// LiveKit about once the pass is applied.
+func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, keep map[int64]struct{}, lost map[int64]bool, again bool, since uint64) []shareWithdrawal {
 	next := make(map[int64]voiceSeen, len(seen))
 
 	// From before the transmit rule is fed until its rows are written
@@ -842,7 +896,7 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 		// Rotated away while this pass was reading it: whatever it saw is
 		// in a room that no longer exists, and nobody is shown for it.
 		p.mu.Unlock()
-		return
+		return nil
 	}
 	old := r.participants
 	for pid := range keep {
@@ -904,8 +958,19 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	}
 	judged := r.transmit.pass(now, mics, keep)
 
-	var events []voiceEvent
-	changed := false
+	// The screen share. A share that ends because its holder left is written
+	// before their leaving, as a transmission is; a share nobody granted is
+	// written after the pass's joins, so that it follows the joining of whoever
+	// published it.
+	shareRows, withdraw, changed := p.judgeShareLocked(r, now, seen, keep, lost, since)
+	var events, unclaimed []voiceEvent
+	for _, e := range shareRows {
+		if e.action == store.AuditVoiceShareUnclaimed {
+			unclaimed = append(unclaimed, e)
+		} else {
+			events = append(events, e)
+		}
+	}
 	ev := func(action string, pid int64) {
 		events = append(events, voiceEvent{
 			actor: fmt.Sprintf("principal:%d", pid), action: action, channelID: r.channelID,
@@ -953,6 +1018,7 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	for _, pid := range rest {
 		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 	}
+	events = append(events, unclaimed...)
 	r.participants = next
 	r.stale = false
 	r.marked = again
@@ -962,6 +1028,7 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	if changed {
 		p.notify(r.channelID)
 	}
+	return withdraw
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,7 +1218,8 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 		r.marked = true
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", r.channelID)
-		events := transmitEvents(r.channelID, r.transmit.leave(now, principalID))
+		events := p.endShareLocked(r, principalID, voiceShareStopAccessLost)
+		events = append(events, transmitEvents(r.channelID, r.transmit.leave(now, principalID))...)
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: r.channelID, detail: detail})
 		p.mu.Unlock()
 		p.writeEvents(ctx, events...)
@@ -1185,9 +1253,17 @@ func (p *voicePoller) forget(ctx context.Context, room string, principalID int64
 	// be about to.
 	r.seq++
 	r.evicted[principalID] = r.seq
-	closing := r.transmit.leave(p.now(), principalID)
+	// A share of theirs ends now, as they leave presence: they lost their
+	// place, and the removal that follows takes the connection away.
+	events := p.endShareLocked(r, principalID, voiceShareStopAccessLost)
+	shareEnded := len(events) > 0
+	events = append(events, transmitEvents(r.channelID, r.transmit.leave(p.now(), principalID))...)
 	p.mu.Unlock()
-	p.writeEvents(ctx, transmitEvents(r.channelID, closing)...)
+	p.writeEvents(ctx, events...)
+	if shareEnded && !ok {
+		// evictFromRoom tells the channel only when they were in presence.
+		p.notify(r.channelID)
+	}
 	return s, ok
 }
 
@@ -1251,6 +1327,9 @@ func (p *voicePoller) snapshotLocked(channelID int64) schema.VoicePresenceV1 {
 			continue
 		}
 		for pid, s := range r.participants {
+			// The share is shown once it has started, on its holder, for
+			// as long as they are shown (voice_share.go).
+			sharing := r.share != nil && !r.share.pending && r.share.principalID == pid
 			room.Participants = append(room.Participants, schema.VoiceParticipant{
 				PrincipalID: pid,
 				// Every V3 member may publish into the channel-wide room
@@ -1258,6 +1337,8 @@ func (p *voicePoller) snapshotLocked(channelID int64) schema.VoicePresenceV1 {
 				CanPublish:   true,
 				Transmitting: s.transmitting,
 				JoinedAt:     schema.NewTimestamp(s.joinedAt),
+				Sharing:      sharing,
+				SharingAudio: sharing && r.share.audio,
 			})
 		}
 	}
@@ -1485,6 +1566,14 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	}
 	delete(p.rooms, name)
 	r.retired = true
+	// The room's screen share ends with it, written first: deleting the room
+	// takes its sources away. A share still pending never started, and its
+	// claim finds the room retired (claimShare).
+	var events []voiceEvent
+	if c := r.share; c != nil && !c.pending {
+		events = append(events, shareStoppedEvent(r.channelID, c.principalID, c.principalID, voiceShareStopRotated))
+	}
+	r.share = nil
 	// Every transmission still open in the room, reported or unreported, is
 	// closed now with reason=left, before the state is dropped
 	// (docs/design/conch-voice.md §6). That includes a reported `started`
@@ -1503,7 +1592,6 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 		}
 	}
 	slices.Sort(pids)
-	var events []voiceEvent
 	for _, pid := range pids {
 		events = append(events, transmitEvents(r.channelID, closing[pid])...)
 		if _, ok := r.participants[pid]; !ok {

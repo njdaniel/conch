@@ -1122,9 +1122,16 @@ type headless struct {
 	done    chan struct{}
 }
 
-// startHeadless starts lk as a participant admitted by token alone.
+// startHeadless starts lk as a participant admitted by token alone,
+// publishing silence as its microphone.
 func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*headless, error) {
-	rl, err := startRelay(lkHostPort, token)
+	return h.startLK(lkBin, lkHostPort, token, nil, "--publish", oggPath)
+}
+
+// startLK starts `lk room join` with the given options, admitted by token
+// alone through a relay whose filter (nil for none) sees what lk sends.
+func (h *harness) startLK(lkBin, lkHostPort, token string, filter func(context.Context, []byte) []byte, options ...string) (*headless, error) {
+	rl, err := startRelay(lkHostPort, token, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1141,8 +1148,10 @@ func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*head
 	}
 	// A throwaway key pair LiveKit has never heard of: lk signs its own token
 	// with it, and the relay replaces that token before LiveKit sees it.
-	cmd := groupStart(lkBin, "--url", rl.url(), "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000",
-		"room", "join", "--identity", "relay-placeholder", "--publish", oggPath, "relay-placeholder-room")
+	args := []string{"--url", rl.url(), "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000",
+		"room", "join", "--identity", "relay-placeholder"}
+	args = append(append(args, options...), "relay-placeholder-room")
+	cmd := groupStart(lkBin, args...)
 	// lk reads livekit.toml from its working directory and LIVEKIT_* from its
 	// environment. It gets an empty directory of its own and PATH, HOME and
 	// TMPDIR, and nothing else of the caller's.

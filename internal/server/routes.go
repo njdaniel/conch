@@ -60,6 +60,11 @@ func (s *Server) routeTable() []route {
 		// Transmit reports (issue #135): a client reports each press and
 		// release. Human members who hold a session; checked in the handler.
 		rt("POST /v1/channels/{channel}/voice/transmit", accessAuthenticated, hf(s.handleVoiceTransmit)),
+		// Screen share (issue #443): a member who holds a session claims the
+		// room's one share; the sharer or an operator (member or not) stops
+		// it. Checked in the handlers; see voice_share.go.
+		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
+		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a
