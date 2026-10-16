@@ -136,7 +136,10 @@ type messageSent struct {
 }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
-	err       error
+	// readOnly are the ids, among approvals, this person may see but not
+	// decide (issue #450).
+	readOnly []int64
+	err      error
 }
 type whoAmILoaded struct {
 	who schema.WhoAmIResponseV1
@@ -192,8 +195,12 @@ type Model struct {
 	events        chan tea.Msg
 	mode          mode
 	approvals     []schema.ApprovalV1
-	selApproval   int
-	selOption     int
+	// readOnly holds the approvals shown that this person may not decide
+	// (issue #450): they are marked in the list and cannot be opened for a
+	// decision.
+	readOnly    map[int64]bool
+	selApproval int
+	selOption   int
 	// bodyOffset is the first line of the selected approval's body shown in
 	// the details pane. Only pgup/pgdn move it, and it is back to 0 whenever
 	// the selected approval changes.
@@ -484,6 +491,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeAgents:
 				return m.activateAgent()
 			case modeInbox:
+				if len(m.approvals) > 0 && m.selApproval < len(m.approvals) && m.readOnly[m.approvals[m.selApproval].ID] {
+					m.setStatus(modeInbox, "view only: you may not decide this")
+					return m, nil
+				}
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
 					m.selOption = 0
@@ -593,6 +604,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(modeInbox, msg.err.Error())
 		} else {
 			m.approvals = msg.approvals
+			m.readOnly = make(map[int64]bool, len(msg.readOnly))
+			for _, id := range msg.readOnly {
+				m.readOnly[id] = true
+			}
 			m.selApproval = 0
 			m.bodyOffset = 0
 			// A slower load can land after the user has already moved into
@@ -1000,7 +1015,7 @@ func (m Model) send(channel, raw, body string, audience *schema.Audience, whispe
 func (m Model) loadApprovals() tea.Cmd {
 	return func() tea.Msg {
 		resp, err := m.api.ListApprovals(m.ctx)
-		return approvalsLoaded{approvals: resp.Approvals, err: err}
+		return approvalsLoaded{approvals: resp.Approvals, readOnly: resp.ReadOnly, err: err}
 	}
 }
 
@@ -1429,6 +1444,9 @@ func (m Model) inboxLines(cols, rows int) []string {
 		esc, escWidth := "", 0
 		if app.State == schema.ApprovalStateEscalated {
 			esc, escWidth = badgeStyle.Render(" [ESC]"), 6
+		}
+		if m.readOnly[app.ID] {
+			esc, escWidth = esc+statusStyle.Render(" [view]"), escWidth+7
 		}
 		title := fitCells(fmt.Sprintf("%d: %s", app.RequesterID, sanitize(app.Title)), cols-2-escWidth)
 		lines = append(lines, prefix+title+esc)

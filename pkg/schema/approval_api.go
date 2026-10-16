@@ -83,6 +83,10 @@ type CreateApprovalResponseV1 struct {
 // filtered listing reuses it.
 type ListApprovalsResponseV1 struct {
 	Approvals []ApprovalV1 `json:"approvals"`
+	// ReadOnly lists the ids, among Approvals, that the caller may see but
+	// not decide: they are in a channel where the caller does not hold the
+	// right to decide approvals (issue #450). Absent when there are none.
+	ReadOnly []int64 `json:"read_only,omitempty"`
 }
 
 // GetApprovalResponseV1 is the response body for reading one approval by id,
@@ -132,3 +136,8 @@ type CastDecisionResponseV1 struct {
 	// Resolution is present only when this decision resolved the approval.
 	Resolution *ApprovalResolutionV1 `json:"resolution,omitempty"`
 }
+
+// ErrorCodeDecisionNotPermitted: the caller is a member of the approval's
+// channel but does not hold the right to decide its approvals (HTTP 403,
+// issue #450). An operator grants the right per member.
+const ErrorCodeDecisionNotPermitted = "decision_not_permitted"

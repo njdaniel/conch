@@ -777,6 +777,14 @@ func (c *Client) PutChannelMember(ctx context.Context, channel string, principal
 	return c.roundTrip(ctx, "add channel member", http.MethodPut, endpoint, nil, nil)
 }
 
+// PutChannelMemberDecide is PutChannelMember with the right to decide the
+// channel's approvals set (issue #450): a new member is added with it, an
+// existing one has it changed.
+func (c *Client) PutChannelMemberDecide(ctx context.Context, channel string, principalID int64, canDecide *bool) error {
+	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "add channel member", http.MethodPut, endpoint, schema.PutChannelMemberRequestV1{CanDecide: canDecide}, nil)
+}
+
 // RemoveChannelMember takes principalID off channel. It is idempotent.
 func (c *Client) RemoveChannelMember(ctx context.Context, channel string, principalID int64) error {
 	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
