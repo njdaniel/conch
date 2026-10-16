@@ -118,6 +118,9 @@ var TSTypes = []TSType{
 	{Value: CreatePrincipalResponse{}, Family: "create-principal-response-v0"},
 	{Value: CreateCredentialRequestV1{}, Family: "create-credential-request-v1"},
 	{Value: CreateCredentialResponseV1{}, Family: "create-credential-response-v1"},
+	// Changing your name (issue #441).
+	{Value: RenamePrincipalRequestV1{}, Family: "rename-principal-request-v1"},
+	{Value: RenamePrincipalResponseV1{}, Family: "rename-principal-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.

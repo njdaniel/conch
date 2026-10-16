@@ -1002,6 +1002,24 @@ export const createCredentialResponseV1 = object<CreateCredentialResponseV1>({
   token: str,
 });
 
+// schema.RenamePrincipalRequestV1
+export interface RenamePrincipalRequestV1 {
+  name: string;
+}
+
+export const renamePrincipalRequestV1 = object<RenamePrincipalRequestV1>({
+  name: str,
+});
+
+// schema.RenamePrincipalResponseV1
+export interface RenamePrincipalResponseV1 {
+  principal: PrincipalV0;
+}
+
+export const renamePrincipalResponseV1 = object<RenamePrincipalResponseV1>({
+  principal: principalV0,
+});
+
 // schema.Health
 export interface Health {
   status: string;

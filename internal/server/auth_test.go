@@ -218,6 +218,7 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
+	"PUT /v1/principals/{id}/name":                {classSelf, "/v1/principals/1/name", `{}`, 400},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
 	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
 	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},

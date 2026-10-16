@@ -26,7 +26,9 @@ export type AuthAction =
   | { readonly type: 'failed'; readonly failure: ApiFailure }
   | { readonly type: 'continue' }
   | { readonly type: 'signOut'; readonly notice?: AuthNotice | null }
-  | { readonly type: 'unauthorized' };
+  | { readonly type: 'unauthorized' }
+  // The signed-in principal changed its name (issue #441).
+  | { readonly type: 'renamed'; readonly name: string };
 
 export function initialAuth(hasStoredToken: boolean): AuthState {
   return hasStoredToken ? { phase: 'restoring' } : { phase: 'signedOut', notice: null };
@@ -63,6 +65,8 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
       return signedOut(action.notice ?? null);
     case 'unauthorized':
       return state.phase === 'signedIn' || state.phase === 'operatorWarning' ? signedOut('expired') : state;
+    case 'renamed':
+      return state.phase === 'signedIn' ? { phase: 'signedIn', principal: { ...state.principal, name: action.name } } : state;
   }
 }
 

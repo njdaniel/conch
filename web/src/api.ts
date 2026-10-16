@@ -19,7 +19,14 @@ import { listChannelMembersResponseV1, listChannelsResponse, type ChannelMemberV
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
-import { whoAmIResponseV1, type WhoAmIResponseV1 } from './schema/principal';
+import {
+  renamePrincipalResponseV1,
+  whoAmIResponseV1,
+  type PrincipalV0,
+  type RenamePrincipalRequestV1,
+  type RenamePrincipalResponseV1,
+  type WhoAmIResponseV1,
+} from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import { voicePresenceV1, voiceSessionResponseV1, type VoicePresenceV1, type VoiceSessionResponseV1, type VoiceTransmitReportV1, type VoiceTransmitState } from './schema/voice';
 import type { Validator } from './schema/validate';
@@ -378,6 +385,25 @@ export function onSignedOutElsewhere(callback: () => void): () => void {
   return () => {
     window.removeEventListener('storage', listener);
   };
+}
+
+// renamePrincipal changes a principal's name (issue #441): the caller's own,
+// or anyone's for an operator. A refusal carries the server's code:
+// principal_exists (the name, or one that looks the same, is taken),
+// rate_limited (too many renames today) or invalid_request (not a valid name).
+export async function renamePrincipal(id: number, name: string): Promise<ApiResult<PrincipalV0>> {
+  const request: RenamePrincipalRequestV1 = { name };
+  const reply = await authedSend('PUT', `/v1/principals/${String(id)}/name`, request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  try {
+    const parsed: unknown = await reply.res.json();
+    if (renamePrincipalResponseV1(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
 }
 
 // listChannels reads the channels the caller can use. A 401 drops the

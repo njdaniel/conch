@@ -39,6 +39,8 @@ import {
   readStateV1,
   redeemInviteRequestV1,
   redeemInviteResponseV1,
+  renamePrincipalRequestV1,
+  renamePrincipalResponseV1,
   revokeAllCredentialsResponseV1,
   runV1,
   sessionRosterV1,
@@ -99,5 +101,7 @@ export const families: [string, Validator<unknown>][] = [
   ['create-principal-response-v0', createPrincipalResponse],
   ['create-credential-request-v1', createCredentialRequestV1],
   ['create-credential-response-v1', createCredentialResponseV1],
+  ['rename-principal-request-v1', renamePrincipalRequestV1],
+  ['rename-principal-response-v1', renamePrincipalResponseV1],
   ['error', errorV0],
 ];

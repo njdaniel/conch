@@ -3,6 +3,7 @@
 // does every call and is the only code that sees the credential.
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
+import { ChangeName } from './ChangeName';
 import { Conversation } from './Conversation';
 import { Lobby } from './Lobby';
 import { OperatorWarning } from './OperatorWarning';
@@ -331,6 +332,19 @@ export function App({ origin }: { readonly origin: string }) {
           unread={unread}
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
+          account={
+            // A person renames themselves; an agent's name is an operator's to set.
+            auth.principal.kind === 'human' ? (
+              <ChangeName
+                id={auth.principal.id}
+                name={auth.principal.name}
+                onRenamed={(p) => {
+                  dispatchAuth({ type: 'renamed', name: p.name });
+                }}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : null
+          }
           voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
           conversation={
             selected === null || channelId === null ? null : (
