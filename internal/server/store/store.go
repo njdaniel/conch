@@ -565,6 +565,15 @@ END`,
 	{
 		`ALTER TABLE channel_members ADD COLUMN can_decide INTEGER NOT NULL DEFAULT 1 CHECK (can_decide IN (0, 1))`,
 	},
+	// 26: Renewable credentials (issue #439). renew_ms, when set, is how far
+	// past a use the credential's expiry moves: a request that authenticates
+	// with it sets expires_at to now + renew_ms, at most once a day
+	// (ResolveCredentialDetail). NULL is a fixed expiry, or none, which every
+	// existing credential keeps. A renewable credential always has an expiry,
+	// so one left unused runs out.
+	{
+		`ALTER TABLE credentials ADD COLUMN renew_ms INTEGER CHECK (renew_ms IS NULL OR (renew_ms > 0 AND expires_at IS NOT NULL))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

@@ -1,9 +1,15 @@
 // The only module that reads or writes the credential, and the only one that
-// calls conchd. The token lives in sessionStorage, which is per tab (decision
-// D2): two tabs are two sign-ins, and closing the tab drops it. It is sent only
-// as the Authorization header, and never put in a URL, a log call, the DOM or
-// an error: a failure is reported as a kind, never with the request in it.
+// calls conchd. Where the token lives depends on whose it is (issue #439,
+// decision O1). A member's lasts: it is kept in localStorage, so it survives
+// closing the browser and every tab of the origin shares it, until it is
+// signed out or stops working. An operator's stays with the one tab that
+// agreed to use it, in sessionStorage (decision D2, kept for operators). The
+// page has no third-party script (script-src 'self'), which is what makes
+// local storage acceptable. The token is sent only as the Authorization
+// header, and never put in a URL, a log call, the DOM or an error: a failure
+// is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
+import { revokeAllCredentialsResponseV1 } from './schema/credential';
 import { errorV0 } from './schema/error';
 import { health } from './schema/health';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
@@ -31,31 +37,93 @@ export type ApiResult<T> =
 
 const tokenKey = 'conch.web.token';
 
+// Where a credential is kept: 'tab' is this tab alone (sessionStorage), for an
+// operator's; 'lasting' is every tab of the origin until it is signed out
+// (localStorage), for a member's.
+type Place = 'tab' | 'lasting';
+
+// The credential this tab uses, and where it was found, so that what drops
+// it drops it from there.
+interface Held {
+  readonly token: string;
+  readonly place: Place;
+}
+
+// The tab's own credential comes first: an operator who continued in this tab
+// is that operator here, whatever member has signed in elsewhere.
+const places: readonly Place[] = ['tab', 'lasting'];
+
+// storageAt may throw (blocked site data); every caller is inside a try.
+function storageAt(place: Place): Storage {
+  return place === 'tab' ? window.sessionStorage : window.localStorage;
+}
+
 // An operator credential that checked out but that the person has not yet
 // agreed to use in this browser (ADR-007). It is kept in memory only, so a
 // reload during the warning starts again at sign-in.
 let pending: string | null = null;
 
-function readToken(): string | null {
+// The credential this page signed in with: set by signIn (a member's),
+// continueAsOperator and restore, and cleared by the sign-outs and by any 401.
+// Every call sends this one and no other. Storage is only where it is kept: if
+// another tab replaces or removes it there, the page is no longer signed in,
+// and a call never falls through to whatever else is stored, which could be
+// another person's credential under this page's name.
+let pinned: Held | null = null;
+
+// current is the pinned credential while it is still the one stored at its
+// place, else nothing (and the pin is cleared).
+function current(): Held | null {
+  const held = pinned;
+  if (held === null) return null;
+  let stored: string | null = null;
   try {
-    return window.sessionStorage.getItem(tokenKey);
+    stored = storageAt(held.place).getItem(tokenKey);
   } catch {
-    return null;
+    // Refused: as good as gone.
   }
+  if (stored === held.token) return held;
+  pinned = null;
+  return null;
 }
 
-function writeToken(token: string): boolean {
+// forget drops the credential held, from memory and from its storage.
+function forget(held: Held): void {
+  if (pinned?.token === held.token && pinned.place === held.place) pinned = null;
+  dropToken(held);
+}
+
+// readToken finds a credential left by an earlier load, for restore to check:
+// this tab's own first, then the lasting one. Nothing else reads storage for a
+// credential.
+function readToken(): Held | null {
+  for (const place of places) {
+    try {
+      const token = storageAt(place).getItem(tokenKey);
+      if (token !== null) return { token, place };
+    } catch {
+      // This storage is refused; the other may still hold one.
+    }
+  }
+  return null;
+}
+
+function writeToken(token: string, place: Place): boolean {
   try {
-    window.sessionStorage.setItem(tokenKey, token);
+    storageAt(place).setItem(tokenKey, token);
     return true;
   } catch {
     return false;
   }
 }
 
-function dropToken(): void {
+// dropToken forgets the credential held, if it is still the one stored there:
+// another tab may have signed in again since this one read it, and a late 401
+// for the old credential must not sign the new one out.
+function dropToken(held: Held): void {
   try {
-    window.sessionStorage.removeItem(tokenKey);
+    const storage = storageAt(held.place);
+    if (storage.getItem(tokenKey) === held.token) storage.removeItem(tokenKey);
   } catch {
     // Nothing stored that could be removed.
   }
@@ -100,15 +168,15 @@ async function get<T>(path: string, token: string, check: Validator<T>): Promise
   return { ok: true, value: body as T };
 }
 
-// authed is every call made with the stored credential: it reads the token,
-// makes the request and, on a 401, drops the token, so "a 401 anywhere signs
-// out" holds for every call added here without each one remembering it.
-// signIn is the one call that does not use it: it checks a candidate.
+// authed is every call made with the signed-in credential: it takes the pinned
+// token, makes the request and, on a 401, drops the token, so "a 401 anywhere
+// signs out" holds for every call added here without each one remembering it.
+// signIn and restore are the calls that do not use it: they check a candidate.
 async function authed<T>(path: string, check: Validator<T>): Promise<ApiResult<T>> {
-  const token = readToken();
-  if (token === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get(path, token, check);
-  if (!result.ok && result.failure === 'unauthorized') dropToken();
+  const held = current();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const result = await get(path, held.token, check);
+  if (!result.ok && result.failure === 'unauthorized') forget(held);
   return result;
 }
 
@@ -122,14 +190,20 @@ type PostReply =
   | { readonly kind: 'unauthorized' };
 
 async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
-  const token = readToken();
-  if (token === null) return { kind: 'unauthorized' };
+  const held = current();
+  if (held === null) return { kind: 'unauthorized' };
+  return sendAs(held, method, path, body, keepalive, signal);
+}
+
+// sendAs is authedSend with the credential already taken, for the sign-outs,
+// which must drop the very credential they revoked.
+async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
   let res: Response;
   try {
     res = await fetch(path, {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${held.token}`,
         Accept: 'application/json',
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
@@ -143,7 +217,7 @@ async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?
     return { kind: 'none' };
   }
   if (res.status === 401) {
-    dropToken();
+    forget(held);
     return { kind: 'unauthorized' };
   }
   return { kind: 'reply', res };
@@ -165,45 +239,145 @@ export async function serverVersion(): Promise<string | null> {
   }
 }
 
-// hasToken says whether this tab holds a credential from an earlier load.
+// hasToken says whether this tab has a credential from an earlier load: its
+// own, or a member's lasting one.
 export function hasToken(): boolean {
   return readToken() !== null;
 }
 
 // signIn checks a credential with GET /v1/whoami. A member's is stored at
-// once. An operator's is held back until continueAsOperator, because a browser
-// is not the place for it. A rejected credential is stored nowhere.
+// once, to last. An operator's is held back until continueAsOperator, because
+// a browser is not the place for it. A rejected credential is stored nowhere.
 export async function signIn(candidate: string): Promise<ApiResult<WhoAmIResponseV1>> {
   pending = null;
+  pinned = null;
   const result = await get('/v1/whoami', candidate, whoAmIResponseV1);
   if (!result.ok) return result;
   if (result.value.role === 'operator') {
     pending = candidate;
-  } else if (!writeToken(candidate)) {
-    // sessionStorage is refused (blocked site data): signing in would not last
+  } else if (writeToken(candidate, 'lasting')) {
+    pinned = { token: candidate, place: 'lasting' };
+  } else {
+    // localStorage is refused (blocked site data): signing in would not last
     // a reload, and the lobby could not call the API either.
     return { ok: false, failure: 'invalid' };
   }
   return result;
 }
 
-// continueAsOperator keeps the operator credential held by signIn.
+// continueAsOperator keeps the operator credential held by signIn, in this tab
+// only.
 export function continueAsOperator(): boolean {
   const token = pending;
   pending = null;
-  return token !== null && writeToken(token);
+  if (token === null || !writeToken(token, 'tab')) return false;
+  pinned = { token, place: 'tab' };
+  return true;
 }
 
-// restore checks the credential left by an earlier load of this tab. A 401
-// drops it.
-export async function restore(): Promise<ApiResult<WhoAmIResponseV1>> {
+// What restore found: who the stored credential is, and whether it is an
+// operator's that was kept to last, which must pass the warning first.
+export interface Restored {
+  readonly principal: WhoAmIResponseV1;
+  readonly warn: boolean;
+}
+
+// restore checks the credential left by an earlier load: this tab's own, else
+// the lasting one, and signs in with it. A 401 drops it. An operator's found
+// in the lasting place is never kept there: it is taken out and held back for
+// the operator warning, as signIn holds one.
+export async function restore(): Promise<ApiResult<Restored>> {
+  pending = null;
+  pinned = null;
+  const held = readToken();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const result = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  if (!result.ok) {
+    if (result.failure === 'unauthorized') dropToken(held);
+    return result;
+  }
+  if (held.place === 'lasting' && result.value.role === 'operator') {
+    dropToken(held);
+    pending = held.token;
+    return { ok: true, value: { principal: result.value, warn: true } };
+  }
+  pinned = held;
+  return { ok: true, value: { principal: result.value, warn: false } };
+}
+
+// whoAmI asks who the signed-in credential is, mid-session (after a socket was
+// refused, say). Unlike restore it never picks a credential: it asks with the
+// one this page signed in with, and a 401 drops it.
+export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
   return authed('/v1/whoami', whoAmIResponseV1);
 }
 
-// signOut forgets the credential in this tab. It revokes nothing on the server.
-export function signOut(): void {
+// signOut revokes the credential this tab uses (DELETE /v1/credentials/current)
+// and then forgets it here, whatever the answer. It resolves to whether the
+// server was told: true when it revoked the credential, when the credential
+// was no longer valid anyway (401), or when none was stored; false when there
+// was no answer or a refusal, and the credential may still work elsewhere.
+export async function signOut(): Promise<boolean> {
   pending = null;
-  dropToken();
+  const held = current();
+  pinned = null;
+  if (held === null) return true;
+  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
+  dropToken(held);
+  return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
+}
+
+// signOutEverywhere revokes every credential of the signed-in principal
+// (POST /v1/principals/{id}/credentials/revoke-all), so every browser and
+// client signed in as them is refused on its next request, and then forgets
+// the credential here. The value is how many were revoked, or null when the
+// answer was a success without a readable count. On any failure nothing is
+// forgotten: the person is still signed in here, and can try again.
+export async function signOutEverywhere(principal: number): Promise<ApiResult<number | null>> {
+  pending = null;
+  const held = current();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const reply = await sendAs(held, 'POST', `/v1/principals/${String(principal)}/credentials/revoke-all`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  // A success: the credentials are revoked, this one with them, whatever the
+  // body turns out to be.
+  forget(held);
+  try {
+    const parsed: unknown = await reply.res.json();
+    if (revokeAllCredentialsResponseV1(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
+  } catch {
+    // Fall through.
+  }
+  return { ok: true, value: null };
+}
+
+// onSignedOutElsewhere calls back when another tab of this origin removes the
+// lasting credential this page signed in with (it signed out, or was refused)
+// or replaces it with another person's. A tab on its own operator credential
+// is not affected. The browser fires the storage event only in the other tabs,
+// never in the one that made the change. It returns the function that stops
+// listening.
+export function onSignedOutElsewhere(callback: () => void): () => void {
+  const listener = (event: StorageEvent) => {
+    // key null is the whole storage cleared.
+    if (event.key !== null && event.key !== tokenKey) return;
+    let lasting: boolean;
+    try {
+      lasting = event.storageArea === window.localStorage;
+    } catch {
+      return;
+    }
+    if (!lasting || pinned?.place !== 'lasting') return;
+    // Still the credential this page signed in with: nothing changed for it.
+    if (current() !== null) return;
+    callback();
+  };
+  window.addEventListener('storage', listener);
+  return () => {
+    window.removeEventListener('storage', listener);
+  };
 }
 
 // listChannels reads the channels the caller can use. A 401 drops the

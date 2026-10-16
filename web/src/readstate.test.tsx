@@ -148,6 +148,7 @@ const noBadges = () => screen.queryAllByRole('img');
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  window.localStorage.clear();
   FakeSocket.all = [];
   install();
 });

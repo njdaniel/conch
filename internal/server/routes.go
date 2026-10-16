@@ -99,10 +99,16 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/principals/{id}/credentials", accessOperator, hf(s.handleListCredentials)),
 		rt("POST /v1/credentials/{credential_id}/rotate", accessOperator, hf(s.handleRotateCredential)),
 		rt("DELETE /v1/credentials/{credential_id}", accessOperator, hf(s.handleRevokeCredential)),
+		// Signing out (issue #439): the caller revokes the credential the
+		// request came with. More specific than the route above, so the mux
+		// never hands "current" to it as an id.
+		rt("DELETE /v1/credentials/current", accessAuthenticated, hf(s.handleRevokeCurrentCredential)),
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
-		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperator, hf(s.handleRevokeAllCredentials)),
+		// Operators, or the principal itself: "sign out everywhere" (issue
+		// #439; checked in the handler).
+		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
 		rt("GET /v1/audit", accessOperator, hf(s.handleExportAudit)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),

@@ -262,6 +262,7 @@ async function showRoster(socket: FakeSocket, sessions: Json[]) {
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  window.localStorage.clear();
   install();
 });
 afterEach(() => {

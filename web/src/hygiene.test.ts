@@ -31,19 +31,71 @@ describe('credential handling', () => {
 
   it('is read only through authed and authedPost (or by signIn, for a candidate)', () => {
     const code = sources['./api.ts'] ?? '';
-    // Every readToken() call is inside authed: one call, and nothing exports
-    // the token's accessors for another module to use.
-    // Its definition, authed, authedPost and hasToken: no other call reads the token.
-    expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(4);
-    expect(code).not.toMatch(/export\s+(async\s+)?function\s+(read|write|drop)Token/);
+    // Nothing exports the token's accessors for another module to use.
+    // Storage is searched for a credential only by its definition, hasToken
+    // and restore. Every other call sends the credential the page signed in
+    // with (current(), #439 review M1), so none can fall through to another
+    // one that happens to be stored.
+    expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(3);
+    expect(code).not.toMatch(/export\s+(async\s+)?function\s+((read|write|drop)Token|sendAs|current|forget)\b/);
+    // The pin is set in three places only: signIn, continueAsOperator and
+    // restore.
+    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(3);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
     const code = sources['./api.ts'] ?? '';
     expect(code).not.toMatch(/\?\s*(token|access_token)=/);
-    expect(code).not.toMatch(/\$\{token\}[^`]*`\s*,\s*\{/);
+    expect(code).not.toMatch(/\$\{(held\.)?token\}[^`]*`\s*,\s*\{/);
   });
 });
+
+// localStorage (issue #439, decision O1): a member's credential lasts there,
+// and nothing else of ours does. Comments are left out: saying where the SDK
+// keeps its log level is not using the storage.
+describe('local storage', () => {
+  it('is named in src/api.ts alone', () => {
+    const naming = Object.entries(sources)
+      .filter(([, code]) => /localStorage/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(naming).toEqual(['./api.ts']);
+  });
+
+  it('is used in src/api.ts only for the token key', () => {
+    const code = withoutComments(sources['./api.ts'] ?? '');
+    // Named twice: where a lasting credential is kept, and the storage
+    // event's check that the change was there. Never read from directly.
+    expect(code.match(/localStorage/g)?.length).toBe(2);
+    expect(code).not.toMatch(/localStorage\s*(\.|\[)/);
+    // Every storage call in the module names the token key, and nothing
+    // lists, counts or clears a storage.
+    expect(code.match(storageCall)?.length).toBeGreaterThan(0);
+    expect(code).not.toMatch(storageCallOtherKey);
+    expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(withoutComments('// keeps a level in localStorage\nconst a = 1;')).not.toMatch(/localStorage/);
+    expect(withoutComments('/* localStorage */ const a = 1;')).not.toMatch(/localStorage/);
+    expect(withoutComments('const s = window.localStorage; // where')).toMatch(/localStorage/);
+    expect(withoutComments("const u = '//'; const s = window.localStorage;")).toMatch(/localStorage/);
+    expect(withoutComments('  // a note\n  window.localStorage.getItem(k);')).toMatch(/localStorage/);
+    for (const example of ['storage.getItem(otherKey)', 'storage.setItem("conch.x", v)', 'storage.removeItem( lastKey)', 'storage.getItem(tokenKeys)']) {
+      expect(storageCallOtherKey.test(example), example).toBe(true);
+    }
+    expect(storageCallOtherKey.test('storage.getItem(tokenKey)')).toBe(false);
+    expect(storageCallOtherKey.test('storage.setItem(tokenKey, token)')).toBe(false);
+  });
+});
+
+const storageCall = /\.(getItem|setItem|removeItem)\(/g;
+const storageCallOtherKey = /\.(getItem|setItem|removeItem)\(\s*(?!tokenKey\b)/;
+
+// withoutComments drops whole-line // comments and /* */ blocks. A // after
+// code on a line is kept, so that a // in a string cannot hide what follows it.
+function withoutComments(code: string): string {
+  return code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+}
 
 // What the page's CSP forbids and what would let someone else's text become
 // markup: none may appear in the source. #281 and #282 render messages and
@@ -138,7 +190,7 @@ describe('the socket ticket', () => {
 });
 
 describe('the built bundle', () => {
-  it('uses the screen and storage APIs only as the SDK does', async () => {
+  it('uses the screen API only as the SDK does, and storage only as the SDK and src/api.ts do', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });
     const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
     const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
@@ -147,17 +199,59 @@ describe('the built bundle', () => {
     // not ours until A11b: the token is microphone-only, so the SDK's screen
     // share could not publish anyway; its mentions are listed so a new one shows.
     expect(screenMentions(code)).toBeLessThanOrEqual(maxScreenMentions);
-    // localStorage: only the SDK's logger (loglevel) mentions it. loglevel
-    // reads localStorage and cookies when a logger is created, for a level
-    // remembered there, and writes them only when a level is set with persist
-    // on; the client never does (setLevel is called with persist=false and the
-    // SDK's setLogLevel, which persists, is never called; sdk.storage.test.ts),
-    // and never touches either itself.
-    for (const at of allIndexes(code, 'localStorage')) {
-      expect(code.slice(Math.max(0, at - 600), at + 600)).toMatch(/loglevel|storageKey/);
+    // localStorage, counted module by module (issue #439): every mention in
+    // the bundle comes from a module storageMentions names, exactly as often
+    // as it says, so a mention from any other module fails here.
+    const found: Record<string, number> = {};
+    let inModules = 0;
+    for (const chunk of outputs) {
+      if (chunk.type !== 'chunk') continue;
+      for (const [id, rendered] of Object.entries(chunk.modules)) {
+        const moduleCode = rendered.code ?? '';
+        const at = allIndexes(moduleCode, 'localStorage');
+        if (at.length === 0) continue;
+        const source = sourceOf(id);
+        found[source] = (found[source] ?? 0) + at.length;
+        inModules += at.length;
+        // The SDK's are its logger's (loglevel), each beside its storage key.
+        if (source === livekitBundle) {
+          for (const i of at) expect(moduleCode.slice(Math.max(0, i - 600), i + 600)).toMatch(/loglevel|storageKey/);
+        }
+      }
     }
+    expect(found).toEqual(storageMentions);
+    // Nor does anything outside a module (code the bundler wrote itself).
+    expect(allIndexes(code, 'localStorage').length).toBe(inModules);
   }, 60_000);
 });
+
+// Where the built bundle may name localStorage, and how many times.
+//
+// src/api.ts keeps a member's credential there (issue #439, decision O1).
+//
+// The LiveKit SDK (livekit-client 2.22.3) bundles its logger, loglevel, into
+// its own ESM build, so loglevel's mentions are counted under the SDK's file.
+// loglevel reads localStorage and cookies when a logger is created, for a
+// level remembered there, and writes them only when a level is set with
+// persist on. The client never does: setLevel is called with persist=false
+// and the SDK's setLogLevel, which persists, is never called
+// (sdk.storage.test.ts). loglevel reads only its own key, never the
+// credential's. A bump of the SDK that changes the count fails here and is
+// looked at.
+const livekitBundle = 'node_modules/livekit-client/dist/livekit-client.esm.mjs';
+const storageMentions: Record<string, number> = {
+  'src/api.ts': 2,
+  [livekitBundle]: 3,
+};
+
+// sourceOf names a bundled module by its path from web/: node_modules/... for
+// a dependency, src/... for ours.
+function sourceOf(id: string): string {
+  const dep = id.lastIndexOf('/node_modules/');
+  if (dep !== -1) return id.slice(dep + 1);
+  const ours = id.lastIndexOf('/web/src/');
+  return ours !== -1 ? id.slice(ours + '/web/'.length) : id;
+}
 
 // How many times the SDK's own code names getDisplayMedia (its screen-share methods
 // are not tree-shaken away), measured on

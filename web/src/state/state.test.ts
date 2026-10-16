@@ -17,6 +17,8 @@ describe('authReducer', () => {
     { name: 'operator verified is warned', from: { phase: 'checking' }, action: { type: 'verified', principal: operator }, to: { phase: 'operatorWarning', principal: operator } },
     { name: 'a restored operator is not warned again', from: { phase: 'restoring' }, action: { type: 'verified', principal: operator }, to: { phase: 'signedIn', principal: operator } },
     { name: 'a restored member signs in', from: { phase: 'restoring' }, action: { type: 'verified', principal: member }, to: { phase: 'signedIn', principal: member } },
+    { name: 'a restored operator credential kept to last is warned about', from: { phase: 'restoring' }, action: { type: 'held', principal: operator }, to: { phase: 'operatorWarning', principal: operator } },
+    { name: 'held outside a restore is ignored', from: { phase: 'signedIn', principal: member }, action: { type: 'held', principal: operator }, to: { phase: 'signedIn', principal: member } },
     { name: 'verified when signed out is ignored', from: { phase: 'signedOut', notice: null }, action: { type: 'verified', principal: member }, to: { phase: 'signedOut', notice: null } },
     { name: '401 at sign-in is rejected', from: { phase: 'checking' }, action: { type: 'failed', failure: 'unauthorized' }, to: { phase: 'signedOut', notice: 'rejected' } },
     { name: 'network failure at sign-in', from: { phase: 'checking' }, action: { type: 'failed', failure: 'network' }, to: { phase: 'signedOut', notice: 'network' } },
@@ -28,6 +30,9 @@ describe('authReducer', () => {
     { name: 'continue elsewhere is ignored', from: { phase: 'checking' }, action: { type: 'continue' }, to: { phase: 'checking' } },
     { name: 'sign out from the lobby', from: { phase: 'signedIn', principal: member }, action: { type: 'signOut' }, to: { phase: 'signedOut', notice: null } },
     { name: 'sign out from the warning', from: { phase: 'operatorWarning', principal: operator }, action: { type: 'signOut' }, to: { phase: 'signedOut', notice: null } },
+    { name: 'sign out the server was not told of', from: { phase: 'signedIn', principal: member }, action: { type: 'signOut', notice: 'untold' }, to: { phase: 'signedOut', notice: 'untold' } },
+    { name: 'sign out everywhere', from: { phase: 'signedIn', principal: member }, action: { type: 'signOut', notice: 'everywhere' }, to: { phase: 'signedOut', notice: 'everywhere' } },
+    { name: 'signed out in another tab', from: { phase: 'signedIn', principal: member }, action: { type: 'signOut', notice: 'elsewhere' }, to: { phase: 'signedOut', notice: 'elsewhere' } },
     { name: '401 mid-session', from: { phase: 'signedIn', principal: member }, action: { type: 'unauthorized' }, to: { phase: 'signedOut', notice: 'expired' } },
     { name: '401 when already signed out changes nothing', from: { phase: 'signedOut', notice: null }, action: { type: 'unauthorized' }, to: { phase: 'signedOut', notice: null } },
   ];

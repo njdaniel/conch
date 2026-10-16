@@ -798,6 +798,7 @@ export interface CredentialV1 {
   created_at: string;
   expires_at?: string;
   revoked_at?: string;
+  renews?: boolean;
 }
 
 export const credentialV1 = object<CredentialV1>({
@@ -807,6 +808,7 @@ export const credentialV1 = object<CredentialV1>({
   created_at: timestamp,
   expires_at: optional(timestamp),
   revoked_at: optional(timestamp),
+  renews: optional(bool),
 });
 
 // schema.InviteChannelV1
@@ -945,6 +947,59 @@ export interface ListInvitesResponseV1 {
 
 export const listInvitesResponseV1 = object<ListInvitesResponseV1>({
   invites: array(inviteV1),
+});
+
+// schema.RevokeAllCredentialsResponseV1
+export interface RevokeAllCredentialsResponseV1 {
+  revoked: number;
+}
+
+export const revokeAllCredentialsResponseV1 = object<RevokeAllCredentialsResponseV1>({
+  revoked: int,
+});
+
+// schema.CreatePrincipalRequest
+export interface CreatePrincipalRequest {
+  kind: PrincipalKind;
+  name: string;
+}
+
+export const createPrincipalRequest = object<CreatePrincipalRequest>({
+  kind: principalKind,
+  name: str,
+});
+
+// schema.CreatePrincipalResponse
+export interface CreatePrincipalResponse {
+  principal: PrincipalV0;
+}
+
+export const createPrincipalResponse = object<CreatePrincipalResponse>({
+  principal: principalV0,
+});
+
+// schema.CreateCredentialRequestV1
+export interface CreateCredentialRequestV1 {
+  label: string;
+  expires_at?: string;
+  renew_lifetime_seconds?: number;
+}
+
+export const createCredentialRequestV1 = object<CreateCredentialRequestV1>({
+  label: str,
+  expires_at: optional(timestamp),
+  renew_lifetime_seconds: optional(int),
+});
+
+// schema.CreateCredentialResponseV1
+export interface CreateCredentialResponseV1 {
+  credential: CredentialV1;
+  token: string;
+}
+
+export const createCredentialResponseV1 = object<CreateCredentialResponseV1>({
+  credential: credentialV1,
+  token: str,
 });
 
 // schema.Health

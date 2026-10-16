@@ -79,6 +79,8 @@ Today the credential lives in `sessionStorage`, one tab at a time (D2): closing 
 
 The alternative is an HttpOnly session cookie. It needs CSRF protection on every write route, which Conch does not have, so it is the bigger change.
 
+*Decided* (2026-10-16, recorded on #420; built in #439): the recommendation is adopted. A member's browser credential is kept in `localStorage` for the origin; sign out revokes it on the server (`DELETE /v1/credentials/current`) and sign out everywhere revokes all of the person's (`revoke-all`, now open to the principal itself). Invite credentials renew by being used, at most once a day. This amends D2 (#260) for members only: an operator's credential is still kept for one tab, after the warning.
+
 **O2. What a joiner is.**
 
 *Recommend:* a joiner is an ordinary human principal with the channels and grants its invite named. There is no separate guest kind. "Guest" is just a person whose invite was narrow.

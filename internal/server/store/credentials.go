@@ -94,12 +94,19 @@ func nullableMillis(t *time.Time) any {
 	return t.UnixMilli()
 }
 
-// insertCredentialTx inserts a credential row for token and returns its wire form.
-func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time) (schema.CredentialV1, error) {
+// insertCredentialTx inserts a credential row for token and returns its wire
+// form. A renew above zero makes it renewable (issue #439): its expiry then
+// moves to renew past each day's first use. A renewable credential must have
+// an expiry, which the table enforces.
+func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration) (schema.CredentialV1, error) {
+	var renewMs any
+	if renew > 0 {
+		renewMs = renew.Milliseconds()
+	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt))
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs)
 	if err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
 	}
@@ -112,6 +119,7 @@ func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label
 		PrincipalID: principalID,
 		Label:       label,
 		CreatedAt:   schema.NewTimestamp(now),
+		Renews:      renew > 0,
 	}
 	if expiresAt != nil {
 		ts := schema.NewTimestamp(*expiresAt)
@@ -137,6 +145,24 @@ func (s *Store) CreateCredential(ctx context.Context, actor string, principalID 
 		}
 		exp = &e
 	}
+	return s.createCredential(ctx, actor, principalID, label, now, exp, 0)
+}
+
+// CreateRenewableCredential is CreateCredential for a renewable credential
+// (issue #439): it expires lifetime after now, and each day it is used its
+// expiry moves to lifetime after that use (ResolveCredentialDetail). It
+// returns ErrCredentialExpiryPast for a lifetime that is not positive.
+func (s *Store) CreateRenewableCredential(ctx context.Context, actor string, principalID int64, label string, lifetime time.Duration) (schema.CredentialV1, string, error) {
+	lifetime = lifetime.Truncate(time.Millisecond)
+	if lifetime <= 0 {
+		return schema.CredentialV1{}, "", ErrCredentialExpiryPast
+	}
+	now := credentialNow().Truncate(time.Millisecond)
+	exp := now.Add(lifetime)
+	return s.createCredential(ctx, actor, principalID, label, now, &exp, lifetime)
+}
+
+func (s *Store) createCredential(ctx context.Context, actor string, principalID int64, label string, now time.Time, exp *time.Time, renew time.Duration) (schema.CredentialV1, string, error) {
 	token, err := newCredentialToken()
 	if err != nil {
 		return schema.CredentialV1{}, "", err
@@ -157,7 +183,7 @@ func (s *Store) CreateCredential(ctx context.Context, actor string, principalID 
 		if disabledAt.Valid {
 			return ErrPrincipalDisabled
 		}
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp)
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew)
 		if err != nil {
 			return err
 		}
@@ -183,7 +209,7 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 		return nil, fmt.Errorf("store: list credentials: find principal: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, principal_id, label, created_at, expires_at, revoked_at
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
 		 FROM credentials WHERE principal_id = ? ORDER BY created_at DESC, id DESC`, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list credentials: %w", err)
@@ -197,7 +223,7 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 			createdAt            int64
 			expiresAt, revokedAt sql.NullInt64
 		)
-		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt, &c.Renews); err != nil {
 			return nil, fmt.Errorf("store: list credentials: scan: %w", err)
 		}
 		c.CreatedAt = schema.NewTimestamp(time.UnixMilli(createdAt))
@@ -212,7 +238,8 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 }
 
 // RotateCredential issues a new credential for the same principal with the
-// same label and expiry, and revokes the old one, in one transaction; a
+// same label and expiry (and, for a renewable one, the same lifetime), and
+// revokes the old one, in one transaction; a
 // credential_rotated audit event is appended in it. The new token is returned
 // once. Concurrent rotations of one credential serialize: exactly one wins and
 // the rest get ErrCredentialRevoked.
@@ -229,13 +256,13 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		runs = nil
 		var (
-			principalID          int64
-			label                string
-			expiresAt, revokedAt sql.NullInt64
+			principalID                   int64
+			label                         string
+			expiresAt, revokedAt, renewMs sql.NullInt64
 		)
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id, label, expires_at, revoked_at FROM credentials WHERE id = ?", credentialID,
-		).Scan(&principalID, &label, &expiresAt, &revokedAt); {
+			"SELECT principal_id, label, expires_at, revoked_at, renew_ms FROM credentials WHERE id = ?", credentialID,
+		).Scan(&principalID, &label, &expiresAt, &revokedAt, &renewMs); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
@@ -273,7 +300,7 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		} else if n != 1 {
 			return ErrCredentialRevoked
 		}
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp)
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond)
 		if err != nil {
 			return err
 		}
@@ -299,6 +326,21 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 // audit event is appended in the same transaction as the first revocation.
 // It returns ErrCredentialNotFound for an unknown id.
 func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
+	return s.revokeCredential(ctx, actor, credentialID, "")
+}
+
+// RevokeOwnCredential is RevokeCredential for a caller signing itself out
+// (issue #439): credentialID must be the credential the request authenticated
+// with, which the caller takes from the request, never from its body. The
+// audit detail carries reason=self. The last operator guard applies as to any
+// revocation.
+func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentialID int64) error {
+	return s.revokeCredential(ctx, actor, credentialID, "self")
+}
+
+// revokeCredential is RevokeCredential with a reason for the audit detail,
+// none when empty.
+func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID int64, reason string) error {
 	var runs []EndedRun
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		runs = nil
@@ -345,8 +387,12 @@ func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID
 		} else if n != 1 {
 			return nil
 		}
+		detail := credentialDetail(credentialID, label)
+		if reason != "" {
+			detail += " reason=" + reason
+		}
 		if err := appendAuditEventTx(ctx, tx, actor, "credential_revoked",
-			principalActor(principalID), credentialDetail(credentialID, label), now); err != nil {
+			principalActor(principalID), detail, now); err != nil {
 			return err
 		}
 		// Its sessions end with it, in this transaction (issue #265).

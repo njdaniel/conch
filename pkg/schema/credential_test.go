@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -17,7 +18,9 @@ func TestCredentialGoldenFixtures(t *testing.T) {
 	}{
 		{"credential-v1.json", func() any { return new(CredentialV1) }},
 		{"credential-v1-revoked.json", func() any { return new(CredentialV1) }},
+		{"credential-v1-renews.json", func() any { return new(CredentialV1) }},
 		{"create-credential-request-v1.json", func() any { return new(CreateCredentialRequestV1) }},
+		{"create-credential-request-v1-renews.json", func() any { return new(CreateCredentialRequestV1) }},
 		{"create-credential-response-v1.json", func() any { return new(CreateCredentialResponseV1) }},
 		{"rotate-credential-response-v1.json", func() any { return new(RotateCredentialResponseV1) }},
 		{"list-credentials-response-v1.json", func() any { return new(ListCredentialsResponseV1) }},
@@ -50,10 +53,10 @@ func TestCredentialFixtureTokenShape(t *testing.T) {
 // credential object, in both the fixtures and a fully populated value: no
 // token, hash, or secret may ever appear on it.
 func TestCredentialV1HasNoSecretFields(t *testing.T) {
-	want := []string{"created_at", "expires_at", "id", "label", "principal_id", "revoked_at"}
+	want := []string{"created_at", "expires_at", "id", "label", "principal_id", "renews", "revoked_at"}
 
 	ts := NewTimestamp(time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC))
-	full := CredentialV1{ID: 1, PrincipalID: 2, Label: "l", CreatedAt: ts, ExpiresAt: &ts, RevokedAt: &ts}
+	full := CredentialV1{ID: 1, PrincipalID: 2, Label: "l", CreatedAt: ts, ExpiresAt: &ts, RevokedAt: &ts, Renews: true}
 	raw, err := json.Marshal(full)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +74,7 @@ func TestCredentialV1HasNoSecretFields(t *testing.T) {
 		t.Errorf("CredentialV1 keys = %v, want %v", got, want)
 	}
 
-	for _, file := range []string{"credential-v1.json", "credential-v1-revoked.json"} {
+	for _, file := range []string{"credential-v1.json", "credential-v1-revoked.json", "credential-v1-renews.json"} {
 		b, err := os.ReadFile(filepath.Join("testdata", file)) // #nosec G304 -- fixture name from this test's own table
 		if err != nil {
 			t.Fatal(err)
@@ -81,7 +84,7 @@ func TestCredentialV1HasNoSecretFields(t *testing.T) {
 			t.Fatal(err)
 		}
 		for k := range m {
-			if k != "id" && k != "principal_id" && k != "label" && k != "created_at" && k != "expires_at" && k != "revoked_at" {
+			if !slices.Contains(want, k) {
 				t.Errorf("%s has unexpected key %q", file, k)
 			}
 		}
@@ -112,6 +115,15 @@ func TestCreateCredentialRequestValidate(t *testing.T) {
 		{"label with leading space", CreateCredentialRequestV1{Label: " ci"}, "whitespace"},
 		{"expiry in past", CreateCredentialRequestV1{Label: "ci", ExpiresAt: &past}, "future"},
 		{"expiry exactly now", CreateCredentialRequestV1{Label: "ci", ExpiresAt: &atNow}, "future"},
+		{"renewable", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(90 * 24 * 60 * 60)}, ""},
+		{"renewable at the floor", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(MinCredentialRenewLifetimeSeconds)}, ""},
+		{"renewable at the ceiling", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(MaxCredentialRenewLifetimeSeconds)}, ""},
+		{"renewable below the floor", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(MinCredentialRenewLifetimeSeconds - 1)}, "between"},
+		{"renewable for a day never renews", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(24 * 60 * 60)}, "between"},
+		{"renewable above the ceiling", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(MaxCredentialRenewLifetimeSeconds + 1)}, "between"},
+		{"renewable zero", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(0)}, "between"},
+		{"renewable negative", CreateCredentialRequestV1{Label: "web", RenewLifetimeSeconds: seconds(-1)}, "between"},
+		{"renewable with a fixed expiry", CreateCredentialRequestV1{Label: "web", ExpiresAt: &future, RenewLifetimeSeconds: seconds(MinCredentialRenewLifetimeSeconds)}, "cannot both"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,3 +137,6 @@ func TestCreateCredentialRequestValidate(t *testing.T) {
 		})
 	}
 }
+
+// seconds is a renew_lifetime_seconds value.
+func seconds(s int64) *int64 { return &s }

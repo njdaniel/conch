@@ -222,11 +222,16 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
 	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
 	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
+	// Signing out (issue #439) revokes the caller's own credential, so the
+	// role matrix sends it from a fixture of its own (special-cased below).
+	// The fixture's operator holds the only operator credential: 409. AuthOff
+	// has no credential to revoke: 401, as whoami.
+	"DELETE /v1/credentials/current": {classAuth, "/v1/credentials/current", "", 409},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
 	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
-	"POST /v1/principals/{id}/credentials/revoke-all": {classOp, "/v1/principals/9999/credentials/revoke-all", "", 404},
+	"POST /v1/principals/{id}/credentials/revoke-all": {classSelf, "/v1/principals/9999/credentials/revoke-all", "", 404},
 	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
 	"GET /v1/hooks":                                   {classOp, "/v1/hooks", "", 200},
 	"DELETE /v1/hooks/{id}":                           {classOp, "/v1/hooks/9999", "", 404},
@@ -392,18 +397,26 @@ func TestRoleMatrix(t *testing.T) {
 			if isInviteRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
+			// Signing out (issue #439) succeeds for any member and revokes
+			// the credential it was sent with, so it runs on a fixture of its
+			// own and the other routes' callers stay signed in.
+			g := f
+			if rt.pattern == "DELETE /v1/credentials/current" {
+				memberWant, agentWant = http.StatusNoContent, http.StatusNoContent
+				g = newAuthFixture(t, AuthRequired)
+			}
 			cases := []struct {
 				who   string
 				token string
 				want  int
 			}{
 				{"unauthenticated", "", http.StatusUnauthorized},
-				{"member human", f.aliceTok, memberWant},
-				{"member agent", f.botTok, agentWant},
-				{"operator", f.rootTok, exp.allowed},
+				{"member human", g.aliceTok, memberWant},
+				{"member agent", g.botTok, agentWant},
+				{"operator", g.rootTok, exp.allowed},
 			}
 			for _, c := range cases {
-				rec := f.do(t, method, exp.path, c.token, exp.body)
+				rec := g.do(t, method, exp.path, c.token, exp.body)
 				if rec.Code != c.want {
 					t.Errorf("%s: status = %d, want %d; body %s", c.who, rec.Code, c.want, rec.Body)
 				}
@@ -422,8 +435,8 @@ func TestAuthOffUnchanged(t *testing.T) {
 			exp := routeExpectations[rt.pattern]
 			t.Run(fmt.Sprintf("%q/%s", mode, rt.pattern), func(t *testing.T) {
 				want := exp.allowed
-				if rt.pattern == "GET /v1/whoami" {
-					want = http.StatusUnauthorized // new route; no caller to report
+				if rt.pattern == "GET /v1/whoami" || rt.pattern == "DELETE /v1/credentials/current" {
+					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to revoke
 				}
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous

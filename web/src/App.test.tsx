@@ -46,6 +46,7 @@ function signIn(token = secret) {
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  window.localStorage.clear();
   window.location.hash = '';
 });
 afterEach(() => {
@@ -97,14 +98,27 @@ describe('sign-in', () => {
     expect(document.body.textContent).not.toMatch(/forgot|username|reset/i);
   });
 
-  it('signs a member in to the lobby, stores the token for the tab and keeps it out of the DOM', async () => {
+  it('signs a member in to the lobby, stores the token to last (issue #439) and keeps it out of the DOM', async () => {
     serve(asMember);
     const { container } = render(<App origin={origin} />);
     signIn();
     await screen.findByRole('navigation', { name: 'Channels' });
-    expect(window.sessionStorage.getItem('conch.web.token')).toBe(secret);
+    expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
+    expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
     expect(container.innerHTML).not.toContain(secret);
     expect(window.location.href).not.toContain(secret);
+  });
+
+  it("is still signed in when the page is opened again, as after closing the browser", async () => {
+    serve(asMember);
+    const first = render(<App origin={origin} />);
+    signIn();
+    await screen.findByRole('navigation', { name: 'Channels' });
+    first.unmount();
+    // A new page: nothing of the first is left but what it stored.
+    render(<App origin={origin} />);
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('ada');
   });
 
   it('shows one line for a refused credential, keeps focus in the field and stores nothing', async () => {
@@ -147,6 +161,18 @@ describe('sign-in', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await screen.findByLabelText('Credential');
     expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('warns again, and keeps nothing to last, when an operator credential is found in the lasting place', async () => {
+    serve({ ...asMember, '/v1/whoami': () => json(operator) });
+    window.localStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await screen.findByRole('heading', { name: 'This is an operator credential' });
+    expect(window.localStorage.getItem('conch.web.token')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(window.sessionStorage.getItem('conch.web.token')).toBe(secret);
+    expect(window.localStorage.getItem('conch.web.token')).toBeNull();
   });
 
   it('picks up a stored credential on reload', async () => {
@@ -288,16 +314,73 @@ describe('lobby', () => {
     expect(screen.getByRole('complementary', { name: 'Members panel' })).toBeDefined();
   });
 
-  it('says sign-out revokes nothing, and returns to sign-in clearing the tab', async () => {
-    serve(asMember);
+  it('signs out by revoking the credential on the server, and returns to sign-in with it forgotten (issue #439)', async () => {
+    const fetchMock = serve({ ...asMember, '/v1/credentials/current': (a) => new Response(null, { status: a === `Bearer ${secret}` ? 204 : 401 }) });
     render(<App origin={origin} />);
     signIn();
     const out = await screen.findByRole('button', { name: 'Sign out' });
     expect(out.getAttribute('aria-describedby')).toBe('signout-note');
-    expect(document.getElementById('signout-note')?.textContent).toContain('does not revoke');
+    expect(document.getElementById('signout-note')?.textContent).toContain('Sign out ends this sign-in');
     fireEvent.click(out);
     await screen.findByLabelText('Credential');
+    const revoke = fetchMock.mock.calls.find(([input]) => input === '/v1/credentials/current');
+    expect(revoke?.[1]?.method).toBe('DELETE');
+    expect(screen.getByRole('alert').textContent).toBe('');
+    expect(window.localStorage.getItem('conch.web.token')).toBeNull();
     expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
+  });
+
+  it('signs out here even when the server cannot be told, and says so', async () => {
+    serve({
+      ...asMember,
+      '/v1/credentials/current': () => {
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await screen.findByText(/^Signed out in this browser, but the server could not be told/);
+    expect(window.localStorage.getItem('conch.web.token')).toBeNull();
+  });
+
+  it('signs out everywhere: every credential revoked, then back to sign-in', async () => {
+    const fetchMock = serve({ ...asMember, '/v1/principals/2/credentials/revoke-all': () => json({ revoked: 2 }) });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
+    await screen.findByText('Signed out everywhere: every sign-in of yours has ended');
+    const call = fetchMock.mock.calls.find(([input]) => input === '/v1/principals/2/credentials/revoke-all');
+    expect(call?.[1]?.method).toBe('POST');
+    expect(window.localStorage.getItem('conch.web.token')).toBeNull();
+  });
+
+  it.each([
+    ['cannot be reached', (): Response => { throw new TypeError('Failed to fetch'); }, /the server cannot be reached/],
+    ['refuses the last operator', () => json({ code: 'last_operator', message: 'no' }, 409), /the only operator who can sign in/],
+  ])('stays signed in, and says so, when sign out everywhere %s', async (_case, handler, line) => {
+    serve({ ...asMember, '/v1/principals/2/credentials/revoke-all': handler });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
+    const alert = await screen.findByText(line);
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(screen.getByRole('navigation', { name: 'Channels' })).toBeDefined();
+    expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
+  });
+
+  it('is signed out when another tab signs the shared credential out', async () => {
+    serve(asMember);
+    render(<App origin={origin} />);
+    signIn();
+    await screen.findByRole('navigation', { name: 'Channels' });
+    // What the browser does in this tab when another one signs out.
+    act(() => {
+      window.localStorage.removeItem('conch.web.token');
+      window.dispatchEvent(new StorageEvent('storage', { key: 'conch.web.token', oldValue: secret, newValue: null, storageArea: window.localStorage }));
+    });
+    await screen.findByText('Signed out in another tab');
+    expect(screen.getByLabelText('Credential')).toBeDefined();
   });
 
   it('returns to sign-in with the expiry line on a 401 mid-session', async () => {

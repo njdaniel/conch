@@ -28,6 +28,8 @@ type adminOpts struct {
 	kind      string
 	label     string
 	expiresAt string
+	// renewDays, when given, issues a renewable credential (issue #439).
+	renewDays *int64
 	file      string
 	// noDecide adds a member without the right to decide approvals; off
 	// revokes it (issue #450).
@@ -73,10 +75,18 @@ var adminCommands = []adminCommand{
 		run:  adminPrincipalCreate},
 	{group: "principal", verb: "disable", args: []string{"id"}, idAt: 1, run: adminPrincipalDisable},
 	{group: "principal", verb: "enable", args: []string{"id"}, idAt: 1, run: adminPrincipalEnable},
-	{group: "credential", verb: "issue", args: []string{"principal-id"}, idAt: 1, flags: "--label <label> [--expires-at <RFC3339>] ", required: []string{"label"},
+	{group: "credential", verb: "issue", args: []string{"principal-id"}, idAt: 1, flags: "--label <label> [--expires-at <RFC3339> | --renew-days <N>] ", required: []string{"label"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.StringVar(&o.label, "label", "", "what the credential is for")
 			fs.StringVar(&o.expiresAt, "expires-at", "", "RFC 3339 time after which the credential stops working")
+			fs.Func("renew-days", "a credential that lasts N days and renews by being used; one unused for N days expires", func(v string) error {
+				n, err := strconv.ParseInt(v, 10, 64)
+				if err != nil {
+					return errors.New("must be a whole number of days")
+				}
+				o.renewDays = &n
+				return nil
+			})
 		},
 		run: adminCredentialIssue},
 	{group: "credential", verb: "list", args: []string{"principal-id"}, idAt: 1, run: adminCredentialList},
@@ -300,6 +310,17 @@ func adminCredentialIssue(ctx context.Context, r *adminRun) error {
 		ts := schema.NewTimestamp(t)
 		req.ExpiresAt = &ts
 	}
+	if r.opts.renewDays != nil {
+		// Checked in days, before multiplying, so a huge N cannot wrap into a
+		// valid number of seconds.
+		days := *r.opts.renewDays
+		minDays, maxDays := int64(schema.MinCredentialRenewLifetimeSeconds/secondsPerDay), int64(schema.MaxCredentialRenewLifetimeSeconds/secondsPerDay)
+		if days < minDays || days > maxDays {
+			return fmt.Errorf("cli: admin credential issue: --renew-days must be between %d and %d", minDays, maxDays)
+		}
+		seconds := days * secondsPerDay
+		req.RenewLifetimeSeconds = &seconds
+	}
 	if err := req.Validate(time.Now()); err != nil {
 		return fmt.Errorf("cli: admin credential issue: %w", err)
 	}
@@ -318,9 +339,15 @@ func adminCredentialIssue(ctx context.Context, r *adminRun) error {
 	if _, err := fmt.Fprintln(r.stdout, resp.Token); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(r.stderr, "credential %d %s\n", resp.Credential.ID, expiryText(resp.Credential.ExpiresAt))
+	line := expiryText(resp.Credential.ExpiresAt)
+	if resp.Credential.Renews {
+		line += ", renewed by use"
+	}
+	_, err = fmt.Fprintf(r.stderr, "credential %d %s\n", resp.Credential.ID, line)
 	return err
 }
+
+const secondsPerDay = 24 * 60 * 60
 
 // wellFormedToken reports whether s has the shape of a credential token: the
 // prefix, then unpadded base64url to the fixed length. Anything else could
