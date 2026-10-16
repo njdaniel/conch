@@ -16,17 +16,28 @@ import (
 const (
 	AuditMemberAdded   = "member_added"
 	AuditMemberRemoved = "member_removed"
+	// AuditMemberDecideGranted and AuditMemberDecideRevoked record a change
+	// to a member's right to decide the channel's approvals (issue #450).
+	AuditMemberDecideGranted = "member_decide_granted"
+	AuditMemberDecideRevoked = "member_decide_revoked"
 )
+
+// ErrNotMember is returned by SetChannelMemberCanDecide when the principal is
+// not a member of the channel. Nothing is written.
+var ErrNotMember = errors.New("store: not a member of the channel")
 
 // ChannelMember is one row of a channel's member list. AddedBy is 0 when
 // unknown (rows backfilled by the upgrade migration, or added with
-// authentication off). Name and Kind come from the principal row.
+// authentication off). Name and Kind come from the principal row. CanDecide
+// is whether the member may decide the channel's approvals (issue #450); it
+// matters for human members only, since agents never decide.
 type ChannelMember struct {
 	PrincipalID int64
 	AddedBy     int64
 	CreatedAt   time.Time
 	Name        string
 	Kind        PrincipalKind
+	CanDecide   bool
 }
 
 func channelSubject(id int64) string { return fmt.Sprintf("channel:%d", id) }
@@ -97,21 +108,33 @@ func checkMemberTargetTx(ctx context.Context, tx execer, channelID, principalID 
 	return nil
 }
 
-// AddChannelMember makes principalID a member of channelID. addedBy is the
-// acting principal, or 0 when unknown. It is idempotent: adding an existing
-// member returns added=false and writes nothing, including no audit event. It
-// returns ErrNotFound for an unknown channel and ErrPrincipalNotFound for an
-// unknown principal.
+// AddChannelMember makes principalID a member of channelID, with the right
+// to decide the channel's approvals. addedBy is the acting principal, or 0
+// when unknown. It is idempotent: adding an existing member returns
+// added=false and writes nothing, including no audit event. It returns
+// ErrNotFound for an unknown channel and ErrPrincipalNotFound for an unknown
+// principal.
 func (s *Store) AddChannelMember(ctx context.Context, actor string, channelID, principalID, addedBy int64) (added bool, err error) {
+	return s.PutChannelMember(ctx, actor, channelID, principalID, addedBy, nil)
+}
+
+// PutChannelMember is AddChannelMember with the decide right chosen (issue
+// #450). canDecide nil means the default for a new member (true) and no
+// change for an existing one. Otherwise a new member is added with it, and
+// an existing member's right is set to it, audited only when it changes. It
+// all happens in one transaction, so a member added without the right never
+// holds it for a moment. added reports whether the principal was new.
+func (s *Store) PutChannelMember(ctx context.Context, actor string, channelID, principalID, addedBy int64, canDecide *bool) (added bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		if err := checkMemberTargetTx(ctx, tx, channelID, principalID); err != nil {
 			return err
 		}
+		decide := canDecide == nil || *canDecide
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (?, ?, ?, ?)
+			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT (channel_id, principal_id) DO NOTHING`,
-			channelID, principalID, nullableID(addedBy), now.UnixMilli())
+			channelID, principalID, nullableID(addedBy), now.UnixMilli(), boolInt(decide))
 		if err != nil {
 			return fmt.Errorf("store: add member %d to channel %d: %w", principalID, channelID, err)
 		}
@@ -120,15 +143,109 @@ func (s *Store) AddChannelMember(ctx context.Context, actor string, channelID, p
 			return fmt.Errorf("store: add member %d to channel %d: %w", principalID, channelID, err)
 		}
 		if n == 0 {
-			return nil
+			if canDecide == nil {
+				return nil
+			}
+			_, err := setCanDecideTx(ctx, tx, actor, channelID, principalID, *canDecide, now)
+			return err
 		}
 		added = true
-		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(principalID), now)
+		detail := memberDetail(principalID)
+		if !decide {
+			// Recorded, so the audit trail says who held the right when.
+			detail += " can_decide=0"
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), detail, now)
 	})
 	if err != nil {
 		return false, err
 	}
 	return added, nil
+}
+
+// SetChannelMemberCanDecide grants or revokes principalID's right to decide
+// channelID's approvals (issue #450). It returns changed=false and writes
+// nothing when the member already has that setting, ErrNotMember when the
+// principal is not a member, and the errors of AddChannelMember for an
+// unknown channel or principal. A change is audited.
+func (s *Store) SetChannelMemberCanDecide(ctx context.Context, actor string, channelID, principalID int64, canDecide bool) (changed bool, err error) {
+	now := time.Now().Truncate(time.Millisecond)
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		if err := checkMemberTargetTx(ctx, tx, channelID, principalID); err != nil {
+			return err
+		}
+		changed, err = setCanDecideTx(ctx, tx, actor, channelID, principalID, canDecide, now)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
+// setCanDecideTx sets an existing member's decide right and audits a change,
+// inside the caller's transaction.
+func setCanDecideTx(ctx context.Context, tx execer, actor string, channelID, principalID int64, canDecide bool, now time.Time) (bool, error) {
+	var current int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&current); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, ErrNotMember
+	case err != nil:
+		return false, fmt.Errorf("store: read decide right of %d in channel %d: %w", principalID, channelID, err)
+	}
+	if (current == 1) == canDecide {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE channel_members SET can_decide = ? WHERE channel_id = ? AND principal_id = ?",
+		boolInt(canDecide), channelID, principalID); err != nil {
+		return false, fmt.Errorf("store: set decide right of %d in channel %d: %w", principalID, channelID, err)
+	}
+	action := AuditMemberDecideRevoked
+	if canDecide {
+		action = AuditMemberDecideGranted
+	}
+	return true, appendAuditEventTx(ctx, tx, actor, action, channelSubject(channelID), memberDetail(principalID), now)
+}
+
+// CanDecideApprovals reports whether principalID is a member of channelID
+// holding the right to decide its approvals (issue #450). A non-member
+// cannot.
+func (s *Store) CanDecideApprovals(ctx context.Context, channelID, principalID int64) (bool, error) {
+	var can int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&can)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: check decide right of %d in channel %d: %w", principalID, channelID, err)
+	}
+	return can == 1, nil
+}
+
+// DecidingChannels returns the ids of the channels where principalID is a
+// member holding the right to decide approvals, as a set.
+func (s *Store) DecidingChannels(ctx context.Context, principalID int64) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT channel_id FROM channel_members WHERE principal_id = ? AND can_decide = 1", principalID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list deciding channels of %d: %w", principalID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	set := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: list deciding channels of %d: %w", principalID, err)
+		}
+		set[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list deciding channels of %d: %w", principalID, err)
+	}
+	return set, nil
 }
 
 // RemoveChannelMember removes principalID from channelID. It is idempotent:
@@ -188,7 +305,7 @@ func (s *Store) IsChannelMember(ctx context.Context, channelID, principalID int6
 // key, and principals are never deleted.
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind FROM channel_members m
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, m.can_decide FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
 		 WHERE m.channel_id = ? ORDER BY m.principal_id ASC`, channelID)
 	if err != nil {
@@ -200,11 +317,13 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 		var m ChannelMember
 		var addedBy sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt, &m.Name, &m.Kind); err != nil {
+		var canDecide int
+		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt, &m.Name, &m.Kind, &canDecide); err != nil {
 			return nil, fmt.Errorf("store: list members of channel %d: %w", channelID, err)
 		}
 		m.AddedBy = addedBy.Int64
 		m.CreatedAt = time.UnixMilli(createdAt)
+		m.CanDecide = canDecide == 1
 		members = append(members, m)
 	}
 	if err := rows.Err(); err != nil {

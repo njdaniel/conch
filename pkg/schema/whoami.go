@@ -22,4 +22,8 @@ type WhoAmIResponseV1 struct {
 	// value /healthz reports (issue #425). Added after the first release of
 	// this shape, so it is optional: a server that predates it omits it.
 	ServerVersion string `json:"server_version,omitempty"`
+	// MayInvite says whether the caller may make invites, so a client knows
+	// whether to offer it (issue #436). True for an operator and for a member
+	// granted the right; omitted when false, and by a server that predates it.
+	MayInvite bool `json:"may_invite,omitempty"`
 }

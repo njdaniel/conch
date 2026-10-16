@@ -29,6 +29,10 @@ type adminOpts struct {
 	label     string
 	expiresAt string
 	file      string
+	// noDecide adds a member without the right to decide approvals; off
+	// revokes it (issue #450).
+	noDecide bool
+	off      bool
 }
 
 // adminRun is what a command's run function gets once its arguments are
@@ -77,7 +81,16 @@ var adminCommands = []adminCommand{
 		run: adminCredentialIssue},
 	{group: "credential", verb: "list", args: []string{"principal-id"}, idAt: 1, run: adminCredentialList},
 	{group: "credential", verb: "revoke", args: []string{"credential-id"}, idAt: 1, run: adminCredentialRevoke},
-	{group: "member", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, run: adminMemberAdd},
+	{group: "member", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--no-decide] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.noDecide, "no-decide", false, "add the member without the right to decide the channel's approvals")
+		},
+		run: adminMemberAdd},
+	{group: "member", verb: "decide", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--off] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.off, "off", false, "take the right away instead of granting it")
+		},
+		run: adminMemberDecide},
 	{group: "member", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, run: adminMemberRemove},
 	{group: "manifest", verb: "put", args: []string{"principal-id"}, idAt: 1, flags: "[--file <path>] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
@@ -231,10 +244,31 @@ func adminCredentialRevoke(ctx context.Context, r *adminRun) error {
 }
 
 func adminMemberAdd(ctx context.Context, r *adminRun) error {
+	if r.opts.noDecide {
+		no := false
+		if err := r.client.PutChannelMemberDecide(ctx, r.pos[0], r.id, &no); err != nil {
+			return err
+		}
+		return r.say("added %d to %s, without the right to decide its approvals\n", r.id, safeLine(r.pos[0]))
+	}
 	if err := r.client.PutChannelMember(ctx, r.pos[0], r.id); err != nil {
 		return err
 	}
 	return r.say("added %d to %s\n", r.id, safeLine(r.pos[0]))
+}
+
+// adminMemberDecide grants a member the right to decide the channel's
+// approvals, or with --off takes it away (issue #450). A principal not yet a
+// member is added with the setting asked for.
+func adminMemberDecide(ctx context.Context, r *adminRun) error {
+	can := !r.opts.off
+	if err := r.client.PutChannelMemberDecide(ctx, r.pos[0], r.id, &can); err != nil {
+		return err
+	}
+	if can {
+		return r.say("%d may decide approvals in %s\n", r.id, safeLine(r.pos[0]))
+	}
+	return r.say("%d may no longer decide approvals in %s\n", r.id, safeLine(r.pos[0]))
 }
 
 func adminMemberRemove(ctx context.Context, r *adminRun) error {

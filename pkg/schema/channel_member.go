@@ -19,10 +19,22 @@ type ChannelMemberV1 struct {
 	CreatedAt   Timestamp     `json:"created_at"`
 	Name        string        `json:"name,omitempty"`
 	Kind        PrincipalKind `json:"kind,omitempty"`
+	// CanDecide is whether the member may decide the channel's approvals
+	// (issue #450). The server fills it for human members; it is absent for
+	// agents, which never decide.
+	CanDecide *bool `json:"can_decide,omitempty"`
 }
 
 // ListChannelMembersResponseV1 is the body of GET /v1/channels/{channel}/members.
 // Members is always a JSON array, ordered by principal_id.
 type ListChannelMembersResponseV1 struct {
 	Members []ChannelMemberV1 `json:"members"`
+}
+
+// PutChannelMemberRequestV1 is the optional body of PUT
+// /v1/channels/{channel}/members/{principal_id} (issue #450). With no body,
+// or with CanDecide absent, a new member may decide the channel's approvals
+// and an existing member keeps what it has. CanDecide sets it either way.
+type PutChannelMemberRequestV1 struct {
+	CanDecide *bool `json:"can_decide,omitempty"`
 }

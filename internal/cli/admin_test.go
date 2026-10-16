@@ -83,6 +83,9 @@ func TestAdminCommands(t *testing.T) {
 		{name: "agent flag last", args: []string{"principal", "create", "deploy-bot", "--kind", "agent"}, wantStdout: "created agent deploy-bot (id 4)\n"},
 		{name: "member add", args: []string{"member", "add", "ops", "3"}, wantStdout: "added 3 to ops\n"},
 		{name: "member add agent", args: []string{"member", "add", "ops", "4"}, wantStdout: "added 4 to ops\n"},
+		{name: "member decide off", args: []string{"member", "decide", "--off", "ops", "3"}, wantStdout: "3 may no longer decide approvals in ops\n"},
+		{name: "member decide", args: []string{"member", "decide", "ops", "3"}, wantStdout: "3 may decide approvals in ops\n"},
+		{name: "member add without the right", args: []string{"member", "add", "--no-decide", "ops", "2"}, wantStdout: "added 2 to ops, without the right to decide its approvals\n"},
 		{name: "manifest put from stdin", args: []string{"manifest", "put", "4"}, stdin: testManifest, wantStdout: "stored manifest for principal 4\n"},
 		{name: "manifest get", args: []string{"manifest", "get", "4"}, wantStdout: "4 tier A capabilities messages.read,messages.post channels 1:read,post deploy-bot\n"},
 		{name: "member remove", args: []string{"member", "remove", "ops", "4"}, wantStdout: "removed 4 from ops\n"},
@@ -342,7 +345,7 @@ func TestAdminUsageErrors(t *testing.T) {
 	}{
 		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
-		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|remove>"},
+		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|decide|remove>"},
 		{"unknown verb", []string{"admin", "member", "frob"}, `unknown subcommand "frob"`},
 		{"channel create without name", []string{"admin", "channel", "create"}, "usage: conch admin channel create [--server <url>] [--json] <name>"},
 		{"channel create extra", []string{"admin", "channel", "create", "a", "b"}, "expected <name>"},

@@ -1,0 +1,22 @@
+{
+  "id": 8,
+  "kind": "open",
+  "created_by": 1,
+  "created_at": "2026-10-15T12:00:00.000Z",
+  "expires_at": "2026-10-16T12:00:00.000Z",
+  "uses": 12,
+  "closed_at": "2026-10-15T18:30:00.000Z",
+  "channels": [
+    {
+      "id": 3,
+      "name": "general"
+    },
+    {
+      "id": 4,
+      "name": "lobby"
+    }
+  ],
+  "voice": false,
+  "may_invite": false,
+  "credential_lifetime_seconds": 7776000
+}

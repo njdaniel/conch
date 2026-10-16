@@ -36,7 +36,14 @@ type authFixture struct {
 
 func newAuthFixture(t *testing.T, mode AuthMode) *authFixture {
 	t.Helper()
-	srv := newTestServerWithConfig(t, Config{AuthMode: mode})
+	return newAuthFixtureWithConfig(t, Config{AuthMode: mode})
+}
+
+// newAuthFixtureWithConfig is newAuthFixture with the server's whole Config,
+// for a test that needs more than the auth mode (an ntfy server, say).
+func newAuthFixtureWithConfig(t *testing.T, cfg Config) *authFixture {
+	t.Helper()
+	srv := newTestServerWithConfig(t, cfg)
 	ctx := context.Background()
 	root, _, rootTok, err := srv.store.BootstrapOperator(ctx, "root")
 	if err != nil {
