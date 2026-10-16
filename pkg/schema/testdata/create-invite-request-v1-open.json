@@ -1,0 +1,12 @@
+{
+  "kind": "open",
+  "channels": [
+    "general",
+    "lobby"
+  ],
+  "expires_at": "2026-10-16T12:00:00.000Z",
+  "max_uses": 25,
+  "voice": false,
+  "may_invite": false,
+  "credential_lifetime_seconds": 2592000
+}
