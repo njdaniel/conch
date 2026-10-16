@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/njdaniel/conch/internal/buildinfo"
 	"github.com/njdaniel/conch/internal/server"
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/livekit"
@@ -26,7 +27,12 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-var version = "v0.0.0-dev"
+// version is set by the linker (-X main.version=...) and is empty in a build
+// that was not stamped; buildVersion is what the binary reports.
+var version string
+
+// buildVersion is the stamped version, or the commit the binary was built from.
+func buildVersion() string { return buildinfo.Version(version) }
 
 // embeddedWeb is the web client built into this binary; a variable so a test
 // can stand in for a binary built with -tags conchweb.
@@ -50,7 +56,7 @@ func run(args []string) error {
 	case "bootstrap-operator":
 		return runBootstrapOperator(args[1:], os.Stdout, os.Stderr)
 	case "version":
-		fmt.Println(version)
+		fmt.Println(buildVersion())
 		fmt.Println("web: " + embeddedWebName())
 		return nil
 	case "-h", "--help", "help":
@@ -304,7 +310,7 @@ func runServe(args []string) error {
 	srv := server.New(server.Config{
 		DataDir:         opts.dataDir,
 		Listen:          opts.listen,
-		Version:         version,
+		Version:         buildVersion(),
 		MCPBearerTokens: opts.mcpTokens,
 		AuthMode:        opts.authMode,
 		LiveKit:         opts.livekit,
@@ -325,7 +331,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	fmt.Printf("conchd %s listening on %s (data %s)\n", version, srv.Addr(), opts.dataDir)
+	fmt.Printf("conchd %s listening on %s (data %s)\n", buildVersion(), srv.Addr(), opts.dataDir)
 	fmt.Printf("conchd web: %s\n", opts.webSource)
 	return srv.Serve(ctx)
 }

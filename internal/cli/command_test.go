@@ -551,6 +551,36 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+func TestWhoAmIPrintsServerVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		body schema.WhoAmIResponseV1
+		want string
+	}{
+		{"server reports its version", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator, ServerVersion: "v0.1.0-alpha.1"},
+			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: v0.1.0-alpha.1\n"},
+		{"an older server says nothing", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator},
+			"id: 42\nkind: human\nname: nick\nrole: operator\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(tt.body)
+			}))
+			t.Cleanup(ts.Close)
+			t.Setenv("CONCH_TOKEN", fakeToken)
+			stdout, _, err := runCLI(t, "", "whoami", "--server", ts.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stdout != tt.want {
+				t.Errorf("whoami = %q, want %q", stdout, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoginThenUseStoredCredential(t *testing.T) {
 	isolateConfig(t)
 	fake := newAuthFake(t, true)

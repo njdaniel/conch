@@ -88,6 +88,10 @@ var TSTypes = []TSType{
 	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
 	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
 
+	// The server's health, which carries its version (the sign-in page shows
+	// it). Not a versioned payload, so it has no fixture family.
+	{Value: Health{}},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }

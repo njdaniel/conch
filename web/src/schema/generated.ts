@@ -23,6 +23,7 @@ export interface WhoAmIResponseV1 {
   kind: PrincipalKind;
   name: string;
   role: PrincipalRole;
+  server_version?: string;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -30,6 +31,7 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   kind: principalKind,
   name: str,
   role: principalRole,
+  server_version: optional(str),
 });
 
 // schema.ChannelV0
@@ -676,6 +678,19 @@ export interface ListReadStateResponseV1 {
 
 export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
   read_state: array(readStateV1),
+});
+
+// schema.Health
+export interface Health {
+  status: string;
+  version: string;
+  db: string;
+}
+
+export const health = object<Health>({
+  status: str,
+  version: str,
+  db: str,
 });
 
 // schema.Error

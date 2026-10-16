@@ -845,6 +845,10 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, safeLine(string(who.Kind)), safeLine(who.Name), safeLine(string(who.Role)))
+	if err != nil || who.ServerVersion == "" { // a server that predates the field says nothing
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion))
 	return err
 }
 
