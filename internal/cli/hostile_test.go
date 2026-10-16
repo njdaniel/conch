@@ -188,6 +188,21 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin member add|remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
 		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
 		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
+		{key: "admin invite create", args: func(u, _ string) []string {
+			return []string{"admin", "invite", "create", "--server", u, "--open", "--channel", "general", "--expires", "1h"}
+		}},
+		{key: "admin invite list", args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
+		{key: "admin invite close|joiners", args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite disable-joiners", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "invite", "disable-joiners", "--server", u, "9"}
+		}},
+		{key: "admin invite pause|resume|status", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "invite", "status", "--server", u} }},
+		{key: "admin principal invite-permission", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "principal", "invite-permission", "--server", u, "9", "on"}
+		}},
+		{key: "admin principal disable-invitees", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "principal", "disable-invitees", "--server", u, "9"}
+		}},
 		{key: "voice status", args: func(u, _ string) []string { return []string{"voice", "status", "--server", u, "general"} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
@@ -307,6 +322,25 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 				Capabilities: []schema.Capability{schema.Capability(hostile)},
 				Channels:     []schema.ChannelGrant{{ChannelID: 1, Permissions: []schema.ChannelPermission{schema.ChannelPermission(hostile)}}},
 			}})
+		case "POST /v1/invites":
+			write(w, http.StatusCreated, schema.CreateInviteResponseV1{
+				Invite: schema.InviteV1{ID: 3, Kind: schema.InviteKind(hostile), CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts,
+					Channels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}},
+				Code: schema.InviteCodePrefix + strings.Repeat("A", schema.InviteCodeLength-len(schema.InviteCodePrefix)),
+			})
+		case "GET /v1/invites":
+			write(w, http.StatusOK, schema.ListInvitesResponseV1{Invites: []schema.InviteV1{{
+				ID: 3, Kind: schema.InviteKind(hostile), CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts,
+				Channels: []schema.InviteChannelV1{{ID: 1, Name: hostile}},
+			}}})
+		case "GET /v1/invites/9/principals":
+			write(w, http.StatusOK, schema.InviteJoinersResponseV1{Joiners: []schema.InviteJoinerV1{{ID: 5, Name: hostile, CreatedAt: ts}}})
+		case "POST /v1/invites/9/disable-joiners", "POST /v1/principals/9/disable-invitees":
+			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
+		case "GET /v1/invites/settings":
+			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
+		case "PUT /v1/principals/9/invite-permission":
+			w.WriteHeader(http.StatusNoContent)
 		case "GET /v1/channels/general/voice":
 			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
 				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}},

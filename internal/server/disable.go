@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -47,12 +48,20 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 	}
 	// Dropped even when nothing changed: a repeat call is a harmless way to
 	// make sure no socket survives.
+	s.principalDisabled(ctx, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// principalDisabled does what follows a committed Store.DisablePrincipal:
+// the principal's open sockets close, rosters learn their sessions ended, and
+// they leave voice. Every route that disables someone calls it, one principal
+// at a time (issue #438).
+func (s *Server) principalDisabled(ctx context.Context, id int64) {
 	s.hub.DropPrincipalAll(id)
 	s.events.dropPrincipalAll(id)
 	// Disabling ends the principal's sessions.
 	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonPrincipalOff)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleEnablePrincipal serves POST /v1/principals/{id}/enable. It clears

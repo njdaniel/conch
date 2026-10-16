@@ -949,6 +949,88 @@ export const listInvitesResponseV1 = object<ListInvitesResponseV1>({
   invites: array(inviteV1),
 });
 
+// schema.InviteJoinerV1
+export interface InviteJoinerV1 {
+  id: number;
+  name: string;
+  created_at: string;
+  disabled: boolean;
+}
+
+export const inviteJoinerV1 = object<InviteJoinerV1>({
+  id: int,
+  name: str,
+  created_at: timestamp,
+  disabled: bool,
+});
+
+// schema.InviteJoinersResponseV1
+export interface InviteJoinersResponseV1 {
+  joiners: InviteJoinerV1[];
+}
+
+export const inviteJoinersResponseV1 = object<InviteJoinersResponseV1>({
+  joiners: array(inviteJoinerV1),
+});
+
+// schema.DisableJoinersRequestV1
+export interface DisableJoinersRequestV1 {
+  dry_run: boolean;
+  close?: boolean;
+}
+
+export const disableJoinersRequestV1 = object<DisableJoinersRequestV1>({
+  dry_run: bool,
+  close: optional(bool),
+});
+
+// schema.DisableJoinersResponseV1
+export interface DisableJoinersResponseV1 {
+  dry_run: boolean;
+  count: number;
+  principal_ids: number[];
+}
+
+export const disableJoinersResponseV1 = object<DisableJoinersResponseV1>({
+  dry_run: bool,
+  count: int,
+  principal_ids: array(int),
+});
+
+// schema.InviteeDepth
+export type InviteeDepth = '1' | 'all';
+
+export const inviteeDepth = vocab<InviteeDepth>({ '1': true, all: true });
+
+// schema.DisableInviteesRequestV1
+export interface DisableInviteesRequestV1 {
+  dry_run: boolean;
+  depth?: InviteeDepth;
+}
+
+export const disableInviteesRequestV1 = object<DisableInviteesRequestV1>({
+  dry_run: bool,
+  depth: optional(inviteeDepth),
+});
+
+// schema.InvitePermissionRequestV1
+export interface InvitePermissionRequestV1 {
+  may_invite: boolean;
+}
+
+export const invitePermissionRequestV1 = object<InvitePermissionRequestV1>({
+  may_invite: bool,
+});
+
+// schema.InviteSettingsV1
+export interface InviteSettingsV1 {
+  paused: boolean;
+}
+
+export const inviteSettingsV1 = object<InviteSettingsV1>({
+  paused: bool,
+});
+
 // schema.RevokeAllCredentialsResponseV1
 export interface RevokeAllCredentialsResponseV1 {
   revoked: number;
