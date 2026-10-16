@@ -282,7 +282,10 @@ func invitesPausedTx(ctx context.Context, tx execer) (bool, error) {
 	case err != nil:
 		return false, fmt.Errorf("store: read invites_paused: %w", err)
 	}
-	return v == "true", nil
+	// Anything that is not a clear "false" counts as paused: a pause switch
+	// that cannot be read must not let people in.
+	paused, perr := strconv.ParseBool(v)
+	return paused || perr != nil, nil
 }
 
 // usableInviteTx finds the invite whose code hashes to codeHash and returns it
@@ -589,6 +592,10 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		}
 
 		for _, c := range kept {
+			// #450 (PR #451) adds channel_members.can_decide with a default of
+			// 1. A member who joins through an invite must NOT get the right to
+			// decide approvals: when #451 lands, this insert names can_decide
+			// and sets it to 0, with a test that such a joiner is refused.
 			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (?, ?, ?, ?)",
 				c.ID, pid, r.createdBy, now.UnixMilli()); err != nil {
@@ -808,8 +815,9 @@ func (s *Store) SetInvitesPaused(ctx context.Context, actor string, paused bool)
 // Operators can always invite whatever it says. An agent cannot hold it
 // (ErrInviteNotAllowed). It audits invite_permission_changed in the same
 // transaction and does nothing when the value already stands. Taking the right
-// away also ends the invites the person left outstanding, at redemption
-// (see makerStillAllowed). It returns ErrPrincipalNotFound for an unknown id.
+// away suspends the invites the person left outstanding: they cannot be
+// redeemed while the right is gone (see makerStillAllowed), and work again if
+// it is given back before they expire. It returns ErrPrincipalNotFound for an unknown id.
 func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int64, may bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {

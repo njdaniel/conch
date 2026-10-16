@@ -1082,3 +1082,26 @@ func TestInvitesMigrationFromSchema23(t *testing.T) {
 		}
 	}
 }
+
+// The pause switch fails closed: a stored value that is not a clear boolean
+// counts as paused.
+func TestInvitesPausedFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	for _, tt := range []struct {
+		value  string
+		paused bool
+	}{{"true", true}, {"false", false}, {"1", true}, {"0", false}, {"TRUE", true}, {"yes", true}, {"", true}} {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO server_settings (key, value, updated_at) VALUES ('invites_paused', ?, 1)
+			ON CONFLICT (key) DO UPDATE SET value = excluded.value`, tt.value); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.InvitesPaused(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tt.paused {
+			t.Errorf("stored %q: paused = %v, want %v", tt.value, got, tt.paused)
+		}
+	}
+}
