@@ -7,12 +7,21 @@
 #
 #   conch-backup.sh   an archive with a SHA-256; exit 3 and a plain message
 #                     without an off-site destination; the off-site path with a
-#                     stand-in rclone; --local-only
+#                     stand-in rclone; --local-only; a backup.env that is not
+#                     0600 is refused; retention by age for nightly archives
+#                     and by count for pre-upgrade ones
 #   conch-restore.sh  the drill: the message and the file are back and /healthz
 #                     answers ok; a tampered archive is refused
 #   conch-upgrade.sh  upgrade, rollback without a migration (data kept) and
-#                     rollback with one (pre-upgrade backup restored), with a
-#                     stand-in systemctl that runs the instance as a child
+#                     rollback with one (pre-upgrade backup restored, the kept
+#                     directory named), with a stand-in systemctl that runs the
+#                     instance as a child; a missing or corrupt pre-upgrade
+#                     backup stops the upgrade, and the rollback, before any
+#                     instance is stopped
+#
+# It runs as one user, so the split between root, conch-<instance> and
+# conch-backup (docs/deploy.md) is not exercised here: run as a user other
+# than root, the scripts do every step as that user.
 #
 # It also runs shellcheck on every script and systemd-analyze verify on the
 # units. sqlite3 is a host prerequisite of the scripts and of this test; it
@@ -157,6 +166,14 @@ sleep 1 # the archive name carries the second
 grep -q 'no off-site copy was made' "$work/b2.out" || fail "--local-only did not say what it did"
 ok "--local-only exits 0"
 
+printf 'CONCH_BACKUP_KEEP_DAYS=14\n' >"$work/loose.env"
+chmod 0644 "$work/loose.env"
+status=0
+out=$(CONCH_BACKUP_ENV=$work/loose.env "$deploy/conch-backup.sh" alpha --local-only 2>&1) || status=$?
+[ "$status" -eq 2 ] || fail "a backup.env of mode 0644 was accepted (exit $status): $out"
+case "$out" in *"make it 0600"*) ;; *) fail "loose backup.env: wrong reason: $out" ;; esac
+ok "a backup.env that is not 0600 is refused"
+
 mkdir "$work/fakebin" "$work/offsite"
 cat >"$work/fakebin/rclone" <<EOF
 #!/bin/sh
@@ -229,9 +246,11 @@ cp "$work/bin/conchd-v0.0.2" "$rel/v0.0.2/conchd_v0.0.2_linux_$arch"
 (cd "$rel/v0.0.2" && sha256sum "./conchd_v0.0.2_linux_$arch" >checksums.txt)
 
 # A stand-in for systemctl that runs the instance as a child of this test.
+# Every call is logged, so a test can say nothing was stopped.
 cat >"$work/systemctl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+echo "\$*" >>"$work/systemctl.calls"
 unit=\${2#conchd@}
 pidfile=$work/pids/\$unit
 case "\$1" in
@@ -274,10 +293,59 @@ grep -q 'does not match checksums.txt' "$work/bad.out" || fail "bad checksum: wr
 [ "$(readlink "$opt/current")" = "$opt/releases/v0.0.1" ] && [ "$(version)" = v0.0.1 ] || fail "a refused upgrade changed the install"
 ok "upgrade: checksum mismatch refused, nothing changed"
 
+# A pre-upgrade backup that is missing, or does not match its .sha256, stops
+# the upgrade before any instance is stopped, and the error says what to do.
+cat >"$work/nobackup.sh" <<'STANDIN'
+#!/bin/sh
+# stand-in for conch-backup.sh that says it backed up and wrote nothing
+echo "conch-backup: pre-upgrade backup, kept on this host only"
+STANDIN
+cat >"$work/badsum.sh" <<STANDIN
+#!/bin/sh
+# stand-in for conch-backup.sh whose archive does not match its .sha256
+mkdir -p "$work/badsum"
+printf 'not an archive' >"$work/badsum/pre-upgrade-x.tar.gz"
+echo "0000000000000000000000000000000000000000000000000000000000000000  pre-upgrade-x.tar.gz" >"$work/badsum/pre-upgrade-x.tar.gz.sha256"
+echo "conch-backup: wrote $work/badsum/pre-upgrade-x.tar.gz (14 bytes)"
+STANDIN
+chmod +x "$work/nobackup.sh" "$work/badsum.sh"
+bpid=$(cat "$work/pids/beta")
+for stand_in in nobackup badsum; do
+    calls=$(wc -l <"$work/systemctl.calls")
+    if CONCH_BACKUP_SCRIPT=$work/$stand_in.sh up v0.0.2 beta >"$work/$stand_in.out" 2>&1; then
+        fail "$stand_in: an upgrade without a good pre-upgrade backup went ahead"
+    fi
+    grep -q 'missing or does not match its .sha256' "$work/$stand_in.out" || fail "$stand_in: wrong reason: $(cat "$work/$stand_in.out")"
+    grep -q 'Nothing was stopped' "$work/$stand_in.out" && grep -q 'run this upgrade again' "$work/$stand_in.out" ||
+        fail "$stand_in: the error does not say what to do: $(cat "$work/$stand_in.out")"
+    [ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] || fail "$stand_in: systemctl was called: $(tail -n 2 "$work/systemctl.calls")"
+    [ "$(cat "$work/pids/beta")" = "$bpid" ] && kill -0 "$bpid" || fail "$stand_in: the instance was stopped"
+    [ "$(readlink "$opt/current")" = "$opt/releases/v0.0.1" ] && [ "$(version)" = v0.0.1 ] || fail "$stand_in: the install changed"
+    [ ! -e "$opt/state/beta" ] || fail "$stand_in: a rollback state was written"
+done
+ok "upgrade: a missing or corrupt pre-upgrade backup stops it before anything is stopped"
+
+# Pre-upgrade backups are kept by count (3), whatever their age, and the
+# nightly retention by age does not touch them.
+mkdir -p "$work/upbackups/beta"
+for d in 1 2 3; do
+    f=$work/upbackups/beta/pre-upgrade-v0.0.0-beta-1999010${d}T000000Z.tar.gz
+    touch -d "2000-01-0$d" "$f" "$f.sha256"
+done
 up v0.0.2 beta >"$work/up1.out" 2>&1 || { cat "$work/up1.out" >&2; fail "upgrade failed"; }
 [ "$(version)" = v0.0.2 ] || fail "after the upgrade /healthz says $(version)"
 has 'before upgrade' || fail "the upgrade lost a message"
 ok "upgrade: /healthz reports v0.0.2, data intact"
+
+pre=$(ls -1 "$work"/upbackups/beta/pre-upgrade-v0.0.2-beta-*.tar.gz)
+[ -f "$pre" ] && [ -f "$pre.sha256" ] || fail "no pre-upgrade-v0.0.2-beta-* archive"
+grep -qx "backup_before=$pre" "$opt/state/beta" || fail "the rollback state does not name $pre"
+[ ! -e "$work/upbackups/beta/pre-upgrade-v0.0.0-beta-19990101T000000Z.tar.gz" ] || fail "the oldest of four pre-upgrade backups was kept"
+[ -e "$work/upbackups/beta/pre-upgrade-v0.0.0-beta-19990102T000000Z.tar.gz" ] || fail "a pre-upgrade backup within the newest three was removed"
+CONCH_DATA_ROOT=$up_data CONCH_BACKUP_DIR=$work/upbackups "$deploy/conch-backup.sh" beta --local-only >/dev/null 2>&1 ||
+    fail "a nightly backup of beta failed"
+[ -e "$work/upbackups/beta/pre-upgrade-v0.0.0-beta-19990102T000000Z.tar.gz" ] || fail "the nightly retention removed a pre-upgrade backup"
+ok "pre-upgrade backup: its own name, kept by count, untouched by the nightly retention"
 
 post "after upgrade, no migration"
 up --rollback beta >"$work/rb1.out" 2>&1 || { cat "$work/rb1.out" >&2; fail "rollback failed"; }
@@ -290,12 +358,26 @@ up v0.0.2 beta >"$work/up2.out" 2>&1 || { cat "$work/up2.out" >&2; fail "second 
 # Stand in for a migration: the new binary raised the schema version.
 sqlite3 "$up_data/beta/conch.db" 'PRAGMA user_version = 999' >/dev/null
 post "after upgrade, with migration"
+
+# The rollback that needs the pre-upgrade backup checks it before stopping
+# anything.
+pre=$(sed -n 's/^backup_before=//p' "$opt/state/beta")
+mv "$pre" "$work/held.tar.gz"
+calls=$(wc -l <"$work/systemctl.calls")
+if up --rollback beta >"$work/rb-missing.out" 2>&1; then fail "a rollback went ahead without the backup it needs"; fi
+grep -q 'Nothing was stopped' "$work/rb-missing.out" || fail "rollback without its backup: wrong reason: $(cat "$work/rb-missing.out")"
+[ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] && [ "$(version)" = v0.0.2 ] || fail "a refused rollback stopped or changed the instance"
+mv "$work/held.tar.gz" "$pre"
+ok "rollback: a missing pre-upgrade backup is found before anything is stopped"
+
 up --rollback beta >"$work/rb2.out" 2>&1 || { cat "$work/rb2.out" >&2; fail "rollback after a migration failed"; }
 [ "$(version)" = v0.0.1 ] || fail "after the second rollback /healthz says $(version)"
 grep -q 'restoring the pre-upgrade backup' "$work/rb2.out" || fail "rollback did not restore the backup"
 has 'after upgrade, no migration' || fail "the pre-upgrade backup lost an older message"
 if has 'after upgrade, with migration'; then fail "a message written after the migration survived the restore"; fi
-ls -d "$up_data"/beta.rolled-back-* >/dev/null || fail "the replaced data directory was not kept"
-ok "rollback with a migration: pre-upgrade backup restored, old binary starts"
+kept=$(sed -n 's/.*the replaced data directory is kept at //p' "$work/rb2.out")
+case "$kept" in "$up_data"/beta.rolled-back-*) ;; *) fail "the rollback did not print the kept directory: $(cat "$work/rb2.out")" ;; esac
+[ -f "$kept/conch.db" ] || fail "the kept directory $kept does not hold the replaced data"
+ok "rollback with a migration: pre-upgrade backup restored, old binary starts, kept directory named"
 
 echo "deploy-scripts-test: PASS"

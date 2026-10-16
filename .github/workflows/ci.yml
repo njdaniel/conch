@@ -84,6 +84,7 @@ jobs:
       # test fails rather than skips when one is missing.
       - name: deployment scripts
         run: |
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
           ./scripts/deploy-scripts-test.sh
 

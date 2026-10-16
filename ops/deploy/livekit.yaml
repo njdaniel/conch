@@ -21,7 +21,9 @@ room:
 
 # TURN over TLS, for networks that block UDP. The certificate is the one
 # Caddy obtains for turn.example.com, mounted read-only at /certs by
-# livekit.service.
+# livekit.service. LiveKit's TURN refuses private and loopback peers by
+# default but relays to any public address for a client holding a valid voice
+# token; turn.deny_peer_cidrs narrows that (docs/deploy.md, step 4).
 turn:
   enabled: true
   domain: turn.example.com

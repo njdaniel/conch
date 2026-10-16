@@ -5,9 +5,17 @@
 # range, and TURN (UDP and TLS). Everything else inbound is closed. conchd and
 # LiveKit's signalling port (7880) listen on loopback and are not opened.
 #
+# SSH is rate-limited (`ufw limit`: six new connections in thirty seconds
+# from one address are refused), which slows password and key guessing.
+#
 # The numbers match livekit.yaml; if you change one, change the other. SSH_PORT
 # is the port sshd really listens on: set it before running, or you lock
 # yourself out. --dry-run prints the commands and runs none.
+#
+# Recommended as well: a DigitalOcean Cloud Firewall on the droplet with the
+# same inbound rules (and SSH only from the addresses you administer from).
+# It filters before traffic reaches the droplet, and it still holds if ufw is
+# disabled or flushed on the host by mistake.
 set -euo pipefail
 
 ssh_port=${SSH_PORT:-22}
@@ -35,7 +43,7 @@ fi
 
 run ufw default deny incoming
 run ufw default allow outgoing
-run ufw allow "$ssh_port/tcp" comment ssh
+run ufw limit "$ssh_port/tcp" comment ssh
 run ufw allow 80/tcp comment 'caddy http (certificates)'
 run ufw allow 443/tcp comment 'caddy https'
 run ufw allow "$tcp_media/tcp" comment 'livekit tcp media'

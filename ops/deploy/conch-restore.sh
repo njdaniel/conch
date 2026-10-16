@@ -49,7 +49,9 @@ echo "sha256:        ok ($have)"
 if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
     fail "the archive holds an absolute or parent path"
 fi
-tar -xzf "$archive" -C "$data"
+# The files become the user running the drill's, with modes from its umask,
+# whatever the archive says (and whoever runs it, root included).
+tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$data"
 [ -f "$data/conch.db" ] || fail "the archive has no conch.db"
 
 # 3. The database is intact.

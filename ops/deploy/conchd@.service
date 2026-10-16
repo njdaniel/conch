@@ -1,7 +1,12 @@
 # One conchd instance. %i is the instance name: the data lives in
 # /var/lib/conch/%i and the settings in /etc/conch/%i.env (mode 0600, see
 # instance.env.example). Every setting comes from that file, so a second
-# instance is a second env file and `systemctl enable --now conchd@<name>`.
+# instance is a second env file, a second user and
+# `systemctl enable --now conchd@<name>` (docs/deploy.md).
+#
+# Each instance runs as its own user, conch-%i, created by the operator
+# (docs/deploy.md), so one instance cannot read another's data even outside
+# the sandbox below.
 [Unit]
 Description=Conch server (%i)
 Documentation=https://github.com/njdaniel/conch/blob/main/docs/deploy.md
@@ -10,8 +15,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=conch
-Group=conch
+User=conch-%i
+Group=conch-%i
+# systemd reads this file as root before it builds the sandbox, so the file
+# stays readable here although /etc/conch is hidden from the service below.
 EnvironmentFile=/etc/conch/%i.env
 ExecStart=/opt/conch/current/conchd serve
 Restart=on-failure
@@ -22,22 +29,37 @@ StateDirectory=conch/%i
 StateDirectoryMode=0700
 UMask=0077
 
-# The service may write its own state directory and nothing else.
+# The service may write its own state directory and nothing else, and sees
+# nothing of /var/lib/conch but that directory: not the other instances, not
+# a rolled-back or broken copy kept beside it.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+TemporaryFileSystem=/var/lib/conch:ro
+BindPaths=/var/lib/conch/%i
 ReadWritePaths=/var/lib/conch/%i
+# The env files and LiveKit's keys, the backups (and their off-site
+# credentials), and Caddy's state with its admin socket are not this
+# service's business.
+InaccessiblePaths=/etc/conch /var/backups/conch -/var/lib/caddy
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
+RestrictRealtime=yes
+RemoveIPC=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 
