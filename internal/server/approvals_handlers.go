@@ -293,10 +293,22 @@ func (s *Server) handleCastDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	decision, resolution, err := s.approvals.Decide(ctx, approvalID, req.PrincipalID, req.OptionID, req.Reason)
+	// With a caller the store checks membership and the right again in the
+	// transaction that writes the decision, and counts toward quorum only
+	// the decisions of members who hold the right now (issue #453): the check
+	// above answers early, this one cannot be raced by a revoke.
+	decide := s.approvals.Decide
+	caller, authed := callerFrom(ctx)
+	if authed {
+		decide = s.approvals.DecideAsMember
+	}
+	decision, resolution, err := decide(ctx, approvalID, req.PrincipalID, req.OptionID, req.Reason)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeApprovalNotFound(w)
+		return
+	case errors.Is(err, store.ErrNoDecideRight):
+		s.denyForbidden(w, r, caller, schema.ErrorCodeDecisionNotPermitted, "you may see this approval but not decide it; an operator can grant you the right")
 		return
 	case errors.Is(err, store.ErrTerminalApproval):
 		writeError(w, http.StatusConflict, "approval_terminal", "approval is already resolved or expired")

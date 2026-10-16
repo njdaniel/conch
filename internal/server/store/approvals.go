@@ -25,6 +25,10 @@ var (
 	// ErrDuplicateDecision is returned when a principal casts a second decision
 	// on the same approval.
 	ErrDuplicateDecision = errors.New("store: principal already decided this approval")
+	// ErrNoDecideRight is returned by CastMemberDecision when the decider is a
+	// member of the approval's channel but does not hold the right to decide
+	// its approvals (issue #450), checked in the deciding transaction (#453).
+	ErrNoDecideRight = errors.New("store: member does not hold the right to decide this channel's approvals")
 )
 
 // Audit actions for the approval lifecycle (approval-object.md §6). notify_sent
@@ -346,7 +350,29 @@ func (s *Store) ListOpenApprovals(ctx context.Context) ([]Approval, error) {
 //
 // The whole read-check-write sequence runs under one IMMEDIATE transaction, so
 // exactly one concurrent decision can be the resolving one.
+//
+// CastDecision is the decision of a server without authentication (AuthOff),
+// where a decider need not be a member: every decision cast counts toward
+// quorum. With a verified caller the decision goes through CastMemberDecision.
 func (s *Store) CastDecision(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error) {
+	return s.castDecision(ctx, approvalID, principalID, optionID, reason, false)
+}
+
+// CastMemberDecision is CastDecision for a verified caller (issue #453). In the
+// same transaction as the write it checks that the decider is a member of the
+// approval's channel (ErrNotFound otherwise, the answer for an approval they
+// cannot see) and holds the right to decide its approvals (ErrNoDecideRight),
+// so a right revoked after the handler's own check cannot land a decision. And
+// quorum counts only the concurring decisions of members who hold the right
+// now: a vote cast by someone whose right was since revoked, or who has left
+// the channel, stays on the record (and in the resolution's decisions) but
+// helps resolve nothing. A revoke itself never resolves or reopens an
+// approval; the count is taken again at the next decision.
+func (s *Store) CastMemberDecision(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error) {
+	return s.castDecision(ctx, approvalID, principalID, optionID, reason, true)
+}
+
+func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64, optionID, reason string, members bool) (schema.Decision, *schema.ApprovalResolutionV1, error) {
 	d := schema.Decision{
 		PrincipalID: principalID,
 		OptionID:    optionID,
@@ -381,6 +407,20 @@ func (s *Store) CastDecision(ctx context.Context, approvalID, principalID int64,
 		if !valid {
 			return fmt.Errorf("store: decide approval %d with option %q: %w", approvalID, optionID, ErrUnknownOption)
 		}
+		if members {
+			var can int
+			err := tx.QueryRowContext(ctx,
+				"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?",
+				a.ChannelID, principalID).Scan(&can)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				return fmt.Errorf("store: decide approval %d as a non-member: %w", approvalID, ErrNotFound)
+			case err != nil:
+				return fmt.Errorf("store: check decide right on approval %d: %w", approvalID, err)
+			case can != 1:
+				return fmt.Errorf("store: decide approval %d: %w", approvalID, ErrNoDecideRight)
+			}
+		}
 
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO approval_decisions (approval_id, principal_id, option_id, reason, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -397,11 +437,18 @@ func (s *Store) CastDecision(ctx context.Context, approvalID, principalID int64,
 		}
 
 		// Quorum: concurring decisions select the same option
-		// (approval-object.md §1).
+		// (approval-object.md §1). For members, only the decisions of those
+		// who hold the right now count (issue #453).
+		count := "SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?"
+		args := []any{approvalID, optionID}
+		if members {
+			count = `SELECT COUNT(*) FROM approval_decisions d
+			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
+			 WHERE d.approval_id = ? AND d.option_id = ?`
+			args = []any{a.ChannelID, approvalID, optionID}
+		}
 		var concurring int
-		if err := tx.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?",
-			approvalID, optionID).Scan(&concurring); err != nil {
+		if err := tx.QueryRowContext(ctx, count, args...).Scan(&concurring); err != nil {
 			return fmt.Errorf("store: count concurring decisions: %w", err)
 		}
 		if concurring < a.Quorum {
