@@ -171,11 +171,12 @@ The existing voice-track issues stay where they are: #185, #189, #393, #394 and 
 
 ## 6. How it is built, tested and fed back
 
-**The board.** One GitHub Project, "Conch", is the working source of truth. Its fields:
+**The board.** One GitHub Project, [Conch](https://github.com/users/njdaniel/projects/14), is the working source of truth. Its fields:
 - **Status:** Backlog → Ready → In progress → Review → Ready to test → Done;
-- **Iteration:** one-week iterations;
+- **Iteration:** one-week iterations, starting 2026-10-19;
 - **Priority:** Blocker, High, Normal, Low;
-- **Type:** Bug, Feature, Chore, Research.
+- **Kind:** Bug, Feature, Chore, Research (GitHub reserves the name "Type");
+- **Build:** the build an item was tested on.
 
 Its views are: the current iteration by status; the backlog by priority; the "Ready to test" queue with the build each item is in; and progress toward the alpha milestone.
 

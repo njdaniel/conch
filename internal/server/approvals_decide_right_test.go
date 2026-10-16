@@ -283,3 +283,45 @@ func TestRevokeDoesNotRetractACastDecision(t *testing.T) {
 		t.Errorf("state = %s; today the revoked member's earlier decision still counts, so want resolved", state)
 	}
 }
+
+// Someone who joins through an invite (issue #436) is a member of the
+// channels it names but never holds the right to decide their approvals:
+// they see the approval read-only and a decision is refused.
+func TestInviteJoinerCannotDecide(t *testing.T) {
+	ctx := context.Background()
+	f := newAuthFixture(t, AuthRequired)
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := f.srv.store.CreateInvite(ctx, "system", f.root.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, time.Now())
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	joined, err := f.srv.store.RedeemInvite(ctx, store.HashInviteCode(inv.Code), "joiner", time.Now())
+	if err != nil {
+		t.Fatalf("RedeemInvite: %v", err)
+	}
+	if member, err := f.srv.store.IsChannelMember(ctx, general.ID, joined.Principal.ID); err != nil || !member {
+		t.Fatalf("the joiner is not a member of general: %v, %v", member, err)
+	}
+	if can, err := f.srv.store.CanDecideApprovals(ctx, general.ID, joined.Principal.ID); err != nil || can {
+		t.Fatalf("the joiner can decide = %v, %v; want false", can, err)
+	}
+
+	rec := f.do(t, "POST", "/v1/approvals", f.aliceTok, createApprovalBody(general.ID, 0))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	id := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval.ID
+	list := decodeBody[schema.ListApprovalsResponseV1](t, f.do(t, "GET", "/v1/approvals", joined.Token, ""))
+	if len(list.ReadOnly) != 1 || list.ReadOnly[0] != id {
+		t.Errorf("the joiner's list marks %v read-only, want [%d]", list.ReadOnly, id)
+	}
+	assertErrorBody(t, f.do(t, "POST", fmt.Sprintf("/v1/approvals/%d/decisions", id), joined.Token, decisionBody(0)),
+		http.StatusForbidden, schema.ErrorCodeDecisionNotPermitted)
+	if a, err := f.srv.store.ApprovalByID(ctx, id); err != nil || a.State != schema.ApprovalStatePending {
+		t.Errorf("after the joiner's refusal approval = %+v, %v; want pending", a, err)
+	}
+}

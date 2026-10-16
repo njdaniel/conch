@@ -359,11 +359,3 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 	}
 	return channels, nil
 }
-
-// boolInt is the SQLite form of a boolean column.
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}

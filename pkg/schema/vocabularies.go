@@ -29,6 +29,7 @@ var Vocabularies = map[string][]string{
 		ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
 	),
 	"EscalationTargetKind": values(EscalationTargetPrincipal, EscalationTargetNtfyTopic),
+	"InviteKind":           values(InviteKindPersonal, InviteKindOpen),
 	"InterventionKind":     values(InterventionKindMessage, InterventionKindCancel, InterventionKindPause, InterventionKindResume),
 	"InterventionState": values(
 		InterventionStateRequested, InterventionStateAcknowledged, InterventionStateApplied, InterventionStateFailed,

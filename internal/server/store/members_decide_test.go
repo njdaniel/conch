@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// A database written before issue #450 keeps today's behaviour: every
+// A database written before issue #450 (version 24) keeps today's behaviour: every
 // existing membership may decide its channel's approvals after the upgrade.
 func TestDecideRightMigrationKeepsEveryExistingMember(t *testing.T) {
-	const pre = 23
+	const pre = 24
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "conch.db")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
@@ -41,7 +41,7 @@ func TestDecideRightMigrationKeepsEveryExistingMember(t *testing.T) {
 		`INSERT INTO principals (id, kind, name, role, created_at) VALUES (1, 'human', 'nick', 'operator', 1), (2, 'human', 'ann', 'member', 2)`,
 		`INSERT INTO channels (id, name, created_at) VALUES (10, 'ops', 3), (11, 'side', 4)`,
 		`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (10, 1, 1, 5), (10, 2, 1, 6), (11, 2, 1, 7)`,
-		`PRAGMA user_version = 23`,
+		`PRAGMA user_version = 24`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("seed %q: %v", stmt, err)
