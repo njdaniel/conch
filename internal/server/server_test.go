@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,9 +20,15 @@ func newTestServer(t *testing.T) *Server {
 	return newTestServerWithConfig(t, Config{AuthMode: AuthOff})
 }
 
+// testDBPaths holds the database file of each server newTestServerWithConfig
+// made, for the few tests that must set up what no route can, such as a
+// second operator (issue #438).
+var testDBPaths sync.Map // *Server -> string
+
 func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
 	t.Helper()
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	path := filepath.Join(t.TempDir(), "conch.db")
+	st, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -33,7 +40,9 @@ func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
 	cfg.DataDir = t.TempDir()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Version = "v1.2.3-test"
-	return New(cfg, st)
+	srv := New(cfg, st)
+	testDBPaths.Store(srv, path)
+	return srv
 }
 
 func TestHealthzOK(t *testing.T) {

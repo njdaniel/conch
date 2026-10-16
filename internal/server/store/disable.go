@@ -107,10 +107,11 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 }
 
 // DisablePrincipal switches principalID off in one transaction: it sets
-// disabled_at, revokes every live credential, and appends principal_disabled
-// plus one credential_revoked per credential (all attributed to actor, none
-// containing token material). A disabled principal cannot authenticate and
-// cannot be issued credentials.
+// disabled_at, revokes every live credential, closes every open invite the
+// principal made, and appends principal_disabled plus one credential_revoked
+// per credential and one invite_closed (reason=creator_disabled) per invite
+// (all attributed to actor, none containing token material). A disabled
+// principal cannot authenticate and cannot be issued credentials.
 //
 // It is idempotent: disabling an already-disabled principal changes nothing,
 // writes no audit event, and reports changed == false. It returns
@@ -161,6 +162,12 @@ func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID 
 			return err
 		}
 		if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "principal disabled", SessionEndedPrincipalDisabled, now, &runs); err != nil {
+			return err
+		}
+		// Redemption already refuses a disabled maker's invites; closing them
+		// makes the invite list say so too (issue #438), and enabling the
+		// principal again does not revive them.
+		if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, "", InviteCloseCreatorDisabled, now); err != nil {
 			return err
 		}
 		changed = true
