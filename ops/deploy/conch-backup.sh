@@ -27,8 +27,8 @@
 #                     no file either of them owns.
 # Each step runs in its own session with no terminal and none of root's
 # environment (only PATH, CONCH_DATA_ROOT, CONCH_BACKUP_DIR and
-# CONCH_BACKUP_ENV are passed), and what it prints is stripped of control
-# characters before it reaches root's terminal or the journal.
+# CONCH_BACKUP_ENV are passed). What it prints to root's terminal, and all
+# it writes to standard error, is stripped of control characters.
 # Run as any other user, both steps run as that user (the tests do this).
 #
 # Without an off-site destination the archive is still made, but the script
@@ -53,6 +53,8 @@
 # those in files of mode 0600 too, never in this repository.
 # CONCH_DATA_ROOT (default /var/lib/conch) comes from the environment only.
 set -euo pipefail
+# Character classes such as [0-9] mean ASCII only in the C locale.
+export LC_ALL=C
 
 usage() { echo "usage: $0 <instance> [--local-only] [--pre-upgrade <tag>]" >&2; exit 2; }
 die() { echo "conch-backup: $1" >&2; exit "${2:-1}"; }

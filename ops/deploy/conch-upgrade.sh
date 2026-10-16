@@ -42,6 +42,8 @@
 #   CONCH_RELEASE_URL (https://github.com/njdaniel/conch/releases/download)
 #   CONCH_BACKUP_SCRIPT (conch-backup.sh beside this script)
 set -euo pipefail
+# Character classes such as [0-9] mean ASCII only in the C locale.
+export LC_ALL=C
 
 opt=${CONCH_OPT:-/opt/conch}
 etc=${CONCH_ETC:-/etc/conch}
@@ -219,6 +221,7 @@ read_state() {
 }
 
 if [ "$1" = --rollback ]; then
+    command -v setsid >/dev/null || fail "setsid is required"
     shift
     validate_names "$@"
     prev=""
@@ -264,7 +267,8 @@ if [ "$1" = --rollback ]; then
             # stream: root never opens the archive, every file is the service
             # user's, and no owner or mode in the archive is taken from it.
             read_archive "$backup_before" |
-                as_instance "$i" tar --no-same-owner --no-same-permissions -xzf - -C "$data_root/$i"
+                as_instance "$i" tar --no-same-owner --no-same-permissions -xzf - -C "$data_root/$i" ||
+                fail "$i: restoring $backup_before failed; the replaced data is kept (see above)"
         else
             echo "conch-upgrade: $i: schema version unchanged ($(user_version "$i")); data kept"
         fi

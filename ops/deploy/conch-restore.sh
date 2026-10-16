@@ -16,6 +16,8 @@
 # CONCHD is the binary to run (default /opt/conch/current/conchd);
 # CONCH_RESTORE_PORT is the first port to try (default 18080).
 set -euo pipefail
+# Character classes such as [0-9] mean ASCII only in the C locale.
+export LC_ALL=C
 
 [ $# -eq 2 ] || { echo "usage: $0 <archive> <scratch-dir>" >&2; exit 2; }
 archive=$1
