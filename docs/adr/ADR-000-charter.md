@@ -44,6 +44,17 @@ component and public-API invariant. It narrows the GUI non-goal above by that
 prototype and no further: the full multi-human GUI stays at P7, and no P9 media
 moves into P3.
 
+### Private-alpha amendment (ADR-008)
+
+[ADR-008](ADR-008-private-communications-alpha.md) moves part of P7 and part of P9 into
+a private communications alpha:
+- the browser client for invited testers, with chat, voice and screen share;
+- invite links as a way to get a credential.
+
+The rest of P7 (the full small-team GUI, presence preferences, human DMs, password and
+OIDC login) stays at P7. The rest of P9 (recording, agent visual participation) stays at
+P9. Single-tenancy, the deployment invariant and every other non-goal are unchanged.
+
 ## Founding decisions (locked)
 
 These are settled. Reopening any requires a new ADR approved by Nick (use the "ADR proposal" issue template).
