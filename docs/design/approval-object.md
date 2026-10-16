@@ -59,6 +59,11 @@ Invariants:
 
 A **decision** is cast by a human principal via `conch approve <id> --reason "..."` (or reject/choose-option variants) — never by agents on their own approvals. Each decision records: principal, selected option id, **required free-text reason**, timestamp. An empty reason is rejected at the API layer, not just the CLI.
 
+**Who may decide (issue #450).** The decider must be a member of the approval's channel who holds that channel's right to decide approvals.
+- **Who holds it:** every member an operator adds holds it unless added with `--no-decide`, and every member from before #450 kept it. A person who joins through an invite never gets it.
+- **Changing it:** an operator grants or revokes it per member (`conch admin member decide [--off]`, or `PUT /v1/channels/{c}/members/{id}` with `{"can_decide": …}`), and the change is audited.
+- **Without it:** a member sees the channel's open approvals, marked read-only (`read_only` in `GET /v1/approvals`), and a decision is refused with `403 decision_not_permitted`, audited as `access_denied`.
+
 When quorum is met, the server emits exactly one **resolution event**:
 
 ```jsonc

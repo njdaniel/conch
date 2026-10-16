@@ -508,6 +508,15 @@ END`,
 	PRIMARY KEY (principal_id, channel_id)
 )`,
 	},
+	// 24: Who may decide a channel's approvals (issue #450). Until now any
+	// human member could, which stops being safe once people join through
+	// invites. can_decide is per membership; every existing membership keeps
+	// the right (the column default), as does a member an operator adds
+	// without saying otherwise. A member who joins through an invite is
+	// inserted with 0.
+	{
+		`ALTER TABLE channel_members ADD COLUMN can_decide INTEGER NOT NULL DEFAULT 1 CHECK (can_decide IN (0, 1))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

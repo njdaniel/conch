@@ -848,7 +848,8 @@ func TestListChannelMembersNameAndKind(t *testing.T) {
 			for _, m := range raw.Members {
 				for k := range m {
 					switch k {
-					case "principal_id", "added_by", "created_at", "name", "kind":
+					// can_decide is a person's right to decide approvals (#450).
+					case "principal_id", "added_by", "created_at", "name", "kind", "can_decide":
 					default:
 						t.Errorf("unexpected key %q in member entry", k)
 					}

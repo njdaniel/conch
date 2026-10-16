@@ -14,6 +14,8 @@ func TestChannelMemberGoldenFixtures(t *testing.T) {
 		{"channel-member-v1.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-named.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-no-adder.json", func() any { return new(ChannelMemberV1) }},
+		{"channel-member-v1-can-decide.json", func() any { return new(ChannelMemberV1) }},
+		{"put-channel-member-request-v1.json", func() any { return new(PutChannelMemberRequestV1) }},
 		{"list-channel-members-response-v1.json", func() any { return new(ListChannelMembersResponseV1) }},
 		{"list-channel-members-response-v1-empty.json", func() any { return new(ListChannelMembersResponseV1) }},
 	}
