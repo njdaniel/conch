@@ -817,6 +817,8 @@ CI runs it on every pull request, since any server change can open a read path.
 
 ### Optional: TLS and a reverse proxy
 
+For a public server on a droplet, with Caddy, LiveKit, systemd, backups and a restore drill, follow [docs/deploy.md](docs/deploy.md); the recipe below is the LAN version.
+
 `conchd` speaks plain HTTP and WebSocket. It has no TLS of its own, and that is the supported core: `conchd` alone, with no other process, is the dependency-free deployment (ADR-002, rule 1 in [CLAUDE.md](CLAUDE.md)). A reverse proxy is **optional**. Nothing in `conchd` needs one and nothing degrades without one. Plain `http://` is fine on localhost and on a trusted LAN with scoped credentials; put the proxy in front when a token would otherwise cross a network you do not control, or when you want the page and the sockets on `https://` and `wss://`.
 
 The proxy terminates TLS and forwards everything, WebSocket upgrades included, to `conchd` on loopback. Three things matter, and each was checked against `conchd` rather than assumed:
@@ -913,6 +915,8 @@ Everything else is unaffected by voice. With no LiveKit settings, messaging, app
 
 ### Run LiveKit beside `conchd`
 
+This is the single-machine setup, for trying voice. A public LiveKit (external address, TLS on signalling, TURN fallback, a key per instance) is in [docs/deploy.md](docs/deploy.md).
+
 These commands run LiveKit in Docker on the host network, with its signalling port bound to localhost, and continue the quickstart (the `ops` channel, `alice` as principal 2). The static settings are in a file; the key pair is not:
 
 `/tmp/conch-voice` below is for a demonstration on a machine only you use: another local user who creates that directory first controls the settings file LiveKit reads. On a shared machine, put the file in a directory that only you can write.
@@ -948,7 +952,7 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080 --livekit-url ws
 - `--livekit-url` (or `CONCHD_LIVEKIT_URL`) is the `ws://` or `wss://` address clients are given. `--livekit-api-url` (or `CONCHD_LIVEKIT_API_URL`) is the `http://` or `https://` address `conchd` calls for room control; it defaults to the same address with the scheme swapped.
 - **Room prefix and one API key per server.** Every room name is a prefix and 128 random bits. `--livekit-room-prefix` (or `CONCHD_LIVEKIT_ROOM_PREFIX`) sets the prefix for new rooms; the default is `conch-`. It is lower-case letters, digits and `-`, at most 32 characters, and ends with `-`; `conchd` refuses to start otherwise. Rooms already stored keep their names, so changing it migrates nothing. Several `conchd` servers may share one LiveKit if each has its own prefix: a server deletes and cleans up only rooms it stored itself; the room list it reads from LiveKit covers every room, and it ignores the rest. The prefix keeps the servers' rooms apart by name, but it is not an access control, because a LiveKit API key can act on every room. Give each server instance its own key pair: LiveKit accepts several (`keys:` in its settings, or several pairs in `LIVEKIT_KEYS`), and one key per server limits what a leaked secret can do and lets you revoke one server without touching the rest.
 - **Clocks.** A join token lives 15 seconds and LiveKit allows a minute of leeway either way. If `conchd` and LiveKit run on different machines, keep their clocks synchronised.
-- **Ports and TLS.** Clients need LiveKit's signalling port (7880 here) and its media ports (TCP 7881 and the UDP range). `bind_addresses` covers the signalling port only: **the media ports listen on every interface of the host** (measured with this configuration: `127.0.0.1:7880`, `*:7881`). Nothing can be done on them without a session negotiated over the signalling port, but if this host is reachable from networks it should not serve, close them in its firewall. Put TLS in front of the signalling port for anything beyond localhost, and see LiveKit's deployment documentation for public addresses; the example is a single-host setup.
+- **Ports and TLS.** Clients need LiveKit's signalling port (7880 here) and its media ports (TCP 7881 and the UDP range). `bind_addresses` covers the signalling port only: **the media ports listen on every interface of the host** (measured with this configuration: `127.0.0.1:7880`, `*:7881`). Nothing can be done on them without a session negotiated over the signalling port, but if this host is reachable from networks it should not serve, close them in its firewall. Put TLS in front of the signalling port for anything beyond localhost: [docs/deploy.md](docs/deploy.md) does that with Caddy, with the public addresses and a firewall. The example here is a single-host setup.
 
 ### Look at it
 
