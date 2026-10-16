@@ -1,0 +1,32 @@
+name: Feedback or idea
+description: Something was awkward, missing, or could be better.
+title: "Feedback: "
+labels: ["type/feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rough is fine: ideas get refined before anyone builds them.
+        Please leave out passwords, invite links and credentials.
+  - type: textarea
+    id: trying
+    attributes:
+      label: What were you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: What got in the way, or what was missing?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea (optional)
+      description: How you would like it to work.
+  - type: input
+    id: version
+    attributes:
+      label: Conch version (if you know it)
+      placeholder: v0.1.0-alpha.1

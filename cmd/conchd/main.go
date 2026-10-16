@@ -110,6 +110,9 @@ Flags for serve:
   --livekit-url          ws:// or wss:// LiveKit address given to clients (env CONCHD_LIVEKIT_URL)
   --livekit-api-url      http:// or https:// LiveKit address conchd calls (env CONCHD_LIVEKIT_API_URL,
                          default: --livekit-url with ws->http, wss->https)
+  --livekit-room-prefix  start of the name of every new voice room (env CONCHD_LIVEKIT_ROOM_PREFIX,
+                         default conch-). Lower-case letters, digits and '-', at most 32
+                         characters, ending in '-'. Rooms already stored keep their names.
   --web-dir              a built web client (a directory holding index.html) to serve at /app/ on
                          the API's own origin; / then redirects to /app/ (env CONCHD_WEB_DIR).
                          Unset, the web client built into this binary is served instead, if there
@@ -132,21 +135,22 @@ serves whether or not LiveKit answers, and looks at it once straight away.
 
 // serveOptions is what `conchd serve` resolved from its flags and environment.
 type serveOptions struct {
-	dataDir         string
-	listen          string
-	authMode        server.AuthMode
-	mcpTokens       map[string]int64
-	ntfyServer      string
-	ntfyTopic       string
-	ntfyUrgentTopic string
-	livekit         livekit.Config
-	maxUploadBytes  int64
-	webDir          string
-	webFS           fs.FS  // the embedded client, when it is the one served
-	webSource       string // what the start-up line names: dir <path>, embedded or none
-	allowedOrigins  []string
-	sessionStale    time.Duration
-	sessionOffline  time.Duration
+	dataDir           string
+	listen            string
+	authMode          server.AuthMode
+	mcpTokens         map[string]int64
+	ntfyServer        string
+	ntfyTopic         string
+	ntfyUrgentTopic   string
+	livekit           livekit.Config
+	livekitRoomPrefix string
+	maxUploadBytes    int64
+	webDir            string
+	webFS             fs.FS  // the embedded client, when it is the one served
+	webSource         string // what the start-up line names: dir <path>, embedded or none
+	allowedOrigins    []string
+	sessionStale      time.Duration
+	sessionOffline    time.Duration
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -163,6 +167,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	ntfyUrgentTopic := fs.String("ntfy-urgent-topic", os.Getenv("CONCHD_NTFY_URGENT_TOPIC"), "urgent escalation ntfy topic")
 	livekitURL := fs.String("livekit-url", os.Getenv(livekit.EnvURL), "ws:// or wss:// LiveKit address given to clients")
 	livekitAPIURL := fs.String("livekit-api-url", os.Getenv(livekit.EnvAPIURL), "http:// or https:// LiveKit address conchd calls (default: derived from --livekit-url)")
+	livekitRoomPrefix := fs.String("livekit-room-prefix", envOr(livekit.EnvRoomPrefix, store.DefaultVoiceRoomPrefix), "start of the name of every new voice room")
 	webDir := fs.String("web-dir", os.Getenv("CONCHD_WEB_DIR"), "built web client directory to serve at /app/")
 	// An off switch that is set to something it cannot read must not be
 	// taken as unset: that would serve the client the operator meant to
@@ -220,6 +225,9 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
+	if err := store.ValidateVoiceRoomPrefix(*livekitRoomPrefix); err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --livekit-room-prefix: %w", err)
+	}
 	origins, err := server.ParseAllowedOrigins(*originsRaw)
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --allowed-origins: %w", err)
@@ -230,7 +238,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	}
 	return serveOptions{
 		webDir: *webDir, webFS: webFS, webSource: webSource, allowedOrigins: origins,
-		livekit: lk, maxUploadBytes: *maxUpload,
+		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
@@ -295,6 +303,9 @@ func runServe(args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	if err := st.SetVoiceRoomPrefix(opts.livekitRoomPrefix); err != nil {
+		return err
+	}
 
 	srv := server.New(server.Config{
 		DataDir:         opts.dataDir,

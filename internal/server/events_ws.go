@@ -397,7 +397,7 @@ type eventsStream struct {
 // run sends frames until the peer leaves, the subscription is dropped, or the
 // credential or membership lapses.
 func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
-	ctx = e.conn.CloseRead(ctx)
+	ctx = e.s.keepAlive(ctx, e.conn, true)
 	var keepAlive <-chan time.Time
 	if e.sessionID != 0 {
 		ticks, stop := e.s.sessionKeepAliveTicks()

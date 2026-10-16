@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -23,6 +24,9 @@ type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
 	token      string
+	// pingInterval and pingTimeout are the socket watchdog's (watchConn);
+	// zero means the defaults. Unexported so tests can shorten them.
+	pingInterval, pingTimeout time.Duration
 }
 
 // ErrUnauthenticated matches the error returned when the server answers 401.
@@ -101,7 +105,54 @@ func (c *Client) dial(ctx context.Context, endpoint string) (*websocket.Conn, *h
 		return nil, resp, err
 	}
 	conn.SetReadLimit(schema.MaxMessageFrameBytes)
+	c.watchConn(ctx, conn)
 	return conn, resp, nil
+}
+
+const (
+	// socketPingInterval and socketPingTimeout make the watchdog notice a
+	// connection that died without a FIN (Wi-Fi off, packets dropped) in at
+	// most their sum, 30 s, inside the 60 s of silence the protocol allows
+	// (schema.HeartbeatTimeoutSeconds). The server pings every 25 s too, but
+	// a client cannot count on that: a proxy may not forward it.
+	socketPingInterval = 20 * time.Second
+	socketPingTimeout  = 10 * time.Second
+)
+
+// watchConn pings the server on an interval and closes conn when a ping gets
+// no pong in time, which ends the caller's read with an error and so starts
+// its reconnect. The library answers pongs from its read loop, so every
+// caller of dial is reading while this runs: a receive callback that blocks
+// for about socketPingTimeout fails the ping and ends the subscription, as
+// the server's own ping would within 35 s. It stops with ctx, or at the
+// first failed ping, which is also what a connection closed by the caller
+// gives.
+func (c *Client) watchConn(ctx context.Context, conn *websocket.Conn) {
+	interval, timeout := c.pingInterval, c.pingTimeout
+	if interval <= 0 {
+		interval = socketPingInterval
+	}
+	if timeout <= 0 {
+		timeout = socketPingTimeout
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			pctx, cancel := context.WithTimeout(ctx, timeout)
+			err := conn.Ping(pctx)
+			cancel()
+			if err != nil {
+				_ = conn.CloseNow()
+				return
+			}
+		}
+	}()
 }
 
 // ListMessages returns one forward page of v1 messages from channel.

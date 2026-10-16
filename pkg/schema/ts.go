@@ -73,6 +73,7 @@ var TSTypes = []TSType{
 	// Agent presence: sessions, runs, activity and interventions.
 	{Value: SessionV1{}, Family: "session-v1", Schema: SessionSchemaV1},
 	{Value: SessionRosterV1{}, Family: "session-roster-v1", Schema: SessionRosterSchemaV1},
+	{Value: HeartbeatV1{}, Family: "heartbeat-v1", Schema: HeartbeatSchemaV1},
 	{Value: CreateSessionRequestV1{}, Family: "create-session-request-v1"},
 	{Value: RunV1{}, Family: "run-v1", Schema: RunSchemaV1},
 	{Value: ListRunsResponseV1{}, Family: "list-runs-response-v1"},

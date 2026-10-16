@@ -373,8 +373,10 @@ async function connect(address: (ticket: string) => string, events: SocketEvents
 }
 
 // openSocket opens the message stream, replaying everything after `after`.
+// heartbeat=1 asks for the server's heartbeat frames, which the feed's silence
+// watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
-  connect((ticket) => socketUrl('/v2/ws', { channel, after: String(after), ticket }), events);
+  connect((ticket) => socketUrl('/v2/ws', { channel, after: String(after), heartbeat: '1', ticket }), events);
 
 // openEventsSocket opens the events stream of a channel (roster, runs,
 // activity, interventions) with the browser's own session, which the server

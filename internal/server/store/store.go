@@ -527,6 +527,9 @@ type Store struct {
 	// runsEnded, when set, is told which runs a committed transaction failed
 	// because their session ended (issue #405).
 	runsEnded func([]EndedRun)
+	// voiceRoomPrefix starts the name of each new voice room; empty means
+	// the default. See SetVoiceRoomPrefix.
+	voiceRoomPrefix string
 }
 
 // EndedRun names a run that ended with its session: the store changed it

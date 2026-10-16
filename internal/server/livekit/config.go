@@ -19,10 +19,11 @@ import (
 // Environment variable names, kept here so error messages and conchd's flag
 // wiring cannot drift apart.
 const (
-	EnvURL       = "CONCHD_LIVEKIT_URL"
-	EnvAPIURL    = "CONCHD_LIVEKIT_API_URL"
-	EnvAPIKey    = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
-	EnvAPISecret = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvURL        = "CONCHD_LIVEKIT_URL"
+	EnvAPIURL     = "CONCHD_LIVEKIT_API_URL"
+	EnvAPIKey     = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
+	EnvAPISecret  = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvRoomPrefix = "CONCHD_LIVEKIT_ROOM_PREFIX"
 )
 
 // Secret holds the signing secret. It keeps the value behind a pointer, so
