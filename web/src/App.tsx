@@ -1,12 +1,15 @@
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { Conversation } from './Conversation';
+import { Invite } from './Invite';
+import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
 import { OperatorWarning } from './OperatorWarning';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel } from './route';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeInviteFromAddress } from './route';
+import type { WhoAmIResponseV1 } from './schema/principal';
 import { SignIn } from './SignIn';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
@@ -285,6 +288,50 @@ export function App({ origin }: { readonly origin: string }) {
     });
   }, [signedIn]);
 
+  // The code of an invite link (issue #440), held here in memory only: never
+  // stored, and dropped once it is used or the person goes back. It is taken
+  // out of the address before the first paint, and again when a link is
+  // pasted into a tab that is already open (a hashchange, no reload).
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    function take() {
+      const found = takeInviteFromAddress();
+      if (found !== null) setInviteCode(found);
+    }
+    take();
+    window.addEventListener('hashchange', take);
+    return () => {
+      window.removeEventListener('hashchange', take);
+    };
+  }, []);
+
+  // Continue as a new person: whoever is signed in is signed out properly
+  // first, their credential revoked, before the invite makes someone else.
+  const leaveForInvite = useCallback(async (): Promise<boolean> => {
+    releaseSession();
+    const told = await api.signOut();
+    forgetChannel();
+    dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
+    return told;
+  }, [releaseSession]);
+
+  // Joined: the code is dropped and the lobby opens on the first channel the
+  // invite granted. A redemption is a sign-in, so it takes a pasted
+  // credential's two steps. When whoami did not answer, it is asked again.
+  const joined = useCallback((who: WhoAmIResponseV1 | null, channel: string | undefined) => {
+    setInviteCode(null);
+    if (channel !== undefined) window.location.hash = hashForChannel(channel);
+    dispatchAuth({ type: 'submit' });
+    if (who !== null) {
+      dispatchAuth({ type: 'verified', principal: who });
+      return;
+    }
+    void api.whoAmI().then((result) => {
+      if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
+      else dispatchAuth({ type: 'failed', failure: result.failure });
+    });
+  }, []);
+
   const submit = useCallback((credential: string) => {
     dispatchAuth({ type: 'submit' });
     void api.signIn(credential).then((result) => {
@@ -292,6 +339,25 @@ export function App({ origin }: { readonly origin: string }) {
       else dispatchAuth({ type: 'failed', failure: result.failure });
     });
   }, []);
+
+  // An invite link is answered before anything else, once a stored sign-in
+  // has been checked, so the page can say who is signed in already.
+  if (inviteCode !== null && auth.phase !== 'restoring') {
+    const signedInAs = auth.phase === 'signedIn' || auth.phase === 'operatorWarning' ? auth.principal.name : null;
+    return (
+      <Invite
+        origin={origin}
+        inviteCode={inviteCode}
+        signedInAs={signedInAs}
+        unchecked={signedInAs === null && api.heldElsewhere()}
+        onNewPerson={leaveForInvite}
+        onBack={() => {
+          setInviteCode(null);
+        }}
+        onJoined={joined}
+      />
+    );
+  }
 
   switch (auth.phase) {
     case 'restoring':
@@ -332,6 +398,11 @@ export function App({ origin }: { readonly origin: string }) {
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
           voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
+          invites={
+            auth.principal.may_invite === true ? (
+              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} onUnauthorized={onUnauthorized} />
+            ) : null
+          }
           conversation={
             selected === null || channelId === null ? null : (
               <>

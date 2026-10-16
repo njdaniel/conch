@@ -126,7 +126,7 @@ export interface Reply {
 }
 
 // call makes one request as the holder of token.
-export async function call(world: World, token: string, method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<Reply> {
+export async function call(world: World, token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<Reply> {
   const res = await fetch(world.origin + path, {
     method,
     headers: {
@@ -152,7 +152,7 @@ export async function call(world: World, token: string, method: 'GET' | 'POST' |
 export async function ok<T>(
   world: World,
   token: string,
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
   check: Validator<T>,
   body?: unknown,
@@ -166,4 +166,10 @@ export async function ok<T>(
 
 export async function principalId(world: World, token: string): Promise<number> {
   return (await ok(world, token, 'GET', '/v1/whoami', whoAmIResponseV1)).id;
+}
+
+// inviteUrl is the link an invite's maker hands out (issue #440), as the web
+// client builds it: the code in the fragment of the client's address.
+export function inviteUrl(world: Pick<World, 'appUrl'>, inviteCode: string): string {
+  return `${world.appUrl}#/invite/${encodeURIComponent(inviteCode)}`;
 }

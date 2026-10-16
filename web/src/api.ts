@@ -10,8 +10,20 @@
 // is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
 import { revokeAllCredentialsResponseV1 } from './schema/credential';
-import { errorV0 } from './schema/error';
+import { errorV0, type ErrorV0 } from './schema/error';
 import { health } from './schema/health';
+import {
+  createInviteResponseV1,
+  invitePreviewV1,
+  listInvitesResponseV1,
+  redeemInviteResponseV1,
+  type CreateInviteRequestV1,
+  type CreateInviteResponseV1,
+  type InvitePreviewRequestV1,
+  type InvitePreviewV1,
+  type InviteV1,
+  type RedeemInviteRequestV1,
+} from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
@@ -350,6 +362,161 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   } catch {
     // Fall through.
   }
+  return { ok: true, value: null };
+}
+
+// Invites (issue #440). Preview and redeem need no credential: the code is
+// the proof. It travels in a POST body only, never in a URL, so no address,
+// access log or performance entry holds it; nothing here stores it, logs it or
+// keeps it once the call returns.
+
+// A refused invite call says why: the server's code; its own line, for a
+// request it could not take (invalid_request names the rule broken, never the
+// value sent); and, for rate_limited, the seconds its Retry-After asks for.
+export type InviteResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | {
+      readonly ok: false;
+      readonly failure: ApiFailure;
+      readonly code?: string;
+      readonly message?: string;
+      readonly retryAfter?: number;
+    };
+
+type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
+
+async function inviteRefused(res: Response): Promise<InviteRefusal> {
+  let doc: ErrorV0 | undefined;
+  try {
+    const body: unknown = await res.json();
+    if (errorV0(body).length === 0) doc = body as ErrorV0;
+  } catch {
+    // No document, or not one.
+  }
+  const message = doc?.message.replace(/\s+/g, ' ').trim().slice(0, 300) ?? '';
+  const retryAfter = Number.parseInt(res.headers.get('Retry-After') ?? '', 10);
+  return {
+    ok: false,
+    failure: 'invalid',
+    ...(doc === undefined ? {} : { code: doc.code }),
+    ...(message === '' ? {} : { message }),
+    ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
+  };
+}
+
+async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteResult<T>> {
+  try {
+    const parsed: unknown = await res.json();
+    if (check(parsed).length === 0) return { ok: true, value: parsed as T };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// sendOpen posts a JSON body with no credential at all, for the two invite
+// routes that take none. It is null when there was no answer.
+async function sendOpen(path: string, body: unknown): Promise<Response | null> {
+  try {
+    return await fetch(path, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+  } catch {
+    return null;
+  }
+}
+
+// previewInvite asks what an invite would grant, without using it.
+export async function previewInvite(inviteCode: string): Promise<InviteResult<InvitePreviewV1>> {
+  const request: InvitePreviewRequestV1 = { code: inviteCode };
+  const res = await sendOpen('/v1/invites/preview', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, invitePreviewV1);
+}
+
+// What redeeming gave besides an answer of the server's: held is a refusal
+// before anything was sent, because this browser still holds another
+// sign-in (see redeemInvite); unkept is an account made whose credential this
+// browser would not keep (site data blocked), so it cannot sign in with it;
+// unchecked is one made and kept whose whoami did not answer, which a reload
+// finishes.
+export type RedeemResult = InviteResult<WhoAmIResponseV1> | { readonly ok: false; readonly failure: 'held' | 'unkept' | 'unchecked' };
+
+// heldElsewhere says whether this browser holds a sign-in other than one
+// redeeming could make: a credential pinned, one waiting behind the operator
+// warning, or one stored that could not be checked (restore had no answer, so
+// it was neither pinned nor dropped).
+export function heldElsewhere(): boolean {
+  return pending !== null || hasToken();
+}
+
+// redeemInvite uses an invite to make a new member called name. The token in
+// the answer is kept as signIn keeps a member's, to last, and pinned; then
+// whoami says who the page now is.
+//
+// Redeeming makes a new person, so it is refused while this browser holds any
+// other sign-in, checked or not: the page signs it out first (signOut), which
+// revokes it rather than leaving it behind. Writing over one that could not
+// be checked would leave a member's credential alive and unrevoked, and an
+// operator's tab credential would win over the joiner's at the next load.
+export async function redeemInvite(inviteCode: string, name: string): Promise<RedeemResult> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
+  pinned = null;
+  const request: RedeemInviteRequestV1 = { code: inviteCode, name };
+  const res = await sendOpen('/v1/invites/redeem', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const redeemed = await readBody(res, redeemInviteResponseV1);
+  if (!redeemed.ok) return redeemed;
+  const held: Held = { token: redeemed.value.token, place: 'lasting' };
+  if (!writeToken(held.token, held.place)) {
+    // The account exists and its credential works, but cannot be kept here:
+    // it is revoked (if the server answers) rather than left alive.
+    await sendAs(held, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unkept' };
+  }
+  pinned = { token: held.token, place: held.place };
+  const who = await whoAmI();
+  if (!who.ok) return { ok: false, failure: 'unchecked' };
+  if (who.value.role === 'operator') {
+    // An invite never makes an operator. Should the server ever say
+    // otherwise, an operator credential is not left to last in this browser.
+    forget(held);
+    return { ok: false, failure: 'invalid' };
+  }
+  return who;
+}
+
+// createInvite makes an invite. The answer carries its code, shown once to
+// whoever made it and nowhere else.
+export async function createInvite(request: CreateInviteRequestV1): Promise<InviteResult<CreateInviteResponseV1>> {
+  const reply = await authedPost('/v1/invites', request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, createInviteResponseV1);
+}
+
+// listInvites reads the invites the caller may see, newest first. For an
+// operator that may be everyone's (issue #438): the panel shows only the
+// caller's own.
+export async function listInvites(): Promise<ApiResult<InviteV1[]>> {
+  const result = await authed('/v1/invites', listInvitesResponseV1);
+  return result.ok ? { ok: true, value: result.value.invites } : result;
+}
+
+// closeInvite closes an invite, so its link stops working. Uses already made
+// stand.
+export async function closeInvite(id: number): Promise<InviteResult<null>> {
+  const reply = await authedSend('DELETE', `/v1/invites/${String(id)}`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
   return { ok: true, value: null };
 }
 

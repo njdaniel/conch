@@ -2,7 +2,7 @@
 // (never a second tab of one), and every page of every context is checked,
 // when the test ends, for a credential in the address bar or in
 // performance.getEntries(): the one thing that must hold throughout.
-import { expect, test as base, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
 import { allTokens, loadWorld, type World } from './world';
 
 // leaks lists where in a page a credential shows, none when it does not.
@@ -28,17 +28,24 @@ export interface Person {
 }
 
 export const test = base.extend<{
-  // meet opens a fresh browser context with a page in it: one person.
-  meet: () => Promise<Person>;
+  // meet opens a fresh browser context with a page in it: one person. The
+  // options are the context's (a phone's screen, say).
+  meet: (options?: BrowserContextOptions) => Promise<Person>;
+  // secrets is the credentials a test came by itself (one an invite gave, say),
+  // which the end-of-test scan looks for beside the world's.
+  secrets: string[];
   world: World;
 }>({
   world: async ({}, use) => {
     await use(loadWorld());
   },
-  meet: async ({ browser, world }, use) => {
+  secrets: async ({}, use) => {
+    await use([]);
+  },
+  meet: async ({ browser, world, secrets }, use) => {
     const people: Person[] = [];
-    await use(async () => {
-      const context = await browser.newContext();
+    await use(async (options?: BrowserContextOptions) => {
+      const context = await browser.newContext(options);
       const person = { context, page: await context.newPage() };
       people.push(person);
       return person;
@@ -48,7 +55,7 @@ export const test = base.extend<{
     const found: string[] = [];
     try {
       for (const { page } of people) {
-        for (const where of await leaks(page, allTokens(world))) found.push(where);
+        for (const where of await leaks(page, [...allTokens(world), ...secrets])) found.push(where);
       }
     } finally {
       for (const { context } of people) await context.close();
