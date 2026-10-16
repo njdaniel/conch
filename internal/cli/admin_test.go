@@ -91,6 +91,8 @@ func TestAdminCommands(t *testing.T) {
 		{name: "member remove", args: []string{"member", "remove", "ops", "4"}, wantStdout: "removed 4 from ops\n"},
 		{name: "disable", args: []string{"principal", "disable", "4"}, wantStdout: "disabled principal 4\n"},
 		{name: "enable", args: []string{"principal", "enable", "4"}, wantStdout: "enabled principal 4\n"},
+		{name: "rename", args: []string{"principal", "rename", "3", "Alice Liddell"}, wantStdout: "renamed principal 3 to Alice Liddell\n"},
+		{name: "rename an agent", args: []string{"principal", "rename", "4", "builder"}, wantStdout: "renamed principal 4 to builder\n"},
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
@@ -273,6 +275,13 @@ func TestAdminJSON(t *testing.T) {
 				t.Errorf("manifest = %+v", r.Manifest)
 			}
 		}},
+		{"principal rename", []string{"principal", "rename", "3", "builder"}, "", func(t *testing.T, out string) {
+			var r schema.RenamePrincipalResponseV1
+			strict(t, out, &r)
+			if r.Principal.ID != 3 || r.Principal.Name != "builder" {
+				t.Errorf("principal = %+v", r.Principal)
+			}
+		}},
 		{"member add has no document", []string{"member", "add", "ops", "3"}, "", func(t *testing.T, out string) {
 			if out != "" {
 				t.Errorf("stdout = %q, want empty", out)
@@ -302,6 +311,7 @@ func TestAdminMemberRefused(t *testing.T) {
 		{"principal create", []string{"principal", "create", "--kind", "human", "x"}, ""},
 		{"principal disable", []string{"principal", "disable", "2"}, ""},
 		{"principal enable", []string{"principal", "enable", "2"}, ""},
+		{"principal rename", []string{"principal", "rename", "1", "x"}, ""},
 		{"credential issue", []string{"credential", "issue", "2", "--label", "x"}, ""},
 		{"credential list", []string{"credential", "list", "2"}, ""},
 		{"credential revoke", []string{"credential", "revoke", "1"}, ""},
@@ -379,7 +389,7 @@ func TestAdminUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest>"},
+		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
 		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|decide|remove>"},
 		{"unknown verb", []string{"admin", "member", "frob"}, `unknown subcommand "frob"`},
@@ -389,6 +399,8 @@ func TestAdminUsageErrors(t *testing.T) {
 		{"principal create bad kind", []string{"admin", "principal", "create", "--kind", "robot", "alice"}, `kind must be "human" or "agent"`},
 		{"principal disable without id", []string{"admin", "principal", "disable"}, "expected <id>"},
 		{"principal disable bad id", []string{"admin", "principal", "disable", "abc"}, "id must be a positive integer"},
+		{"principal rename without name", []string{"admin", "principal", "rename", "3"}, "expected <id> <name>"},
+		{"principal rename bad id", []string{"admin", "principal", "rename", "bob", "robert"}, "id must be a positive integer"},
 		{"credential issue without label", []string{"admin", "credential", "issue", "3"}, "--label is required"},
 		{"credential issue without id", []string{"admin", "credential", "issue", "--label", "x"}, "expected <principal-id>"},
 		{"credential issue bad expiry", []string{"admin", "credential", "issue", "3", "--label", "x", "--expires-at", "tomorrow"}, "--expires-at must be an RFC 3339 time"},

@@ -218,6 +218,7 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
+	"PUT /v1/principals/{id}/name":                {classSelf, "/v1/principals/1/name", `{}`, 400},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
 	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
 	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
@@ -258,6 +259,16 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
 	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	// Operator administration of invites (issue #438). Each names an invite
+	// or a principal that does not exist, or sets the pause switch to the
+	// value it has, so it changes and audits nothing. Like the routes above,
+	// AuthOff gets 401 (special-cased below).
+	"GET /v1/invites/{id}/principals":           {classOp, "/v1/invites/9999/principals", "", 404},
+	"POST /v1/invites/{id}/disable-joiners":     {classOp, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
+	"POST /v1/principals/{id}/disable-invitees": {classOp, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
+	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
+	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -267,9 +278,17 @@ func isFileRoute(pattern string) bool {
 }
 
 // isInviteRoute reports whether pattern is one of the authenticated invite
-// routes (issue #437); preview and redeem are exempt and not among them.
+// routes (issues #437 and #438); preview and redeem are exempt and not among
+// them.
 func isInviteRoute(pattern string) bool {
-	return pattern == "POST /v1/invites" || pattern == "GET /v1/invites" || pattern == "DELETE /v1/invites/{id}"
+	switch pattern {
+	case "POST /v1/invites", "GET /v1/invites", "DELETE /v1/invites/{id}",
+		"GET /v1/invites/{id}/principals", "POST /v1/invites/{id}/disable-joiners",
+		"POST /v1/principals/{id}/disable-invitees", "PUT /v1/principals/{id}/invite-permission",
+		"GET /v1/invites/settings", "PUT /v1/invites/settings":
+		return true
+	}
+	return false
 }
 
 func routeMethod(pattern string) string {

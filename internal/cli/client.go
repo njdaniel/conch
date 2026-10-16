@@ -732,6 +732,17 @@ func (c *Client) CreatePrincipal(ctx context.Context, kind schema.PrincipalKind,
 	return result.Principal, nil
 }
 
+// RenamePrincipal changes a principal's name: the caller's own, or anyone's
+// for an operator (issue #441).
+func (c *Client) RenamePrincipal(ctx context.Context, id int64, name string) (schema.PrincipalV0, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "name")
+	var result schema.RenamePrincipalResponseV1
+	if err := c.roundTrip(ctx, "rename principal", http.MethodPut, endpoint, schema.RenamePrincipalRequestV1{Name: name}, &result); err != nil {
+		return schema.PrincipalV0{}, err
+	}
+	return result.Principal, nil
+}
+
 // DisablePrincipal switches a principal off and revokes its credentials.
 func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")

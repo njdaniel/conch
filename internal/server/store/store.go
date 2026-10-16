@@ -574,13 +574,41 @@ END`,
 	{
 		`ALTER TABLE credentials ADD COLUMN renew_ms INTEGER CHECK (renew_ms IS NULL OR (renew_ms > 0 AND expires_at IS NOT NULL))`,
 	},
+	// 27: Name keys (issue #441). name_key and name_skel are a principal
+	// name's two keys (names.KeysOf): case-folded and reduced to its UTS #39
+	// confusable skeleton, folding first and mapping first. Two names that
+	// share either key are one name, and every write that sets a name
+	// refuses a key someone else holds (claimNameTx). The check is in the
+	// writing transaction, not a UNIQUE index, because a database may
+	// already hold two names with one key ("Alice" and "alice"); those are
+	// kept, and the Go step logs them. The keys are computed in Go, so the
+	// step fills them for every existing row, and the triggers refuse a row
+	// written without them: no path that creates or renames a principal can
+	// forget them.
+	{
+		`ALTER TABLE principals ADD COLUMN name_key TEXT`,
+		`ALTER TABLE principals ADD COLUMN name_skel TEXT`,
+		`CREATE INDEX principals_by_name_key ON principals (name_key)`,
+		`CREATE INDEX principals_by_name_skel ON principals (name_skel)`,
+		`CREATE TRIGGER principals_name_key_insert BEFORE INSERT ON principals
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'principals.name_key and name_skel are required');
+END`,
+		`CREATE TRIGGER principals_name_key_update BEFORE UPDATE OF name, name_key, name_skel ON principals
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'principals.name_key and name_skel are required');
+END`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
 // after its SQL statements, for the rare change SQL cannot express. It is
 // keyed by the migration's 1-based number (the schema version it produces).
 var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
-	10: hashPlaintextHooks,
+	10:               hashPlaintextHooks,
+	nameKeyMigration: fillNameKeys,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

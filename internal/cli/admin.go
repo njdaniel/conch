@@ -35,6 +35,9 @@ type adminOpts struct {
 	// revokes it (issue #450).
 	noDecide bool
 	off      bool
+	// invite holds the flags of `invite` and of the principal commands that
+	// administer invites (issue #438).
+	invite inviteOpts
 }
 
 // adminRun is what a command's run function gets once its arguments are
@@ -75,6 +78,7 @@ var adminCommands = []adminCommand{
 		run:  adminPrincipalCreate},
 	{group: "principal", verb: "disable", args: []string{"id"}, idAt: 1, run: adminPrincipalDisable},
 	{group: "principal", verb: "enable", args: []string{"id"}, idAt: 1, run: adminPrincipalEnable},
+	{group: "principal", verb: "rename", args: []string{"id", "name"}, idAt: 1, run: adminPrincipalRename},
 	{group: "credential", verb: "issue", args: []string{"principal-id"}, idAt: 1, flags: "--label <label> [--expires-at <RFC3339> | --renew-days <N>] ", required: []string{"label"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.StringVar(&o.label, "label", "", "what the credential is for")
@@ -108,9 +112,24 @@ var adminCommands = []adminCommand{
 		},
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
+	// Invites and their administration (issue #438), in admin_invite.go.
+	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] ",
+		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
+	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
+		bind: bindInviteList, run: adminInviteList},
+	{group: "invite", verb: "close", args: []string{"id"}, idAt: 1, run: adminInviteClose},
+	{group: "invite", verb: "joiners", args: []string{"id"}, idAt: 1, run: adminInviteJoiners},
+	{group: "invite", verb: "disable-joiners", args: []string{"id"}, idAt: 1, flags: "[--yes] ",
+		bind: bindYes, run: adminInviteDisableJoiners},
+	{group: "invite", verb: "pause", run: adminInvitePause},
+	{group: "invite", verb: "resume", run: adminInviteResume},
+	{group: "invite", verb: "status", run: adminInviteStatus},
+	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
+	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
+		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest"
+const adminGroups = "channel|principal|credential|member|manifest|invite"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -227,6 +246,23 @@ func adminPrincipalCreate(ctx context.Context, r *adminRun) error {
 	}
 	_, err = fmt.Fprintf(r.stdout, "created %s %s (id %d)\n", safeLine(string(p.Kind)), safeLine(p.Name), p.ID)
 	return err
+}
+
+// adminPrincipalRename renames any principal (issue #441). The name is checked
+// as the server checks it first, so a name it would refuse costs no request.
+func adminPrincipalRename(ctx context.Context, r *adminRun) error {
+	req := schema.RenamePrincipalRequestV1{Name: r.pos[1]}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("cli: admin principal rename: %w", err)
+	}
+	p, err := r.client.RenamePrincipal(ctx, r.id, req.Name)
+	if err != nil {
+		return err
+	}
+	if r.opts.asJSON {
+		return r.printJSON(schema.RenamePrincipalResponseV1{Principal: p})
+	}
+	return r.say("renamed principal %d to %s\n", p.ID, safeLine(p.Name))
 }
 
 // The commands that answer 204 have no response document, so --json prints

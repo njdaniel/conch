@@ -48,7 +48,10 @@ jobs:
           verify: false # network-dependent; see ci.yml
 
       - name: go test
-        run: go test -race ./...
+        # internal/server alone takes 7–10 minutes under -race on a runner,
+        # past go test's default 10-minute timeout per package (#471);
+        # making it faster is #472.
+        run: go test -race -timeout 25m ./...
 
       # schema-compat is a diff-based PR/main gate; a tag has no base to
       # diff against, and everything tagged already passed it pre-merge.

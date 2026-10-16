@@ -25,6 +25,17 @@ func TestInviteGoldenFixtures(t *testing.T) {
 		{"list-invites-response-v1.json", func() any { return new(ListInvitesResponseV1) }},
 		{"list-invites-response-v1-empty.json", func() any { return new(ListInvitesResponseV1) }},
 		{"whoami-response-v1-may-invite.json", func() any { return new(WhoAmIResponseV1) }},
+		// Operator administration (issue #438).
+		{"invite-joiners-response-v1.json", func() any { return new(InviteJoinersResponseV1) }},
+		{"invite-joiners-response-v1-empty.json", func() any { return new(InviteJoinersResponseV1) }},
+		{"disable-joiners-request-v1.json", func() any { return new(DisableJoinersRequestV1) }},
+		{"disable-joiners-request-v1-keep-open.json", func() any { return new(DisableJoinersRequestV1) }},
+		{"disable-joiners-response-v1.json", func() any { return new(DisableJoinersResponseV1) }},
+		{"disable-joiners-response-v1-dry-run.json", func() any { return new(DisableJoinersResponseV1) }},
+		{"disable-invitees-request-v1.json", func() any { return new(DisableInviteesRequestV1) }},
+		{"disable-invitees-request-v1-direct.json", func() any { return new(DisableInviteesRequestV1) }},
+		{"invite-permission-request-v1.json", func() any { return new(InvitePermissionRequestV1) }},
+		{"invite-settings-v1.json", func() any { return new(InviteSettingsV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -230,6 +241,50 @@ func TestInviteRequestValidate(t *testing.T) {
 		t.Run("redeem "+tt.name, func(t *testing.T) {
 			if err := tt.req.Validate(); (err != nil) != tt.wantErr {
 				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDisableJoinersRequestV1EffectiveClose(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name string
+		req  DisableJoinersRequestV1
+		want bool
+	}{
+		{"absent closes", DisableJoinersRequestV1{}, true},
+		{"true closes", DisableJoinersRequestV1{Close: &yes}, true},
+		{"false keeps it open", DisableJoinersRequestV1{Close: &no}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.req.EffectiveClose(); got != tt.want {
+				t.Errorf("EffectiveClose = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDisableInviteesRequestV1(t *testing.T) {
+	tests := []struct {
+		name      string
+		req       DisableInviteesRequestV1
+		wantErr   bool
+		wantDepth InviteeDepth
+	}{
+		{"absent is direct", DisableInviteesRequestV1{}, false, InviteeDepthDirect},
+		{"direct", DisableInviteesRequestV1{Depth: InviteeDepthDirect}, false, InviteeDepthDirect},
+		{"all", DisableInviteesRequestV1{Depth: InviteeDepthAll}, false, InviteeDepthAll},
+		{"unknown", DisableInviteesRequestV1{Depth: "2"}, true, "2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.req.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := tt.req.EffectiveDepth(); got != tt.wantDepth {
+				t.Errorf("EffectiveDepth = %q, want %q", got, tt.wantDepth)
 			}
 		})
 	}

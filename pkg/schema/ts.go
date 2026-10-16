@@ -109,6 +109,14 @@ var TSTypes = []TSType{
 	{Value: RedeemInviteRequestV1{}, Family: "redeem-invite-request-v1"},
 	{Value: RedeemInviteResponseV1{}, Family: "redeem-invite-response-v1"},
 	{Value: ListInvitesResponseV1{}, Family: "list-invites-response-v1"},
+	// Operator administration of invites (issue #438).
+	{Value: InviteJoinerV1{}},
+	{Value: InviteJoinersResponseV1{}, Family: "invite-joiners-response-v1"},
+	{Value: DisableJoinersRequestV1{}, Family: "disable-joiners-request-v1"},
+	{Value: DisableJoinersResponseV1{}, Family: "disable-joiners-response-v1"},
+	{Value: DisableInviteesRequestV1{}, Family: "disable-invitees-request-v1"},
+	{Value: InvitePermissionRequestV1{}, Family: "invite-permission-request-v1"},
+	{Value: InviteSettingsV1{}, Family: "invite-settings-v1"},
 	// Signing out everywhere (issue #439): the page revokes every credential
 	// of its own principal. Signing out of one credential has no body.
 	{Value: RevokeAllCredentialsResponseV1{}, Family: "revoke-all-credentials-response-v1"},
@@ -118,6 +126,9 @@ var TSTypes = []TSType{
 	{Value: CreatePrincipalResponse{}, Family: "create-principal-response-v0"},
 	{Value: CreateCredentialRequestV1{}, Family: "create-credential-request-v1"},
 	{Value: CreateCredentialResponseV1{}, Family: "create-credential-response-v1"},
+	// Changing your name (issue #441).
+	{Value: RenamePrincipalRequestV1{}, Family: "rename-principal-request-v1"},
+	{Value: RenamePrincipalResponseV1{}, Family: "rename-principal-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.

@@ -24,6 +24,7 @@ export function Lobby({
   panel,
   voice,
   invites,
+  account,
   onOpen,
   onRetry,
   onSignOut,
@@ -41,6 +42,9 @@ export function Lobby({
   readonly voice: ReactNode;
   // "Invite someone" (issue #440), or null for a person who may not invite.
   readonly invites: ReactNode;
+  // The caller's own account: changing their name (issue #441). There is no
+  // settings page yet, so it sits in the header.
+  readonly account?: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -55,6 +59,7 @@ export function Lobby({
     <div className="lobby">
       <header>
         <h1>Conch</h1>
+        {account}
         <div className="signout">
           <button type="button" onClick={onSignOut} aria-describedby="signout-note">
             Sign out

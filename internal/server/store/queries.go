@@ -104,7 +104,10 @@ type AuditEvent struct {
 	CreatedAt time.Time
 }
 
-// CreatePrincipal registers a human or agent identity. Names are unique.
+// CreatePrincipal registers a human or agent identity. Names are unique by
+// their key (issue #441): a name that clashes with an existing one, by case
+// or by look-alike characters, is ErrDuplicate; a name with nothing a reader
+// can see is ErrNameInvalid.
 func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name string) (Principal, error) {
 	if kind != PrincipalHuman && kind != PrincipalAgent {
 		return Principal{}, fmt.Errorf("store: invalid principal kind %q", kind)
@@ -113,18 +116,30 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	// returned value to the same precision so a create response exactly
 	// describes what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
-	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO principals (kind, name, created_at) VALUES (?, ?, ?)",
-		string(kind), name, now.UnixMilli())
-	if isUniqueConstraintErr(err) {
-		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, ErrDuplicate)
-	}
+	var id int64
+	// IMMEDIATE, so the clash check and the insert are one step: a second
+	// create of the same key waits for this one and then sees its row.
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		keys, err := claimNameTx(ctx, tx, name, 0)
+		if err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx,
+			"INSERT INTO principals (kind, name, name_key, name_skel, created_at) VALUES (?, ?, ?, ?, ?)",
+			string(kind), name, keys.Folded, keys.Skeletal, now.UnixMilli())
+		if isUniqueConstraintErr(err) {
+			return fmt.Errorf("store: create principal %q: %w", name, ErrDuplicate)
+		}
+		if err != nil {
+			return fmt.Errorf("store: create principal %q: %w", name, err)
+		}
+		if id, err = res.LastInsertId(); err != nil {
+			return fmt.Errorf("store: create principal %q: %w", name, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Principal{}, fmt.Errorf("store: create principal %q: %w", name, err)
+		return Principal{}, err
 	}
 	return Principal{ID: id, Kind: kind, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: true}, nil
 }
@@ -214,19 +229,28 @@ func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {
 // PrincipalByID returns the principal with id. It returns ErrNotFound when no
 // such principal exists.
 func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) {
-	var p Principal
+	p, found, err := queryPrincipal(ctx, s.db, id)
+	if err == nil && !found {
+		err = fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
+	}
+	return p, err
+}
+
+// queryPrincipal reads principal id through q, a database or a transaction.
+// found is false, with no error, when there is none.
+func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found bool, err error) {
 	var kind, role string
 	var createdAt int64
 	var disabledAt, invitedBy, inviteID sql.NullInt64
-	err := s.db.QueryRowContext(ctx,
+	err = q.QueryRowContext(ctx,
 		`SELECT id, kind, name, role, created_at, disabled_at, invited_by, invite_id, may_invite, voice_allowed
 		 FROM principals WHERE id = ?`, id,
 	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, ErrNotFound)
+		return Principal{}, false, nil
 	}
 	if err != nil {
-		return Principal{}, fmt.Errorf("store: find principal %d: %w", id, err)
+		return Principal{}, false, fmt.Errorf("store: find principal %d: %w", id, err)
 	}
 	p.Kind = PrincipalKind(kind)
 	p.Role = Role(role)
@@ -237,7 +261,7 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 		t := time.UnixMilli(disabledAt.Int64)
 		p.DisabledAt = &t
 	}
-	return p, nil
+	return p, true, nil
 }
 
 // InsertMessage appends a message to a channel. The channel and author must

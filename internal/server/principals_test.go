@@ -182,3 +182,42 @@ func TestPrincipalWithLegacyNameStillWorks(t *testing.T) {
 		t.Errorf("list channels = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestCreatePrincipalLookAlike: a name that clashes with an existing one by
+// case or look-alike characters is taken (issue #441), with the same 409 as
+// an exact duplicate; a name that only resembles one is not.
+func TestCreatePrincipalLookAlike(t *testing.T) {
+	tests := []struct {
+		held, asked string
+		status      int
+	}{
+		{"Alice", "alice", http.StatusConflict},
+		{"Alice", "\u0410lice", http.StatusConflict},
+		{"paypal", "p\u0430ypal", http.StatusConflict},
+		{"\ufb01ona", "fiona", http.StatusConflict},
+		{"alice", "alicia", http.StatusCreated},
+		{"Zo\u00eb", "Zoe", http.StatusCreated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.held+"/"+tt.asked, func(t *testing.T) {
+			srv := newTestServer(t)
+			create := func(name string) *httptest.ResponseRecorder {
+				body := fmt.Sprintf(`{"kind":"human","name":%s}`, jsonString(t, name))
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v0/principals", bytes.NewBufferString(body)))
+				return rec
+			}
+			if rec := create(tt.held); rec.Code != http.StatusCreated {
+				t.Fatalf("create %q = %d %s", tt.held, rec.Code, rec.Body)
+			}
+			rec := create(tt.asked)
+			if tt.status == http.StatusConflict {
+				assertAPIError(t, rec, http.StatusConflict, "principal_exists")
+				return
+			}
+			if rec.Code != tt.status {
+				t.Errorf("create %q = %d %s, want %d", tt.asked, rec.Code, rec.Body, tt.status)
+			}
+		})
+	}
+}

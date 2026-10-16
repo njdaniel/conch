@@ -58,6 +58,23 @@ body {
   gap: 0.75rem;
 }
 
+.change-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.change-name form:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.change-name p {
+  margin: 0;
+}
+
 .areas {
   display: grid;
   grid-template-columns: 14rem 1fr 16rem;

@@ -291,3 +291,107 @@ type RedeemInviteResponseV1 struct {
 type ListInvitesResponseV1 struct {
 	Invites []InviteV1 `json:"invites"`
 }
+
+// Operator administration of invites (issue #438): seeing who joined through
+// an invite, disabling them or everyone a person invited, the right to invite,
+// and the pause switch. Like the shapes above, these are additive REST bodies
+// with no schema-name field.
+
+// InviteJoinerV1 is one person who joined through an invite, as an operator
+// sees them.
+type InviteJoinerV1 struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt Timestamp `json:"created_at"`
+	Disabled  bool      `json:"disabled"`
+}
+
+// InviteJoinersResponseV1 lists everyone who joined through one invite, by id.
+// Producers must send an empty slice, not nil.
+type InviteJoinersResponseV1 struct {
+	Joiners []InviteJoinerV1 `json:"joiners"`
+}
+
+// DisableJoinersRequestV1 asks to disable everyone who joined through an
+// invite. DryRun only counts them. Close, absent by default, says whether the
+// invite is closed too; see EffectiveClose.
+type DisableJoinersRequestV1 struct {
+	DryRun bool  `json:"dry_run"`
+	Close  *bool `json:"close,omitempty"`
+}
+
+// EffectiveClose is whether the invite is closed with the disabling: the
+// requested value, or true. A link that leaked is closed unless the operator
+// says otherwise.
+func (r DisableJoinersRequestV1) EffectiveClose() bool {
+	return r.Close == nil || *r.Close
+}
+
+// DisableJoinersResponseV1 is the answer of both bulk disables, of an
+// invite's joiners and of a person's invitees: how many principals were
+// disabled and which, or with DryRun how many and which would be. Producers
+// must send an empty slice, not nil.
+type DisableJoinersResponseV1 struct {
+	DryRun       bool    `json:"dry_run"`
+	Count        int     `json:"count"`
+	PrincipalIDs []int64 `json:"principal_ids"`
+}
+
+// InviteeDepth is how far down the tree of invites a disable-invitees
+// request goes. The vocabulary is closed.
+type InviteeDepth string
+
+const (
+	// InviteeDepthDirect is the people the person invited, and no further.
+	InviteeDepthDirect InviteeDepth = "1"
+	// InviteeDepthAll is everyone under the person: whom they invited, whom
+	// those invited, and so on.
+	InviteeDepthAll InviteeDepth = "all"
+)
+
+// Valid reports whether d is a recognized depth.
+func (d InviteeDepth) Valid() bool {
+	switch d {
+	case InviteeDepthDirect, InviteeDepthAll:
+		return true
+	default:
+		return false
+	}
+}
+
+// DisableInviteesRequestV1 asks to disable the people one person invited.
+// DryRun only counts them. Depth is absent by default, which is
+// InviteeDepthDirect.
+type DisableInviteesRequestV1 struct {
+	DryRun bool         `json:"dry_run"`
+	Depth  InviteeDepth `json:"depth,omitempty"`
+}
+
+// EffectiveDepth is the depth asked for, or InviteeDepthDirect.
+func (r DisableInviteesRequestV1) EffectiveDepth() InviteeDepth {
+	if r.Depth == "" {
+		return InviteeDepthDirect
+	}
+	return r.Depth
+}
+
+// Validate reports whether the depth, when present, is known.
+func (r DisableInviteesRequestV1) Validate() error {
+	if r.Depth != "" && !r.Depth.Valid() {
+		return fmt.Errorf("schema: depth must be one of: %s", strings.Join(Vocabularies["InviteeDepth"], ", "))
+	}
+	return nil
+}
+
+// InvitePermissionRequestV1 grants or takes away one person's right to make
+// personal invites. Only an operator sends it.
+type InvitePermissionRequestV1 struct {
+	MayInvite bool `json:"may_invite"`
+}
+
+// InviteSettingsV1 is the server's invite switch: while Paused, no invite can
+// be made, previewed or used. It is both the body of the change and the
+// answer to reading it.
+type InviteSettingsV1 struct {
+	Paused bool `json:"paused"`
+}

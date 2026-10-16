@@ -255,6 +255,8 @@ A principal who is not a member of a channel cannot read it, post to it, subscri
 
 A credential issued with `--renew-days N` (REST: `renew_lifetime_seconds`, from 2 to 365 days, not together with `expires_at`) expires N days after it is issued, and a request it makes once a day has passed since its expiry was last set moves the expiry to N days after that request; so it is written at most once a day, and an expired or revoked credential is never brought back. One unused for N days expires. `credential list --json` shows it with `"renews": true`; rotating it keeps it renewable. A person who redeems an invite gets one, with the invite's credential lifetime. Anyone can sign themselves out over REST: `DELETE /v1/credentials/current` revokes the credential the request carries (audited `credential_revoked` with `reason=self`), and `POST /v1/principals/{id}/credentials/revoke-all` is open to the principal itself as well as to operators (sign out everywhere; anyone else is refused `403` and audited `access_denied`). Neither may remove the last operator's last credential (`409 last_operator`).
 
+**Names.** A principal's name is unique on the server by how it reads, not how it is spelt: a name that differs from an existing one only by case ("Alice" and "alice"), by look-alike characters (a Latin "a" and a Cyrillic "а", a capital "I" for an "l" as in "AIice", a zero for an "o" as in "b0b", the ligature "ﬁ" and "fi"), by an invisible joiner or direction mark, or by extra or unusual spaces ("Alice  Smith", a trailing blank) is taken, and creating, bootstrapping, joining through an invite or renaming with it is refused with `409 principal_exists`. A name made only of characters nobody can see (a Hangul filler, say) is refused with `400 invalid_request`. The name is still stored and shown as typed. The comparison uses two keys per name, Unicode case folding and the confusable skeleton of [UTS #39](https://www.unicode.org/reports/tr39/) in both orders, and two names clash when either key matches (the data is pinned in `internal/server/names`). Two names that already clashed before this rule (an older database) are both kept, and neither can be renamed to a name that clashes with the other. `PUT /v1/principals/{id}/name` with `{"name":"…"}` renames. A person may rename themselves up to five times a day, and try up to twenty times a day: a rename refused because the name is taken counts as a try and is audited as `principal_rename_refused` (without the name), so the refusal cannot be used to search the server for names. Past either limit the answer is `429 rate_limited` with `Retry-After`. Only the person's own renames and tries count. An operator may rename anyone, with no limit, and an operator's rename of someone else counts toward nothing. An agent may not rename itself (`403 human_required`; its name is the operator's to set). Each rename is audited as `principal_renamed` with both names, and connected clients get the new name in their next roster. `conch rename <name>` renames you; `conch admin principal rename <id> <name>` renames anyone; the web client has "Change your name" in the lobby.
+
 Later steps sign in as someone else, so `unset CONCH_TOKEN` when you are done administering (it overrides a stored login).
 
 **Audit export.** An operator can read the audit trail as JSON Lines: `GET /v1/audit?after=<id>&limit=<n>` (both optional) streams one `conch.audit_event.v1` object per line, in ascending id order, `Content-Type: application/x-ndjson`, up to the last event at the moment the request started. To follow on, pass the last id you received as `after`. The trail names every principal and every refusal, so no one but an operator can read any of it, and each export is itself recorded as an `audit_exported` event (naming the caller and the range) that is not part of that export. `conch audit export [--after N] [--limit N]` writes the same lines to standard output unchanged: `conch audit export > audit.jsonl`. This is the one command that does not rewrite what the server sent: its output is for files and pipes, the server's own bytes.
@@ -812,6 +814,7 @@ CI runs it on every pull request, since any server change can open a read path.
 
 - **Authentication is now on by default.** Run `conchd bootstrap-operator` once against your existing data directory before starting the new `conchd`. It revokes credentials and deletes webhook hooks created before the operator existed, and tells you how many. `go run ./e2e/p2-hardening` performs this upgrade on a real P1 database on every pull request (with `--keep-existing-credentials`, to show a P1 webhook URL survives).
 - **Channels now have members.** The upgrade makes every existing principal a member of every existing channel, so nothing disappears; channels and principals created afterwards start with no memberships.
+- **Names clash by case and look-alike characters.** The upgrade computes the name keys of every existing principal and keeps them all; if existing names already clash (say "Alice" and "alice"), or a name has no character a reader can see, `conchd` logs the groups and the principal ids once, at that start. Both keep working; see Names in step 3.
 - **Agents are deny-by-default.** An agent that existed before has no manifest and can do nothing until you write one; `conchd` logs how many such agents there are at startup. The static `--mcp-token token=principal_id` flag still works but is deprecated in favour of issued credentials.
 
 ### Known limitations
@@ -950,7 +953,7 @@ What the routes answer:
 | Route | Who | Success | Refusals |
 | --- | --- | --- | --- |
 | `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `503 invites_paused`; `429 rate_limited` |
-| `GET /v1/invites` | people | `200`, the caller's own invites, newest first | |
+| `GET /v1/invites` | people | `200`, newest first: every invite for an operator, the caller's own for anyone else. `?kind=personal\|open`, `?state=open\|used\|expired\|closed` and, for an operator, `?created_by=<id>` narrow it | `400 invalid_request` for a filter value it does not know |
 | `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
 | `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
 | `POST /v1/invites/redeem` | anyone | `201` with the principal, its credential and the token, `Cache-Control: no-store` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name that is not acceptable; `503 invites_paused`; `429 rate_limited` |
@@ -970,7 +973,50 @@ Each is a bucket that refills evenly, and failed attempts count the same as succ
 
 Anyone holding a valid code can learn whether a name is taken, from the `409`, within the redeem limit, and without using the invite up. A link that leaks lets whoever finds it test names that way, so close a leaked link.
 
-**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address.
+### Administering invites
+
+An operator sees every invite, closes any of them, and has these routes besides (each refuses anyone else with `403 forbidden`, audited as `access_denied`; with authentication off they answer `401`):
+
+| Route | Body | Success |
+| --- | --- | --- |
+| `GET /v1/invites/{id}/principals` | | `200`, everyone who joined through it: id, name, when, and whether disabled |
+| `POST /v1/invites/{id}/disable-joiners` | `{"dry_run":bool,"close":bool}` | `200`, `{"dry_run":…,"count":N,"principal_ids":[…]}`. Disables every enabled joiner the way `POST /v1/principals/{id}/disable` does: credentials revoked, sockets closed, out of voice. `close` (default `true`) closes the invite first. `dry_run` changes nothing and only counts |
+| `POST /v1/principals/{id}/disable-invitees` | `{"dry_run":bool,"depth":"1"\|"all"}` | `200`, the same shape: the people this person invited (`"1"`, the default), or everyone under them (`"all"`). The person themselves is left alone, and plain `disable` never follows the tree |
+| `PUT /v1/principals/{id}/invite-permission` | `{"may_invite":bool}` | `204`. Only an operator grants the right to invite. Taking it away closes the person's open personal invites; giving it back does not reopen them |
+| `GET /v1/invites/settings`, `PUT /v1/invites/settings` | `{"paused":bool}` | `200` with the setting. Paused refuses making, previewing and redeeming any invite. It is stored, so it survives a restart |
+
+The two bulk disables never disable an operator or the caller, and the last operator is never disabled by anything. Disabling a person, however it is done, closes every invite they made that could still be used.
+
+`conch admin` covers all of it:
+
+```sh
+LINK=$(bin/conch admin invite create --open --channel red --channel blue --expires 24h --voice)   # the link, alone on stdout
+bin/conch admin invite create --personal --channel red --expires 7d
+bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] expires <time> by <id> channels <names>
+bin/conch admin invite close 3
+bin/conch admin invite joiners 1                    # <id> <enabled|disabled> <joined> <name>
+bin/conch admin invite disable-joiners 1            # a dry run: how many it would disable
+bin/conch admin invite disable-joiners 1 --yes      # disable them and close the link
+bin/conch admin invite pause                        # resume, status
+bin/conch admin principal invite-permission 5 on    # or off
+bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
+```
+
+`invite create` prints the link and nothing else on standard output; its id and expiry go to standard error. The code appears in no other output.
+
+**When a link leaks.**
+
+1. `conch admin invite pause`: nobody can join through any invite while you work.
+2. `conch admin invite joiners <id>`: who came in through it.
+3. `conch admin invite disable-joiners <id>` to see how many, then again with `--yes`. Each of them is disabled at once, sockets and voice included, and the link is closed.
+4. `conch admin invite list --state open` to check that nothing else needs closing (`conch admin invite close <id>`).
+5. `conch admin invite resume`.
+
+Someone who joined through the link and should stay can be enabled again (`conch admin principal enable <id>`) and issued a new credential.
+
+Removing a person and everyone they invited (`conch admin principal disable-invitees <id> --all`) works the same way: pause first. The tree is read once, before anyone is disabled, and each person's own invites close only when they are disabled, so someone who joins through one of them in between is not in the list.
+
+**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. `invite_closed` says why: `reason=creator` (its maker), `operator` (an operator who did not make it), `creator_disabled` (its maker was disabled) or `permission_revoked` (its maker lost the right to invite). An operator's administration adds `invites_paused`, `invites_resumed`, `invite_permission_changed`, and one summary row per bulk disable, `joiners_disabled` (the invite, the count, whether it was closed) or `invitees_disabled` (the person, the depth, the count), beside each person's own `principal_disabled`. A dry run writes nothing. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address.
 
 ## Voice (optional)
 

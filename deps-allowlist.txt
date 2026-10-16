@@ -12,3 +12,5 @@ github.com/coder/websocket
 github.com/modelcontextprotocol/go-sdk
 # No-echo token prompt for conch login (issue #134): approved under Nick's delegation, 2026-10-09.
 golang.org/x/term
+# Unicode normalization and case folding for the name key (issue #441): approved by Nick on #420/#441, 2026-10-16.
+golang.org/x/text

@@ -416,7 +416,9 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	case errors.Is(err, store.ErrOperatorExists):
 		return errors.New("bootstrap-operator: an operator already exists; nothing changed")
 	case errors.Is(err, store.ErrDuplicate):
-		return fmt.Errorf("bootstrap-operator: a principal named %q already exists; nothing changed", *name)
+		return fmt.Errorf("bootstrap-operator: a principal named %q, or a name that looks the same, already exists; nothing changed", *name)
+	case errors.Is(err, store.ErrNameInvalid):
+		return errors.New("bootstrap-operator: --name has no character a reader can see; nothing changed")
 	case err != nil:
 		return fmt.Errorf("bootstrap-operator: %w", err)
 	}
