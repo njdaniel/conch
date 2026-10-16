@@ -374,6 +374,9 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     await screen.findByRole('navigation', { name: 'Channels' });
+    // The listener is attached by an effect after the lobby renders; on a
+    // busy machine the lobby can be on screen first (#465). Let it attach.
+    await act(async () => {});
     // What the browser does in this tab when another one signs out.
     act(() => {
       window.localStorage.removeItem('conch.web.token');
