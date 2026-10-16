@@ -527,7 +527,7 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 // called name, in one IMMEDIATE transaction: it checks the invite (as
 // PreviewInvite does), spends one use, creates the principal with the invite's
 // grants and the invite and inviter it came through, adds its memberships,
-// issues its first credential (label "invite <id>", expiring after the
+// issues its first credential (label "invite <id>", renewable with the
 // invite's credential lifetime) and audits invite_redeemed, principal_created,
 // member_added for each channel and credential_created. If anything fails
 // nothing is written. A name already taken is ErrDuplicate, found only after
@@ -610,8 +610,11 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 			}
 		}
 
-		exp := now.Add(time.Duration(r.lifetimeMs) * time.Millisecond)
-		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp)
+		// The joiner's credential renews by being used (issue #439): its
+		// expiry moves to the invite's lifetime past each day's first use.
+		lifetime := time.Duration(r.lifetimeMs) * time.Millisecond
+		exp := now.Add(lifetime)
+		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime)
 		if err != nil {
 			return err
 		}

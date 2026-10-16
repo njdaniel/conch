@@ -26,6 +26,8 @@ export function Lobby({
   onOpen,
   onRetry,
   onSignOut,
+  onSignOutEverywhere,
+  signOutProblem,
 }: {
   readonly origin: string;
   readonly name: string;
@@ -39,6 +41,10 @@ export function Lobby({
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
+  // Sign out everywhere (issue #439), and why it last failed, if it did. A1
+  // added no settings panel, so both live in the header.
+  readonly onSignOutEverywhere: () => void;
+  readonly signOutProblem: string | null;
 }) {
   const [panelOpen, setPanelOpen] = useState(startsOpen);
 
@@ -50,9 +56,17 @@ export function Lobby({
           <button type="button" onClick={onSignOut} aria-describedby="signout-note">
             Sign out
           </button>
+          <button type="button" onClick={onSignOutEverywhere} aria-describedby="signout-note">
+            Sign out everywhere
+          </button>
           <span id="signout-note" className="hint">
-            Signing out only clears this tab. It does not revoke the credential.
+            Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
           </span>
+          {signOutProblem === null ? null : (
+            <p role="alert" className="notice">
+              {signOutProblem}
+            </p>
+          )}
         </div>
       </header>
       <div className="areas">

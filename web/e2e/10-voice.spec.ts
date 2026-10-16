@@ -103,34 +103,40 @@ test.describe('with LiveKit', () => {
   // storage and cookies, and (unless timing is false) its resource timing
   // entries. And no policy violation in the console.
   //
-  // The one secret a page keeps by design is its own credential, in
-  // sessionStorage under conch.web.token (A7): it must be exactly the signed-in
-  // member's, and the rest of storage is checked without it.
+  // The one secret a page keeps by design is its own credential, under
+  // conch.web.token: a member's in localStorage since A7 (issue #439), an
+  // operator's in sessionStorage. Each must be exactly the signed-in member's,
+  // and the rest of storage is checked without it.
   //
   // timing is false after LiveKit was down: on a failed connection the SDK
   // puts the join token in its /rtc/validate request, which the page's
   // resource timing records (README, "Voice in the browser").
   async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }, timing = true): Promise<void> {
     await p.watch.settled();
-    const { kept, credential } = await p.page.evaluate((withTiming) => {
-      const session: Record<string, string | null> = {};
-      for (let i = 0; i < sessionStorage.length; i++) {
-        const key = sessionStorage.key(i);
-        if (key !== null && key !== 'conch.web.token') session[key] = sessionStorage.getItem(key);
-      }
+    const { kept, credentials } = await p.page.evaluate((withTiming) => {
+      const without = (storage: Storage) => {
+        const rest: Record<string, string | null> = {};
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (key !== null && key !== 'conch.web.token') rest[key] = storage.getItem(key);
+        }
+        return JSON.stringify(rest);
+      };
       return {
-        credential: sessionStorage.getItem('conch.web.token'),
+        credentials: [sessionStorage.getItem('conch.web.token'), localStorage.getItem('conch.web.token')],
         kept: [
           document.documentElement.outerHTML,
           location.href,
-          JSON.stringify(session),
-          JSON.stringify(localStorage),
+          without(sessionStorage),
+          without(localStorage),
           document.cookie,
           withTiming ? JSON.stringify(performance.getEntries().map((e) => e.name)) : '',
         ].join('\n'),
       };
     }, timing);
-    expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
+    for (const credential of credentials) {
+      expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
+    }
     const said = p.watch.console.join('\n');
     for (const s of vw.secrets) {
       expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);

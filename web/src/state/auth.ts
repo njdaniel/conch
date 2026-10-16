@@ -4,8 +4,11 @@ import type { WhoAmIResponseV1 } from '../schema/principal';
 
 // Why the sign-in screen is showing a line. expired is a credential that
 // stopped working after it was accepted (a 401 mid-session, or a stored one
-// that no longer checks out).
-export type AuthNotice = 'rejected' | 'network' | 'invalid' | 'expired';
+// that no longer checks out). The rest follow a sign-out (issue #439): untold
+// is one the server could not be told of, so the credential may still work;
+// everywhere is every credential of the person revoked; elsewhere is another
+// tab of this browser signing the shared credential out.
+export type AuthNotice = 'rejected' | 'network' | 'invalid' | 'expired' | 'untold' | 'everywhere' | 'elsewhere';
 
 export type AuthState =
   | { readonly phase: 'restoring' }
@@ -17,9 +20,12 @@ export type AuthState =
 export type AuthAction =
   | { readonly type: 'submit' }
   | { readonly type: 'verified'; readonly principal: WhoAmIResponseV1 }
+  // held: on restore, an operator credential found kept to last, taken out of
+  // storage and held back for the warning (issue #439).
+  | { readonly type: 'held'; readonly principal: WhoAmIResponseV1 }
   | { readonly type: 'failed'; readonly failure: ApiFailure }
   | { readonly type: 'continue' }
-  | { readonly type: 'signOut' }
+  | { readonly type: 'signOut'; readonly notice?: AuthNotice | null }
   | { readonly type: 'unauthorized' };
 
 export function initialAuth(hasStoredToken: boolean): AuthState {
@@ -41,6 +47,8 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
           : { phase: 'signedIn', principal: action.principal };
       }
       return state.phase === 'restoring' ? { phase: 'signedIn', principal: action.principal } : state;
+    case 'held':
+      return state.phase === 'restoring' ? { phase: 'operatorWarning', principal: action.principal } : state;
     case 'failed':
       if (state.phase === 'checking') {
         return signedOut(action.failure === 'unauthorized' ? 'rejected' : action.failure);
@@ -52,7 +60,7 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
     case 'continue':
       return state.phase === 'operatorWarning' ? { phase: 'signedIn', principal: state.principal } : state;
     case 'signOut':
-      return signedOut(null);
+      return signedOut(action.notice ?? null);
     case 'unauthorized':
       return state.phase === 'signedIn' || state.phase === 'operatorWarning' ? signedOut('expired') : state;
   }
@@ -63,6 +71,9 @@ const lines: Record<AuthNotice, string> = {
   network: 'Cannot reach the server',
   invalid: 'The server gave an unexpected reply',
   expired: 'Signed out: the credential is no longer valid',
+  untold: 'Signed out in this browser, but the server could not be told: the credential may still work until it expires',
+  everywhere: 'Signed out everywhere: every sign-in of yours has ended',
+  elsewhere: 'Signed out in another tab',
 };
 
 export function noticeText(notice: AuthNotice): string {

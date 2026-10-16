@@ -164,6 +164,7 @@ const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryA
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  window.localStorage.clear();
   FakeSocket.all = [];
   nextId = 100;
   install();

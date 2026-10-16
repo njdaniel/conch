@@ -121,7 +121,7 @@ export function useLiveChannel({
           // the close reason is not read. Ask who we are, then whether the
           // channel is still ours. Anything unsettled waits out the backoff.
           setStatus('reconnecting');
-          void api.restore().then((who) => {
+          void api.whoAmI().then((who) => {
             if (!live) return;
             if (!who.ok) {
               if (who.failure === 'unauthorized') onUnauthorized();

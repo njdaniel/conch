@@ -111,7 +111,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_manifests").Scan(&res.Manifests); err != nil {
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
-		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil); err != nil {
+		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", "operator_bootstrapped", principalActor(id), "", now); err != nil {

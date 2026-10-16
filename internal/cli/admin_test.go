@@ -337,6 +337,42 @@ func TestAdminServerErrorCodeInText(t *testing.T) {
 	}
 }
 
+// --renew-days issues a credential that renews by being used (issue #439).
+func TestAdminCredentialIssueRenewable(t *testing.T) {
+	e := newAdminEnv(t)
+	before := time.Now()
+	stdout, stderr, err := e.admin(t, e.operatorToken, "", "credential", "issue", "--renew-days", "90", "2", "--label", "browser")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !tokenPattern.MatchString(strings.TrimSpace(stdout)) {
+		t.Errorf("stdout is not a token alone")
+	}
+	m := regexp.MustCompile(`^credential 3 expires (\S+), renewed by use\n$`).FindStringSubmatch(stderr)
+	if m == nil {
+		t.Fatalf("stderr = %q, want the expiry and that it is renewed by use", stderr)
+	}
+	exp, err := time.Parse("2006-01-02T15:04:05.000Z07:00", m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lo, hi := before.Add(90*24*time.Hour-time.Second), time.Now().Add(90*24*time.Hour+time.Second); exp.Before(lo) || exp.After(hi) {
+		t.Errorf("expires %v, want about 90 days from now", exp)
+	}
+
+	out, _, err := e.admin(t, e.operatorToken, "", "credential", "list", "--json", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list schema.ListCredentialsResponseV1
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("list --json: %v: %q", err, out)
+	}
+	if len(list.Credentials) != 2 || !list.Credentials[0].Renews || list.Credentials[1].Renews {
+		t.Errorf("credentials = %+v, want the new one renewable and the old one not", list.Credentials)
+	}
+}
+
 func TestAdminUsageErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -357,6 +393,12 @@ func TestAdminUsageErrors(t *testing.T) {
 		{"credential issue without id", []string{"admin", "credential", "issue", "--label", "x"}, "expected <principal-id>"},
 		{"credential issue bad expiry", []string{"admin", "credential", "issue", "3", "--label", "x", "--expires-at", "tomorrow"}, "--expires-at must be an RFC 3339 time"},
 		{"credential issue past expiry", []string{"admin", "credential", "issue", "3", "--label", "x", "--expires-at", "2001-01-01T00:00:00Z"}, "must be in the future"},
+		{"credential issue renew days not a number", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "ninety"}, "must be a whole number of days"},
+		{"credential issue renew one day", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "1"}, "--renew-days must be between 2 and 365"},
+		{"credential issue renew too long", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "366"}, "--renew-days must be between 2 and 365"},
+		{"credential issue renew huge", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "9223372036854775807"}, "--renew-days must be between 2 and 365"},
+		{"credential issue renew negative", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "-90"}, "--renew-days must be between 2 and 365"},
+		{"credential issue renew and expiry", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "90", "--expires-at", "2099-01-01T00:00:00Z"}, "cannot both be given"},
 		{"credential revoke zero", []string{"admin", "credential", "revoke", "0"}, "credential-id must be a positive integer"},
 		{"member add missing id", []string{"admin", "member", "add", "ops"}, "expected <channel> <principal-id>"},
 		{"unknown flag", []string{"admin", "channel", "create", "--frob", "x"}, "flag provided but not defined"},

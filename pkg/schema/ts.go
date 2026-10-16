@@ -109,6 +109,15 @@ var TSTypes = []TSType{
 	{Value: RedeemInviteRequestV1{}, Family: "redeem-invite-request-v1"},
 	{Value: RedeemInviteResponseV1{}, Family: "redeem-invite-response-v1"},
 	{Value: ListInvitesResponseV1{}, Family: "list-invites-response-v1"},
+	// Signing out everywhere (issue #439): the page revokes every credential
+	// of its own principal. Signing out of one credential has no body.
+	{Value: RevokeAllCredentialsResponseV1{}, Family: "revoke-all-credentials-response-v1"},
+	// How the browser suite's operator sets up a person of its own to sign
+	// out everywhere (issue #439). The page itself never sends these.
+	{Value: CreatePrincipalRequest{}, Family: "create-principal-request-v0"},
+	{Value: CreatePrincipalResponse{}, Family: "create-principal-response-v0"},
+	{Value: CreateCredentialRequestV1{}, Family: "create-credential-request-v1"},
+	{Value: CreateCredentialResponseV1{}, Family: "create-credential-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.

@@ -33,6 +33,8 @@ export function App({ origin }: { readonly origin: string }) {
   // Whether this tab has shown the audit-log notice: once per tab.
   const whisperNoted = useRef(false);
   const [attempt, setAttempt] = useState(0);
+  // Why the last sign out everywhere did not happen, shown in the lobby.
+  const [everywhereFailed, setEverywhereFailed] = useState<string | null>(null);
   // The newest chat state, for code that outlives a render (the socket's resume point).
   // It is moved by the same reducer in the same call as the state, so it is
   // never behind: the history is loaded and the socket opened in one tick.
@@ -49,8 +51,11 @@ export function App({ origin }: { readonly origin: string }) {
     let live = true;
     void api.restore().then((result) => {
       if (!live) return;
-      if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
-      else dispatchAuth({ type: 'failed', failure: result.failure });
+      if (!result.ok) dispatchAuth({ type: 'failed', failure: result.failure });
+      // An operator credential found where only a member's may last is held
+      // back for the warning, as at sign-in.
+      else if (result.value.warn) dispatchAuth({ type: 'held', principal: result.value.principal });
+      else dispatchAuth({ type: 'verified', principal: result.value.principal });
     });
     return () => {
       live = false;
@@ -94,6 +99,7 @@ export function App({ origin }: { readonly origin: string }) {
       dispatchDrafts({ type: 'reset' });
       dispatchTargets({ type: 'reset' });
       setAttempt(0);
+      setEverywhereFailed(null);
     }
   }, [auth.phase]);
 
@@ -231,14 +237,53 @@ export function App({ origin }: { readonly origin: string }) {
   );
 
   const releaseSession = agents.release;
+  // One sign-out at a time: a second click while the first is with the server
+  // does nothing.
+  const signingOut = useRef(false);
   const signOut = useCallback(() => {
+    if (signingOut.current) return;
+    signingOut.current = true;
     // The session is ended first: the request needs the credential that
-    // signing out forgets.
+    // signing out revokes.
     releaseSession();
-    api.signOut();
-    forgetChannel();
-    dispatchAuth({ type: 'signOut' });
+    void api.signOut().then((told) => {
+      signingOut.current = false;
+      forgetChannel();
+      dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
+    });
   }, [releaseSession]);
+
+  // Sign out everywhere revokes every credential of the person. If the server
+  // does not do it, the person stays signed in here and is told, so they can
+  // try again: dropping the credential would leave the others alive with no
+  // way left to end them from this browser.
+  const principalId = principal?.id ?? null;
+  const signOutEverywhere = useCallback(() => {
+    if (signingOut.current || principalId === null) return;
+    signingOut.current = true;
+    setEverywhereFailed(null);
+    void api.signOutEverywhere(principalId).then((result) => {
+      signingOut.current = false;
+      if (result.ok) {
+        forgetChannel();
+        dispatchAuth({ type: 'signOut', notice: 'everywhere' });
+      } else if (result.failure === 'unauthorized') {
+        dispatchAuth({ type: 'unauthorized' });
+      } else {
+        setEverywhereFailed(everywhereFailure(result));
+      }
+    });
+  }, [principalId]);
+
+  // Another tab of this browser signing the shared credential out signs this
+  // one out too.
+  useEffect(() => {
+    if (!signedIn) return;
+    return api.onSignedOutElsewhere(() => {
+      forgetChannel();
+      dispatchAuth({ type: 'signOut', notice: 'elsewhere' });
+    });
+  }, [signedIn]);
 
   const submit = useCallback((credential: string) => {
     dispatchAuth({ type: 'submit' });
@@ -341,7 +386,16 @@ export function App({ origin }: { readonly origin: string }) {
             setAttempt((n) => n + 1);
           }}
           onSignOut={signOut}
+          onSignOutEverywhere={signOutEverywhere}
+          signOutProblem={everywhereFailed}
         />
       );
   }
+}
+
+// everywhereFailure is the line shown when sign out everywhere did not happen.
+function everywhereFailure(result: { readonly failure: api.ApiFailure; readonly code?: string }): string {
+  if (result.failure === 'network') return 'Could not sign out everywhere: the server cannot be reached. You are still signed in; try again.';
+  if (result.code === 'last_operator') return 'Could not sign out everywhere: you are the only operator who can sign in.';
+  return 'Could not sign out everywhere: the server refused. You are still signed in.';
 }
