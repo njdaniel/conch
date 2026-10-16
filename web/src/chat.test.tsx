@@ -129,7 +129,8 @@ function install() {
         server.posts.push(sent.audience === undefined ? { channel, body } : { channel, body, audience: sent.audience });
         return Promise.resolve(server.post(channel, body));
       }
-      // The server's read: ids below `before`, newest first, at most `limit`.
+      // The server's read: ids below `before`, newest first, at most `limit`
+      // (or `firstPage` for the test's first history read, of any channel).
       server.historyRequests.push(url);
       const before = url.searchParams.get('before');
       const asked = Number(url.searchParams.get('limit'));
@@ -943,7 +944,8 @@ describe('a long channel', () => {
     expect(screen.getByText('older history is not loaded')).toBeDefined();
     expect(screen.getByText(`m${String(maxHeld + 100)}`)).toBeDefined();
     expect(server.historyRequests).toHaveLength(3);
-  });
+    // About 3.7 s locally; the default 5 s is too close on a busy runner.
+  }, 15000);
 });
 
 describe('the address bar', () => {
