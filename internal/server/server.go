@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -67,6 +68,15 @@ type Config struct {
 	// to start unless stale is shorter than offline.
 	SessionStale   time.Duration
 	SessionOffline time.Duration
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For conchd
+	// believes, for the invite routes' per-address rate limits (see
+	// clientaddr.go). Empty, the header is never read and the client is the
+	// connection's peer.
+	TrustedProxies []netip.Prefix
+	// InviteAllowance is how many outstanding personal invites one inviter
+	// who is not an operator may hold. Zero or less means
+	// store.DefaultPersonalInviteAllowance.
+	InviteAllowance int
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -152,6 +162,10 @@ type Server struct {
 	// point of a replay. Both are unexported and set by tests before serving.
 	replayPageSize int
 	replayHooks    wsReplayHooks
+	// inviteLimits is the invite routes' rate limits (invite_limits.go), in
+	// memory only; its clock is now. Tests replace it with setInviteLimits
+	// before serving.
+	inviteLimits *inviteLimiter
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -181,7 +195,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(defaultInviteLimits())}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()

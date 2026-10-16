@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -75,6 +76,7 @@ Usage:
   conchd serve [--data <dir>] [--listen <addr>] [--auth off|required] [--ntfy-server <url>]
                      [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
                      [--web-dir <dir> | --no-web] [--allowed-origins <origin,...>]
+                     [--trusted-proxies <cidr,...>] [--invite-allowance <n>]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -124,6 +126,15 @@ Flags for serve:
                          http://localhost:5173 (env CONCHD_ALLOWED_ORIGINS). It exists only so a
                          Vite dev server on another port can connect; unset keeps the same-origin
                          check. Each entry is one exact origin; wildcards are refused.
+  --trusted-proxies      comma-separated CIDRs of reverse proxies whose X-Forwarded-For is
+                         believed, such as 127.0.0.1/32,::1/128 for a proxy on this host
+                         (env CONCHD_TRUSTED_PROXIES, default none). The client address is
+                         used only for the invite routes' rate limits. Unset, the header is
+                         never read and every request counts as coming from its connection's
+                         peer: behind a proxy, from the proxy.
+  --invite-allowance     how many open personal invites one person who may invite can hold
+                         at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
+                         default 5)
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -151,6 +162,8 @@ type serveOptions struct {
 	allowedOrigins    []string
 	sessionStale      time.Duration
 	sessionOffline    time.Duration
+	trustedProxies    []netip.Prefix
+	inviteAllowance   int
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -190,6 +203,15 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	}
 	sessionStale := fs.Duration("session-stale", staleDefault, "how long without a heartbeat before a session shows as stale")
 	sessionOffline := fs.Duration("session-offline", offlineDefault, "how long without a heartbeat before a session shows as offline")
+	trustedProxiesRaw := fs.String("trusted-proxies", os.Getenv("CONCHD_TRUSTED_PROXIES"), "comma-separated CIDRs of reverse proxies whose X-Forwarded-For is believed")
+	inviteAllowance := fs.Int("invite-allowance", store.DefaultPersonalInviteAllowance, "open personal invites one inviter may hold at once")
+	if raw := os.Getenv("CONCHD_INVITE_ALLOWANCE"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return serveOptions{}, fmt.Errorf("serve: CONCHD_INVITE_ALLOWANCE: %q is not a whole number", raw)
+		}
+		*inviteAllowance = v
+	}
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -208,6 +230,15 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	}
 	if *maxUpload < 0 {
 		return serveOptions{}, errors.New("serve: --max-upload-bytes must not be negative (0 disables uploads)")
+	}
+	// Zero would read as "nobody may invite" but mean the default to the
+	// store, so it is refused rather than reinterpreted.
+	if *inviteAllowance < 1 {
+		return serveOptions{}, errors.New("serve: --invite-allowance must be at least 1")
+	}
+	trustedProxies, err := server.ParseTrustedProxies(*trustedProxiesRaw)
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --trusted-proxies: %w", err)
 	}
 	if err := server.ValidateSessionThresholds(*sessionStale, *sessionOffline); err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
@@ -240,6 +271,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		webDir: *webDir, webFS: webFS, webSource: webSource, allowedOrigins: origins,
 		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
+		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -320,6 +352,8 @@ func runServe(args []string) error {
 		AllowedOrigins:  opts.allowedOrigins,
 		SessionStale:    opts.sessionStale,
 		SessionOffline:  opts.sessionOffline,
+		TrustedProxies:  opts.trustedProxies,
+		InviteAllowance: opts.inviteAllowance,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,

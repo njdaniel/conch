@@ -242,6 +242,8 @@ func TestInviteErrorCodes(t *testing.T) {
 		ErrorCodeInviteAllowanceExceeded:   "invite_allowance_exceeded",
 		ErrorCodeInviteGrantExceedsInviter: "invite_grant_exceeds_inviter",
 		ErrorCodeInviteNotAllowed:          "invite_not_allowed",
+		ErrorCodeInviteNotFound:            "invite_not_found",
+		ErrorCodePrincipalExists:           "principal_exists",
 	}
 	for got, w := range want {
 		if got != w {

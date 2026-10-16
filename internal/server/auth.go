@@ -284,5 +284,13 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		Name:          caller.Name,
 		Role:          schema.PrincipalRole(caller.Role),
 		ServerVersion: s.cfg.Version,
+		MayInvite:     mayInvite(caller),
 	})
+}
+
+// mayInvite is what whoami says about making invites (issue #437): true for
+// an operator and for a person granted the right. Only people make invites,
+// so an agent is told false whatever its role; the store refuses it anyway.
+func mayInvite(p store.Principal) bool {
+	return p.Kind == store.PrincipalHuman && (isOperator(p) || p.MayInvite)
 }

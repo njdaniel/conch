@@ -147,9 +147,8 @@ Set, for `alpha`:
 - `CONCHD_LISTEN=127.0.0.1:8080` (loopback; one port per instance);
 - `CONCHD_LIVEKIT_URL=wss://livekit.your.domain`, `CONCHD_LIVEKIT_API_URL=http://127.0.0.1:7880`;
 - `CONCHD_LIVEKIT_ROOM_PREFIX=alpha-` (per instance);
-- `CONCHD_LIVEKIT_API_KEY` and `CONCHD_LIVEKIT_API_SECRET`: the pair from step 4.
-
-The trusted-proxy setting of issue A6b is a commented line in the example, to be filled when that lands. Until then `conchd` sees every connection as coming from Caddy.
+- `CONCHD_LIVEKIT_API_KEY` and `CONCHD_LIVEKIT_API_SECRET`: the pair from step 4;
+- `CONCHD_TRUSTED_PROXIES=127.0.0.1/32,::1/128` (Caddy, on loopback), as the example has it, so the invite routes' rate limits see each client's address rather than Caddy's.
 
 ## 6. The first operator
 
