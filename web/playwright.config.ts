@@ -5,6 +5,7 @@
 // One worker, files in name order: the specs share one server and one
 // community, and the last one restarts the server.
 import { defineConfig, devices } from '@playwright/test';
+import { toneFile } from './e2e/tone';
 
 export default defineConfig({
   testDir: 'e2e',
@@ -26,5 +27,25 @@ export default defineConfig({
   // open a trace.
   use: { trace: 'retain-on-failure' },
   // Chromium only (issue #285): no Firefox, no WebKit, no phone sizes.
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  //
+  // Browser voice (issue #442) runs on Chromium's fake microphone: the permission
+  // prompt is answered, and the microphone plays a steady tone from a file, so
+  // no test needs a real device. The local-IP flag keeps WebRTC to the LiveKit
+  // on 127.0.0.1 from hiding host candidates behind mDNS names.
+  projects: [
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          args: [
+            '--use-fake-ui-for-media-stream',
+            '--use-fake-device-for-media-stream',
+            `--use-file-for-fake-audio-capture=${toneFile()}`,
+            '--disable-features=WebRtcHideLocalIpsWithMdns',
+          ],
+        },
+      },
+    },
+  ],
 });

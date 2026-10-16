@@ -59,7 +59,9 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/channels/{channel}/voice/transmit", accessAuthenticated, hf(s.handleVoiceTransmit)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
-		rt("GET /v1/voice/ws", accessAuthenticated, hf(s.handleVoiceWS)),
+		// Takes ?ticket= (issue #442): a browser cannot set a header on a
+		// socket. The credential and membership re-checks are unchanged.
+		{pattern: "GET /v1/voice/ws", access: accessAuthenticated, handler: hf(s.handleVoiceWS), acceptsTicket: true},
 		// Sessions (issue #265). Any caller with a credential; the session
 		// routes act on the caller's own sessions (by credential) and the
 		// list is a membership-gated read. Checked in the handlers.

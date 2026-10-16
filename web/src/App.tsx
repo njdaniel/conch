@@ -21,6 +21,7 @@ import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
+import { VoiceStatus } from './VoiceStatus';
 
 export function App({ origin }: { readonly origin: string }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
@@ -285,6 +286,7 @@ export function App({ origin }: { readonly origin: string }) {
           unread={unread}
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
+          voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
           conversation={
             selected === null || channelId === null ? null : (
               <>

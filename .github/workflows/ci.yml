@@ -361,6 +361,10 @@ jobs:
     # driver reads) run in the check job's go test.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Labels the LiveKit container of the browser voice spec, so the clean-up
+      # step below removes only this run's.
+      VOICE_CHECK_RUN: web-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
 
@@ -389,7 +393,10 @@ jobs:
     # The browser suite (issue #285, D7): the web client in Chromium, against
     # the fixture community of e2e/p3-local (started with --keep and a
     # temporary root by the suite's own global setup, removed by its teardown,
-    # which runs when a test fails too). Playwright is pinned in
+    # which runs when a test fails too). Browser voice (issue #442) also runs
+    # here: the spec starts the pinned LiveKit image in Docker, which the
+    # runner has, on Chromium's fake microphone; with CI set it fails, not
+    # skips, if Docker is missing. Playwright is pinned in
     # web/package.json and installs the Chromium that version needs. A job of
     # its own and not part of check, which needs no browser. It runs on every
     # pull request and every push to main. Scripted agents only: the claude
@@ -421,6 +428,12 @@ jobs:
 
       - name: web-e2e
         run: make web-e2e
+
+      # The spec removes its own container on every path; this is for the case
+      # where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-web-voice=$VOICE_CHECK_RUN" | xargs -r docker rm -f
 
       # The traces hold this run's fixture credentials (Bearer headers, the
       # filled sign-in value). They are throwaway: `make web-e2e` runs the

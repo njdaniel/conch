@@ -33,3 +33,7 @@ typescript-eslint
 # The browser suite (issue #285, D7): drives the client in Chromium. Run by
 # `make web-e2e` and its own CI job, never by `make check`.
 @playwright/test
+
+# Browser voice (issue #442): the LiveKit JavaScript SDK (Apache-2.0), used
+# only from src/voice/. Approved by Nick 2026-10-16 (see #420 and #442).
+livekit-client

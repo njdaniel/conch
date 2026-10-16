@@ -62,7 +62,7 @@ export { expect };
 // ---------------------------------------------------------------- the page
 
 // signIn pastes a credential into the sign-in field and waits for the lobby.
-export async function signIn(page: Page, world: World, token: string, name: string): Promise<void> {
+export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(token);
   await page.getByRole('button', { name: 'Sign in' }).click();

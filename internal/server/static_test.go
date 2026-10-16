@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/njdaniel/conch/internal/server/livekit"
 )
 
 const (
@@ -186,6 +189,7 @@ func TestStaticServing(t *testing.T) {
 						"Content-Security-Policy": webCSP,
 						"X-Content-Type-Options":  "nosniff",
 						"Referrer-Policy":         "no-referrer",
+						"Permissions-Policy":      webPermissionsPolicy,
 					} {
 						if got := resp.Header.Get(h); got != want {
 							t.Errorf("%s = %q, want %q", h, got, want)
@@ -609,4 +613,64 @@ func TestSocketOriginMatrix(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestStaticCSPWithVoice: with voice configured connect-src also names the
+// LiveKit origin, as socket and http scheme; with it not configured the policy
+// is webCSP, character for character (issue #442).
+func TestStaticCSPWithVoice(t *testing.T) {
+	const base = "default-src 'self'; connect-src 'self'%s; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	tests := []struct {
+		name  string
+		url   string
+		extra string
+	}{
+		{"not configured", "", ""},
+		{"wss with a port", "wss://lk.example.net:7443", " wss://lk.example.net:7443 https://lk.example.net:7443"},
+		{"wss without a port", "wss://lk.example.net", " wss://lk.example.net https://lk.example.net"},
+		{"ws on localhost", "ws://localhost:7880", " ws://localhost:7880 http://localhost:7880"},
+		{"a path is not part of the origin", "wss://lk.example.net/rtc?x=1", " wss://lk.example.net https://lk.example.net"},
+		{"an unusable scheme adds nothing", "http://lk.example.net", ""},
+		{"an unparseable url adds nothing", "wss://[bad", ""},
+		{"a valid host and port", "wss://lk-1.example.net:443", " wss://lk-1.example.net:443 https://lk-1.example.net:443"},
+		{"an IPv4 address", "ws://127.0.0.1:7880", " ws://127.0.0.1:7880 http://127.0.0.1:7880"},
+		{"a wildcard host adds nothing", "wss://*.example.net", ""},
+		{"a wildcard alone adds nothing", "wss://*", ""},
+		{"a semicolon in the host adds nothing", "wss://lk.example.net;script-src", ""},
+		{"a semicolon that would start a directive adds nothing", "wss://a;script-src", ""},
+		{"an IPv6 literal adds nothing", "wss://[::1]:7880", ""},
+		{"an empty host name adds nothing", "wss://:7880", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := fmt.Sprintf(base, tt.extra)
+			if got := webCSPFor(tt.url); got != want {
+				t.Errorf("webCSPFor(%q) = %q, want %q", tt.url, got, want)
+			}
+		})
+	}
+
+	t.Run("served", func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			cfg  livekit.Config
+			want string
+		}{
+			{"voice configured", voiceConfig(t, "http://127.0.0.1:1"), webCSPFor(voiceTestURL)},
+			{"voice not configured", livekit.Config{}, webCSP},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, WebDir: webFixture(t), LiveKit: tt.cfg})
+				ts := httptest.NewServer(srv.Handler())
+				t.Cleanup(ts.Close)
+				resp, _ := fetch(t, "GET", ts.URL+"/app/")
+				if got := resp.Header.Get("Content-Security-Policy"); got != tt.want {
+					t.Errorf("CSP = %q, want %q", got, tt.want)
+				}
+				if got := resp.Header.Get("Permissions-Policy"); got != "microphone=(self), camera=(), display-capture=()" {
+					t.Errorf("Permissions-Policy = %q", got)
+				}
+			})
+		}
+	})
 }

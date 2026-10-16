@@ -88,6 +88,14 @@ var TSTypes = []TSType{
 	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
 	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
 
+	// Browser voice (issue #442): the session that admits the page to a room,
+	// the presence snapshot its socket streams, and the transmit report.
+	{Value: VoiceRoomGrant{}},
+	{Value: VoiceSessionResponseV1{}, Family: "voice-session-response-v1"},
+	{Value: VoiceParticipant{}},
+	{Value: VoicePresenceRoom{}},
+	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
+	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},

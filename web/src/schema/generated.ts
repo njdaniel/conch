@@ -684,6 +684,97 @@ export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
   read_state: array(readStateV1),
 });
 
+// schema.VoiceRoomGrant
+export interface VoiceRoomGrant {
+  room: string;
+  token: string;
+  can_publish: boolean;
+  expires_at: string;
+  audience?: Audience;
+}
+
+export const voiceRoomGrant = object<VoiceRoomGrant>({
+  room: str,
+  token: str,
+  can_publish: bool,
+  expires_at: timestamp,
+  audience: optional(audience),
+});
+
+// schema.VoiceSessionResponseV1
+export interface VoiceSessionResponseV1 {
+  livekit_url: string;
+  identity: string;
+  rooms: VoiceRoomGrant[];
+}
+
+export const voiceSessionResponseV1 = object<VoiceSessionResponseV1>({
+  livekit_url: str,
+  identity: str,
+  rooms: array(voiceRoomGrant),
+});
+
+// schema.VoiceParticipant
+export interface VoiceParticipant {
+  principal_id: number;
+  can_publish: boolean;
+  transmitting: boolean;
+  joined_at: string;
+}
+
+export const voiceParticipant = object<VoiceParticipant>({
+  principal_id: int,
+  can_publish: bool,
+  transmitting: bool,
+  joined_at: timestamp,
+});
+
+// schema.VoicePresenceRoom
+export interface VoicePresenceRoom {
+  audience?: Audience;
+  participants: VoiceParticipant[];
+}
+
+export const voicePresenceRoom = object<VoicePresenceRoom>({
+  audience: optional(audience),
+  participants: array(voiceParticipant),
+});
+
+// schema.VoicePresenceV1
+export const voicePresenceV1Schema = 'conch.voice_presence.v1';
+
+export interface VoicePresenceV1 {
+  schema: typeof voicePresenceV1Schema;
+  channel_id: number;
+  configured: boolean;
+  available: boolean;
+  rooms: VoicePresenceRoom[];
+}
+
+export const voicePresenceV1 = object<VoicePresenceV1>({
+  schema: vocab<typeof voicePresenceV1Schema>({ [voicePresenceV1Schema]: true }),
+  channel_id: int,
+  configured: bool,
+  available: bool,
+  rooms: array(voicePresenceRoom),
+});
+
+// schema.VoiceTransmitState
+export type VoiceTransmitState = 'started' | 'stopped';
+
+export const voiceTransmitState = vocab<VoiceTransmitState>({ started: true, stopped: true });
+
+// schema.VoiceTransmitReportV1
+export interface VoiceTransmitReportV1 {
+  state: VoiceTransmitState;
+  audience?: Audience;
+}
+
+export const voiceTransmitReportV1 = object<VoiceTransmitReportV1>({
+  state: voiceTransmitState,
+  audience: optional(audience),
+});
+
 // schema.PrincipalV0
 export interface PrincipalV0 {
   id: number;

@@ -179,11 +179,24 @@ describe('lobby', () => {
     expect(status.textContent).toContain('ada');
     expect(status.textContent).toContain(origin);
     expect(status.textContent).toContain('Connected');
-    // Voice is said to be unavailable (UX-04, UX-23), only in its own section,
-    // and nothing anywhere else mentions voice or offers to join it.
+    // Voice is only in its own section; nothing anywhere else mentions voice
+    // or offers to join it. Here conchd has no voice route, so it is not
+    // joinable, and it joins nothing by itself.
     const voice = screen.getByRole('region', { name: 'Voice' });
     expect(document.body.textContent.replace(voice.textContent, '')).not.toMatch(/voice|join/i);
-    expect(voice.textContent).toBe('Not in voiceVoice is not available in the browser yet');
+    expect(voice.textContent).toMatch(/^Not in voice/);
+    expect(within(voice).getByRole('button', { name: 'Join voice' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
+    const presence = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: false, available: false, rooms: [] };
+    serve({ ...asMember, '/v1/channels/general/voice': () => json(presence) });
+    render(<App origin={origin} />);
+    signIn();
+    const voice = await screen.findByRole('region', { name: 'Voice' });
+    await waitFor(() => {
+      expect(voice.textContent).toContain('Voice is not set up on this server');
+    });
     expect(within(voice).queryByRole('button')).toBeNull();
   });
 

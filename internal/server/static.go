@@ -7,9 +7,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/njdaniel/conch/internal/server/livekit"
 )
 
 // webCSP is the Content-Security-Policy of every /app/ response. The page and
@@ -17,6 +20,48 @@ import (
 // not set a <base>, embeds no plugin content, and may submit a form only to
 // conchd (form-action does not fall back to default-src, so it is spelled out).
 const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+
+// webPermissionsPolicy limits the powers the page may use: its own origin may
+// capture a microphone (browser voice, #442) and nothing else; no camera and no
+// screen capture until screen share is built.
+const webPermissionsPolicy = "microphone=(self), camera=(), display-capture=()"
+
+// webCSPFor is webCSP for a server whose voice is at livekitURL. With voice not
+// configured (an empty or unusable URL) it is webCSP unchanged. Otherwise
+// connect-src also names the LiveKit origin, as ws(s):// for the signalling
+// socket and http(s):// for the requests the SDK makes to the same host when a
+// connection fails. Only the origin is named, never a path. An address whose
+// host or port livekit.CheckCSPHost refuses adds nothing.
+func webCSPFor(livekitURL string) string {
+	if livekitURL == "" {
+		return webCSP
+	}
+	u, err := url.Parse(livekitURL)
+	if err != nil || u.Host == "" {
+		return webCSP
+	}
+	// ParseConfig has refused such an address at startup; should one reach
+	// here anyway, the page gets the plain policy rather than whatever the
+	// address would write into it.
+	if livekit.CheckCSPHost(u) != nil {
+		return webCSP
+	}
+	host := u.Hostname()
+	if port := u.Port(); port != "" {
+		host += ":" + port
+	}
+	var httpScheme string
+	switch u.Scheme {
+	case "wss":
+		httpScheme = "https"
+	case "ws":
+		httpScheme = "http"
+	default:
+		return webCSP
+	}
+	extra := u.Scheme + "://" + host + " " + httpScheme + "://" + host
+	return strings.Replace(webCSP, "connect-src 'self';", "connect-src 'self' "+extra+";", 1)
+}
 
 const (
 	webIndex     = "index.html"
@@ -89,7 +134,7 @@ func (s *Server) webRoutes() []route {
 		return nil
 	}
 	return []route{
-		{pattern: "GET /app/", access: accessExempt, handler: &staticHandler{src: src}},
+		{pattern: "GET /app/", access: accessExempt, handler: &staticHandler{src: src, csp: webCSPFor(s.cfg.LiveKit.URL)}},
 		{pattern: "GET /{$}", access: accessExempt, handler: http.RedirectHandler("/app/", http.StatusFound)},
 	}
 }
@@ -150,11 +195,18 @@ func (f fsSource) Open(name string) (webFile, error) {
 // staticHandler serves a built web client out of a webSource.
 type staticHandler struct {
 	src webSource
+	// csp is the Content-Security-Policy to send; empty means webCSP.
+	csp string
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hd := w.Header()
-	hd.Set("Content-Security-Policy", webCSP)
+	csp := h.csp
+	if csp == "" {
+		csp = webCSP
+	}
+	hd.Set("Content-Security-Policy", csp)
+	hd.Set("Permissions-Policy", webPermissionsPolicy)
 	hd.Set("X-Content-Type-Options", "nosniff")
 	hd.Set("Referrer-Policy", "no-referrer")
 
