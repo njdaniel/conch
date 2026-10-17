@@ -8,6 +8,8 @@ vi.mock('../api', () => ({
   reportVoiceTransmit: () => Promise.resolve('ok'),
   getVoicePresence: () => new Promise(() => undefined),
   openVoiceSocket: () => new Promise(() => undefined),
+  claimVoiceShare: () => new Promise(() => undefined),
+  stopVoiceShare: () => new Promise(() => undefined),
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => ({}) }));
 

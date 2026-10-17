@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { TransmitAnswer, VoiceSessionResult } from '../api';
-import { VoiceClient, reconnectLimit, type Room, type RoomEvents } from './connection';
+import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
+import type { VoicePresenceV1 } from '../schema/voice';
+import { VoiceClient, reconnectLimit, type Room, type RoomEvents, type ShareSink } from './connection';
+import type { Captured } from './share';
 import { FakeClock, settle } from './fakes';
 
 const token = 'join-token-secret-value';
@@ -31,6 +33,34 @@ class StubRoom implements Room {
     this.closed = true;
     return Promise.resolve();
   };
+  // The share and watch half of a room (issue #444), recorded.
+  calls: string[] = [];
+  watching: boolean[] = [];
+  sinks: (ShareSink | null)[] = [];
+  pickAudio = true;
+  pickFails = false;
+  publishMicrophone = (): Promise<void> => {
+    this.calls.push('microphone');
+    return Promise.resolve();
+  };
+  setWatching = (on: boolean): void => {
+    this.watching.push(on);
+  };
+  attachShare = (sink: ShareSink | null): void => {
+    this.sinks.push(sink);
+  };
+  pickScreen = (): Promise<Captured> => {
+    this.calls.push('pick');
+    return this.pickFails ? Promise.reject(new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
+  };
+  publishScreen = (): Promise<void> => {
+    this.calls.push('publish');
+    return Promise.resolve();
+  };
+  stopScreen = (): Promise<void> => {
+    this.calls.push('stop');
+    return Promise.resolve();
+  };
 }
 
 const okSession = (canPublish = true): VoiceSessionResult => ({
@@ -42,11 +72,15 @@ const okSession = (canPublish = true): VoiceSessionResult => ({
   },
 });
 
+const claim: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:00.000Z', audio: true } };
+
 function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
   const reports: string[] = [];
+  // What the share asked conchd, in order.
+  const shares: string[] = [];
   const client = new VoiceClient(
     {
       clock,
@@ -65,10 +99,18 @@ function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: Tr
         rooms.push(room);
         return room;
       },
+      claimShare: (channel) => {
+        shares.push(`claim ${channel}`);
+        return Promise.resolve(claim);
+      },
+      stopShare: (channel) => {
+        shares.push(`stop ${channel}`);
+        return Promise.resolve();
+      },
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports };
+  return { client, clock, rooms, asked, reports, shares };
 }
 
 async function joined(t = setup()) {
@@ -295,5 +337,157 @@ describe('leaving', () => {
     expect(t.reports).toEqual(['started', 'stopped']);
     expect(t.rooms[0]?.closed).toBe(true);
     expect(t.client.snapshot().phase).toBe('idle');
+  });
+});
+
+// Issue #444: the share, watching and watch only, through the client.
+const presenceWith = (sharing: number | null): VoicePresenceV1 => ({
+  schema: 'conch.voice_presence.v1',
+  channel_id: 1,
+  configured: true,
+  available: true,
+  rooms: [
+    {
+      participants: [7, 8].map((id) => ({
+        principal_id: id,
+        can_publish: true,
+        transmitting: false,
+        joined_at: '2026-10-16T00:00:00.000Z',
+        ...(id === sharing ? { sharing: true } : {}),
+      })),
+    },
+  ],
+});
+
+describe('watch only', () => {
+  it('connects without publishing the microphone, takes no press, and publishes it when asked', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    expect(t.rooms[0]?.connectArgs?.publish).toBe(false);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true });
+    t.client.press();
+    await settle();
+    expect(t.reports).toEqual([]);
+    expect(t.rooms[0]?.calls).toEqual([]);
+    await t.client.useMicrophone();
+    expect(t.rooms[0]?.calls).toEqual(['microphone']);
+    expect(t.client.snapshot().watchOnly).toBe(false);
+    t.client.press();
+    await settle();
+    expect(t.reports).toEqual(['started']);
+  });
+
+  it('stays watch only across a reconnect through conchd', async () => {
+    const t = setup([okSession(), okSession()]);
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.rooms[1]?.connectArgs?.publish).toBe(false);
+  });
+});
+
+describe('sharing through the client', () => {
+  it('claims, picks, claims again and publishes on the connected room; leaving stops it and tells conchd', async () => {
+    const t = await joined();
+    t.client.startShare('detail');
+    await settle();
+    expect(t.shares).toEqual(['claim general', 'claim general']);
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'sharing', audio: true });
+    await t.client.leave();
+    expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish', 'stop']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'left' });
+  });
+
+  it('a share does not outlive its connection: a reconnect through conchd ends it and tells conchd', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.startShare('motion');
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'lost' });
+  });
+
+  it('an SDK reconnect claims the share again', async () => {
+    const t = await joined();
+    t.client.startShare('detail');
+    await settle();
+    t.rooms[0]?.events?.onReconnecting();
+    t.rooms[0]?.events?.onReconnected();
+    await settle();
+    expect(t.shares).toEqual(['claim general', 'claim general', 'claim general']);
+    expect(t.client.snapshot().share.kind).toBe('sharing');
+  });
+
+  it('presence that no longer shows this person sharing is the server ending it', async () => {
+    const t = await joined();
+    t.client.startShare('detail');
+    await settle();
+    t.client.presence(presenceWith(7));
+    t.client.presence(presenceWith(null));
+    await settle();
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'server' });
+    // Not asked to stop: by now the room's share may be someone else's.
+    expect(t.shares).toEqual(['claim general', 'claim general']);
+  });
+
+  it('the room ending the published share is the browser or the server, by cause', async () => {
+    const t = await joined();
+    t.client.startShare('detail');
+    await settle();
+    t.rooms[0]?.events?.onScreenEnded('browser');
+    await settle();
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'browser' });
+    expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
+  });
+
+  it("does not ask conchd to stop a share presence shows as someone else's", async () => {
+    const t = await joined();
+    t.client.startShare('detail');
+    await settle();
+    t.client.presence(presenceWith(7));
+    // The server ended this share and principal 8 claimed the room's.
+    t.client.presence(presenceWith(8));
+    await settle();
+    await t.client.leave();
+    expect(t.shares).toEqual(['claim general', 'claim general']);
+  });
+
+  it('is not offered before the connection is up', () => {
+    const t = setup();
+    t.client.join('general');
+    t.client.startShare('detail');
+    expect(t.shares).toEqual([]);
+  });
+});
+
+describe('watching', () => {
+  it('subscribes when asked, keeps the choice and the view on a new connection, and lets go when the share ends', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    expect(t.rooms[0]?.watching).toEqual([false]);
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    t.client.attachShare(sink);
+    t.client.watch(true);
+    expect(t.rooms[0]?.watching).toEqual([false, true]);
+    expect(t.rooms[0]?.sinks.at(-1)).toBe(sink);
+    t.rooms[0]?.events?.onShareTracks({ video: true, audio: true });
+    expect(t.client.snapshot().shareTracks).toEqual({ video: true, audio: true });
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    // The next connection is told before it connects.
+    expect(t.rooms[1]?.watching).toEqual([true]);
+    expect(t.rooms[1]?.sinks).toEqual([sink]);
+    expect(t.client.snapshot().shareTracks).toEqual({ video: false, audio: false });
+    t.client.presence(presenceWith(8));
+    expect(t.client.snapshot().watching).toBe(true);
+    t.client.presence(presenceWith(null));
+    expect(t.client.snapshot().watching).toBe(false);
+    expect(t.rooms[1]?.watching).toEqual([true, false]);
   });
 });

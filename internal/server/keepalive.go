@@ -59,6 +59,10 @@ func (s *Server) keepAlive(ctx context.Context, conn *websocket.Conn, heartbeat 
 			cancel()
 			if err != nil {
 				if ctx.Err() == nil {
+					// Said before the close, which ends the reader and so
+					// the handler's loop: the connection log line then
+					// names the timeout, not the client.
+					noteClose(ctx, schema.SocketCloseKeepaliveTimeout)
 					slog.DebugContext(ctx, "ws: ping failed, closing", "error", err)
 				}
 				// CloseNow, not Close: the close handshake would wait on
@@ -70,6 +74,9 @@ func (s *Server) keepAlive(ctx context.Context, conn *websocket.Conn, heartbeat 
 				continue
 			}
 			if err := writeHeartbeat(ctx, conn); err != nil {
+				if ctx.Err() == nil {
+					noteClose(ctx, schema.SocketCloseError)
+				}
 				_ = conn.CloseNow()
 				return
 			}
@@ -92,5 +99,5 @@ func mustHeartbeatFrame() []byte {
 func writeHeartbeat(ctx context.Context, conn *websocket.Conn) error {
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
-	return conn.Write(wctx, websocket.MessageText, heartbeatFrame)
+	return countFrame(ctx, conn.Write(wctx, websocket.MessageText, heartbeatFrame))
 }

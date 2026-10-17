@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -71,6 +72,67 @@ func TestHealthzOK(t *testing.T) {
 	}
 	if h.DB != schema.HealthOK {
 		t.Errorf("db = %q, want %q", h.DB, schema.HealthOK)
+	}
+}
+
+// TestHealthzVoice: /healthz says what the presence poller knows of LiveKit,
+// and a voice outage never makes the server degraded or the answer 503: the
+// core works without voice (issue #446, ADR-002).
+func TestHealthzVoice(t *testing.T) {
+	lk := livekit.Config{URL: "ws://lk.invalid", APIURL: "http://lk.invalid", APIKey: "k", APISecret: livekit.NewSecret("s")}
+	tests := []struct {
+		name            string
+		cfg             livekit.Config
+		contacted, down bool
+		want            schema.HealthVoice
+	}{
+		{"not configured", livekit.Config{}, false, false, schema.HealthVoiceNotConfigured},
+		{"configured, not answered yet", lk, false, false, schema.HealthVoiceUnavailable},
+		{"configured and answering", lk, true, false, schema.HealthVoiceOK},
+		{"configured and down", lk, true, true, schema.HealthVoiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, LiveKit: tt.cfg})
+			srv.voice.mu.Lock()
+			srv.voice.contacted, srv.voice.down = tt.contacted, tt.down
+			srv.voice.mu.Unlock()
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 whatever voice says", rec.Code)
+			}
+			var h schema.Health
+			if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+				t.Fatal(err)
+			}
+			if h.Voice != tt.want || h.Status != schema.HealthOK || h.DB != schema.HealthOK {
+				t.Errorf("health = %+v, want status ok, db ok, voice %s", h, tt.want)
+			}
+		})
+	}
+}
+
+// A real outage, as the poller finds it: LiveKit's address answers nothing,
+// one sweep marks voice down, and /healthz says unavailable with a 200.
+func TestHealthzVoiceOutage(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, LiveKit: livekit.Config{
+		URL: "ws://lk.invalid", APIURL: deadURL, APIKey: "k", APISecret: livekit.NewSecret("s"),
+	}})
+	srv.voice.runSweep(context.Background())
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var h schema.Health
+	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || h.Status != schema.HealthOK || h.Voice != schema.HealthVoiceUnavailable {
+		t.Errorf("healthz = %d %+v, want 200 ok with voice unavailable", rec.Code, h)
 	}
 }
 

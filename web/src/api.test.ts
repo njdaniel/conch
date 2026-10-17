@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  claimVoiceShare,
   closeInvite,
   continueAsOperator,
   createInvite,
@@ -17,6 +18,7 @@ import {
   signIn,
   signOut,
   signOutEverywhere,
+  stopVoiceShare,
   whoAmI,
 } from './api';
 
@@ -507,6 +509,28 @@ describe('invites', () => {
       { path: '/v1/invites', method: 'GET', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites/4', method: 'DELETE', auth: `Bearer ${memberToken}` },
     ]);
+  });
+
+  it('claims and stops a screen share with the signed-in credential (issue #444)', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const share = { principal_id: 2, started_at: at, audio: true };
+    const calls = serve((c) => (c.method === 'POST' ? json(share) : new Response(null, { status: 204 })));
+    expect(await claimVoiceShare('red team')).toEqual({ ok: true, value: share });
+    expect(await stopVoiceShare('red team')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { path: '/v1/channels/red%20team/voice/share', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/channels/red%20team/voice/share', method: 'DELETE', auth: `Bearer ${memberToken}` },
+    ]);
+  });
+
+  it("answers a refused share claim with its status and the server's code, and a malformed one as invalid", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'voice_share_busy', message: 'someone else is sharing in this room' }, 409));
+    expect(await claimVoiceShare('red')).toEqual({ ok: false, failure: 'invalid', status: 409, code: 'voice_share_busy' });
+    serve(() => json({ principal_id: 0, audio: 'yes' }));
+    expect(await claimVoiceShare('red')).toEqual({ ok: false, failure: 'invalid' });
+    serve(() => Promise.reject(new Error('offline')));
+    expect(await claimVoiceShare('red')).toEqual({ ok: false, failure: 'network' });
   });
 
   it("answers a refused invite with the server's code and line", async () => {

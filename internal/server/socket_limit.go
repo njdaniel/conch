@@ -57,8 +57,9 @@ func (c *socketCounter) count(credentialID int64) int {
 }
 
 // admitSocket counts the request's socket against its credential. Every socket
-// handler calls it once, after its last refusal and immediately before
-// websocket.Accept, and defers the release it returns, so a socket is counted
+// handler calls it once, through acceptSocket (connlog.go), after its last
+// refusal and immediately before websocket.Accept, and defers the release it
+// returns, so a socket is counted
 // from the upgrade until its handler returns, whatever ends it (accept
 // failure, close, drop, slow consumer, shutdown). Calling it that late means a
 // 404 for a non-member is never turned into a 429 and no refusal has a count

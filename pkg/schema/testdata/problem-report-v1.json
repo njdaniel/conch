@@ -1,0 +1,49 @@
+{
+  "id": 7,
+  "state": "open",
+  "created_at": "2026-10-16T09:02:00.000Z",
+  "principal_id": 12,
+  "server_version": "v0.1.0-alpha.2",
+  "voice": "unavailable",
+  "did": "Joined voice and pressed the talk key",
+  "expected": "The others to hear me",
+  "happened": "Nobody heard anything and voice said it was reconnecting",
+  "often": "sometimes",
+  "client": {
+    "name": "conch-web",
+    "version": "v0.1.0-alpha.2",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/141.0",
+    "platform": "Linux x86_64",
+    "screen": "1280x800",
+    "voice": "reconnecting"
+  },
+  "diagnostics": [
+    {
+      "at": "2026-10-16T09:01:02.000Z",
+      "kind": "http_failure",
+      "code": 503,
+      "error": "voice_unavailable",
+      "request_id": "3f9a0c1d2b4e5f60"
+    }
+  ],
+  "server": {
+    "requests": [
+      {
+        "at": "2026-10-16T09:01:02.000Z",
+        "request_id": "3f9a0c1d2b4e5f60",
+        "route": "POST /v1/channels/{channel}/voice/session",
+        "status": 503
+      }
+    ],
+    "socket_closes": [
+      {
+        "at": "2026-10-16T09:01:00.000Z",
+        "request_id": "a1b2c3d4e5f60718",
+        "route": "GET /v2/ws",
+        "reason": "keepalive_timeout",
+        "duration_seconds": 312,
+        "frames": 48
+      }
+    ]
+  }
+}

@@ -170,6 +170,14 @@ type Server struct {
 	// memory only; its clock is now. Tests replace it with setInviteLimits
 	// before serving.
 	inviteLimits *inviteLimiter
+	// diag is each principal's recent request ids and socket closes, and
+	// connLogs thins the connection log (issue #446). Both are in memory
+	// only.
+	diag     diagRing
+	connLogs connLogLimiter
+	// reportLimits is the problem-report rate limit (reports.go), in memory
+	// only; its clock is now. Tests replace it before serving.
+	reportLimits *reportLimiter
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -199,7 +207,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(defaultInviteLimits())}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(defaultInviteLimits()), reportLimits: newReportLimiter(defaultReportLimit())}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
@@ -216,7 +224,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
 		s.routeByPattern[rt.pattern] = rt
-		s.mux.Handle(rt.pattern, s.guard(rt))
+		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
 	if s.VoiceConfigured() {
@@ -236,6 +244,9 @@ func New(cfg Config, st *store.Store) *Server {
 	} else {
 		slog.Warn("auth: authentication is OFF: every endpoint is open to anyone who can reach this port, and request bodies are trusted for identity; use this for local development only")
 	}
+	// Outside authentication, so every answer has a request id, a refusal
+	// included (issue #446).
+	handler = s.requestIDMiddleware(handler)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
@@ -339,12 +350,15 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // handleHealth serves GET /healthz: 200 with a schema.Health body when the
-// store is reachable, 503 with status "degraded" when it is not.
+// store is reachable, 503 with status "degraded" when it is not. Voice is
+// reported but never decides either: it is optional, and the core works
+// without it (ADR-002).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	h := schema.Health{
 		Status:  schema.HealthOK,
 		Version: s.cfg.Version,
 		DB:      schema.HealthOK,
+		Voice:   s.voice.health(),
 	}
 	code := http.StatusOK
 

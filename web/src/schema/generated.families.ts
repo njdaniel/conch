@@ -12,6 +12,8 @@ import {
   createInviteResponseV1,
   createPrincipalRequest,
   createPrincipalResponse,
+  createProblemReportRequestV1,
+  createProblemReportResponseV1,
   createSessionRequestV1,
   credentialV1,
   disableInviteesRequestV1,
@@ -127,5 +129,7 @@ export const families: [string, Validator<unknown>][] = [
   ['hide-principal-response-v1', hidePrincipalResponseV1],
   ['hide-principals-request-v1', hidePrincipalsRequestV1],
   ['hide-principals-response-v1', hidePrincipalsResponseV1],
+  ['create-problem-report-request-v1', createProblemReportRequestV1],
+  ['create-problem-report-response-v1', createProblemReportResponseV1],
   ['error', errorV0],
 ];

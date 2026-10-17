@@ -202,6 +202,31 @@ func TestStaticServing(t *testing.T) {
 	}
 }
 
+// TestStaticPermissionsPolicy pins the page's powers directive by directive
+// (issue #444): its own origin may capture a microphone and a screen, nothing
+// may use a camera, and nothing else is named.
+func TestStaticPermissionsPolicy(t *testing.T) {
+	directives := strings.Split(webPermissionsPolicy, ", ")
+	tests := []struct {
+		feature string
+		want    string
+	}{
+		{"microphone", "microphone=(self)"},
+		{"camera", "camera=()"},
+		{"display-capture", "display-capture=(self)"},
+	}
+	if len(directives) != len(tests) {
+		t.Fatalf("Permissions-Policy has %d directives, want %d: %q", len(directives), len(tests), webPermissionsPolicy)
+	}
+	for i, tt := range tests {
+		t.Run(tt.feature, func(t *testing.T) {
+			if directives[i] != tt.want {
+				t.Errorf("directive %d = %q, want %q", i, directives[i], tt.want)
+			}
+		})
+	}
+}
+
 // The policy text is part of the contract; pin it character for character.
 func TestStaticCSPIsExact(t *testing.T) {
 	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
@@ -667,7 +692,9 @@ func TestStaticCSPWithVoice(t *testing.T) {
 				if got := resp.Header.Get("Content-Security-Policy"); got != tt.want {
 					t.Errorf("CSP = %q, want %q", got, tt.want)
 				}
-				if got := resp.Header.Get("Permissions-Policy"); got != "microphone=(self), camera=(), display-capture=()" {
+				// Screen capture is the page's own since #444, as the
+				// microphone is since #442; the camera stays off.
+				if got := resp.Header.Get("Permissions-Policy"); got != "microphone=(self), camera=(), display-capture=(self)" {
 					t.Errorf("Permissions-Policy = %q", got)
 				}
 			})

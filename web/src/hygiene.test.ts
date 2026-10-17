@@ -121,9 +121,16 @@ describe('rendering hygiene', () => {
 
 // Browser voice (#442): the LiveKit SDK is imported only from src/voice/sdk.ts,
 // and it alone reaches for the microphone. No source of ours calls a device
-// API, not even under src/voice/, so the ban of #395 stays as it was, for
-// every file.
-const deviceApi = /getUserMedia|mediaDevices|enumerateDevices|getDisplayMedia/;
+// API, not even under src/voice/, so the ban of #395 stays as it was for the
+// microphone and the camera, in every file.
+//
+// Screen share (#444): the SDK opens the screen picker too. One file of ours,
+// src/voice/share.ts, may name the screen API, to look for it (no iPhone or
+// iPad browser has one) before offering to share; it never calls it.
+const deviceApi = /getUserMedia|enumerateDevices/;
+const screenApi = /getDisplayMedia|mediaDevices/;
+const screenCall = /getDisplayMedia\s*\(/;
+const screenChecker = './voice/share.ts';
 const notVoice = (path: string) => !path.startsWith('./voice/');
 
 // Where the join token of a voice grant may be read: a property read
@@ -132,11 +139,24 @@ const notVoice = (path: string) => !path.startsWith('./voice/');
 const tokenRead = /\.token\b|rooms\[|\{[^{}]*\btoken\b[^{}]*\}\s*=[^=>]/;
 
 describe('media devices', () => {
-  it('are never reached for by our code: no getUserMedia, no navigator.mediaDevices, anywhere', () => {
+  it('are never reached for by our code: no getUserMedia, no enumerateDevices, anywhere', () => {
     const hits = Object.entries(sources)
       .filter(([, code]) => deviceApi.test(code))
       .map(([path]) => path);
     expect(hits).toEqual([]);
+  });
+
+  it('the screen API is named only by src/voice/share.ts, which never calls it', () => {
+    const naming = Object.entries(sources)
+      .filter(([, code]) => screenApi.test(code))
+      .map(([path]) => path);
+    expect(naming).toEqual([screenChecker]);
+    const code = sources[screenChecker] ?? '';
+    expect(code).not.toMatch(screenCall);
+    // It only looks the API up: a type of what it looks for, and the look.
+    expect(withoutComments(code).match(/getDisplayMedia/g)).toHaveLength(2);
+    expect(code).toContain('readonly mediaDevices?: { readonly getDisplayMedia?: unknown }');
+    expect(code).toContain("typeof devices.getDisplayMedia === 'function'");
   });
 
   it('the LiveKit SDK is imported only from src/voice/sdk.ts', () => {
@@ -156,9 +176,18 @@ describe('media devices', () => {
 
   it('are not mentioned by a pattern the rule would miss: a bare test of each rule', () => {
     // Still forbidden in every file, src/voice/ included.
-    for (const example of ['navigator.mediaDevices.getUserMedia({audio:true})', 'x.enumerateDevices()', 'getDisplayMedia()']) {
-      expect(deviceApi.test(example)).toBe(true);
+    for (const example of ['navigator.mediaDevices.getUserMedia({audio:true})', 'x.enumerateDevices()', 'navigator.getUserMedia(c, ok, no)']) {
+      expect(deviceApi.test(example), example).toBe(true);
     }
+    // The screen API: named anywhere else, it is caught; in share.ts, a call
+    // of it is caught.
+    for (const example of ['navigator.mediaDevices.getDisplayMedia({video:true})', 'const d = navigator.mediaDevices;', "typeof devices.getDisplayMedia === 'function'"]) {
+      expect(screenApi.test(example), example).toBe(true);
+    }
+    for (const example of ['devices.getDisplayMedia({ video: true })', 'navigator.mediaDevices.getDisplayMedia ()']) {
+      expect(screenCall.test(example), example).toBe(true);
+    }
+    expect(screenCall.test("typeof devices.getDisplayMedia === 'function'")).toBe(false);
     // Ways to read the token outside src/api.ts and src/voice/, each caught.
     for (const example of [
       'const t = grant.token;',
@@ -345,39 +374,99 @@ describe('the invite code', () => {
   });
 });
 
+// The diagnostic ring of "Report a problem" (issue #446). It is memory only,
+// only api.ts and the voice client record into it, and what they record names
+// no path, body, address, channel, room, token, ticket or invite code: those
+// are what an event must never hold. diagnostics.test.ts drives each kind
+// through the real code; these rules keep a later change from going around it.
+const ringRecorders = ['./api.ts', './voice/connection.ts'];
+const importsRecord = /import\s*\{[^}]*\brecord\b[^}]*\}\s*from\s*['"](\.\.?\/)+diagnostics['"]/;
+const storageNames = /localStorage|sessionStorage|indexedDB|document\.cookie|\bcaches\b/;
+// A recording call, to the end of its line (each is one line).
+const recordCall = /\brecord\(\{.*$/gm;
+const recordsForbidden = /path|body|url|address|ticket|token|channel|room|message|reason|why/i;
+
+describe('the diagnostic ring', () => {
+  it('is in memory only: neither the ring nor the form names a storage', () => {
+    for (const path of ['./diagnostics.ts', './Report.tsx']) {
+      expect(sources[path], path).toBeDefined();
+      expect(storageNames.test(withoutComments(sources[path] ?? '')), path).toBe(false);
+    }
+    // The ring needs nothing at run time but itself.
+    expect(withoutComments(sources['./diagnostics.ts'] ?? '')).not.toMatch(/^import (?!type\b)/m);
+  });
+
+  it('is recorded into by src/api.ts and the voice client alone', () => {
+    const recording = Object.entries(sources)
+      .filter(([, code]) => importsRecord.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(recording).toEqual(ringRecorders);
+  });
+
+  it('is told kinds, codes, states and names, never what was sent or where', () => {
+    let calls = 0;
+    for (const path of ringRecorders) {
+      for (const call of (sources[path] ?? '').match(recordCall) ?? []) {
+        calls++;
+        expect(recordsForbidden.test(call), `${path}: ${call}`).toBe(false);
+      }
+    }
+    // Every recording site was seen: two failures, an open, a close, a
+    // reconnect, a voice state and a device error.
+    expect(calls).toBe(7);
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(importsRecord.test("import { record } from './diagnostics';")).toBe(true);
+    expect(importsRecord.test("import { forget, record } from '../diagnostics';")).toBe(true);
+    expect(importsRecord.test("import { recent } from './diagnostics';")).toBe(false);
+    for (const bad of ["record({ kind: 'http_failure', status: 0, error: path })", 'record({ kind: "device_error", name: room.name })', "record({ kind: 'reconnect', socket: url, attempt: 1 })"]) {
+      expect(recordsForbidden.test(bad), bad).toBe(true);
+    }
+    expect(storageNames.test('window.sessionStorage.setItem(k, v)')).toBe(true);
+    expect(storageNames.test('indexedDB.open("x")')).toBe(true);
+  });
+});
+
 describe('the built bundle', () => {
-  it('uses the screen API only as the SDK does, and storage only as the SDK and src/api.ts do', async () => {
+  it('uses the screen API only as the SDK and src/voice/share.ts do, and storage only as the SDK and src/api.ts do', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });
     const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
     const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
     expect(code.length).toBeGreaterThan(1000);
-    // The SDK reaches for the microphone (allowed since #442). The screen is
-    // not ours until A11b: the token is microphone-only, so the SDK's screen
-    // share could not publish anyway; its mentions are listed so a new one shows.
-    expect(screenMentions(code)).toBeLessThanOrEqual(maxScreenMentions);
-    // localStorage, counted module by module (issue #439): every mention in
-    // the bundle comes from a module storageMentions names, exactly as often
-    // as it says, so a mention from any other module fails here.
-    const found: Record<string, number> = {};
-    let inModules = 0;
-    for (const chunk of outputs) {
-      if (chunk.type !== 'chunk') continue;
-      for (const [id, rendered] of Object.entries(chunk.modules)) {
-        const moduleCode = rendered.code ?? '';
-        const at = allIndexes(moduleCode, 'localStorage');
-        if (at.length === 0) continue;
-        const source = sourceOf(id);
-        found[source] = (found[source] ?? 0) + at.length;
-        inModules += at.length;
-        // The SDK's are its logger's (loglevel), each beside its storage key.
-        if (source === livekitBundle) {
-          for (const i of at) expect(moduleCode.slice(Math.max(0, i - 600), i + 600)).toMatch(/loglevel|storageKey/);
+    // getDisplayMedia (issue #444) and localStorage (issue #439), counted
+    // module by module: every mention in the bundle comes from a module the
+    // table names, exactly as often as it says, so a mention from any other
+    // module fails here.
+    for (const [needle, table, minifiedAway] of [
+      ['getDisplayMedia', screenMentions, screenMinifiedAway],
+      ['localStorage', storageMentions, 0],
+    ] as const) {
+      const found: Record<string, number> = {};
+      let inModules = 0;
+      for (const chunk of outputs) {
+        if (chunk.type !== 'chunk') continue;
+        for (const [id, rendered] of Object.entries(chunk.modules)) {
+          const moduleCode = rendered.code ?? '';
+          const at = allIndexes(moduleCode, needle);
+          if (at.length === 0) continue;
+          const source = sourceOf(id);
+          found[source] = (found[source] ?? 0) + at.length;
+          inModules += at.length;
+          // The SDK's storage mentions are its logger's (loglevel), each
+          // beside its storage key.
+          if (needle === 'localStorage' && source === livekitBundle) {
+            for (const i of at) expect(moduleCode.slice(Math.max(0, i - 600), i + 600)).toMatch(/loglevel|storageKey/);
+          }
         }
       }
+      expect(found, needle).toEqual(table);
+      // Nor does anything outside a module (code the bundler wrote itself):
+      // the bundle has exactly the modules' mentions, less any the minifier
+      // takes out.
+      expect(allIndexes(code, needle).length, needle).toBe(inModules - minifiedAway);
     }
-    expect(found).toEqual(storageMentions);
-    // Nor does anything outside a module (code the bundler wrote itself).
-    expect(allIndexes(code, 'localStorage').length).toBe(inModules);
   }, 60_000);
 });
 
@@ -409,15 +498,21 @@ function sourceOf(id: string): string {
   return ours !== -1 ? id.slice(ours + '/web/'.length) : id;
 }
 
-// How many times the SDK's own code names getDisplayMedia (its screen-share methods
-// are not tree-shaken away), measured on
-// the pinned version (livekit-client 2.22.3). A bump that adds one fails here
-// and is looked at.
-const maxScreenMentions = 6;
-
-function screenMentions(code: string): number {
-  return allIndexes(code, 'getDisplayMedia').length;
-}
+// Where the built bundle may name getDisplayMedia, and how many times.
+//
+// The SDK (livekit-client 2.22.3) names it 7 times in its module, measured on
+// the pinned version: its browser shim (4) and its picker call,
+// LocalParticipant.createScreenTracks (3), which the page uses since issue
+// #444. Minifying drops the shim's function name, which is why the whole
+// bundle's count before #444 was 6; using the picker call added none.
+// src/voice/share.ts names it once, to see whether the browser has a picker
+// at all. A bump of the SDK that changes the count fails here and is looked at.
+const screenMentions: Record<string, number> = {
+  'src/voice/share.ts': 1,
+  [livekitBundle]: 7,
+};
+// The shim's function name, which the minifier drops.
+const screenMinifiedAway = 1;
 
 function allIndexes(code: string, needle: string): number[] {
   const found: number[] = [];
