@@ -55,7 +55,8 @@ and [voice setup](#voice-optional) for the implemented surfaces.
 What comes next is the [private communications alpha](docs/design/private-alpha.md)
 ([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)), and the work is tracked on the
 [Conch project board](https://github.com/users/njdaniel/projects/14) (private for now). Found a problem or have an
-idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose).
+idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose). Want to
+work on it? Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Client design and P3 planning
 
@@ -1248,6 +1249,10 @@ ops/report-to-issue.sh 7
 ```
 
 `--markdown` writes the bug template's sections (what you did, what you expected, what happened instead, version, device, how often, diagnostics). It names no one. The operator's `GET /v1/reports/{id}` answer carries a `redact` list, every channel, net and principal name on the server (never stored with the report, and in no other answer), and every one of them is replaced by `[channel]` or `[person]` in everything the client wrote, whether or not the operator is in that channel; standard error says how many were taken out. Each of the tester's three answers is in a fenced code block longer than any run of backticks in it, so a mention, an issue link or HTML in it stays text. The browser appears as its family and major version (`Firefox 131`); the stored report keeps the full user agent. `ops/report-to-issue.sh` runs it, opens the result in `$EDITOR` to read and trim, refuses anything that still looks like a Conch credential, warns about anything that looks like a web, email or IP address, asks for a title and a yes, and only then runs `gh issue create --label type/bug --body-file …` and `conch admin reports file <id> <issue-url>`. The issue lands in the Project's Backlog with the bug template's label.
+
+## Contributing
+
+Setting up, the checks to run, and how issues, pull requests and reviews work are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
