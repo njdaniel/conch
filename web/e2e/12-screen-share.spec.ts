@@ -5,6 +5,10 @@
 // Docker the tests fail when CI is set and are skipped otherwise, as in
 // 10-voice.
 //
+// A share carries on when the room is renewed under it (issue #516): another
+// member disabled renews the room, and the sharer's page claims the share
+// again and publishes the same capture in the new one, with no picker.
+//
 // What this cannot try: a real system's sound, macOS, Windows, Firefox,
 // Safari, iOS and Android. Those cells of the plan's section 2 are for a
 // person with the devices (#474).
@@ -23,10 +27,11 @@ const narrow: BrowserContextOptions = { viewport: { width: 360, height: 740 } };
 // SDK makes (for getStats), keeps the screen the picker gave (so a test can
 // end it as the browser's stop control does), and counts microphone requests.
 const instrument = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[]; __screen: MediaStream | null; __micAsks: number };
+  const w = window as unknown as { __pcs: RTCPeerConnection[]; __screen: MediaStream | null; __micAsks: number; __picks: number };
   w.__pcs = [];
   w.__screen = null;
   w.__micAsks = 0;
+  w.__picks = 0;
   const Original = window.RTCPeerConnection;
   const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
     const pc = new Original(...args);
@@ -39,6 +44,7 @@ const instrument = () => {
   const devices = navigator.mediaDevices;
   const display = devices.getDisplayMedia.bind(devices);
   devices.getDisplayMedia = async (options?: DisplayMediaStreamOptions) => {
+    w.__picks++;
     const stream = await display(options);
     w.__screen = stream;
     return stream;
@@ -65,6 +71,8 @@ async function inbound(page: Page): Promise<Inbound> {
     let width = 0;
     let audioBytes = 0;
     for (const pc of w.__pcs) {
+      // A connection closed (a room renewed, issue #516) has no stats to give.
+      if (pc.signalingState === 'closed') continue;
       const stats = await pc.getStats();
       stats.forEach((r: { type: string; kind?: string; framesDecoded?: number; frameWidth?: number; bytesReceived?: number }) => {
         if (r.type !== 'inbound-rtp') return;
@@ -107,12 +115,12 @@ test.describe('screen share with LiveKit', () => {
     readonly close: () => Promise<void>;
   }
 
-  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions): Promise<Someone> {
+  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions): Promise<Someone> {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     const watch = watchPage(page, vw);
     await page.addInitScript(instrument);
-    const member = vw[who];
+    const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await channelButton(page, vw.channel).click();
     return { page, watch, member, close: () => context.close() };
@@ -132,10 +140,13 @@ test.describe('screen share with LiveKit', () => {
     await expect(voice).toContainText('You are sharing your screen with its sound.', { timeout: 30_000 });
   }
 
-  async function watching(p: Someone): Promise<void> {
+  // How many times the picker was opened on this page.
+  const picks = (page: Page) => page.evaluate(() => (window as unknown as { __picks: number }).__picks);
+
+  async function watching(p: Someone, who = 'alice'): Promise<void> {
     const voice = voiceRegion(p.page);
     await voice.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
-    await expect(shareView(p.page)).toContainText('alice is sharing');
+    await expect(shareView(p.page)).toContainText(`${who} is sharing`);
     // Frames arrive and keep arriving.
     await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
     const before = (await inbound(p.page)).frames;
@@ -258,6 +269,65 @@ test.describe('screen share with LiveKit', () => {
       await expectClean(b);
     } finally {
       for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #516. Disabling a member renews every voice room they are in, which
+  // ends the share in progress (reason=rotated). The sharer's page claims it
+  // again in the new room and publishes the same capture: the audit shows the
+  // share stopped by the renewal and started again. A sharer who is the one
+  // disabled gets no session, and the share does not come back.
+  test('a share carries on when another member is disabled, and ends for good when the sharer is', async ({ browser }) => {
+    const before = (await shareRows()).length;
+    const dave = await vw.addMember('dave');
+    const erin = await vw.addMember('erin');
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    const d = await person(browser, dave);
+    const e = await person(browser, erin);
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await join(d, 'Join voice');
+      await share(a);
+      await watching(b);
+
+      // Another member is disabled: the room is renewed, every page
+      // reconnects, and the share is back without anyone doing anything.
+      await vw.disable(dave);
+      await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 30_000 });
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      expect(await picks(a.page), 'the picker is not opened again').toBe(1);
+      await expect(shareView(b.page)).toContainText('alice is sharing', { timeout: 30_000 });
+      await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
+      const frames = (await inbound(b.page)).frames;
+      await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
+      await expect
+        .poll(async () => (await shareRows()).slice(before).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim()), { timeout: 15_000 })
+        .toEqual(['voice_share_started', 'voice_share_stopped rotated', 'voice_share_started']);
+
+      // The sharer is the one disabled: the share ends, and does not come
+      // back; the capture is stopped.
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
+      await join(e, 'Join voice');
+      await share(e);
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
+      await watching(b, 'erin');
+      const middle = (await shareRows()).length;
+      await vw.disable(erin);
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: 30_000 });
+      await expect
+        .poll(() => e.page.evaluate(() => (window as unknown as { __screen: MediaStream | null }).__screen?.getVideoTracks()[0]?.readyState ?? 'gone'), { timeout: 30_000 })
+        .toBe('ended');
+      // Long enough for a resume to have been claimed (it takes a reconnect).
+      await b.page.waitForTimeout(10_000);
+      expect((await shareRows()).slice(middle).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim())).toEqual(['voice_share_stopped rotated']);
+      await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
+      await expectClean(a, 1);
+      for (const p of [b, d]) await expectClean(p);
+    } finally {
+      for (const p of [a, b, d, e]) await p.close();
     }
   });
 

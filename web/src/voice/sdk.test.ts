@@ -479,9 +479,11 @@ describe('the watch view', () => {
     return p;
   };
 
+  // The SDK stops no track it unpublishes, so that a share's capture
+  // survives its room (issue #516); the adapter stops every track itself.
   it('joins with adaptive stream and dynacast on, and subscribes to nothing automatically', async () => {
     await newLiveKitRoom().connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
-    expect(state.roomOptions).toEqual({ adaptiveStream: true, dynacast: true });
+    expect(state.roomOptions).toEqual({ adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: false });
     expect(state.connectOptions).toEqual({ autoSubscribe: false });
   });
 
@@ -647,6 +649,79 @@ describe('sharing a screen', () => {
     await room.pickScreen('detail');
     await room.close();
     expect(state.screenTracks.map((t) => t.stopped > 0)).toEqual([true, true]);
+  });
+
+  // Issue #516: a renewed room. The capture is taken off the old connection
+  // still running, and published on the next with the same options.
+  it('keeps a capture across connections: unpublished without being stopped or reported, and published on the next as picked', async () => {
+    vi.useFakeTimers();
+    try {
+      const ends: string[] = [];
+      const old = await connected((cause) => ends.push(cause));
+      await old.pickScreen('motion');
+      await old.publishScreen();
+      const kept = old.keepScreen();
+      expect(kept?.audio).toBe(true);
+      expect(kept?.live()).toBe(true);
+      expect(state.calls.filter((c) => c.startsWith('unpublish'))).toEqual(['unpublish screen_share', 'unpublish screen_share_audio']);
+      await old.close();
+      vi.runAllTimers();
+      expect(ends).toEqual([]);
+      expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+      // Kept: stopScreen on the old connection has nothing to stop.
+      await old.stopScreen();
+      expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+
+      const next = await connected((cause) => ends.push(`next ${cause}`));
+      if (kept === null) throw new Error('nothing kept');
+      next.adoptScreen(kept);
+      state.published.length = 0;
+      await next.publishScreen();
+      expect(state.published.map((p) => p.options)).toEqual([
+        {
+          source: 'screen_share',
+          simulcast: true,
+          screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 30 },
+          screenShareSimulcastLayers: [
+            { width: 640, height: 360, encoding: { maxBitrate: 300_000, maxFramerate: 5 } },
+            { width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } },
+          ],
+        },
+        { source: 'screen_share_audio', audioPreset: { maxBitrate: 128000 }, dtx: false, red: false, forceStereo: true },
+      ]);
+      // The browser's stop control now is the new connection's to report.
+      state.screenTracks[0]?.mediaStreamTrack.ended();
+      vi.runAllTimers();
+      expect(ends).toEqual(['next browser']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a kept capture says when the browser ended it, and stops when asked', async () => {
+    const room = await connected();
+    await room.pickScreen('detail');
+    await room.publishScreen();
+    const kept = room.keepScreen();
+    await room.close();
+    if (kept === null) throw new Error('nothing kept');
+    let told = 0;
+    kept.onEnded = () => {
+      told++;
+    };
+    state.screenTracks[0]?.mediaStreamTrack.ended();
+    expect(told).toBe(1);
+    expect(kept.live()).toBe(false);
+    kept.stop();
+    expect(state.screenTracks.map((t) => t.stopped)).toEqual([1, 1]);
+  });
+
+  it('keeps nothing when nothing was picked, and adopts only a capture it kept', async () => {
+    const room = await connected();
+    expect(room.keepScreen()).toBeNull();
+    expect(() => {
+      room.adoptScreen({ audio: false, live: () => true, onEnded: null, stop: () => undefined });
+    }).toThrow();
   });
 });
 

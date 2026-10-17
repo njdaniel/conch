@@ -78,6 +78,13 @@ export interface VoiceWorld {
   // The audit trail as the operator exports it: one line per event.
   audit: () => Promise<{ actor: string; action: string; subject: string; detail: string }[]>;
   removeFromChannel: (member: Member) => Promise<void>;
+  // A member made for one test, in the channel, for a test that disables
+  // them (issue #516): a disabled principal's credentials never work again,
+  // so the three above are not used for that.
+  addMember: (name: string) => Promise<Member>;
+  // An operator disables a principal: conchd renews every voice room they
+  // are in.
+  disable: (member: Member) => Promise<void>;
   // An operator stops the channel's screen share (issue #444); the status.
   stopShareAsOperator: () => Promise<number>;
   stopLiveKit: () => void;
@@ -212,6 +219,14 @@ room:
       removeFromChannel: async (m) => {
         const r = await api(operator, 'DELETE' as const, `/v1/channels/${channel}/members/${String(m.id)}`);
         if (r.status < 200 || r.status > 299) throw new Error(`remove ${m.name}: status ${String(r.status)}`);
+      },
+      addMember: async (name) => {
+        const m = await member(name);
+        secrets.push(m.token);
+        return m;
+      },
+      disable: async (m) => {
+        await must(`disable ${m.name}`, operator, 'POST', `/v1/principals/${String(m.id)}/disable`);
       },
       stopShareAsOperator: async () => (await api(operator, 'DELETE', `/v1/channels/${channel}/voice/share`)).status,
       stopLiveKit: () => {

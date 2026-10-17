@@ -7,7 +7,7 @@ import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer } from './presence';
-import { endedNote, ownPageNote, sharedNote, soundNote, type ShareContent } from './share';
+import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote, type ShareContent } from './share';
 import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
 
@@ -230,6 +230,14 @@ function ShareControls({ voice, holderName }: { readonly voice: VoiceControl; re
       return (
         <div className="voice-share">
           <p role="status">{sharedNote(share.audio, features)}</p>
+          {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
+          <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
+        </div>
+      );
+    case 'resuming':
+      return (
+        <div className="voice-share">
+          <p role="status">{resumingNote}</p>
           <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
         </div>
       );
