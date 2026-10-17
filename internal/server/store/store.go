@@ -601,14 +601,24 @@ BEGIN
 	SELECT RAISE(ABORT, 'principals.name_key and name_skel are required');
 END`,
 	},
+	// 28: Hidden principals (issue #445). Deleting an account means disabling
+	// and hiding it: hidden_at is when it was hidden, NULL for every existing
+	// principal. A hidden principal is always disabled, which the CHECK holds
+	// to; enabling it clears both. Names starting with "hidden-" are reserved
+	// for hidden principals from now on, and the Go step logs any principal
+	// that already has one: it keeps its name.
+	{
+		`ALTER TABLE principals ADD COLUMN hidden_at INTEGER CHECK (hidden_at IS NULL OR disabled_at IS NOT NULL)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
 // after its SQL statements, for the rare change SQL cannot express. It is
 // keyed by the migration's 1-based number (the schema version it produces).
 var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
-	10:               hashPlaintextHooks,
-	nameKeyMigration: fillNameKeys,
+	10:                hashPlaintextHooks,
+	nameKeyMigration:  fillNameKeys,
+	hiddenAtMigration: reportReservedNames,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

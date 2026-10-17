@@ -89,7 +89,28 @@ type Participant struct {
 	// MicrophoneMuted is true when every published microphone track is muted.
 	// It is false when no microphone track is published.
 	MicrophoneMuted bool
+	// ScreenSharePublished is true when a track with the screen-share source
+	// is published, and ScreenShareAudioPublished when one with the
+	// screen-share audio source is (issue #443). Muted or not: a published
+	// share is a share.
+	ScreenSharePublished      bool
+	ScreenShareAudioPublished bool
+	// ShareSourcesGranted is true when the participant's current permission
+	// lets it publish either screen-share source: it may publish, and its
+	// list of sources names one of them or is empty (LiveKit reads an empty
+	// list as every source; measured on 1.13.7, a token naming no sources
+	// is listed with can_publish_sources: []). It is false when LiveKit did
+	// not report a permission at all.
+	ShareSourcesGranted bool
+	// CanPublish is the participant's current permission to publish at all,
+	// as LiveKit reports it. It is false when LiveKit reported no permission,
+	// so a caller that restores a grant from it never widens one.
+	CanPublish bool
 }
+
+// Sharing reports whether the participant has either screen-share source
+// published.
+func (p Participant) Sharing() bool { return p.ScreenSharePublished || p.ScreenShareAudioPublished }
 
 // Transmitting reports whether the participant has a microphone track
 // published and unmuted, which is what push-to-talk looks like.
@@ -155,6 +176,7 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 				Source flexEnum `json:"source"`
 				Muted  bool     `json:"muted"`
 			} `json:"tracks"`
+			Permission *participantPermission `json:"permission"`
 		} `json:"participants"`
 	}
 	// An admin grant with no room named is wider than this call needs, so an
@@ -177,9 +199,21 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 		}
 		mics, muted := 0, 0
 		for _, t := range p.Tracks {
+			// A screen share is recognised by its source alone, whatever
+			// its type: a source that is not allowed is refused by LiveKit
+			// whatever the type says, so a track of an unexpected type
+			// under a share source is still a share.
+			switch {
+			case t.Source.is(sourceScreenShare, 3):
+				part.ScreenSharePublished = true
+				continue
+			case t.Source.is(sourceScreenShareAudio, 4):
+				part.ScreenShareAudioPublished = true
+				continue
+			}
 			// protojson drops default values: an AUDIO type (0) is usually
 			// absent, so only an explicit non-audio type disqualifies a track.
-			if !t.Source.is("MICROPHONE", 2) || (!t.Type.absent() && !t.Type.is("AUDIO", 0)) {
+			if !t.Source.is(sourceMicrophone, 2) || (!t.Type.absent() && !t.Type.is("AUDIO", 0)) {
 				continue
 			}
 			mics++
@@ -189,6 +223,8 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 		}
 		part.MicrophonePublished = mics > 0
 		part.MicrophoneMuted = mics > 0 && muted == mics
+		part.ShareSourcesGranted = p.Permission.grantsShare()
+		part.CanPublish = p.Permission != nil && (p.Permission.CanPublish || p.Permission.SnakeCanPublish)
 		out = append(out, part)
 	}
 	return out, nil
@@ -244,6 +280,124 @@ func (c *Client) DeleteRoom(ctx context.Context, name string) error {
 		return nil
 	}
 	return err
+}
+
+// LiveKit's names for the track sources conchd grants, as its room API
+// writes them (the TrackSource enum). Join tokens use the lower-case form
+// (token.go).
+const (
+	sourceMicrophone       = "MICROPHONE"
+	sourceScreenShare      = "SCREEN_SHARE"
+	sourceScreenShareAudio = "SCREEN_SHARE_AUDIO"
+)
+
+// Permission is what UpdateParticipant sets a connected participant's
+// permission to. LiveKit replaces the whole permission with what it is sent,
+// so this names only what conchd decides and the request spells out the
+// rest: subscribe, never publish data, nothing hidden or administrative.
+// With ScreenShare false it is exactly what a join token grants (JoinToken),
+// and LiveKit treats setting it on a participant that already has it as no
+// change at all.
+type Permission struct {
+	// CanPublish is the join token's publishing grant: may publish a
+	// microphone. False is a listen-only participant.
+	CanPublish bool
+	// ScreenShare adds the screen-share sources to the microphone: a screen
+	// and its sound. It means nothing without CanPublish.
+	ScreenShare bool
+}
+
+// sources lists the sources p allows, in LiveKit's room-API names.
+func (p Permission) sources() []string {
+	if p.ScreenShare {
+		return []string{sourceMicrophone, sourceScreenShare, sourceScreenShareAudio}
+	}
+	return []string{sourceMicrophone}
+}
+
+// participantPermission is the permission ListParticipants reports for a
+// participant, in either of the JSON spellings protojson may use.
+type participantPermission struct {
+	CanPublish      bool       `json:"canPublish"`
+	SnakeCanPublish bool       `json:"can_publish"`
+	Sources         []flexEnum `json:"canPublishSources"`
+	SnakeSources    []flexEnum `json:"can_publish_sources"`
+}
+
+// grantsShare reports whether the permission lets its holder publish either
+// screen-share source. A nil permission (LiveKit reported none) grants
+// nothing that can be seen; the tracks are then the only evidence.
+func (pp *participantPermission) grantsShare() bool {
+	if pp == nil || (!pp.CanPublish && !pp.SnakeCanPublish) {
+		return false
+	}
+	sources := append(append([]flexEnum(nil), pp.Sources...), pp.SnakeSources...)
+	// LiveKit reads an empty list as "any source" (protocol auth.VideoGrant
+	// GetCanPublishSource), so an empty list grants the share.
+	if len(sources) == 0 {
+		return true
+	}
+	for _, s := range sources {
+		if s.is(sourceScreenShare, 3) || s.is(sourceScreenShareAudio, 4) {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateParticipant sets the permission of identity's connection to room,
+// which is how a screen share is granted and withdrawn (issue #443). LiveKit
+// applies it at once: withdrawing a source unpublishes every track of that
+// source, and every subscriber is told it is gone, before the call returns
+// (measured on 1.13.7). It also sends the connection a fresh token of its own
+// carrying the new permission, so a client that reconnects on the token it
+// was last sent keeps exactly what it has now.
+//
+// found is false, with a nil error, when LiveKit has nobody by that identity
+// in the room: the not_found Twirp answer (measured on 1.13.7: 404,
+// {"code":"not_found","msg":"twirp error unknown: participant does not
+// exist"}). Only that exact answer counts, as for RemoveParticipant. A 200
+// must name the identity back, so an answer from something that is not
+// LiveKit is not taken for a change that was made.
+func (c *Client) UpdateParticipant(ctx context.Context, room, identity string, p Permission) (found bool, err error) {
+	if room == "" || identity == "" {
+		return false, errors.New("livekit: UpdateParticipant needs a room name and an identity")
+	}
+	// Every field of the permission is written out: LiveKit replaces the
+	// permission as a whole, and protojson reads an absent bool as false,
+	// which for subscribing is not what the join token granted.
+	req := map[string]any{
+		"room":     room,
+		"identity": identity,
+		"permission": map[string]any{
+			"can_subscribe":            true,
+			"can_publish":              p.CanPublish,
+			"can_publish_data":         false,
+			"can_publish_sources":      p.sources(),
+			"hidden":                   false,
+			"recorder":                 false,
+			"can_update_metadata":      false,
+			"agent":                    false,
+			"can_subscribe_metrics":    false,
+			"can_manage_agent_session": false,
+		},
+	}
+	var answer struct {
+		Identity string `json:"identity"`
+	}
+	grant := adminGrant{RoomAdmin: true, Room: room}
+	err = c.call(ctx, "UpdateParticipant", grant, req, &answer)
+	var status httpStatusError
+	if errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if answer.Identity != identity {
+		return false, fmt.Errorf("%w: UpdateParticipant: the answer does not name the participant", ErrUnavailable)
+	}
+	return true, nil
 }
 
 // httpStatusError is a non-2xx answer from LiveKit. It is always wrapped in

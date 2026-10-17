@@ -53,8 +53,9 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // the only code path that creates an operator.
 //
 // Everything happens in one write transaction. If any operator exists it
-// returns ErrOperatorExists, and if name is taken (by a member), or clashes
-// with a member's by case or look-alike characters, it returns ErrDuplicate;
+// returns ErrOperatorExists, and if name is taken (by a member), clashes
+// with a member's by case or look-alike characters, or is reserved for
+// hidden principals, it returns ErrDuplicate;
 // in both cases nothing is written, including no revocations.
 //
 // Unless opts.KeepExistingCredentials is set, every live credential (not
@@ -67,9 +68,9 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // credential bound to a principal of its creator's choosing, so every existing
 // hook is deleted, with one hook_revoked audit event each (never containing
 // the token). Agent manifests are only counted. The operator's own credential
-// is created after, so it is never revoked. On success an operator_bootstrapped
-// event and the usual credential_created event are appended in the same
-// transaction; none carries a token.
+// is created after, so it is never revoked. On success principal_created
+// (issue #445), operator_bootstrapped and the usual credential_created event
+// are appended in the same transaction; none carries a token.
 func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts BootstrapOptions) (BootstrapResult, error) {
 	token, err := newCredentialToken()
 	if err != nil {
@@ -117,6 +118,9 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
 		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
+			return err
+		}
+		if err := appendAuditEventTx(ctx, tx, "system", AuditPrincipalCreated, principalActor(id), "kind=human", now); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", "operator_bootstrapped", principalActor(id), "", now); err != nil {

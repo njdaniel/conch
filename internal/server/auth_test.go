@@ -170,6 +170,12 @@ var routeExpectations = map[string]routeExpectation{
 	// the same code: 503 for a member here, 400 under AuthOff, 403 for an
 	// agent. The body is not read before those answers.
 	"POST /v1/channels/{channel}/voice/transmit": {classAuth, "/v1/channels/general/voice/transmit", `{"state":"started"}`, 503},
+	// Screen share (issue #443): checked as the routes above, so 503 for a
+	// member here, 400 under AuthOff, 403 for an agent. Stopping lets an
+	// operator through member or not, and the fixture's operator gets the same
+	// 503 a member does.
+	"POST /v1/channels/{channel}/voice/share":   {classAuth, "/v1/channels/general/voice/share", "", 503},
+	"DELETE /v1/channels/{channel}/voice/share": {classAuth, "/v1/channels/general/voice/share", "", 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
@@ -269,6 +275,14 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Operator administration of principals (issue #445). The hide names a
+	// principal that does not exist, the bulk hide selects nobody (a 400
+	// before anything is read), and the list only reads. The bulk hide, like
+	// the bulk disables, needs a caller to leave out: AuthOff gets 401
+	// (special-cased below).
+	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
+	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
+	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -393,7 +407,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -457,7 +471,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if rt.pattern == "GET /v1/whoami" || rt.pattern == "DELETE /v1/credentials/current" {
 					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to revoke
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				if isFileRoute(rt.pattern) {
@@ -475,6 +489,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if isInviteRoute(rt.pattern) {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
 				}
+				if rt.pattern == "POST /v1/principals/hide" {
+					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
 					t.Errorf("status = %d, want %d; body %s", rec.Code, want, rec.Body)
@@ -486,12 +503,13 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 			})
 		}
-		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
-		// the fixture's three member_added events, and the fixture agent's
+		// Bootstrap writes 3 audit events (principal_created among them,
+		// issue #445), alice's and bot's credentials 1 each, the fixture's
+		// three member_added events, and the fixture agent's
 		// manifest_created; no request may add to that (in particular no
 		// access_denied).
-		if n := len(f.audit(t)); n != 8 {
-			t.Errorf("mode %q: audit events = %d, want 8", mode, n)
+		if n := len(f.audit(t)); n != 9 {
+			t.Errorf("mode %q: audit events = %d, want 9", mode, n)
 		}
 	}
 }

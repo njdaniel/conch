@@ -159,6 +159,12 @@ func TestChannelContentLeak(t *testing.T) {
 		// Transmit reports (issue #135) answer as the session endpoint does:
 		// a non-member is told nothing, whatever the body says.
 		{"voice transmit report", "POST", "/v1/channels/%s/voice/transmit", `{"state":"started"}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// Screen share (issue #443): claiming answers as the session endpoint
+		// does. Stopping lets an operator through, member or not (moderation
+		// is theirs, and they may see every channel anyway); any other
+		// non-member is told nothing.
+		{"voice share claim", "POST", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice share stop", "DELETE", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, http.StatusServiceUnavailable}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.

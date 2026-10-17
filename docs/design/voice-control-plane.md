@@ -3,7 +3,7 @@
 - **Status:** Adopted for V3 implementation, 2026-10-09 (governing decision: [ADR-004](../adr/ADR-004-voice-via-livekit.md), Accepted). §10 records the LiveKit behaviours it relies on, as measured.
 - **Touches:** [ADR-002](../adr/ADR-002-single-binary-sqlite.md) (optional processes degrade gracefully), [ADR-003](../adr/ADR-003-multi-human-access.md) (authenticated humans, channel membership), [ADR-005](../adr/ADR-005-nets-and-whispers.md) (audiences), [ADR-006](../adr/ADR-006-rust-voice-client.md) (the client).
 - **Owner:** protocol-designer (schemas), server-engineer (control plane)
-- **Issues:** epic #122, this note #123; room rotation #161
+- **Issues:** epic #122, this note #123; room rotation #161; screen share #443 (§12, which records its own measurements)
 - **Evidence:** the V0 spike, summarised in ADR-004 "Spike findings".
 
 ADR-004 decides that `conchd` is the only authority on who may speak and who may hear, that LiveKit only moves audio, and that there is one LiveKit room per net. This note says how `conchd` does that: configuration, rooms, session tokens, live enforcement, presence, and audit. It covers the server only. The client, `conch-voice`, is V4.
@@ -185,6 +185,9 @@ A snapshot is the whole state, not a delta, so a client that misses one loses no
 | `voice_participant_removed` | `conchd` removes someone by name | channel, audience, reason |
 | `voice_room_rotated` | a channel's room is rotated (§5); once per rotation, written in the rotation's transaction | actor `system`, subject `channel:<id>`, detail `reason=<principal_disabled, member_removed, credential_revoked, credential_expired or not_human>`; never a room name |
 | `voice_enforcement_unavailable` | LiveKit becomes unreachable (once per outage; also when no room is in use, since a failed sweep means conchd cannot tell) | `source=observed` |
+| `voice_share_started` | a screen share is granted (§12), before the claim is answered | actor the sharer; `channel`, `audio` |
+| `voice_share_stopped` | a share ends, once for every share that started (§12) | actor the sharer, or the operator who stopped it; `channel`, `principal` (the sharer), `reason=self`, `operator`, `left`, `access_lost`, `rotated` or `idle` |
+| `voice_share_unclaimed` | a pass sees a screen-share track published by someone who does not hold the room's share (§12) | actor that principal; `channel`, `sources`, `source=observed` |
 
 The actor is the principal. No audio and no token is ever recorded.
 
@@ -206,7 +209,8 @@ Canonical types live in `pkg/schema/voice.go` (#124; the transmit report was add
 | `VoiceRoomGrant` | element of `rooms` above | one per room the caller may join |
 | `VoicePresenceV1` | `conch.voice_presence.v1` (`schema.VoicePresenceSchemaV1`) | `GET /v1/channels/{channel}/voice` and the presence socket (§6) |
 | `VoicePresenceRoom` | element of `rooms` in presence | one per room the caller may see: optional `audience`, `participants` |
-| `VoiceParticipant` | element of `participants` | `principal_id`, `can_publish`, `transmitting`, `joined_at` |
+| `VoiceParticipant` | element of `participants` | `principal_id`, `can_publish`, `transmitting`, `joined_at`; and, from #443, `sharing` and `sharing_audio`, optional and omitted when false (§12) |
+| `VoiceShareV1` | REST body, versioned by suffix | `POST /v1/channels/{channel}/voice/share` (§12): `principal_id`, `started_at`, `audio` |
 | `VoiceTransmitReportV1` | REST request body, versioned by suffix | `POST /v1/channels/{channel}/voice/transmit` (V4; [conch-voice.md](conch-voice.md) §6): a `state` of `started` or `stopped`, optional `audience` |
 
 Every `audience` field reuses `Audience` from the V2 schema (#114); absent means the whole channel. The error codes `voice_not_configured`, `voice_unavailable` and `voice_requires_auth` are the constants `ErrorCodeVoiceNotConfigured`, `ErrorCodeVoiceUnavailable` and `ErrorCodeVoiceRequiresAuth`, carried in the existing `Error` body.
@@ -223,7 +227,9 @@ What the schema enforces, so that handlers and clients do not restate it:
 - Transmit report: a `state` of exactly `started` or `stopped` (case-sensitive), and a well-formed `audience` if present; an unknown audience kind fails the report. The report carries no time, no sequence number, and no principal, room or token: `conchd` stamps the time of receipt, takes reports in arrival order, and knows the caller and the room itself.
 - A transmit report is decoded strictly, unlike presence. `schema.DecodeVoiceTransmitReportV1` is the one way a request body becomes a report: it rejects any field the type does not declare, at any depth (`at`, `time`, `seq`, `principal_id`, `room`, `token`, or an extra field inside `audience`), anything after the one JSON object, and a report that does not validate. A dropped field would otherwise sit in a captured request looking as though `conchd` had honoured it. `voice_test.go` also pins the fields a report can carry to an exact list, so adding one is a deliberate act and a new version of the shape. The decoder does not bound the body; the handler does.
 
-Golden fixtures in `pkg/schema/testdata/`: `voice-session-response-v1.json`, `voice-session-response-v1-net.json`, `voice-presence-v1.json`, `voice-presence-v1-unavailable.json`, `voice-presence-v1-not-configured.json`, `voice-transmit-report-v1-started.json`, `voice-transmit-report-v1-stopped.json`, `voice-transmit-report-v1-net.json`.
+Golden fixtures in `pkg/schema/testdata/`: `voice-session-response-v1.json`, `voice-session-response-v1-net.json`, `voice-presence-v1.json`, `voice-presence-v1-unavailable.json`, `voice-presence-v1-not-configured.json`, `voice-transmit-report-v1-started.json`, `voice-transmit-report-v1-stopped.json`, `voice-transmit-report-v1-net.json`, and from #443 `voice-presence-v1-sharing.json` and `voice-share-v1.json`.
+
+The screen share (#443) changed nothing published: `VoiceShareV1` is a new type, the two presence fields are optional and omitted when false (a document with nobody sharing is byte for byte what it was), and the error code `voice_share_busy` (`ErrorCodeVoiceShareBusy`) travels in the existing `Error` body. Presence also checks that `sharing` needs `can_publish`, that `sharing_audio` needs `sharing`, and that a room lists at most one participant sharing; no document an older server sent can fail those.
 
 API parity (CLAUDE.md rule 4): `conch voice status <channel>` prints the snapshot. Joining is `conch-voice`'s job in V4, using the same session endpoint.
 
@@ -259,4 +265,90 @@ Checked against LiveKit's documentation, not a server: its webhooks have no mute
 
 ## 11. Out of scope
 
-Recording; video and screen share (P9); agents as voice participants; whisper mapping; anything about audio quality, echo cancellation or push-to-talk keys, which belong to the client (V4 and V5).
+Recording; camera video; agents as voice participants; whisper mapping; anything about audio quality, echo cancellation or push-to-talk keys, which belong to the client (V4 and V5). Screen share was here until ADR-008 moved it into the private alpha; its server half is §12.
+
+## 12. Screen share
+
+ADR-008 §3 moves screen sharing into the private alpha: one person shares into a channel's voice room, with sound where the browser provides it, and the others in that room watch. Nothing is recorded. This section is the server half (#443); the browser half, sharing with sound, the watch view and simulcast, is #444. The rule is decision O5 of [private-alpha.md](private-alpha.md), adopted by Nick on 2026-10-16: **anyone in the room may share, one share per room at a time; the sharer can stop it, and so can an operator.**
+
+### The claim
+
+A join token still grants the microphone alone (§4), and `e2e/voice` still asserts exactly that. Sharing is a separate, checked step, so that conchd decides who shares as it decides who speaks.
+
+`POST /v1/channels/{channel}/voice/share`, authenticated, no body.
+
+- **Who may ask** is checked by the same code as a session, in the same order: a verified caller (with `--auth off`, 400 `voice_requires_auth`), a member (anyone else, operators included, the unknown-channel 404), a human (an agent, 403), voice granted (403 `voice_not_allowed`), voice configured (503 `voice_not_configured`).
+- **A session** is then required, as for a transmit report: the credential the request came with must be a recorded holder of the channel's current room (§4), or 409 `voice_no_session`.
+- **The room's share** is looked at last. Held by another principal: 409 `voice_share_busy`, naming nobody. Free: the caller's claim is recorded and LiveKit is asked to let the caller's connection publish the screen-share sources.
+- **The answer** is 200 and a `VoiceShareV1`: the sharer, when the share started, and `audio`, whether it may carry sound. Today `audio` is always true: conchd grants a share's sound with it. The field is there so that a later rule (an invite that grants voice but not sound, say) does not need a new version.
+- **Not connected.** A share is granted to a connection. A holder with no connection in the room (LiveKit answers `not_found`) gets 409 `voice_no_session` and nothing is recorded. The client connects first, then claims, then publishes.
+- **LiveKit down.** If LiveKit cannot be asked, nothing is granted and nothing recorded: 503 `voice_unavailable`. Chat and everything else are unaffected (rule 1).
+- **Asking again while holding it** grants the sources again and answers with the share already held, unchanged; it writes nothing. That is how a sharer whose connection was replaced by one made with a fresh join token (a full reconnect through conchd) gets the share's sources on the new connection.
+
+**How the sources are granted.** conchd calls LiveKit's `UpdateParticipant` for the sharer's identity in the room, with the whole permission spelled out: subscribe; publish; never data; sources `MICROPHONE`, `SCREEN_SHARE`, `SCREEN_SHARE_AUDIO`; nothing hidden, recorder, agent, metadata or metrics. Taking the share away sets the same permission with `MICROPHONE` alone, which is exactly the join grant, so LiveKit treats it as no change for a participant that never shared. LiveKit replaces a permission as a whole, which is why every field is written out. This is the recommended path of #443, and the measurements below show it holds; the fallback (a second identity per share, with its own token) was not needed.
+
+Claims and stops of one room are made one at a time, and so are the withdrawals a pass makes (below), so that none of them takes away a grant another has just made. A claim is recorded before LiveKit is asked, so a pass that sees the new grant sees its holder too, and stays *pending* until its `voice_share_started` row is written; nothing ends a pending share, and presence does not show it. A claim whose row cannot be written is undone and its sources withdrawn: a share conchd cannot account for does not start.
+
+### Stopping
+
+`DELETE /v1/channels/{channel}/voice/share`, authenticated.
+
+- **An operator** is let through after a verified caller and a channel that exists, member or not, and whatever their kind or voice grant: moderation is theirs, and an operator can add themselves to any channel anyway.
+- **Anyone else** is checked as on every voice route, so a non-member gets the unknown-channel 404 and learns nothing; then voice configured (503).
+- **No share** (or no room): 204, nothing written. **Someone else's share**, for anyone but an operator: 403 `forbidden`, audited as `access_denied`; the share goes on.
+- **Otherwise** the share ends at once: it leaves presence, `voice_share_stopped` is written (`reason=self`, or `reason=operator` with the operator as actor), and then LiveKit is asked to take the sources away. A withdrawal LiveKit cannot be asked for is retried by the passes; the stop is not refused for it.
+
+### How a share ends by itself
+
+A pass (§6) ends a share, with its reason:
+
+- **`left`**: the sharer is not in the room on a pass. A connection replaced between two passes is not a leaving: the share is the principal's, not the connection's, and survives a reconnect. If the new connection was made with LiveKit's own refreshed token it already has the share's sources (finding S4 below); if it was made with a fresh join token it claims again.
+- **`access_lost`**: the sharer is no longer entitled (a pass finds them not a member, disabled or not human), or is removed by name at once (§5).
+- **`rotated`**: the room is rotated (§5). Rotation drops every claim of the room, writes the row before anyone's `voice_left`, and deleting the room takes the grant with it. Removing or disabling a sharer who holds a session rotates the room, so this is how their share normally ends; nothing of it survives in memory, in LiveKit or in presence, and the channel's new room has no share.
+- **`idle`**: nothing has been shared for a while. 15 seconds after the claim if no screen-share track has been seen at all (time to pick a window in the browser's picker), and 5 seconds after the last pass that saw one once the share has been published. Either screen-share source counts.
+
+Ending a share takes the sources away (unless the room is gone), and LiveKit then unpublishes the share's tracks for every viewer at once.
+
+### Enforcement
+
+Every pass compares every entitled participant with the room's share. Anyone but the holder who has a screen-share source **granted** (LiveKit reports each participant's permission; an empty source list counts, since LiveKit reads it as every source) or **published** has the sources withdrawn, leaving them their own publish grant and never more: the room's where conchd knows it (a share is claimed only in a channel-wide room, where every member may publish; a claim for any other room is 409 `voice_no_session`), otherwise what LiveKit reports they may publish, so a listen-only participant is never made a publisher by losing a share.
+
+- **Audit.** A published share nobody holds is audited as `voice_share_unclaimed`. A withdrawal conchd still owes (a share just ended, a claim that failed) is quiet: what the pass sees is the share being taken away. Once LiveKit has confirmed the withdrawal, a share published again, on a later listing, is a new one and is audited, which is what a client rejoining on a token LiveKit sent it during the share looks like.
+- **Eviction.** If a share is still published and LiveKit will not withdraw its sources, the participant is removed from the room instead (`voice_participant_removed`, `reason=share_unclaimed`, or `reason=share_not_withdrawn` for a share that was stopped or went idle): fail closed. A stop is therefore effective within a pass even when LiveKit refuses the withdrawal: presence says nobody is sharing at once, and nobody goes on watching. A grant with nothing published is only retried.
+- **Voice withdrawn.** The poller's entitlement check includes `voice_allowed` (#437): a person without voice found in a room is removed by name (`reason=voice_not_allowed`), and a share of theirs ends with `access_lost`. No route turns voice off after an invite today, so this is a guard for when one does; such a change would also need the rotation hook (§5), which does not look at `voice_allowed`.
+
+Through conchd an unclaimed share should be impossible: LiveKit refuses a source the permission does not name (finding S1). It happens when a client reconnects on a token LiveKit sent it while it held a share, after the share ended (finding S5), and after a restart.
+
+**Claims are held in memory, like transmit state, and a restart drops every claim.** That was a choice: no migration, and a share is short-lived. After a restart, the first pass over a room finds any share's grant still in LiveKit with no claim behind it and withdraws it; a track still published is audited as unclaimed. The sharer claims again. Presence never shows a share conchd does not hold.
+
+**LiveKit unreachable.** No share can be granted (503). A share already held survives the outage, and the first pass after it judges it as usual: a sharer still publishing goes on, one who is gone ends with `left`. A stop during the outage ends the share at once (row and presence), and the passes take the sources away when LiveKit answers again, or remove the sharer if LiveKit lists the room but still refuses the withdrawal.
+
+**A claim that finds its room retired** once granted (a rotation landed meanwhile) takes the grant back at once, before ending the share as `rotated` and answering 409 `voice_no_session`: deleting the room would take it too, but a `DeleteRoom` that fails leaves the room until the sweep.
+
+### Presence
+
+`VoiceParticipant` gains `sharing` (the participant holds the room's share; conchd's decision, true from the moment the claim is answered) and `sharing_audio` (sharing, and a screen-share audio track was published on the last pass). Both are omitted when false. Subscribers are told at once when a share starts and stops, and when its sound appears or goes. Presence never carries a room name or a token, and the share adds none.
+
+### Audit
+
+`voice_share_started` (actor the sharer; detail `channel=<id> audio=<bool>`), `voice_share_stopped` (actor the sharer, or the operator for `reason=operator`; detail `channel=<id> principal=<sharer> reason=<reason>`) and `voice_share_unclaimed` (actor the publisher; detail `channel=<id> sources=<screen_share,screen_share_audio> source=observed`), all with subject `channel:<id>` (§7). Every share that started gets exactly one stopped row. No room name and no token, as for every voice row.
+
+### Sizing (O6)
+
+Nothing on the server limits bitrate or resolution. The publisher chooses its simulcast layers (#444), and LiveKit forwards a layer per subscriber. The bandwidth of one sharer to about 29 viewers is measured on the real droplet (plan item A15).
+
+### LiveKit behaviours the share relies on, as measured
+
+Measured on 2026-10-16 against LiveKit server 1.13.7 (the release binary, which reports `livekit-server version 1.13.7`; the `e2e/voice` image is the same version) with automatic room creation off, bound to localhost. The participants were `lk` 2.19.0, the version `e2e/voice` pins, joined through a relay that substitutes a token signed as conchd signs it (microphone only, 15 s). `lk` publishes a file as a microphone and its demo video as a camera, so the relay rewrote the `source` of those `add_track` requests to `SCREEN_SHARE` and `SCREEN_SHARE_AUDIO`; to LiveKit that is a screen share like a browser's, since the source is what the client declares and the permission check is on the source. To publish on the connection that was granted, the relay held the share's `add_track` back until the grant had been made. The admin calls were plain JSON over HTTP, as conchd makes them.
+
+| # | Behaviour | Result |
+|---|---|---|
+| S1 | The join grant refuses the screen-share sources | **Holds.** With `canPublishSources: ["microphone"]`, LiveKit logged `no permission to publish track` for the screen and never listed it; `lk` gave up after its 10 s publish timeout (`timed out publishing track`). The same for the screen's sound. |
+| S2 | `UpdateParticipant` grants them on a live connection | **Holds.** HTTP 200 in about 2 ms, answering with the participant and the new permission; the held `add_track` was then accepted, and `ListParticipants` listed `SCREEN_SHARE` and `SCREEN_SHARE_AUDIO` tracks 29 ms after it was let go. A second participant subscribed to both within 0.3 s. |
+| S3 | Withdrawing the sources unpublishes the share's tracks | **Holds, at once.** After `UpdateParticipant` back to `MICROPHONE` returned (0.7 ms), `ListParticipants` no longer listed either track on the very next call (0.25 ms), the viewer was told `track unpublished` for both, and the microphone and the connection were untouched. |
+| S4 | The token LiveKit refreshes for a connected participant carries the updated permission | **Holds.** Each permission change makes LiveKit send the connection a new ten-minute token of its own at once (it was sent within the same millisecond as the 200): after the grant with `canPublishSources: ["microphone","screen_share","screen_share_audio"]`, after the withdrawal with `["microphone"]`, plus `canUpdateOwnMetadata`, `canSubscribeMetrics` and `canManageAgentSession` spelled out as false. LiveKit's source (`pkg/rtc/participant.go` `SetPermission` calls back `refreshToken`) says the same. A client that reconnects on the last token it was sent therefore keeps exactly what it has: a reconnect within the SDK's window neither regains nor loses sources unexpectedly. |
+| S5 | A token sent during a share still grants it after the share ended | **Yes, for its ten minutes.** Reconnecting with the token LiveKit sent during the share, after the share had been withdrawn, gave the new connection the share's sources, and it published a screen. Reconnecting with the token sent after the withdrawal gave only the microphone, and the screen was refused. The passes cover the first case: a grant or a track without a claim is withdrawn, and a track is audited (Enforcement). |
+| S6 | `UpdateParticipant` for an identity not in the room | 404 with the Twirp body `{"code":"not_found","msg":"twirp error unknown: participant does not exist"}`. With a grant other than `roomAdmin` for the room, 401 `unauthenticated`. |
+| S7 | What `ListParticipants` says of the permission | Every participant carries `permission` with every field written out, snake case, sources as names: `{"can_subscribe":true,"can_publish":true,"can_publish_data":false,"can_publish_sources":["MICROPHONE"],"hidden":false,...}`. A token that names no sources is listed with `"can_publish_sources":[]`, which LiveKit reads as every source. A share's tracks are listed with `"source":"SCREEN_SHARE"` (type `VIDEO`) and `"source":"SCREEN_SHARE_AUDIO"` (type `AUDIO`), and `"stream":"screen"`. |
+
+`e2e/voice` repeats S1 to S4 on every run against the pinned image (`share.go`): the permission LiveKit reports and the token it sends are checked field by field against the join grant, with and without the share's sources.

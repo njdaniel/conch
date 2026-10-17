@@ -151,6 +151,18 @@ type lkParticipant struct {
 	Identity string    `json:"identity"`
 	State    any       `json:"state"`
 	Tracks   []lkTrack `json:"tracks"`
+	// Permission is what LiveKit says the connection may do now: the join
+	// token's grant, or what conchd last set with UpdateParticipant.
+	Permission map[string]any `json:"permission"`
+}
+
+// sources lists the sources of the participant's published tracks.
+func (p lkParticipant) sources() []string {
+	var out []string
+	for _, t := range p.Tracks {
+		out = append(out, fmt.Sprint(t.Source))
+	}
+	return out
 }
 
 // mic returns the participant's microphone track, if it has one.
@@ -318,6 +330,12 @@ type relay struct {
 	ln       net.Listener
 	upstream string // host:port of LiveKit
 	token    string // the token conchd issued
+	// filter, when set, sees every frame the client sends LiveKit before
+	// LiveKit does, and returns what is sent instead. It may block, which
+	// holds back that frame and every one after it. The screen-share
+	// scenario uses it (share.go): lk cannot say that a track is a screen
+	// share, and cannot wait to publish one until conchd has granted it.
+	filter func(ctx context.Context, frame []byte) []byte
 
 	mu     sync.Mutex
 	issued []string
@@ -330,12 +348,14 @@ func (r *relay) issuedTokens() []string {
 	return append([]string(nil), r.issued...)
 }
 
-func startRelay(upstreamHostPort, conchdToken string) (*relay, error) {
+// startRelay starts a relay that admits its client on conchdToken alone.
+// filter is nil for a relay that passes the client's frames on unchanged.
+func startRelay(upstreamHostPort, conchdToken string, filter func(context.Context, []byte) []byte) (*relay, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	r := &relay{ln: ln, upstream: upstreamHostPort, token: conchdToken}
+	r := &relay{ln: ln, upstream: upstreamHostPort, token: conchdToken, filter: filter}
 	rp := &httputil.ReverseProxy{
 		// lk retries after LiveKit stops; that is expected, not output.
 		ErrorLog: log.New(io.Discard, "", 0),
@@ -413,6 +433,9 @@ func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request) {
 			typ, data, err := from.Read(ctx)
 			if err != nil {
 				return
+			}
+			if !capture && r.filter != nil {
+				data = r.filter(ctx, data)
 			}
 			if capture {
 				if found := jwtRE.FindAll(data, -1); len(found) > 0 {

@@ -6,8 +6,8 @@
 //
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
-import type { Page } from '@playwright/test';
-import { channelButton, expect, signIn, test } from './fixtures';
+import type { BrowserContextOptions, Page } from '@playwright/test';
+import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -87,8 +87,8 @@ test.describe('with LiveKit', () => {
     stopWorld?.();
   });
 
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob') {
-    const context = await browser.newContext();
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob', options?: BrowserContextOptions) {
+    const context = await browser.newContext(options);
     const page = await context.newPage();
     const watch = watchPage(page, vw);
     await page.addInitScript(countBytes);
@@ -238,6 +238,33 @@ test.describe('with LiveKit', () => {
       await expectClean(a);
     } finally {
       await a.context.close();
+    }
+  });
+
+  // Issue #467: on a phone the voice panel, joined, fits the screen in both
+  // microphone modes, and is worked by tapping.
+  test('on a phone the joined voice panel fits the screen and is worked by tapping', async ({ browser }) => {
+    for (const [size, options] of phones) {
+      const a = await person(browser, 'alice', options);
+      try {
+        const voice = voiceRegion(a.page);
+        await expectFits(a.page, `${size}: the lobby before joining voice`);
+        await voice.getByRole('button', { name: 'Join voice' }).tap();
+        await expect(voice).toContainText('Connected in', { timeout: 30_000 });
+        await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+        await expectFits(a.page, `${size}: the voice panel, push to talk`);
+        await voice.getByRole('button', { name: 'Mute' }).tap();
+        await expect(voice).toContainText('Muted.');
+        await voice.getByRole('button', { name: 'Unmute' }).tap();
+        await voice.getByLabel('Open microphone').tap();
+        await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
+        await expectFits(a.page, `${size}: the voice panel, open microphone`);
+        await voice.getByLabel('Push to talk').tap();
+        await voice.getByRole('button', { name: 'Leave voice' }).tap();
+        await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      } finally {
+        await a.context.close();
+      }
     }
   });
 
