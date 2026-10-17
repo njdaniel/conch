@@ -96,6 +96,9 @@ var TSTypes = []TSType{
 	{Value: VoicePresenceRoom{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
+	// Screen share (issue #443): the claim the page is given when the room's
+	// share is its own. Presence says who shares (VoiceParticipant above).
+	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},

@@ -54,6 +54,26 @@ const (
 	AuditVoiceReportRateLimited = "voice_report_rate_limited"
 )
 
+// Audit actions of the screen share (issue #443,
+// docs/design/voice-control-plane.md §12). Their subject is "channel:<id>";
+// none carries a token or a room name.
+const (
+	// AuditVoiceShareStarted is written by the share endpoint when a claim is
+	// granted, before it is answered. Its actor is the sharer and its detail
+	// "channel=<id> audio=<bool>".
+	AuditVoiceShareStarted = "voice_share_started"
+	// AuditVoiceShareStopped is written once for every share that started,
+	// when it ends. Its actor is the operator for reason=operator and the
+	// sharer otherwise, and its detail "channel=<id> principal=<sharer>
+	// reason=<self, operator, left, access_lost, rotated or idle>".
+	AuditVoiceShareStopped = "voice_share_stopped"
+	// AuditVoiceShareUnclaimed is written by the poller when it sees a
+	// screen-share track published by a participant who does not hold the
+	// room's share. Its actor is that participant's principal; the sources
+	// are withdrawn.
+	AuditVoiceShareUnclaimed = "voice_share_unclaimed"
+)
+
 // AuditVoiceRoomRotated is written, by the store and in the transaction that
 // rotates the room, once per rotation (issue #161). Its actor is "system",
 // its subject "channel:<id>" and its detail "reason=<reason>"; it never

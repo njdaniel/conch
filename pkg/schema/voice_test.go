@@ -29,6 +29,8 @@ func TestVoiceGoldenFixtures(t *testing.T) {
 		{name: "transmit report, started, channel-wide", file: "voice-transmit-report-v1-started.json", new: func() any { return new(VoiceTransmitReportV1) }},
 		{name: "transmit report, stopped, channel-wide", file: "voice-transmit-report-v1-stopped.json", new: func() any { return new(VoiceTransmitReportV1) }},
 		{name: "transmit report, started, net audience", file: "voice-transmit-report-v1-net.json", new: func() any { return new(VoiceTransmitReportV1) }},
+		{name: "presence, one participant sharing with sound", file: "voice-presence-v1-sharing.json", new: func() any { return new(VoicePresenceV1) }},
+		{name: "share claim", file: "voice-share-v1.json", new: func() any { return new(VoiceShareV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -55,6 +57,7 @@ func TestVoiceErrorCodes(t *testing.T) {
 		{ErrorCodeVoiceNoSession, "voice_no_session"},
 		{ErrorCodeVoiceReportRateLimited, "voice_report_rate_limited"},
 		{ErrorCodeVoiceNotAllowed, "voice_not_allowed"},
+		{ErrorCodeVoiceShareBusy, "voice_share_busy"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -209,6 +212,21 @@ func TestVoiceParticipantValidate(t *testing.T) {
 			wantErr: "voice participant 3 cannot be transmitting without can_publish",
 		},
 		{name: "zero joined_at", mutate: func(p *VoiceParticipant) { p.JoinedAt = Timestamp{} }, wantErr: "voice participant joined_at is required"},
+
+		// The screen share (issue #443).
+		{name: "valid, sharing", mutate: func(p *VoiceParticipant) { p.Sharing = true }},
+		{name: "valid, sharing with sound", mutate: func(p *VoiceParticipant) { p.Sharing, p.SharingAudio = true, true }},
+		{name: "valid, sharing and silent", mutate: func(p *VoiceParticipant) { p.Transmitting, p.Sharing = false, true }},
+		{
+			name:    "listen-only but sharing",
+			mutate:  func(p *VoiceParticipant) { p.CanPublish, p.Transmitting, p.Sharing = false, false, true },
+			wantErr: "voice participant 3 cannot be sharing without can_publish",
+		},
+		{
+			name:    "sound of a share without the share",
+			mutate:  func(p *VoiceParticipant) { p.SharingAudio = true },
+			wantErr: "voice participant 3 cannot have sharing_audio without sharing",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -251,6 +269,19 @@ func TestVoicePresenceRoomValidate(t *testing.T) {
 			name:    "duplicate principal",
 			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].PrincipalID = 3 },
 			wantErr: "voice room lists principal 3 more than once",
+		},
+		{name: "valid, one participant sharing", mutate: func(r *VoicePresenceRoom) { r.Participants[1].Sharing = true }},
+		{
+			name: "two participants sharing",
+			mutate: func(r *VoicePresenceRoom) {
+				r.Participants[0].Sharing, r.Participants[1].Sharing = true, true
+			},
+			wantErr: "voice room lists principals 3 and 7 as sharing; a room has one share at a time",
+		},
+		{
+			name:    "a participant's share is checked in the room",
+			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].SharingAudio = true },
+			wantErr: "voice participant 7 cannot have sharing_audio without sharing",
 		},
 	}
 	for _, tt := range tests {
@@ -560,6 +591,7 @@ func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
 		"audience", "participants", // a room
 		"kind", "net_id", "principal_ids", // an audience
 		"principal_id", "can_publish", "transmitting", "joined_at", // a participant
+		"sharing", "sharing_audio", // a participant's screen share (issue #443)
 	}
 	for _, k := range want {
 		if !got[k] {
@@ -926,5 +958,74 @@ func TestVoiceTransmitReportFieldsAreAnExactList(t *testing.T) {
 	}
 	for k := range got {
 		t.Errorf("a transmit report can now carry %q, which is not on the reviewed list", k)
+	}
+}
+
+func TestVoiceShareV1Validate(t *testing.T) {
+	valid := func() VoiceShareV1 {
+		return VoiceShareV1{PrincipalID: 3, StartedAt: NewTimestamp(time.Date(2026, 10, 16, 12, 0, 4, 125e6, time.UTC)), Audio: true}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceShareV1)
+		wantErr string
+	}{
+		{name: "valid, with sound", mutate: func(*VoiceShareV1) {}},
+		{name: "valid, without sound", mutate: func(s *VoiceShareV1) { s.Audio = false }},
+		{name: "zero principal", mutate: func(s *VoiceShareV1) { s.PrincipalID = 0 }, wantErr: "voice share principal_id must be positive, got 0"},
+		{name: "negative principal", mutate: func(s *VoiceShareV1) { s.PrincipalID = -1 }, wantErr: "voice share principal_id must be positive, got -1"},
+		{name: "zero started_at", mutate: func(s *VoiceShareV1) { s.StartedAt = Timestamp{} }, wantErr: "voice share started_at is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := valid()
+			tt.mutate(&s)
+			assertValidation(t, s.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoiceShareEncoding: the claim always spells out audio, and its fields
+// are an exact list with no room and no token at any depth: it grants the
+// connection the caller already has, and nothing in it helps anyone join a
+// room.
+func TestVoiceShareEncoding(t *testing.T) {
+	raw, err := json.Marshal(VoiceShareV1{PrincipalID: 3, StartedAt: voiceJoinedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"audio":false`) {
+		t.Errorf("share without sound = %s, want audio:false", raw)
+	}
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoiceShareV1{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := map[string]bool{"principal_id": true, "started_at": true, "audio": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a share carries %v, want exactly %v", got, want)
+	}
+}
+
+// TestVoiceParticipantSharingIsOptional: a participant who is not sharing is
+// encoded exactly as before issue #443, so a document with nobody sharing is
+// byte for byte what an older server sent, and an older document reads as
+// nobody sharing.
+func TestVoiceParticipantSharingIsOptional(t *testing.T) {
+	raw, err := json.Marshal(validVoiceParticipant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sharing") {
+		t.Errorf("a participant who is not sharing encodes as %s, want no sharing fields", raw)
+	}
+	var back VoiceParticipant
+	if err := json.Unmarshal([]byte(`{"principal_id":3,"can_publish":true,"transmitting":false,"joined_at":"2026-10-09T12:00:00.000Z"}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Sharing || back.SharingAudio {
+		t.Errorf("an older participant decodes as sharing: %+v", back)
 	}
 }
