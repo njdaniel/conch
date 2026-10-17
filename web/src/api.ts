@@ -267,7 +267,14 @@ export function hasToken(): boolean {
 // signIn checks a credential with GET /v1/whoami. A member's is stored at
 // once, to last. An operator's is held back until continueAsOperator, because
 // a browser is not the place for it. A rejected credential is stored nowhere.
-export async function signIn(candidate: string): Promise<ApiResult<WhoAmIResponseV1>> {
+//
+// It is refused ('held') while this browser holds a sign-in that could not be
+// checked (the server was not reachable when the page loaded): signing in over
+// it would overwrite a member's credential without revoking it, or sit under
+// an operator's tab credential that the next load would prefer (issue #469).
+// forgetStored ends that one first.
+export async function signIn(candidate: string): Promise<ApiResult<WhoAmIResponseV1> | { readonly ok: false; readonly failure: 'held' }> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
   pending = null;
   pinned = null;
   const result = await get('/v1/whoami', candidate, whoAmIResponseV1);
@@ -460,6 +467,30 @@ export type RedeemResult = InviteResult<WhoAmIResponseV1> | { readonly ok: false
 // it was neither pinned nor dropped).
 export function heldElsewhere(): boolean {
   return pending !== null || hasToken();
+}
+
+// forgetStored ends a stored sign-in that could not be checked: each stored
+// credential is revoked on the server if it answers (best effort), then
+// dropped here. It resolves to whether the server was told about every one
+// (true when none was stored).
+export async function forgetStored(): Promise<boolean> {
+  pending = null;
+  pinned = null;
+  let told = true;
+  for (const place of places) {
+    let token: string | null = null;
+    try {
+      token = storageAt(place).getItem(tokenKey);
+    } catch {
+      // Refused storage holds nothing to forget.
+    }
+    if (token === null) continue;
+    const held: Held = { token, place };
+    const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
+    if (!(reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok))) told = false;
+    dropToken(held);
+  }
+  return told;
 }
 
 // redeemInvite uses an invite to make a new member called name. The token in

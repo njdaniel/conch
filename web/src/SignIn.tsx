@@ -9,11 +9,15 @@ export function SignIn({
   notice,
   checking,
   onSubmit,
+  onForget,
 }: {
   readonly origin: string;
   readonly notice: AuthNotice | null;
   readonly checking: boolean;
   readonly onSubmit: (credential: string) => void;
+  // Forgetting a stored sign-in that could not be checked (issue #469),
+  // offered only when signing in was refused because of one.
+  readonly onForget: () => void;
 }) {
   const field = useRef<HTMLInputElement>(null);
 
@@ -64,6 +68,11 @@ export function SignIn({
         <p role="alert" className="notice">
           {notice === null ? '' : noticeText(notice)}
         </p>
+        {notice === 'held' && (
+          <button type="button" onClick={onForget}>
+            Forget the stored sign-in
+          </button>
+        )}
       </form>
       <ServerVersion className="hint" />
     </main>

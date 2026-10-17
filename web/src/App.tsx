@@ -341,6 +341,14 @@ export function App({ origin }: { readonly origin: string }) {
     });
   }, []);
 
+  // Forgetting a stored sign-in that could not be checked (issue #469): it is
+  // revoked if the server answers, then dropped, and signing in is open again.
+  const forgetStored = useCallback(() => {
+    void api.forgetStored().then((told) => {
+      dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
+    });
+  }, []);
+
   // An invite link is answered before anything else, once a stored sign-in
   // has been checked, so the page can say who is signed in already.
   if (inviteCode !== null && auth.phase !== 'restoring') {
@@ -376,6 +384,7 @@ export function App({ origin }: { readonly origin: string }) {
           notice={auth.phase === 'signedOut' ? auth.notice : null}
           checking={auth.phase === 'checking'}
           onSubmit={submit}
+          onForget={forgetStored}
         />
       );
     case 'operatorWarning':

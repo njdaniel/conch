@@ -8,7 +8,7 @@ import type { WhoAmIResponseV1 } from '../schema/principal';
 // is one the server could not be told of, so the credential may still work;
 // everywhere is every credential of the person revoked; elsewhere is another
 // tab of this browser signing the shared credential out.
-export type AuthNotice = 'rejected' | 'network' | 'invalid' | 'expired' | 'untold' | 'everywhere' | 'elsewhere';
+export type AuthNotice = 'rejected' | 'network' | 'invalid' | 'expired' | 'untold' | 'everywhere' | 'elsewhere' | 'held';
 
 export type AuthState =
   | { readonly phase: 'restoring' }
@@ -23,7 +23,7 @@ export type AuthAction =
   // held: on restore, an operator credential found kept to last, taken out of
   // storage and held back for the warning (issue #439).
   | { readonly type: 'held'; readonly principal: WhoAmIResponseV1 }
-  | { readonly type: 'failed'; readonly failure: ApiFailure }
+  | { readonly type: 'failed'; readonly failure: ApiFailure | 'held' }
   | { readonly type: 'continue' }
   | { readonly type: 'signOut'; readonly notice?: AuthNotice | null }
   | { readonly type: 'unauthorized' }
@@ -78,6 +78,7 @@ const lines: Record<AuthNotice, string> = {
   untold: 'Signed out in this browser, but the server could not be told: the credential may still work until it expires',
   everywhere: 'Signed out everywhere: every sign-in of yours has ended',
   elsewhere: 'Signed out in another tab',
+  held: 'This browser holds another sign-in that could not be checked. Reload when the server can be reached, or forget it here first.',
 };
 
 export function noticeText(notice: AuthNotice): string {
