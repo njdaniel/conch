@@ -1,0 +1,24 @@
+␛[1mCONCH␛[0m ␛[90m127.0.0.1…␛[39m  ␛[1m␛[36m[Chat]␛[0m ␛[90mInbox␛[39m ␛[90mAgents␛[39m ␛[90mRuns␛[39m ␛[1malice␛[0m · ␛[32m● text live␛[39m · ␛[90mhelp: F1, /help
+␛[36m╭─␛[1m␛[39m ▸ CHANNELS ␛[0m␛[36m───╮␛[90m╭─␛[1m␛[39m # general ␛[0m␛[90m───────────────────────────────────────────────╮␛[39m
+␛[36m│␛[1m› general␛[0m       ␛[36m│␛[90m│15:42␛[39m ␛[1malice␛[0m: Morning all. The release branch is cut;       ␛[90m│␛[39m
+␛[36m│␛[39m  ops ␛[1m␛[33m2␛[0m         ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mplease keep main green today.                      ␛[90m│␛[39m
+␛[36m│␛[39m  movie-night   ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: On it. I will look at the flaky test in the     ␛[90m│␛[39m
+␛[36m│␛[39m  design-review ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mingest suite first.                                ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│15:42␛[39m ␛[1mcarol-with-a-rather-lon…␛[0m: A long message, to see     ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mwrapping: the parser rewrite touches the           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mtokenizer, the error recovery and the              ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mpretty-printer, so reviews should look at each of  ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mthose separately rather than as one large diff,    ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mand the benchmarks need a fresh baseline before    ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39manyone compares numbers.                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│15:42␛[39m ␛[1mrex␛[0m ␛[1m␛[33m[agent]␛[0m: Build 4127 passed:                      ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mhttps://ci.example.com/jobs/4127/artifacts/very/lon␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mg/path/that/does/not/break/at/spaces/report.html   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: Notes from the call:                            ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m1. ship the parser behind a flag                   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m2. keep the old path for a week                    ␛[90m│␛[39m
+␛[36m╰────────────────╯␛[90m╰─────────────────────────────────␛[1m␛[36m ↓ 3 newer · end: latest ␛[0m␛[90m─╯␛[39m
+general > ␛[1m␛[36m▌␛[0m
+␛[90monline: bob alice(3) · agents: rex ●␛[39m
+␛[90myou: in #general voice from another client · voice: 2 alice  ●3 bob␛[39m
+␛[90malice | connected  ↑/↓ channels • end latest • enter send • tab inbox • esc quit

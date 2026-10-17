@@ -1,0 +1,18 @@
+␛[36m╭─␛[1m␛[39m ▸ HELP · Chat ␛[0m␛[36m─────────────────────────────────────────╮␛[39m
+␛[36m│␛[39m ␛[1m␛[36mtype, enter␛[0m  write a message and send it to the         ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  audience the prompt names                  ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mbackspace  ␛[0m  delete the last character of the draft     ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/net NAME  ␛[0m  send plain messages to net NAME; /net      ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  alone: the whole channel                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/w IDS TEXT␛[0m  whisper TEXT once to the principal ids IDS ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  (3,5)                                      ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m//TEXT     ␛[0m  send TEXT that starts with /               ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/help      ␛[0m  this help                                  ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m↑/↓        ␛[0m  focus on channels: open the channel above  ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  or below                                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  focus on messages: scroll the history a    ␛[36m│␛[39m
+␛[36m╰────────────────────␛[1m ↓ 19 more · ↑/↓ scroll · esc close ␛[0m␛[36m─╯␛[39m
+general >
+␛[90monline: bob alice(2) · agents: rex ●␛[39m
+␛[90myou: in #general voice from another client · voice: +2␛[39m
+␛[90malice | connected  esc close help␛[39m

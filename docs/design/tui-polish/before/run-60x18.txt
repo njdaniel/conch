@@ -1,0 +1,18 @@
+╭──────────────────────────────────────────────────────────╮
+│run #2 · running                                          │
+│task: fix the flaky ingest test                           │
+│link: https://ci.example.com/jobs/4128                    │
+│started: 15:42:27 (9m ago)                                │
+│duration: 9m05s so far                                    │
+│activity (2)                                              │
+│  +0.0s            command_started go test ./internal/ing…│
+│› +0.0s            ▸ command_finished go test ./internal/…│
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│m message · x cancel · pause (unsupported) · resume (unsu…│
+╰──────────────────────────────────────────────────────────╯
+
+alice | r…  ↑/↓ timeline • enter data • g message • esc back

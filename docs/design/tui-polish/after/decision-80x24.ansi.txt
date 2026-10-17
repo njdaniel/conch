@@ -1,0 +1,24 @@
+␛[1mCONCH␛[0m ␛[90m127.0.0.1:29180␛[39m  ␛[90mChat␛[39m ␛[1m␛[36m[Inbox]␛[0m ␛[90mAgents␛[39m ␛[90mRuns␛[39m   ␛[1malice␛[0m · ␛[32m● text live␛[39m · ␛[90mhelp: F1
+╭─␛[1m␛[39m APPROVALS ␛[0m␛[90m────╮␛[36m╭─␛[1m␛[39m ▸ DECIDE ␛[0m␛[36m────────────────────────────────────────────────╮␛[39m
+␛[90m│␛[1m␛[36m› ␛[0m6: Restart th…␛[90m│␛[36m│␛[1mRestart the ingest workers on staging␛[0m                      ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39mRequester: 6  Deadline: Oct 17 22:42                       ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[90m┊ ␛[39mTwo ingest tests fail under load. Restarting the workers ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[90m┊ ␛[39mclears the stuck queue.                                  ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[90m┊ ␛[39mRisk: about 30 s of delayed messages on staging.         ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[1mDecision Options:␛[0m                                          ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[1m› ␛[0mRestart now                                              ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m  Wait for the fix                                         ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m│␛[39m                ␛[90m│␛[36m│␛[39m                                                           ␛[36m│␛[39m
+␛[90m╰────────────────╯␛[36m╰───────────────────────────────────────────────────────────╯␛[39m
+> ␛[1m␛[36m▌␛[0m
+␛[90malice | type reason to decide  ↑/↓ options • enter confirm • esc cancel␛[39m

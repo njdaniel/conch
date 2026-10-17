@@ -63,27 +63,30 @@ func find(t *testing.T, m Model, text string) (x, y int) {
 }
 
 func TestMouseClickSelectsChannel(t *testing.T) {
+	// 80x24 has a title bar on row 0, 50x24 has none: the rows are the layout's.
 	for _, width := range []int{80, 50} {
-		leftW, _ := paneWidths(width)
+		l := mouseModel(width, 24, 0).layout()
+		leftW, top := l.leftW, l.top
 		tests := []struct {
 			name     string
 			x, y     int
 			selected int
 			cmd      bool
 		}{
-			{"first row", 2, 1, 0, false},
-			{"second row", 2, 2, 1, true},
-			{"last row", 2, 4, 3, true},
-			{"right edge of the content", leftW - 2, 3, 2, true},
-			{"below the last row", 2, 5, 0, false},
-			{"bottom of the pane", 2, 10, 0, false},
-			{"left border", 0, 2, 0, false},
-			{"right border", leftW - 1, 2, 0, false},
-			{"top border", 2, 0, 0, false},
-			{"bottom border", 2, 21, 0, false},
-			{"message pane", leftW + 3, 2, 0, false},
-			{"input line", 2, 22, 0, false},
+			{"first row", 2, top + 1, 0, false},
+			{"second row", 2, top + 2, 1, true},
+			{"last row", 2, top + 4, 3, true},
+			{"right edge of the content", leftW - 2, top + 3, 2, true},
+			{"below the last row", 2, top + 5, 0, false},
+			{"bottom of the pane", 2, top + 10, 0, false},
+			{"left border", 0, top + 2, 0, false},
+			{"right border", leftW - 1, top + 2, 0, false},
+			{"top border", 2, top, 0, false},
+			{"bottom border", 2, top + l.contentH + 1, 0, false},
+			{"message pane", leftW + 3, top + 2, 0, false},
+			{"input line", 2, top + l.contentH + 2, 0, false},
 			{"status line", 2, 23, 0, false},
+			{"title bar", 2, top - 1, 0, false},
 			{"outside the screen", 2, 99, 0, false},
 			{"negative", -1, -1, 0, false},
 		}
@@ -147,9 +150,10 @@ func visibleMessages(t *testing.T, m Model) (first, last int) {
 }
 
 func TestMouseWheelScrollsMessages(t *testing.T) {
-	// 80x24: 20 content rows, 19 message lines; 40 messages, so 21 can be
-	// scrolled off at most.
+	// 80x24: the title bar, 19 content rows, all of them message lines; 40
+	// messages, so 21 can be scrolled off at most.
 	const rx, ry = 40, 5
+	top := mouseModel(80, 24, 40).layout().top
 	tests := []struct {
 		name        string
 		events      []tea.MouseMsg
@@ -161,7 +165,8 @@ func TestMouseWheelScrollsMessages(t *testing.T) {
 		{"three up", []tea.MouseMsg{wheel(true, rx, ry), wheel(true, rx, ry), wheel(true, rx, ry)}, 3, 19, 37},
 		{"up then down", []tea.MouseMsg{wheel(true, rx, ry), wheel(true, rx, ry), wheel(false, rx, ry)}, 1, 21, 39},
 		{"down at the newest", []tea.MouseMsg{wheel(false, rx, ry)}, 0, 22, 40},
-		{"on the border", []tea.MouseMsg{wheel(true, 18, 0)}, 1, 21, 39},
+		{"on the border", []tea.MouseMsg{wheel(true, 18, top)}, 1, 21, 39},
+		{"on the title bar", []tea.MouseMsg{wheel(true, 40, top-1)}, 0, 22, 40},
 		{"over the left pane", []tea.MouseMsg{wheel(true, 2, ry)}, 0, 22, 40},
 		{"over the input line", []tea.MouseMsg{wheel(true, 40, 22)}, 0, 22, 40},
 		{"release is ignored", []tea.MouseMsg{{X: rx, Y: ry, Action: tea.MouseActionRelease, Button: tea.MouseButtonWheelUp}}, 0, 22, 40},
@@ -317,8 +322,9 @@ func TestMessagesArrivingWhileScrolled(t *testing.T) {
 		}
 	})
 	t.Run("switching channels goes back to the bottom", func(t *testing.T) {
+		x, y := find(t, mouseModel(80, 24, 40), "ops")
 		for name, switchTo := range map[string]tea.Msg{
-			"click": click(2, 2),
+			"click": click(x, y),
 			"key":   tea.KeyMsg{Type: tea.KeyDown},
 		} {
 			m := mouseModel(80, 24, 40)
@@ -511,6 +517,7 @@ func TestMouseNeverActs(t *testing.T) {
 
 	m := mouseModel(80, 24, 40)
 	m.input, m.authorID = "hello", 7
+	top := m.layout().top
 	for y := -1; y < 26; y++ {
 		for x := -1; x < 82; x++ {
 			for _, b := range buttons {
@@ -518,7 +525,7 @@ func TestMouseNeverActs(t *testing.T) {
 				if got.sending || got.input != "hello" || got.mode != modeChannels {
 					t.Fatalf("%v at (%d,%d): sending %v, input %q", b, x, y, got.sending, got.input)
 				}
-				if onChannelRow := b == tea.MouseButtonLeft && x >= 1 && x <= 16 && y >= 2 && y <= 4; cmd != nil && !onChannelRow {
+				if onChannelRow := b == tea.MouseButtonLeft && x >= 1 && x <= 16 && y >= top+2 && y <= top+4; cmd != nil && !onChannelRow {
 					t.Fatalf("%v at (%d,%d) returned a command", b, x, y)
 				}
 			}
@@ -530,9 +537,10 @@ func TestMouseNeverActs(t *testing.T) {
 // nothing, and its row takes one from the panes without moving a hit.
 func TestMouseVoiceRoster(t *testing.T) {
 	m := mouseModel(80, 24, 0)
+	without := m.layout().contentH
 	m.voice.state = voiceReconnecting
 	l := m.layout()
-	if l.voice == "" || l.contentH != 19 {
+	if l.voice == "" || l.contentH != without-1 {
 		t.Fatalf("voice line %q, content rows %d: the voice line should take a row from the panes", l.voice, l.contentH)
 	}
 	x, y := find(t, m, "voice: reconnecting")

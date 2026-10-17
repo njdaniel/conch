@@ -1,0 +1,18 @@
+␛[90m╭──────────────────────────────────────────────────────────╮
+│␛[1m␛[36m› ␛[0m▾ ␛[1m␛[33m[agent]␛[0m rex  running · task: fix the flaky ingest tes…␛[90m│
+│␛[39m    #1 running · none · task: fix the flaky ingest test ·…␛[90m│
+│␛[39m      run #2 running · task: fix the flaky ingest test · …␛[90m│
+│␛[39m      run #1 completed · task: nightly lint · 8m ago      ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+│␛[39m                                                          ␛[90m│
+╰──────────────────────────────────────────────────────────╯
+␛[39m
+␛[90m  ↑/↓ agents • enter sessions • r runs • tab channels • esc…

@@ -1,0 +1,48 @@
+CONCH 127.0.0.1:29180  Chat [Inbox] Agents Runs                                                                                alice · ● text live · help: F1, ?
+╭─ ▸ APPROVALS ────────────────────╮╭─ DETAILS ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│› 6: Restart the ingest workers o…││Restart the ingest workers on staging                                                                                    │
+│                                  ││Requester: 6  Deadline: Oct 17 22:42                                                                                     │
+│                                  ││                                                                                                                         │
+│                                  ││┊ Two ingest tests fail under load. Restarting the workers clears the stuck queue.                                       │
+│                                  ││┊ Risk: about 30 s of delayed messages on staging.                                                                       │
+│                                  ││                                                                                                                         │
+│                                  ││  - Restart now                                                                                                          │
+│                                  ││  - Wait for the fix                                                                                                     │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+│                                  ││                                                                                                                         │
+╰──────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+alice | inbox loaded  ↑/↓ approvals • enter decide • tab agents • esc quit
