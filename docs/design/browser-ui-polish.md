@@ -50,7 +50,7 @@ illustrative, and none of them is reproduced.
 
 | Element | Now | Why |
 | --- | --- | --- |
-| Large stage, "X is sharing", stream volume, full screen | The watch view on the stage at the top of the centre column: who is sharing (and whether with sound), the picture, Mute share, Share volume, Full screen, Stop watching | Same controls as #444. The picture is sized to leave the conversation a header, a few messages and the composer. |
+| Large stage, "X is sharing", stream volume, full screen | The watch view on the stage at the top of the centre column: who is sharing (and whether with sound), the picture, Mute share, Share volume, Full screen, Stop watching | Same controls as #444. The picture gives way first: the conversation keeps what its header, a few lines and the composer need. |
 | "1080p" badge | Not shown | The client does not know the layer it receives. |
 | Compact participant strip | The roster chips | — |
 | Chat beside the stage | The conversation below the stage; the members column where it was | The image's right column is captions, a later feature. |
@@ -62,7 +62,7 @@ illustrative, and none of them is reproduced.
 | --- | --- |
 | 1100 px and wider | Top bar; channels (15rem), the centre, members (17rem; Members folds it away); the voice strip across the bottom. Each column scrolls on its own; the page does not. |
 | 700 to 1099 px | Channels and the centre. Members opens a panel over the right side (UX-22: the right panel goes first). |
-| Below 700 px | One column. The channels are one row under the top bar that scrolls sideways within itself, so the open channel stays in sight and one tap opens another. The top bar's and the strip's buttons show icons, their names hidden on screen but still read out; Send likewise. Stop sharing and Leave voice keep their words. Voice options, open, scroll inside the strip (at most 40% of the height). While a share is watched, the channel heading is read out only (the row above names the channel) and the picture shrinks first, so the composer stays on screen at 390×844 and 360×740. |
+| Below 700 px | One column. The channels are one row under the top bar that scrolls sideways within itself, so the open channel stays in sight and one tap opens another. The top bar's and the strip's buttons show icons, their names hidden on screen but still read out; Send likewise. Stop sharing and Leave voice keep their words. Voice options, open, scroll inside the strip (at most 40% of the height). While a share is watched, the channel heading is read out only (the row above names the channel). |
 | Under 560 px tall (200% zoom of 1440×900 is 720×450) | The page scrolls as a document instead of fitting every column to the window; the conversation keeps a height of its own, so it scrolls and loads older messages as before, and the strip is at the end of the page. |
 
 Settings and, below 1100 px, Members are panels over the page with a dimmed
@@ -74,13 +74,24 @@ focus cannot go behind it. Members is not modal. A members column left open
 closes when the window narrows, rather than cover the page, and focus that was
 in it goes to Members.
 
+**Room for the conversation while watching.** While a share is watched the
+centre column is a grid of two rows: `minmax(0, auto)` for the stage and
+`minmax(min-content, 1fr)` for the conversation. The conversation's least
+height is what its header, the log's minimum and the composer measure with the
+fonts actually in use (the log has `contain: size`, so its messages never count);
+the stage gets the rest. In the watch view the title and the controls keep
+their height and the picture's row gives way, down to 3rem; with less room than
+that the stage scrolls. Nothing is a fixed reserve, so other font metrics (CI's
+runner wraps the share controls onto two rows) move the picture, not the
+composer. The composer is on screen without scrolling at 390×844 and 360×740
+(checked in 12-screen-share, and by hand with every rem made 19 px).
+
 **Media continuity.** The voice section is rendered once, in the strip, and
 never moves: panels, the members column and the window's width change classes
 only. The watch view is drawn on the stage with a React portal from that same
 section (`web/src/stage.ts`), so it is one component instance through every
-layout change, and its `<video>` is attached to the room once. If the stage and
-the conversation do not both fit (a phone, watching), the centre column scrolls;
-nothing is drawn under the strip.
+layout change, and its `<video>` is attached to the room once. The centre
+column also scrolls as a last resort, so nothing is ever drawn under the strip.
 
 The navigation is not a drawer on a phone, though the issue suggested
 collapsible navigation: a drawer would hide which channel is open and add a tap
@@ -108,7 +119,6 @@ so form controls and scroll bars match.
 | `--warn` | `#e8c06a` | Reconnecting, stale, Not confirmed, Microphone in use, a narrowed audience |
 | `--focus` | `#8ec5ff` | Focus outline (2 px, offset 2 px) |
 | `--hue-0` … `--hue-5` | six muted hues | Initials, chosen by principal id; white letter |
-| `--stage-reserve` | 26rem (16rem on a phone) | Height the watch view leaves for its controls and the conversation |
 
 Type: the system UI font (the CSP allows no web font, and none is needed),
 15 px base, 1.45 line height; 0.8125 rem for times and hints; weight 600 for
