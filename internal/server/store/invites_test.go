@@ -355,6 +355,68 @@ func TestInviteAllowance(t *testing.T) {
 	})
 }
 
+// TestInvitesRemaining checks the count whoami reports (issue #468) against
+// open, used, expired and closed invites, and that it agrees with
+// CreateInvite: the next personal invite is refused exactly when it says 0.
+func TestInvitesRemaining(t *testing.T) {
+	week := 8 * 24 * time.Hour
+	openOne := func(f *inviteFixture) { f.mustCreate(f.alice, personal("general")) }
+	usedOne := func(f *inviteFixture) {
+		if _, err := f.redeem(f.mustCreate(f.alice, personal("general")).Code, "joiner"); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	// Made more than its 7-day default expiry ago.
+	expiredOne := func(f *inviteFixture) {
+		if _, err := f.s.CreateInvite(f.ctx, "system", f.alice.ID, personal("general"), InviteOptions{}, f.now.Add(-week)); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	closedOne := func(f *inviteFixture) {
+		id := f.mustCreate(f.alice, personal("general")).Invite.ID
+		if _, err := f.s.CloseInvite(f.ctx, "system", f.alice.ID, id, f.now); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name      string
+		allowance int
+		setup     []func(*inviteFixture)
+		want      int
+	}{
+		{"none", 0, nil, DefaultPersonalInviteAllowance},
+		{"one open", 0, []func(*inviteFixture){openOne}, DefaultPersonalInviteAllowance - 1},
+		{"one used", 0, []func(*inviteFixture){usedOne}, DefaultPersonalInviteAllowance},
+		{"one expired", 0, []func(*inviteFixture){expiredOne}, DefaultPersonalInviteAllowance},
+		{"one closed", 0, []func(*inviteFixture){closedOne}, DefaultPersonalInviteAllowance},
+		{"one of each", 0, []func(*inviteFixture){openOne, usedOne, expiredOne, closedOne}, DefaultPersonalInviteAllowance - 1},
+		{"others' invites do not count", 0, []func(*inviteFixture){func(f *inviteFixture) {
+			f.mustCreate(f.op, personal("general"))
+			f.mustCreate(f.op, open("general"))
+		}}, DefaultPersonalInviteAllowance},
+		{"the allowance is a parameter", 2, []func(*inviteFixture){openOne}, 1},
+		{"used up", 2, []func(*inviteFixture){openOne, openOne}, 0},
+		{"never below zero when the allowance is lowered", 1, []func(*inviteFixture){openOne, openOne, openOne}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newInviteFixture(t)
+			for _, setup := range tt.setup {
+				setup(f)
+			}
+			opts := InviteOptions{Allowance: tt.allowance}
+			got, err := f.s.InvitesRemaining(f.ctx, f.alice.ID, opts, f.now)
+			if err != nil || got != tt.want {
+				t.Fatalf("InvitesRemaining = %d, %v, want %d", got, err, tt.want)
+			}
+			_, err = f.s.CreateInvite(f.ctx, "system", f.alice.ID, personal("general"), opts, f.now)
+			if refused := errors.Is(err, ErrInviteAllowanceExceeded); refused != (tt.want == 0) {
+				t.Errorf("CreateInvite with %d remaining: error = %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestRedeemInviteCreatesAccount(t *testing.T) {
 	f := newInviteFixture(t)
 	req := personal("general", "lobby")

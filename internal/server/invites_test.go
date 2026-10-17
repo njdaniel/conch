@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -484,6 +485,116 @@ func TestWhoAmIMayInvite(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("member granted the right", f.aliceTok, true)
+}
+
+func int64Ptr(n int64) *int64 { return &n }
+
+// whoami says whether the caller holds voice and, for a person with an
+// allowance, how much of it is left (issue #468).
+func TestWhoAmIVoiceAndInvitesRemaining(t *testing.T) {
+	f := newInviteFixture(t, Config{InviteAllowance: 3})
+	ctx := context.Background()
+	inviterCode := f.createInvite(t, f.rootTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"red"}, Voice: true, MayInvite: boolPtr(true)}).Code
+	plainCode := f.createInvite(t, f.rootTok, openLink("red")).Code
+	inviter := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, inviterCode, "inviter"))
+	plain := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, plainCode, "plain"))
+	// One open personal invite counts against the allowance, and a closed one
+	// does not.
+	f.createInvite(t, inviter.Token, personal("red"))
+	closed := f.createInvite(t, inviter.Token, personal("red"))
+	if _, err := f.srv.store.CloseInvite(ctx, "system", f.root.ID, closed.Invite.ID, f.clock); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		token     string
+		mayInvite bool
+		voice     bool
+		remaining *int64
+	}{
+		// Operators have no allowance, so no number.
+		{"operator", f.rootTok, true, true, nil},
+		{"member who may not invite", f.aliceTok, false, true, nil},
+		{"member who may invite", inviter.Token, true, true, int64Ptr(2)},
+		{"member without voice", plain.Token, false, false, nil},
+		{"agent", f.botTok, false, false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.send(t, "GET", "/v1/whoami", tt.token, "", "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("whoami = %d %s", rec.Code, rec.Body)
+			}
+			got := decodeBody[schema.WhoAmIResponseV1](t, rec)
+			if got.MayInvite != tt.mayInvite {
+				t.Errorf("may_invite = %v, want %v", got.MayInvite, tt.mayInvite)
+			}
+			if got.VoiceAllowed == nil || *got.VoiceAllowed != tt.voice {
+				t.Errorf("voice_allowed = %s, want %v", rec.Body, tt.voice)
+			}
+			if !reflect.DeepEqual(got.InvitesRemaining, tt.remaining) {
+				t.Errorf("invites_remaining in %s, want %v", rec.Body, tt.remaining)
+			}
+		})
+	}
+}
+
+// What whoami says is left follows what CreateInvite allows: it goes down
+// with each personal invite, is 0 (and sent) exactly when the next is
+// refused, comes back as invites close or expire, and goes away with the
+// right to invite.
+func TestWhoAmIInvitesRemainingFollowsCreate(t *testing.T) {
+	f := newInviteFixture(t, Config{InviteAllowance: 2})
+	ctx := context.Background()
+	if _, err := f.srv.store.SetMayInvite(ctx, "system", f.alice.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	remaining := func(t *testing.T) *int64 {
+		t.Helper()
+		return decodeBody[schema.WhoAmIResponseV1](t, f.send(t, "GET", "/v1/whoami", f.aliceTok, "", "")).InvitesRemaining
+	}
+	steps := []struct {
+		name string
+		do   func(t *testing.T)
+		want *int64
+	}{
+		{"before any", func(*testing.T) {}, int64Ptr(2)},
+		{"after one", func(t *testing.T) { f.createInvite(t, f.aliceTok, personal("red")) }, int64Ptr(1)},
+		{"after an operator's invite, which is not counted", func(t *testing.T) { f.createInvite(t, f.rootTok, personal("red")) }, int64Ptr(1)},
+		{"after two", func(t *testing.T) { f.createInvite(t, f.aliceTok, personal("red")) }, int64Ptr(0)},
+		{"after a refused third", func(t *testing.T) {
+			rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), "")
+			assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+		}, int64Ptr(0)},
+		{"after closing one", func(t *testing.T) {
+			list := decodeBody[schema.ListInvitesResponseV1](t, f.send(t, "GET", "/v1/invites", f.aliceTok, "", ""))
+			id := list.Invites[0].ID
+			if rec := f.send(t, "DELETE", fmt.Sprintf("/v1/invites/%d", id), f.aliceTok, "", ""); rec.Code != http.StatusNoContent {
+				t.Fatalf("close = %d %s", rec.Code, rec.Body)
+			}
+		}, int64Ptr(1)},
+		{"after the rest expire", func(*testing.T) { f.advance(8 * 24 * time.Hour) }, int64Ptr(2)},
+		{"after the right is taken away", func(t *testing.T) {
+			if _, err := f.srv.store.SetMayInvite(ctx, "system", f.alice.ID, false); err != nil {
+				t.Fatal(err)
+			}
+		}, nil},
+	}
+	for _, step := range steps {
+		step.do(t)
+		if got := remaining(t); !reflect.DeepEqual(got, step.want) {
+			t.Fatalf("%s: invites_remaining = %v, want %v", step.name, deref(got), deref(step.want))
+		}
+	}
+}
+
+// deref prints an optional count as its number, or "absent".
+func deref(n *int64) string {
+	if n == nil {
+		return "absent"
+	}
+	return fmt.Sprint(*n)
 }
 
 // The whole chain over REST: an operator puts out an open link for two
