@@ -14,7 +14,8 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import { repoRoot, safePath, type World } from './world';
 
-// The same image, by version and digest, as e2e/voice/harness.go.
+// The same image, by version and digest, as e2e/internal/lkit/kit.go (which
+// e2e/voice and e2e/isolation run).
 const livekitImage = 'livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3';
 
 export function dockerAvailable(): boolean {
@@ -63,6 +64,9 @@ export interface VoiceWorld {
   // A third member, for the screen share (issue #444): one shares, one
   // watches, and this one is told who is sharing.
   readonly carol: Member;
+  // The operator's credential, for a spec that makes a group of its own beside
+  // the channel (issue #447: a second group must see nothing of this one).
+  readonly operator: string;
   // Every secret of this world, for the check that none shows on a page: the
   // credentials and the LiveKit secret, and every join token and room name a
   // page was given (added by watchPage as the sessions are answered).
@@ -189,6 +193,7 @@ room:
       alice,
       bob,
       carol,
+      operator,
       secrets,
       sessionSecrets: () => fromSessions,
       addSecret: (value) => {

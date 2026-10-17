@@ -1,4 +1,4 @@
-package main
+package lkit
 
 import (
 	"bytes"
@@ -86,7 +86,7 @@ func silentOpusOgg(seconds int) []byte {
 
 	tags := new(bytes.Buffer)
 	tags.WriteString("OpusTags")
-	vendor := "conch voice-check"
+	vendor := "conch e2e"
 	_ = binary.Write(tags, binary.LittleEndian, uint32(len(vendor))) // #nosec G115 -- constant, short
 	tags.WriteString(vendor)
 	_ = binary.Write(tags, binary.LittleEndian, uint32(0)) // no comments
@@ -113,7 +113,8 @@ func silentOpusOgg(seconds int) []byte {
 	return out.Bytes()
 }
 
-func writeSilentOpus(path string, seconds int) error {
+// WriteSilentOpus writes seconds of Opus silence, as an Ogg file, to path.
+func WriteSilentOpus(path string, seconds int) error {
 	if err := os.WriteFile(path, silentOpusOgg(seconds), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}

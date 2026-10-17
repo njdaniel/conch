@@ -1,4 +1,4 @@
-package main
+package lkit
 
 import (
 	"bytes"
@@ -25,28 +25,28 @@ import (
 
 // ------------------------------------------------------------ admin API
 
-// lkAdmin asks LiveKit directly, with the API secret the harness chose, for
+// Admin asks LiveKit directly, with the API secret the harness chose, for
 // ground truth that does not pass through conchd or any client: who is in a
 // room, which rooms exist, and the server-side mute that stands in for a key
 // press. It does not use conchd's own LiveKit client, so a defect there cannot
 // make this program agree with itself.
-type lkAdmin struct {
+type Admin struct {
 	base   string // http://127.0.0.1:port
 	key    string
 	secret string
 	http   *http.Client
 }
 
-func newLKAdmin(base, key, secret string) *lkAdmin {
+func NewAdmin(base, key, secret string) *Admin {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
-	return &lkAdmin{base: base, key: key, secret: secret, http: &http.Client{Transport: tr, Timeout: 5 * time.Second}}
+	return &Admin{base: base, key: key, secret: secret, http: &http.Client{Transport: tr, Timeout: 5 * time.Second}}
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 // token signs an HS256 admin token carrying the given video grant.
-func (a *lkAdmin) token(video map[string]any) (string, error) {
+func (a *Admin) token(video map[string]any) (string, error) {
 	now := time.Now()
 	body, err := json.Marshal(map[string]any{
 		"iss":   a.key,
@@ -63,7 +63,7 @@ func (a *lkAdmin) token(video map[string]any) (string, error) {
 	return signing + "." + b64(mac.Sum(nil)), nil
 }
 
-func (a *lkAdmin) call(ctx context.Context, method string, video map[string]any, req, out any) error {
+func (a *Admin) call(ctx context.Context, method string, video map[string]any, req, out any) error {
 	tok, err := a.token(video)
 	if err != nil {
 		return err
@@ -80,7 +80,7 @@ func (a *lkAdmin) call(ctx context.Context, method string, video map[string]any,
 	r.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := a.http.Do(r)
 	if err != nil {
-		return fmt.Errorf("livekit %s: %w", method, unwrapURLError(err))
+		return fmt.Errorf("livekit %s: %w", method, UnwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -88,7 +88,7 @@ func (a *lkAdmin) call(ctx context.Context, method string, video map[string]any,
 		return fmt.Errorf("livekit %s: %w", method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return &lkStatusError{method: method, status: resp.StatusCode, body: truncate(string(data), 200)}
+		return &StatusError{method: method, status: resp.StatusCode, body: Truncate(string(data), 200)}
 	}
 	if out == nil {
 		return nil
@@ -96,28 +96,28 @@ func (a *lkAdmin) call(ctx context.Context, method string, video map[string]any,
 	return json.Unmarshal(data, out)
 }
 
-// lkStatusError is LiveKit answering an admin call with something other than
+// StatusError is LiveKit answering an admin call with something other than
 // 200, kept apart from a call that got no answer: "the room does not exist"
 // is a fact about LiveKit, "the call failed" is not.
-type lkStatusError struct {
+type StatusError struct {
 	method string
 	status int
 	body   string
 }
 
-func (e *lkStatusError) Error() string {
+func (e *StatusError) Error() string {
 	return fmt.Sprintf("livekit %s: HTTP %d: %s", e.method, e.status, e.body)
 }
 
-// roomNotFound reports whether err is LiveKit saying the room does not exist.
-func roomNotFound(err error) bool {
-	var se *lkStatusError
+// RoomNotFound reports whether err is LiveKit saying the room does not exist.
+func RoomNotFound(err error) bool {
+	var se *StatusError
 	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
-// unwrapURLError drops the URL from a transport error; the URL of an admin
+// UnwrapURLError drops the URL from a transport error; the URL of an admin
 // call is harmless but the habit keeps credentials out of messages.
-func unwrapURLError(err error) error {
+func UnwrapURLError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		return ue.Err
@@ -125,39 +125,39 @@ func unwrapURLError(err error) error {
 	return err
 }
 
-func truncate(s string, n int) string {
+func Truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[:n] + "..."
 }
 
-type lkTrack struct {
+type Track struct {
 	SID    string `json:"sid"`
 	Type   any    `json:"type"`
 	Source any    `json:"source"`
 	Muted  bool   `json:"muted"`
 }
 
-// isMicrophone is true for an audio track whose source is the microphone.
+// IsMicrophone is true for an audio track whose source is the microphone.
 // protojson omits defaults, so an absent type is audio.
-func (t lkTrack) isMicrophone() bool {
+func (t Track) IsMicrophone() bool {
 	typ := fmt.Sprint(t.Type)
 	src := fmt.Sprint(t.Source)
 	return (t.Type == nil || typ == "AUDIO" || typ == "0") && (src == "MICROPHONE" || src == "2")
 }
 
-type lkParticipant struct {
-	Identity string    `json:"identity"`
-	State    any       `json:"state"`
-	Tracks   []lkTrack `json:"tracks"`
+type Participant struct {
+	Identity string  `json:"identity"`
+	State    any     `json:"state"`
+	Tracks   []Track `json:"tracks"`
 	// Permission is what LiveKit says the connection may do now: the join
 	// token's grant, or what conchd last set with UpdateParticipant.
 	Permission map[string]any `json:"permission"`
 }
 
-// sources lists the sources of the participant's published tracks.
-func (p lkParticipant) sources() []string {
+// Sources lists the sources of the participant's published tracks.
+func (p Participant) Sources() []string {
 	var out []string
 	for _, t := range p.Tracks {
 		out = append(out, fmt.Sprint(t.Source))
@@ -165,25 +165,25 @@ func (p lkParticipant) sources() []string {
 	return out
 }
 
-// mic returns the participant's microphone track, if it has one.
-func (p lkParticipant) mic() (lkTrack, bool) {
+// Mic returns the participant's microphone track, if it has one.
+func (p Participant) Mic() (Track, bool) {
 	for _, t := range p.Tracks {
-		if t.isMicrophone() {
+		if t.IsMicrophone() {
 			return t, true
 		}
 	}
-	return lkTrack{}, false
+	return Track{}, false
 }
 
-func (a *lkAdmin) listParticipants(ctx context.Context, room string) ([]lkParticipant, error) {
+func (a *Admin) ListParticipants(ctx context.Context, room string) ([]Participant, error) {
 	var resp struct {
-		Participants []lkParticipant `json:"participants"`
+		Participants []Participant `json:"participants"`
 	}
 	err := a.call(ctx, "ListParticipants", map[string]any{"roomAdmin": true, "room": room}, map[string]any{"room": room}, &resp)
 	return resp.Participants, err
 }
 
-func (a *lkAdmin) listRooms(ctx context.Context) ([]string, error) {
+func (a *Admin) ListRooms(ctx context.Context) ([]string, error) {
 	var resp struct {
 		Rooms []struct {
 			Name string `json:"name"`
@@ -199,10 +199,10 @@ func (a *lkAdmin) listRooms(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// mintJoin signs a join token for identity into room with the API secret this
+// MintJoin signs a join token for identity into room with the API secret this
 // run chose: a participant conchd never issued a token to, as someone holding a
 // leaked secret could make. The token lives a minute.
-func (a *lkAdmin) mintJoin(identity, room string) (string, error) {
+func (a *Admin) MintJoin(identity, room string) (string, error) {
 	now := time.Now()
 	body, err := json.Marshal(map[string]any{
 		"iss": a.key,
@@ -222,22 +222,22 @@ func (a *lkAdmin) mintJoin(identity, room string) (string, error) {
 	return signing + "." + b64(mac.Sum(nil)), nil
 }
 
-func (a *lkAdmin) mute(ctx context.Context, room, identity, sid string, muted bool) error {
+func (a *Admin) Mute(ctx context.Context, room, identity, sid string, muted bool) error {
 	return a.call(ctx, "MutePublishedTrack", map[string]any{"roomAdmin": true, "room": room},
 		map[string]any{"room": room, "identity": identity, "track_sid": sid, "muted": muted}, nil)
 }
 
 // ----------------------------------------------- signalling-only client
 
-// jwtRE finds a JWT inside a binary signalling frame.
-var jwtRE = regexp.MustCompile(`eyJ[\w-]+\.[\w-]+\.[\w-]+`)
+// JWT finds a JWT inside a binary signalling frame.
+var JWT = regexp.MustCompile(`eyJ[\w-]+\.[\w-]+\.[\w-]+`)
 
-// signalConn is a participant that has connected to LiveKit's signalling
+// SignalConn is a participant that has connected to LiveKit's signalling
 // WebSocket with a token and does nothing else. LiveKit counts it as joined;
 // it cannot publish. Its job here is to be a connected participant (the
 // outsider, the removed member) and to hear the token LiveKit sends every
 // connected participant of its own (design note §10, finding 9).
-type signalConn struct {
+type SignalConn struct {
 	c      *websocket.Conn
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -247,9 +247,9 @@ type signalConn struct {
 	closeErr error
 }
 
-// dialSignal connects to LiveKit's signalling endpoint. On a refused join it
+// DialSignal connects to LiveKit's signalling endpoint. On a refused join it
 // returns the HTTP status and body LiveKit answered with.
-func dialSignal(ctx context.Context, wsBase, token string) (*signalConn, int, string, error) {
+func DialSignal(ctx context.Context, wsBase, token string) (*SignalConn, int, string, error) {
 	q := url.Values{"access_token": {token}, "protocol": {"9"}, "auto_subscribe": {"1"}}
 	cctx, cancel := context.WithCancel(context.Background())
 	c, resp, err := websocket.Dial(ctx, wsBase+"/rtc?"+q.Encode(), nil)
@@ -267,12 +267,12 @@ func dialSignal(ctx context.Context, wsBase, token string) (*signalConn, int, st
 		return nil, status, body, fmt.Errorf("signalling join refused")
 	}
 	c.SetReadLimit(1 << 20)
-	s := &signalConn{c: c, cancel: cancel, done: make(chan struct{})}
+	s := &SignalConn{c: c, cancel: cancel, done: make(chan struct{})}
 	go s.readLoop(cctx)
 	return s, http.StatusSwitchingProtocols, "", nil
 }
 
-func (s *signalConn) readLoop(ctx context.Context) {
+func (s *SignalConn) readLoop(ctx context.Context) {
 	defer close(s.done)
 	for {
 		_, data, err := s.c.Read(ctx)
@@ -282,7 +282,7 @@ func (s *signalConn) readLoop(ctx context.Context) {
 			s.mu.Unlock()
 			return
 		}
-		if found := jwtRE.FindAll(data, -1); len(found) > 0 {
+		if found := JWT.FindAll(data, -1); len(found) > 0 {
 			s.mu.Lock()
 			for _, f := range found {
 				s.issued = append(s.issued, string(f))
@@ -292,14 +292,14 @@ func (s *signalConn) readLoop(ctx context.Context) {
 	}
 }
 
-// issuedTokens returns the JWTs LiveKit has sent so far.
-func (s *signalConn) issuedTokens() []string {
+// IssuedTokens returns the JWTs LiveKit has sent so far.
+func (s *SignalConn) IssuedTokens() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.issued...)
 }
 
-func (s *signalConn) closed() bool {
+func (s *SignalConn) Closed() bool {
 	select {
 	case <-s.done:
 		return true
@@ -308,7 +308,7 @@ func (s *signalConn) closed() bool {
 	}
 }
 
-func (s *signalConn) Close() {
+func (s *SignalConn) Close() {
 	s.cancel()
 	_ = s.c.CloseNow()
 	<-s.done
@@ -316,7 +316,7 @@ func (s *signalConn) Close() {
 
 // -------------------------------------------- token-substituting relay
 
-// relay is a signalling proxy between `lk` and LiveKit. `lk room join` signs
+// Relay is a signalling proxy between `lk` and LiveKit. `lk room join` signs
 // its own join token from an API key and secret and has no option to use a
 // token it is given, which would bypass conchd and prove nothing. So the
 // relay sits in the middle: `lk` signs a token with a throwaway key LiveKit
@@ -325,48 +325,51 @@ func (s *signalConn) Close() {
 // participant, or not, on conchd's token alone. The relay also reads what
 // LiveKit sends back, which is how the harness gets the token LiveKit itself
 // issues a connected participant.
-type relay struct {
-	srv      *http.Server
-	ln       net.Listener
-	upstream string // host:port of LiveKit
-	secure   bool   // LiveKit is reached over TLS (wss and https), as on a deployment
-	token    string // the token conchd issued
-	// mint, when set, stands in for token: each request the client makes is
-	// admitted on the token mint returns for the one the client presented.
-	// The load test (loadtest.go) uses it to admit every participant that
-	// lk load-test starts, through one relay, each on a token conchd issued
-	// to a principal of its own.
-	mint func(ctx context.Context, clientToken string) (string, error)
-	// filter, when set, sees every frame the client sends LiveKit before
+//
+// The fields are set before ServeRelay and not changed after.
+type Relay struct {
+	Upstream string // host:port of LiveKit
+	Secure   bool   // LiveKit is reached over TLS (wss and https), as on a deployment
+	Token    string // the token conchd issued
+	// Mint, when set, stands in for Token: each request the client makes is
+	// admitted on the token Mint returns for the one the client presented.
+	// e2e/voice's load test uses it to admit every participant that lk
+	// load-test starts, through one relay, each on a token conchd issued to a
+	// principal of its own.
+	Mint func(ctx context.Context, clientToken string) (string, error)
+	// Filter, when set, sees every frame the client sends LiveKit before
 	// LiveKit does, and returns what is sent instead. It may block, which
 	// holds back that frame and every one after it. The screen-share
-	// scenario uses it (share.go): lk cannot say that a track is a screen
+	// scenarios use it (share.go): lk cannot say that a track is a screen
 	// share, and cannot wait to publish one until conchd has granted it.
-	filter func(ctx context.Context, frame []byte) []byte
+	Filter func(ctx context.Context, frame []byte) []byte
+
+	srv *http.Server
+	ln  net.Listener
 
 	mu     sync.Mutex
 	issued []string
 }
 
-// issuedTokens returns the JWTs LiveKit sent the participant behind the relay.
-func (r *relay) issuedTokens() []string {
+// IssuedTokens returns the JWTs LiveKit sent the participant behind the relay.
+func (r *Relay) IssuedTokens() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.issued...)
 }
 
-// startRelay starts a relay that admits its client on conchdToken alone.
+// StartRelay starts a relay that admits its client on conchdToken alone.
 // filter is nil for a relay that passes the client's frames on unchanged.
-func startRelay(upstreamHostPort, conchdToken string, filter func(context.Context, []byte) []byte) (*relay, error) {
-	return serveRelay(&relay{upstream: upstreamHostPort, token: conchdToken, filter: filter})
+func StartRelay(upstreamHostPort, conchdToken string, filter func(context.Context, []byte) []byte) (*Relay, error) {
+	return ServeRelay(&Relay{Upstream: upstreamHostPort, Token: conchdToken, Filter: filter})
 }
 
 // relayTokenKey carries the token the relay chose for a plain HTTP request
 // to the reverse proxy's Rewrite.
 type relayTokenKey struct{}
 
-// serveRelay starts r on a loopback port of its own.
-func serveRelay(r *relay) (*relay, error) {
+// ServeRelay starts r on a loopback port of its own.
+func ServeRelay(r *Relay) (*Relay, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -377,18 +380,18 @@ func serveRelay(r *relay) (*relay, error) {
 		ErrorLog: log.New(io.Discard, "", 0),
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = r.scheme("http")
-			pr.Out.URL.Host = r.upstream
-			pr.Out.Host = r.upstream
+			pr.Out.URL.Host = r.Upstream
+			pr.Out.Host = r.Upstream
 			token, _ := pr.In.Context().Value(relayTokenKey{}).(string)
 			r.swap(pr.Out.URL, pr.Out.Header, token)
 		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		token := r.token
-		if r.mint != nil {
+		token := r.Token
+		if r.Mint != nil {
 			var err error
-			if token, err = r.mint(req.Context(), clientToken(req)); err != nil {
+			if token, err = r.Mint(req.Context(), ClientToken(req)); err != nil {
 				// The error says what went wrong; it never carries a token.
 				http.Error(w, "relay: "+err.Error(), http.StatusServiceUnavailable)
 				return
@@ -405,20 +408,21 @@ func serveRelay(r *relay) (*relay, error) {
 	return r, nil
 }
 
-func (r *relay) url() string { return "ws://" + r.ln.Addr().String() }
+// URL is where a client reaches the relay.
+func (r *Relay) URL() string { return "ws://" + r.ln.Addr().String() }
 
 // scheme is the upstream scheme for plain, "http" or "ws": its TLS form when
 // LiveKit is reached over TLS.
-func (r *relay) scheme(plain string) string {
-	if r.secure {
+func (r *Relay) scheme(plain string) string {
+	if r.Secure {
 		return plain + "s"
 	}
 	return plain
 }
 
-// clientToken is the token the client presented, in the query or the
+// ClientToken is the token the client presented, in the query or the
 // Authorization header, where LiveKit reads it; "" when there is none.
-func clientToken(req *http.Request) string {
+func ClientToken(req *http.Request) string {
 	if t := req.URL.Query().Get("access_token"); t != "" {
 		return t
 	}
@@ -428,8 +432,8 @@ func clientToken(req *http.Request) string {
 	return ""
 }
 
-// swap puts conchd's token where the client put its own.
-func (r *relay) swap(u *url.URL, h http.Header, token string) {
+// swap puts token where the client put its own.
+func (r *Relay) swap(u *url.URL, h http.Header, token string) {
 	q := u.Query()
 	if q.Has("access_token") {
 		q.Set("access_token", token)
@@ -440,14 +444,14 @@ func (r *relay) swap(u *url.URL, h http.Header, token string) {
 	}
 }
 
-func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request, token string) {
+func (r *Relay) serveSocket(w http.ResponseWriter, req *http.Request, token string) {
 	out := req.URL
 	hdr := http.Header{}
 	if a := req.Header.Get("Authorization"); a != "" {
 		hdr.Set("Authorization", a)
 	}
 	u := *out
-	u.Scheme, u.Host = r.scheme("ws"), r.upstream
+	u.Scheme, u.Host = r.scheme("ws"), r.Upstream
 	r.swap(&u, hdr, token)
 	up, resp, err := websocket.Dial(req.Context(), u.String(), &websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
@@ -481,11 +485,11 @@ func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request, token stri
 			if err != nil {
 				return
 			}
-			if !capture && r.filter != nil {
-				data = r.filter(ctx, data)
+			if !capture && r.Filter != nil {
+				data = r.Filter(ctx, data)
 			}
 			if capture {
-				if found := jwtRE.FindAll(data, -1); len(found) > 0 {
+				if found := JWT.FindAll(data, -1); len(found) > 0 {
 					r.mu.Lock()
 					for _, f := range found {
 						r.issued = append(r.issued, string(f))
@@ -505,7 +509,8 @@ func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request, token stri
 	_ = down.CloseNow()
 }
 
-func (r *relay) Close() {
+// Close stops the relay.
+func (r *Relay) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = r.srv.Shutdown(ctx)

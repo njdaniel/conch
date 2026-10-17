@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 )
 
 // fakeJWT is a token shaped as lk signs one, naming participant sub. Its
@@ -135,7 +137,7 @@ func TestClientToken(t *testing.T) {
 			if tt.auth != "" {
 				req.Header.Set("Authorization", tt.auth)
 			}
-			if got := clientToken(req); got != tt.want {
+			if got := lkit.ClientToken(req); got != tt.want {
 				t.Fatalf("clientToken = %q, want %q", got, tt.want)
 			}
 		})
@@ -198,7 +200,7 @@ func TestMintingRelay(t *testing.T) {
 		}
 		return "conchd-" + id, nil
 	}
-	rl, err := serveRelay(&relay{upstream: strings.TrimPrefix(upstream.URL, "http://"), mint: mint})
+	rl, err := lkit.ServeRelay(&lkit.Relay{Upstream: strings.TrimPrefix(upstream.URL, "http://"), Mint: mint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,14 +210,14 @@ func TestMintingRelay(t *testing.T) {
 	defer cancel()
 	for _, id := range []string{"a", "b"} {
 		hdr := http.Header{"Authorization": {"Bearer " + fakeJWT(id)}}
-		c, _, err := websocket.Dial(ctx, rl.url()+"/rtc?access_token="+fakeJWT(id), &websocket.DialOptions{HTTPHeader: hdr})
+		c, _, err := websocket.Dial(ctx, rl.URL()+"/rtc?access_token="+fakeJWT(id), &websocket.DialOptions{HTTPHeader: hdr})
 		if err != nil {
 			t.Fatalf("dial as %s: %v", id, err)
 		}
 		_, _, _ = c.Read(ctx)
 		_ = c.CloseNow()
 	}
-	_, resp, err := websocket.Dial(ctx, rl.url()+"/rtc?access_token="+fakeJWT("refused"), nil)
+	_, resp, err := websocket.Dial(ctx, rl.URL()+"/rtc?access_token="+fakeJWT("refused"), nil)
 	if err == nil || resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("a refused mint: err %v, response %v; want 503", err, resp)
 	}

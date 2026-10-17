@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -30,11 +31,11 @@ import (
 // use a token it is given. Run that way the test would bypass conchd and need
 // the deployment's LiveKit secret on the load generator. So the script runs
 // lk load-test through a relay, as this program's checks run `lk room join`
-// (livekit.go): every connection lk opens is admitted on a token conchd issued
+// (e2e/internal/lkit): every connection lk opens is admitted on a token conchd issued
 // to a principal of its own, asked for over the public API at that moment.
 //
 // It is here, as subcommands of the voice check, because it reuses that
-// check's pinned lk download (fetchLK), its relay and its screen-share filter.
+// check's pinned lk download, its relay and its screen-share filter (lkit).
 // Everything it says to conchd is a pkg/schema type.
 //
 //	voice-check fetch-lk DIR   download the pinned lk into DIR, print its path
@@ -127,7 +128,7 @@ func fetchLKMain(args []string) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	path, err := fetchLK(ctx, args[0])
+	path, err := lkit.FetchLK(ctx, args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fetch-lk:", err)
 		return 1
@@ -156,6 +157,7 @@ func loadtestMain(args []string) int {
 		return 1
 	}
 	h := &harness{tmp: tmp, secrets: map[string]string{}, rooms: map[string][]string{}, jtis: map[string]bool{}}
+	h.kit = lkit.New(kitHost{h}, stopCtx, "voice-check")
 	h.secret("the operator credential", token)
 	lt := &loadtest{h: h, cfg: cfg, op: api{baseURL: cfg.server, token: token}, byLK: map[string]*person{}}
 
@@ -253,15 +255,15 @@ func (lt *loadtest) run(ctx context.Context) error {
 			return err
 		}
 	}
-	rl, err := serveRelay(&relay{upstream: upstream, secure: secure, mint: lt.mint})
+	rl, err := lkit.ServeRelay(&lkit.Relay{Upstream: upstream, Secure: secure, Mint: lt.mint})
 	if err != nil {
 		return err
 	}
 	h.onCleanup(rl.Close)
-	if err := os.WriteFile(cfg.ready, []byte(rl.url()+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfg.ready, []byte(rl.URL()+"\n"), 0o600); err != nil {
 		return err
 	}
-	h.say("relay up at %s in front of LiveKit; each participant lk opens is admitted on a conchd token of its own", rl.url())
+	h.say("relay up at %s in front of LiveKit; each participant lk opens is admitted on a conchd token of its own", rl.URL())
 	<-ctx.Done()
 	lt.mu.Lock()
 	used := len(lt.byLK)
@@ -395,7 +397,7 @@ func livekitUpstream(raw string) (hostPort string, secure bool, err error) {
 
 // startSharer makes one more member, joins it with lk publishing its demo
 // video and a silent sound file, claims the channel's share for it and lets
-// the relay pass those tracks as the screen and its sound (share.go): a
+// the relay pass those tracks as the screen and its sound (lkit.ShareFilter): a
 // stand-in for a browser sharing a screen, for a rehearsal of the run or a
 // local proof. The real runs share from a browser.
 func (lt *loadtest) startSharer(ctx context.Context, upstream string, secure bool, expires schema.Timestamp) error {
@@ -413,11 +415,11 @@ func (lt *loadtest) startSharer(ctx context.Context, upstream string, secure boo
 		return err
 	}
 	audio := filepath.Join(dir, "share-audio.ogg")
-	if err := writeSilentOpus(audio, 3600); err != nil {
+	if err := lkit.WriteSilentOpus(audio, 3600); err != nil {
 		return err
 	}
-	gate := newShareFilter(true)
-	rl, err := serveRelay(&relay{upstream: upstream, secure: secure, token: s.Rooms[0].Token, filter: gate.filter})
+	gate := lkit.NewShareFilter(true)
+	rl, err := lkit.ServeRelay(&lkit.Relay{Upstream: upstream, Secure: secure, Token: s.Rooms[0].Token, Filter: gate.Filter})
 	if err != nil {
 		return err
 	}
@@ -434,15 +436,15 @@ func (lt *loadtest) startSharer(ctx context.Context, upstream string, secure boo
 		}
 	})
 	select {
-	case <-gate.held:
-	case <-hl.done:
-		return errors.New("the fake sharer's lk exited: " + hl.tail(h))
+	case <-gate.Held():
+	case <-hl.Done():
+		return errors.New("the fake sharer's lk exited: " + hl.Tail())
 	case <-ctx.Done():
 		return errInterrupted
 	case <-time.After(60 * time.Second):
-		return errors.New("the fake sharer's lk did not try to publish within 60 s: " + hl.tail(h))
+		return errors.New("the fake sharer's lk did not try to publish within 60 s: " + hl.Tail())
 	}
-	before := len(rl.issuedTokens())
+	before := len(rl.IssuedTokens())
 	share, status, code, err := claimShare(sharer, lt.cfg.channel)
 	if err != nil {
 		return fmt.Errorf("claim the share: %w", err)
@@ -453,11 +455,11 @@ func (lt *loadtest) startSharer(ctx context.Context, upstream string, secure boo
 	// LiveKit sends the connection a token carrying the share; publishing
 	// before it arrives is refused.
 	if err := waitFor("LiveKit to send the fake sharer a token carrying the share", 15*time.Second, func() (bool, string) {
-		return len(rl.issuedTokens()) > before, "no token since the claim"
+		return len(rl.IssuedTokens()) > before, "no token since the claim"
 	}); err != nil {
 		return err
 	}
-	gate.release()
+	gate.Release()
 	h.say("fake sharer %s is sharing lk's demo video as a screen (sound=%v)", sharer.name, share.Audio)
 	return nil
 }

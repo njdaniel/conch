@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/internal/server/store"
 )
 
@@ -92,8 +93,8 @@ func (l *live) joinedTransmittingOutsider(ctx context.Context) error {
 	if _, err := h.session(bob, "bridge"); err != nil {
 		return err
 	}
-	if g := sa.Rooms[0]; sa.LivekitURL != l.srv.wsURL || !g.CanPublish {
-		return fmt.Errorf("alice's session: url %q (want %q), can_publish=%v (want true)", sa.LivekitURL, l.srv.wsURL, g.CanPublish)
+	if g := sa.Rooms[0]; sa.LivekitURL != l.srv.WSURL || !g.CanPublish {
+		return fmt.Errorf("alice's session: url %q (want %q), can_publish=%v (want true)", sa.LivekitURL, l.srv.WSURL, g.CanPublish)
 	}
 	bridgeRoom := sa.Rooms[0].Room
 	h.room(bridgeRoom)
@@ -114,8 +115,8 @@ func (l *live) joinedTransmittingOutsider(ctx context.Context) error {
 	aliceID := alice.id
 	if err := waitForOrFail("LiveKit to list alice in bridge's room", 60*time.Second, func() (bool, string, error) {
 		ok, _, saw := l.lkHas(bridgeRoom, aliceID)
-		if !ok && hl.exited() {
-			return false, "", errors.New("lk exited: " + hl.tail(h))
+		if !ok && hl.Exited() {
+			return false, "", errors.New("lk exited: " + hl.Tail())
 		}
 		return ok, saw, nil
 	}); err != nil {
@@ -134,7 +135,7 @@ func (l *live) joinedTransmittingOutsider(ctx context.Context) error {
 	if err := waitFor("conch voice status (as bob) to list alice", 30*time.Second, func() (bool, string) {
 		out, err := bob.cli.run("", "voice", "status", "bridge")
 		if err != nil {
-			return false, oneLine(out, err)
+			return false, lkit.OneLine(out, err)
 		}
 		for _, line := range strings.Split(out, "\n") {
 			if strings.HasPrefix(line, want) {
@@ -215,13 +216,13 @@ func (l *live) transmitting(ctx context.Context) error {
 	// LiveKit's side, which is all conchd can see of a key press: the muted
 	// state of a published microphone track.
 	actor := fmt.Sprintf("principal:%d", aliceID)
-	var track lkTrack
+	var track lkit.Track
 	if err := waitFor("alice's microphone track in LiveKit", 30*time.Second, func() (bool, string) {
 		ok, p, saw := l.lkHas(bridgeRoom, aliceID)
 		if !ok {
 			return false, saw
 		}
-		t, has := p.mic()
+		t, has := p.Mic()
 		track = t
 		return has, "alice is in the room but has no microphone track"
 	}); err != nil {
@@ -230,7 +231,7 @@ func (l *live) transmitting(ctx context.Context) error {
 	setMuted := func(muted bool) error {
 		mctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		if err := l.adm.mute(mctx, bridgeRoom, identity(aliceID), track.SID, muted); err != nil {
+		if err := l.adm.Mute(mctx, bridgeRoom, identity(aliceID), track.SID, muted); err != nil {
 			return err
 		}
 		return waitFor(fmt.Sprintf("LiveKit to report alice's track muted=%v", muted), 15*time.Second, func() (bool, string) {
@@ -238,7 +239,7 @@ func (l *live) transmitting(ctx context.Context) error {
 			if !ok {
 				return false, saw
 			}
-			t, _ := p.mic()
+			t, _ := p.Mic()
 			return t.Muted == muted, fmt.Sprintf("muted=%v", t.Muted)
 		})
 	}
@@ -363,7 +364,7 @@ func (l *live) outsider(ctx context.Context) error {
 	if sideRoom == bridgeRoom {
 		return errors.New("bridge and side were given the same room")
 	}
-	sc, status, body, err := dialSignal(ctx, l.srv.wsURL, cs.Rooms[0].Token)
+	sc, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, cs.Rooms[0].Token)
 	if err != nil {
 		return fmt.Errorf("carol joining side with her own token: HTTP %d %s", status, h.redact(body))
 	}
@@ -407,7 +408,7 @@ func (l *live) outsider(ctx context.Context) error {
 // show her, and say so in the audit log.
 func (l *live) enforcedByName(ctx context.Context) error {
 	h, bob, carol, bridgeRoom := l.h, l.bob, l.carol, l.bridgeRoom
-	tok, err := l.adm.mintJoin(identity(carol.id), bridgeRoom)
+	tok, err := l.adm.MintJoin(identity(carol.id), bridgeRoom)
 	if err != nil {
 		return err
 	}
@@ -416,7 +417,7 @@ func (l *live) enforcedByName(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	sc, status, body, err := dialSignal(ctx, l.srv.wsURL, tok)
+	sc, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, tok)
 	if err != nil {
 		return fmt.Errorf("carol joining bridge with a token minted from the API secret: HTTP %d %s", status, h.redact(body))
 	}
@@ -438,8 +439,8 @@ func (l *live) enforcedByName(ctx context.Context) error {
 				n++
 			}
 		}
-		return gone && sc.closed() && n == 1 && len(rows) == removedBefore+1,
-			fmt.Sprintf("LiveKit: %s; her connection closed=%v; %d removal rows for her", sawLK, sc.closed(), n)
+		return gone && sc.Closed() && n == 1 && len(rows) == removedBefore+1,
+			fmt.Sprintf("LiveKit: %s; her connection closed=%v; %d removal rows for her", sawLK, sc.Closed(), n)
 	}); err != nil {
 		return err
 	}

@@ -3,12 +3,11 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/njdaniel/conch/e2e/internal/routetable"
 )
 
 // The suite calls the server through its public routes only: the table in
@@ -54,78 +53,17 @@ func (t loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newLoggingTransport() http.RoundTripper { return loggingTransport{http.DefaultTransport} }
 
-// routePattern is one entry of the route table: an optional method and a path
-// whose {name} segments match any one segment.
-type routePattern struct {
-	method string
-	path   *regexp.Regexp
-	text   string
-}
-
-var routeEntry = regexp.MustCompile(`(?:\brt\(|pattern:\s*)"((?:(?:GET|POST|PUT|DELETE|PATCH|HEAD) )?/[^"]*)"`)
+// routePattern is one entry of the route table (e2e/internal/routetable).
+type routePattern = routetable.Route
 
 // publicRoutes reads the route table of the repository's server.
-func publicRoutes(repo string) ([]routePattern, error) {
-	src, err := os.ReadFile(filepath.Join(repo, "internal", "server", "routes.go")) // #nosec G304 -- the repository this run is in
-	if err != nil {
-		return nil, err
-	}
-	var out []routePattern
-	for _, m := range routeEntry.FindAllStringSubmatch(string(src), -1) {
-		p, err := parseRoutePattern(m[1])
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("internal/server/routes.go has no routes this check can read")
-	}
-	return out, nil
-}
+func publicRoutes(repo string) ([]routePattern, error) { return routetable.Read(repo) }
 
-func parseRoutePattern(text string) (routePattern, error) {
-	method, path := "", text
-	if m, p, ok := strings.Cut(text, " "); ok {
-		method, path = m, p
-	}
-	var re strings.Builder
-	re.WriteString("^")
-	for _, seg := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
-		re.WriteString("/")
-		if strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
-			re.WriteString("[^/]+")
-			continue
-		}
-		re.WriteString(regexp.QuoteMeta(seg))
-	}
-	// A pattern that ends in a slash matches everything below it, as the mux's
-	// does; the table has none, and a call to such a path would be refused here.
-	re.WriteString("$")
-	compiled, err := regexp.Compile(re.String())
-	if err != nil {
-		return routePattern{}, err
-	}
-	return routePattern{method: method, path: compiled, text: text}, nil
-}
+func parseRoutePattern(text string) (routePattern, error) { return routetable.Parse(text) }
 
 // unlisted is the requests in seen that no route of the table serves.
 func unlisted(routes []routePattern, seen []string) []string {
-	var out []string
-	for _, call := range seen {
-		method, path, _ := strings.Cut(call, " ")
-		ok := false
-		for _, r := range routes {
-			if (r.method == "" || r.method == method) && r.path.MatchString(path) {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			out = append(out, call)
-		}
-	}
-	return out
+	return routetable.Unlisted(routes, seen)
 }
 
 // checkPublicRoutes fails if the suite has asked for a path that is not in the
