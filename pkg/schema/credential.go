@@ -105,3 +105,26 @@ type RotateCredentialResponseV1 struct {
 type ListCredentialsResponseV1 struct {
 	Credentials []CredentialV1 `json:"credentials"`
 }
+
+// OwnCredentialV1 is one of the caller's own sign-ins, as
+// GET /v1/credentials/mine lists it (issue #496): a credential of theirs that
+// can still sign in. It never contains the token or its hash, nor the
+// principal, which is the caller. Current is true for the credential the
+// listing request itself came with ("this browser"). A credential made by a
+// sign-in link is labelled "sign-in link <id>", so the person can see that a
+// link was used for their account.
+type OwnCredentialV1 struct {
+	ID        int64      `json:"id"`
+	Label     string     `json:"label"`
+	CreatedAt Timestamp  `json:"created_at"`
+	ExpiresAt *Timestamp `json:"expires_at,omitempty"`
+	Renews    bool       `json:"renews,omitempty"`
+	Current   bool       `json:"current,omitempty"`
+}
+
+// ListOwnCredentialsResponseV1 is the response to GET /v1/credentials/mine:
+// the caller's live credentials, newest first; revoked and expired ones are
+// left out. Producers must send an empty slice, not nil.
+type ListOwnCredentialsResponseV1 struct {
+	Credentials []OwnCredentialV1 `json:"credentials"`
+}

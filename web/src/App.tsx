@@ -13,6 +13,7 @@ import { OperatorWarning } from './OperatorWarning';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { SignIn } from './SignIn';
+import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
@@ -454,6 +455,7 @@ export function App({ origin }: { readonly origin: string }) {
               />
             ) : null
           }
+          signIns={(endThis) => <YourSignIns onEndThis={endThis} onUnauthorized={onUnauthorized} />}
           report={<ReportProblem onUnauthorized={onUnauthorized} />}
           voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
           invites={

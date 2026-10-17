@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -401,6 +402,13 @@ func matrixRows() []row {
 		}),
 		{route: "DELETE /v1/credentials/current", what: "signs out (her spare credential)", spare: true, own: true,
 			probe: func(*world, subject) probe { return del("/v1/credentials/current") }},
+		// Her own sign-ins (issue #496): the list holds hers alone, and an A
+		// member's credential id is ended no more than one never issued.
+		{route: "GET /v1/credentials/mine", what: "lists her own sign-ins", own: true, after: checkOwnSignIns,
+			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
+		{route: "DELETE /v1/credentials/mine/{id}", what: "ends an A member's sign-in", pick: aCredential,
+			want:  answer{http.StatusNotFound, "credential_not_found"},
+			probe: func(_ *world, s subject) probe { return del("/v1/credentials/mine/" + id(s.id)) }},
 		operator("POST /v1/principals/{id}/disable", "disables an A member", aMember, func(_ *world, s subject) probe {
 			return post("/v1/principals/"+id(s.id)+"/disable", nil)
 		}),
@@ -695,6 +703,42 @@ func checkReadClamp(w *world, a api) error {
 	}
 	if mark.LastReadID != newest {
 		return fmt.Errorf("a mark at %d is stored as %d, want %d, the newest message B can see in %s", w.ghost().id, mark.LastReadID, newest, channel)
+	}
+	return nil
+}
+
+// checkOwnSignIns is the sign-in list's own check: what B is shown is exactly
+// her live credentials as the operator sees them, with the one the request
+// came with marked current. The marker scan has already found none of A's.
+func checkOwnSignIns(w *world, a api) error {
+	var mine schema.ListOwnCredentialsResponseV1
+	if err := a.call(http.MethodGet, "/v1/credentials/mine", nil, &mine); err != nil {
+		return err
+	}
+	var all schema.ListCredentialsResponseV1
+	if err := w.op.call(http.MethodGet, fmt.Sprintf("/v1/principals/%d/credentials", w.prober.id), nil, &all); err != nil {
+		return err
+	}
+	now := time.Now()
+	var want []int64
+	for _, c := range all.Credentials {
+		if c.RevokedAt == nil && (c.ExpiresAt == nil || c.ExpiresAt.Time().After(now)) {
+			want = append(want, c.ID)
+		}
+	}
+	var got []int64
+	var current []int64
+	for _, c := range mine.Credentials {
+		got = append(got, c.ID)
+		if c.Current {
+			current = append(current, c.ID)
+		}
+	}
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("her sign-ins are listed as %v; her live credentials are %v", got, want)
+	}
+	if len(current) != 1 || current[0] != w.prober.credID {
+		return fmt.Errorf("the sign-ins marked current are %v, want her own credential %d alone", current, w.prober.credID)
 	}
 	return nil
 }

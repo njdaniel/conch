@@ -196,6 +196,78 @@ func (s *Server) handleRevokeCurrentCredential(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleListOwnCredentials serves GET /v1/credentials/mine (issue #496): the
+// caller's own sign-ins, the credentials of theirs that can still sign in,
+// with the one this request came with marked current. Whose they are comes
+// from the request context, never from the path or a query, so no caller can
+// list another's. Any authenticated caller may, a person or an agent.
+func (s *Server) handleListOwnCredentials(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := callerFrom(ctx)
+	currentID, hasCred := credentialIDFrom(ctx)
+	if !ok || !hasCred {
+		// AuthOff: nobody asked, so there is nobody's to list. Answered as
+		// whoami answers it.
+		writeUnauthenticated(w)
+		return
+	}
+	creds, err := s.store.ListLiveCredentials(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "credentials: own list failed", "principal", caller.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]schema.OwnCredentialV1, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, schema.OwnCredentialV1{
+			ID:        c.ID,
+			Label:     c.Label,
+			CreatedAt: c.CreatedAt,
+			ExpiresAt: c.ExpiresAt,
+			Renews:    c.Renews,
+			Current:   c.ID == currentID,
+		})
+	}
+	writeJSON(w, http.StatusOK, schema.ListOwnCredentialsResponseV1{Credentials: out})
+}
+
+// handleRevokeOwnCredential serves DELETE /v1/credentials/mine/{id} (issue
+// #496): the caller ends one of their own sign-ins by its id, this one or
+// another. The store revokes it only if it is the caller's: another's id is
+// answered exactly as an id never issued, 404 credential_not_found, so the
+// answer says nothing of whether it exists. Audited credential_revoked with
+// reason=self, as signing out is; the last operator guard applies.
+func (s *Server) handleRevokeOwnCredential(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := callerFrom(ctx)
+	// A caller who did not sign in with a credential has no sign-ins of
+	// their own to end; checked as the list does, so this stays closed
+	// however AuthOff is answered.
+	if _, hasCred := credentialIDFrom(ctx); !ok || !hasCred {
+		writeUnauthenticated(w)
+		return
+	}
+	id, ok := pathID(w, r, "id", "credential")
+	if !ok {
+		return
+	}
+	err := s.store.RevokeCredentialOf(ctx, auditActor(ctx), caller.ID, id)
+	switch {
+	case errors.Is(err, store.ErrCredentialNotFound):
+		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
+		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "credentials: own revoke failed", "principal", caller.ID, "credential", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	s.credentialRevoked(ctx)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // credentialRevoked is what follows the revocation of one credential, by an
 // operator or by its holder. A voice room the credential held a session for
 // is rotated before the response is written, so a token LiveKit renewed for

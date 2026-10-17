@@ -34,6 +34,7 @@ export function Lobby({
   voice,
   invites,
   account,
+  signIns,
   report,
   onOpen,
   onRetry,
@@ -55,6 +56,10 @@ export function Lobby({
   // The caller's own account: changing their name (issue #441). There is no
   // settings page yet, so it sits in the header.
   readonly account?: ReactNode;
+  // "Your sign-ins" (issue #496), beside it. Ending this browser's own sign-in
+  // is signing out, so the section is handed endThis, which asks the
+  // sign-out's question below.
+  readonly signIns?: (endThis: () => void) => ReactNode;
   // "Report a problem" (issue #446): in the header beside the sign-outs, and
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
@@ -80,6 +85,9 @@ export function Lobby({
       <header>
         <h1>Conch</h1>
         {account}
+        {signIns?.(() => {
+          setConfirming('here');
+        })}
         <div className="signout">
           {confirming === null ? (
             <>

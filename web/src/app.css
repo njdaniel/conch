@@ -78,6 +78,30 @@ body {
   margin: 0;
 }
 
+/* "Your sign-ins" (issue #496): one button in the account area; the list
+   opens in place below it, no wider than the header, and a long label wraps
+   rather than widening the page. */
+.signins {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.signins-panel p {
+  margin: 0.25rem 0;
+  max-width: 32rem;
+}
+
+.signin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.signin-list li {
+  padding: 0.25rem 0;
+}
+
 /* "Report a problem" (issue #446): one button in the header; the form opens
    below it, no wider than the window. */
 .report {

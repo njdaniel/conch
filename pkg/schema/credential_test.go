@@ -25,6 +25,10 @@ func TestCredentialGoldenFixtures(t *testing.T) {
 		{"rotate-credential-response-v1.json", func() any { return new(RotateCredentialResponseV1) }},
 		{"list-credentials-response-v1.json", func() any { return new(ListCredentialsResponseV1) }},
 		{"list-credentials-response-v1-empty.json", func() any { return new(ListCredentialsResponseV1) }},
+		{"own-credential-v1.json", func() any { return new(OwnCredentialV1) }},
+		{"own-credential-v1-current.json", func() any { return new(OwnCredentialV1) }},
+		{"list-own-credentials-response-v1.json", func() any { return new(ListOwnCredentialsResponseV1) }},
+		{"list-own-credentials-response-v1-empty.json", func() any { return new(ListOwnCredentialsResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -88,6 +92,19 @@ func TestCredentialV1HasNoSecretFields(t *testing.T) {
 				t.Errorf("%s has unexpected key %q", file, k)
 			}
 		}
+	}
+}
+
+// TestOwnCredentialV1HasNoSecretFields pins the key set of a sign-in as its
+// holder sees it (issue #496): no token, hash or secret, and no principal.
+func TestOwnCredentialV1HasNoSecretFields(t *testing.T) {
+	ts := NewTimestamp(time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC))
+	full := OwnCredentialV1{ID: 1, Label: "l", CreatedAt: ts, ExpiresAt: &ts, Renews: true, Current: true}
+	if got, want := jsonKeys(t, full), "created_at,current,expires_at,id,label,renews"; got != want {
+		t.Errorf("OwnCredentialV1 keys = %s, want %s", got, want)
+	}
+	if got, want := jsonKeys(t, OwnCredentialV1{}), "created_at,id,label"; got != want {
+		t.Errorf("a bare OwnCredentialV1's keys = %s, want %s", got, want)
 	}
 }
 
