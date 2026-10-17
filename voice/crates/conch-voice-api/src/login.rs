@@ -118,8 +118,45 @@ wire_object!(StoredCredential, "a stored credential object", unknown = ignored, 
     token: optional,
 });
 
+/// The servers a login is stored for under `config_dir`, sorted by key: the rule of
+/// `storedServers` in `internal/cli/credentials.go`, which `conch` picks its server by when
+/// nothing names one.
+///
+/// A key that is not exactly a server's key as [`ServerAddress::parse`] makes it was not
+/// written by `conch login` and names no server to reach, and a key whose host `conch`
+/// refuses names one other than its own; both are left out. A file that cannot be used
+/// gives none: this only helps choose a server, and reading that server's token then
+/// reports what is wrong with the file. Like [`resolve_token`], it never writes anything.
+pub fn stored_servers(config_dir: Option<&Path>) -> Vec<ServerAddress> {
+    let Some(Ok(Some(logins))) = config_dir.map(|dir| read_logins(&credentials_path(dir))) else {
+        return Vec::new();
+    };
+    let mut servers: Vec<ServerAddress> = logins
+        .into_keys()
+        .filter_map(|key| {
+            ServerAddress::parse(&key)
+                .ok()
+                .filter(|server| server.key() == key && !server.has_refused_host())
+        })
+        .collect();
+    servers.sort_by(|a, b| a.key().cmp(b.key()));
+    servers
+}
+
 /// The token stored for `server` in the credentials file at `path`, if there is one.
 fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, Error> {
+    let Some(logins) = read_logins(path)? else {
+        return Ok(None);
+    };
+    Ok(logins
+        .into_iter()
+        .find(|(key, _)| key == server.key())
+        .and_then(|(_, credential)| credential?.token)
+        .filter(|token| !token.is_empty()))
+}
+
+/// Every login in the credentials file at `path`, by key; `None` when there is no file.
+fn read_logins(path: &Path) -> Result<Option<HashMap<String, Option<StoredCredential>>>, Error> {
     let unreadable = |source| Error::CredentialsUnreadable {
         path: path.to_owned(),
         source,
@@ -173,22 +210,15 @@ fn stored_token(server: &ServerAddress, path: &Path) -> Result<Option<Secret>, E
     // token, so only its position is kept.
     let mut values = serde_json::Deserializer::from_slice(&data)
         .into_iter::<Option<HashMap<String, Option<StoredCredential>>>>();
-    let logins = match values.next() {
-        Some(Ok(logins)) => logins.unwrap_or_default(),
-        Some(Err(e)) => {
-            return Err(invalid(format!(
-                "not the JSON 'conch login' writes, at line {} column {}",
-                e.line(),
-                e.column()
-            )));
-        }
-        None => return Err(invalid("it is empty".into())),
-    };
-    Ok(logins
-        .into_iter()
-        .find(|(key, _)| key == server.key())
-        .and_then(|(_, credential)| credential?.token)
-        .filter(|token| !token.is_empty()))
+    match values.next() {
+        Some(Ok(logins)) => Ok(Some(logins.unwrap_or_default())),
+        Some(Err(e)) => Err(invalid(format!(
+            "not the JSON 'conch login' writes, at line {} column {}",
+            e.line(),
+            e.column()
+        ))),
+        None => Err(invalid("it is empty".into())),
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -676,6 +706,100 @@ mod tests {
         let error = resolve_token(None, &server("http://a:1"), Some(&dir)).unwrap_err();
         assert!(matches!(error, Error::CredentialsExposed { .. }));
         assert!(!error.to_string().contains('\n'), "{error}");
+    }
+
+    fn keys(servers: &[ServerAddress]) -> Vec<&str> {
+        servers.iter().map(ServerAddress::key).collect()
+    }
+
+    #[test]
+    fn the_stored_servers_are_the_keys_conch_login_writes_sorted() {
+        // (the file, the servers listed)
+        let table: [(String, &[&str]); 8] = [
+            (
+                as_go_writes_it(),
+                &["http://a:1", "https://b.example/conch"],
+            ),
+            ("{}".into(), &[]),
+            ("null".into(), &[]),
+            // An entry without a token is listed as conch lists it: the key is there.
+            (
+                r#"{"http://b:2": null, "http://a:1": {}}"#.into(),
+                &["http://a:1", "http://b:2"],
+            ),
+            // Keys conch login would not write: not a URL, not normalised, a scheme it
+            // refuses, and hosts with a letter it refuses (which are never their own key).
+            (
+                format!(
+                    r#"{{"http://a:1": {{"token": "{FAKE_A}"}}, "not a url": {{"token": "{FAKE_B}"}},
+                        "HTTP://Other:2/": {{"token": "{FAKE_B}"}}, "http://other:2/": {{"token": "{FAKE_B}"}},
+                        "ftp://c:3": {{"token": "{FAKE_B}"}}, "http://\u0130.example": {{"token": "{FAKE_B}"}},
+                        "http://[fe80::1%c4%b0]": {{"token": "{FAKE_B}"}}}}"#
+                ),
+                &["http://a:1"],
+            ),
+            // A file that cannot be used lists nothing; reading a token says why.
+            ("not json".into(), &[]),
+            (format!(r#"{{"http://a:1": "{FAKE_A}"}}"#), &[]),
+            ("".into(), &[]),
+        ];
+        for (contents, want) in table {
+            let dir = config_with(&contents, 0o600);
+            assert_eq!(keys(&stored_servers(Some(dir.path()))), want, "{contents}");
+        }
+    }
+
+    #[test]
+    fn no_file_or_one_that_cannot_be_used_lists_no_server() {
+        assert!(stored_servers(None).is_empty());
+        let empty = tempfile::tempdir().unwrap();
+        assert!(stored_servers(Some(empty.path())).is_empty());
+        assert!(stored_servers(Some(&empty.path().join("gone"))).is_empty());
+        // Others may read it: conch would not use it, and neither does this.
+        let exposed = config_with(&as_go_writes_it(), 0o644);
+        assert!(stored_servers(Some(exposed.path())).is_empty());
+        // A link to a good file, a directory in its place, a FIFO that would never answer.
+        let real = config_with(&as_go_writes_it(), 0o600);
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            credentials_path(real.path()),
+            credentials_path(linked.path()),
+        )
+        .unwrap();
+        assert!(stored_servers(Some(linked.path())).is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(credentials_path(directory.path())).unwrap();
+        assert!(stored_servers(Some(directory.path())).is_empty());
+        let fifo = tempfile::tempdir().unwrap();
+        if fifo_in(fifo.path()).is_some() {
+            let path = fifo.path().to_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(stored_servers(Some(&path)).len());
+            });
+            let listed = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("stored_servers waited on the FIFO");
+            assert_eq!(listed, 0);
+        }
+    }
+
+    #[test]
+    fn listing_the_servers_shows_no_token_and_changes_nothing() {
+        let dir = config_with(&as_go_writes_it(), 0o600);
+        let path = credentials_path(dir.path());
+        let before = fs::read(&path).unwrap();
+        let servers = stored_servers(Some(dir.path()));
+        let shown = format!("{servers:?} {servers:#?}");
+        assert!(!shown.contains("FAKE"), "{shown}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // A server listed is one whose token is found under it.
+        for server in &servers {
+            assert!(
+                resolve_token(None, server, Some(dir.path())).is_ok(),
+                "{server:?}"
+            );
+        }
     }
 
     #[test]

@@ -230,6 +230,7 @@ pub fn join(
         key_device: key_device
             .as_ref()
             .map(|(device, _)| device.display().to_string()),
+        unreachable_note: resolved.unreachable_note,
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
