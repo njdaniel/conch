@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -133,6 +134,26 @@ func LoadToken(server string) (string, error) {
 		return "", err
 	}
 	return creds[key].Token, nil
+}
+
+// storedServers returns the servers that have a stored login, sorted. A key
+// that is not a server as NormalizeServer writes it was not stored by conch
+// and names no server it could reach, so it is left out. Any error reading
+// the file gives none: this only picks a default, and the command that then
+// loads its token reports the error itself.
+func storedServers() []string {
+	creds, err := readCredentials()
+	if err != nil {
+		return nil
+	}
+	servers := make([]string, 0, len(creds))
+	for key := range creds {
+		if normalized, err := NormalizeServer(key); err == nil && normalized == key && checkSafeServer(key) == nil {
+			servers = append(servers, key)
+		}
+	}
+	sort.Strings(servers)
+	return servers
 }
 
 // SaveToken stores token for server, creating the directory (0700) and file
