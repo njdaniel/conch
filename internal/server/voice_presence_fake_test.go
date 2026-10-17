@@ -624,7 +624,13 @@ func (f *presenceFixture) sweep(t *testing.T) {
 // snap returns ch's snapshot after checking it validates.
 func (f *presenceFixture) snap(t *testing.T, ch store.Channel) schema.VoicePresenceV1 {
 	t.Helper()
-	s := f.srv.voice.snapshot(ch.ID)
+	return f.snapAs(t, ch, "")
+}
+
+// snapAs is ch's snapshot as who reads it ("" for nobody in particular).
+func (f *presenceFixture) snapAs(t *testing.T, ch store.Channel, who string) schema.VoicePresenceV1 {
+	t.Helper()
+	s := f.srv.voice.snapshot(ch.ID, f.ids[who])
 	if err := s.Validate(); err != nil {
 		t.Fatalf("snapshot does not validate: %v", err)
 	}

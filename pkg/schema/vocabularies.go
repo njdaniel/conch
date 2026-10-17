@@ -68,7 +68,11 @@ var Vocabularies = map[string][]string{
 		SessionStatusOnline, SessionStatusIdle, SessionStatusRunning, SessionStatusBlocked,
 		SessionStatusWaiting, SessionStatusFailed, SessionStatusStale, SessionStatusOffline,
 	),
-	"TradeSide":          values(TradeSideBuy, TradeSideSell),
+	"TradeSide": values(TradeSideBuy, TradeSideSell),
+	"VoiceShareEndReason": values(
+		VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft,
+		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,
+	),
 	"VoiceTransmitState": values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 }
 

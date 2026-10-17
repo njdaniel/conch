@@ -14,10 +14,14 @@
 // this person's: claimed, and not shown by presence as someone else's or
 // nobody's since. conchd's stop ends whoever holds the share when the caller
 // is an operator, so a stop sent after the claim lapsed (a picker left open)
-// would end another person's share as a moderation stop. A share the server
-// ended (an operator, the sharer's access, the room) is not asked about again:
-// the page only stops publishing and says so.
+// would end another person's share as a moderation stop. Every release also
+// names the claim it means (issue #487), so conchd itself refuses one that
+// arrives after that claim ended. A share the server ended (an operator, the
+// sharer's access, the room) is not asked about again: the page only stops
+// publishing and says why, from the reason the sharer's own presence carries
+// (share_ended), matched to the claim by its started_at.
 import type { ShareClaimResult } from '../api';
+import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 
 // What is being shared: text and pictures, or video or a game. It becomes the
 // capture's content hint, which tells the encoder what to keep.
@@ -48,13 +52,19 @@ export interface ShareRoom {
   readonly stopScreen: () => Promise<void>;
 }
 
-// Why the last share ended, or why one did not start.
+// Why the last share ended, or why one did not start. 'server' is the server
+// ending it for a reason the page was not told; 'operator', 'access_lost',
+// 'rotated' and 'idle' are the reasons it tells the sharer.
 export type ShareEnd =
   | 'self'
   | 'browser'
   | 'left'
   | 'lost'
   | 'server'
+  | 'operator'
+  | 'access_lost'
+  | 'rotated'
+  | 'idle'
   | 'busy'
   | 'cancelled'
   | 'not_connected'
@@ -73,7 +83,8 @@ export const idleShare: ShareState = { kind: 'idle', ended: null };
 
 export interface ShareApi {
   readonly claim: (channel: string) => Promise<ShareClaimResult>;
-  readonly release: (channel: string) => Promise<unknown>;
+  // Releases the claim whose started_at is startedAt, and no other.
+  readonly release: (channel: string, startedAt: string) => Promise<unknown>;
 }
 
 type Refusal = Extract<ShareClaimResult, { ok: false }>;
@@ -84,6 +95,18 @@ export function refusalEnd(r: Refusal): ShareEnd {
   if (r.code === 'voice_no_session') return 'not_connected';
   if (r.code === 'voice_unavailable' || r.failure === 'network') return 'unavailable';
   return 'failed';
+}
+
+// Every reason the server gives the sharer is an end the page can say: its
+// own stop and leaving as the page says them, the rest in their own words. A
+// reason added to the schema without a word for it fails to compile here.
+const toldEnd: (reason: VoiceShareEndReason) => ShareEnd = (reason) => reason;
+
+// sameInstant reports whether two wire timestamps are one moment, whatever
+// their spelling.
+function sameInstant(a: string, b: string): boolean {
+  const x = Date.parse(a);
+  return !Number.isNaN(x) && x === Date.parse(b);
 }
 
 export class ScreenShare {
@@ -102,6 +125,11 @@ export class ScreenShare {
   // claim, cleared by presence showing someone else or nobody, and by every
   // stop. Only a held share is ever asked to stop.
   private held = false;
+  // The started_at of the last claim granted: what a release names, and how
+  // the reason in presence is known to be about this share.
+  private claimed: string | null = null;
+  // Why the server ended the share of that claim, once presence said.
+  private told: ShareEnd | null = null;
 
   constructor(api: ShareApi, onChange: (state: ShareState) => void) {
     this.api = api;
@@ -127,7 +155,7 @@ export class ScreenShare {
     this.seen = false;
     this.set({ kind: 'claiming' });
     const first = await this.api.claim(channel);
-    if (first.ok) this.held = true;
+    if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
       // and is let go, unless a newer share has begun.
@@ -157,7 +185,7 @@ export class ScreenShare {
     this.set({ kind: 'publishing' });
     this.seen = false;
     const again = await this.api.claim(channel);
-    if (again.ok) this.held = true;
+    if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
       if (this.isIdle()) await this.releaseHeld(channel);
@@ -203,11 +231,23 @@ export class ScreenShare {
     return this.state.kind === 'idle';
   }
 
-  // releaseHeld asks conchd to end the share if it is known to be ours, once.
+  // granted records a claim conchd granted: the share is ours, and is the
+  // one of that started_at. Asking again while holding it answers the same
+  // time; a new time is a new share, and what presence said of the last one
+  // is not about it.
+  private granted(startedAt: string): void {
+    this.held = true;
+    if (this.claimed !== null && sameInstant(this.claimed, startedAt)) return;
+    this.claimed = startedAt;
+    this.told = null;
+  }
+
+  // releaseHeld asks conchd to end the share if it is known to be ours, once,
+  // naming the claim: conchd refuses it if that claim has ended meanwhile.
   private async releaseHeld(channel: string): Promise<void> {
-    if (!this.held) return;
+    if (!this.held || this.claimed === null) return;
     this.held = false;
-    await this.api.release(channel).catch(() => undefined);
+    await this.api.release(channel, this.claimed).catch(() => undefined);
   }
 
   // ended is the room saying the published share is gone: the browser's stop
@@ -218,10 +258,20 @@ export class ScreenShare {
     else void this.serverEnded();
   }
 
-  // presence is who the voice socket shows sharing. A share shown as someone
+  // presence is who the voice socket shows sharing, and why this person's
+  // last share ended when the server ended it. A share shown as someone
   // else's, or nobody's, is no longer ours to stop. While the picker is open a
   // share gone is not an end: the claim is made again after it.
-  presence(holder: Holder): void {
+  //
+  // The reason counts only for the share of the last claim (by its
+  // started_at). It may come before the room's withdrawal is seen, or after
+  // the share already ended without it: then the end is said again, with
+  // the reason.
+  presence(holder: Holder, ended?: VoiceShareEnded): void {
+    if (ended !== undefined && this.claimed !== null && sameInstant(ended.started_at, this.claimed)) {
+      this.told = toldEnd(ended.reason);
+      if (this.state.kind === 'idle' && this.state.ended === 'server') this.set({ kind: 'idle', ended: this.told });
+    }
     if (holder !== 'me') this.held = false;
     if (this.state.kind === 'idle' || this.state.kind === 'stopping') return;
     if (holder === 'me') {
@@ -242,7 +292,7 @@ export class ScreenShare {
     const answer = await this.api.claim(this.channel);
     if (mine !== this.attempt) return;
     if (answer.ok) {
-      this.held = true;
+      this.granted(answer.value.started_at);
       return;
     }
     if (refusalEnd(answer) === 'busy') await this.serverEnded();
@@ -254,7 +304,9 @@ export class ScreenShare {
     const room = this.room;
     this.set({ kind: 'stopping' });
     await room?.stopScreen();
-    if (mine === this.attempt) this.set({ kind: 'idle', ended: 'server' });
+    // The reason, if presence has said it by now; if not, presence says it
+    // when it comes (presence above).
+    if (mine === this.attempt) this.set({ kind: 'idle', ended: this.told ?? 'server' });
   }
 }
 
@@ -340,6 +392,14 @@ export function endedNote(end: ShareEnd, who: string | null): string {
       return 'Your share ended when the voice connection dropped. Share again if you want to.';
     case 'server':
       return 'The server ended your share: an operator stopped it, or you may no longer share here.';
+    case 'operator':
+      return 'An operator stopped your share.';
+    case 'access_lost':
+      return 'Your share ended: you no longer have voice in this channel.';
+    case 'rotated':
+      return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
+    case 'idle':
+      return 'Your share ended because nothing was shared for a while.';
     case 'busy':
       return who === null ? 'Someone else is sharing. One person shares at a time.' : `${who} is sharing. One person shares at a time.`;
     case 'cancelled':

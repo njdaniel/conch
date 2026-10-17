@@ -526,6 +526,15 @@ describe('invites', () => {
     ]);
   });
 
+  it('names the share a release means by its started_at, and passes on a stale answer (issue #487)', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => new Response(null, { status: 204 }));
+    expect(await stopVoiceShare('red team', '2026-10-16T12:00:04.125Z')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([{ path: '/v1/channels/red%20team/voice/share?started_at=2026-10-16T12%3A00%3A04.125Z', method: 'DELETE', auth: `Bearer ${memberToken}` }]);
+    serve(() => json({ code: 'voice_share_stale', message: 'that share has already ended' }, 409));
+    expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: false, failure: 'invalid', code: 'voice_share_stale' });
+  });
+
   it("answers a refused share claim with its status and the server's code, and a malformed one as invalid", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'voice_share_busy', message: 'someone else is sharing in this room' }, 409));

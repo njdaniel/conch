@@ -1131,8 +1131,15 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
 
 // stopVoiceShare ends the caller's share. A share nobody holds is 204 too, so
 // stopping twice is harmless.
-export async function stopVoiceShare(channel: string): Promise<ApiResult<null>> {
-  const reply = await authedSend('DELETE', `${channelPath(channel)}/voice/share`);
+//
+// startedAt names the share meant (issue #487): the started_at of the
+// caller's own claim. conchd then ends it only while it is still the room's
+// share and the caller's, and otherwise answers 409 voice_share_stale and
+// changes nothing, so a release sent late never ends somebody's newer share.
+// The parameter is schema.VoiceShareClaimParam.
+export async function stopVoiceShare(channel: string, startedAt?: string): Promise<ApiResult<null>> {
+  const query = startedAt === undefined ? '' : `?${new URLSearchParams({ started_at: startedAt }).toString()}`;
+  const reply = await authedSend('DELETE', `${channelPath(channel)}/voice/share${query}`);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);

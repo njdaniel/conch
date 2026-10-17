@@ -285,6 +285,45 @@ describe('sharing', () => {
     expect(t.rooms[0]?.calls).toEqual([]);
   });
 
+  // Issue #487: the sharer's own presence says why the server ended the
+  // share, and the panel says it in those words.
+  it('the sharer is told why the server ended the share', async () => {
+    for (const [reason, text] of [
+      ['operator', 'An operator stopped your share.'],
+      ['left', 'You left voice, so your share ended.'],
+      ['access_lost', 'Your share ended: you no longer have voice in this channel.'],
+      ['rotated', 'Your share ended because the voice room was renewed. Share again once you are back in voice.'],
+      ['idle', 'Your share ended because nothing was shared for a while.'],
+    ] as const) {
+      const t = setup();
+      t.client.join('general');
+      await act(settle);
+      fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
+      await act(settle);
+      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      t.seen(presence(7));
+      t.seen({ ...presence(null), share_ended: { reason, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } });
+      await act(settle);
+      expect(await within(voice()).findByText(text), reason).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it('the reason may come after the room withdrew the share, and replaces the guess', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    act(() => {
+      t.rooms[0]?.events?.onScreenEnded('server');
+    });
+    await act(settle);
+    expect(await within(voice()).findByText(/The server ended your share/)).toBeTruthy();
+    t.seen({ ...presence(null), share_ended: { reason: 'operator', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } });
+    expect(await within(voice()).findByText('An operator stopped your share.')).toBeTruthy();
+  });
+
   it('a browser without a picker is not offered sharing, and is told it can still watch', async () => {
     const t = setup([], { canShare: false, chromium: false, platform: 'ios' });
     t.client.join('general');
