@@ -269,6 +269,14 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Operator administration of principals (issue #445). The hide names a
+	// principal that does not exist, the bulk hide selects nobody (a 400
+	// before anything is read), and the list only reads. The bulk hide, like
+	// the bulk disables, needs a caller to leave out: AuthOff gets 401
+	// (special-cased below).
+	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
+	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
+	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -475,6 +483,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if isInviteRoute(rt.pattern) {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
 				}
+				if rt.pattern == "POST /v1/principals/hide" {
+					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
 					t.Errorf("status = %d, want %d; body %s", rec.Code, want, rec.Body)
@@ -486,12 +497,13 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 			})
 		}
-		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
-		// the fixture's three member_added events, and the fixture agent's
+		// Bootstrap writes 3 audit events (principal_created among them,
+		// issue #445), alice's and bot's credentials 1 each, the fixture's
+		// three member_added events, and the fixture agent's
 		// manifest_created; no request may add to that (in particular no
 		// access_denied).
-		if n := len(f.audit(t)); n != 8 {
-			t.Errorf("mode %q: audit events = %d, want 8", mode, n)
+		if n := len(f.audit(t)); n != 9 {
+			t.Errorf("mode %q: audit events = %d, want 9", mode, n)
 		}
 	}
 }

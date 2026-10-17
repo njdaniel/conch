@@ -129,6 +129,14 @@ var TSTypes = []TSType{
 	// Changing your name (issue #441).
 	{Value: RenamePrincipalRequestV1{}, Family: "rename-principal-request-v1"},
 	{Value: RenamePrincipalResponseV1{}, Family: "rename-principal-response-v1"},
+	// Operator administration of principals (issue #445): the list, and
+	// hiding one or many.
+	{Value: PrincipalAdminV1{}, Family: "principal-admin-v1"},
+	{Value: ListPrincipalsResponseV1{}, Family: "list-principals-response-v1"},
+	{Value: HidePrincipalResponseV1{}, Family: "hide-principal-response-v1"},
+	{Value: HidePrincipalsRequestV1{}, Family: "hide-principals-request-v1"},
+	{Value: HiddenPrincipalV1{}},
+	{Value: HidePrincipalsResponseV1{}, Family: "hide-principals-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.

@@ -14,8 +14,11 @@ import (
 
 // Audit actions written by membership changes.
 const (
-	AuditMemberAdded   = "member_added"
-	AuditMemberRemoved = "member_removed"
+	// AuditChannelCreated records a new channel (issue #445): actor the
+	// creator, subject the channel, detail name=<name> quoted.
+	AuditChannelCreated = "channel_created"
+	AuditMemberAdded    = "member_added"
+	AuditMemberRemoved  = "member_removed"
 	// AuditMemberDecideGranted and AuditMemberDecideRevoked record a change
 	// to a member's right to decide the channel's approvals (issue #450).
 	AuditMemberDecideGranted = "member_decide_granted"
@@ -52,12 +55,16 @@ func nullableID(id int64) any {
 	return id
 }
 
-// CreateChannelAs creates a channel. When creatorID is non-zero the creator
-// becomes the channel's only member (added_by is the creator) and a
-// member_added event with the given actor is written, all in the creating
-// transaction. With creatorID 0 (no authenticated caller) the channel has no
-// members. Names are unique (ErrDuplicate).
+// CreateChannelAs creates a channel and writes channel_created (issue #445).
+// When creatorID is non-zero the creator becomes the channel's only member
+// (added_by is the creator) and a member_added event is written. Both rows
+// are attributed to actor and written in the creating transaction. With
+// creatorID 0 (no authenticated caller) the channel has no members. Names are
+// unique (ErrDuplicate).
 func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creatorID int64) (Channel, error) {
+	// SQLite stores timestamps at millisecond precision. Normalize the
+	// returned value to the same precision so a create response exactly
+	// describes what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
 	var ch Channel
 	err := s.withImmediateTx(ctx, func(tx execer) error {
@@ -73,6 +80,11 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 			return fmt.Errorf("store: create channel %q: %w", name, err)
 		}
 		ch = Channel{ID: id, Name: name, CreatedAt: now}
+		// Quoted, as a rename's names are, so a name with spaces in it reads
+		// as one field.
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), fmt.Sprintf("name=%q", name), now); err != nil {
+			return err
+		}
 		if creatorID == 0 {
 			return nil
 		}
@@ -259,30 +271,38 @@ func (s *Store) RemoveChannelMember(ctx context.Context, actor string, channelID
 		if err := checkMemberTargetTx(ctx, tx, channelID, principalID); err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx,
-			"DELETE FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID)
-		if err != nil {
-			return fmt.Errorf("store: remove member %d from channel %d: %w", principalID, channelID, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("store: remove member %d from channel %d: %w", principalID, channelID, err)
-		}
-		if n == 0 {
-			return nil
-		}
-		removed = true
-		if err := appendAuditEventTx(ctx, tx, actor, AuditMemberRemoved, channelSubject(channelID), memberDetail(principalID), now); err != nil {
-			return err
-		}
-		// A net member must be a channel member (ADR-005), so the net seats go
-		// in the same transaction.
-		return removeNetMembershipsTx(ctx, tx, actor, channelID, principalID, now)
+		removed, err = removeChannelMemberTx(ctx, tx, actor, channelID, principalID, now)
+		return err
 	})
 	if err != nil {
 		return false, err
 	}
 	return removed, nil
+}
+
+// removeChannelMemberTx is RemoveChannelMember inside the caller's
+// transaction, for a channel and principal known to exist. Hiding a principal
+// (issue #445) calls it once per channel, so every removal is audited the
+// same way.
+func removeChannelMemberTx(ctx context.Context, tx execer, actor string, channelID, principalID int64, now time.Time) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID)
+	if err != nil {
+		return false, fmt.Errorf("store: remove member %d from channel %d: %w", principalID, channelID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: remove member %d from channel %d: %w", principalID, channelID, err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditMemberRemoved, channelSubject(channelID), memberDetail(principalID), now); err != nil {
+		return false, err
+	}
+	// A net member must be a channel member (ADR-005), so the net seats go
+	// in the same transaction.
+	return true, removeNetMembershipsTx(ctx, tx, actor, channelID, principalID, now)
 }
 
 // IsChannelMember reports whether principalID is a member of channelID.

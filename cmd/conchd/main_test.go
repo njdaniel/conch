@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,6 +139,11 @@ func TestBootstrapOperator(t *testing.T) {
 	if who.Name != "nick" || who.Role != schema.RoleOperator || who.Kind != schema.PrincipalHuman {
 		t.Errorf("whoami = %+v", who)
 	}
+	// The operator's creation is audited like any other (issue #445).
+	created, err := st.LastAuditEvent(context.Background(), store.AuditPrincipalCreated)
+	if err != nil || created.Actor != "system" || created.Subject != fmt.Sprintf("principal:%d", who.ID) || created.Detail != "kind=human" {
+		t.Errorf("principal_created = %+v, %v", created, err)
+	}
 	ts.Close()
 	_ = st.Close()
 
@@ -175,6 +181,19 @@ func TestBootstrapOperatorNameCollision(t *testing.T) {
 	}
 	if after := dbCounts(t, dir); after != before {
 		t.Errorf("database changed: %v -> %v", before, after)
+	}
+}
+
+// A name reserved for hidden accounts (issue #445) is refused, saying so, and
+// nothing is written.
+func TestBootstrapOperatorReservedName(t *testing.T) {
+	dir := t.TempDir()
+	stdout, _, err := bootstrap(t, dir, "HIDDEN-1")
+	if err == nil || !strings.Contains(err.Error(), "names beginning with hidden- are reserved") || stdout != "" {
+		t.Errorf("err = %v, stdout = %q", err, stdout)
+	}
+	if got := dbCounts(t, dir); got != [3]int{} {
+		t.Errorf("database after the refusal = %v, want empty", got)
 	}
 }
 

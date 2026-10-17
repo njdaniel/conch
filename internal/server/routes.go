@@ -109,6 +109,14 @@ func (s *Server) routeTable() []route {
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
+		// Deleting an account is disabling and hiding it (issue #445): one
+		// principal, or every principal from an invite or with a name
+		// prefix. The list shows them all, hidden ones on request. The bulk
+		// route has one segment fewer than the per-id ones, so the two never
+		// meet in the mux; POST /v0/principals is another version.
+		rt("POST /v1/principals/{id}/hide", accessOperator, hf(s.handleHidePrincipal)),
+		rt("POST /v1/principals/hide", accessOperator, hf(s.handleHidePrincipals)),
+		rt("GET /v1/principals", accessOperator, hf(s.handleListPrincipals)),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),

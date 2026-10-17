@@ -181,6 +181,11 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "admin principal disable|enable", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "principal", "disable", "--server", u, "9"} }},
 		{key: "admin principal rename", args: func(u, _ string) []string { return []string{"admin", "principal", "rename", "--server", u, "9", "bob"} }},
+		{key: "admin principal list", args: func(u, _ string) []string { return []string{"admin", "principal", "list", "--server", u} }},
+		{key: "admin principal hide", args: func(u, _ string) []string { return []string{"admin", "principal", "hide", "--server", u, "9"} }},
+		{key: "admin principal hide", args: func(u, _ string) []string {
+			return []string{"admin", "principal", "hide", "--server", u, "--prefix", "test-"}
+		}},
 		{key: "admin credential issue", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "credential", "issue", "--server", u, "--label", "laptop", "9"}
 		}},
@@ -309,6 +314,17 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusCreated, schema.CreatePrincipalResponse{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
 		case "PUT /v1/principals/9/name", "PUT /v1/principals/42/name":
 			write(w, http.StatusOK, schema.RenamePrincipalResponseV1{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
+		case "GET /v1/principals":
+			invite := int64(3)
+			write(w, http.StatusOK, schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{{
+				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, InviteID: &invite,
+			}}})
+		case "POST /v1/principals/9/hide":
+			write(w, http.StatusOK, schema.HidePrincipalResponseV1{Principal: schema.PrincipalAdminV1{
+				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, HiddenAt: &ts, DisabledAt: &ts,
+			}})
+		case "POST /v1/principals/hide":
+			write(w, http.StatusOK, schema.HidePrincipalsResponseV1{DryRun: true, Count: 1, Principals: []schema.HiddenPrincipalV1{{ID: 9, Name: hostile}}, Remaining: 2})
 		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/principals/9/credentials":
