@@ -676,7 +676,7 @@ func TestHookForAgentFollowsManifest(t *testing.T) {
 // is deny-by-default and those agents can do nothing.
 func TestStartupReportsAgentsWithoutManifest(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "conch.db"))
+	st, err := store.Open(ctx, newTestDBPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
