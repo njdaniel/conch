@@ -199,6 +199,10 @@ pub struct Settings {
     /// The key device being watched, as it is named when its state is shown. `None` when
     /// presses come from standard input only.
     pub key_device: Option<String>,
+    /// Added, in brackets, to what is shown when no connection to `conchd` could be made:
+    /// the stored logins, when the server is the default and they are for others
+    /// (`cli::Resolved::unreachable_note`).
+    pub unreachable_note: Option<String>,
     /// Waits and limits.
     pub timings: Timings,
 }
@@ -567,6 +571,7 @@ struct Session<T: Transport> {
     scrubber: Arc<Scrubber>,
     out: Output,
     key_device: Option<String>,
+    unreachable_note: Option<String>,
     inputs: mpsc::UnboundedReceiver<Input>,
     inputs_open: bool,
     /// The origin of the times the machine and the policy are given.
@@ -610,6 +615,7 @@ pub async fn join<T: Transport>(
         release_tail_ms,
         max_transmit,
         key_device,
+        unreachable_note,
         timings,
     } = settings;
     let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
@@ -631,6 +637,7 @@ pub async fn join<T: Transport>(
         scrubber,
         out,
         key_device,
+        unreachable_note,
         inputs,
         inputs_open: true,
         start: Instant::now(),
@@ -847,7 +854,7 @@ impl<T: Transport> Session<T> {
                         Some((outcome, reason)) => self.decide(Ended {
                             outcome,
                             reason,
-                            detail: Some(self.shown_text(&error)),
+                            detail: Some(self.session_failure_text(&error)),
                         }),
                         None => self.exit = Some(Err(Error::Api(error))),
                     },
@@ -923,6 +930,15 @@ impl<T: Transport> Session<T> {
     /// secrets out of them and bounds their length, and cannot know these values.
     fn shown_text(&self, error: &dyn std::fmt::Display) -> String {
         self.scrubber.scrub_line(&error.to_string())
+    }
+
+    /// What is shown for a session request that failed: the error, and when no connection
+    /// could be made at all, the note on the stored logins, as `conch` adds it.
+    fn session_failure_text(&self, error: &ApiError) -> String {
+        match (error, &self.unreachable_note) {
+            (ApiError::Connect { .. }, Some(note)) => self.shown_text(&format!("{error} ({note})")),
+            _ => self.shown_text(error),
+        }
     }
 
     /// Asks the connection policy what follows, and does it.

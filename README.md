@@ -1157,6 +1157,10 @@ bin/conch voice status ops
 
 `alice.header` holds the line `Authorization: Bearer <alice's token>` (as in step 3, kept in a private file so the token is not in the process list). If you run `conch voice status` within a second or two of starting `conchd` and LiveKit together, it can say "voice is unavailable" until `conchd` has looked at LiveKit once; run it again. Joining is a client's job; until `conch-voice` exists, `go run ./e2e/voice` joins a headless participant. Stop LiveKit with `docker rm -f livekit` and the same two commands print `503` (the body says `voice_unavailable`) and "voice is unavailable", the second exiting nonzero. If a `go run ./e2e/voice` is killed before it can clean up, remove what it left with `docker ps -aq --filter label=conch-voice-check | xargs -r docker rm -f`; that removes every voice-check container on the host, so do not run it where another run is in progress.
 
+### Which server `conch-voice` uses
+
+`conch-voice join` takes the server from `--server`, else `CONCH_SERVER`, else `server` in `voice.toml`, else the server of the stored login when exactly one is stored (and `CONCH_TOKEN` is not set: that token is not the stored login, and is never sent to its server), else `http://127.0.0.1:8080`. It reads the same `credentials.json` as `conch` and uses it the same way, so one `conch login` is enough for both. With several logins stored it does not guess: if it ends up on the default and has no login for it, or nothing answers there, the error names the stored servers, and `--server <url>`, `server` in `voice.toml` or `CONCH_SERVER=<url>` picks one.
+
 ### Voice in the browser
 
 The web page at `/app/` joins a channel's voice with the LiveKit JavaScript SDK, in the same room and under the same rules as `conch-voice`: `conchd` issues the session, the join token allows publishing a microphone and nothing else, and the poller checks what the page reports. One identity is allowed per person per room, so the browser and `conch-voice` displace each other: the one that joined later stays, and the other says another device took over.

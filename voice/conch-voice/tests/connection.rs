@@ -257,6 +257,63 @@ async fn a_conchd_that_cannot_reach_livekit_or_cannot_be_reached_is_tried_again(
     assert_eq!(rig.sdk.calls(), []);
 }
 
+/// When the server is the default and logins are stored for others, a connection that
+/// could not be made says so and names them, as `conch` does (issue #523). An answer that
+/// did come, even a refusal that is waited out, is not about the wrong server and says
+/// nothing of the kind.
+#[tokio::test]
+async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_else_does() {
+    const NOTE: &str = "nothing answered at http://127.0.0.1:8080; logins are stored for \
+                        http://a.test:1, http://b.test:2: choose one with --server <url>, \
+                        `server` in voice.toml, or CONCH_SERVER=<url>";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let nowhere = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let setup = Setup {
+        server: Some(nowhere),
+        unreachable_note: Some(NOTE.to_owned()),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.until("a wait", |rig| {
+        rig.connection_states()
+            .iter()
+            .any(|state| state == "waiting")
+    })
+    .await;
+    let waiting = rig
+        .events_named("connection")
+        .into_iter()
+        .find(|event| event["state"] == "waiting")
+        .unwrap();
+    assert_eq!(waiting["reason"], "server_unreachable");
+    let detail = waiting["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("could not connect to conchd: ")
+            && detail.ends_with(&format!(" ({NOTE})")),
+        "{detail}"
+    );
+
+    let conchd = Stub::start().await;
+    conchd.next_session(Reply::error(503, "voice_unavailable"));
+    let setup = Setup {
+        unreachable_note: Some(NOTE.to_owned()),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(conchd, setup, |_| {}).await;
+    rig.connected(1).await;
+    let waiting = rig
+        .events_named("connection")
+        .into_iter()
+        .find(|event| event["state"] == "waiting")
+        .unwrap();
+    assert_eq!(waiting["reason"], "voice_unavailable");
+    assert!(
+        !waiting.to_string().contains("logins are stored"),
+        "{waiting}"
+    );
+}
+
 /// A room that was joined and whose publish then failed is left before anything else: the
 /// next attempt joins as the same identity, and nothing would ever close the first.
 #[tokio::test]

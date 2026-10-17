@@ -23,7 +23,8 @@
 //! an `https` address, and never to a host other than the one its login is stored under.
 //!
 //! - [`ServerAddress`]: the address, and the key a login is stored under, as Go makes it.
-//! - [`resolve_token`], [`default_config_dir`]: the stored login.
+//! - [`resolve_token`], [`default_config_dir`]: the stored login; [`stored_servers`]: the
+//!   servers one is stored for.
 //! - [`Client`]: [`Client::session`], [`Client::transmit`], [`Client::presence`],
 //!   [`Client::presence_stream`].
 //! - [`PresenceStream`]: snapshots in order, then a [`StreamEnd`].
@@ -43,7 +44,7 @@ mod types;
 
 pub use client::Client;
 pub use error::{Error, Refusal, code};
-pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token};
+pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token, stored_servers};
 pub use presence::{PresenceEvent, PresenceStream, StreamEnd};
 pub use server::ServerAddress;
 pub use types::{

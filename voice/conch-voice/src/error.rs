@@ -60,6 +60,17 @@ pub enum Error {
     #[error(transparent)]
     Api(#[from] conch_voice_api::Error),
 
+    /// No login for the default server, which nothing named, while logins are stored for
+    /// other servers: the person most likely meant one of those, and "not signed in" alone
+    /// would not tell them so.
+    #[error("{error} ({note})")]
+    DefaultServer {
+        /// What the login said: not signed in to the default.
+        error: conch_voice_api::Error,
+        /// The stored servers and how to choose one ([`crate::cli::stored_elsewhere`]).
+        note: String,
+    },
+
     /// A test microphone or the counting sink was refused.
     #[error(transparent)]
     Audio(#[from] conch_voice_audio::AudioError),

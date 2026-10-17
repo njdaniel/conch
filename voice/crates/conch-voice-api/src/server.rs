@@ -58,6 +58,8 @@ pub struct ServerAddress {
     /// Whether the address has a query or a fragment. Neither is part of the key, and a
     /// client refuses an address that has one, as `cli.NewClient` does.
     has_query_or_fragment: bool,
+    /// Whether the host holds a letter `conch` refuses a server for ([`refused_host`]).
+    refused_host: bool,
 }
 
 const NOT_HTTP: Error = Error::InvalidServer {
@@ -121,6 +123,7 @@ impl ServerAddress {
             prefix,
             key,
             has_query_or_fragment: !query.is_empty() || !fragment.is_empty(),
+            refused_host: refused_host(&host),
         })
     }
 
@@ -133,6 +136,14 @@ impl ServerAddress {
     /// Whether the address carries a query or a fragment.
     pub(crate) fn has_query_or_fragment(&self) -> bool {
         self.has_query_or_fragment
+    }
+
+    /// Whether `conch` refuses this address as a server (`checkSafeServer` in
+    /// `internal/cli/credentials.go`): its host holds a letter whose lower case is another
+    /// host's name, so the key its login is stored under names a host other than the one
+    /// it would be reached at.
+    pub(crate) fn has_refused_host(&self) -> bool {
+        self.refused_host
     }
 
     /// The path of a request for `segments` under this server, as `Client.resolve` in
@@ -162,6 +173,50 @@ impl fmt::Debug for ServerAddress {
 /// `url.QueryEscape`: for one value in a query string.
 pub(crate) fn query_escape(value: &str) -> String {
     escape(value.as_bytes(), Mode::QueryComponent)
+}
+
+/// `hostContainsRefusedRune` in `internal/cli/credentials.go`, on the host as Go's
+/// `URL.Host` holds it (unescaped): U+0130 or U+1E9E in it, in it once more unescaped, or
+/// escaped in it in either case. Bytes, as Go's strings are: the host need not be UTF-8.
+fn refused_host(host: &[u8]) -> bool {
+    const REFUSED: [&[u8]; 2] = ["\u{130}".as_bytes(), "\u{1e9e}".as_bytes()];
+    const ESCAPED: [&[u8]; 2] = [b"%c4%b0", b"%e1%ba%9e"];
+    let holds = |text: &[u8], needles: &[&[u8]]| {
+        needles
+            .iter()
+            .any(|needle| text.windows(needle.len()).any(|window| window == *needle))
+    };
+    if holds(host, &REFUSED) {
+        return true;
+    }
+    // url.PathUnescape: a host it cannot unescape is not looked at again.
+    if let Some(unescaped) = path_unescape(host)
+        && holds(&unescaped, &REFUSED)
+    {
+        return true;
+    }
+    // strings.ToLower: no letter outside ASCII lowers to one of the ASCII the escapes
+    // are written in, so lowering ASCII alone finds what Go finds.
+    holds(&host.to_ascii_lowercase(), &ESCAPED)
+}
+
+/// `url.PathUnescape` on bytes: `%XX` becomes the byte, and a `%` without two hex digits
+/// after it is an error (`None`).
+fn path_unescape(text: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == b'%' {
+            let high = text.get(i + 1).copied().and_then(unhex)?;
+            let low = text.get(i + 2).copied().and_then(unhex)?;
+            out.push(high << 4 | low);
+            i += 3;
+        } else {
+            out.push(text[i]);
+            i += 1;
+        }
+    }
+    Some(out)
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
@@ -627,6 +682,44 @@ mod tests {
         for (value, want) in table {
             assert_eq!(query_escape(value), want);
         }
+    }
+
+    #[test]
+    fn a_host_is_refused_as_checksafeserver_refuses_it() {
+        // (address, refused): the cases of hostContainsRefusedRune, each way a letter can
+        // be in Go's URL.Host.
+        let table = [
+            ("http://\u{130}stanbul.example", true),
+            ("https://STRA\u{1e9e}E.example:8080/prefix", true),
+            // Escaped in the address: URL.Host holds the letter itself.
+            ("http://%C4%B0stanbul.example", true),
+            ("http://stra%E1%BA%9Ee.example", true),
+            // Escaped in the host itself, through a zone's "%25": found escaped, in either
+            // case, and found again once unescaped.
+            ("http://[fe80::1%25%25c4%25b0]", true),
+            ("http://[fe80::1%25%25C4%25B0]", true),
+            ("http://[fe80::1%25%25e1%25BA%259e]", true),
+            // Escaped twice over: one unescape finds the escape and not the letter, and Go
+            // unescapes once.
+            ("http://[fe80::1%2525c4%2525b0]", false),
+            ("http://istanbul.example", false),
+            ("http://strasse.example", false),
+            ("http://[fe80::1%25en0]:80", false),
+            // Only the host is looked at.
+            ("http://host/\u{130}stanbul", false),
+            ("http://host/%C4%B0", false),
+            ("http://user@host/", false),
+        ];
+        for (raw, refused) in table {
+            let address = ServerAddress::parse(raw).unwrap();
+            assert_eq!(address.has_refused_host(), refused, "{raw}");
+        }
+        // Bytes that are not text, and escapes that are not escapes, are looked at as Go
+        // looks at them.
+        assert!(refused_host(b"\xff\xc4\xb0"));
+        assert!(refused_host(b"%zz%C4%B0"));
+        assert!(!refused_host(b"%zz\xc4"));
+        assert!(!refused_host(b"%c4"));
     }
 
     #[test]
