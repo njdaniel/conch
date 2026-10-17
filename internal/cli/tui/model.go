@@ -216,6 +216,9 @@ type Model struct {
 	// notice is a channel-list problem that must survive the "connected"
 	// status the first backfill would otherwise write.
 	notice string
+	// channelsErr is why the channel list could not be read. There are then
+	// no channels, and the message pane says what failed and where.
+	channelsErr error
 	// backoff is the delay the next failure of a channel's subscription will
 	// wait; absent means minResubscribeDelay.
 	backoff map[string]time.Duration
@@ -644,11 +647,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch {
 		case msg.err != nil:
-			m.notice = "channel list: " + msg.err.Error()
+			// No stand-in channel: one that may not exist, on a server that may
+			// not be there, only hid why nothing worked (issue #522). The
+			// message pane gives the whole error; the status line is too short.
+			m.channelsErr = msg.err
+			m.notice = "cannot read the channel list"
 			if errors.Is(msg.err, cli.ErrUnauthenticated) {
 				m.notice = msg.err.Error()
 			}
-			names = []string{"general"}
+			m.setStatus(modeChannels, m.notice)
+			return m, nil
 		case len(names) == 0:
 			m.notice = "no channels on server"
 			names = []string{"general"}
@@ -1103,6 +1111,9 @@ func (m Model) View() string {
 		for _, message := range m.messages[m.current()] {
 			messageLines = append(messageLines, m.messageLine(m.current(), message, rightWidth))
 		}
+		if len(messageLines) == 0 && m.channelsErr != nil {
+			messageLines = m.channelsErrLines(rightWidth - 2)
+		}
 		if len(messageLines) == 0 {
 			messageLines = append(messageLines, statusStyle.Render("No messages"))
 		}
@@ -1172,6 +1183,28 @@ func (m Model) View() string {
 	// wider than the screen.
 	status = statusStyle.Width(width).Render(fitCells(status, width))
 	return panes + "\n" + voice + inputStr + "\n" + status
+}
+
+// channelsErrLines says, in a pane of the given inner width, why there are no
+// channels: the server asked, its error in full, and how to choose another.
+// The TUI takes no flags, so CONCH_SERVER is the way.
+func (m Model) channelsErrLines(width int) []string {
+	from := "the server"
+	if s, ok := m.api.(interface{ Server() string }); ok {
+		from = s.Server()
+	}
+	paragraphs := []string{"Cannot read the channel list from " + from + ".", m.channelsErr.Error()}
+	if !errors.Is(m.channelsErr, cli.ErrUnauthenticated) {
+		paragraphs = append(paragraphs, "To use another server, quit (esc) and start conch with CONCH_SERVER=<url>.")
+	}
+	var lines []string
+	for i, p := range paragraphs {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, wrapCells(sanitize(p), width)...)
+	}
+	return lines
 }
 
 // channelLines is the channel list in a pane of the given outer width.
