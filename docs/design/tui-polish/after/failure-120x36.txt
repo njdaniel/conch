@@ -1,0 +1,36 @@
+CONCH 127.0.0.1:29199  [Chat] Inbox Agents Runs                  identity unknown · ○ text unavailable · help: F1, /help
+╭─ ▸ CHANNELS ─────────╮╭─ MESSAGES ────────────────────────────────────────────────────╮╭─ PEOPLE ───────────────────╮
+│                      ││Cannot read the channel list from http://127.0.0.1:29199.      ││people: unavailable         │
+│                      ││                                                               ││                            │
+│                      ││cli: list channels: Get "http://127.0.0.1:29199/v1/channels": d││                            │
+│                      ││ial tcp 127.0.0.1:29199: connect: connection refused           ││                            │
+│                      ││                                                               ││                            │
+│                      ││To use another server, quit (esc) and start conch with CONCH_SE││                            │
+│                      ││RVER=<url>.                                                    ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+│                      ││                                                               ││                            │
+╰──────────────────────╯╰───────────────────────────────────────────────────────────────╯╰────────────────────────────╯
+(no channel) > ▌
+whoami: cli: whoami: Get "http://127.0.0.1:29199/v1/whoam…  ↑/↓ channels • ←/→ focus • enter send • tab inbox • esc quit

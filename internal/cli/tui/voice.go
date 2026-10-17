@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/coder/websocket"
@@ -209,13 +208,21 @@ func (m Model) voiceRetry(msg voiceRetryDue) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// voiceNames maps the principals the TUI knows by name to their names. The API
-// offers a member only whoami, exactly the case `conch voice status` has.
+// voiceNames maps the principals the TUI knows by name to their names: the
+// channel's member list, which names the authors of its messages too, and
+// whoami for the person signed in here. A participant neither names stays a
+// number, as in `conch voice status`.
 func (m Model) voiceNames() map[int64]string {
-	if m.authorID > 0 && m.userName != "" {
-		return map[int64]string{m.authorID: m.userName}
+	names := make(map[int64]string, len(m.members[m.current()])+1)
+	for id, member := range m.members[m.current()] {
+		if member.Name != "" {
+			names[id] = member.Name
+		}
 	}
-	return nil
+	if m.authorID > 0 && m.userName != "" {
+		names[m.authorID] = m.userName
+	}
+	return names
 }
 
 // voiceLine is the one line of voice roster, "" when nothing is to be shown.
@@ -230,14 +237,14 @@ func (m Model) voiceLine(width int) string {
 		case !v.doc.Available:
 			text = "unavailable"
 		default:
-			text = m.roster(width - utf8.RuneCountInString(prefix))
+			text = m.roster(width - cellWidth(prefix))
 		}
 	case voiceReconnecting:
 		text = "reconnecting"
 	default:
 		return ""
 	}
-	return clip(prefix+text, width)
+	return fitCells(prefix+text, width)
 }
 
 // roster lists the people in the channel-wide voice room as `conch voice
@@ -273,7 +280,7 @@ func (m Model) roster(width int) string {
 		if name, ok := names[p.PrincipalID]; ok {
 			entry += " " + cli.VoiceName(name)
 		}
-		cost := utf8.RuneCountInString(entry)
+		cost := cellWidth(entry)
 		if i > 0 {
 			cost += len(sep)
 		}
@@ -298,4 +305,96 @@ func (m Model) roster(width int) string {
 		b.WriteString("+" + strconv.Itoa(more))
 	}
 	return b.String()
+}
+
+// selfInVoice reports what presence says of the person signed in here in the
+// voice rooms of the channel on screen: whether they are in one (from some
+// other client: this one never joins), whether they are transmitting there,
+// and whether presence says anything at all. It knows nothing of any other
+// channel's rooms, nor anything while presence is reconnecting or LiveKit
+// cannot be reached.
+func (m Model) selfInVoice() (in, talking, known bool) {
+	if m.voice.state != voiceLive || !m.voice.doc.Available || m.authorID <= 0 {
+		return false, false, false
+	}
+	for _, room := range m.voice.doc.Rooms {
+		for _, p := range room.Participants {
+			if p.PrincipalID == m.authorID {
+				in = true
+				talking = talking || p.Transmitting
+			}
+		}
+	}
+	return in, talking, true
+}
+
+// voiceStrip is the persistent voice row of the chat view, "" when the voice
+// line has nothing to show. It starts with what is known of the voice of the
+// person here in the channel on screen, and only that: they may be in another
+// channel's room, which this channel's presence does not show, and while
+// presence is down nothing is known. This terminal does not join voice, so in
+// a room means from another client. Then comes the voice line: who is in the
+// channel's room. Issue #542 puts the voice controls in the left part.
+func (m Model) voiceStrip(width int) string {
+	if m.voiceLine(width) == "" {
+		return ""
+	}
+	channel := "#" + sanitize(m.current())
+	prefix := channel + " "
+	if in, talking, known := m.selfInVoice(); known {
+		mine := "you: not in " + channel + " voice"
+		if in {
+			mine = "you: in " + channel + " voice from another client"
+			if talking {
+				mine += ", ● talking"
+			}
+		}
+		prefix = mine + " · "
+	}
+	if cellWidth(prefix)+12 > width {
+		prefix = ""
+	}
+	return fitCells(prefix+m.voiceLine(width-cellWidth(prefix)), width)
+}
+
+// voicePeople is the voice section of the people pane, in lines of at most
+// cols cells: who is in the channel's room, one per line, a mark and a word
+// for whoever is transmitting. Names come from the member list; a participant
+// it does not have shows as a number. Nothing is shown while presence says
+// nothing.
+func (m Model) voicePeople(cols int) []string {
+	v := m.voice
+	head := titleStyle.Render(fitCells("VOICE · "+sanitize(m.current())+" room", cols))
+	switch {
+	case v.state == voiceReconnecting:
+		return []string{head, statusStyle.Render(fitCells("reconnecting…", cols))}
+	case v.state != voiceLive:
+		return nil
+	case !v.doc.Available:
+		return []string{head, statusStyle.Render(fitCells("unavailable", cols))}
+	}
+	var people []schema.VoiceParticipant
+	for _, room := range v.doc.Rooms {
+		if room.Audience == nil {
+			people = append(people, room.Participants...)
+		}
+	}
+	lines := []string{head}
+	if len(people) == 0 {
+		return append(lines, statusStyle.Render(fitCells("nobody in voice", cols)))
+	}
+	sort.SliceStable(people, func(i, j int) bool { return people[i].PrincipalID < people[j].PrincipalID })
+	for _, p := range people {
+		name, _ := m.authorName(m.current(), p.PrincipalID)
+		if p.PrincipalID == m.authorID {
+			name += " (you)"
+		}
+		mark, word := "  ", ""
+		if p.Transmitting {
+			mark, word = "● ", "talking"
+		}
+		room := max(1, cols-2-1-cellWidth(word))
+		lines = append(lines, mark+padCells(fitCells(name, room), room)+" "+activeStyle.Render(word))
+	}
+	return lines
 }

@@ -1,0 +1,18 @@
+␛[90m╭────────────────╮╭───────────────────────────────────────╮␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39mCannot read the channel list from http:␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m//127.0.0.1:29199.                     ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39mcli: list channels: Get "http://127.0.0␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m.1:29199/v1/channels": dial tcp 127.0.0␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m.1:29199: connect: connection refused  ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39mTo use another server, quit (esc) and s␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39mtart conch with CONCH_SERVER=<url>.    ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m╰────────────────╯╰───────────────────────────────────────╯␛[39m
+␛[90mmembers: unavailable␛[39m
+(no channel) >
+␛[90mcannot re…  ↑/↓ channels • enter send • tab inbox • esc quit

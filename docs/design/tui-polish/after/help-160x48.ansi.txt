@@ -1,0 +1,48 @@
+␛[1mCONCH␛[0m ␛[90m127.0.0.1:29180␛[39m  ␛[1m␛[36m[Chat]␛[0m ␛[90mInbox␛[39m ␛[90mAgents␛[39m ␛[90mRuns␛[39m                                                                           ␛[1malice␛[0m · ␛[32m● text live␛[39m · ␛[90mhelp: esc closes
+␛[36m╭─␛[1m␛[39m ▸ HELP · Chat ␛[0m␛[36m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮␛[39m
+␛[36m│␛[39m ␛[1m␛[36mtype, enter␛[0m  write a message and send it to the audience the prompt names                                                                                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mbackspace  ␛[0m  delete the last character of the draft                                                                                                         ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/net NAME  ␛[0m  send plain messages to net NAME; /net alone: the whole channel                                                                                 ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/w IDS TEXT␛[0m  whisper TEXT once to the principal ids IDS (3,5)                                                                                               ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m//TEXT     ␛[0m  send TEXT that starts with /                                                                                                                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m/help      ␛[0m  this help                                                                                                                                      ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m↑/↓        ␛[0m  focus on channels: open the channel above or below                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m           ␛[0m  focus on messages: scroll the history a line                                                                                                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36m←/→        ␛[0m  move the focus between the channel list and the messages                                                                                       ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mpgup/pgdn  ␛[0m  scroll the history a page                                                                                                                      ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mhome/end   ␛[0m  the oldest message held / back to the newest                                                                                                   ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mtab        ␛[0m  Inbox                                                                                                                                          ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mshift+tab  ␛[0m  the view before                                                                                                                                ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mesc        ␛[0m  quit                                                                                                                                           ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mF1         ␛[0m  open or close this help; where the terminal keeps F1 for itself, /help in Chat and ? elsewhere                                                 ␛[36m│␛[39m
+␛[36m│␛[39m ␛[1m␛[36mctrl+c     ␛[0m  quit                                                                                                                                           ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m ␛[90mMouse: a click selects or focuses and the wheel scrolls; a click never sends, decides or quits.␛[39m                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m ␛[90mVoice is shown, not joined: browsing a channel never moves your voice, and this terminal has no talk key.␛[39m                                                   ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m│␛[39m                                                                                                                                                             ␛[36m│␛[39m
+␛[36m╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────␛[1m esc close ␛[0m␛[36m─╯␛[39m
+general >
+␛[90myou: in #general voice from another client · voice: 2 alice  ●3 bob␛[39m
+␛[90malice | connected  esc close help␛[39m

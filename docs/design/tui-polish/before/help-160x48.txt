@@ -1,0 +1,48 @@
+╭────────────────╮╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│› general       ││15:42 alice: Morning all. The release branch is cut; please keep main green today.                                                         │
+│  ops 2         ││15:42 bob: On it. I will look at the flaky test in the ingest suite first.                                                                 │
+│  movie-night   ││15:42 carol-with-a-rather-lon…: A long message, to see wrapping: the parser rewrite touches the tokenizer, the error recovery and the pret…│
+│  design-review ││15:42 rex [agent]: Build 4127 passed: https://ci.example.com/jobs/4127/artifacts/very/long/path/that/does/not/break/at/spaces/report.html  │
+│                ││15:42 bob: Notes from the call: ↵ 1. ship the parser behind a flag ↵ 2. keep the old path for a week ↵ 3. alice owns the rollout           │
+│                ││15:42 dave: 日本語の名前とテキストも表示できますか？幅の広い文字はセル二つ分です。                                                         │
+│                ││15:42 bob: \[31mred?[0m evil and a bell  and [net:alpha] a fake badge                                                                      │
+│                ││15:42 alice: \[whisper:2,3] not a real whisper either                                                                                      │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+│                ││                                                                                                                                           │
+╰────────────────╯╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+online: bob alice(2) · agents: rex ●
+voice: 2 alice  ●3
+general >
+alice | connected  ↑/↓ channels • enter send • tab inbox • esc quit

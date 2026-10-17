@@ -1,0 +1,18 @@
+╭─ ▸ CHANNELS ───╮╭─ # general ───────────────────────────╮
+│› general       ││      ┊ should look at each of those   │
+│  ops 2         ││      ┊ separately rather than as one  │
+│  movie-night   ││      ┊ large diff, and the benchmarks │
+│  design-review ││      ┊ need a fresh baseline before   │
+│                ││      ┊ anyone compares numbers.       │
+│                ││15:42 rex [agent]: Build 4127 passed:  │
+│                ││      ┊ https://ci.example.com/jobs/412│
+│                ││      ┊ 7/artifacts/very/long/path/that│
+│                ││      ┊ /does/not/break/at/spaces/repor│
+│                ││      ┊ t.html                         │
+│                ││15:42 bob: Notes from the call:        │
+│                ││      ┊ 1. ship the parser behind a    │
+╰────────────────╯╰───────────── ↓ 3 newer · end: latest ─╯
+general > ▌
+online: bob alice(2) · agents: rex ●
+you: in #general voice from another client · voice: +2
+alice | connected  enter send • tab inbox • esc quit

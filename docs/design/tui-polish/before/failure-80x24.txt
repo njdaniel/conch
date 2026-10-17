@@ -1,0 +1,24 @@
+╭────────────────╮╭───────────────────────────────────────────────────────────╮
+│                ││Cannot read the channel list from http://127.0.0.1:29199.  │
+│                ││                                                           │
+│                ││cli: list channels: Get "http://127.0.0.1:29199/v1/channels│
+│                ││": dial tcp 127.0.0.1:29199: connect: connection refused   │
+│                ││                                                           │
+│                ││To use another server, quit (esc) and start conch with CONC│
+│                ││H_SERVER=<url>.                                            │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+╰────────────────╯╰───────────────────────────────────────────────────────────╯
+members: unavailable
+(no channel) >
+cannot read the channel list  ↑/↓ channels • enter send • tab inbox • esc quit
