@@ -87,7 +87,7 @@ test.describe('with LiveKit', () => {
     stopWorld?.();
   });
 
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob', options?: BrowserContextOptions) {
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions) {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     const watch = watchPage(page, vw);
@@ -190,6 +190,51 @@ test.describe('with LiveKit', () => {
     } finally {
       await a.context.close();
       await b.context.close();
+    }
+  });
+
+  // Issue #495: conchd's poller compares the microphone it sees with the
+  // reports. With each report held back 700 ms on its way to conchd (several
+  // gaps between passes), a page that opened its track before its report was
+  // answered was seen transmitting unreported; it opens it only after.
+  //
+  // Carol is in no other test of this world, and the press waits until conchd
+  // has seen her join: a press made before the poller has noticed a new
+  // connection is a different case (the report is taken for the connection it
+  // replaces), and is not what this test is about.
+  test('a push-to-talk whose reports are slow is still audited as only the reported pair', async ({ browser }) => {
+    const c = await person(browser, 'carol');
+    try {
+      await c.page.route('**/voice/transmit', async (route) => {
+        await new Promise((r) => setTimeout(r, 700));
+        await route.continue();
+      });
+      const voice = voiceRegion(c.page);
+      const actor = `principal:${String(vw.carol.id)}`;
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
+      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      // Five presses, each followed by its two reports. Two passes inside one
+      // held-back report are likely but far from certain, so with fewer
+      // presses the old order passed too often.
+      const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
+      await c.page.getByRole('heading', { name: 'Conch' }).click();
+      for (let i = 1; i <= 5; i++) {
+        await c.page.keyboard.down('Backquote');
+        await expect(voice).toContainText('Transmitting');
+        await new Promise((r) => setTimeout(r, 1200));
+        await c.page.keyboard.up('Backquote');
+        await expect(voice).toContainText('Not transmitting');
+        await expect.poll(transmits, { timeout: 15_000 }).toEqual(Array<string[]>(i).fill(pair).flat());
+      }
+      // Nothing the poller writes later, either.
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(await transmits()).toEqual(Array<string[]>(5).fill(pair).flat());
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await c.context.close();
     }
   });
 

@@ -1,6 +1,10 @@
 // Transmit reports: each gate open and close is reported to conchd, one at a
 // time and in order, because conchd takes them in arrival order (conch-voice.md
-// section 6, "Client side"). Audio never waits for a report.
+// section 6, "Client side").
+//
+// A press waits for the answer to its `started` report, for a short while,
+// before the track opens (connection.ts, issue #495); push takes a callback for
+// that. Nothing else waits for a report.
 //
 // A failed report is retried briefly in place. When it is given up on, the
 // owner drops the connection, so a request cannot be delivered late. 409
@@ -27,9 +31,14 @@ export const defaultRetryDelays: readonly number[] = [250, 750];
 // How long one attempt may take, on the injected clock.
 export const reportTimeout = 4000;
 
+interface Queued {
+  readonly state: VoiceTransmitState;
+  readonly done: (() => void) | undefined;
+}
+
 export class ReportQueue {
   private readonly options: ReportQueueOptions;
-  private queue: VoiceTransmitState[] = [];
+  private queue: Queued[] = [];
   private busy = false;
   private generation = 0;
   private controller: AbortController | null = null;
@@ -41,14 +50,17 @@ export class ReportQueue {
     this.options = options;
   }
 
-  push(state: VoiceTransmitState): void {
-    this.queue.push(state);
+  // push queues a report. done, when given, is called once the report is
+  // settled: answered, given up on, or dropped by a reset.
+  push(state: VoiceTransmitState, done?: () => void): void {
+    this.queue.push({ state, done });
     if (!this.busy) void this.pump();
   }
 
   // reset drops everything unsent and abandons the request in flight.
   reset(): void {
     this.generation++;
+    const dropped = this.queue;
     this.queue = [];
     this.busy = false;
     if (this.timer !== null) this.options.clock.clearTimeout(this.timer);
@@ -57,6 +69,7 @@ export class ReportQueue {
     this.deadline = null;
     this.controller?.abort();
     this.controller = null;
+    for (const q of dropped) q.done?.();
     this.release();
   }
 
@@ -118,8 +131,9 @@ export class ReportQueue {
     this.busy = true;
     const delays = this.options.retryDelays ?? defaultRetryDelays;
     while (this.queue.length > 0 && mine === this.generation) {
-      const state = this.queue[0];
-      if (state === undefined) break;
+      const head = this.queue[0];
+      if (head === undefined) break;
+      const state = head.state;
       let answer: TransmitAnswer = 'failed';
       for (let attempt = 0; attempt <= delays.length; attempt++) {
         const controller = new AbortController();
@@ -134,30 +148,39 @@ export class ReportQueue {
         if (mine !== this.generation) return;
       }
       this.queue.shift();
-      switch (answer) {
-        case 'ok':
-          this.options.onEvent('ok');
-          break;
-        case 'rate_limited':
-          this.options.onEvent('rate_limited');
-          break;
-        case 'failed':
-          this.reset();
-          this.options.onEvent('gave_up');
-          return;
-        case 'no_session':
-          this.reset();
-          this.options.onEvent('no_session');
-          return;
-        case 'unauthorized':
-          this.reset();
-          this.options.onEvent('unauthorized');
-          return;
-      }
+      const goOn = this.settle(answer);
+      // Told once the answer has been acted on: for a failure, after the
+      // owner has dropped the connection.
+      head.done?.();
+      if (!goOn) return;
     }
     if (mine === this.generation) {
       this.busy = false;
       this.release();
+    }
+  }
+
+  // settle acts on one report's answer. It says whether the queue goes on.
+  private settle(answer: TransmitAnswer): boolean {
+    switch (answer) {
+      case 'ok':
+        this.options.onEvent('ok');
+        return true;
+      case 'rate_limited':
+        this.options.onEvent('rate_limited');
+        return true;
+      case 'failed':
+        this.reset();
+        this.options.onEvent('gave_up');
+        return false;
+      case 'no_session':
+        this.reset();
+        this.options.onEvent('no_session');
+        return false;
+      case 'unauthorized':
+        this.reset();
+        this.options.onEvent('unauthorized');
+        return false;
     }
   }
 }
