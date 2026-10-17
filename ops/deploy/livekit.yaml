@@ -16,7 +16,7 @@ rtc:
 room:
   # Required. conchd creates a channel's room itself and deletes it when
   # someone loses access; with automatic creation on, a stale token would
-  # recreate the room (README, "Run LiveKit beside conchd").
+  # recreate the room (docs/manual.md, "Run LiveKit beside conchd").
   auto_create: false
 
 # TURN over TLS, for networks that block UDP. The certificate is the one
