@@ -73,6 +73,12 @@ func configDir() (string, error) {
 	return "", nil
 }
 
+// ConfigDir returns the configuration directory conch uses, by the rule of
+// configDir: always absolute, or "" when there is none. The TUI hands it to
+// the conch-voice helper it starts, so that both read the same login and
+// voice.toml (docs/design/tui-voice.md §9).
+func ConfigDir() (string, error) { return configDir() }
+
 // credentialsPath returns the credentials file location, or "" when there is no
 // configuration directory. An error means CONCH_CONFIG_DIR is unusable.
 func credentialsPath() (string, error) {
@@ -119,21 +125,30 @@ func hostContainsRefusedRune(host string) bool {
 // non-empty, otherwise the stored credential. An empty token with a nil error
 // means no credential is available.
 func LoadToken(server string) (string, error) {
+	token, _, err := LoadCredential(server)
+	return token, err
+}
+
+// LoadCredential is LoadToken, and also says where the token came from:
+// fromEnv is true when it is CONCH_TOKEN's, false when it is the stored login
+// (or there is none). A voice helper the TUI starts must use the same source
+// (docs/design/tui-voice.md §9).
+func LoadCredential(server string) (token string, fromEnv bool, err error) {
 	if err := checkSafeServer(server); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
-		return token, nil
+		return token, true, nil
 	}
 	key, err := NormalizeServer(server)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	creds, err := readCredentials()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return creds[key].Token, nil
+	return creds[key].Token, false, nil
 }
 
 // storedServers returns the servers that have a stored login, sorted. A key
