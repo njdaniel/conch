@@ -284,6 +284,7 @@ const (
 	stepRemoved
 	stepDropped
 	stepUnread
+	stepReplaced
 )
 
 // ruleStep is one input to the rule, at a time in milliseconds after ruleT0.
@@ -311,6 +312,11 @@ func stopped(at int) ruleStep { return ruleStep{at: at, kind: stepReport} }
 // The principal is removed by name; the room is dropped (a rotation).
 func removed(at int) ruleStep { return ruleStep{at: at, kind: stepRemoved} }
 func dropped(at int) ruleStep { return ruleStep{at: at, kind: stepDropped} }
+
+// A pass finds the principal's connection replaced by a new one of the same
+// identity. The poller follows it, at the same instant, with that pass's look
+// at the new connection: a scenario does the same with a pass step.
+func replaced(at int) ruleStep { return ruleStep{at: at, kind: stepReplaced} }
 
 // rowText renders a row as "<action>@<ms> <source>[ <reason>]", with the
 // action's voice_transmit_ prefix dropped.
@@ -358,6 +364,8 @@ func runRuleOn(t *testing.T, ledger *transmitLedger, steps []ruleStep) []transmi
 			}
 		case stepRemoved:
 			rows = ledger.leave(at, rulePID)
+		case stepReplaced:
+			rows = ledger.replace(at, rulePID)
 		case stepDropped:
 			rows = ledger.drop(at)
 		}
@@ -636,8 +644,8 @@ func TestTransmitRuleExcuseNeedsAnEdgeOrTheRation(t *testing.T) {
 			"stopped@3600 reported",
 		}},
 		// Nor does being removed by name, or being replaced by a second
-		// connection (which the poller feeds to the rule as a removal and, at
-		// the same instant, a pass that sees the new connection).
+		// connection (which the poller feeds to the rule as a replacement
+		// and, at the same instant, a pass that sees the new connection).
 		{"the ration outlasts a removal by name", []ruleStep{
 			started(0), talking(500),
 			stopped(990), talking(1000), started(1010), talking(1500), // excused at 1000
@@ -654,7 +662,7 @@ func TestTransmitRuleExcuseNeedsAnEdgeOrTheRation(t *testing.T) {
 		{"the ration outlasts a replaced connection", []ruleStep{
 			started(0), talking(500),
 			stopped(990), talking(1000), started(1010), talking(1500), // excused at 1000
-			removed(2000), quiet(2000), // replaced while reported started: closed as left
+			replaced(2000), quiet(2000), // replaced while reported started: closed as left
 			started(2200), talking(2500),
 			stopped(2990), talking(3000), started(3010), talking(3500), // 2 s after 1000: recorded
 			stopped(3600), quiet(4000),
@@ -681,7 +689,7 @@ func TestTransmitRuleExcuseNeedsAnEdgeOrTheRation(t *testing.T) {
 		{"after a replaced connection that was transmitting, the new one's first pass is an edge", []ruleStep{
 			started(0), talking(500),
 			stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
-			removed(2000), talking(2000), started(2010), talking(2500), stopped(2600), quiet(3000),
+			replaced(2000), talking(2000), started(2010), talking(2500), stopped(2600), quiet(3000),
 		}, []string{
 			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@2000 observed left",
 			"started@2010 reported", "stopped@2600 reported",
@@ -854,6 +862,63 @@ func TestTransmitRuleLeft(t *testing.T) {
 		{"a holder never seen is not gone", []ruleStep{
 			started(100), absent(500), absent(2100),
 		}, []string{"started@100 reported", "stopped@2100 observed no_stop_report"}},
+	})
+}
+
+// TestTransmitRuleReplaced: a connection replaced by a new one of the same
+// identity between two passes has left, and what it had open is closed with
+// reason=left, except a reported `started` received since the previous pass:
+// the new connection may have made it, and keeps it (issue #501). A page
+// reloaded and pressed before the poller noticed the new connection was
+// recorded as started, stopped reason=left, unreported, stopped reason=muted.
+func TestTransmitRuleReplaced(t *testing.T) {
+	runScenarios(t, []ruleScenario{
+		// The case of the issue: the new page presses within the gap in
+		// which it replaced the old connection.
+		{"a press reported after the previous pass is the new connection's", []ruleStep{
+			quiet(0), started(300), replaced(500), talking(500), talking(1000), stopped(1200), quiet(1500),
+		}, []string{"started@300 reported", "stopped@1200 reported"}},
+		// The browser reports before it unmutes (#495), so the pass may find
+		// the new connection still muted.
+		{"reported, and not yet unmuted when the pass finds the new connection", []ruleStep{
+			quiet(0), started(300), replaced(500), quiet(500), talking(1000), stopped(1200), quiet(1500),
+		}, []string{"started@300 reported", "stopped@1200 reported"}},
+		{"a release and a new press in the same gap", []ruleStep{
+			started(100), talking(500), stopped(700), started(800), replaced(1000), talking(1000), stopped(1200), quiet(1500),
+		}, []string{"started@100 reported", "stopped@700 reported", "started@800 reported", "stopped@1200 reported"}},
+		// The old connection was seen transmitting on the pass before, with
+		// no report: a lone pass, and the report after it excuses it as an
+		// edge, as it would have without the replacement.
+		{"a lone unaccounted pass before the replacement is excused by the report after it", []ruleStep{
+			quiet(0), talking(500), started(600), replaced(1000), talking(1000), stopped(1200), quiet(1500),
+		}, []string{"started@600 reported", "stopped@1200 reported"}},
+		// Kept, it is a reported `started` like any other: nobody transmits
+		// under it, and the 2 s rule closes it.
+		{"a kept started that nobody follows up is closed by the 2 s rule", []ruleStep{
+			quiet(0), started(300), replaced(500), quiet(500), quiet(1000), quiet(1500), quiet(2000), quiet(2300),
+		}, []string{"started@300 reported", "stopped@2300 observed no_stop_report"}},
+		// A started from before the previous pass is the old connection's:
+		// the previous pass saw the old connection, so the new one did not
+		// exist yet. Closed as left, and the new connection's own
+		// transmission needs its own report.
+		{"a started from before the previous pass is closed as left", []ruleStep{
+			started(100), talking(500), replaced(1000), quiet(1000), quiet(1500),
+		}, []string{"started@100 reported", "stopped@1000 observed left"}},
+		{"and the new connection transmitting without a report of its own is recorded", []ruleStep{
+			started(100), talking(500), replaced(1000), talking(1000), talking(1500), quiet(2000),
+		}, []string{"started@100 reported", "stopped@1000 observed left", "unreported@1000 observed", "stopped@2000 observed muted"}},
+		// With an unreported transmission open, the one reason=left row
+		// closes both kinds, as it always has.
+		{"with an unreported transmission open, one left row closes both", []ruleStep{
+			talking(0), talking(500), started(700), replaced(800), quiet(800), quiet(1300),
+		}, []string{"unreported@0 observed", "started@700 reported", "stopped@800 observed left"}},
+		// A started already due for the 2 s rule is stale either way.
+		{"a started already 2 s without a transmission is closed as left", []ruleStep{
+			quiet(0), started(100), unread(500), unread(1000), unread(1500), unread(2000), replaced(2100), quiet(2100),
+		}, []string{"started@100 reported", "stopped@2100 observed left"}},
+		{"a stopped since the previous pass leaves nothing to keep", []ruleStep{
+			started(100), talking(500), stopped(700), replaced(1000), quiet(1000),
+		}, []string{"started@100 reported", "stopped@700 reported"}},
 	})
 }
 
@@ -1172,6 +1237,8 @@ func TestTransmitLedgerUnsettled(t *testing.T) {
 		{"that pass judged and recorded", []ruleStep{quiet(0), talking(500), quiet(1000)}, false},
 		{"that pass judged and excused", []ruleStep{quiet(0), talking(500), started(510), stopped(520), quiet(1000)}, false},
 		{"that pass settled by a removal", []ruleStep{quiet(0), talking(500), removed(600)}, false},
+		{"a started kept across a replacement", []ruleStep{quiet(0), started(300), replaced(500), quiet(500)}, true},
+		{"a started closed by a replacement", []ruleStep{started(0), quiet(300), replaced(500), quiet(500)}, false},
 		{"an unreported transmission open", []ruleStep{talking(0), talking(500)}, true},
 		{"an unreported transmission closed", []ruleStep{talking(0), talking(500), quiet(1000)}, false},
 		{"everything open, then the principal gone", []ruleStep{talking(0), talking(500), started(600), absent(1000)}, false},
@@ -1381,11 +1448,15 @@ func TestTransmitRuleAlwaysPairs(t *testing.T) {
 			case 9, 10:
 				steps = append(steps, stopped(at))
 			case 11:
-				switch rng.Intn(3) {
+				switch rng.Intn(4) {
 				case 0:
 					steps = append(steps, removed(at))
 				case 1:
 					steps = append(steps, unread(at))
+				case 2:
+					// As the poller feeds it: the replacement, and at the
+					// same instant the pass that sees the new connection.
+					steps = append(steps, replaced(at), [...]func(int) ruleStep{talking, quiet}[rng.Intn(2)](at))
 				default:
 					steps = append(steps, talking(at))
 					at += rng.Intn(600)

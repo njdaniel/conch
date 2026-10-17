@@ -947,7 +947,10 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	}
 	// The transmit rule. A connection replaced by another between two passes
 	// left: whatever it had open is closed before the new connection is
-	// looked at, and the new one starts from a reported state of `stopped`.
+	// looked at. A reported `started` received since the previous pass is the
+	// exception: the new connection may well have made it, and keeps it
+	// (transmitTrack.replace, issue #501). Otherwise the new one starts from a
+	// reported state of `stopped`.
 	left := make(map[int64][]transmitRow)
 	mics := make(map[int64]micObservation, len(next))
 	for pid, n := range next {
@@ -955,7 +958,7 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 			continue
 		}
 		if reconnected(pid) {
-			left[pid] = r.transmit.leave(now, pid)
+			left[pid] = r.transmit.replace(now, pid)
 		}
 		mics[pid] = micQuiet
 		if n.transmitting {

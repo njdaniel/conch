@@ -1,5 +1,5 @@
-// The SDK adapter against a stub of the SDK: the track is muted straight after
-// it is published, after any republish and after a remote unmute, the capture
+// The SDK adapter against a stub of the SDK: the track is muted before it is
+// published and straight after, after any republish and after a remote unmute, the capture
 // asks for the browser's echo cancellation and noise suppression, a Leave at
 // any point leaves no microphone open, and the SDK's logs are redacted and
 // kept off the console. The screen share (issue #444): what the picker is
@@ -21,6 +21,7 @@ interface StubTrack {
   stopped: number;
   mediaStreamTrack: { clone: () => { enabled: boolean; stop: () => void } };
   stop: () => void;
+  mute: () => Promise<void>;
 }
 interface StubPub {
   source: string;
@@ -34,8 +35,10 @@ interface Stub {
   logger: { methodFactory: (method: string) => Sink; setLevel: (...args: unknown[]) => void };
   stubFactory: (method: string) => Sink;
   levelCalls: unknown[][];
-  // When set, the next capture or publish waits for the test to settle it.
+  // When set, the next capture, mute of the captured track, or publish waits
+  // for the test to settle it.
   capture: Deferred<StubTrack> | null;
+  premute: Deferred<undefined> | null;
   publish: Deferred<StubPub> | null;
   publishFails: boolean;
   tracks: StubTrack[];
@@ -83,6 +86,7 @@ const state = vi.hoisted((): Stub => {
     stubFactory,
     levelCalls,
     capture: null,
+    premute: null,
     publish: null,
     publishFails: false,
     tracks: [],
@@ -224,6 +228,11 @@ vi.mock('livekit-client', () => {
         stop: () => {
           track.stopped++;
         },
+        // The captured track's own mute, before it is published.
+        mute: () => {
+          state.calls.push('premute');
+          return state.premute === null ? Promise.resolve() : state.premute.promise;
+        },
       };
       state.tracks.push(track);
       if (state.capture === null) return Promise.resolve(track);
@@ -257,6 +266,7 @@ beforeEach(() => {
   state.handlers.clear();
   state.calls.length = 0;
   state.capture = null;
+  state.premute = null;
   state.publish = null;
   state.publishFails = false;
   state.tracks.length = 0;
@@ -305,10 +315,29 @@ const events = {
 };
 
 describe('the SDK adapter', () => {
-  it('captures with echo cancellation, noise suppression and auto gain, and mutes straight after publishing', async () => {
+  // Issue #501: muted before publishing, so that LiveKit lists the
+  // microphone muted from the first; and again after, as the second layer.
+  it('captures with echo cancellation, noise suppression and auto gain, and mutes before publishing and straight after', async () => {
     await newLiveKitRoom().connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, events);
     expect(state.captureOptions).toEqual({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
-    expect(state.calls).toEqual(['connect', 'capture', 'publish', 'mute']);
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+  });
+
+  it('a Leave while the captured track is being muted stops it, and publishes nothing', async () => {
+    state.premute = deferred();
+    const room = newLiveKitRoom();
+    const outcome = room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, events).then(
+      () => 'resolved',
+      () => 'rejected',
+    );
+    await settle();
+    expect(state.calls).toEqual(['connect', 'capture', 'premute']);
+    await room.close();
+    state.premute.resolve(undefined);
+    expect(await outcome).toBe('rejected');
+    expect(state.tracks[0]?.stopped).toBeGreaterThan(0);
+    expect(state.calls).not.toContain('publish');
+    expect(state.audioContexts).toBe(0);
   });
 
   it('mutes again when the SDK republishes, unless the gate is open', async () => {
@@ -376,7 +405,7 @@ describe('the SDK adapter', () => {
       () => 'rejected',
     );
     await settle();
-    expect(state.calls).toEqual(['connect', 'capture', 'publish']);
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish']);
     await room.close();
     // close() stops the captured track at once, publish or not.
     expect(state.tracks[0]?.stopped).toBeGreaterThan(0);
@@ -430,7 +459,7 @@ describe('watch only', () => {
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
     expect(state.calls).toEqual(['connect']);
     await room.publishMicrophone();
-    expect(state.calls).toEqual(['connect', 'capture', 'publish', 'mute']);
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
     // Once is enough.
     await room.publishMicrophone();
     expect(state.calls.filter((c) => c === 'capture')).toHaveLength(1);

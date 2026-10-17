@@ -200,8 +200,8 @@ test.describe('with LiveKit', () => {
   //
   // Carol is in no other test of this world, and the press waits until conchd
   // has seen her join: a press made before the poller has noticed a new
-  // connection is a different case (the report is taken for the connection it
-  // replaces), and is not what this test is about.
+  // connection is a different case (the next test's), and is not what this
+  // test is about.
   test('a push-to-talk whose reports are slow is still audited as only the reported pair', async ({ browser }) => {
     const c = await person(browser, 'carol');
     try {
@@ -235,6 +235,45 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
       await c.context.close();
+    }
+  });
+
+  // Issue #501: a page reloaded and joined again replaces its old connection
+  // in LiveKit (one participant per identity), and a press made at once is
+  // often reported before the poller has seen the new connection. conchd took
+  // the replacement for a leaving and closed that press as left, then
+  // recorded the open microphone as unreported. Measured against that server:
+  // 2 of 10 such presses. Bob transmits in no test before this one.
+  test('a press made at once after a reload is still audited as only the reported pair', async ({ browser }) => {
+    const b = await person(browser, 'bob');
+    try {
+      const voice = voiceRegion(b.page);
+      const actor = `principal:${String(vw.bob.id)}`;
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
+      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => `${e.action} ${e.detail.replace(/^channel=\d+ audience=channel /, '')}`);
+      const pair = ['voice_transmit_started source=reported', 'voice_transmit_stopped source=reported'];
+      for (let i = 1; i <= 5; i++) {
+        await b.page.reload();
+        await channelButton(b.page, vw.channel).click();
+        await voice.getByRole('button', { name: 'Join voice' }).click();
+        await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+        await b.page.getByRole('heading', { name: 'Conch' }).click();
+        await b.page.keyboard.down('Backquote');
+        await expect(voice).toContainText('Transmitting');
+        await new Promise((r) => setTimeout(r, 1200));
+        await b.page.keyboard.up('Backquote');
+        await expect(voice).toContainText('Not transmitting');
+        await expect.poll(transmits, { timeout: 15_000 }).toEqual(Array<string[]>(i).fill(pair).flat());
+      }
+      // Nothing the poller writes later, either.
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(await transmits()).toEqual(Array<string[]>(5).fill(pair).flat());
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await b.context.close();
     }
   });
 
