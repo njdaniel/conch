@@ -31,12 +31,17 @@
 // when the server ends a connection (a deleted room does), so it is told not
 // to stop a track it unpublishes: this adapter stops every track itself, on
 // stopScreen and on close.
+//
+// A share is published only once LiveKit has told this connection that the
+// claim granted its sources (issue #525): conchd's answer to the claim can be
+// read first, and the SDK refuses a source its last permission does not name.
 import {
   AudioPresets,
   DisconnectReason,
   LocalAudioTrack,
   LogLevel,
   LoggerNames,
+  PublishTrackError,
   Room as LiveKitRoom,
   RoomEvent,
   ScreenSharePresets,
@@ -151,6 +156,24 @@ export function audioPublishOptions(stereo: boolean): TrackPublishOptions {
   };
 }
 
+// How long a share's publish waits for LiveKit to tell this connection that
+// the claim granted the screen-share sources (issue #525). Within conchd's
+// wait for a share's first track (15 s), past which the claim ends anyway.
+export const grantWait = 10_000;
+
+// within reports whether done settles before ms have passed.
+function within(done: Promise<void>, ms: number): Promise<boolean> {
+  let timer = 0;
+  const late = new Promise<boolean>((resolve) => {
+    timer = window.setTimeout(() => {
+      resolve(false);
+    }, ms);
+  });
+  return Promise.race([done.then(() => true), late]).finally(() => {
+    window.clearTimeout(timer);
+  });
+}
+
 // Thrown by a connection step that resumes after the adapter was closed.
 class ClosedError extends Error {
   constructor() {
@@ -216,6 +239,10 @@ class LiveKitAdapter implements Room {
   // adapter is the one taking it down, so its own unpublish is not reported.
   private screen: LocalTrack[] = [];
   private stoppingScreen = false;
+  // Called at the next change of this connection's own permission, and when
+  // the share is stopped, kept or closed: where a share's publish refused for
+  // want of the claim's grant waits (publishGranted).
+  private grantWaiters: (() => void)[] = [];
   // The browser ended the capture (its own stop control, or the shared tab
   // or window closed).
   private captureEnded = false;
@@ -285,6 +312,9 @@ class LiveKitAdapter implements Room {
         window.setTimeout(() => {
           if (!this.captureEnded && !this.closed) events.onScreenEnded('server');
         }, 0);
+      })
+      .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, participant: Participant) => {
+        if (participant === room.localParticipant) this.wakeGrant();
       })
       .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
@@ -414,6 +444,7 @@ class LiveKitAdapter implements Room {
   keepScreen(): KeptScreen | null {
     const tracks = this.screen;
     this.screen = [];
+    this.wakeGrant();
     if (tracks.length === 0) return null;
     // Unpublished, if the room still has them, without being stopped: a
     // connection closed with them published would stop them. This is not
@@ -435,17 +466,57 @@ class LiveKitAdapter implements Room {
 
   async publishScreen(): Promise<void> {
     this.ensureOpen();
+    // One bound for the whole share, on the monotonic clock: a grant comes
+    // for every source at once, and a clock set back must not stretch it.
+    const deadline = performance.now() + grantWait;
     for (const track of this.screen) {
       const stereo = (track.mediaStreamTrack.getSettings().channelCount ?? 1) >= 2;
       const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions(stereo) : videoPublishOptions();
-      await this.room.localParticipant.publishTrack(track, options);
+      await this.publishGranted(track, options, deadline);
       this.ensureOpen();
     }
+  }
+
+  // publishGranted publishes a share's track once this connection may
+  // (issue #525). conchd answers a claim once LiveKit has granted the share's
+  // sources, but LiveKit tells this connection on its own socket, which the
+  // page can read after conchd's answer. The SDK refuses at once (403) a
+  // source that the permission it was last told does not name, so a refusal
+  // waits for this connection's permission to change and tries again, until
+  // the share's deadline (grantWait). This is the SDK's own check, made
+  // early: LiveKit checks every publish against the grant whatever the page
+  // does.
+  private async publishGranted(track: LocalTrack, options: TrackPublishOptions, deadline: number): Promise<void> {
+    for (;;) {
+      // Listened for before publishing: the grant may come while the SDK is
+      // getting there.
+      const changed = new Promise<void>((resolve) => {
+        this.grantWaiters.push(resolve);
+      });
+      try {
+        await this.room.localParticipant.publishTrack(track, options);
+        return;
+      } catch (err) {
+        if (!(err instanceof PublishTrackError) || err.status !== 403) throw err;
+        const left = deadline - performance.now();
+        if (left <= 0 || !(await within(changed, left))) throw err;
+        this.ensureOpen();
+        // Stopped or kept for another connection meanwhile: not to publish.
+        if (!this.screen.includes(track)) throw err;
+      }
+    }
+  }
+
+  private wakeGrant(): void {
+    const waiters = this.grantWaiters;
+    this.grantWaiters = [];
+    for (const wake of waiters) wake();
   }
 
   async stopScreen(): Promise<void> {
     const tracks = this.screen;
     this.screen = [];
+    this.wakeGrant();
     if (tracks.length === 0) return;
     this.stoppingScreen = true;
     // The capture stops first, at once: the browser's sharing indicator goes
@@ -514,6 +585,8 @@ class LiveKitAdapter implements Room {
     if (this.closed) return;
     this.closed = true;
     this.wantSending = false;
+    // A share's publish waiting for a grant stops waiting.
+    this.wakeGrant();
     for (const el of this.elements.values()) el.remove();
     this.elements.clear();
     this.attachShare(null);
