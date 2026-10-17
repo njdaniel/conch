@@ -301,6 +301,20 @@ func countAudit(t *testing.T, f *authFixture, action string) int {
 	return n
 }
 
+// countJoinersCreated counts the principal_created rows a redemption wrote:
+// those attributed to an invite. Bootstrapping the operator writes one too
+// (issue #445).
+func countJoinersCreated(t *testing.T, f *authFixture) int {
+	t.Helper()
+	n := 0
+	for _, e := range f.audit(t) {
+		if e.Action == store.AuditPrincipalCreated && strings.HasPrefix(e.Actor, "invite:") {
+			n++
+		}
+	}
+	return n
+}
+
 // Preview says who invited and what a joiner would get, and nothing else.
 func TestPreviewInvite(t *testing.T) {
 	f := newInviteFixture(t, Config{})
@@ -393,7 +407,7 @@ func TestInvalidInviteCodesAreIndistinguishable(t *testing.T) {
 		}
 	}
 	// None of them made anybody: the one principal made is the first use.
-	if n := countAudit(t, f.authFixture, store.AuditPrincipalCreated); n != 1 {
+	if n := countJoinersCreated(t, f.authFixture); n != 1 {
 		t.Errorf("principal_created rows = %d, want 1", n)
 	}
 }
@@ -456,7 +470,7 @@ func TestInvitesPausedOnPreviewAndRedeem(t *testing.T) {
 		assertErrorBody(t, f.preview(t, c), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 		assertErrorBody(t, f.redeem(t, c, "newcomer"), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 	}
-	if n := countAudit(t, f.authFixture, store.AuditPrincipalCreated); n != 0 {
+	if n := countJoinersCreated(t, f.authFixture); n != 0 {
 		t.Errorf("principal_created rows = %d while paused, want 0", n)
 	}
 }
@@ -682,7 +696,7 @@ func TestInviteEndToEnd(t *testing.T) {
 	for _, e := range f.audit(t) {
 		counts[e.Action]++
 	}
-	if counts[store.AuditInviteCreated] != 1 || counts[store.AuditInviteRedeemed] != 2 || counts[store.AuditPrincipalCreated] != 2 ||
+	if counts[store.AuditInviteCreated] != 1 || counts[store.AuditInviteRedeemed] != 2 || countJoinersCreated(t, f.authFixture) != 2 ||
 		counts[store.AuditInviteClosed] != 1 || counts[auditInviteRedeemRefused] != 1 {
 		t.Errorf("audit counts = %v", counts)
 	}

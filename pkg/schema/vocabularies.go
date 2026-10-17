@@ -35,11 +35,12 @@ var Vocabularies = map[string][]string{
 	"InterventionState": values(
 		InterventionStateRequested, InterventionStateAcknowledged, InterventionStateApplied, InterventionStateFailed,
 	),
-	"NetRole":       values(NetRoleMember, NetRoleMonitor),
-	"OptionKind":    values(OptionKindApprove, OptionKindReject, OptionKindCustom),
-	"Outcome":       values(OutcomeApproved, OutcomeRejected, OutcomeCustom, OutcomeExpired),
-	"PrincipalKind": values(PrincipalHuman, PrincipalAgent),
-	"PrincipalRole": values(RoleOperator, RoleMember),
+	"NetRole":        values(NetRoleMember, NetRoleMonitor),
+	"OptionKind":     values(OptionKindApprove, OptionKindReject, OptionKindCustom),
+	"Outcome":        values(OutcomeApproved, OutcomeRejected, OutcomeCustom, OutcomeExpired),
+	"PrincipalKind":  values(PrincipalHuman, PrincipalAgent),
+	"PrincipalRole":  values(RoleOperator, RoleMember),
+	"PrincipalState": values(PrincipalStateActive, PrincipalStateDisabled, PrincipalStateHidden),
 	"RunState": values(
 		RunStateQueued, RunStateStarting, RunStateRunning, RunStateBlocked,
 		RunStateWaiting, RunStateCompleted, RunStateFailed, RunStateCancelled,

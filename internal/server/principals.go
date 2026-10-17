@@ -31,7 +31,12 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, err := s.store.CreatePrincipal(ctx, store.PrincipalKind(req.Kind), req.Name)
+	// principal_created is written with the principal (issue #445).
+	principal, err := s.store.CreatePrincipalAs(ctx, auditActor(ctx), store.PrincipalKind(req.Kind), req.Name)
+	if errors.Is(err, store.ErrNameReserved) {
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessage)
+		return
+	}
 	if errors.Is(err, store.ErrDuplicate) {
 		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, principalExistsMessage)
 		return
@@ -63,14 +68,17 @@ const (
 // renames and attempts count toward them. An operator may rename anyone with
 // no limit, and an operator's rename of someone else counts toward nothing:
 // an operator may already create a principal with any name, and an
-// operator's rename, such as hiding an account, must not fail on a limit. An
-// agent may not rename itself: its name is set with its manifest by an
-// operator. Refusals of who may rename are audited as access_denied, and are
-// decided before the body is read or the principal looked up, so a caller
-// cannot probe which principals exist. The new name meets the create rule,
-// must have something a reader can see (400), and must not clash with anyone
-// else's (409 principal_exists; for a person renaming themselves the refusal
-// is also audited, without the name, as principal_rename_refused).
+// operator's cleanup must not fail on a limit. (Hiding an account renames it
+// with the same store write, but through POST /v1/principals/{id}/hide, not
+// this route.) An agent may not rename itself: its name is set with its
+// manifest by an operator. Refusals of who may rename are audited as
+// access_denied, and are decided before the body is read or the principal
+// looked up, so a caller cannot probe which principals exist. The new name
+// meets the create rule, must have something a reader can see (400), must not
+// be reserved for hidden principals (409 principal_exists, saying so), and
+// must not clash with anyone else's (409 principal_exists; for a person
+// renaming themselves the refusal is also audited, without the name, as
+// principal_rename_refused).
 func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := pathID(w, r, "id", "principal")
@@ -117,6 +125,11 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNameInvalid):
 		writeError(w, http.StatusBadRequest, "invalid_request", nameInvisibleMessage)
 		return
+	case errors.Is(err, store.ErrNameReserved):
+		// Not counted as a refused attempt: it says nothing of who is on the
+		// server, which is what the attempt limit guards.
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessage)
+		return
 	case errors.Is(err, store.ErrDuplicate):
 		if self {
 			// The rename rolled back; the attempt is recorded on its own,
@@ -154,7 +167,10 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 // The refusals every name write shares (issue #441).
 const (
 	principalExistsMessage = "a principal with this name, or one that looks the same, already exists"
-	nameInvisibleMessage   = "schema: principal name must have a character a reader can see"
+	// nameReservedMessage answers a name only a hide gives (issue #445),
+	// with the 409 a taken name gets: clients already ask for another.
+	nameReservedMessage  = "names beginning with " + schema.HiddenPrincipalNamePrefix + " are reserved; choose another"
+	nameInvisibleMessage = "schema: principal name must have a character a reader can see"
 )
 
 func principalFromStore(principal store.Principal) schema.PrincipalV0 {

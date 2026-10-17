@@ -1,0 +1,11 @@
+{
+  "dry_run": true,
+  "count": 1,
+  "principals": [
+    {
+      "id": 9,
+      "name": "test-alice"
+    }
+  ],
+  "remaining": 3
+}

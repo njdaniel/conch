@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -319,6 +321,9 @@ func TestAdminMemberRefused(t *testing.T) {
 		{"member remove", []string{"member", "remove", "ops", "2"}, ""},
 		{"manifest put", []string{"manifest", "put", "2"}, testManifest},
 		{"manifest get", []string{"manifest", "get", "1"}, ""},
+		{"principal list", []string{"principal", "list"}, ""},
+		{"principal hide", []string{"principal", "hide", "2"}, ""},
+		{"principal hide by prefix", []string{"principal", "hide", "--prefix", "mal", "--yes"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -415,6 +420,16 @@ func TestAdminUsageErrors(t *testing.T) {
 		{"member add missing id", []string{"admin", "member", "add", "ops"}, "expected <channel> <principal-id>"},
 		{"unknown flag", []string{"admin", "channel", "create", "--frob", "x"}, "flag provided but not defined"},
 		{"manifest put without id", []string{"admin", "manifest", "put"}, "expected <principal-id>"},
+		{"principal hide with nothing", []string{"admin", "principal", "hide"}, "give an id, or --prefix or --invite"},
+		{"principal hide with both", []string{"admin", "principal", "hide", "3", "--prefix", "test-"}, "not both"},
+		{"principal hide yes with an id", []string{"admin", "principal", "hide", "3", "--yes"}, "not both"},
+		{"principal hide short prefix", []string{"admin", "principal", "hide", "--prefix", "te"}, "3 to 100 characters"},
+		{"principal hide bad kind", []string{"admin", "principal", "hide", "--prefix", "test-", "--kind", "robot"}, "kind"},
+		{"principal hide bad id", []string{"admin", "principal", "hide", "abc"}, "id must be a positive integer"},
+		{"principal hide two ids", []string{"admin", "principal", "hide", "3", "4"}, "expected <id>"},
+		{"principal list bad state", []string{"admin", "principal", "list", "--state", "gone"}, "--state must be active, disabled or hidden"},
+		{"principal list bad kind", []string{"admin", "principal", "list", "--kind", "robot"}, "--kind must be"},
+		{"principal list stray argument", []string{"admin", "principal", "list", "3"}, "usage: conch admin principal list"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -552,5 +567,119 @@ func TestUsageListsAdmin(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("help lacks %q", want)
 		}
+	}
+}
+
+// TestAdminPrincipalListAndHide walks the cleanup of test accounts (issue
+// #445) against a real server: the list, a dry run that changes nothing, a
+// bulk hide by prefix and kind, a hide by id, the hidden list, and the names
+// free again while hidden-<id> stays reserved. Ids as in TestAdminCommands:
+// root 1, mallory 2, then test-a 3, test-b 4 and keeper 5.
+func TestAdminPrincipalListAndHide(t *testing.T) {
+	e := newAdminEnv(t)
+	steps := []struct {
+		name       string
+		args       []string
+		wantStdout string
+	}{
+		{"create a", []string{"principal", "create", "--kind", "human", "test-a"}, "created human test-a (id 3)\n"},
+		{"create b", []string{"principal", "create", "--kind", "agent", "test-b"}, "created agent test-b (id 4)\n"},
+		{"create keeper", []string{"principal", "create", "--kind", "human", "keeper"}, "created human keeper (id 5)\n"},
+		{"list", []string{"principal", "list"}, "5 human member active creds 0 invite - keeper\n" +
+			"4 agent member active creds 0 invite - test-b\n" +
+			"3 human member active creds 0 invite - test-a\n" +
+			"2 human member active creds 1 invite - mallory\n" +
+			"1 human operator active creds 1 invite - root\n"},
+		{"dry run", []string{"principal", "hide", "--prefix", "test-"}, "3 test-a\n4 test-b\nwould hide 2 principal(s); run again with --yes to do it\n"},
+		{"nothing hidden by the dry run", []string{"principal", "list", "--prefix", "test-"}, "4 agent member active creds 0 invite - test-b\n" +
+			"3 human member active creds 0 invite - test-a\n"},
+		{"agents only", []string{"principal", "hide", "--prefix", "test-", "--kind", "agent", "--yes"}, "4 test-b\nhid 1 principal(s)\n"},
+		{"by id", []string{"principal", "hide", "3"}, "hid principal 3; it is now called hidden-3\n"},
+		{"hidden", []string{"principal", "list", "--state", "hidden"}, "4 agent member hidden creds 0 invite - hidden-4\n" +
+			"3 human member hidden creds 0 invite - hidden-3\n"},
+		{"not hidden", []string{"principal", "list", "--state", "active", "--kind", "human"}, "5 human member active creds 0 invite - keeper\n" +
+			"2 human member active creds 1 invite - mallory\n" +
+			"1 human operator active creds 1 invite - root\n"},
+		{"nothing left", []string{"principal", "hide", "--prefix", "test-", "--yes"}, "hid 0 principal(s)\n"},
+		{"the name is free", []string{"principal", "create", "--kind", "human", "test-a"}, "created human test-a (id 6)\n"},
+	}
+	for _, st := range steps {
+		t.Run(st.name, func(t *testing.T) {
+			stdout, stderr, err := e.admin(t, e.operatorToken, "", st.args...)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if stdout != st.wantStdout || stderr != "" {
+				t.Errorf("stdout = %q, stderr %q; want %q", stdout, stderr, st.wantStdout)
+			}
+		})
+	}
+
+	// The hidden name, and a look-alike of it, cannot be taken.
+	for _, name := range []string{"hidden-9", "HIDDEN-l2"} {
+		_, _, err := e.admin(t, e.operatorToken, "", "principal", "create", "--kind", "human", name)
+		if err == nil || !strings.Contains(err.Error(), schema.ErrorCodePrincipalExists) {
+			t.Errorf("create %q = %v, want %s", name, err, schema.ErrorCodePrincipalExists)
+		}
+	}
+	// Nor can the operator hide themselves.
+	if _, _, err := e.admin(t, e.operatorToken, "", "principal", "hide", "1"); err == nil || !strings.Contains(err.Error(), "cannot hide themselves") {
+		t.Errorf("hide self = %v", err)
+	}
+
+	// --json prints the server's documents.
+	stdout, _, err := e.admin(t, e.operatorToken, "", "principal", "list", "--state", "hidden", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list schema.ListPrincipalsResponseV1
+	if err := json.Unmarshal([]byte(stdout), &list); err != nil || len(list.Principals) != 2 || list.Principals[0].Name != "hidden-4" {
+		t.Errorf("--json list = %q (%v)", stdout, err)
+	}
+	stdout, _, err = e.admin(t, e.operatorToken, "", "principal", "hide", "--prefix", "keep", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dry schema.HidePrincipalsResponseV1
+	if err := json.Unmarshal([]byte(stdout), &dry); err != nil || !dry.DryRun || dry.Count != 1 || dry.Principals[0].Name != "keeper" {
+		t.Errorf("--json dry run = %q (%v)", stdout, err)
+	}
+}
+
+// The list follows the server's pages to the end, passing next_before as
+// before, and refuses pages that do not move.
+func TestAdminPrincipalListPages(t *testing.T) {
+	for _, stuck := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stuck=%t", stuck), func(t *testing.T) {
+			isolateConfig(t)
+			var queries []string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				queries = append(queries, r.URL.RawQuery)
+				resp := schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{{ID: 9, Kind: schema.PrincipalHuman, Name: "a", Role: schema.RoleMember}}, NextBefore: 9}
+				if r.URL.Query().Get("before") == "9" && !stuck {
+					resp = schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{{ID: 4, Kind: schema.PrincipalAgent, Name: "b", Role: schema.RoleMember}}}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(resp)
+			}))
+			t.Cleanup(ts.Close)
+			t.Setenv("CONCH_TOKEN", "conch_"+strings.Repeat("A", 43))
+			stdout, _, err := runCLI(t, "", "admin", "principal", "list", "--prefix", "x y", "--server", ts.URL)
+			if stuck {
+				if err == nil || !strings.Contains(err.Error(), "do not move forward") {
+					t.Errorf("stuck pages: err = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "9 human member active creds 0 invite - a\n4 agent member active creds 0 invite - b\n"; stdout != want {
+				t.Errorf("stdout = %q, want %q", stdout, want)
+			}
+			if want := []string{"limit=200&name_prefix=x+y", "before=9&limit=200&name_prefix=x+y"}; !slices.Equal(queries, want) {
+				t.Errorf("queries = %q, want %q", queries, want)
+			}
+		})
 	}
 }

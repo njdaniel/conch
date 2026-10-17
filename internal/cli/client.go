@@ -755,6 +755,65 @@ func (c *Client) EnablePrincipal(ctx context.Context, id int64) error {
 	return c.roundTrip(ctx, "enable principal", http.MethodPost, endpoint, nil, nil)
 }
 
+// PrincipalListFilter narrows ListPrincipals. A zero field matches everyone,
+// except State: empty is everyone not hidden.
+type PrincipalListFilter struct {
+	State      string
+	NamePrefix string
+	Kind       string
+	InviteID   int64
+	// Before and Limit page the list; zero leaves them to the server.
+	Before int64
+	Limit  int
+}
+
+// ListPrincipals returns one page of every principal, newest first, as an
+// operator sees them (issue #445).
+func (c *Client) ListPrincipals(ctx context.Context, filter PrincipalListFilter) (schema.ListPrincipalsResponseV1, error) {
+	endpoint := c.resolve("v1", "principals")
+	query := endpoint.Query()
+	for name, value := range map[string]string{"state": filter.State, "name_prefix": filter.NamePrefix, "kind": filter.Kind} {
+		if value != "" {
+			query.Set(name, value)
+		}
+	}
+	if filter.InviteID > 0 {
+		query.Set("invite_id", strconv.FormatInt(filter.InviteID, 10))
+	}
+	if filter.Before > 0 {
+		query.Set("before", strconv.FormatInt(filter.Before, 10))
+	}
+	if filter.Limit > 0 {
+		query.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	endpoint.RawQuery = query.Encode()
+	var result schema.ListPrincipalsResponseV1
+	if err := c.roundTrip(ctx, "list principals", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListPrincipalsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// HidePrincipal disables and hides a principal, which frees its name.
+func (c *Client) HidePrincipal(ctx context.Context, id int64) (schema.HidePrincipalResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "hide")
+	var result schema.HidePrincipalResponseV1
+	if err := c.roundTrip(ctx, "hide principal", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.HidePrincipalResponseV1{}, err
+	}
+	return result, nil
+}
+
+// HidePrincipals hides every principal a request selects, or with a dry run
+// says whom it would.
+func (c *Client) HidePrincipals(ctx context.Context, request schema.HidePrincipalsRequestV1) (schema.HidePrincipalsResponseV1, error) {
+	var result schema.HidePrincipalsResponseV1
+	if err := c.roundTrip(ctx, "hide principals", http.MethodPost, c.resolve("v1", "principals", "hide"), request, &result); err != nil {
+		return schema.HidePrincipalsResponseV1{}, err
+	}
+	return result, nil
+}
+
 // CreateCredential issues a credential for a principal. The response carries
 // the plaintext token, which the server shows only once.
 func (c *Client) CreateCredential(ctx context.Context, principalID int64, request schema.CreateCredentialRequestV1) (schema.CreateCredentialResponseV1, error) {

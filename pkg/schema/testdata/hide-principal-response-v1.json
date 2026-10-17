@@ -1,0 +1,12 @@
+{
+  "principal": {
+    "id": 14,
+    "kind": "human",
+    "name": "hidden-14",
+    "role": "member",
+    "created_at": "2026-10-15T13:00:00.000Z",
+    "disabled_at": "2026-10-16T09:30:00.000Z",
+    "hidden_at": "2026-10-16T09:30:00.000Z",
+    "live_credentials": 0
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name_prefix": "test-",
+  "kind": "human",
+  "dry_run": true
+}

@@ -409,6 +409,8 @@ func (h *harness) closeOut() error {
 		}
 	}
 	want := []string{
+		// Creating a principal is audited since issue #445.
+		"principal_created",
 		"credential_created", "credential_created",
 		"credential_revoked", "credential_revoked", "credentials_revoked_all",
 		"credential_created",

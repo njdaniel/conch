@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/names"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // Names and renames (issue #441). A principal's name is unique by its keys
@@ -39,6 +40,11 @@ const RenameWindow = 24 * time.Hour
 // keys are empty: it is made only of characters a reader cannot see (Hangul
 // fillers, blanks), so it could not be told from any other such name.
 var ErrNameInvalid = errors.New("store: the name has no character a reader can see")
+
+// ErrNameReserved is returned by every write that sets a name when the name
+// is reserved for hidden principals (reservedName, issue #445). The error
+// that carries it is ErrDuplicate too: the name is not to be had.
+var ErrNameReserved = errors.New("store: names beginning with " + schema.HiddenPrincipalNamePrefix + " are reserved")
 
 // ErrRenameLimited is the error RenamePrincipal returns, as a
 // *RenameLimitedError, when the principal has used up its renames.
@@ -71,26 +77,51 @@ type RenameLimits struct {
 // claimNameTx is the one clash check, used by every path that creates or
 // renames a principal: it returns name's keys, ErrNameInvalid when they are
 // empty, or ErrDuplicate when a principal other than self holds either of
-// them (the folded key against folded keys, the skeletal against skeletal).
-// self is the principal being renamed, or 0 on create. It must run in the
-// transaction that writes the name, and the keys it returns are the ones that
-// row must store.
+// them (the folded key against folded keys, the skeletal against skeletal),
+// or when the name is reserved for hidden principals (reservedName). self is
+// the principal being renamed, or 0 on create. It must run in the transaction
+// that writes the name, and the keys it returns are the ones that row must
+// store.
 func claimNameTx(ctx context.Context, tx execer, name string, self int64) (names.Keys, error) {
 	keys := names.KeysOf(name)
 	if keys.Empty() {
 		return names.Keys{}, ErrNameInvalid
 	}
+	if reservedName(keys) {
+		// A duplicate as well, so a caller that maps only ErrDuplicate still
+		// refuses it as taken; one that knows ErrNameReserved says why.
+		return names.Keys{}, fmt.Errorf("store: name %q: %w (%w)", name, ErrNameReserved, ErrDuplicate)
+	}
+	return keys, clashTx(ctx, tx, name, keys, self)
+}
+
+// hiddenKeys are the keys of schema.HiddenPrincipalNamePrefix.
+var hiddenKeys = names.KeysOf(schema.HiddenPrincipalNamePrefix)
+
+// reservedName reports whether a name with these keys is one only a hide may
+// write (issue #445): either key begins with the same key of
+// schema.HiddenPrincipalNamePrefix. Comparing keys, not spellings, reserves
+// "HIDDEN-12", "hidden-l2" and "hidden-12" spelt with a Cyrillic i with
+// "hidden-12", so nobody can take, ahead of a hide, a name that would clash
+// with the one it gives.
+func reservedName(keys names.Keys) bool {
+	return strings.HasPrefix(keys.Folded, hiddenKeys.Folded) || strings.HasPrefix(keys.Skeletal, hiddenKeys.Skeletal)
+}
+
+// clashTx returns ErrDuplicate when a principal other than self holds either
+// of keys.
+func clashTx(ctx context.Context, tx execer, name string, keys names.Keys, self int64) error {
 	var other int64
 	err := tx.QueryRowContext(ctx,
 		"SELECT id FROM principals WHERE (name_key = ? OR name_skel = ?) AND id != ? LIMIT 1",
 		keys.Folded, keys.Skeletal, self).Scan(&other)
 	switch {
 	case err == nil:
-		return names.Keys{}, fmt.Errorf("store: name %q: %w", name, ErrDuplicate)
+		return fmt.Errorf("store: name %q: %w", name, ErrDuplicate)
 	case errors.Is(err, sql.ErrNoRows):
-		return keys, nil
+		return nil
 	default:
-		return names.Keys{}, fmt.Errorf("store: check name %q: %w", name, err)
+		return fmt.Errorf("store: check name %q: %w", name, err)
 	}
 }
 
@@ -105,9 +136,10 @@ type RenameResult struct {
 
 // RenamePrincipal sets principal id's name, in one IMMEDIATE transaction: the
 // new name must not clash with anyone else's (ErrDuplicate; the principal's
-// own old keys do not count, so "alice" may become "Alice"), its keys must
-// not be empty (ErrNameInvalid), and a principal_renamed row records both
-// names. name must already be a valid name
+// own old keys do not count, so "alice" may become "Alice"), nor be one
+// reserved for hidden principals (ErrDuplicate, whoever renames), its keys
+// must not be empty (ErrNameInvalid), and a principal_renamed row records
+// both names. name must already be a valid name
 // (schema.RenamePrincipalRequestV1.Validate); the store does not check.
 //
 // lim bounds the principal's own renames (rows whose actor is the principal
@@ -140,20 +172,7 @@ func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, nam
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE principals SET name = ?, name_key = ?, name_skel = ? WHERE id = ?",
-			name, keys.Folded, keys.Skeletal, id)
-		if isUniqueConstraintErr(err) {
-			// The exact name is held by someone whose stored keys differ
-			// from its keys now: keys computed from other Unicode tables.
-			return fmt.Errorf("store: rename principal %d: %w", id, ErrDuplicate)
-		}
-		if err != nil {
-			return fmt.Errorf("store: rename principal %d: %w", id, err)
-		}
-		// Quoted, so a name with spaces or "to=" in it cannot be read as
-		// another field, and an invisible character shows as an escape.
-		if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalRenamed, principalActor(id),
-			fmt.Sprintf("from=%q to=%q", p.Name, name), now); err != nil {
+		if err := setNameTx(ctx, tx, actor, p, name, keys, now); err != nil {
 			return err
 		}
 		out.Principal.Name = name
@@ -164,6 +183,26 @@ func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, nam
 		return RenameResult{}, err
 	}
 	return out, nil
+}
+
+// setNameTx writes name and the keys a claim returned for it to principal p,
+// and appends principal_renamed. It is the one statement that changes a
+// principal's name, for a rename and for a hide (issue #445).
+func setNameTx(ctx context.Context, tx execer, actor string, p Principal, name string, keys names.Keys, now time.Time) error {
+	_, err := tx.ExecContext(ctx, "UPDATE principals SET name = ?, name_key = ?, name_skel = ? WHERE id = ?",
+		name, keys.Folded, keys.Skeletal, p.ID)
+	if isUniqueConstraintErr(err) {
+		// The exact name is held by someone whose stored keys differ
+		// from its keys now: keys computed from other Unicode tables.
+		return fmt.Errorf("store: rename principal %d: %w", p.ID, ErrDuplicate)
+	}
+	if err != nil {
+		return fmt.Errorf("store: rename principal %d: %w", p.ID, err)
+	}
+	// Quoted, so a name with spaces or "to=" in it cannot be read as
+	// another field, and an invisible character shows as an escape.
+	return appendAuditEventTx(ctx, tx, actor, AuditPrincipalRenamed, principalActor(p.ID),
+		fmt.Sprintf("from=%q to=%q", p.Name, name), now)
 }
 
 // RecordRenameRefused appends a principal_rename_refused row for a person

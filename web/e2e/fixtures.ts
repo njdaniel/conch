@@ -82,6 +82,24 @@ export const channelButton = (page: Page, name: string) => page.getByRole('navig
 export const messages = (page: Page) => page.getByRole('log', { name: 'Messages' });
 export const conversation = (page: Page) => page.getByRole('region', { name: 'Conversation' });
 
+// The phone sizes the lobby must fit (issue #467): mobile Chromium, with touch
+// and a phone's pixel density, at the two widths most phones have.
+export const phones = [
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
+
+// expectFits checks that the page is no wider than the window: nothing scrolls
+// sideways, and the window is still the screen's width. A phone browser shown
+// a page wider than its screen zooms out to fit it, which is what made taps
+// land below where they were aimed (issue #467).
+export async function expectFits(page: Page, view: string): Promise<void> {
+  const { scroll, inner } = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+  const screen = page.viewportSize()?.width;
+  expect(inner, `${view}: the window is ${String(inner)} px wide on a ${String(screen)} px screen`).toBe(screen);
+  expect(scroll, `${view}: the page is ${String(scroll)} px wide in a ${String(inner)} px window`).toBeLessThanOrEqual(inner);
+}
+
 // say types into the composer and sends with the Send button.
 export async function say(page: Page, channel: string, body: string): Promise<void> {
   await page.getByLabel(`Message #${channel}`).fill(body);
