@@ -71,6 +71,8 @@ struct Inner {
     /// While set, handing over a frame never returns.
     sends_hang: bool,
     close_takes: Duration,
+    /// How long a mute holds the thread it is called on before it takes effect.
+    mute_takes: Duration,
     records: Vec<Record>,
     muted: bool,
     enabled: bool,
@@ -149,6 +151,13 @@ impl FakeSdk {
     /// Leaving a room takes this long.
     pub fn close_takes(&self, time: Duration) {
         self.lock().close_takes = time;
+    }
+
+    /// From now on a mute holds the thread it is called on for this long before it takes
+    /// effect, as a slow call into the SDK would: whatever the client does after it waits,
+    /// and whatever runs elsewhere does not.
+    pub fn mute_takes(&self, time: Duration) {
+        self.lock().mute_takes = time;
     }
 
     /// The fake writes these through the `log` facade at every connection attempt.
@@ -363,6 +372,11 @@ pub struct FakeTrack {
 
 impl MicTrack for FakeTrack {
     fn mute(&self) {
+        let takes = self.inner.lock().unwrap().mute_takes;
+        if !takes.is_zero() {
+            // On purpose not an await: the call holds its thread, as the SDK's would.
+            std::thread::sleep(takes);
+        }
         let mut inner = self.inner.lock().unwrap();
         inner.calls.push(Call::Mute);
         // As the SDK: muting a muted track changes nothing, an enabled one included.

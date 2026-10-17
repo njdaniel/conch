@@ -165,6 +165,9 @@ pub fn quick() -> Timings {
         close_limit: Duration::from_secs(2),
         attempt_limit: Duration::from_millis(300),
         gate_shut_grace: Duration::from_millis(150),
+        // The design's: a report the stub answers at once never meets it, and a test that
+        // wants to see it run out shortens it itself.
+        report_wait: conch_voice::session::REPORT_WAIT,
         report_flush: Duration::from_secs(2),
         output_flush: Duration::from_millis(200),
         stats_every: Duration::from_millis(50),

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 /// The login every test signs in with. Obviously not a credential.
@@ -49,6 +49,9 @@ pub enum Reply {
     Empty(u16),
     /// Read the request and never answer: a `conchd` that has stopped responding.
     Stall,
+    /// Read the request, and give this answer once the test notifies the handle: a
+    /// `conchd` that is slow by as much as the test likes.
+    Held(Arc<Notify>, Box<Reply>),
 }
 
 impl Reply {
@@ -60,6 +63,10 @@ impl Reply {
         )
     }
 }
+
+/// Called with the state of each transmit report as it is received, before it is
+/// answered.
+pub type OnReport = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The join token of the stub's `n`th session, from 1.
 pub fn join_token(n: u32) -> String {
@@ -106,6 +113,7 @@ struct State {
     livekit_url: String,
     /// Answers to the next transmit reports; when empty, 204.
     transmit_plan: VecDeque<Reply>,
+    on_report: Option<OnReport>,
     presence: Option<String>,
     presence_sockets: Vec<mpsc::UnboundedSender<String>>,
     /// Connections the client closed, in the order it closed them.
@@ -139,6 +147,7 @@ impl Stub {
             with_net_grant: false,
             livekit_url: "ws://livekit.invalid:7880".to_owned(),
             transmit_plan: VecDeque::new(),
+            on_report: None,
             presence: None,
             presence_sockets: Vec::new(),
             closed: Vec::new(),
@@ -195,6 +204,12 @@ impl Stub {
     /// The next transmit report gets this answer instead of 204.
     pub fn next_transmit(&self, reply: Reply) {
         self.lock().transmit_plan.push_back(reply);
+    }
+
+    /// From now on `look` is called with the state of each transmit report the moment it
+    /// is received: to see what else was true when `conchd` heard of a press or release.
+    pub fn on_report(&self, look: impl Fn(&str) + Send + Sync + 'static) {
+        self.lock().on_report = Some(Arc::new(look));
     }
 
     /// Sends a presence document to every open presence socket, and to each new one.
@@ -303,6 +318,11 @@ fn route(state: &Mutex<State>, request: &Request, headers: &[(String, String)]) 
             Routed::Reply(planned.unwrap_or_else(|| session(&mut state)))
         }
         ("POST", path) if path.ends_with("/voice/transmit") => {
+            if let Some(look) = &state.on_report {
+                let body: serde_json::Value =
+                    serde_json::from_str(&request.body).unwrap_or_default();
+                look(body["state"].as_str().unwrap_or_default());
+            }
             Routed::Reply(state.transmit_plan.pop_front().unwrap_or(Reply::Empty(204)))
         }
         ("GET", "/v1/voice/ws") => match header("sec-websocket-key") {
@@ -376,7 +396,12 @@ async fn until_closed(stream: &mut TcpStream) {
 async fn serve(mut stream: TcpStream, conn: u64, state: Arc<Mutex<State>>) {
     let mut buffer = Vec::new();
     while let Some((request, headers)) = read_request(&mut stream, &mut buffer, conn).await {
-        let response = match route(&state, &request, &headers) {
+        let mut routed = route(&state, &request, &headers);
+        if let Routed::Reply(Reply::Held(release, reply)) = routed {
+            release.notified().await;
+            routed = Routed::Reply(*reply);
+        }
+        let response = match routed {
             Routed::Reply(Reply::Json(status, body)) => format!(
                 "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
@@ -385,7 +410,7 @@ async fn serve(mut stream: TcpStream, conn: u64, state: Arc<Mutex<State>>) {
             Routed::Reply(Reply::Empty(status)) => {
                 format!("HTTP/1.1 {status} Stub\r\nContent-Length: 0\r\n\r\n")
             }
-            Routed::Reply(Reply::Stall) => {
+            Routed::Reply(Reply::Stall | Reply::Held(..)) => {
                 until_closed(&mut stream).await;
                 break;
             }
