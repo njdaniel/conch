@@ -284,6 +284,37 @@ func TestVoiceTransmitReconnectWithinAPassGap(t *testing.T) {
 			{100, "started"}, {110, "unmute"}, {500, "pass"}, {700, "rejoin"}, {710, "unmute"}, {1000, "pass"}, {1500, "pass"},
 			{1600, "mute"}, {2000, "pass"},
 		}, []string{"ann started@100 reported", "ann stopped@1000 observed left", "ann unreported@1000 observed", "ann stopped@2000 observed muted"}},
+		// Issue #509: transmitting all along, a false stopped before a pass,
+		// started after it, and a new connection before the next. The
+		// replacement is no edge of a transmission, so the lone pass is
+		// excused only once in 3 s: the second cycle is recorded, and from
+		// there the new connections transmit unreported.
+		{"a false stopped, a started and a reconnect around every other pass", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"},
+			{990, "stopped"}, {1000, "pass"}, {1010, "started"}, {1200, "rejoin"}, {1210, "unmute"}, {1500, "pass"},
+			{1990, "stopped"}, {2000, "pass"}, {2010, "started"}, {2200, "rejoin"}, {2210, "unmute"}, {2500, "pass"},
+			{2990, "stopped"}, {3000, "pass"}, {3010, "started"}, {3200, "rejoin"}, {3210, "unmute"}, {3500, "pass"},
+			{3600, "mute"}, {3610, "stopped"}, {4000, "pass"},
+		}, []string{
+			"ann started@100 reported", "ann stopped@990 reported", "ann started@1010 reported",
+			"ann stopped@1990 reported", "ann started@2010 reported", "ann unreported@2000 observed", "ann stopped@2500 observed left",
+			"ann unreported@2500 observed", "ann started@3010 reported", "ann stopped@3500 observed left",
+			"ann unreported@3500 observed", "ann stopped@4000 observed muted",
+		}},
+		// The same with the reconnect before the pass: the new connection's
+		// first pass is the lone one, and the replacement the look before it.
+		{"a false stopped, a reconnect and a started around every other pass", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"},
+			{990, "stopped"}, {995, "rejoin"}, {996, "unmute"}, {1000, "pass"}, {1010, "started"}, {1500, "pass"},
+			{1990, "stopped"}, {1995, "rejoin"}, {1996, "unmute"}, {2000, "pass"}, {2010, "started"}, {2500, "pass"},
+			{2990, "stopped"}, {2995, "rejoin"}, {2996, "unmute"}, {3000, "pass"}, {3010, "started"}, {3500, "pass"},
+			{3600, "mute"}, {3610, "stopped"}, {4000, "pass"},
+		}, []string{
+			"ann started@100 reported", "ann stopped@990 reported", "ann started@1010 reported",
+			"ann stopped@1990 reported", "ann started@2010 reported", "ann unreported@2000 observed", "ann stopped@2500 observed reported",
+			"ann stopped@2990 reported", "ann started@3010 reported", "ann unreported@3000 observed", "ann stopped@3500 observed reported",
+			"ann stopped@3610 reported",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
