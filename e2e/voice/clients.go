@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -77,15 +78,15 @@ type voiceClient struct {
 func (h *harness) buildVoiceClient() (bin, skip string, err error) {
 	ctx, cancel := context.WithTimeout(stopCtx, 30*time.Minute)
 	defer cancel()
-	check := groupCommand(ctx, "bash", "-c", ". ./scripts/voice-env.sh")
+	check := lkit.GroupCommand(ctx, "bash", "-c", ". ./scripts/voice-env.sh")
 	check.Dir = h.repo
 	if out, err := check.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {
 			return "", "", errInterrupted
 		}
-		return "", "the pinned Rust toolchain is not set up: " + oneLine(string(out), err), nil
+		return "", "the pinned Rust toolchain is not set up: " + lkit.OneLine(string(out), err), nil
 	}
-	build := groupCommand(ctx, "bash", "-c", ". ./scripts/voice-env.sh && cd voice && cargo build --locked -p conch-voice")
+	build := lkit.GroupCommand(ctx, "bash", "-c", ". ./scripts/voice-env.sh && cd voice && cargo build --locked -p conch-voice")
 	build.Dir = h.repo
 	if out, err := build.CombinedOutput(); err != nil {
 		if stopCtx.Err() != nil {
@@ -119,7 +120,7 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 		_ = outFile.Close()
 		return nil, err
 	}
-	cmd := groupStart(l.voiceBin, "join", channel, "--json", "--mic", mic,
+	cmd := lkit.GroupStart(l.voiceBin, "join", channel, "--json", "--mic", mic,
 		"--sink", fmt.Sprintf("count:%d,%d,%d", toneAnn, toneBen, toneCy))
 	cmd.Env = p.cli.env
 	cmd.Stderr = errFile
@@ -184,7 +185,7 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 }
 
 func (c *voiceClient) kill() {
-	_ = killGroup(c.cmd)
+	_ = lkit.KillGroup(c.cmd)
 	<-c.done
 }
 
@@ -639,7 +640,7 @@ func (l *live) voiceClients(ctx context.Context) error {
 			if !ok {
 				return false, saw
 			}
-			if t, has := p.mic(); !has || !t.Muted {
+			if t, has := p.Mic(); !has || !t.Muted {
 				return false, fmt.Sprintf("%s's microphone track: published=%v muted=%v", c.who.name, has, t.Muted)
 			}
 		}
@@ -768,7 +769,7 @@ func (s *squad) misreported(liar, listener *voiceClient) error {
 		return err
 	}
 	if status != http.StatusNoContent {
-		return fmt.Errorf("a stopped report with %s's credential while %s transmits: HTTP %d %s, want 204", liar.who.name, liar.who.name, status, l.h.redact(truncate(string(body), 200)))
+		return fmt.Errorf("a stopped report with %s's credential while %s transmits: HTTP %d %s, want 204", liar.who.name, liar.who.name, status, l.h.redact(lkit.Truncate(string(body), 200)))
 	}
 	actor := fmt.Sprintf("principal:%d", liar.who.id)
 	if err := waitFor("a voice_transmit_unreported row for the transmission "+liar.who.name+" reported as stopped", 30*time.Second, func() (bool, string) {
@@ -972,7 +973,7 @@ func (s *squad) outage(ctx context.Context, a, b *voiceClient) error {
 		return err
 	}
 	stoppedAt := time.Now()
-	if err := l.srv.stop(ctx); err != nil {
+	if err := l.srv.Stop(ctx); err != nil {
 		return err
 	}
 	for _, c := range s.clients {
@@ -1006,7 +1007,7 @@ func (s *squad) outage(ctx context.Context, a, b *voiceClient) error {
 		return err
 	}
 	startedAt := time.Now()
-	if err := l.srv.start(ctx); err != nil {
+	if err := l.srv.Start(ctx); err != nil {
 		return err
 	}
 	var back time.Time

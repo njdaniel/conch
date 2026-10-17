@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,12 +20,16 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// historyLimit is how many of a channel's newest messages the first load reads:
+// the most the server returns in one page.
+const historyLimit = 100
+
 // API is the shared Conch client surface used by the TUI.
 type API interface {
 	// Messages travel through the v2 methods only: a v1 reader would render a
 	// scoped message as an open one, so the v1 methods are deliberately not
 	// part of this interface and the TUI cannot call them.
-	ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error)
+	ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error)
 	PostMessageV2(ctx context.Context, channel string, authorID int64, body string, audience *schema.Audience) (schema.MessageV2, error)
 	// SubscribeV2After sends the visible messages with an id above the given
 	// one, then carries on live. The TUI loads a page over REST first and
@@ -48,6 +53,9 @@ type API interface {
 	ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error)
 	CreateIntervention(ctx context.Context, run int64, request schema.CreateInterventionRequestV1) (schema.InterventionV1, error)
 	ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error)
+	// Read state: the unread count of each channel, and moving the read mark.
+	ListReadState(context.Context) (schema.ListReadStateResponseV1, error)
+	MarkRead(ctx context.Context, channel string, lastReadID int64) (schema.ReadStateV1, error)
 }
 
 type channelsLoaded struct {
@@ -128,7 +136,10 @@ type messageSent struct {
 }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
-	err       error
+	// readOnly are the ids, among approvals, this person may see but not
+	// decide (issue #450).
+	readOnly []int64
+	err      error
 }
 type whoAmILoaded struct {
 	who schema.WhoAmIResponseV1
@@ -147,8 +158,12 @@ const (
 	// modeAgents follows modeDecision so the modes that existed keep their
 	// values; tab reaches it from the inbox.
 	modeAgents
-	// modeRun is run detail, opened from the Agents view; esc goes back.
+	// modeRun is run detail, opened from the Agents view or the Runs view; esc
+	// goes back to the one it came from.
 	modeRun
+	// modeRuns is the Runs view: the channel's runs. r in the Agents view enters
+	// it, a goes back, tab moves on to the channels.
+	modeRuns
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -180,8 +195,12 @@ type Model struct {
 	events        chan tea.Msg
 	mode          mode
 	approvals     []schema.ApprovalV1
-	selApproval   int
-	selOption     int
+	// readOnly holds the approvals shown that this person may not decide
+	// (issue #450): they are marked in the list and cannot be opened for a
+	// decision.
+	readOnly    map[int64]bool
+	selApproval int
+	selOption   int
 	// bodyOffset is the first line of the selected approval's body shown in
 	// the details pane. Only pgup/pgdn move it, and it is back to 0 whenever
 	// the selected approval changes.
@@ -276,6 +295,12 @@ type Model struct {
 	agentsStatus string
 	// rd is the open run of run detail; the zero value is none.
 	rd runDetail
+	// runs is the Runs view of the selected channel.
+	runs runsView
+	// rs is the person's read state: the unread counts and the read mark.
+	rs readState
+	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
+	clockTicking bool
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -301,6 +326,8 @@ func (m Model) status() string {
 		return "agents: " + sanitize(m.current())
 	case modeRun:
 		return m.runStatus()
+	case modeRuns:
+		return m.runsStatus()
 	}
 	return m.inboxStatus
 }
@@ -327,7 +354,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
-		sessionRuns: make(map[sessionRunKey][]schema.RunV1)}
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -357,9 +384,9 @@ func (m Model) Init() tea.Cmd {
 		who = m.loadWhoAmI()
 	}
 	if m.loadingChannels {
-		return tea.Batch(who, m.startSession(), m.loadChannels(), m.waitEvent())
+		return tea.Batch(who, m.startSession(), m.loadChannels(), m.loadReadState(), m.waitEvent())
 	}
-	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.waitEvent())
+	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.loadReadState(), m.waitEvent())
 }
 
 // Update applies keyboard, window, and injected API-result messages.
@@ -376,6 +403,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeAgents {
 			// A line about the last key is read once.
 			m.agentsStatus = ""
+			if msg.String() == "r" {
+				return m.enterRuns()
+			}
+		}
+		if m.mode == modeRuns {
+			if next, cmd, ok := m.runsKey(msg.String()); ok {
+				return next, cmd
+			}
 		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -395,11 +430,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeInbox:
 				m.mode = modeAgents
 				return m, nil
-			case modeAgents:
+			case modeAgents, modeRuns:
 				// The channel status is left as it is: results that landed
 				// while the user was away are already recorded in it.
 				m.mode = modeChannels
-				return m, nil
+				return m, m.markReading()
 			}
 		case "up":
 			switch m.mode {
@@ -447,7 +482,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.String() == "pgdown" {
 					step = -step
 				}
-				return m.scrollMessages(step), nil
+				return m.scrolled(step)
 			}
 		case "enter":
 			switch m.mode {
@@ -456,6 +491,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case modeAgents:
 				return m.activateAgent()
 			case modeInbox:
+				if len(m.approvals) > 0 && m.selApproval < len(m.approvals) && m.readOnly[m.approvals[m.selApproval].ID] {
+					m.setStatus(modeInbox, "view only: you may not decide this")
+					return m, nil
+				}
 				if len(m.approvals) > 0 {
 					m.mode = modeDecision
 					m.selOption = 0
@@ -495,8 +534,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.castDecision(app.ID, opt.ID, reason)
 			}
 		case "backspace":
-			// The Agents view has no input: the draft is the channel's.
-			if m.input != "" && m.mode != modeAgents {
+			// The Agents and Runs views have no input: the draft is the channel's.
+			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
 				_, size := utf8.DecodeLastRuneInString(m.input)
 				m.input = m.input[:len(m.input)-size]
 			}
@@ -508,6 +547,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case readStateLoaded:
+		return m.readStateLoaded(msg)
+	case readMarked:
+		return m.readMarked(msg)
+	case markDue:
+		return m.markDue(msg)
 	case voiceKick:
 		return m, m.beginVoice()
 	case voicePresenceReceived:
@@ -536,6 +581,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.interventionSent(msg)
 	case sessionRunsLoaded:
 		return m.sessionRunsLoaded(msg)
+	case runsLoaded:
+		return m.runsLoaded(msg)
+	case clockTick:
+		return m.clockTicked()
 	case eventsEnded:
 		return m.eventsEnded(msg)
 	case eventsRetryDue:
@@ -555,6 +604,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(modeInbox, msg.err.Error())
 		} else {
 			m.approvals = msg.approvals
+			m.readOnly = make(map[int64]bool, len(msg.readOnly))
+			for _, id := range msg.readOnly {
+				m.readOnly[id] = true
+			}
 			m.selApproval = 0
 			m.bodyOffset = 0
 			// A slower load can land after the user has already moved into
@@ -662,18 +715,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, nil
+		return m, m.markReading()
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, m.waitEvent()
+		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading())
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, m.waitEvent()
+		if m.rs.dropped[msg.channel] {
+			// Messages may have come while it was down: ask what is unread now.
+			delete(m.rs.dropped, msg.channel)
+			return m, tea.Batch(m.waitEvent(), m.loadReadState(), m.flushMark(msg.channel))
+		}
+		return m, tea.Batch(m.waitEvent(), m.flushMark(msg.channel))
 	case subscriptionEnded:
 		return m.subscriptionEnded(msg)
 	case resubscribeDue:
@@ -728,6 +786,7 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 		return m, wait
 	}
 	m.subscribed[msg.channel] = false
+	m.rs.dropped[msg.channel] = true
 	selected := msg.channel == m.current()
 	if errors.Is(msg.err, cli.ErrUnauthenticated) {
 		// Retrying cannot fix a missing login; the user must act, and
@@ -772,11 +831,13 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 	}
 	m.selected = next
 	m.scroll = 0
+	// The Runs view is of one channel.
+	m.runs = runsView{channel: m.current(), filter: m.runs.filter}
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
 	m.pendingNet = ""
 	m.setStatus(modeChannels, "loading…")
-	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents()}
+	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents(), m.markReading()}
 	// A pending retry timer will start the subscription itself.
 	switch {
 	case m.subscribed[m.current()] || m.retryPending[m.current()]:
@@ -838,19 +899,16 @@ func (m Model) loadCurrent() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		var messages []schema.MessageV2
-		var after int64
-		for {
-			page, err := m.api.ListMessagesV2(m.ctx, channel, after, 100)
-			if err != nil {
-				return messagesLoaded{channel: channel, err: err}
-			}
-			messages = append(messages, page.Messages...)
-			if page.NextAfter == 0 || page.NextAfter <= after {
-				return messagesLoaded{channel: channel, messages: messages}
-			}
-			after = page.NextAfter
+		// One request for the newest page, whatever the channel's size; older
+		// history is not shown, and the TUI has no scroll-back to fetch it.
+		page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
+		if err != nil {
+			return messagesLoaded{channel: channel, err: err}
 		}
+		// The server sends newest first; the model holds ascending.
+		messages := slices.Clone(page.Messages)
+		slices.Reverse(messages)
+		return messagesLoaded{channel: channel, messages: messages}
 	}
 }
 
@@ -957,7 +1015,7 @@ func (m Model) send(channel, raw, body string, audience *schema.Audience, whispe
 func (m Model) loadApprovals() tea.Cmd {
 	return func() tea.Msg {
 		resp, err := m.api.ListApprovals(m.ctx)
-		return approvalsLoaded{approvals: resp.Approvals, err: err}
+		return approvalsLoaded{approvals: resp.Approvals, readOnly: resp.ReadOnly, err: err}
 	}
 }
 
@@ -1035,6 +1093,8 @@ func (m Model) View() string {
 		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
 	case modeAgents:
 		panes = m.agentsPanes(l)
+	case modeRuns:
+		panes = m.runsPanes(l)
 	case modeRun:
 		panes = borderStyle.Width(width - 2).Height(contentHeight).Render(strings.Join(m.runLines(width-2, contentHeight), "\n"))
 	default:
@@ -1074,9 +1134,11 @@ func (m Model) View() string {
 	case modeDecision:
 		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
 	case modeRun:
-		statusKeys = "  ↑/↓ activity • esc back"
+		statusKeys = "  ↑/↓ timeline • enter data • g message • esc back"
 	case modeAgents:
-		statusKeys = "  ↑/↓ agents • enter sessions • tab channels • esc quit"
+		statusKeys = "  ↑/↓ agents • enter sessions • r runs • tab channels • esc quit"
+	case modeRuns:
+		statusKeys = "  ↑/↓ runs • enter open • f filter • a agents • esc quit"
 	case modeInbox:
 		statusKeys = "  ↑/↓ approvals • enter decide • tab agents • esc quit"
 	default:
@@ -1116,12 +1178,20 @@ func (m Model) View() string {
 func (m Model) channelLines(leftWidth int) []string {
 	lines := make([]string, len(m.channels))
 	for i, channel := range m.channels {
-		channel = clip(sanitize(channel), leftWidth-4)
+		badge := m.unreadBadge(channel)
+		room := leftWidth - 4
+		if badge != "" {
+			room -= 1 + len(badge)
+		}
+		name := fitCells(sanitize(channel), room)
 		prefix := "  "
 		if i == m.selected {
 			prefix = activeStyle.Render("› ")
 		}
-		lines[i] = prefix + channel
+		lines[i] = prefix + name
+		if badge != "" {
+			lines[i] += " " + badgeStyle.Render(badge)
+		}
 	}
 	if len(lines) == 0 && m.loadingChannels {
 		lines = append(lines, statusStyle.Render("loading…"))
@@ -1140,6 +1210,18 @@ func (m Model) agentsPanes(l layout) string {
 	lines, sel := m.agentLines(l.rightW - 2)
 	agents := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
 	return lipgloss.JoinHorizontal(lipgloss.Top, channels, agents)
+}
+
+// runsPanes is the Runs view: laid out as the Agents view is.
+func (m Model) runsPanes(l layout) string {
+	if l.width < fullWidth || l.height < fullHeight {
+		lines, sel := m.runsLines(l.width - 2)
+		return borderStyle.Width(l.width - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	}
+	channels := borderStyle.Width(l.leftW - 2).Height(l.contentH).Render(strings.Join(m.channelLines(l.leftW), "\n"))
+	lines, sel := m.runsLines(l.rightW - 2)
+	runs := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, channels, runs)
 }
 
 // size is the terminal size, or 80x24 before the first WindowSizeMsg.
@@ -1243,7 +1325,7 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
-	if m.mode == modeAgents || m.mode == modeRun {
+	if m.mode == modeAgents || m.mode == modeRun || m.mode == modeRuns {
 		// Lists and a pane that are read with the keys; there is nothing to click.
 		return m, nil
 	}
@@ -1265,7 +1347,7 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeChannels:
 			if l.inRight(msg.X, msg.Y) {
-				return m.scrollMessages(step), nil
+				return m.scrolled(step)
 			}
 		case modeInbox:
 			if l.inLeft(msg.X, msg.Y) {
@@ -1362,6 +1444,9 @@ func (m Model) inboxLines(cols, rows int) []string {
 		esc, escWidth := "", 0
 		if app.State == schema.ApprovalStateEscalated {
 			esc, escWidth = badgeStyle.Render(" [ESC]"), 6
+		}
+		if m.readOnly[app.ID] {
+			esc, escWidth = esc+statusStyle.Render(" [view]"), escWidth+7
 		}
 		title := fitCells(fmt.Sprintf("%d: %s", app.RequesterID, sanitize(app.Title)), cols-2-escWidth)
 		lines = append(lines, prefix+title+esc)

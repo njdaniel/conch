@@ -1,0 +1,107 @@
+// The test every spec uses. Each person is a browser context of their own
+// (never a second tab of one), and every page of every context is checked,
+// when the test ends, for a credential in the address bar or in
+// performance.getEntries(): the one thing that must hold throughout.
+import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
+import { allTokens, loadWorld, type World } from './world';
+
+// leaks lists where in a page a credential shows, none when it does not.
+async function leaks(page: Page, tokens: readonly string[]): Promise<string[]> {
+  if (page.isClosed()) return [];
+  const found: string[] = [];
+  const url = page.url();
+  // performance.getEntries() is the page's own record of every address it asked
+  // for, the web socket's included (it carries a ticket, which is not the credential).
+  const entries = await page.evaluate(() => JSON.stringify(performance.getEntries().map((e) => e.name)));
+  const visible = await page.evaluate(() => document.documentElement.outerHTML);
+  for (const token of tokens) {
+    if (url.includes(token)) found.push('the address bar');
+    if (entries.includes(token)) found.push('performance.getEntries()');
+    if (visible.includes(token)) found.push('the page');
+  }
+  return found;
+}
+
+export interface Person {
+  readonly page: Page;
+  readonly context: BrowserContext;
+}
+
+export const test = base.extend<{
+  // meet opens a fresh browser context with a page in it: one person. The
+  // options are the context's (a phone's screen, say).
+  meet: (options?: BrowserContextOptions) => Promise<Person>;
+  // secrets is the credentials a test came by itself (one an invite gave, say),
+  // which the end-of-test scan looks for beside the world's.
+  secrets: string[];
+  world: World;
+}>({
+  world: async ({}, use) => {
+    await use(loadWorld());
+  },
+  secrets: async ({}, use) => {
+    await use([]);
+  },
+  meet: async ({ browser, world, secrets }, use) => {
+    const people: Person[] = [];
+    await use(async (options?: BrowserContextOptions) => {
+      const context = await browser.newContext(options);
+      const person = { context, page: await context.newPage() };
+      people.push(person);
+      return person;
+    });
+    // The credential must not have been anywhere visible, in any test. Every
+    // context is closed whatever the check finds.
+    const found: string[] = [];
+    try {
+      for (const { page } of people) {
+        for (const where of await leaks(page, [...allTokens(world), ...secrets])) found.push(where);
+      }
+    } finally {
+      for (const { context } of people) await context.close();
+    }
+    expect(found, 'a credential in the address bar, in performance.getEntries() or in the page').toEqual([]);
+  },
+});
+
+export { expect };
+
+// ---------------------------------------------------------------- the page
+
+// signIn pastes a credential into the sign-in field and waits for the lobby.
+export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
+  await page.goto(world.appUrl);
+  await page.getByLabel('Credential').fill(token);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(statusLine(page)).toContainText(name);
+  await expect(statusLine(page)).toContainText('Connected');
+}
+
+export const statusLine = (page: Page) => page.getByRole('status', { name: 'Status' });
+export const channelButton = (page: Page, name: string) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name, exact: true });
+export const messages = (page: Page) => page.getByRole('log', { name: 'Messages' });
+export const conversation = (page: Page) => page.getByRole('region', { name: 'Conversation' });
+
+// The phone sizes the lobby must fit (issue #467): mobile Chromium, with touch
+// and a phone's pixel density, at the two widths most phones have.
+export const phones = [
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
+
+// expectFits checks that the page is no wider than the window: nothing scrolls
+// sideways, and the window is still the screen's width. A phone browser shown
+// a page wider than its screen zooms out to fit it, which is what made taps
+// land below where they were aimed (issue #467).
+export async function expectFits(page: Page, view: string): Promise<void> {
+  const { scroll, inner } = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+  const screen = page.viewportSize()?.width;
+  expect(inner, `${view}: the window is ${String(inner)} px wide on a ${String(screen)} px screen`).toBe(screen);
+  expect(scroll, `${view}: the page is ${String(scroll)} px wide in a ${String(inner)} px window`).toBeLessThanOrEqual(inner);
+}
+
+// say types into the composer and sends with the Send button.
+export async function say(page: Page, channel: string, body: string): Promise<void> {
+  await page.getByLabel(`Message #${channel}`).fill(body);
+  await page.getByRole('button', { name: 'Send' }).click();
+}

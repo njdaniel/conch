@@ -113,6 +113,7 @@ func TestSessionErrorCodes(t *testing.T) {
 		ErrorCodeSessionNotFound:     "session_not_found",
 		ErrorCodeSessionsRequireAuth: "sessions_require_auth",
 		ErrorCodeTooManySessions:     "too_many_sessions",
+		ErrorCodeSessionOffline:      "session_offline",
 		ErrorCodeAgentRequired:       "agent_required",
 	})
 }

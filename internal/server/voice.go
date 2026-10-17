@@ -115,12 +115,12 @@ func (s *Server) voiceSessionCaller(w http.ResponseWriter, r *http.Request) (sto
 // voicePresenceChannel resolves the channel for a voice request and applies
 // the checks of the caller that every voice route shares, in one order: a
 // verified caller, then the unknown-channel 404 for a non-member, then the
-// refusal of agents. The session and transmit-report endpoints go through it
-// (voiceSessionCaller), as do the presence snapshot and its socket. It writes
-// the response and returns false when the request must stop. With
-// authentication off there is no verified caller, the identity would be
-// whatever the request says, and voice is never anonymous: refused, before the
-// channel is looked at.
+// refusal of agents, then the refusal of a person without voice. The session
+// and transmit-report endpoints go through it (voiceSessionCaller), as do the
+// presence snapshot and its socket. It writes the response and returns false
+// when the request must stop. With authentication off there is no verified
+// caller, the identity would be whatever the request says, and voice is never
+// anonymous: refused, before the channel is looked at.
 //
 // For the socket, afterLookup runs between the channel lookup and the
 // membership check: the caller subscribes there, so a removal that lands
@@ -168,6 +168,15 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return store.Channel{}, store.Principal{}, false
 	}
+	// A person whose invite did not grant voice (issue #437). Checked here,
+	// after membership and after the agent refusal, so that every voice
+	// route inherits it in the same order: a non-member still gets the 404,
+	// and only a member learns that voice is withheld. The caller is the
+	// principal as resolved for this request, so the grant is read fresh.
+	if !caller.VoiceAllowed {
+		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+		return store.Channel{}, store.Principal{}, false
+	}
 	return channel, caller, true
 }
 
@@ -176,11 +185,12 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 // (configured and available false, no rooms) rather than failing; only a
 // caller who passed the membership check sees that.
 func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
-	channel, _, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
+	channel, caller, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
 	if !ok {
 		return
 	}
-	snap := s.voice.snapshot(channel.ID)
+	// The caller's own snapshot: why their last share ended is theirs alone.
+	snap := s.voice.snapshot(channel.ID, caller.ID)
 	if err := snap.Validate(); err != nil {
 		slog.ErrorContext(r.Context(), "voice: built an invalid presence document", "channel", channel.ID, "error", err)
 		writeInternalError(w)

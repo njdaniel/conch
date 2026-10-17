@@ -22,6 +22,25 @@ via LiveKit, never bespoke WebRTC.
 > (#81), runs on every pull request. Password login and OIDC (#24) did not ship in it and
 > move to P7; see the P2 paragraph. P3 is next among the numbered phases.
 
+> **Amended 2026-10-15:** **P3 is done** (#423). All its code is on `main`, and its
+> success criterion was met in an agent run on 2026-10-15 (walkthrough row P3-14, recorded
+> in the [exit record](docs/design/p3-exit-record.md)). Its optional extensions moved out
+> of the P3 milestone, by Nick's choice:
+> - the voice rows (#393, #394, #396; tracker #354) went to the P8 Voice milestone, beside
+>   #189, which gates them;
+> - the by-hand VM/LAN guest session (#381; tracker #353) went to "P3 extensions".
+>
+> Which numbered phase comes next is Nick's call.
+
+> **Amended 2026-10-15 (ADR-008, #420):** next is a **private communications alpha**.
+> Invited testers, in separate groups on one server, chat, talk and share a screen in
+> the browser on every platform. See the alpha section below and
+> [the plan](docs/design/private-alpha.md).
+> - Screen sharing moves into it from P9, and invite onboarding from P7.
+> - P4 and P5 are deferred, not removed.
+> - Live transcription follows the alpha.
+> - The voice track's native Linux exit (#189) continues, and the alpha does not wait for it.
+
 **Two invariants hold the whole way:**
 
 - **Usable at every phase.** Each phase ends in a deployment you actually run, not
@@ -83,18 +102,7 @@ Two things this paragraph used to list did not ship here:
 
 *Deployment: dependency-free core, localhost, Nick + one or more agents in the TUI.*
 
----
-
-## The long arc
-
-> **Client/P3 amendment (2026-10-13, #259):**
-> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the client stack and adds a
-> small read/write browser prototype alongside the TUI at P3. The
-> [P3 local prototype brief](docs/design/p3-local-prototype.md) and the plan on
-> [#260](https://github.com/njdaniel/conch/issues/260) define the work; none of it is
-> built yet. No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
-
-### P3 — Agent presence & runs 🎯 *next*
+### P3 — Agent presence & runs ✅
 Make agents visible, first-class **workspace members**, not just participants that read
 and post. This is the "open Conch and see everything running" phase — the most
 immediately useful thing on the roadmap.
@@ -139,6 +147,35 @@ Ships:
 > Richer timelines, additional adapters and full intervention follow; this first
 > slice does not by itself complete all P3 objectives.
 
+> **First prototype exited 2026-10-14 (#286).** The code is on `main` (#264–#285): the
+> walkthrough (`docs/p3-walkthrough.md`), the automated suite (`go run ./e2e/p3-local`)
+> and the browser suite (`make web-e2e`), both run in CI on every pull request. Every row
+> P3-01 to P3-13 passed in an agent run on Nick's machine, P3-13 with one real Claude Code
+> reply; the [exit record](docs/design/p3-exit-record.md) says so plainly and keeps a place
+> for Nick's own run.
+
+> **Follow-ons merged by 2026-10-15.** These are on `main`:
+> - the Codex and local-model adapters (#343, #344);
+> - `pause` and `resume` (#345, #346);
+> - the web client embedded in the binary (#347), and generated TypeScript bindings (#348);
+> - Runs views and richer timelines (#349, #350);
+> - read state and unread counts (#351);
+> - nets and whispers in the browser (#352);
+> - the webhook/event adapter (#359);
+> - the parts of the VM/LAN extension that need no second machine (#379, #380, #382).
+>
+> The success criterion below was **met in an agent run** on 2026-10-15 (walkthrough row
+> P3-14, recorded in the [exit record](docs/design/p3-exit-record.md), by Nick's choice).
+> Claude Code, Codex and a local model ran at once, each was shown with its runtime and
+> model, its activity could be read, and an instruction to one was applied. The two
+> defects that run found are fixed: agents no longer answer each other in a shared channel
+> (#410), and local-model replies carry no terminal escapes (#411).
+>
+> What remains:
+> - the guest session by hand, #381 (Nick, VM/LAN, tracker #353);
+> - the voice extension, gated on #189 (#393, #394, #396; tracker #354), which is
+>   non-blocking for P3.
+
 > **Success criterion:** Nick opens Conch and sees Claude Code, Codex, and a local model
 > running simultaneously, sees what each is doing, opens each activity stream, and sends
 > an instruction to one — without switching terminals.
@@ -154,6 +191,48 @@ LiveKit remains optional for the parallel voice track.*
 > Slack-style multi-human GUI in P7. The TUI stays first-class for ops and approvals.
 > **Extended by ADR-007:** the early GUI allowance now covers the bounded read/write
 > local prototype above, and no more than that.
+
+---
+
+## The long arc
+
+> **Client/P3 amendment (2026-10-13, #259):**
+> [ADR-007](docs/adr/ADR-007-client-interfaces.md) selects the client stack and adds a
+> small read/write browser prototype alongside the TUI at P3. The
+> [P3 local prototype brief](docs/design/p3-local-prototype.md) and the plan on
+> [#260](https://github.com/njdaniel/conch/issues/260) define the work; none of it is
+> built yet. No V4–V6 exit gate is removed, and full P7/P9 scope is not pulled into P3.
+
+### Private communications alpha 🎯 *next* (ADR-008)
+
+Conch used by people:
+- **who:** invited testers in several completely separate groups, about 30 online at once;
+- **what:** chat, voice and screen share, in the browser on Linux, Windows, macOS and phones;
+- **where:** one server Nick runs on DigitalOcean.
+
+The plan, its open decisions and the work in order are in
+[docs/design/private-alpha.md](docs/design/private-alpha.md).
+
+Ships:
+- **Invites.** Personal invites, which testers may make, and time-limited open links, which operators make. There is no public signup. Every account records the invite it came through, and access is revoked at once.
+- **Browser voice and screen share** through LiveKit's JavaScript SDK:
+  - push-to-talk while the tab has focus, mute and deafen;
+  - one share per room, with sound where the browser can.
+- **Separate groups as private channels on one server,** checked end to end so one group finds nothing of another.
+- **A deployed, versioned server,** with the build's version visible, backups with a tried restore, keepalive and reconnects, and in-product problem reports.
+
+> **Exit:** Nick deploys a versioned build, and testers join through invites from at least
+> Windows, macOS, Linux and a phone. They chat, talk and share a screen with sound. They
+> recover from a dropped connection. One is revoked and the open link is closed. A
+> problem report reaches the backlog with its build and diagnostics.
+
+**After the alpha:**
+- a desktop app with a talk key that works while another app has focus (Electron, ADR-007);
+- nets in voice (V5);
+- live transcription and captions, with explicit on and off, consent, and where the processing runs decided first.
+
+*Deployment: one DigitalOcean droplet, `conchd` + Caddy + LiveKit, browser clients. LiveKit stays
+optional; without it, chat and invites work.*
 
 ### Parallel track — nets and voice (V0–V6)
 
@@ -189,7 +268,7 @@ audio's audience; TTS behind `publish:audio`), Windows/macOS clients.
 *Deployment: `conchd` alone through V2; `conchd` + optional LiveKit from V3; Linux/PipeWire
 clients; a few humans plus agents.*
 
-### P4 — Assemblies (floor-controlled multi-agent rooms)
+### P4 — Assemblies (floor-controlled multi-agent rooms) ⏸ *deferred (ADR-008)*
 Multiple agent principals in one channel reading the **shared** log, so each sees the
 others' contributions. Brainstorm with several models at once instead of tabbing between
 siloed chats.
@@ -228,7 +307,7 @@ Ships:
 
 *Deployment: dependency-free core, local, TUI, solo-with-agents. No new infra.*
 
-### P5 — Deliberation & convergence
+### P5 — Deliberation & convergence ⏸ *deferred (ADR-008)*
 Turn a brainstorm into a decision. Agents rank and critique each other's typed proposals;
 the assembly converges to a recommendation that lands as an **approval object** Nick
 resolves — closing the loop onto the existing decision/audit core. Saved assembly
@@ -248,6 +327,10 @@ media — just make the single-user-plus-agents experience excellent.
 happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 ### P7 — Small-team multi-human + Slack-style GUI ⚠️ *charter amendment*
+
+> **Amended by ADR-008:** invite onboarding and a browser client for invited testers
+> (chat, voice, screen share) move into the private alpha. The full small-team GUI,
+> presence preferences, human DMs and password or OIDC login stay here.
 
 ADR-007 brings the shared React foundation and a limited browser lobby/chat/agent
 view into P3, and with it a basic online / stale / offline roster for people as well
@@ -283,6 +366,9 @@ auditable), or hold a `publish:audio` capability and speak via TTS.
 *Deployment: self-hosted `conchd` + LiveKit, as established by the track.*
 
 ### P9 — Screen sharing + session media
+
+> **Amended by ADR-008:** basic screen sharing (one share per room, with sound where
+> the browser can) moves into the private alpha. Recording and agent visual participation stay here.
 Screen-share is a second track type on the same LiveKit rooms as voice — one design, not
 two. Agents can watch a share and raise a `request_approval` off what they see. Session
 recording/transcription flows into the audit log.
@@ -300,14 +386,15 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | Phase | Focus | Deployment |
 | ----- | ----- | ---------- |
 | P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
-| **P3** | **Agent presence, sessions, runs, activity, adapters**; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
-| **P4** | **Assemblies / floor-controlled multi-agent rooms** | Core, local, solo+agents |
-| **P5** | **Deliberation, critique, ranking, convergence** | Core, local, solo+agents |
+| P3 ✅ | Agent presence, sessions, runs, activity, adapters; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
+| **Alpha** | **Private communications alpha: invites, browser chat, voice and screen share** (ADR-008) | One droplet, conchd + Caddy + LiveKit, browsers |
+| P4 ⏸ | Assemblies / floor-controlled multi-agent rooms (deferred) | Core, local, solo+agents |
+| P5 ⏸ | Deliberation, critique, ranking, convergence (deferred) | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |
 | P7 | Small-team multi-human + Slack-style GUI ⚠️ | Small self-hosted, humans+agents |
 | V0–V6 | Nets and voice track (parallel): auth, membership, text nets, PTT voice | Core, then + optional LiveKit |
 | P8 | Agents in voice | Self-hosted + LiveKit |
-| P9 | Screen sharing, recording, agent visual participation | Self-hosted + LiveKit |
+| P9 | Recording, agent visual participation (basic screen share moved to the alpha) | Self-hosted + LiveKit |
 | P10+ | Mobile, bridges, broader reach | As earned |
 
 ---

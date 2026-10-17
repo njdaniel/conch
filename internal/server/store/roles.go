@@ -53,8 +53,10 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // the only code path that creates an operator.
 //
 // Everything happens in one write transaction. If any operator exists it
-// returns ErrOperatorExists, and if name is taken (by a member) it returns
-// ErrDuplicate; in both cases nothing is written, including no revocations.
+// returns ErrOperatorExists, and if name is taken (by a member), clashes
+// with a member's by case or look-alike characters, or is reserved for
+// hidden principals, it returns ErrDuplicate;
+// in both cases nothing is written, including no revocations.
 //
 // Unless opts.KeepExistingCredentials is set, every live credential (not
 // revoked, not expired) is revoked first, because until an operator exists the
@@ -66,9 +68,9 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // credential bound to a principal of its creator's choosing, so every existing
 // hook is deleted, with one hook_revoked audit event each (never containing
 // the token). Agent manifests are only counted. The operator's own credential
-// is created after, so it is never revoked. On success an operator_bootstrapped
-// event and the usual credential_created event are appended in the same
-// transaction; none carries a token.
+// is created after, so it is never revoked. On success principal_created
+// (issue #445), operator_bootstrapped and the usual credential_created event
+// are appended in the same transaction; none carries a token.
 func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts BootstrapOptions) (BootstrapResult, error) {
 	token, err := newCredentialToken()
 	if err != nil {
@@ -76,7 +78,9 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 	}
 	now := credentialNow().Truncate(time.Millisecond)
 	var res BootstrapResult
+	var runs []EndedRun
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
 		var one int
 		switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM principals WHERE role = 'operator' LIMIT 1").Scan(&one); {
 		case err == nil:
@@ -84,9 +88,13 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("store: bootstrap operator: check operators: %w", err)
 		}
+		keys, err := claimNameTx(ctx, tx, name, 0)
+		if err != nil {
+			return fmt.Errorf("store: bootstrap operator: %w", err)
+		}
 		ins, err := tx.ExecContext(ctx,
-			"INSERT INTO principals (kind, name, role, created_at) VALUES ('human', ?, 'operator', ?)",
-			name, now.UnixMilli())
+			"INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', ?, ?, ?, 'operator', ?)",
+			name, keys.Folded, keys.Skeletal, now.UnixMilli())
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: bootstrap operator %q: %w", name, ErrDuplicate)
 		}
@@ -97,9 +105,9 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		if err != nil {
 			return fmt.Errorf("store: bootstrap operator %q: %w", name, err)
 		}
-		res.Principal = Principal{ID: id, Kind: PrincipalHuman, Name: name, Role: RoleOperator, CreatedAt: now}
+		res.Principal = Principal{ID: id, Kind: PrincipalHuman, Name: name, Role: RoleOperator, CreatedAt: now, VoiceAllowed: true}
 		if !opts.KeepExistingCredentials {
-			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now); err != nil {
+			if res.Revoked, err = revokeLiveCredentialsTx(ctx, tx, now, &runs); err != nil {
 				return err
 			}
 			if res.RevokedHooks, err = deleteHooksTx(ctx, tx, now); err != nil {
@@ -109,7 +117,10 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_manifests").Scan(&res.Manifests); err != nil {
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
-		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil); err != nil {
+		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
+			return err
+		}
+		if err := appendAuditEventTx(ctx, tx, "system", AuditPrincipalCreated, principalActor(id), "kind=human", now); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", "operator_bootstrapped", principalActor(id), "", now); err != nil {
@@ -121,6 +132,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 	if err != nil {
 		return BootstrapResult{}, err
 	}
+	s.announceRunsEnded(runs)
 	res.Token = token
 	return res, nil
 }
@@ -128,7 +140,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 // revokeLiveCredentialsTx revokes every credential that is neither revoked nor
 // expired at now, writing one credential_revoked event each, and returns how
 // many it revoked.
-func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int, error) {
+func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time, ended *[]EndedRun) (int, error) {
 	type live struct {
 		id, principalID int64
 		label           string
@@ -170,7 +182,7 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time) (int
 			return 0, err
 		}
 		// Its sessions end with it, as on every other revocation (issue #265).
-		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now); err != nil {
+		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now, ended); err != nil {
 			return 0, err
 		}
 	}

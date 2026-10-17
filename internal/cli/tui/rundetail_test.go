@@ -29,9 +29,11 @@ type runAPI struct {
 	runs      []schema.RunV1
 	pageSize  int
 	createErr error
-	created   []schema.CreateInterventionRequestV1
-	gets      int
-	listed    int
+	// listErr fails the runs reads.
+	listErr error
+	created []schema.CreateInterventionRequestV1
+	gets    int
+	listed  int
 	// listRequests is every runs read, in order.
 	listRequests []runsRequest
 }
@@ -105,6 +107,9 @@ func (a *runAPI) ListRuns(_ context.Context, _ string, session int64, page cli.R
 	defer a.state.Unlock()
 	a.listed++
 	a.listRequests = append(a.listRequests, runsRequest{session: session, page: page, limit: limit})
+	if a.listErr != nil {
+		return schema.ListRunsResponseV1{}, a.listErr
+	}
 	resp := schema.ListRunsResponseV1{Runs: []schema.RunV1{}}
 	if page.NewestFirst {
 		// The server's newest page: up to limit runs, whatever the page size
@@ -294,7 +299,8 @@ func TestRunDetailShowsFieldsActivityAndHistory(t *testing.T) {
 		"run #41 · running", "task: fix the parser", "link: https://example.com/pr/1", "started: 11:55:00 (5m ago)",
 		// Five entries over pages of two: every page was read.
 		"step 1", "step 2", "step 3", "step 4", "step 5 → ok", "activity (5)",
-		"#3 message · applied · use the cache", "#4 cancel · failed: cannot stop now", "interventions (2)",
+		// An intervention is two lines of the timeline: the ask, and its answer.
+		"↳ #3 message · asked · use the cache", "↳ #3 applied", "↳ #4 cancel · asked", "↳ #4 failed: cannot stop now", "interventions (2)",
 		"m message · x cancel",
 	} {
 		if !strings.Contains(view, want) {
@@ -355,44 +361,178 @@ func TestRunDetailOpensFromRecentRuns(t *testing.T) {
 }
 
 func TestRunDetailKeysFollowTheDeclaredKinds(t *testing.T) {
+	const (
+		msg    = schema.InterventionKindMessage
+		cancel = schema.InterventionKindCancel
+		pause  = schema.InterventionKindPause
+		resume = schema.InterventionKindResume
+	)
 	tests := []struct {
-		name         string
-		declared     []schema.InterventionKind
-		wantHint     string
-		wantMessage  bool
-		wantCancel   bool
-		wantAbsentIn string
+		name     string
+		declared []schema.InterventionKind
+		state    schema.RunState
+		wantHint string
+		// wantKeys is the keys that do something: m, x, p, r.
+		wantKeys string
+		// absent is a hint that must not be on the screen.
+		absent string
 	}{
-		{"both", bothKinds, "m message · x cancel · pause (unsupported) · resume (unsupported)", true, true, ""},
-		{"message only", []schema.InterventionKind{schema.InterventionKindMessage},
-			"m message · cancel (unsupported) · pause (unsupported) · resume (unsupported)", true, false, "x cancel"},
-		{"cancel only", []schema.InterventionKind{schema.InterventionKindCancel},
-			"message (unsupported) · x cancel · pause (unsupported) · resume (unsupported)", false, true, "m message"},
-		{"none", nil, "message (unsupported) · cancel (unsupported) · pause (unsupported) · resume (unsupported)", false, false, "m message"},
-		// Pause is out of scope: declaring it earns no key.
-		{"pause declared", []schema.InterventionKind{schema.InterventionKindPause},
-			"message (unsupported) · cancel (unsupported) · pause (unsupported) · resume (unsupported)", false, false, ""},
+		{"message and cancel", bothKinds, schema.RunStateRunning,
+			"m message · x cancel · pause (unsupported) · resume (unsupported)", "mx", ""},
+		{"message only", []schema.InterventionKind{msg}, schema.RunStateRunning,
+			"m message · cancel (unsupported) · pause (unsupported) · resume (unsupported)", "m", "x cancel"},
+		{"cancel only", []schema.InterventionKind{cancel}, schema.RunStateRunning,
+			"message (unsupported) · x cancel · pause (unsupported) · resume (unsupported)", "x", "m message"},
+		{"none", nil, schema.RunStateRunning,
+			"message (unsupported) · cancel (unsupported) · pause (unsupported) · resume (unsupported)", "", "m message"},
+		{"all, running", []schema.InterventionKind{msg, cancel, pause, resume}, schema.RunStateRunning,
+			"m message · x cancel · p pause", "mxp", "r resume"},
+		{"all, waiting", []schema.InterventionKind{msg, cancel, pause, resume}, schema.RunStateWaiting,
+			"m message · x cancel · r resume", "mxr", "p pause"},
+		{"all, blocked", []schema.InterventionKind{msg, cancel, pause, resume}, schema.RunStateBlocked,
+			"m message · x cancel", "mx", "pause"},
+		{"pause only", []schema.InterventionKind{pause}, schema.RunStateRunning,
+			"message (unsupported) · cancel (unsupported) · p pause · resume (unsupported)", "p", "r resume"},
+		{"resume only, running", []schema.InterventionKind{resume}, schema.RunStateRunning,
+			"message (unsupported) · cancel (unsupported) · pause (unsupported)", "", "r resume"},
+		{"resume only, waiting", []schema.InterventionKind{resume}, schema.RunStateWaiting,
+			"message (unsupported) · cancel (unsupported) · pause (unsupported) · r resume", "r", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := newRunAPI(testRun(41, schema.RunStateRunning))
+			api := newRunAPI(testRun(41, tt.state))
 			m := openCurrent(runModel(t, api, tt.declared...))
-			if view := m.View(); !strings.Contains(view, tt.wantHint) {
+			view := m.View()
+			if !strings.Contains(view, tt.wantHint) {
 				t.Errorf("hint line lacks %q:\n%s", tt.wantHint, view)
 			}
+			if tt.absent != "" && strings.Contains(view, tt.absent) {
+				t.Errorf("hint line holds %q:\n%s", tt.absent, view)
+			}
+			// m and x ask for more input; p and r send at once.
 			opened := pressKey(m, "m")
-			if got := opened.rd.input == inputMessage; got != tt.wantMessage {
-				t.Errorf("m opened the input = %v, want %v", got, tt.wantMessage)
+			if got := opened.rd.input == inputMessage; got != strings.Contains(tt.wantKeys, "m") {
+				t.Errorf("m opened the input = %v", got)
 			}
 			asked := pressKey(m, "x")
-			if got := asked.rd.input == inputCancel; got != tt.wantCancel {
-				t.Errorf("x asked to cancel = %v, want %v", got, tt.wantCancel)
+			if got := asked.rd.input == inputCancel; got != strings.Contains(tt.wantKeys, "x") {
+				t.Errorf("x asked to cancel = %v", got)
 			}
-			if !tt.wantMessage && !tt.wantCancel && (opened.rd.status != "" || asked.rd.status != "") {
+			for _, k := range []struct {
+				key  string
+				kind schema.InterventionKind
+			}{{"p", pause}, {"r", resume}} {
+				// A fresh API per key: the model sends the request in the
+				// command the key returns, which pressKey runs.
+				keyed := newRunAPI(testRun(41, tt.state))
+				pressed := pressKey(openCurrent(runModel(t, keyed, tt.declared...)), k.key)
+				sent := keyed.createdRequests()
+				want := strings.Contains(tt.wantKeys, k.key)
+				if got := len(sent) == 1 && sent[0].Kind == k.kind; got != want {
+					t.Errorf("%s sent %+v, want a %s = %v", k.key, sent, k.kind, want)
+				}
+				if !want && (len(sent) != 0 || pressed.rd.status != "") {
+					t.Errorf("an inapplicable %s did something: %+v %q", k.key, sent, pressed.rd.status)
+				}
+			}
+			if tt.wantKeys == "" && (opened.rd.status != "" || asked.rd.status != "") {
 				t.Errorf("an undeclared key did something: %q / %q", opened.rd.status, asked.rd.status)
 			}
 			if got := api.createdRequests(); len(got) != 0 {
 				t.Errorf("requests sent without a confirmation: %+v", got)
+			}
+		})
+	}
+}
+
+// Pause and resume ask at once, with no question, and the run reads waiting only
+// when its frame says so: the key press, the request, the intervention's own
+// frames and a stale read never move it.
+func TestPauseAndResumeShowTheRunOnlyFromFrames(t *testing.T) {
+	const (
+		pause  = schema.InterventionKindPause
+		resume = schema.InterventionKindResume
+	)
+	api := newRunAPI(testRun(41, schema.RunStateRunning))
+	m := openCurrent(runModel(t, api, schema.InterventionKindMessage, schema.InterventionKindCancel, pause, resume))
+	wantState := func(m Model, state string, step string) {
+		t.Helper()
+		view := m.View()
+		if !strings.Contains(view, "run #41 · "+state) {
+			t.Fatalf("%s: the run does not read %s:\n%s", step, state, view)
+		}
+		if other := map[string]string{"running": "waiting", "waiting": "running"}[state]; strings.Contains(view, "run #41 · "+other) {
+			t.Fatalf("%s: the run reads %s:\n%s", step, other, view)
+		}
+	}
+
+	m = pressKey(m, "p")
+	if got := api.createdRequests(); len(got) != 1 || got[0].Kind != pause || got[0].Body != "" {
+		t.Fatalf("requests after p = %+v, want one pause", got)
+	}
+	if m.rd.input != inputNone {
+		t.Error("p asked a question; pause needs no confirmation")
+	}
+	wantState(m, "running", "after p")
+	wantState(m, "running", "after the server took the request")
+	if view := m.View(); !strings.Contains(view, "↳ #101 pause · requested…") {
+		t.Errorf("the request does not read requested…:\n%s", view)
+	}
+	for _, state := range []schema.InterventionState{schema.InterventionStateAcknowledged, schema.InterventionStateApplied} {
+		m = frameIntervention(m, intervention(101, 41, pause, "", state, ""))
+		wantState(m, "running", "after the pause was "+string(state))
+	}
+	if view := m.View(); !strings.Contains(view, "↳ #101 applied") {
+		t.Errorf("the answer is not in the history:\n%s", view)
+	}
+	// While the run reads running, resume is not offered and sends nothing.
+	if m = pressKey(m, "r"); len(api.createdRequests()) != 1 {
+		t.Error("r sent a resume for a run that reads running")
+	}
+
+	paused := testRun(41, schema.RunStateWaiting)
+	paused.Outcome = "paused"
+	m = frameRun(m, paused)
+	wantState(m, "waiting", "after the run frame")
+	if view := m.View(); !strings.Contains(view, "outcome: paused") || !strings.Contains(view, "r resume") || strings.Contains(view, "p pause") {
+		t.Errorf("a paused run offers the wrong keys:\n%s", view)
+	}
+	if m = pressKey(m, "p"); len(api.createdRequests()) != 1 {
+		t.Error("p sent a pause for a run that reads waiting")
+	}
+
+	m = pressKey(m, "r")
+	if got := api.createdRequests(); len(got) != 2 || got[1].Kind != resume {
+		t.Fatalf("requests after r = %+v, want a resume second", got)
+	}
+	wantState(m, "waiting", "after r")
+	if view := m.View(); !strings.Contains(view, "↳ #102 resume · requested…") {
+		t.Errorf("the resume does not read requested…:\n%s", view)
+	}
+	m = frameIntervention(m, intervention(102, 41, resume, "", schema.InterventionStateApplied, ""))
+	wantState(m, "waiting", "after the resume was applied")
+	m = frameRun(m, testRun(41, schema.RunStateRunning))
+	wantState(m, "running", "after the second run frame")
+}
+
+// A refused pause or resume is one line of the adapter's own reason.
+func TestPauseAndResumeFailureShowsItsReason(t *testing.T) {
+	for _, reason := range []string{"not paused", "already paused"} {
+		t.Run(reason, func(t *testing.T) {
+			kind := schema.InterventionKindResume
+			state := schema.RunStateWaiting
+			if reason == "already paused" {
+				kind, state = schema.InterventionKindPause, schema.RunStateRunning
+			}
+			api := newRunAPI(testRun(41, state))
+			m := openCurrent(runModel(t, api, schema.InterventionKindPause, schema.InterventionKindResume))
+			m = frameIntervention(m, intervention(7, 41, kind, "", schema.InterventionStateFailed, reason))
+			want := "↳ #7 failed: " + reason
+			if view := m.View(); strings.Count(view, want) != 1 {
+				t.Errorf("view lacks one line %q:\n%s", want, view)
+			}
+			if m.rd.run.State != state {
+				t.Errorf("a failed answer moved the run to %q", m.rd.run.State)
 			}
 		})
 	}
@@ -405,10 +545,11 @@ func TestInterventionStatesRenderFromFrames(t *testing.T) {
 		why   string
 		want  string
 	}{
-		{"requested", schema.InterventionStateRequested, "", "#101 message · requested… · hello"},
-		{"acknowledged", schema.InterventionStateAcknowledged, "", "#101 message · acknowledged · hello"},
-		{"applied", schema.InterventionStateApplied, "", "#101 message · applied · hello"},
-		{"failed", schema.InterventionStateFailed, "no such file", "#101 message · failed: no such file · hello"},
+		{"requested", schema.InterventionStateRequested, "", "↳ #101 message · requested… · hello"},
+		// Once answered the ask reads "asked" and the answer is a line of its own.
+		{"acknowledged", schema.InterventionStateAcknowledged, "", "↳ #101 acknowledged"},
+		{"applied", schema.InterventionStateApplied, "", "↳ #101 applied"},
+		{"failed", schema.InterventionStateFailed, "no such file", "↳ #101 failed: no such file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

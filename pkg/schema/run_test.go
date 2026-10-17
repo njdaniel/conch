@@ -37,6 +37,8 @@ func TestRunErrorCodes(t *testing.T) {
 	assertErrorCodes(t, map[string]string{
 		ErrorCodeRunNotFound:       "run_not_found",
 		ErrorCodeInvalidTransition: "invalid_transition",
+		ErrorCodeTooManyRuns:       "too_many_runs",
+		ErrorCodeTooMuchActivity:   "too_much_activity",
 	})
 }
 

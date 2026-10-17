@@ -98,15 +98,21 @@ type liveStep struct {
 }
 
 // runLive plays steps for ann in room. A change in LiveKit is seen by the next
-// "pass" step and by nothing else.
+// "pass" step and by nothing else. "rejoin" replaces ann's connection with a
+// new one, muted, as a page that reloads and joins again does: LiveKit lists
+// one participant for the identity, with a later join time.
 func (f *presenceFixture) runLive(t *testing.T, room string, steps []liveStep) {
 	t.Helper()
 	ann := f.identity("ann")
+	joined := int64(1_000)
 	for _, st := range steps {
 		f.at(st.at)
 		switch st.do {
 		case "join":
-			f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: 1_000, published: true, muted: true})
+			f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: joined, published: true, muted: true})
+		case "rejoin":
+			joined += 1_000
+			f.lk.setRoom(room, fakeParticipant{identity: ann, joinedMs: joined, published: true, muted: true})
 		case "unmute":
 			f.lk.update(room, ann, func(p *fakeParticipant) { p.muted = false })
 		case "mute":
@@ -236,6 +242,102 @@ func TestVoiceTransmitScenarios(t *testing.T) {
 				if !strings.Contains(e.Detail, "source=reported") {
 					t.Errorf("a voice_transmit_started row from the poller: %q", e.Detail)
 				}
+			}
+		})
+	}
+}
+
+// TestVoiceTransmitReconnectWithinAPassGap (issue #501): a page reloads, joins
+// again with the same identity, and presses before the poller has seen the new
+// connection. The press is the new connection's and is recorded as the
+// reported pair; the poller still records the old connection leaving and the
+// new one joining. Before the fix the rows were started, stopped reason=left,
+// unreported, stopped reason=muted.
+func TestVoiceTransmitReconnectWithinAPassGap(t *testing.T) {
+	open := []liveStep{{0, "join"}, {0, "pass"}}
+	tests := []struct {
+		name  string
+		steps []liveStep
+		want  []string
+	}{
+		{"pressed after the rejoin, unmuted before the pass", []liveStep{
+			{200, "rejoin"}, {300, "started"}, {310, "unmute"}, {500, "pass"}, {1000, "pass"},
+			{1200, "mute"}, {1210, "stopped"}, {1500, "pass"},
+		}, []string{"ann started@300 reported", "ann stopped@1210 reported"}},
+		{"pressed after the rejoin, still muted at the pass", []liveStep{
+			{200, "rejoin"}, {480, "started"}, {500, "pass"}, {510, "unmute"}, {1000, "pass"},
+			{1200, "mute"}, {1210, "stopped"}, {1500, "pass"},
+		}, []string{"ann started@480 reported", "ann stopped@1210 reported"}},
+		{"held across two rejoins", []liveStep{
+			{200, "rejoin"}, {300, "started"}, {310, "unmute"}, {500, "pass"},
+			{600, "rejoin"}, {700, "stopped"}, {750, "started"}, {760, "unmute"}, {1000, "pass"},
+			{1200, "mute"}, {1210, "stopped"}, {1500, "pass"},
+		}, []string{"ann started@300 reported", "ann stopped@700 reported", "ann started@750 reported", "ann stopped@1210 reported"}},
+		// A started the poller had already seen before the new connection
+		// came is the old connection's, and the old connection is gone: closed
+		// as left, as before. The new connection's own transmission needs a
+		// report of its own.
+		{"a started from before the pass that saw the old connection", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"}, {700, "rejoin"}, {1000, "pass"}, {1500, "pass"},
+		}, []string{"ann started@100 reported", "ann stopped@1000 observed left"}},
+		{"and the new connection then transmitting unreported", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"}, {700, "rejoin"}, {710, "unmute"}, {1000, "pass"}, {1500, "pass"},
+			{1600, "mute"}, {2000, "pass"},
+		}, []string{"ann started@100 reported", "ann stopped@1000 observed left", "ann unreported@1000 observed", "ann stopped@2000 observed muted"}},
+		// Issue #509: transmitting all along, a false stopped before a pass,
+		// started after it, and a new connection before the next. The
+		// replacement is no edge of a transmission, so the lone pass is
+		// excused only once in 3 s: the second cycle is recorded, and from
+		// there the new connections transmit unreported.
+		{"a false stopped, a started and a reconnect around every other pass", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"},
+			{990, "stopped"}, {1000, "pass"}, {1010, "started"}, {1200, "rejoin"}, {1210, "unmute"}, {1500, "pass"},
+			{1990, "stopped"}, {2000, "pass"}, {2010, "started"}, {2200, "rejoin"}, {2210, "unmute"}, {2500, "pass"},
+			{2990, "stopped"}, {3000, "pass"}, {3010, "started"}, {3200, "rejoin"}, {3210, "unmute"}, {3500, "pass"},
+			{3600, "mute"}, {3610, "stopped"}, {4000, "pass"},
+		}, []string{
+			"ann started@100 reported", "ann stopped@990 reported", "ann started@1010 reported",
+			"ann stopped@1990 reported", "ann started@2010 reported", "ann unreported@2000 observed", "ann stopped@2500 observed left",
+			"ann unreported@2500 observed", "ann started@3010 reported", "ann stopped@3500 observed left",
+			"ann unreported@3500 observed", "ann stopped@4000 observed muted",
+		}},
+		// The same with the reconnect before the pass: the new connection's
+		// first pass is the lone one, and the replacement the look before it.
+		{"a false stopped, a reconnect and a started around every other pass", []liveStep{
+			{100, "started"}, {110, "unmute"}, {500, "pass"},
+			{990, "stopped"}, {995, "rejoin"}, {996, "unmute"}, {1000, "pass"}, {1010, "started"}, {1500, "pass"},
+			{1990, "stopped"}, {1995, "rejoin"}, {1996, "unmute"}, {2000, "pass"}, {2010, "started"}, {2500, "pass"},
+			{2990, "stopped"}, {2995, "rejoin"}, {2996, "unmute"}, {3000, "pass"}, {3010, "started"}, {3500, "pass"},
+			{3600, "mute"}, {3610, "stopped"}, {4000, "pass"},
+		}, []string{
+			"ann started@100 reported", "ann stopped@990 reported", "ann started@1010 reported",
+			"ann stopped@1990 reported", "ann started@2010 reported", "ann unreported@2000 observed", "ann stopped@2500 observed reported",
+			"ann stopped@2990 reported", "ann started@3010 reported", "ann unreported@3000 observed", "ann stopped@3500 observed reported",
+			"ann stopped@3610 reported",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			room := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room
+			f.runLive(t, room, append(slices.Clone(open), tt.steps...))
+			if got := f.transmitRows(t); !slices.Equal(got, tt.want) {
+				t.Errorf("transmit rows:\n got  %q\n want %q", got, tt.want)
+			}
+			assertTransmitPairs(t, f.audit(t))
+			// The replacement is still seen: each rejoin is a leaving and a
+			// joining.
+			rejoins := 0
+			for _, st := range tt.steps {
+				if st.do == "rejoin" {
+					rejoins++
+				}
+			}
+			if n := len(f.audits(t, store.AuditVoiceLeft)); n != rejoins {
+				t.Errorf("voice_left rows = %d, want %d", n, rejoins)
+			}
+			if n := len(f.audits(t, store.AuditVoiceJoined)); n != rejoins+1 {
+				t.Errorf("voice_joined rows = %d, want %d", n, rejoins+1)
 			}
 		})
 	}

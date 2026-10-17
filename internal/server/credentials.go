@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -53,13 +54,24 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	var expiresAt *time.Time
-	if req.ExpiresAt != nil {
-		t := req.ExpiresAt.Time()
-		expiresAt = &t
+	var (
+		cred  schema.CredentialV1
+		token string
+		err   error
+	)
+	if req.RenewLifetimeSeconds != nil {
+		// A renewable credential (issue #439). Validate has refused one that
+		// also names expires_at.
+		lifetime := time.Duration(*req.RenewLifetimeSeconds) * time.Second
+		cred, token, err = s.store.CreateRenewableCredential(ctx, auditActor(ctx), principalID, req.Label, lifetime)
+	} else {
+		var expiresAt *time.Time
+		if req.ExpiresAt != nil {
+			t := req.ExpiresAt.Time()
+			expiresAt = &t
+		}
+		cred, token, err = s.store.CreateCredential(ctx, auditActor(ctx), principalID, req.Label, expiresAt)
 	}
-
-	cred, token, err := s.store.CreateCredential(ctx, auditActor(ctx), principalID, req.Label, expiresAt)
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
@@ -149,11 +161,120 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	// A voice room this credential held a session for is rotated before the
-	// response is written, so a token LiveKit renewed for it is useless
-	// (issue #161). It cannot fail the request.
-	s.voiceCredentialRevoked(ctx)
-	// Revoking ends the credential's sessions.
-	s.events.notifyRosters()
+	s.credentialRevoked(ctx)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRevokeCurrentCredential serves DELETE /v1/credentials/current (issue
+// #439): the caller signs itself out by revoking the credential this very
+// request authenticated with. Which credential that is comes from the request
+// context, never from the path or a body, so no caller can name another's.
+// Any authenticated caller may; the last operator guard still applies, as to
+// any revocation.
+func (s *Server) handleRevokeCurrentCredential(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, ok := credentialIDFrom(ctx)
+	if !ok {
+		// AuthOff: no credential made this request, so there is none to
+		// revoke. Answered as whoami answers it.
+		writeUnauthenticated(w)
+		return
+	}
+	err := s.store.RevokeOwnCredential(ctx, auditActor(ctx), id)
+	switch {
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
+	case err != nil:
+		// ErrCredentialNotFound included: the credential resolved a moment
+		// ago, so its absence now is a fault, not the caller's.
+		slog.ErrorContext(ctx, "credentials: self revoke failed", "credential", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	s.credentialRevoked(ctx)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleListOwnCredentials serves GET /v1/credentials/mine (issue #496): the
+// caller's own sign-ins, the credentials of theirs that can still sign in,
+// with the one this request came with marked current. Whose they are comes
+// from the request context, never from the path or a query, so no caller can
+// list another's. Any authenticated caller may, a person or an agent.
+func (s *Server) handleListOwnCredentials(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := callerFrom(ctx)
+	currentID, hasCred := credentialIDFrom(ctx)
+	if !ok || !hasCred {
+		// AuthOff: nobody asked, so there is nobody's to list. Answered as
+		// whoami answers it.
+		writeUnauthenticated(w)
+		return
+	}
+	creds, err := s.store.ListLiveCredentials(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "credentials: own list failed", "principal", caller.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := make([]schema.OwnCredentialV1, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, schema.OwnCredentialV1{
+			ID:        c.ID,
+			Label:     c.Label,
+			CreatedAt: c.CreatedAt,
+			ExpiresAt: c.ExpiresAt,
+			Renews:    c.Renews,
+			Current:   c.ID == currentID,
+		})
+	}
+	writeJSON(w, http.StatusOK, schema.ListOwnCredentialsResponseV1{Credentials: out})
+}
+
+// handleRevokeOwnCredential serves DELETE /v1/credentials/mine/{id} (issue
+// #496): the caller ends one of their own sign-ins by its id, this one or
+// another. The store revokes it only if it is the caller's: another's id is
+// answered exactly as an id never issued, 404 credential_not_found, so the
+// answer says nothing of whether it exists. Audited credential_revoked with
+// reason=self, as signing out is; the last operator guard applies.
+func (s *Server) handleRevokeOwnCredential(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, ok := callerFrom(ctx)
+	// A caller who did not sign in with a credential has no sign-ins of
+	// their own to end; checked as the list does, so this stays closed
+	// however AuthOff is answered.
+	if _, hasCred := credentialIDFrom(ctx); !ok || !hasCred {
+		writeUnauthenticated(w)
+		return
+	}
+	id, ok := pathID(w, r, "id", "credential")
+	if !ok {
+		return
+	}
+	err := s.store.RevokeCredentialOf(ctx, auditActor(ctx), caller.ID, id)
+	switch {
+	case errors.Is(err, store.ErrCredentialNotFound):
+		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
+		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "credentials: own revoke failed", "principal", caller.ID, "credential", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	s.credentialRevoked(ctx)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// credentialRevoked is what follows the revocation of one credential, by an
+// operator or by its holder. A voice room the credential held a session for
+// is rotated before the response is written, so a token LiveKit renewed for
+// it is useless (issue #161); it cannot fail the request. Revoking ended the
+// credential's sessions, so rosters are told. Open sockets on the credential
+// close at their next liveness re-check (defaultCredentialRecheckInterval).
+func (s *Server) credentialRevoked(ctx context.Context) {
+	s.voiceCredentialRevoked(ctx)
+	s.events.notifyRosters()
 }

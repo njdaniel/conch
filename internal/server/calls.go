@@ -97,6 +97,10 @@ var (
 	// call. REST answers it as every credential failure, WWW-Authenticate and
 	// all (writeUnauthenticated).
 	callUnauthenticated = refuseWith(http.StatusUnauthorized, errUnauthenticated)
+	callTooManyRuns     = refuse(http.StatusTooManyRequests, schema.ErrorCodeTooManyRuns, "this session already has the most open runs it may have; end one first")
+	callTooManyCredRuns = refuse(http.StatusTooManyRequests, schema.ErrorCodeTooManyRuns, "this credential already has the most open runs it may have across its sessions; end one, or end the sessions you no longer use")
+	callTooMuchActivity = refuse(http.StatusTooManyRequests, schema.ErrorCodeTooMuchActivity, "this run already has the most activity entries it may have; start a new run")
+	callSessionOffline  = refuse(http.StatusConflict, schema.ErrorCodeSessionOffline, "this session is offline or has ended; heartbeat an offline session first (ending a run is still allowed)")
 	callTooManySess     = refuse(http.StatusTooManyRequests, schema.ErrorCodeTooManySessions, "this credential already has the most sessions it may have; end one first")
 )
 

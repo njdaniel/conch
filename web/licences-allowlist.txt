@@ -1,0 +1,34 @@
+# Licences a package in web/package-lock.json may carry (ADR-007). One SPDX
+# identifier per line; comments and blank lines ignored. Enforced by
+# scripts/web-licences.sh.
+#
+# This repository is AGPL-3.0. The list starts as the one voice/deny.toml
+# allows for the Rust client; adding a licence requires Nick's sign-off in the
+# same PR, as it does there.
+MIT
+Apache-2.0
+BSD-3-Clause
+ISC
+Unicode-3.0
+Zlib
+Apache-2.0 WITH LLVM-exception
+
+# Proposed in the pull request for #279, for Nick's sign-off there. Each is
+# carried only by development tools (build, lint, test); none is in the
+# built page under web/dist.
+#   MPL-2.0       lightningcss and its per-platform builds (Vite's CSS minifier)
+#   BSD-2-Clause  espree, eslint-scope, esrecurse, estraverse, esutils,
+#                 entities, uri-js, webidl-conversions
+#   MIT-0         two @csstools packages
+#   BlueOak-1.0.0 lru-cache, minimatch
+#   CC0-1.0       mdn-data
+MPL-2.0
+BSD-2-Clause
+MIT-0
+BlueOak-1.0.0
+CC0-1.0
+
+# Proposed in the pull request for #442, for Nick's sign-off there.
+#   0BSD  tslib (a runtime dependency of livekit-client, so in the built page;
+#         a public-domain-equivalent licence, more permissive than MIT)
+0BSD

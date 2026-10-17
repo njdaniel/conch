@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,16 @@ type fakeParticipant struct {
 	// published and muted describe the microphone track.
 	published bool
 	muted     bool
+	// screen and screenAudio are published screen-share tracks (issue #443),
+	// and shareGranted whether the participant's permission names the
+	// screen-share sources. LiveKit refuses a share track that is not
+	// granted; a test may still set one here to force what should be
+	// impossible.
+	screen, screenAudio bool
+	shareGranted        bool
+	// listenOnly is a participant whose permission does not let it publish
+	// at all, as a net monitor's will (V5).
+	listenOnly bool
 }
 
 // lkCall is one request the scripted LiveKit received (or an "http-response"
@@ -111,6 +122,12 @@ type scriptedLiveKit struct {
 	// onRemove runs while RemoveParticipant is being answered, before it takes
 	// effect: the moment a snapshot taken mid-removal would catch.
 	onRemove func(room, identity string)
+	// updateStatus is the status of UpdateParticipant; 0 means 200, or 404
+	// not_found when the identity is not in the room, as LiveKit answers.
+	updateStatus int
+	// onUpdate runs while UpdateParticipant is being answered, before it
+	// takes effect: the moment between a claim's grant and its answer.
+	onUpdate func(room, identity string, share bool)
 }
 
 func newScriptedLiveKit(t *testing.T) *scriptedLiveKit {
@@ -129,9 +146,13 @@ func (f *scriptedLiveKit) record(method, room, identity string) {
 func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var req struct {
-		Name     string `json:"name"`
-		Room     string `json:"room"`
-		Identity string `json:"identity"`
+		Name       string `json:"name"`
+		Room       string `json:"room"`
+		Identity   string `json:"identity"`
+		Permission struct {
+			CanPublish bool     `json:"can_publish"`
+			Sources    []string `json:"can_publish_sources"`
+		} `json:"permission"`
 	}
 	_ = json.Unmarshal(raw, &req)
 	method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
@@ -194,8 +215,24 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		parts := make([]map[string]any, 0)
 		for _, p := range f.rooms[req.Room] {
 			part := map[string]any{"identity": p.identity, "joined_at_ms": strconv.FormatInt(p.joinedMs, 10)}
+			// As LiveKit 1.13.7 lists it: the permission spelled out.
+			sources := []string{"MICROPHONE"}
+			if p.shareGranted {
+				sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
+			}
+			part["permission"] = map[string]any{"can_subscribe": true, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+			var tracks []map[string]any
 			if p.published {
-				part["tracks"] = []map[string]any{{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted}}
+				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
+			}
+			if p.screen {
+				tracks = append(tracks, map[string]any{"type": "VIDEO", "source": "SCREEN_SHARE", "muted": false})
+			}
+			if p.screenAudio {
+				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
+			}
+			if tracks != nil {
+				part["tracks"] = tracks
 			}
 			parts = append(parts, part)
 		}
@@ -220,6 +257,32 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 			f.drop(req.Room, req.Identity)
 		}
 		writeFakeJSON(w, http.StatusOK, map[string]any{})
+	case "UpdateParticipant":
+		// As LiveKit does: the permission replaces the old one, and a source
+		// taken away unpublishes its tracks at once.
+		f.record(method, req.Room, req.Identity)
+		share := slices.Contains(req.Permission.Sources, "SCREEN_SHARE")
+		status, hook := f.updateStatus, f.onUpdate
+		f.mu.Unlock()
+		if hook != nil {
+			hook(req.Room, req.Identity, share)
+		}
+		if status != 0 {
+			writeFakeJSON(w, status, map[string]any{"code": "internal"})
+			return
+		}
+		if !f.in(req.Room, req.Identity) {
+			writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "not_found", "msg": "twirp error unknown: participant does not exist"})
+			return
+		}
+		f.update(req.Room, req.Identity, func(p *fakeParticipant) {
+			p.shareGranted = share
+			p.listenOnly = !req.Permission.CanPublish
+			if !share {
+				p.screen, p.screenAudio = false, false
+			}
+		})
+		writeFakeJSON(w, http.StatusOK, map[string]any{"identity": req.Identity, "state": "ACTIVE"})
 	case "DeleteRoom":
 		// Deleting a room disconnects everyone in it and forgets it.
 		f.record(method, req.Room, "")
@@ -296,6 +359,24 @@ func (f *scriptedLiveKit) setOnCreate(fn func(room string)) {
 }
 func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 	f.config(func(l *scriptedLiveKit) { l.onRemove = fn })
+}
+func (f *scriptedLiveKit) setUpdateStatus(s int) {
+	f.config(func(l *scriptedLiveKit) { l.updateStatus = s })
+}
+func (f *scriptedLiveKit) setOnUpdate(fn func(room, identity string, share bool)) {
+	f.config(func(l *scriptedLiveKit) { l.onUpdate = fn })
+}
+
+// participant returns identity's connection to room as the fake has it.
+func (f *scriptedLiveKit) participant(room, identity string) (fakeParticipant, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.rooms[room] {
+		if p.identity == identity {
+			return p, true
+		}
+	}
+	return fakeParticipant{}, false
 }
 
 // in reports whether identity is connected to room.
@@ -543,7 +624,13 @@ func (f *presenceFixture) sweep(t *testing.T) {
 // snap returns ch's snapshot after checking it validates.
 func (f *presenceFixture) snap(t *testing.T, ch store.Channel) schema.VoicePresenceV1 {
 	t.Helper()
-	s := f.srv.voice.snapshot(ch.ID)
+	return f.snapAs(t, ch, "")
+}
+
+// snapAs is ch's snapshot as who reads it ("" for nobody in particular).
+func (f *presenceFixture) snapAs(t *testing.T, ch store.Channel, who string) schema.VoicePresenceV1 {
+	t.Helper()
+	s := f.srv.voice.snapshot(ch.ID, f.ids[who])
 	if err := s.Validate(); err != nil {
 		t.Fatalf("snapshot does not validate: %v", err)
 	}

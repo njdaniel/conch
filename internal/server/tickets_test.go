@@ -402,8 +402,9 @@ func TestWSTicketOnlyOnOptedInRoutes(t *testing.T) {
 			optedIn = append(optedIn, rt.pattern)
 		}
 	}
-	if len(optedIn) != 2 || optedIn[0] != "GET /v2/ws" || optedIn[1] != "GET /v1/events/ws" {
-		t.Errorf("routes that accept a ticket = %v, want only GET /v2/ws and GET /v1/events/ws", optedIn)
+	want := []string{"GET /v2/ws", "GET /v1/events/ws", "GET /v1/voice/ws"}
+	if strings.Join(optedIn, "|") != strings.Join(want, "|") {
+		t.Errorf("routes that accept a ticket = %v, want only %v", optedIn, want)
 	}
 
 	tk := f.ticketFor(t, f.aliceTok)
@@ -618,6 +619,23 @@ func TestWSTicketOpensSocket(t *testing.T) {
 		tk := f.ticketFor(t, f.aliceTok)
 		f.clock.Advance(30 * time.Second)
 		refusedWith(t, "/v2/ws?channel=alpha&ticket="+tk, http.StatusUnauthorized)
+	})
+
+	// The voice presence socket (issue #442) takes a ticket for the browser;
+	// its membership check is the same as with a bearer.
+	t.Run("the voice socket opens with a ticket, once, for a member", func(t *testing.T) {
+		tk := f.ticketFor(t, f.aliceTok)
+		path := "/v1/voice/ws?channel=alpha&ticket=" + tk
+		conn, _, err := openTicketSocket(ctx, base, path) //nolint:bodyclose // upgraded
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.CloseNow() })
+		refusedWith(t, path, http.StatusUnauthorized) // spent
+		refusedWith(t, "/v1/voice/ws?channel=alpha&ticket="+f.ticketFor(t, f.carolTok), http.StatusNotFound)
+		expired := f.ticketFor(t, f.aliceTok)
+		f.clock.Advance(30 * time.Second)
+		refusedWith(t, "/v1/voice/ws?channel=alpha&ticket="+expired, http.StatusUnauthorized)
 	})
 
 	t.Run("the older sockets do not take a ticket", func(t *testing.T) {

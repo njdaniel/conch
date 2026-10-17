@@ -1,0 +1,234 @@
+// A8 (issue #440): invites in the browser. The operator makes invites through
+// the API, as with curl or conch; each person opens the link in a browser of
+// their own, at desktop and phone sizes. This spec runs after the others but
+// 12-phone, which counts nobody, so the people it adds to the fixture channels
+// touch no other spec.
+import type { BrowserContextOptions, Page } from '@playwright/test';
+import { invitesOf, makeInvite } from './api';
+import { channelButton, expect, expectFits, statusLine, test } from './fixtures';
+import { call, inviteUrl, principalId, type World } from './world';
+
+const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
+const phone: BrowserContextOptions = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
+const sizes = [
+  ['desktop', desktop],
+  ['phone', phone],
+] as const;
+
+const noLongerWorks = 'This invite no longer works. Ask the person who sent it for a new one.';
+
+const unique = (label: string) => `a8-${label}-${String(Date.now())}`;
+const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button');
+
+// join chooses a name on the landing page and waits for the lobby.
+async function join(page: Page, name: string): Promise<void> {
+  await page.getByLabel('Your name').fill(name);
+  await page.getByRole('button', { name: 'Join' }).click();
+  await expect(statusLine(page)).toContainText(name);
+  await expect(statusLine(page)).toContainText('Connected');
+}
+
+// keepToken reads the credential an invite gave this page and hands it to
+// the fixture's end-of-test scan, so it is looked for in every page beside the
+// world's.
+async function keepToken(page: Page, secrets: string[]): Promise<string> {
+  const token = await page.evaluate(() => window.localStorage.getItem('conch.web.token'));
+  if (token === null) throw new Error('no credential was kept');
+  secrets.push(token);
+  return token;
+}
+
+// expectCodeGone checks that the code is nowhere in the page: not in the
+// address, the page, the storage or the addresses it asked for, and not in any
+// entry of the back history, each of which is visited. Then the page opens the
+// client again (signed in, when it was), so the fixture's scan at the end
+// looks at a live page rather than at where going back left it.
+//
+// One record keeps it, and no script can clear it: the browser's navigation
+// timing entry names the address the document was loaded from, fragment and
+// all, for as long as the document lives. Only this page's own scripts can
+// read it (script-src 'self'), and a reload replaces it. It is checked to be
+// that one entry and nothing else.
+async function expectCodeGone(page: Page, inviteCode: string, world: World, signedIn: boolean): Promise<void> {
+  const where = () =>
+    page.evaluate(() =>
+      [
+        location.href,
+        document.documentElement.outerHTML,
+        JSON.stringify(performance.getEntries().filter((e) => e.entryType !== 'navigation').map((e) => e.name)),
+        ...[window.localStorage, window.sessionStorage].flatMap((s) => Object.keys(s).map((k) => `${k}=${s.getItem(k) ?? ''}`)),
+      ].join('\n'),
+    );
+  expect(await where(), 'the code in the address, the page, the storage or performance.getEntries()').not.toContain(inviteCode);
+  const entries = await page.evaluate(() => history.length);
+  for (let i = 1; i < entries; i++) {
+    await page.goBack();
+    expect(page.url(), `back ${String(i)}`).not.toContain(inviteCode);
+  }
+  await page.goto(world.appUrl);
+  if (signedIn) await expect(statusLine(page)).toContainText('Connected');
+  else await expect(page.getByLabel('Credential')).toBeVisible();
+}
+
+for (const [size, options] of sizes) {
+  test(`A8 an operator's invite is opened (${size}), a name chosen, and the lobby shows only its channels`, async ({ meet, secrets, world }) => {
+    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+    const name = unique(size);
+    const { page } = await meet(options);
+    await page.goto(inviteUrl(world, made.code));
+
+    await expect(page.getByRole('heading', { name: 'You are invited to Conch' })).toBeVisible();
+    const gives = page.getByLabel('What the invite gives');
+    await expect(gives).toContainText('p3-operator');
+    await expect(gives).toContainText('#general');
+    await expect(gives).toContainText('Not included');
+    await expect(page.getByText(world.origin)).toBeVisible();
+    // Out of the address as soon as the page read it.
+    expect(page.url()).not.toContain(made.code);
+    expect(page.url()).not.toContain('#');
+    // The landing page fits the screen: nothing wider than the window.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(await page.evaluate(() => window.innerWidth)).toBe(options.viewport?.width);
+
+    await join(page, name);
+    await expect(channelButton(page, 'general')).toBeVisible();
+    await expect(channelButtons(page)).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+    // A joiner the operator did not let invite sees no invite controls.
+    await expect(page.getByRole('button', { name: 'Invite someone' })).toHaveCount(0);
+    // The server agrees: the new person is a member, not an operator.
+    const token = await keepToken(page, secrets);
+    const who = await call(world, token, 'GET', '/v1/whoami');
+    expect(who.body).toMatchObject({ name, role: 'member' });
+    await expectCodeGone(page, made.code, world, true);
+  });
+}
+
+test('A8 a personal link opened again says it no longer works', async ({ meet, secrets, world }) => {
+  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const first = await meet(desktop);
+  await first.page.goto(inviteUrl(world, made.code));
+  await join(first.page, unique('once'));
+  await keepToken(first.page, secrets);
+
+  const again = await meet(phone);
+  await again.page.goto(inviteUrl(world, made.code));
+  await expect(again.page.getByRole('heading', { name: 'This invite no longer works' })).toBeVisible();
+  await expect(again.page.getByRole('alert')).toHaveText(noLongerWorks);
+  await expect(again.page.getByLabel('Your name')).toHaveCount(0);
+  await expectCodeGone(again.page, made.code, world, false);
+});
+
+test('A8 a joiner who may invite makes a link that another browser redeems, then closes one', async ({ meet, secrets, world }) => {
+  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general', 'nets-demo'], voice: false, may_invite: true });
+  const inviterName = unique('inviter');
+  const inviter = await meet({ ...desktop, permissions: ['clipboard-read', 'clipboard-write'] });
+  const page = inviter.page;
+  await page.goto(inviteUrl(world, made.code));
+  await join(page, inviterName);
+  await expect(channelButtons(page)).toHaveCount(2);
+  await keepToken(page, secrets);
+
+  // A member gets personal invites only.
+  const panel = page.getByRole('region', { name: 'Invites' });
+  await panel.getByRole('button', { name: 'Invite someone' }).click();
+  await expect(panel.getByRole('radio')).toHaveCount(0);
+  await expect(panel.getByText('Joiners may invite others')).toHaveCount(0);
+  await panel.getByRole('checkbox', { name: '#general' }).check();
+  await panel.getByRole('button', { name: 'Make invite' }).click();
+  const shown = panel.getByRole('textbox', { name: 'Invite link' });
+  await expect(shown).toBeVisible();
+  await expect(panel.getByText(/Anyone with this link can join/)).toBeVisible();
+  await panel.getByRole('button', { name: 'Copy link' }).click();
+  await expect(panel.getByText('Copied.')).toBeVisible();
+  const link = await page.evaluate(() => navigator.clipboard.readText());
+  expect(link).toBe(await shown.inputValue());
+  expect(link).toContain('/app/#/invite/conch_inv_');
+  const list = panel.getByRole('list', { name: 'Your invites' });
+  await expect(list.getByRole('listitem')).toHaveCount(1);
+  await expect(list.getByRole('listitem')).toContainText('Open');
+
+  // Someone else, on a phone: the inviter's name is taken, another is not.
+  const joiner = await meet(phone);
+  await joiner.page.goto(link);
+  await expect(joiner.page.getByLabel('What the invite gives')).toContainText(inviterName);
+  await joiner.page.getByLabel('Your name').fill(inviterName);
+  await joiner.page.getByRole('button', { name: 'Join' }).click();
+  await expect(joiner.page.getByRole('alert')).toHaveText('That name is taken. Choose another.');
+  await expect(joiner.page.getByLabel('Your name')).toHaveValue(inviterName);
+  await join(joiner.page, unique('joiner'));
+  await expect(channelButton(joiner.page, 'general')).toBeVisible();
+  await expect(channelButtons(joiner.page)).toHaveCount(1);
+  const inviteCode = decodeURIComponent(link.slice(link.indexOf('#/invite/') + '#/invite/'.length));
+  await keepToken(joiner.page, secrets);
+  await expectCodeGone(joiner.page, inviteCode, world, true);
+
+  // The inviter's list says it was used. A second one is made and closed.
+  await panel.getByRole('button', { name: 'Refresh' }).click();
+  await expect(list.getByRole('listitem')).toContainText('Used');
+  await panel.getByRole('button', { name: 'Done' }).click();
+  await expect(shown).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Make invite' }).click();
+  await expect(shown).toBeVisible();
+  await expect(list.getByRole('listitem')).toHaveCount(2);
+  const open = list.getByRole('listitem').filter({ hasText: 'Open' });
+  await expect(open).toHaveCount(1);
+  await open.getByRole('button', { name: 'Close' }).click();
+  await expect(list.getByRole('listitem').first()).toContainText('Closed');
+  await expect(list.getByRole('button', { name: 'Close' })).toHaveCount(0);
+});
+
+// The test does not sign out: that would revoke the world's operator
+// credential. It adds the operator to general, which the panel offers, since
+// an operator's own channels are the ones the page lists. It runs at phone
+// size, where the lobby fits the screen (issue #467), and checks that the
+// panel, with every control an operator gets, fits too.
+test('A8 an operator makes an open link with its defaults, and closes it', async ({ meet, world }) => {
+  const operatorId = await principalId(world, world.tokens.operator);
+  const added = await call(world, world.tokens.operator, 'PUT', `/v1/channels/general/members/${String(operatorId)}`);
+  expect(added.status).toBeLessThan(300);
+
+  const { page } = await meet(phone);
+  await page.goto(world.appUrl);
+  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Continue anyway' }).click();
+  await expect(statusLine(page)).toContainText('Connected');
+
+  const panel = page.getByRole('region', { name: 'Invites' });
+  await panel.getByRole('button', { name: 'Invite someone' }).click();
+  await panel.getByRole('radio', { name: 'Open link: anyone with it' }).check();
+  await expect(panel.getByRole('combobox')).toHaveValue('24 hours');
+  await expect(panel.getByRole('checkbox', { name: 'Limit the number of people' })).not.toBeChecked();
+  await expect(panel.getByRole('checkbox', { name: 'Joiners may invite others' })).not.toBeChecked();
+  await panel.getByRole('checkbox', { name: '#general' }).check();
+  // With a cap's field shown too, then without it again.
+  await panel.getByRole('checkbox', { name: 'Limit the number of people' }).check();
+  await expect(panel.getByRole('spinbutton')).toBeVisible();
+  await expectFits(page, 'the operator\'s invite form');
+  await panel.getByRole('checkbox', { name: 'Limit the number of people' }).uncheck();
+  const before = Date.now();
+  await panel.getByRole('button', { name: 'Make invite' }).click();
+  await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
+
+  // What the server made: open, uncapped, no right to invite, a day long.
+  const mine = (await invitesOf(world, world.tokens.operator)).filter((i) => i.created_by === operatorId && i.kind === 'open');
+  const open = mine[0];
+  if (open === undefined) throw new Error('the operator has no open link');
+  expect(open.max_uses).toBeUndefined();
+  expect(open.may_invite).toBe(false);
+  expect(open.voice).toBe(false);
+  expect(open.channels.map((c) => c.name)).toEqual(['general']);
+  const lifetime = Date.parse(open.expires_at) - before;
+  expect(lifetime).toBeGreaterThan(24 * 60 * 60 * 1000 - 60_000);
+  expect(lifetime).toBeLessThan(24 * 60 * 60 * 1000 + 60_000);
+
+  const list = panel.getByRole('list', { name: 'Your invites' });
+  const item = list.getByRole('listitem').filter({ hasText: 'Open link' }).filter({ hasText: 'Open ·' });
+  await expect(item).toHaveCount(1);
+  await expectFits(page, 'the operator\'s invite panel with a new link');
+  await item.getByRole('button', { name: 'Close' }).click();
+  await expect(list.getByRole('listitem').filter({ hasText: 'Open link' }).first()).toContainText('Closed');
+  const closed = (await invitesOf(world, world.tokens.operator)).find((i) => i.id === open.id);
+  expect(closed?.closed_at).toBeDefined();
+});

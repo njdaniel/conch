@@ -118,7 +118,7 @@ func (a *sessionAPI) SubscribeEvents(ctx context.Context, channel string, sessio
 	return ctx.Err()
 }
 
-func (a *sessionAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
+func (a *sessionAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.pages++

@@ -116,7 +116,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			}
 			name := sel.Sel.Name
 			// Any store method that mentions messages must be one of the
-			// known four. A heuristic on the method's prefix alone would miss
+			// known ones. A heuristic on the method's prefix alone would miss
 			// a read named, say, MessagesSince or LastMessage.
 			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
 				switch name {
@@ -125,7 +125,10 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				// ListThreadMessages, ReplyRootMessage and InsertReplyMessage
 				// (issue #25) ask the visibility question about a thread's root
 				// and are held to the same reader rule below.
-				case "ListVisibleMessages", "SearchVisibleMessages", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
+				// CountVisibleMessagesAfter (issue #351) is the unread count: the
+				// same condition, in the same statement, held to the same reader
+				// rule below.
+				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
 					"InsertMessage", "InsertMessageV1", "InsertScopedMessage":
 				default:
 					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
@@ -143,7 +146,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			if !listsMessages {
 				return true
 			}
-			if name != "ListVisibleMessages" && name != "SearchVisibleMessages" && !takesReader {
+			if name != "ListVisibleMessages" && name != "ListVisibleMessagesPage" && name != "SearchVisibleMessages" && name != "CountVisibleMessagesAfter" && !takesReader {
 				// The Client types in internal/cli list over HTTP; nothing under
 				// the walked roots has such a method, so any other is a store read.
 				t.Errorf("%s: %s calls %s; use ListVisibleMessages so the audience filter applies", path, fset.Position(x.Pos()), name)

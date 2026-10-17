@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -32,7 +35,7 @@ const (
 type runInput int
 
 const (
-	// inputNone: the keys are the pane's own (m, x, esc, scrolling).
+	// inputNone: the keys are the pane's own (m, x, p, r, esc, scrolling).
 	inputNone runInput = iota
 	// inputMessage: a one-line message is being typed.
 	inputMessage
@@ -55,11 +58,19 @@ type runDetail struct {
 	runStamp      int
 	activity      []schema.AgentActivityV1
 	interventions []schema.InterventionV1
-	// scroll is how many activity lines the view is scrolled up from the
-	// newest.
+	// scroll is how many timeline lines the cursor is above the newest; the
+	// cursor is the bottom line of the window, and enter acts on it.
 	scroll int
-	input  runInput
-	draft  string
+	// unfold is the id of the activity entry whose data is shown under the
+	// cursor, 0 for none, and bodyScroll how far that body is scrolled. Moving
+	// the cursor folds it.
+	unfold     int64
+	bodyScroll int
+	// fromRuns is true when run detail was opened from the Runs view, which esc
+	// goes back to; otherwise it is the Agents view.
+	fromRuns bool
+	input    runInput
+	draft    string
 	// sending is true while an intervention is being posted, so a second key
 	// cannot send the same ask twice.
 	sending bool
@@ -145,7 +156,8 @@ func (m Model) openRun(id, sessionID int64, run schema.RunV1) (Model, tea.Cmd) {
 	m.rd = rd
 	m.mode = modeRun
 	m.agentsStatus = ""
-	return m, m.readRun(0)
+	m, tick := m.tickClock()
+	return m, tea.Batch(tick, m.readRun(0))
 }
 
 // readRun reads the run, its activity after the last entry held and its
@@ -201,10 +213,16 @@ func (m Model) checkRun() tea.Cmd {
 	}
 }
 
-// closeRun leaves run detail for the Agents view, saying why in one line when
-// there is something to say.
+// closeRun leaves run detail for the view it was opened from, saying why in one
+// line when there is something to say.
 func (m Model) closeRun(status string) Model {
+	fromRuns := m.rd.fromRuns
 	m.rd = runDetail{}
+	if fromRuns {
+		m.mode = modeRuns
+		m.runs.note = sanitize(status)
+		return m
+	}
 	m.mode = modeAgents
 	m.agentsStatus = sanitize(status)
 	return m
@@ -387,6 +405,13 @@ func (m Model) eventsRun(msg eventsRunReceived) (tea.Model, tea.Cmd) {
 		m = m.applyRun(msg.run)
 	}
 	m = m.cacheRun(msg.run)
+	m = m.runsFrame(msg.run)
+	// A frame may make a run open that was not: the duration moves again.
+	if !schema.RunStateTerminal(msg.run.State) && m.showsOpenRun() {
+		var tick tea.Cmd
+		m, tick = m.tickClock()
+		return m, tea.Batch(wait, tick)
+	}
 	return m, wait
 }
 
@@ -494,10 +519,25 @@ func (m Model) declares(kind schema.InterventionKind) bool {
 	return false
 }
 
-// canAsk reports whether the key for kind does anything: the run is open and
-// its session declared the kind.
+// canAsk reports whether the key for kind does anything: the run is open, its
+// session declared the kind, and the run is in a state the kind applies to.
 func (m Model) canAsk(kind schema.InterventionKind) bool {
-	return m.rd.haveRun && !m.rd.terminal() && !m.rd.sending && m.declares(kind)
+	return m.rd.haveRun && !m.rd.terminal() && !m.rd.sending && m.declares(kind) && m.fitsState(kind)
+}
+
+// fitsState reports whether the run's state, as its last frame said it, is one
+// the kind applies to: only a running run is paused, and only a waiting one
+// (a paused run reads waiting) is resumed. Never what a key press assumed.
+// The outcome is deliberately not consulted: a run paused while it waits for
+// an approval keeps an empty outcome, and gating on "paused" would strand it.
+func (m Model) fitsState(kind schema.InterventionKind) bool {
+	switch kind {
+	case schema.InterventionKindPause:
+		return m.rd.run.State == schema.RunStateRunning
+	case schema.InterventionKindResume:
+		return m.rd.run.State == schema.RunStateWaiting
+	}
+	return true
 }
 
 // runKey handles a key in run detail.
@@ -517,11 +557,19 @@ func (m Model) runKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if rd.status == noDataNote || rd.status == noMessageNote {
+		// A line about the last key is read once.
+		rd.status = ""
+	}
 	switch key {
 	case "esc":
 		return m.closeRun(""), nil
 	case "ctrl+c":
 		return m, tea.Quit
+	case "enter":
+		return m.toggleData(), nil
+	case "g":
+		return m.goToMessage()
 	case "m":
 		if m.canAsk(schema.InterventionKindMessage) {
 			rd.input, rd.draft, rd.status = inputMessage, "", ""
@@ -530,16 +578,42 @@ func (m Model) runKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.canAsk(schema.InterventionKindCancel) {
 			rd.input, rd.status = inputCancel, ""
 		}
+	case "p":
+		// Reversible, so no question: the run reads waiting only once its
+		// frame says so.
+		if m.canAsk(schema.InterventionKindPause) {
+			return m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause})
+		}
+	case "r":
+		if m.canAsk(schema.InterventionKindResume) {
+			return m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindResume})
+		}
 	case "up":
-		rd.scroll = min(rd.scroll+1, max(0, len(rd.activity)-1))
+		m.moveCursor(1)
 	case "down":
-		rd.scroll = max(0, rd.scroll-1)
+		m.moveCursor(-1)
 	case "pgup":
-		rd.scroll = min(rd.scroll+m.runPage(), max(0, len(rd.activity)-1))
+		if rd.unfold != 0 {
+			rd.bodyScroll = max(0, rd.bodyScroll-m.runPage())
+			return m, nil
+		}
+		m.moveCursor(m.runPage())
 	case "pgdown":
-		rd.scroll = max(0, rd.scroll-m.runPage())
+		if rd.unfold != 0 {
+			rd.bodyScroll = min(rd.bodyScroll+m.runPage(), max(0, len(m.dataLines(m.layout().width-2))-1))
+			return m, nil
+		}
+		m.moveCursor(-m.runPage())
 	}
 	return m, nil
+}
+
+// moveCursor moves the timeline cursor by delta lines back in time (forward when
+// negative), stopping at the oldest and the newest. Any move folds the data.
+func (m *Model) moveCursor(delta int) {
+	rd := &m.rd
+	rd.scroll = min(max(rd.scroll+delta, 0), max(0, len(rd.timeline())-1))
+	rd.unfold, rd.bodyScroll = 0, 0
 }
 
 func (m Model) runPage() int { return max(1, m.layout().contentH/2) }
@@ -698,6 +772,12 @@ func (m Model) runHead(cols int) []string {
 		times += " · ended: " + m.clock(*r.EndedAt)
 	}
 	lines = append(lines, times)
+	// An open run's duration is to now: it is as live as the last render.
+	duration := "duration: " + spanText(m.runDuration(r), false)
+	if !rd.terminal() {
+		duration += " so far"
+	}
+	lines = append(lines, duration)
 	if r.Outcome != "" {
 		lines = append(lines, "outcome: "+sanitize(r.Outcome))
 	}
@@ -708,14 +788,6 @@ func (m Model) runHead(cols int) []string {
 		lines[i] = fitCells(lines[i], cols)
 	}
 	return lines
-}
-
-func activityLine(m Model, e schema.AgentActivityV1, cols int) string {
-	line := m.clock(e.At) + " " + sanitize(string(e.Kind)) + " " + sanitize(e.Summary)
-	if e.Outcome != "" {
-		line += " → " + sanitize(e.Outcome)
-	}
-	return fitCells(line, cols)
 }
 
 // interventionState is how the history words the state of an intervention:
@@ -730,17 +802,209 @@ func interventionState(iv schema.InterventionV1) string {
 	return sanitize(string(iv.State))
 }
 
-func interventionLine(iv schema.InterventionV1, cols int) string {
-	// The state comes before the body so a long body is what is cut.
-	line := "#" + strconv.FormatInt(iv.ID, 10) + " " + sanitize(string(iv.Kind)) + " · " + interventionState(iv)
+// timelineItem is one line of run detail's timeline: an activity entry, or an
+// intervention's request or its answer.
+type timelineItem struct {
+	at    time.Time
+	entry schema.AgentActivityV1
+	iv    schema.InterventionV1
+	// isIv is true for the two kinds of intervention line; answer tells the
+	// answer from the request.
+	isIv, answer bool
+}
+
+// timeline is the activity and the interventions in one stream, oldest first.
+// An intervention is its request, and its answer when it has one, each at the
+// time the server recorded it. Ties keep the activity first, and a request
+// before its answer.
+func (rd runDetail) timeline() []timelineItem {
+	items := make([]timelineItem, 0, len(rd.activity)+2*len(rd.interventions))
+	for _, e := range rd.activity {
+		items = append(items, timelineItem{at: e.At.Time(), entry: e})
+	}
+	for _, iv := range rd.interventions {
+		items = append(items, timelineItem{at: iv.RequestedAt.Time(), iv: iv, isIv: true})
+	}
+	for _, iv := range rd.interventions {
+		if iv.State == schema.InterventionStateRequested {
+			continue
+		}
+		at := iv.RequestedAt.Time()
+		if iv.AnsweredAt != nil {
+			at = iv.AnsweredAt.Time()
+		}
+		items = append(items, timelineItem{at: at, iv: iv, isIv: true, answer: true})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].at.Before(items[j].at) })
+	return items
+}
+
+// The width of the offset and gap columns of a timeline line.
+const (
+	offsetCells = 7
+	gapCells    = 8
+)
+
+// timelineText is the words of item: what happened, after the offset and the
+// gap. An intervention line starts with the mark ↳.
+func timelineText(it timelineItem, folded bool) string {
+	if !it.isIv {
+		e := it.entry
+		text := sanitize(string(e.Kind)) + " " + sanitize(e.Summary)
+		if e.Outcome != "" {
+			text += " → " + sanitize(e.Outcome)
+		}
+		if len(e.Data) > 0 {
+			mark := "▸ "
+			if !folded {
+				mark = "▾ "
+			}
+			text = mark + text
+		}
+		return text
+	}
+	iv := it.iv
+	id := "↳ #" + strconv.FormatInt(iv.ID, 10)
+	if it.answer {
+		return id + " " + interventionState(iv)
+	}
+	// The request names the state only while it is the only word: an answer
+	// has a line of its own, at the time it was given.
+	line := id + " " + sanitize(string(iv.Kind)) + " · asked"
+	if iv.State == schema.InterventionStateRequested {
+		line = id + " " + sanitize(string(iv.Kind)) + " · " + interventionState(iv)
+	}
 	if iv.Body != "" {
 		line += " · " + sanitize(iv.Body)
 	}
-	return fitCells(line, cols)
+	return line
+}
+
+// timelineLine is item i of items in at most cols cells: the offset from the
+// run's start, the gap from the item before it when that is a second or more,
+// and the words. cursor marks the line enter acts on.
+func (m Model) timelineLine(items []timelineItem, i, cols int, cursor bool) string {
+	it := items[i]
+	offset := "+" + spanText(it.at.Sub(m.rd.run.StartedAt.Time()), true)
+	gap := ""
+	if i > 0 {
+		if d := it.at.Sub(items[i-1].at); d >= time.Second {
+			gap = "(+" + spanText(d, false) + ")"
+		}
+	}
+	marker := "  "
+	if cursor {
+		marker = activeStyle.Render("› ")
+	}
+	folded := !cursor || it.isIv || it.entry.ID != m.rd.unfold
+	rest := padCells(offset, offsetCells) + " " + padCells(gap, gapCells) + " " + timelineText(it, folded)
+	return marker + fitCells(rest, cols-2)
+}
+
+// dataLimit bounds the data shown under an entry.
+const dataLimit = 2 << 10
+
+// dataLines is the data of the entry under the cursor, pretty-printed, cut at
+// dataLimit bytes with …, and laid out in lines of at most cols cells. It is
+// nil when the cursor is not on the entry that is unfolded.
+func (m Model) dataLines(cols int) []string {
+	rd := m.rd
+	items := rd.timeline()
+	if rd.unfold == 0 || len(items) == 0 {
+		return nil
+	}
+	it := items[len(items)-1-min(rd.scroll, len(items)-1)]
+	if it.isIv || it.entry.ID != rd.unfold || len(it.entry.Data) == 0 {
+		return nil
+	}
+	return dataBody(it.entry.Data, cols)
+}
+
+// dataBody lays out opaque data: JSON indented, anything else as it came. Every
+// line starts with the body gutter, so it cannot pass for a timeline line.
+func dataBody(data []byte, cols int) []string {
+	var pretty bytes.Buffer
+	text := string(data)
+	if json.Indent(&pretty, data, "", "  ") == nil {
+		text = pretty.String()
+	}
+	if len(text) > dataLimit {
+		cut := dataLimit
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "…"
+	}
+	gutter := "    " + bodyGutter
+	var lines []string
+	for _, line := range bodyLines(text, cols-cellWidth(gutter)) {
+		lines = append(lines, gutter+line)
+	}
+	return lines
+}
+
+const (
+	noDataNote    = "this entry has no data"
+	noMessageNote = "no message"
+)
+
+// toggleData is enter: it unfolds the data of the entry under the cursor, or
+// folds it again.
+func (m Model) toggleData() Model {
+	rd := &m.rd
+	items := rd.timeline()
+	if len(items) == 0 {
+		rd.status = noDataNote
+		return m
+	}
+	it := items[len(items)-1-min(rd.scroll, len(items)-1)]
+	switch {
+	case it.isIv || len(it.entry.Data) == 0:
+		rd.status = noDataNote
+	case rd.unfold == it.entry.ID:
+		rd.unfold, rd.bodyScroll = 0, 0
+	default:
+		rd.unfold, rd.bodyScroll = it.entry.ID, 0
+	}
+	return m
+}
+
+// goToMessage is g: it leaves run detail for the channels view at the message
+// the run answers, centred when the history held reaches it. A run that answers
+// no message says so and stays.
+func (m Model) goToMessage() (tea.Model, tea.Cmd) {
+	id := m.rd.run.MessageID
+	if !m.rd.haveRun || id == 0 {
+		m.rd.status = noMessageNote
+		return m, nil
+	}
+	channel := m.current()
+	messages := m.messages[channel]
+	at := -1
+	for i, message := range messages {
+		if message.ID == id {
+			at = i
+			break
+		}
+	}
+	m.rd = runDetail{}
+	m.mode = modeChannels
+	if at < 0 {
+		m.setStatus(modeChannels, "message #"+strconv.FormatInt(id, 10)+" is older than the history held")
+		return m, nil
+	}
+	rows := m.layout().messageRows()
+	// scroll counts messages up from the newest; the pane ends at the message
+	// half a page below the one wanted.
+	m.scroll = min(max(len(messages)-1-(at+rows/2), 0), max(0, len(messages)-rows))
+	m.setStatus(modeChannels, "run answers message #"+strconv.FormatInt(id, 10))
+	return m, nil
 }
 
 // keyHints is the line of what the keys do: those the session declared, and the
-// rest as unsupported. A run that ended has no keys.
+// rest as unsupported. A declared kind the run's state does not take (pause on a
+// waiting run, resume on a running one) is left out. A run that ended has no
+// keys.
 func (m Model) keyHints(cols int) string {
 	rd := m.rd
 	switch {
@@ -756,33 +1020,37 @@ func (m Model) keyHints(cols int) string {
 	if _, ok := m.runSession(); !ok {
 		return fitCells("interventions unavailable: the session is not in the roster", cols)
 	}
-	hint := func(key string, kind schema.InterventionKind) string {
-		if m.declares(kind) {
-			return key + " " + string(kind)
+	var hints []string
+	for _, k := range []struct {
+		key  string
+		kind schema.InterventionKind
+	}{
+		{"m", schema.InterventionKindMessage}, {"x", schema.InterventionKindCancel},
+		{"p", schema.InterventionKindPause}, {"r", schema.InterventionKindResume},
+	} {
+		switch {
+		case !m.declares(k.kind):
+			hints = append(hints, string(k.kind)+" (unsupported)")
+		case m.fitsState(k.kind):
+			hints = append(hints, k.key+" "+string(k.kind))
 		}
-		return string(kind) + " (unsupported)"
 	}
-	return fitCells(strings.Join([]string{
-		hint("m", schema.InterventionKindMessage), hint("x", schema.InterventionKindCancel),
-		"pause (unsupported)", "resume (unsupported)",
-	}, " · "), cols)
+	return fitCells(strings.Join(hints, " · "), cols)
 }
 
 // runLines is run detail in lines of at most cols cells, exactly rows of them:
-// the fields, the newest activity and interventions that fit, and the keys.
+// the fields, the newest of the timeline that fits, and the keys.
 func (m Model) runLines(cols, rows int) []string {
 	rd := m.rd
 	lines := m.runHead(cols)
-	// The key line is the last row; two more are the section titles.
-	if body := rows - 1 - len(lines) - 2; rd.haveRun && body >= 1 {
-		nIv := min(len(rd.interventions), max(body/3, 1))
-		if body < 2 {
-			nIv = 0
+	// The key line is the last row; one more is the title.
+	if body := rows - 1 - len(lines) - 1; rd.haveRun && body >= 1 {
+		title := "activity (" + strconv.Itoa(len(rd.activity)) + ")"
+		if n := len(rd.interventions); n > 0 {
+			title += " · ↳ interventions (" + strconv.Itoa(n) + ")"
 		}
-		lines = append(lines, statusStyle.Render(fitCells("activity ("+strconv.Itoa(len(rd.activity))+")", cols)))
-		lines = append(lines, m.activityWindow(cols, body-nIv)...)
-		lines = append(lines, statusStyle.Render(fitCells("interventions ("+strconv.Itoa(len(rd.interventions))+")", cols)))
-		lines = append(lines, interventionWindow(rd.interventions, cols, nIv)...)
+		lines = append(lines, statusStyle.Render(fitCells(title, cols)))
+		lines = append(lines, m.timelineWindow(cols, body)...)
 	}
 	if len(lines) > rows-1 {
 		lines = lines[:max(rows-1, 0)]
@@ -793,31 +1061,31 @@ func (m Model) runLines(cols, rows int) []string {
 	return append(lines, statusStyle.Render(m.keyHints(cols)))
 }
 
-// activityWindow is n lines of activity ending scroll lines before the newest.
-func (m Model) activityWindow(cols, n int) []string {
-	if n <= 0 {
+// timelineWindow is n lines of the timeline ending at the cursor. When the
+// cursor's entry is unfolded its data follows it and takes up to n-1 of the
+// lines, with a mark when more is below.
+func (m Model) timelineWindow(cols, n int) []string {
+	items := m.rd.timeline()
+	if n <= 0 || len(items) == 0 {
 		return nil
 	}
-	entries := m.rd.activity
-	end := len(entries) - min(m.rd.scroll, max(0, len(entries)-1))
-	start := max(0, end-n)
+	cur := len(items) - 1 - min(m.rd.scroll, len(items)-1)
+	body := m.dataLines(cols)
+	if skip := min(m.rd.bodyScroll, max(0, len(body)-1)); len(body) > 0 {
+		body = body[skip:]
+	}
+	if n < 2 {
+		body = nil
+	}
+	if len(body) > n-1 {
+		body = append(body[:n-2:n-2], statusStyle.Render(fitCells("    … more data (pgdn)", cols)))
+	}
+	start := max(0, cur+1-(n-len(body)))
 	lines := make([]string, 0, n)
-	for _, e := range entries[start:end] {
-		lines = append(lines, activityLine(m, e, cols))
+	for i := start; i <= cur; i++ {
+		lines = append(lines, m.timelineLine(items, i, cols, i == cur))
 	}
-	return lines
-}
-
-func interventionWindow(list []schema.InterventionV1, cols, n int) []string {
-	if n <= 0 {
-		return nil
-	}
-	list = list[max(0, len(list)-n):]
-	lines := make([]string, 0, n)
-	for _, iv := range list {
-		lines = append(lines, interventionLine(iv, cols))
-	}
-	return lines
+	return append(lines, body...)
 }
 
 // runPrompt is the input row of run detail: the message being typed, the

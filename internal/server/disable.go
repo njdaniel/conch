@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,10 +10,11 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// Disabling a principal and revoking all of its credentials (issue #101). All
-// three endpoints are operator-only under AuthRequired (route table) and open
-// with no caller under AuthOff, like the other administrative endpoints.
-// Nothing here reads, logs, or audits a token.
+// Disabling a principal and revoking all of its credentials (issue #101).
+// Disable and enable are operator-only under AuthRequired (route table);
+// revoke-all is for operators or the principal itself (issue #439). All three
+// are open with no caller under AuthOff, like the other administrative
+// endpoints. Nothing here reads, logs, or audits a token.
 
 // handleDisablePrincipal serves POST /v1/principals/{id}/disable.
 //
@@ -46,12 +48,20 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 	}
 	// Dropped even when nothing changed: a repeat call is a harmless way to
 	// make sure no socket survives.
+	s.principalDisabled(ctx, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// principalDisabled does what follows a committed Store.DisablePrincipal:
+// the principal's open sockets close, rosters learn their sessions ended, and
+// they leave voice. Every route that disables someone calls it, one principal
+// at a time (issue #438).
+func (s *Server) principalDisabled(ctx context.Context, id int64) {
 	s.hub.DropPrincipalAll(id)
 	s.events.dropPrincipalAll(id)
 	// Disabling ends the principal's sessions.
 	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonPrincipalOff)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleEnablePrincipal serves POST /v1/principals/{id}/enable. It clears
@@ -79,10 +89,19 @@ func (s *Server) handleEnablePrincipal(w http.ResponseWriter, r *http.Request) {
 // POST /v1/principals/{id}/credentials/revoke-all: the principal stays enabled
 // and can be issued new credentials, but every live one is revoked atomically
 // and its open WebSockets are closed after the transaction commits.
+//
+// An operator may do it to anyone; anyone else only to themselves, which is
+// "sign out everywhere" (issue #439). The check comes before any lookup, so a
+// refused caller learns nothing of the principal named. The last operator
+// guard applies to a self revoke-all as to any other.
 func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := pathID(w, r, "id", "principal")
 	if !ok {
+		return
+	}
+	if caller, authed := callerFrom(ctx); authed && !isOperator(caller) && caller.ID != id {
+		s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
 		return
 	}
 	n, err := s.store.RevokeAllCredentials(ctx, auditActor(ctx), id)

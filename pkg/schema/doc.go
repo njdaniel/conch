@@ -19,10 +19,21 @@
 //     activity stream.
 //   - InterventionV1 (conch.intervention.v1), a person's request to a run
 //     and the adapter's answer.
+//   - ReadStateV1 (conch.read_state.v1), how far a person has read a channel
+//     and how many messages they may see past it.
 //
 // Their request and response bodies (CreateSessionRequestV1,
 // CreateRunRequestV1, SetRunStateRequestV1, ListRunsResponseV1,
 // AppendActivityRequestV1, ListActivityResponseV1,
 // CreateInterventionRequestV1, AckInterventionRequestV1 and
-// ListInterventionsResponseV1) live beside them.
+// ListInterventionsResponseV1, MarkReadRequestV1 and ListReadStateResponseV1)
+// live beside them.
+//
+// The web client's TypeScript types and validators are generated from this
+// package (issue #348): ts.go lists the types, vocabularies.go the values of
+// each closed vocabulary, and cmd/schema-ts writes web/src/schema/generated.ts
+// from them. Run `go generate ./pkg/schema` after changing either or a listed
+// type; scripts/schema-ts-check.sh fails while the committed file is stale.
 package schema
+
+//go:generate go run ../../cmd/schema-ts -out ../../web/src/schema

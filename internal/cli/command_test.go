@@ -551,6 +551,36 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+func TestWhoAmIPrintsServerVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		body schema.WhoAmIResponseV1
+		want string
+	}{
+		{"server reports its version", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator, ServerVersion: "v0.1.0-alpha.1"},
+			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: v0.1.0-alpha.1\n"},
+		{"an older server says nothing", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator},
+			"id: 42\nkind: human\nname: nick\nrole: operator\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(tt.body)
+			}))
+			t.Cleanup(ts.Close)
+			t.Setenv("CONCH_TOKEN", fakeToken)
+			stdout, _, err := runCLI(t, "", "whoami", "--server", ts.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stdout != tt.want {
+				t.Errorf("whoami = %q, want %q", stdout, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoginThenUseStoredCredential(t *testing.T) {
 	isolateConfig(t)
 	fake := newAuthFake(t, true)
@@ -1541,5 +1571,37 @@ func TestVoicePresenceScopedRoomAddsAField(t *testing.T) {
 		if n := len(strings.Fields(line)); n != 4 && n != 5 {
 			t.Errorf("line %q has %d fields", line, n)
 		}
+	}
+}
+
+// An approval this person may see but not decide (issue #450) is listed with
+// a mark saying so; the others are listed as before.
+func TestApprovalsListMarksViewOnly(t *testing.T) {
+	deadline := schema.NewTimestamp(time.Date(2026, time.October, 16, 12, 0, 0, 0, time.UTC))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(schema.ListApprovalsResponseV1{
+			Approvals: []schema.ApprovalV1{
+				{ID: 1, State: schema.ApprovalStatePending, Title: "mine", RequesterID: 42, Deadline: deadline},
+				{ID: 2, State: schema.ApprovalStatePending, Title: "theirs", RequesterID: 42, Deadline: deadline},
+			},
+			ReadOnly: []int64{2},
+		})
+	}))
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	if err := Run(context.Background(), []string{"approvals", "list", "--server", server.URL}, &stdout, &stderr, "vtest"); err != nil {
+		t.Fatal(err)
+	}
+	const mark = "view only: you may not decide this"
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		switch {
+		case strings.HasSuffix(line, "| mine"):
+		case strings.Contains(line, "| theirs") && strings.Contains(line, mark):
+		case strings.Contains(line, "mine") || strings.Contains(line, "theirs"):
+			t.Errorf("line %q is marked wrongly", line)
+		}
+	}
+	if strings.Count(stdout.String(), mark) != 1 {
+		t.Errorf("want exactly one view-only mark:\n%s", stdout.String())
 	}
 }

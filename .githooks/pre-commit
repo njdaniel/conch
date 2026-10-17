@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 echo "pre-commit: gofmt"
-unformatted=$(gofmt -l .)
+unformatted=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
 if [ -n "$unformatted" ]; then
     echo "gofmt needed on:"
     echo "$unformatted"
@@ -33,6 +33,13 @@ go test ./...
 
 echo "pre-commit: schema compatibility"
 ./scripts/schema-compat.sh
+
+# The generated TypeScript wire types (issue #348). Guarded like the Rust leg
+# below: the hook may belong to a newer checkout than the branch committed.
+if [ -f ./scripts/schema-ts-check.sh ]; then
+    echo "pre-commit: generated TypeScript wire types"
+    ./scripts/schema-ts-check.sh
+fi
 
 echo "pre-commit: dependency gate"
 ./scripts/depgate.sh

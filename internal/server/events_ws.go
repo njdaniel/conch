@@ -21,9 +21,10 @@ import (
 //
 // GET /v1/events/ws?channel=<name>[&session=<id>] sends, as JSON text frames,
 // the documents a client needs to follow a channel's agents live: the roster
-// of its members' sessions on connect and whenever it changes, and the runs,
-// activity and interventions of runs in the channel that the reader may see.
-// Each frame is one pkg/schema document, told apart by its schema field.
+// of its members' sessions on connect and whenever it changes, the member
+// list whenever it changes (issue #515), and the runs, activity and
+// interventions of runs in the channel that the reader may see. Each frame is
+// one pkg/schema document, told apart by its schema field.
 //
 // This file holds no visibility rule and no SQL. A change commits, and the
 // handler that made it enqueues a reference ("the roster changed", "run 41
@@ -359,17 +360,11 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, ok := s.admitSocket(w, r)
+	conn, ctx, done, ok := s.acceptSocket(w, r)
 	if !ok {
 		return
 	}
-	defer release()
-
-	conn, err := websocket.Accept(w, r, s.acceptOptions())
-	if err != nil {
-		slog.DebugContext(ctx, "events ws: accept failed", "error", err)
-		return
-	}
+	defer done()
 	ticker := time.NewTicker(s.credRecheckInterval)
 	defer ticker.Stop()
 	es := &eventsStream{s: s, r: r, conn: conn, sub: sub, channel: channel, principalID: caller.ID, credID: credID, sessionID: sessionID}
@@ -387,6 +382,9 @@ type eventsStream struct {
 	credID      int64
 	sessionID   int64  // the session to keep alive; 0 for none
 	lastRoster  []byte // the roster frame last sent
+	// lastMembers is the member list frame last sent, or, before any was,
+	// the list as it stood at the first roster: that one is not sent.
+	lastMembers []byte
 	// rosterBuilt is when a roster was last built, for the roster floor;
 	// rosterLater fires when one owed meanwhile may be built, and is nil
 	// while none is owed.
@@ -397,7 +395,7 @@ type eventsStream struct {
 // run sends frames until the peer leaves, the subscription is dropped, or the
 // credential or membership lapses.
 func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
-	ctx = e.conn.CloseRead(ctx)
+	ctx = e.s.keepAlive(ctx, e.conn, true)
 	var keepAlive <-chan time.Time
 	if e.sessionID != 0 {
 		ticks, stop := e.s.sessionKeepAliveTicks()
@@ -409,7 +407,7 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = e.conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, e.conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return
 		case <-recheck:
 			if !e.stillAllowed(ctx) {
@@ -421,7 +419,7 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 				// expired credential's): nothing is left to keep alive.
 				// Closing tells the client, which reconnects and is
 				// refused 404 session_not_found.
-				_ = e.conn.Close(websocket.StatusPolicyViolation, "session ended")
+				closeWS(ctx, e.conn, schema.SocketCloseSessionEnded, websocket.StatusPolicyViolation, "session ended")
 				return
 			}
 		case <-e.sub.wake:
@@ -430,6 +428,15 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			}
 		case <-e.rosterLater:
 			e.rosterLater = nil
+			// select picks at random among ready cases: a drop that is
+			// ready too (a disabled member keeps their place on the list,
+			// so stillMember passes) wins, and nothing more is built.
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
 			if !e.stillMember(ctx) || !e.sendRoster(ctx) {
 				return
 			}
@@ -505,13 +512,13 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 		if ctx.Err() == nil {
 			slog.ErrorContext(ctx, "events ws: recheck membership failed", "error", err)
 		}
-		_ = e.conn.Close(websocket.StatusInternalError, "membership check failed")
+		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "membership check failed")
 		return false
 	case !member:
-		_ = e.conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+		closeWS(ctx, e.conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return false
 	case e.s.agentMayNoLongerRead(cctx, e.principalID, e.channel.ID):
-		_ = e.conn.Close(websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
+		closeWS(ctx, e.conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
 		return false
 	}
 	return true
@@ -553,7 +560,7 @@ func (e *eventsStream) rosterNowOrLater(ctx context.Context) bool {
 }
 
 // sendRoster builds the roster for this reader now and sends it unless it is
-// the one last sent.
+// the one last sent, then does the same for the member list.
 func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	e.rosterBuilt = time.Now()
 	viewer, err := e.s.store.PrincipalByID(ctx, e.principalID)
@@ -568,13 +575,40 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
-	if bytes.Equal(raw, e.lastRoster) {
-		return true
+	if !bytes.Equal(raw, e.lastRoster) {
+		if !e.write(ctx, raw) {
+			return false
+		}
+		e.lastRoster = raw
 	}
-	if !e.write(ctx, raw) {
+	return e.sendMembers(ctx, viewer)
+}
+
+// sendMembers builds the member list for this reader now and sends it if it
+// changed since the last one (issue #515). Everything that changes the list
+// already owes a roster (a member added or removed, hidden or renamed), so the
+// list is rebuilt with each roster, under the same floor; the roster alone
+// would miss a member who had no session. The list as it stood at the first
+// roster is kept but not sent: a client reads the list over REST once the
+// socket is live, as it always has, and learns here only what changed after.
+// A channel the change did not touch hears nothing.
+func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) bool {
+	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
+	if err != nil {
+		return e.failed(ctx, "list members", err)
+	}
+	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
+	raw, ok := e.encode(ctx, doc)
+	if !ok {
 		return false
 	}
-	e.lastRoster = raw
+	if bytes.Equal(raw, e.lastMembers) {
+		return true
+	}
+	if e.lastMembers != nil && !e.write(ctx, raw) {
+		return false
+	}
+	e.lastMembers = raw
 	return true
 }
 
@@ -630,13 +664,13 @@ func (e *eventsStream) sendDoc(ctx context.Context, doc validated) bool {
 func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool) {
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(ctx, "events ws: built an invalid document", "channel", e.channel.ID, "error", err)
-		_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 		return nil, false
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		slog.ErrorContext(ctx, "events ws: encode failed", "channel", e.channel.ID, "error", err)
-		_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 		return nil, false
 	}
 	return raw, true
@@ -648,8 +682,8 @@ func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 	}
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
-	if err := e.conn.Write(wctx, websocket.MessageText, raw); err != nil {
-		_ = e.conn.Close(websocket.StatusInternalError, "write failed")
+	if err := countFrame(ctx, e.conn.Write(wctx, websocket.MessageText, raw)); err != nil {
+		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 		_ = e.conn.CloseNow()
 		return false
 	}
@@ -660,11 +694,11 @@ func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 // read cut short by the peer leaving or by shutdown is not a fault.
 func (e *eventsStream) failed(ctx context.Context, what string, err error) bool {
 	if ctx.Err() != nil {
-		_ = e.conn.Close(websocket.StatusNormalClosure, "")
+		closeWS(ctx, e.conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 		return false
 	}
 	slog.ErrorContext(ctx, "events ws: could not "+what, "channel", e.channel.ID, "error", err)
-	_ = e.conn.Close(websocket.StatusInternalError, "internal error")
+	closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 	return false
 }
 
@@ -674,7 +708,7 @@ func (e *eventsStream) failed(ctx context.Context, what string, err error) bool 
 // queue that filled (closeDropped's reason for that).
 func (s *Server) closeEventsDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
 	if s.events.isClosed() {
-		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
 		return
 	}
 	s.closeDropped(ctx, conn, channelID, principalID, credID)

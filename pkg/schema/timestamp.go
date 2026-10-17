@@ -60,10 +60,20 @@ func (ts *Timestamp) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return errors.New("schema: timestamp must be a JSON string")
 	}
+	parsed, err := parseTimestamp(s)
+	if err != nil {
+		return err
+	}
+	*ts = parsed
+	return nil
+}
+
+// parseTimestamp reads a timestamp written as text, outside JSON (a query
+// parameter), exactly as UnmarshalJSON reads the string inside the quotes.
+func parseTimestamp(s string) (Timestamp, error) {
 	parsed, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		return errors.New("schema: invalid timestamp: " + err.Error())
+		return Timestamp{}, errors.New("schema: invalid timestamp: " + err.Error())
 	}
-	*ts = NewTimestamp(parsed)
-	return nil
+	return NewTimestamp(parsed), nil
 }

@@ -1,12 +1,9 @@
 package main
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,11 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -44,8 +41,9 @@ type harness struct {
 	logs    []namedFile // files to scan for secrets before the run ends
 	// headless are the lk participants started, whose LiveKit-issued tokens
 	// are registered as secrets before the final scan.
-	headless []*headless
+	headless []*lkit.Headless
 	cleanup  []func()
+	kit      *lkit.Kit
 }
 
 // namedFile is a captured log. rooms is true for files that must not mention
@@ -67,7 +65,9 @@ func newHarness() (*harness, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &harness{repo: repo, tmp: tmp, secrets: map[string]string{}, rooms: map[string][]string{}, jtis: map[string]bool{}}, nil
+	h := &harness{repo: repo, tmp: tmp, secrets: map[string]string{}, rooms: map[string][]string{}, jtis: map[string]bool{}}
+	h.kit = lkit.New(kitHost{h}, stopCtx, "voice-check")
+	return h, nil
 }
 
 // say prints one line and remembers it, so the run can check at the end that
@@ -125,7 +125,7 @@ func (h *harness) redact(s string) string {
 	for r := range h.rooms {
 		s = strings.ReplaceAll(s, r, "[room redacted]")
 	}
-	return jwtRE.ReplaceAllString(s, "[jwt redacted]")
+	return lkit.JWT.ReplaceAllString(s, "[jwt redacted]")
 }
 
 // leak reports the first secret found in text, by label only.
@@ -137,7 +137,7 @@ func (h *harness) leak(text string) (string, bool) {
 			return label, true
 		}
 	}
-	if jwtRE.MatchString(text) {
+	if lkit.JWT.MatchString(text) {
 		return "a JWT-shaped string", true
 	}
 	return "", false
@@ -162,10 +162,12 @@ func (h *harness) scanAll() error {
 		}
 	}
 	h.mu.Lock()
-	participants := append([]*headless(nil), h.headless...)
+	participants := append([]*lkit.Headless(nil), h.headless...)
 	h.mu.Unlock()
 	for _, hl := range participants {
-		hl.registerTokens(h)
+		for _, t := range hl.Relay.IssuedTokens() {
+			h.secret("a LiveKit-issued token", t)
+		}
 	}
 	h.mu.Lock()
 	printed := h.out.String()
@@ -285,7 +287,7 @@ func (h *harness) build() error {
 	}
 	h.bin = binaries{dir: dir, conchd: filepath.Join(dir, "conchd"), conch: filepath.Join(dir, "conch")}
 	for out, pkg := range map[string]string{h.bin.conchd: "./cmd/conchd", h.bin.conch: "./cmd/conch"} {
-		cmd := groupCommand(stopCtx, "go", "build", "-o", out, pkg)
+		cmd := lkit.GroupCommand(stopCtx, "go", "build", "-o", out, pkg)
 		cmd.Dir = h.repo
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("go build %s: %w\n%s", pkg, err, output)
@@ -346,7 +348,7 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 	}
 	env := append(cleanEnv(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_DATA_HOME="+filepath.Join(home, "data"))
 
-	bootstrap := groupCommand(stopCtx, h.bin.conchd, "bootstrap-operator", "--data", dataDir, "--name", "voice-operator")
+	bootstrap := lkit.GroupCommand(stopCtx, h.bin.conchd, "bootstrap-operator", "--data", dataDir, "--name", "voice-operator")
 	bootstrap.Env = env
 	tokenOut, err := bootstrap.Output()
 	if err != nil {
@@ -372,7 +374,7 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 	if err != nil {
 		return nil, err
 	}
-	cmd := groupStart(h.bin.conchd, args...)
+	cmd := lkit.GroupStart(h.bin.conchd, args...)
 	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
@@ -408,7 +410,7 @@ func (p *conchdProc) stop() {
 		return
 	}
 	p.stopped = true
-	_ = killGroup(p.cmd)
+	_ = lkit.KillGroup(p.cmd)
 	<-p.done
 }
 
@@ -512,7 +514,7 @@ func (a api) do(method, path string, body any) (int, []byte, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, nil, unwrapURLError(err)
+		return 0, nil, lkit.UnwrapURLError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
@@ -534,7 +536,7 @@ func (a api) call(method, path string, body, out any) error {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("%s %s: status %d: %s", method, path, status, truncate(string(data), 300))
+		return fmt.Errorf("%s %s: status %d: %s", method, path, status, lkit.Truncate(string(data), 300))
 	}
 	if out == nil {
 		return nil
@@ -723,7 +725,7 @@ func (h *harness) newConchUser(serverURL, token string) (*conchUser, error) {
 func (u *conchUser) run(stdin string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(stopCtx, 30*time.Second)
 	defer cancel()
-	cmd := groupCommand(ctx, u.bin, args...)
+	cmd := lkit.GroupCommand(ctx, u.bin, args...)
 	cmd.Env = u.env
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
@@ -757,7 +759,7 @@ func (h *harness) runDogfood(label string, extraEnv ...string) error {
 	if err != nil {
 		return err
 	}
-	cmd := groupCommand(ctx, "go", "run", "./e2e/dogfood")
+	cmd := lkit.GroupCommand(ctx, "go", "run", "./e2e/dogfood")
 	cmd.Dir = h.repo
 	// conch and conchd under dogfood get their own temp config directories;
 	// the only environment passed through is what Go itself needs, minus
@@ -809,389 +811,63 @@ func cleanEnvKeepingHome() []string {
 	return env
 }
 
-// ---------------------------------------------------------------------- docker
+// ------------------------------------------------------------------- LiveKit
 
-const (
-	// livekitImage is pinned by version and by digest. The digest is that of
-	// the multi-architecture index for v1.13.7.
-	livekitImage = "livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3"
+// kitHost is the harness as the LiveKit kit sees it (e2e/internal/lkit).
+type kitHost struct{ h *harness }
 
-	lkVersion = "2.19.0"
-)
+func (k kitHost) Mkdir(prefix string) (string, error) { return k.h.mkdir(prefix) }
+func (k kitHost) OnCleanup(f func())                  { k.h.onCleanup(f) }
+func (k kitHost) Secret(label, value string)          { k.h.secret(label, value) }
+func (k kitHost) Say(format string, args ...any)      { k.h.say(format, args...) }
+func (k kitHost) Redact(s string) string              { return k.h.redact(s) }
 
-// lkSHA256 are the SHA-256 sums of the lk release archives, from the
-// checksums.txt published with livekit-cli v2.19.0.
-var lkSHA256 = map[string]string{
-	"linux_amd64":  "601ce74299db7e538014426644ab23b2a1ba171c506967197a259c3cd762d418",
-	"linux_arm64":  "64e8f68f26eb1de81f0696a9a0fca7564c4e7e551de6cc98efc327ca02b56b52",
-	"darwin_amd64": "9f7f23ebc5b146e9b3bcba63254e1792f40598247a468a415ef051e97b31ff57",
-	"darwin_arm64": "f5e2413303d91814b0dfe9a0b6a284d8f095b3cb2558ad702970f653cfe1dfa9",
+// Log registers lk's output, which is scanned for secrets but may name a
+// room: lk prints the room it joined.
+func (k kitHost) Log(what, path string) {
+	k.h.mu.Lock()
+	k.h.logs = append(k.h.logs, namedFile{what, path, false})
+	k.h.mu.Unlock()
 }
 
-func docker(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", args...) // #nosec G204 -- constant command; args are this program's own
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+// settingsOf is what conchd is told of a LiveKit server.
+func settingsOf(s *lkit.Server) *livekitSettings {
+	return &livekitSettings{url: s.WSURL, key: s.Key, secret: s.Secret}
 }
 
-// livekitServer is the container this run started, named by this run.
-type livekitServer struct {
-	h      *harness
-	name   string
-	id     string // container id, once docker run has printed it
-	apiURL string // http://127.0.0.1:port
-	wsURL  string // ws://127.0.0.1:port
-	key    string
-	secret string
+// startHeadless starts lk as a participant admitted by token alone,
+// publishing silence as its microphone.
+func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*lkit.Headless, error) {
+	return h.startLK(lkBin, lkHostPort, token, nil, "--publish", oggPath)
 }
 
-// startLiveKit runs the pinned image on the host network, bound to localhost,
-// with automatic room creation off. enable_remote_unmute lets the harness
-// stand in for a key press from the server side (LiveKit refuses a
-// server-side unmute otherwise); conchd needs no such setting. The container is registered for removal
-// before it is started, so a failure at any point still removes it.
-func (h *harness) startLiveKit(ctx context.Context) (*livekitServer, error) {
-	// The ports are chosen by asking the kernel for free ones and letting them
-	// go again, so something else on the machine can take one before LiveKit
-	// binds it. LiveKit then exits saying so, and the answer is other ports.
-	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		var srv *livekitServer
-		srv, err = h.startLiveKitOnce(ctx)
-		if err == nil {
-			return srv, nil
-		}
-		if !strings.Contains(err.Error(), "address already in use") || stopCtx.Err() != nil {
-			return nil, err
-		}
-		h.say("     LiveKit could not bind a port that was free a moment before (attempt %d of 3); starting it on others", attempt)
-	}
-	return nil, err
-}
-
-// probeClient asks whether LiveKit is up. It gives up quickly: if LiveKit lost
-// the race for its port, whatever won it may accept a connection and never
-// answer, and a request with no timeout would wait for it for ever.
-var probeClient = &http.Client{Timeout: 2 * time.Second}
-
-// startLiveKitOnce is one attempt of startLiveKit, on ports of its own.
-func (h *harness) startLiveKitOnce(ctx context.Context) (*livekitServer, error) {
-	httpAddr, err := freeAddr()
+// startLK starts `lk room join` with the given options (lkit.Kit.StartLK) and
+// remembers it, so that the tokens LiveKit sent it are registered as secrets
+// before the final scan.
+func (h *harness) startLK(lkBin, lkHostPort, token string, filter func(context.Context, []byte) []byte, options ...string) (*lkit.Headless, error) {
+	hl, err := h.kit.StartLK(lkBin, lkHostPort, token, filter, options...)
 	if err != nil {
 		return nil, err
 	}
-	tcpAddr, err := freeAddr()
-	if err != nil {
-		return nil, err
-	}
-	httpPort := httpAddr[strings.LastIndex(httpAddr, ":")+1:]
-	tcpPort := tcpAddr[strings.LastIndex(tcpAddr, ":")+1:]
-	// 100 UDP ports for media, at a random place in the high range.
-	base := 40000 + int(randByte())*100
-	srv := &livekitServer{
-		h:      h,
-		name:   "conch-voice-check-" + randHex(4),
-		apiURL: "http://127.0.0.1:" + httpPort,
-		wsURL:  "ws://127.0.0.1:" + httpPort,
-		key:    "voicecheckkey",
-		secret: "voice-check-NOT-FOR-PRODUCTION-" + randHex(24),
-	}
-	h.secret("the LiveKit API secret", srv.secret)
-	// The settings go in a file and the key pair in the environment of the
-	// docker command, passed on by name: neither is on a command line, where
-	// any local user could read the secret while the container runs.
-	cfg := fmt.Sprintf(`port: %s
-bind_addresses: ["127.0.0.1"]
-rtc:
-  tcp_port: %s
-  port_range_start: %d
-  port_range_end: %d
-  use_external_ip: false
-room:
-  auto_create: false
-  empty_timeout: 5
-  departure_timeout: 5
-  enable_remote_unmute: true
-`, httpPort, tcpPort, base, base+99)
-	dir, err := h.mkdir("livekit-")
-	if err != nil {
-		return nil, err
-	}
-	// The directory and file are made readable beyond this user because the
-	// process in the container may not run as it; they hold no secret.
-	cfgPath := filepath.Join(dir, "livekit.yaml")
-	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- holds only the settings file below, no secret
-		return nil, err
-	}
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil { // #nosec G306 -- settings only; the key pair is passed in the environment
-		return nil, err
-	}
-	h.onCleanup(func() { srv.remove() })
-	cmd := groupCommand(stopCtx, "docker", "run", "-d", "--name", srv.name, "--label", containerLabel(), "--network", "host",
-		"-e", "LIVEKIT_KEYS", "-v", cfgPath+":/etc/livekit.yaml:ro",
-		livekitImage, "--config", "/etc/livekit.yaml", "--node-ip", "127.0.0.1")
-	cmd.Env = append(os.Environ(), "LIVEKIT_KEYS="+srv.key+": "+srv.secret)
-	raw, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(raw))
-	// docker prints the new container's id; remove() uses it. A signal that
-	// arrives while docker run is working can leave a container behind with
-	// no id for us: remove() then finds it by the name and label this run gave it.
-	if id := lastField(out); len(id) == 64 {
-		srv.id = id
-	}
-	if stopCtx.Err() != nil {
-		return nil, errInterrupted
-	}
-	if err != nil {
-		return nil, fmt.Errorf("docker run: %s", h.redact(out))
-	}
-	if err := waitForOrFail("LiveKit to answer on "+srv.apiURL, 60*time.Second, func() (bool, string, error) {
-		resp, err := probeClient.Get(srv.apiURL) // #nosec G107 -- the container this run started
-		if err != nil {
-			// A container that has exited will never answer.
-			if state, derr := docker(ctx, "inspect", "--format", "{{.State.Status}}", srv.name); derr == nil && strings.TrimSpace(state) == "exited" {
-				return false, "", errors.New("the LiveKit container exited")
-			}
-			return false, unwrapURLError(err).Error(), nil
-		}
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode), nil
-	}); err != nil {
-		logs, _ := docker(ctx, "logs", "--tail", "20", srv.name)
-		srv.remove()
-		return nil, fmt.Errorf("%w\ncontainer log:\n%s", err, h.redact(logs))
-	}
-	return srv, nil
-}
-
-// containerLabel is the label every container of this run carries. In CI the
-// job sets VOICE_CHECK_RUN to something unique to the run, and its clean-up
-// step removes by that label, so that it can never remove the container of
-// another job on the same host.
-func containerLabel() string {
-	run := os.Getenv("VOICE_CHECK_RUN")
-	if run == "" {
-		run = "local"
-	}
-	return "conch-voice-check=" + run
-}
-
-func randByte() byte {
-	var b [1]byte
-	_, _ = rand.Read(b[:])
-	return b[0] % 150 // keeps the range below 55000
-}
-
-func (s *livekitServer) settings() *livekitSettings {
-	return &livekitSettings{url: s.wsURL, key: s.key, secret: s.secret}
-}
-
-func (s *livekitServer) admin() *lkAdmin { return newLKAdmin(s.apiURL, s.key, s.secret) }
-
-// stop stops the container, so LiveKit is down but its address is known.
-func (s *livekitServer) stop(ctx context.Context) error {
-	if out, err := docker(ctx, "stop", "-t", "1", s.name); err != nil {
-		return fmt.Errorf("docker stop: %s", out)
-	}
-	return nil
-}
-
-// start starts the stopped container again and waits for LiveKit to answer.
-// It is a new LiveKit process on the same address: every room is gone.
-func (s *livekitServer) start(ctx context.Context) error {
-	if out, err := docker(ctx, "start", s.name); err != nil {
-		return fmt.Errorf("docker start: %s", out)
-	}
-	return waitFor("LiveKit to answer again on "+s.apiURL, 60*time.Second, func() (bool, string) {
-		resp, err := probeClient.Get(s.apiURL) // #nosec G107 -- the container this run started
-		if err != nil {
-			return false, unwrapURLError(err).Error()
-		}
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode)
-	})
-}
-
-// remove removes the container, running or not, by its id. It is safe to call
-// twice. When docker run never reported an id (it was interrupted), the id is
-// looked up by the name and label this run gave the container.
-func (s *livekitServer) remove() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	id := s.id
-	if id == "" {
-		out, _ := docker(ctx, "ps", "-aq", "--no-trunc", "--filter", "name=^/"+s.name+"$", "--filter", "label="+containerLabel())
-		id = lastField(out)
-	}
-	if id != "" {
-		_, _ = docker(ctx, "rm", "-f", id)
-	}
-}
-
-// lastField is the last whitespace-separated word of s.
-func lastField(s string) string {
-	f := strings.Fields(s)
-	if len(f) == 0 {
-		return ""
-	}
-	return f[len(f)-1]
-}
-
-// ---------------------------------------------------------------- lk download
-
-// errUnreachable marks a download that failed for want of a network: the one
-// failure of fetchLK that is a reason to skip.
-var errUnreachable = errors.New("the download could not be completed")
-
-// checksumError is a downloaded file that is not the one pinned in this
-// file. That is evidence of tampering or of a wrong pin, never of a missing
-// network, so the run fails on it everywhere and does not skip.
-type checksumError struct{ msg string }
-
-func (e *checksumError) Error() string { return e.msg }
-
-// fetchLK downloads the pinned lk release, checks its SHA-256 against the
-// sum written in this file, and extracts the lk binary into dir.
-func fetchLK(ctx context.Context, dir string) (string, error) {
-	key := runtime.GOOS + "_" + runtime.GOARCH
-	want, ok := lkSHA256[key]
-	if !ok {
-		return "", fmt.Errorf("no lk %s release is pinned for %s", lkVersion, key)
-	}
-	url := fmt.Sprintf("https://github.com/livekit/livekit-cli/releases/download/v%s/lk_%s_%s.tar.gz", lkVersion, lkVersion, key)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download lk: %w: %w", errUnreachable, unwrapURLError(err))
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 500 {
-		return "", fmt.Errorf("download lk: %w: HTTP %d", errUnreachable, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download lk: the pinned release URL answered HTTP %d", resp.StatusCode)
-	}
-	archive, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
-	if err != nil {
-		return "", fmt.Errorf("download lk: %w: %w", errUnreachable, err)
-	}
-	sum := sha256.Sum256(archive)
-	if got := hex.EncodeToString(sum[:]); got != want {
-		return "", &checksumError{fmt.Sprintf("lk %s archive has SHA-256 %s, want %s: refusing to run it", lkVersion, got, want)}
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		return "", err
-	}
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			return "", errors.New("lk archive has no lk binary")
-		}
-		if err != nil {
-			return "", err
-		}
-		if hdr.Name != "lk" && hdr.Name != "./lk" {
-			continue
-		}
-		path := filepath.Join(dir, "lk")
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700) // #nosec G302 G304 -- a path under this program's temp dir; the downloaded lk must be executable
-		if err != nil {
-			return "", err
-		}
-		if _, err := io.Copy(f, io.LimitReader(tr, 300<<20)); err != nil { // #nosec G110 -- bounded
-			_ = f.Close()
-			return "", err
-		}
-		return path, f.Close()
-	}
-}
-
-// ------------------------------------------------------------ headless client
-
-// headless is `lk room join` publishing silence, joined through a relay that
-// substitutes the token conchd issued for the one lk signed itself.
-type headless struct {
-	relay   *relay
-	cmd     *exec.Cmd
-	logPath string
-	done    chan struct{}
-}
-
-// startHeadless starts lk as a participant admitted by token alone.
-func (h *harness) startHeadless(lkBin, oggPath, lkHostPort, token string) (*headless, error) {
-	rl, err := startRelay(lkHostPort, token)
-	if err != nil {
-		return nil, err
-	}
-	dir, err := h.mkdir("lk-")
-	if err != nil {
-		rl.Close()
-		return nil, err
-	}
-	logPath := filepath.Join(dir, "lk.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- a path under this program's temp dir
-	if err != nil {
-		rl.Close()
-		return nil, err
-	}
-	// A throwaway key pair LiveKit has never heard of: lk signs its own token
-	// with it, and the relay replaces that token before LiveKit sees it.
-	cmd := groupStart(lkBin, "--url", rl.url(), "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000",
-		"room", "join", "--identity", "relay-placeholder", "--publish", oggPath, "relay-placeholder-room")
-	// lk reads livekit.toml from its working directory and LIVEKIT_* from its
-	// environment. It gets an empty directory of its own and PATH, HOME and
-	// TMPDIR, and nothing else of the caller's.
-	cmd.Dir = dir
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir}
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		rl.Close()
-		return nil, err
-	}
-	hl := &headless{relay: rl, cmd: cmd, logPath: logPath, done: make(chan struct{})}
-	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(hl.done) }()
-	h.onCleanup(hl.stop)
-	h.mu.Lock()
-	h.logs = append(h.logs, namedFile{"lk output", logPath, false})
-	h.headless = append(h.headless, hl)
-	h.mu.Unlock()
+	h.remember(hl)
 	return hl, nil
 }
 
-func (hl *headless) stop() {
-	_ = killGroup(hl.cmd)
-	<-hl.done
-	hl.relay.Close()
+// startLKVia is startLK through a relay already started (lkit.Kit.StartLKVia),
+// which it owns from then on: stopping the participant closes it.
+func (h *harness) startLKVia(lkBin string, rl *lkit.Relay, options ...string) (*lkit.Headless, error) {
+	hl, err := h.kit.StartLKVia(lkBin, rl, options...)
+	if err != nil {
+		return nil, err
+	}
+	h.remember(hl)
+	return hl, nil
 }
 
-// registerTokens makes the tokens LiveKit sent this participant known to the
-// leak scan.
-func (hl *headless) registerTokens(h *harness) {
-	for _, t := range hl.relay.issuedTokens() {
-		h.secret("a LiveKit-issued token", t)
-	}
-}
-
-func (hl *headless) exited() bool {
-	select {
-	case <-hl.done:
-		return true
-	default:
-		return false
-	}
-}
-
-func (hl *headless) tail(h *harness) string {
-	data, _ := os.ReadFile(hl.logPath) // #nosec G304 -- a path under this program's temp dir
-	s := string(data)
-	if len(s) > 1500 {
-		s = s[len(s)-1500:]
-	}
-	return h.redact(s)
+// remember keeps a participant, whose LiveKit-issued tokens become secrets
+// before the final scan.
+func (h *harness) remember(hl *lkit.Headless) {
+	h.mu.Lock()
+	h.headless = append(h.headless, hl)
+	h.mu.Unlock()
 }

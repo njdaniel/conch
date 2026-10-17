@@ -278,10 +278,42 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		writeUnauthenticated(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, schema.WhoAmIResponseV1{
-		ID:   caller.ID,
-		Kind: schema.PrincipalKind(caller.Kind),
-		Name: caller.Name,
-		Role: schema.PrincipalRole(caller.Role),
-	})
+	voice := voiceAllowed(caller)
+	resp := schema.WhoAmIResponseV1{
+		ID:            caller.ID,
+		Kind:          schema.PrincipalKind(caller.Kind),
+		Name:          caller.Name,
+		Role:          schema.PrincipalRole(caller.Role),
+		ServerVersion: s.cfg.Version,
+		MayInvite:     mayInvite(caller),
+		VoiceAllowed:  &voice,
+	}
+	// Only a person with an allowance is told what is left of it (issue
+	// #468): operators have none, and nobody else may invite.
+	if resp.MayInvite && !isOperator(caller) {
+		ctx := r.Context()
+		n, err := s.store.InvitesRemaining(ctx, caller.ID, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, s.now())
+		if err != nil {
+			slog.ErrorContext(ctx, "whoami: count invites remaining failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		remaining := int64(n)
+		resp.InvitesRemaining = &remaining
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// voiceAllowed is what whoami says about voice (issue #468): what the
+// person's access grants, and false for an agent, which every voice route
+// refuses whatever its grant says (voicePresenceChannel).
+func voiceAllowed(p store.Principal) bool {
+	return p.Kind == store.PrincipalHuman && p.VoiceAllowed
+}
+
+// mayInvite is what whoami says about making invites (issue #437): true for
+// an operator and for a person granted the right. Only people make invites,
+// so an agent is told false whatever its role; the store refuses it anyway.
+func mayInvite(p store.Principal) bool {
+	return p.Kind == store.PrincipalHuman && (isOperator(p) || p.MayInvite)
 }

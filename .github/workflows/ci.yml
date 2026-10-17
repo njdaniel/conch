@@ -22,7 +22,7 @@ jobs:
 
       - name: gofmt
         run: |
-          out=$(gofmt -l .)
+          out=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
 
       # No tracked text file may hold a bidi control, a line or paragraph
@@ -58,15 +58,38 @@ jobs:
           verify: false
 
       - name: go test
-        run: go test -race ./...
+        # internal/server alone takes 7–10 minutes under -race on a runner,
+        # past go test's default 10-minute timeout per package (#471);
+        # making it faster is #472.
+        run: go test -race -timeout 25m ./...
 
       - name: schema compatibility
         env:
           SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/schema-compat.sh
 
+      # The web client's wire types are generated from pkg/schema (#348): this
+      # fails when web/src/schema/generated*.ts differ from what
+      # `go generate ./pkg/schema` writes. Go only. The script's own test
+      # runs first.
+      - name: generated TypeScript wire types
+        run: |
+          ./scripts/schema-ts-check-test.sh
+          ./scripts/schema-ts-check.sh
+
       - name: dependency gate
         run: ./scripts/depgate.sh
+
+      # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
+      # verify, and the backup, restore, upgrade and rollback scripts against
+      # a real conchd. sqlite3 is a host prerequisite of those scripts; the
+      # runner image has shellcheck and systemd-analyze, and with CI set the
+      # test fails rather than skips when one is missing.
+      - name: deployment scripts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
+          ./scripts/deploy-scripts-test.sh
 
       # The Rust voice client under voice/ (ADR-006). The toolchain script
       # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
@@ -108,6 +131,107 @@ jobs:
       - name: rust check
         run: make rust-check
 
+      # The web client under web/ (ADR-007). setup-node installs exactly the
+      # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
+      # web-check installs with npm ci only, and downloads no browser.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web check
+        run: make web-check
+
+  web-embedded:
+    # The web client built into conchd (issue #347): make build-web-embedded
+    # builds bin/conchd with -tags conchweb, and this job starts it with no
+    # --web-dir and checks what an operator who downloaded a release binary
+    # gets: /app/ with the security headers and no-store on the index, a
+    # hashed asset as immutable, `conchd version` saying so, and --no-web
+    # turning it off. The untagged build is what the check job tests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build
+        run: make build-web-embedded
+
+      - name: version says embedded
+        run: |
+          bin/conchd version | tee /dev/stderr | grep -qx 'web: embedded'
+
+      - name: serve /app/ from the binary
+        run: |
+          set -eu
+          data=$(mktemp -d)
+          log=$(mktemp)
+          bin/conchd serve --data "$data" --listen 127.0.0.1:0 > "$log" 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          addr=""
+          for _ in $(seq 1 50); do
+            addr=$(sed -n 's/^conchd .* listening on \(127\.0\.0\.1:[0-9]*\) .*/\1/p' "$log")
+            [ -n "$addr" ] && break
+            sleep 0.2
+          done
+          [ -n "$addr" ] || { echo "conchd did not start"; cat "$log"; exit 1; }
+          grep -qx 'conchd web: embedded' "$log"
+
+          # headers <path> <status>: writes the response headers to $hdr.
+          hdr=$(mktemp)
+          check() { # path want-status header-regex...
+            path=$1; want=$2; shift 2
+            got=$(curl -s -o /dev/null -D "$hdr" -w '%{http_code}' "http://$addr$path")
+            [ "$got" = "$want" ] || { echo "GET $path = $got, want $want"; exit 1; }
+            for re in "$@"; do
+              grep -iq "$re" "$hdr" || { echo "GET $path: no header matching $re"; cat "$hdr"; exit 1; }
+            done
+          }
+          check /app/ 200 \
+            "^content-security-policy: default-src 'self'" \
+            '^cache-control: no-store' \
+            '^x-content-type-options: nosniff' \
+            '^referrer-policy: no-referrer'
+          asset=$(ls internal/web/dist/assets | head -n 1)
+          [ -n "$asset" ] || { echo "the build has no hashed asset"; exit 1; }
+          check "/app/assets/$asset" 200 '^cache-control: public, max-age=31536000, immutable'
+          check /app/assets/missing.js 404
+          check / 302 '^location: /app/'
+
+      - name: --no-web turns it off
+        run: |
+          set -eu
+          data=$(mktemp -d)
+          log=$(mktemp)
+          bin/conchd serve --no-web --data "$data" --listen 127.0.0.1:0 > "$log" 2>&1 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          addr=""
+          for _ in $(seq 1 50); do
+            addr=$(sed -n 's/^conchd .* listening on \(127\.0\.0\.1:[0-9]*\) .*/\1/p' "$log")
+            [ -n "$addr" ] && break
+            sleep 0.2
+          done
+          [ -n "$addr" ] || { echo "conchd did not start"; cat "$log"; exit 1; }
+          # Authentication is on, so a route that does not exist answers 401
+          # (nothing is exempt); what matters is that it is not 200 or 302.
+          for p in /app/ /; do
+            got=$(curl -s -o /dev/null -w '%{http_code}' "http://$addr$p")
+            case "$got" in 200|301|302) echo "GET $p = $got with --no-web"; exit 1;; esac
+          done
+
   rust-advisories:
     # Known advisories against the crates conch-voice links (RustSec). A job of
     # its own and not part of check: it reads a database on the network, and a
@@ -120,6 +244,25 @@ jobs:
 
       - name: advisories
         run: ./scripts/voice-advisories.sh
+
+  web-advisories:
+    # Known advisories (high or critical) against the packages web/dist ships:
+    # the runtime dependencies, so development tools are left out. A job of
+    # its own and not part of check, as rust-advisories is: it reads the npm
+    # registry's database, and a new advisory turns it red with no change
+    # here. Red means look at it, and update the package or say why not.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+
+      - name: advisories
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
 
   dogfood-check:
     # The P1 release canary (ROADMAP success criterion,
@@ -161,6 +304,26 @@ jobs:
       - name: nets-check
         run: go run ./e2e/nets
 
+  conch-bot-check:
+    # conch-adapter against a real conchd, answering with the fixture
+    # e2e/p3-local/fixtures/echo.sh (never a model): the reply loop in every
+    # audience, the adapter's session and one run per reply seen through the
+    # API, a clean stop that ends the session and releases the lock, and the old
+    # name conch-bot still starting with one deprecation line. It runs on every
+    # pull request and every push to main: the adapter and the session, run and
+    # intervention tools it calls move together.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: conch-bot-check
+        run: go run ./e2e/conch-bot
+
   p2-hardening-check:
     # The P2 exit gate (issue #81): a database written by a P1 conchd is
     # upgraded, and real conchd/conch binaries are driven through everything
@@ -182,6 +345,111 @@ jobs:
 
       - name: p2-hardening-check
         run: go run ./e2e/p2-hardening
+
+  p3-local-check:
+    # The automated P3 suite (issues #283 and #284): builds conchd, conch and
+    # conch-adapter and the web client, starts a disposable conchd with
+    # --session-stale 2s --session-offline 5s, creates the test community and
+    # reads it back through the API, checks that each participant can connect
+    # and send, and then runs the thirteen rows of the brief's test table
+    # (P3-01 to P3-13): two terminal clients on pseudo-terminals, the
+    # scripted agents as real conch-adapter processes, and the API only to
+    # look and to see the requests no client makes refused. It tears
+    # everything down and fails if anything is left behind. Without --keep,
+    # so nothing outlives the job; P3-13 runs only with --real-adapter and the
+    # claude program on PATH, which this job has neither of, and is reported
+    # as not run. It runs on every pull request and every push to main, and
+    # release.yml runs it before it builds. Its own tests (reset, interrupts,
+    # the HOME sentinel, the walkthrough's commands, the screen the terminal
+    # driver reads) run in the check job's go test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Labels the LiveKit container of the browser voice spec, so the clean-up
+      # step below removes only this run's.
+      VOICE_CHECK_RUN: web-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: p3-local
+        run: go run ./e2e/p3-local
+
+      # The same suite again with conchd bound to the runner's own private
+      # IPv4 (eth0) and every client given that address, to catch an address
+      # assumption in the server, the runner or the clients (issue #382). It
+      # proves addressing, not another machine. The run refuses to start where
+      # there is no such address, and never falls back to loopback.
+      - name: p3-local, non-loopback
+        run: go run ./e2e/p3-local --non-loopback
+
+  web-e2e:
+    # The browser suite (issue #285, D7): the web client in Chromium, against
+    # the fixture community of e2e/p3-local (started with --keep and a
+    # temporary root by the suite's own global setup, removed by its teardown,
+    # which runs when a test fails too). Browser voice (issue #442) also runs
+    # here: the spec starts the pinned LiveKit image in Docker, which the
+    # runner has, on Chromium's fake microphone; with CI set it fails, not
+    # skips, if Docker is missing. Playwright is pinned in
+    # web/package.json and installs the Chromium that version needs. A job of
+    # its own and not part of check, which needs no browser. It runs on every
+    # pull request and every push to main. Scripted agents only: the claude
+    # program is neither on this runner nor ever run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        working-directory: web
+        run: npm ci --no-audit
+
+      # --with-deps installs the system libraries Chromium needs, with sudo,
+      # which the runner has. Locally, `npx playwright install chromium` alone.
+      - name: browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: web-e2e
+        run: make web-e2e
+
+      # The spec removes its own container on every path; this is for the case
+      # where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-web-voice=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+      # The traces hold this run's fixture credentials (Bearer headers, the
+      # filled sign-in value). They are throwaway: `make web-e2e` runs the
+      # global teardown, which stops the server and removes the root, before
+      # this step, so by the time anyone downloads a trace they open nothing.
+      - name: traces of the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-test-results
+          path: web/test-results
+          retention-days: 7
+          if-no-files-found: ignore
 
   voice-check:
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
@@ -244,3 +512,36 @@ jobs:
       - name: remove any leftover LiveKit container
         if: always()
         run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+  isolation-check:
+    # The private alpha's cross-group check (issue #447): two groups on one
+    # conchd, a route-table-driven matrix proving a member of one reaches
+    # nothing of the other over REST, the sockets and LiveKit's media (the
+    # pinned image in Docker, the pinned lk), and a revoked tester's sockets
+    # and LiveKit participant gone within their bounds. It runs on every pull
+    # request and every push to main, like check. CI=true makes a skip a
+    # failure: without Docker, the image or lk this job is red, not quietly
+    # green. A run takes well under a minute once the image and lk are
+    # fetched; the timeout leaves room for a slow pull.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      ISOLATION_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: isolation-check
+        run: go run ./e2e/isolation
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-isolation-check=$ISOLATION_CHECK_RUN" | xargs -r docker rm -f

@@ -29,6 +29,9 @@ func TestVoiceGoldenFixtures(t *testing.T) {
 		{name: "transmit report, started, channel-wide", file: "voice-transmit-report-v1-started.json", new: func() any { return new(VoiceTransmitReportV1) }},
 		{name: "transmit report, stopped, channel-wide", file: "voice-transmit-report-v1-stopped.json", new: func() any { return new(VoiceTransmitReportV1) }},
 		{name: "transmit report, started, net audience", file: "voice-transmit-report-v1-net.json", new: func() any { return new(VoiceTransmitReportV1) }},
+		{name: "presence, one participant sharing with sound", file: "voice-presence-v1-sharing.json", new: func() any { return new(VoicePresenceV1) }},
+		{name: "share claim", file: "voice-share-v1.json", new: func() any { return new(VoiceShareV1) }},
+		{name: "presence, as the sharer reads it after an operator stopped the share", file: "voice-presence-v1-share-ended.json", new: func() any { return new(VoicePresenceV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,6 +57,9 @@ func TestVoiceErrorCodes(t *testing.T) {
 		{ErrorCodeVoiceRequiresAuth, "voice_requires_auth"},
 		{ErrorCodeVoiceNoSession, "voice_no_session"},
 		{ErrorCodeVoiceReportRateLimited, "voice_report_rate_limited"},
+		{ErrorCodeVoiceNotAllowed, "voice_not_allowed"},
+		{ErrorCodeVoiceShareBusy, "voice_share_busy"},
+		{ErrorCodeVoiceShareStale, "voice_share_stale"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -208,6 +214,21 @@ func TestVoiceParticipantValidate(t *testing.T) {
 			wantErr: "voice participant 3 cannot be transmitting without can_publish",
 		},
 		{name: "zero joined_at", mutate: func(p *VoiceParticipant) { p.JoinedAt = Timestamp{} }, wantErr: "voice participant joined_at is required"},
+
+		// The screen share (issue #443).
+		{name: "valid, sharing", mutate: func(p *VoiceParticipant) { p.Sharing = true }},
+		{name: "valid, sharing with sound", mutate: func(p *VoiceParticipant) { p.Sharing, p.SharingAudio = true, true }},
+		{name: "valid, sharing and silent", mutate: func(p *VoiceParticipant) { p.Transmitting, p.Sharing = false, true }},
+		{
+			name:    "listen-only but sharing",
+			mutate:  func(p *VoiceParticipant) { p.CanPublish, p.Transmitting, p.Sharing = false, false, true },
+			wantErr: "voice participant 3 cannot be sharing without can_publish",
+		},
+		{
+			name:    "sound of a share without the share",
+			mutate:  func(p *VoiceParticipant) { p.SharingAudio = true },
+			wantErr: "voice participant 3 cannot have sharing_audio without sharing",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,6 +271,19 @@ func TestVoicePresenceRoomValidate(t *testing.T) {
 			name:    "duplicate principal",
 			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].PrincipalID = 3 },
 			wantErr: "voice room lists principal 3 more than once",
+		},
+		{name: "valid, one participant sharing", mutate: func(r *VoicePresenceRoom) { r.Participants[1].Sharing = true }},
+		{
+			name: "two participants sharing",
+			mutate: func(r *VoicePresenceRoom) {
+				r.Participants[0].Sharing, r.Participants[1].Sharing = true, true
+			},
+			wantErr: "voice room lists principals 3 and 7 as sharing; a room has one share at a time",
+		},
+		{
+			name:    "a participant's share is checked in the room",
+			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].SharingAudio = true },
+			wantErr: "voice participant 7 cannot have sharing_audio without sharing",
 		},
 	}
 	for _, tt := range tests {
@@ -327,6 +361,25 @@ func TestVoicePresenceV1Validate(t *testing.T) {
 			wantErr: "voice participant 3 cannot be transmitting without can_publish",
 		},
 		{name: "room audience malformed", mutate: func(p *VoicePresenceV1) { p.Rooms[0].Audience = &Audience{Kind: AudienceKindNet} }, wantErr: "audience net_id must be positive, got 0"},
+
+		{name: "valid, the sharer's own share ended", mutate: func(p *VoicePresenceV1) { p.ShareEnded = validVoiceShareEnded() }},
+		{
+			// A share stopped during an outage has ended all the same.
+			name:   "valid, share ended while unavailable",
+			mutate: func(p *VoicePresenceV1) { p.Available, p.Rooms, p.ShareEnded = false, nil, validVoiceShareEnded() },
+		},
+		{
+			name: "share ended when not configured",
+			mutate: func(p *VoicePresenceV1) {
+				p.Configured, p.Available, p.Rooms, p.ShareEnded = false, false, nil, validVoiceShareEnded()
+			},
+			wantErr: "voice presence cannot carry share_ended when not configured",
+		},
+		{
+			name:    "share ended with an unknown reason",
+			mutate:  func(p *VoicePresenceV1) { p.ShareEnded = validVoiceShareEnded(); p.ShareEnded.Reason = "kicked" },
+			wantErr: `voice share end reason "kicked" is not one of`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -430,6 +483,7 @@ func TestVoicePresenceTypesAreReached(t *testing.T) {
 		reflect.TypeOf(VoicePresenceV1{}),
 		reflect.TypeOf(VoicePresenceRoom{}),
 		reflect.TypeOf(VoiceParticipant{}),
+		reflect.TypeOf(VoiceShareEnded{}),
 		reflect.TypeOf(Audience{}),
 		reflect.TypeOf(Timestamp{}),
 	} {
@@ -559,6 +613,10 @@ func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
 		"audience", "participants", // a room
 		"kind", "net_id", "principal_ids", // an audience
 		"principal_id", "can_publish", "transmitting", "joined_at", // a participant
+		"sharing", "sharing_audio", // a participant's screen share (issue #443)
+		// Why the reader's own share ended (issue #487): in the sharer's
+		// document alone, and naming nobody.
+		"share_ended", "reason", "started_at", "ended_at",
 	}
 	for _, k := range want {
 		if !got[k] {
@@ -925,5 +983,185 @@ func TestVoiceTransmitReportFieldsAreAnExactList(t *testing.T) {
 	}
 	for k := range got {
 		t.Errorf("a transmit report can now carry %q, which is not on the reviewed list", k)
+	}
+}
+
+func TestVoiceShareV1Validate(t *testing.T) {
+	valid := func() VoiceShareV1 {
+		return VoiceShareV1{PrincipalID: 3, StartedAt: NewTimestamp(time.Date(2026, 10, 16, 12, 0, 4, 125e6, time.UTC)), Audio: true}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceShareV1)
+		wantErr string
+	}{
+		{name: "valid, with sound", mutate: func(*VoiceShareV1) {}},
+		{name: "valid, without sound", mutate: func(s *VoiceShareV1) { s.Audio = false }},
+		{name: "zero principal", mutate: func(s *VoiceShareV1) { s.PrincipalID = 0 }, wantErr: "voice share principal_id must be positive, got 0"},
+		{name: "negative principal", mutate: func(s *VoiceShareV1) { s.PrincipalID = -1 }, wantErr: "voice share principal_id must be positive, got -1"},
+		{name: "zero started_at", mutate: func(s *VoiceShareV1) { s.StartedAt = Timestamp{} }, wantErr: "voice share started_at is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := valid()
+			tt.mutate(&s)
+			assertValidation(t, s.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoiceShareEncoding: the claim always spells out audio, and its fields
+// are an exact list with no room and no token at any depth: it grants the
+// connection the caller already has, and nothing in it helps anyone join a
+// room.
+func TestVoiceShareEncoding(t *testing.T) {
+	raw, err := json.Marshal(VoiceShareV1{PrincipalID: 3, StartedAt: voiceJoinedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"audio":false`) {
+		t.Errorf("share without sound = %s, want audio:false", raw)
+	}
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoiceShareV1{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := map[string]bool{"principal_id": true, "started_at": true, "audio": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a share carries %v, want exactly %v", got, want)
+	}
+}
+
+// TestVoiceParticipantSharingIsOptional: a participant who is not sharing is
+// encoded exactly as before issue #443, so a document with nobody sharing is
+// byte for byte what an older server sent, and an older document reads as
+// nobody sharing.
+func TestVoiceParticipantSharingIsOptional(t *testing.T) {
+	raw, err := json.Marshal(validVoiceParticipant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sharing") {
+		t.Errorf("a participant who is not sharing encodes as %s, want no sharing fields", raw)
+	}
+	var back VoiceParticipant
+	if err := json.Unmarshal([]byte(`{"principal_id":3,"can_publish":true,"transmitting":false,"joined_at":"2026-10-09T12:00:00.000Z"}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Sharing || back.SharingAudio {
+		t.Errorf("an older participant decodes as sharing: %+v", back)
+	}
+}
+
+func validVoiceShareEnded() *VoiceShareEnded {
+	return &VoiceShareEnded{
+		Reason:    VoiceShareEndOperator,
+		StartedAt: NewTimestamp(time.Date(2026, 10, 16, 12, 0, 4, 125e6, time.UTC)),
+		EndedAt:   NewTimestamp(time.Date(2026, 10, 16, 12, 3, 40, 500e6, time.UTC)),
+	}
+}
+
+func TestVoiceShareEndReasonValues(t *testing.T) {
+	tests := []struct {
+		reason VoiceShareEndReason
+		want   string
+		valid  bool
+	}{
+		{VoiceShareEndSelf, "self", true},
+		{VoiceShareEndOperator, "operator", true},
+		{VoiceShareEndLeft, "left", true},
+		{VoiceShareEndAccessLost, "access_lost", true},
+		{VoiceShareEndRotated, "rotated", true},
+		{VoiceShareEndIdle, "idle", true},
+		{"", "", false},
+		{"Operator", "Operator", false},
+		{"kicked", "kicked", false},
+	}
+	for _, tt := range tests {
+		if string(tt.reason) != tt.want {
+			t.Errorf("reason = %q, want %q", tt.reason, tt.want)
+		}
+		if got := tt.reason.Valid(); got != tt.valid {
+			t.Errorf("%q.Valid() = %v, want %v", tt.reason, got, tt.valid)
+		}
+	}
+}
+
+func TestVoiceShareEndedValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceShareEnded)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*VoiceShareEnded) {}},
+		{name: "valid, ended the moment it started", mutate: func(e *VoiceShareEnded) { e.EndedAt = e.StartedAt }},
+		{name: "empty reason", mutate: func(e *VoiceShareEnded) { e.Reason = "" }, wantErr: `voice share end reason "" is not one of`},
+		{name: "zero started_at", mutate: func(e *VoiceShareEnded) { e.StartedAt = Timestamp{} }, wantErr: "voice share end started_at is required"},
+		{name: "zero ended_at", mutate: func(e *VoiceShareEnded) { e.EndedAt = Timestamp{} }, wantErr: "voice share end ended_at is required"},
+		{
+			name:    "ended before it started",
+			mutate:  func(e *VoiceShareEnded) { e.EndedAt = NewTimestamp(e.StartedAt.Time().Add(-time.Millisecond)) },
+			wantErr: "voice share end ended_at is before started_at",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := validVoiceShareEnded()
+			tt.mutate(e)
+			assertValidation(t, e.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoicePresenceShareEndedIsOptional: a document without share_ended, which
+// is every reader's but the sharer's, is encoded exactly as before issue #487,
+// and an older document reads as no share ended.
+func TestVoicePresenceShareEndedIsOptional(t *testing.T) {
+	raw, err := json.Marshal(validVoicePresenceV1())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "share_ended") {
+		t.Errorf("presence with no share ended encodes as %s, want no share_ended", raw)
+	}
+	var back VoicePresenceV1
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ShareEnded != nil {
+		t.Errorf("an older document decodes with share_ended %+v", back.ShareEnded)
+	}
+}
+
+// TestParseVoiceShareClaim: the release parameter reads the started_at a claim
+// gave, in any RFC 3339 form, as the same instant at millisecond precision,
+// and refuses anything else.
+func TestParseVoiceShareClaim(t *testing.T) {
+	want := NewTimestamp(time.Date(2026, 10, 16, 12, 0, 4, 125e6, time.UTC))
+	tests := []struct {
+		name    string
+		in      string
+		wantErr string
+	}{
+		{name: "as the claim wrote it", in: "2026-10-16T12:00:04.125Z"},
+		{name: "another offset", in: "2026-10-16T14:00:04.125+02:00"},
+		{name: "finer precision", in: "2026-10-16T12:00:04.125999Z"},
+		{name: "empty", in: "", wantErr: "invalid timestamp"},
+		{name: "not a time", in: "yesterday", wantErr: "invalid timestamp"},
+		{name: "a number", in: "1792152004125", wantErr: "invalid timestamp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseVoiceShareClaim(tt.in)
+			assertValidation(t, err, tt.wantErr)
+			if tt.wantErr == "" && got != want {
+				t.Errorf("ParseVoiceShareClaim(%q) = %v, want %v", tt.in, got.Time(), want.Time())
+			}
+		})
+	}
+	if VoiceShareClaimParam != "started_at" {
+		t.Errorf("VoiceShareClaimParam = %q", VoiceShareClaimParam)
 	}
 }

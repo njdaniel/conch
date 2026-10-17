@@ -1,0 +1,39 @@
+# Direct dependencies of the web client under web/ (ADR-007), approved by Nick
+# (ADR-000: new dependencies require his sign-off).
+# One package name per line; comments and blank lines ignored.
+# Adding a line here requires Nick's sign-off in the same PR.
+# Enforced by scripts/web-depgate.sh. Transitive packages follow these, pinned
+# by web/package-lock.json; scripts/web-licences.sh checks their licences.
+#
+# Proposed with the toolchain (issue #279), awaiting Nick's sign-off on that PR.
+
+# Runtime: the only code shipped in web/dist besides the client's own.
+react
+react-dom
+
+# The compiler. Typechecks only; Vite strips the types when it builds.
+typescript
+# Builds web/dist and serves the page in development.
+vite
+# Vite's JSX transform and React fast refresh.
+@vitejs/plugin-react
+# Unit tests, run by Vite's own transform.
+vitest
+# A DOM for the unit tests, which need no browser.
+jsdom
+# Renders a component in a test and finds what it shows.
+@testing-library/react
+# Lint, with typescript-eslint's typed rules.
+eslint
+typescript-eslint
+# React's types: React ships none of its own.
+@types/react
+@types/react-dom
+
+# The browser suite (issue #285, D7): drives the client in Chromium. Run by
+# `make web-e2e` and its own CI job, never by `make check`.
+@playwright/test
+
+# Browser voice (issue #442): the LiveKit JavaScript SDK (Apache-2.0), used
+# only from src/voice/. Approved by Nick 2026-10-16 (see #420 and #442).
+livekit-client

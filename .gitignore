@@ -9,6 +9,15 @@
 # (scripts/voice-env.sh).
 /voice/target/
 
+# Web client (web/). npm ci installs node_modules from package-lock.json, which
+# is committed; dist is what `make web-build` produces for conchd --web-dir.
+/web/node_modules/
+/web/dist/
+
+# The copy of web/dist that conchd embeds (-tags conchweb); `make web-embed`
+# makes it.
+/internal/web/dist/
+
 # Go
 *.test
 *.out
@@ -27,3 +36,6 @@ coverage.*
 .idea/
 .vscode/
 *.swp
+
+# Browser suite output (web/e2e, issue #285): traces of failed tests.
+/web/test-results/

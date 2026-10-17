@@ -195,6 +195,12 @@ func (s *Server) createRun(ctx context.Context, call sessionCall, sessionID int6
 		// Removed from the channel, or lost sight of the message, since the
 		// checks above.
 		return schema.RunV1{}, callChannelMissing
+	case errors.Is(err, store.ErrTooManyRuns):
+		return schema.RunV1{}, callTooManyRuns
+	case errors.Is(err, store.ErrTooManyCredentialRuns):
+		return schema.RunV1{}, callTooManyCredRuns
+	case errors.Is(err, store.ErrSessionOffline):
+		return schema.RunV1{}, callSessionOffline
 	case err != nil:
 		slog.ErrorContext(ctx, "runs: create failed", "principal", call.caller.ID, "error", err)
 		return schema.RunV1{}, callInternal
@@ -369,6 +375,8 @@ func (s *Server) setRunState(ctx context.Context, call sessionCall, run store.Ru
 		return schema.RunV1{}, callRunMissing
 	case errors.Is(err, store.ErrInvalidTransition):
 		return schema.RunV1{}, refuse(http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run cannot move from its current state to that one")
+	case errors.Is(err, store.ErrSessionOffline):
+		return schema.RunV1{}, callSessionOffline
 	case err != nil:
 		slog.ErrorContext(ctx, "runs: set state failed", "principal", call.caller.ID, "error", err)
 		return schema.RunV1{}, callInternal
@@ -429,6 +437,10 @@ func (s *Server) appendRunActivity(ctx context.Context, call sessionCall, run st
 	switch {
 	case errors.Is(err, store.ErrRunNotFound):
 		return schema.AgentActivityV1{}, callRunMissing
+	case errors.Is(err, store.ErrTooMuchActivity):
+		return schema.AgentActivityV1{}, callTooMuchActivity
+	case errors.Is(err, store.ErrSessionOffline):
+		return schema.AgentActivityV1{}, callSessionOffline
 	case errors.Is(err, store.ErrInvalidTransition):
 		return schema.AgentActivityV1{}, refuse(http.StatusConflict, schema.ErrorCodeInvalidTransition, "the run has ended and takes no more activity")
 	case err != nil:

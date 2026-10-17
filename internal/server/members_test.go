@@ -159,6 +159,12 @@ func TestChannelContentLeak(t *testing.T) {
 		// Transmit reports (issue #135) answer as the session endpoint does:
 		// a non-member is told nothing, whatever the body says.
 		{"voice transmit report", "POST", "/v1/channels/%s/voice/transmit", `{"state":"started"}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// Screen share (issue #443): claiming answers as the session endpoint
+		// does. Stopping lets an operator through, member or not (moderation
+		// is theirs, and they may see every channel anyway); any other
+		// non-member is told nothing.
+		{"voice share claim", "POST", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice share stop", "DELETE", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, http.StatusServiceUnavailable}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.
@@ -175,6 +181,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/members/{principal_id}":            "operator-only membership write; covered by the role matrix",
 		"POST /v2/channels/{channel}/files":                               "humans-only upload: an agent is refused before the channel is looked up; covered by TestFileUploadRefusals and the file visibility matrix",
 		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"PUT /v1/channels/{channel}/read-state":                           "humans-only: an agent is refused 403 before the channel is looked up, whichever channel it names, and a human non-member gets the unknown-channel 404; covered by TestReadStatePut",
 		"POST /v1/ws-tickets":                                             "names no channel (it only matches the \"/ws\" test above by its spelling); a ticket opens the same v2 socket, which is checked per channel at the upgrade by the row above and by TestWSTicketOpensSocket",
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
@@ -847,7 +854,8 @@ func TestListChannelMembersNameAndKind(t *testing.T) {
 			for _, m := range raw.Members {
 				for k := range m {
 					switch k {
-					case "principal_id", "added_by", "created_at", "name", "kind":
+					// can_decide is a person's right to decide approvals (#450).
+					case "principal_id", "added_by", "created_at", "name", "kind", "can_decide":
 					default:
 						t.Errorf("unexpected key %q in member entry", k)
 					}

@@ -1,0 +1,8 @@
+{
+  "dry_run": false,
+  "count": 2,
+  "principal_ids": [
+    9,
+    11
+  ]
+}

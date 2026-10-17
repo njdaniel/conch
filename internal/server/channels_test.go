@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -180,7 +179,7 @@ func TestListChannels(t *testing.T) {
 }
 
 func TestListChannelsStoreFailure(t *testing.T) {
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	st, err := store.Open(context.Background(), newTestDBPath(t))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

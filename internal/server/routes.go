@@ -26,6 +26,9 @@ func (s *Server) routeTable() []route {
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
 		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
+		// Renaming (issue #441): operators rename anyone, a person themselves
+		// (checked in the handler).
+		rt("PUT /v1/principals/{id}/name", accessOperatorOrSelf, hf(s.handleRenamePrincipal)),
 		rt("POST /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessage)),
 		rt("GET /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessages)),
 		rt("POST /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV1)),
@@ -57,9 +60,16 @@ func (s *Server) routeTable() []route {
 		// Transmit reports (issue #135): a client reports each press and
 		// release. Human members who hold a session; checked in the handler.
 		rt("POST /v1/channels/{channel}/voice/transmit", accessAuthenticated, hf(s.handleVoiceTransmit)),
+		// Screen share (issue #443): a member who holds a session claims the
+		// room's one share; the sharer or an operator (member or not) stops
+		// it. Checked in the handlers; see voice_share.go.
+		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
+		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
-		rt("GET /v1/voice/ws", accessAuthenticated, hf(s.handleVoiceWS)),
+		// Takes ?ticket= (issue #442): a browser cannot set a header on a
+		// socket. The credential and membership re-checks are unchanged.
+		{pattern: "GET /v1/voice/ws", access: accessAuthenticated, handler: hf(s.handleVoiceWS), acceptsTicket: true},
 		// Sessions (issue #265). Any caller with a credential; the session
 		// routes act on the caller's own sessions (by credential) and the
 		// list is a membership-gated read. Checked in the handlers.
@@ -85,6 +95,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
 		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
 		rt("POST /v1/interventions/{id}/ack", accessAuthenticated, hf(s.handleAckIntervention)),
+		// Read state (issue #351). People only (an agent gets 403
+		// human_required, in the handler); the caller's own marks, per
+		// principal. See read_state.go.
+		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
+		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),
@@ -92,14 +107,72 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/principals/{id}/credentials", accessOperator, hf(s.handleListCredentials)),
 		rt("POST /v1/credentials/{credential_id}/rotate", accessOperator, hf(s.handleRotateCredential)),
 		rt("DELETE /v1/credentials/{credential_id}", accessOperator, hf(s.handleRevokeCredential)),
+		// Signing out (issue #439): the caller revokes the credential the
+		// request came with. More specific than the route above, so the mux
+		// never hands "current" to it as an id.
+		rt("DELETE /v1/credentials/current", accessAuthenticated, hf(s.handleRevokeCurrentCredential)),
+		// Your sign-ins (issue #496): the caller lists its own live
+		// credentials and ends any one of them by id; another's id is 404,
+		// as one never issued (checked in the store). There is no GET of one
+		// credential, and ending one has a segment more than the operator's
+		// revoke above, so neither route meets another in the mux.
+		rt("GET /v1/credentials/mine", accessAuthenticated, hf(s.handleListOwnCredentials)),
+		rt("DELETE /v1/credentials/mine/{id}", accessAuthenticated, hf(s.handleRevokeOwnCredential)),
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
-		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperator, hf(s.handleRevokeAllCredentials)),
+		// Deleting an account is disabling and hiding it (issue #445): one
+		// principal, or every principal from an invite or with a name
+		// prefix. The list shows them all, hidden ones on request. The bulk
+		// route has one segment fewer than the per-id ones, so the two never
+		// meet in the mux; POST /v0/principals is another version.
+		rt("POST /v1/principals/{id}/hide", accessOperator, hf(s.handleHidePrincipal)),
+		rt("POST /v1/principals/hide", accessOperator, hf(s.handleHidePrincipals)),
+		rt("GET /v1/principals", accessOperator, hf(s.handleListPrincipals)),
+		// Operators, or the principal itself: "sign out everywhere" (issue
+		// #439; checked in the handler).
+		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
 		rt("GET /v1/audit", accessOperator, hf(s.handleExportAudit)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
 		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),
+		// Invites (issue #437). Making, listing and closing one's own are for
+		// people (an agent gets 403 human_required, in the handler). Preview
+		// and redeem are exempt: whoever holds a code may ask what it grants
+		// and use it. They carry the code in the body only, are rate-limited
+		// per client address before any store work, and the store decides
+		// everything else. See invites.go.
+		rt("POST /v1/invites", accessAuthenticated, hf(s.handleCreateInvite)),
+		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
+		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
+		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
+		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
+		// Operator administration of invites (issue #438): who joined through
+		// an invite, disabling them or everyone a person invited, the right to
+		// invite, and the pause switch. Operators only; GET /v1/invites and
+		// DELETE /v1/invites/{id} above serve operators everyone's invites.
+		rt("GET /v1/invites/{id}/principals", accessOperator, hf(s.handleInviteJoiners)),
+		rt("POST /v1/invites/{id}/disable-joiners", accessOperator, hf(s.handleDisableJoiners)),
+		rt("POST /v1/principals/{id}/disable-invitees", accessOperator, hf(s.handleDisableInvitees)),
+		rt("PUT /v1/principals/{id}/invite-permission", accessOperator, hf(s.handleInvitePermission)),
+		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
+		rt("PUT /v1/invites/settings", accessOperator, hf(s.handlePutInviteSettings)),
+		// Sign-in links (issue #493): an operator makes a one-time link that
+		// signs a member back into the same account. Preview and redeem are
+		// exempt, as an invite's are, and limited the same way. See
+		// sign_in_links.go.
+		rt("POST /v1/principals/{id}/sign-in-links", accessOperator, hf(s.handleCreateSignInLink)),
+		rt("POST /v1/sign-in-links/preview", accessExempt, hf(s.handlePreviewSignInLink)),
+		rt("POST /v1/sign-in-links/redeem", accessExempt, hf(s.handleRedeemSignInLink)),
+		// Closing one that leaked, without disabling its person.
+		rt("DELETE /v1/sign-in-links/{id}", accessOperator, hf(s.handleCloseSignInLink)),
+		// Problem reports (issue #446). Sending one is for people (an agent
+		// gets 403 human_required, in the handler); reading and filing them
+		// is for operators. conchd never sends a report anywhere.
+		rt("POST /v1/reports", accessAuthenticated, hf(s.handleCreateReport)),
+		rt("GET /v1/reports", accessOperator, hf(s.handleListReports)),
+		rt("GET /v1/reports/{id}", accessOperator, hf(s.handleGetReport)),
+		rt("PUT /v1/reports/{id}", accessOperator, hf(s.handleUpdateReport)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust

@@ -52,3 +52,15 @@ allow-wildcard-paths = true
 [advisories]
 # Checked by a job of its own in CI (it needs the network and its result can
 # change with no change here), not by `make check`.
+# zip 0.6.6 reaches us only as a build-dependency of webrtc-sys-build 0.3.19
+# (livekit -> libwebrtc -> webrtc-sys [build]), whose only use of it is
+# download_webrtc(): extracting LiveKit's prebuilt archive when no libwebrtc
+# is given. scripts/voice-env.sh, which every build here sources, always sets
+# LK_CUSTOM_WEBRTC to the hash-checked library scripts/voice-pins.sh pins, so
+# that path never runs (#480). Drop these when upstream moves to zip >= 9
+# (#481).
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+]

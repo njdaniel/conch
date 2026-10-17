@@ -17,7 +17,8 @@ import (
 // lifecycle of schema.RunTransitionAllowed. Activity is the stream of what the
 // run did. The server records what the agent reports and never invents a
 // state or an outcome: nothing here changes a run when its session goes
-// stale, offline or ends.
+// stale or offline. The one exception is a session that ends, which fails its
+// open runs with outcome "session ended" (sessions.go, issue #402).
 //
 // Who may see a run is decided in audience.go, beside the message rule it is
 // built on, and every read of the runs and run_activity tables is there
@@ -34,6 +35,26 @@ const (
 	AuditRunEnded   = "run_ended"
 )
 
+// The bounds on what one session and one run may hold (issue #388). Nothing
+// else stops a misbehaving runtime from growing the runs and run_activity
+// tables, because the runs.manage rate limit is optional in a manifest. They
+// apply to every agent.
+const (
+	// MaxOpenRunsPerSession bounds the runs of one session that have not
+	// ended. Ended runs do not count, so ending one frees a slot.
+	MaxOpenRunsPerSession = 32
+	// MaxOpenRunsPerCredential bounds the runs that have not ended across the
+	// sessions of one credential that have not ended, live or offline: what
+	// the live-session and per-session bounds allow together (issue #402).
+	// Ending a session ends its runs, so ended sessions hold none. New sessions would otherwise each start with a fresh 32.
+	MaxOpenRunsPerCredential = MaxLiveSessionsPerCredential * MaxOpenRunsPerSession
+	// RunOutcomeSessionEnded is the outcome of a run the server failed
+	// because its session ended (issue #402).
+	RunOutcomeSessionEnded = "session ended"
+	// MaxActivityPerRun bounds the activity entries of one run.
+	MaxActivityPerRun = 10000
+)
+
 var (
 	// ErrRunNotFound is returned when no run the reader may see, and (for a
 	// write) that the credential owns, has the id. A missing run, a run the
@@ -48,6 +69,27 @@ var (
 	// ErrInvalidTransition is returned when a state change is not in the
 	// lifecycle, and for activity on a run that has ended. Nothing is written.
 	ErrInvalidTransition = errors.New("store: invalid run transition")
+	// ErrTooManyRuns is returned by CreateRun when the session already has
+	// MaxOpenRunsPerSession runs that have not ended. Nothing is written.
+	ErrTooManyRuns = errors.New("store: too many open runs for this session")
+	// ErrTooManyCredentialRuns is returned by CreateRun when the credential
+	// already has MaxOpenRunsPerCredential runs that have not ended, on its
+	// live and offline sessions. Ending a session ends its runs, so ending the
+	// old sessions frees the slots. Nothing is written.
+	ErrTooManyCredentialRuns = errors.New("store: too many open runs for this credential")
+	// ErrSessionOffline is returned by CreateRun, AppendRunActivity and
+	// SetRunState (to a state that is not terminal) when the run's session is
+	// offline (an ended session is offline too). Offline sessions are outside
+	// the credential's live-session bound, so without this each would stay an
+	// uncounted channel for new runs and activity (issue #392). It keeps
+	// reports on the credential's live sessions; the runs already open on
+	// offline sessions are bounded per credential (ErrTooManyCredentialRuns).
+	// A heartbeat revives the session; ending a run is always allowed.
+	// Nothing is written.
+	ErrSessionOffline = errors.New("store: session is offline")
+	// ErrTooMuchActivity is returned by AppendRunActivity when the run already
+	// holds MaxActivityPerRun entries. Nothing is written.
+	ErrTooMuchActivity = errors.New("store: too much activity for this run")
 )
 
 // Run is one row of the runs table. MessageID is 0 for a run that answers no
@@ -107,10 +149,18 @@ func storedTime(t time.Time) time.Time { return time.UnixMilli(t.UnixMilli()) }
 //   - the session must exist, not have ended, belong to credential
 //     p.CredentialID and to reader's principal (ErrNotFound otherwise, the
 //     same answer as every session route gives);
+//   - the session must not be offline (ErrSessionOffline), checked once the
+//     caller is known to own it so that it tells a stranger nothing;
 //   - reader must be, now, a member of the channel and an enabled principal
 //     (ErrNotChannelMember);
 //   - a message the run answers must be in the channel and visible to reader
-//     by the message rule (ErrRunAnchorNotFound).
+//     by the message rule (ErrRunAnchorNotFound);
+//   - the session must hold fewer than MaxOpenRunsPerSession runs that have
+//     not ended (ErrTooManyRuns). The count and the insert share this
+//     transaction, so concurrent creates cannot pass the bound together;
+//   - the credential must hold fewer than MaxOpenRunsPerCredential runs that
+//     have not ended, on its live and offline sessions
+//     (ErrTooManyCredentialRuns).
 //
 // reader is the agent itself; the run is then visible to it by RunVisible's
 // rule. A refused run stores nothing.
@@ -119,9 +169,10 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 	var out Run
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		var principalID int64
+		var sessionState string
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id FROM sessions WHERE id = ? AND credential_id = ? AND ended_at IS NULL",
-			p.SessionID, p.CredentialID).Scan(&principalID); {
+			"SELECT principal_id, state FROM sessions WHERE id = ? AND credential_id = ? AND ended_at IS NULL",
+			p.SessionID, p.CredentialID).Scan(&principalID, &sessionState); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:
@@ -129,6 +180,9 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 		}
 		if reader.PrincipalID <= 0 || reader.PrincipalID != principalID {
 			return ErrNotFound
+		}
+		if sessionState == string(schema.SessionStateOffline) {
+			return ErrSessionOffline
 		}
 		usable, err := principalUsableInChannelTx(ctx, tx, p.ChannelID, principalID)
 		if err != nil {
@@ -143,6 +197,20 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 				return err
 			}
 			message = p.MessageID
+		}
+		open, err := countOpenRunsTx(ctx, tx, p.SessionID)
+		if err != nil {
+			return err
+		}
+		if open >= MaxOpenRunsPerSession {
+			return ErrTooManyRuns
+		}
+		held, err := countOpenRunsOfCredentialTx(ctx, tx, p.CredentialID)
+		if err != nil {
+			return err
+		}
+		if held >= MaxOpenRunsPerCredential {
+			return ErrTooManyCredentialRuns
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO runs (session_id, principal_id, channel_id, message_id, state, task, link, started_at)
@@ -191,6 +259,13 @@ func (s *Store) SetRunState(ctx context.Context, actor string, runID, credential
 		}
 		if !schema.RunTransitionAllowed(run.State, to) {
 			return ErrInvalidTransition
+		}
+		// Ending a run is how an agent cleans up, so a terminal state is
+		// allowed on an offline session; any other change is not.
+		if !schema.RunStateTerminal(to) {
+			if err := refuseOfflineSessionTx(ctx, tx, run.SessionID); err != nil {
+				return err
+			}
 		}
 		var ended any
 		if schema.RunStateTerminal(to) {
@@ -243,6 +318,8 @@ type ActivityParams struct {
 // one credentialID owns, that reader may see and whose message reader may
 // still speak to (reportableRunTx), decided inside the transaction
 // (ErrRunNotFound otherwise), and must not have ended (ErrInvalidTransition).
+// A run that already holds MaxActivityPerRun entries takes no more
+// (ErrTooMuchActivity), counted in the same transaction as the insert.
 // Nothing is audited: the entry is the record.
 func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64, reader Reader, p ActivityParams, now time.Time) (Activity, error) {
 	now = storedTime(now)
@@ -254,6 +331,16 @@ func (s *Store) AppendRunActivity(ctx context.Context, runID, credentialID int64
 		}
 		if schema.RunStateTerminal(run.State) {
 			return ErrInvalidTransition
+		}
+		if err := refuseOfflineSessionTx(ctx, tx, run.SessionID); err != nil {
+			return err
+		}
+		held, err := countRunActivityTx(ctx, tx, run.ID)
+		if err != nil {
+			return err
+		}
+		if held >= MaxActivityPerRun {
+			return ErrTooMuchActivity
 		}
 		var data any
 		if len(p.Data) > 0 {
@@ -301,6 +388,21 @@ func reportableRunTx(ctx context.Context, tx execer, runID, credentialID int64, 
 		}
 	}
 	return run, nil
+}
+
+// refuseOfflineSessionTx is ErrSessionOffline when session sessionID is
+// offline, read inside the caller's transaction. A session that has ended is
+// offline too (sessions.go sets both together), so a run left on one cannot
+// be reported on either, though it can still be ended.
+func refuseOfflineSessionTx(ctx context.Context, tx execer, sessionID int64) error {
+	var state string
+	if err := tx.QueryRowContext(ctx, "SELECT state FROM sessions WHERE id = ?", sessionID).Scan(&state); err != nil {
+		return fmt.Errorf("store: read session %d: %w", sessionID, err)
+	}
+	if state == string(schema.SessionStateOffline) {
+		return ErrSessionOffline
+	}
+	return nil
 }
 
 // principalUsableInChannelTx reports whether principalID is, now, a member of

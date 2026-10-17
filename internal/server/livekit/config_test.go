@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,24 @@ func TestParseConfig(t *testing.T) {
 		{name: "no scheme", url: "lk.local:7880", key: "k", secret: "s", wantErr: []string{"client URL"}},
 		{name: "no host", url: "ws://", key: "k", secret: "s", wantErr: []string{"no host"}},
 		{name: "unparsable", url: "ws://a b\x7f", key: "k", secret: "s", wantErr: []string{"client URL"}, notErr: []string{"a b"}},
+		{
+			name: "an IPv4 client address is fine", url: "ws://127.0.0.1:7880", key: "k", secret: "s",
+			want: Config{URL: "ws://127.0.0.1:7880", APIURL: "http://127.0.0.1:7880", APIKey: "k", APISecret: NewSecret("s")},
+		},
+		{
+			name: "a hyphenated host name is fine", url: "wss://lk-1.example.net:443", key: "k", secret: "s",
+			want: Config{URL: "wss://lk-1.example.net:443", APIURL: "https://lk-1.example.net:443", APIKey: "k", APISecret: NewSecret("s")},
+		},
+		// The client address is written into the web client's CSP, so its host
+		// may not carry a character that changes the policy (#442).
+		{name: "a wildcard host", url: "wss://*.example.net", key: "k", secret: "s", wantErr: []string{"client URL", "letters, digits, dots and hyphens"}, notErr: []string{"example.net"}},
+		{name: "a semicolon in the host", url: "wss://lk.example.net;script-src", key: "k", secret: "s", wantErr: []string{"client URL", "letters, digits, dots and hyphens"}, notErr: []string{"script-src"}},
+		{name: "an IPv6 client address", url: "ws://[::1]:7880", key: "k", secret: "s", wantErr: []string{"client URL", "IPv6"}, notErr: []string{"::1"}},
+		{name: "an empty host name", url: "ws://:7880", key: "k", secret: "s", wantErr: []string{"client URL", "letters, digits, dots and hyphens"}},
+		{
+			name: "an IPv6 API address is fine: it is not in the policy", url: "ws://lk.local:7880", apiURL: "http://[::1]:7880", key: "k", secret: "s",
+			want: Config{URL: "ws://lk.local:7880", APIURL: "http://[::1]:7880", APIKey: "k", APISecret: NewSecret("s")},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -190,5 +209,34 @@ func TestSecretCannotBePrinted(t *testing.T) {
 	}
 	if NewSecret("").IsSet() || !NewSecret("x").IsSet() || NewSecret("").String() != "[unset]" {
 		t.Error("Secret set/unset reporting is wrong")
+	}
+}
+
+// TestCheckCSPHost: the rule on its own, including a port that is not digits,
+// which url.Parse already refuses for a URL but CheckCSPHost checks anyway.
+func TestCheckCSPHost(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		u    url.URL
+		ok   bool
+	}{
+		{"name", url.URL{Scheme: "wss", Host: "lk.example.net"}, true},
+		{"name and port", url.URL{Scheme: "wss", Host: "lk.example.net:7443"}, true},
+		{"IPv4", url.URL{Scheme: "ws", Host: "127.0.0.1:7880"}, true},
+		{"IPv6", url.URL{Scheme: "ws", Host: "[::1]:7880"}, false},
+		{"IPv4-mapped IPv6", url.URL{Scheme: "ws", Host: "[::ffff:127.0.0.1]:7880"}, false},
+		{"wildcard", url.URL{Scheme: "wss", Host: "*"}, false},
+		{"semicolon", url.URL{Scheme: "wss", Host: "a;b"}, false},
+		{"space", url.URL{Scheme: "wss", Host: "a b"}, false},
+		{"quote", url.URL{Scheme: "wss", Host: "a'b"}, false},
+		{"port with a wildcard", url.URL{Scheme: "wss", Host: "lk.example.net:*"}, false},
+		{"port with a semicolon", url.URL{Scheme: "wss", Host: "lk.example.net:1;x"}, false},
+		{"empty host", url.URL{Scheme: "wss", Host: ":1"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckCSPHost(&tt.u); (err == nil) != tt.ok {
+				t.Errorf("CheckCSPHost(%q) = %v, want ok=%v", tt.u.Host, err, tt.ok)
+			}
+		})
 	}
 }

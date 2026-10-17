@@ -12,17 +12,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
 // Environment variable names, kept here so error messages and conchd's flag
 // wiring cannot drift apart.
 const (
-	EnvURL       = "CONCHD_LIVEKIT_URL"
-	EnvAPIURL    = "CONCHD_LIVEKIT_API_URL"
-	EnvAPIKey    = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
-	EnvAPISecret = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvURL        = "CONCHD_LIVEKIT_URL"
+	EnvAPIURL     = "CONCHD_LIVEKIT_API_URL"
+	EnvAPIKey     = "CONCHD_LIVEKIT_API_KEY"    // #nosec G101 -- a variable name, not a credential
+	EnvAPISecret  = "CONCHD_LIVEKIT_API_SECRET" // #nosec G101 -- a variable name, not a credential
+	EnvRoomPrefix = "CONCHD_LIVEKIT_ROOM_PREFIX"
 )
 
 // Secret holds the signing secret. It keeps the value behind a pointer, so
@@ -149,6 +152,9 @@ func ParseConfig(clientURL, apiURL, apiKey, apiSecret string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := CheckCSPHost(cu); err != nil {
+		return Config{}, fmt.Errorf("livekit: invalid client URL: %w", err)
+	}
 	var au *url.URL
 	if apiURL == "" {
 		swapped := *cu
@@ -193,4 +199,33 @@ func parseAddr(raw, what string, schemes ...string) (*url.URL, error) {
 		return nil, errors.New("livekit: invalid " + what + ": must not contain a query or fragment")
 	}
 	return u, nil
+}
+
+// cspHostname is what a host may be when it is written into the web client's
+// Content-Security-Policy: letters, digits, dots and hyphens. Anything else
+// could end the source list (";"), widen it ("*") or start a new one.
+var cspHostname = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+
+// cspPort is a port as the policy may carry it: digits only, or none.
+var cspPort = regexp.MustCompile(`^[0-9]*$`)
+
+// CheckCSPHost reports why the client address's host and port cannot be
+// named in the web client's Content-Security-Policy (connect-src), which
+// conchd builds from it when voice is configured. The host must be a name of
+// letters, digits, dots and hyphens or an IPv4 address, and the port digits.
+// An IPv6 literal is refused: a CSP source expression cannot carry one.
+//
+// The error names the rule, never the value.
+func CheckCSPHost(u *url.URL) error {
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return errors.New("the host must not be an IPv6 literal: the web client's Content-Security-Policy cannot name one; use a host name")
+	}
+	if !cspHostname.MatchString(host) {
+		return errors.New("the host must be letters, digits, dots and hyphens only (or an IPv4 address)")
+	}
+	if !cspPort.MatchString(u.Port()) {
+		return errors.New("the port must be digits only")
+	}
+	return nil
 }

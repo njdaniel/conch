@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -68,6 +69,10 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runLogout(args[1:], stderr)
 	case "whoami":
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
+	case "rename":
+		return runRename(ctx, args[1:], stdout, stderr)
+	case "report":
+		return runReport(ctx, args[1:], stdin, stdout, stderr, version)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -99,12 +104,28 @@ Usage:
   conch admin channel create [--server <url>] [--json] <name>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
+  conch admin principal rename [--server <url>] [--json] <id> <name>
+  conch admin principal list [--server <url>] [--json] [--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent]
+  conch admin principal hide [--server <url>] [--json] <id>
+  conch admin principal hide [--server <url>] [--json] --prefix <name-prefix>|--invite <id> [--kind human|agent] [--yes]
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
   conch admin credential revoke [--server <url>] [--json] <credential-id>
   conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
+  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>]
+  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
+  conch admin invite close|joiners [--server <url>] [--json] <id>
+  conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
+  conch admin invite pause|resume|status [--server <url>] [--json]
+  conch admin principal invite-permission [--server <url>] [--json] <id> on|off
+  conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
+  conch admin principal sign-in-link [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin sign-in-link close [--server <url>] [--json] <id>
+  conch admin reports list [--server <url>] [--json] [--limit <n>]
+  conch admin reports show [--server <url>] [--json] [--markdown] <id>
+  conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -113,6 +134,8 @@ Usage:
   conch login [--server <url>]     (reads the token from stdin: conch login < tokenfile)
   conch logout [--server <url>]
   conch whoami [--server <url>]
+  conch rename [--server <url>] [--json] <name>
+  conch report [--server <url>] [--did <text>] [--expected <text>] [--happened <text>] [--often every_time|sometimes|once] [--yes] [--json]
   conch version
 
 Scope:
@@ -168,6 +191,26 @@ Scope:
     <id> <active|revoked> <created> <expires|-> <label>
   manifest put reads a PutAgentManifest JSON body from standard input or
   --file, refuses unknown fields, and checks it locally before sending.
+
+  rename changes your own name; admin principal rename changes anyone's
+  (operators only). A name is unique by how it reads, not how it is spelt:
+  one that differs from another only by case, by look-alike letters (a
+  Latin a and a Cyrillic one, a capital I for an l, a zero for an o, a
+  ligature and its letters) or by spacing is taken. A person may rename
+  themselves five times a day and try twenty times a day (a name refused as
+  taken counts as a try); an operator's rename of someone else counts toward
+  neither. An agent's name is set by an operator. Each prints "renamed
+  principal <id> to <name>", or with --json the response document.
+
+  report sends a problem report to the server's operator, in the bug
+  template's words: what you did, what you expected, what happened instead,
+  and how often. Answers not given as flags are asked for, one line each.
+  It shows exactly what will be sent and sends it only on "y" (or --yes);
+  the server adds its version and the ids of your recent requests. It prints
+  the report's number. admin reports (operators only) lists reports, shows
+  one (--markdown: as an issue body with channel and person names taken
+  out), and records the issue one was filed as. conchd never sends a report
+  anywhere; ops/report-to-issue.sh files one from the operator's machine.
 
   audit export (operators only) writes the audit trail to standard output as
   JSON Lines, one conch.audit_event.v1 object per line in ascending id order,
@@ -577,9 +620,18 @@ func runApprovalsList(ctx context.Context, args []string, stdout, stderr io.Writ
 
 	_, _ = fmt.Fprintf(stdout, "%-6s | %-12s | %-20s | %-20s | %s\n", "ID", "STATE", "DEADLINE", "REQUESTER", "TITLE")
 	_, _ = fmt.Fprintln(stdout, strings.Repeat("-", 90))
+	readOnly := make(map[int64]bool, len(resp.ReadOnly))
+	for _, id := range resp.ReadOnly {
+		readOnly[id] = true
+	}
 	for _, a := range resp.Approvals {
 		deadline := a.Deadline.Time().Format(time.RFC3339)
-		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, safeLine(string(a.State)), deadline, a.RequesterID, safeLine(a.Title))
+		title := safeLine(a.Title)
+		if readOnly[a.ID] {
+			// Issue #450: listed for this person to see, not to decide.
+			title += "  (view only: you may not decide this)"
+		}
+		_, _ = fmt.Fprintf(stdout, "%-6d | %-12s | %-20s | %-20d | %s\n", a.ID, safeLine(string(a.State)), deadline, a.RequesterID, title)
 	}
 	return nil
 }
@@ -845,6 +897,55 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, safeLine(string(who.Kind)), safeLine(who.Name), safeLine(string(who.Role)))
+	if err != nil || who.ServerVersion == "" { // a server that predates the field says nothing
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion))
+	return err
+}
+
+// runRename changes the caller's own name (issue #441): whoami says who the
+// caller is, then PUT /v1/principals/{id}/name. The name is checked as the
+// server checks it first, so a name it would refuse costs no request.
+func runRename(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("rename", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	asJSON := fs.Bool("json", false, "print the server's response document")
+	// Flags may follow the name, as they may for admin.
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: rename: %w", err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(pos) != 1 {
+		return errors.New("cli: rename: usage: conch rename [--server <url>] [--json] <name>")
+	}
+	req := schema.RenamePrincipalRequestV1{Name: pos[0]}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("cli: rename: %w", err)
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	who, err := client.WhoAmI(ctx)
+	if err != nil {
+		return err
+	}
+	p, err := client.RenamePrincipal(ctx, who.ID, req.Name)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(stdout).Encode(schema.RenamePrincipalResponseV1{Principal: p})
+	}
+	_, err = fmt.Fprintf(stdout, "renamed principal %d to %s\n", p.ID, safeLine(p.Name))
 	return err
 }
 

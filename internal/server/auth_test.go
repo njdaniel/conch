@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -36,7 +37,14 @@ type authFixture struct {
 
 func newAuthFixture(t *testing.T, mode AuthMode) *authFixture {
 	t.Helper()
-	srv := newTestServerWithConfig(t, Config{AuthMode: mode})
+	return newAuthFixtureWithConfig(t, Config{AuthMode: mode})
+}
+
+// newAuthFixtureWithConfig is newAuthFixture with the server's whole Config,
+// for a test that needs more than the auth mode (an ntfy server, say).
+func newAuthFixtureWithConfig(t *testing.T, cfg Config) *authFixture {
+	t.Helper()
+	srv := newTestServerWithConfig(t, cfg)
 	ctx := context.Background()
 	root, _, rootTok, err := srv.store.BootstrapOperator(ctx, "root")
 	if err != nil {
@@ -163,6 +171,12 @@ var routeExpectations = map[string]routeExpectation{
 	// the same code: 503 for a member here, 400 under AuthOff, 403 for an
 	// agent. The body is not read before those answers.
 	"POST /v1/channels/{channel}/voice/transmit": {classAuth, "/v1/channels/general/voice/transmit", `{"state":"started"}`, 503},
+	// Screen share (issue #443): checked as the routes above, so 503 for a
+	// member here, 400 under AuthOff, 403 for an agent. Stopping lets an
+	// operator through member or not, and the fixture's operator gets the same
+	// 503 a member does.
+	"POST /v1/channels/{channel}/voice/share":   {classAuth, "/v1/channels/general/voice/share", "", 503},
+	"DELETE /v1/channels/{channel}/voice/share": {classAuth, "/v1/channels/general/voice/share", "", 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
@@ -199,22 +213,39 @@ var routeExpectations = map[string]routeExpectation{
 	// below); the poll is an own-session call, so a human and the fixture
 	// agent both get 404 session_not_found. AuthOff gets 400
 	// sessions_require_auth on all five (special-cased below).
-	"POST /v1/runs/{id}/interventions":            {classAuth, "/v1/runs/9999/interventions", `{"kind":"cancel"}`, 404},
-	"GET /v1/runs/{id}/interventions":             {classAuth, "/v1/runs/9999/interventions", "", 404},
-	"GET /v1/interventions/{id}":                  {classAuth, "/v1/interventions/9999", "", 404},
-	"GET /v1/sessions/{id}/interventions":         {classAuth, "/v1/sessions/9999/interventions?state=requested", "", 404},
-	"POST /v1/interventions/{id}/ack":             {classAuth, "/v1/interventions/9999/ack", `{"state":"applied"}`, 404},
+	"POST /v1/runs/{id}/interventions":    {classAuth, "/v1/runs/9999/interventions", `{"kind":"cancel"}`, 404},
+	"GET /v1/runs/{id}/interventions":     {classAuth, "/v1/runs/9999/interventions", "", 404},
+	"GET /v1/interventions/{id}":          {classAuth, "/v1/interventions/9999", "", 404},
+	"GET /v1/sessions/{id}/interventions": {classAuth, "/v1/sessions/9999/interventions?state=requested", "", 404},
+	"POST /v1/interventions/{id}/ack":     {classAuth, "/v1/interventions/9999/ack", `{"state":"applied"}`, 404},
+	// Read state (issue #351): people only, so an agent gets 403 on both and
+	// AuthOff 400 read_state_require_auth (both special-cased below). A mark of
+	// 0 writes nothing.
+	"GET /v1/read-state":                          {classAuth, "/v1/read-state", "", 200},
+	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
 	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
+	"PUT /v1/principals/{id}/name":                {classSelf, "/v1/principals/1/name", `{}`, 400},
 	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
 	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
 	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
 	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
+	// Signing out (issue #439) revokes the caller's own credential, so the
+	// role matrix sends it from a fixture of its own (special-cased below).
+	// The fixture's operator holds the only operator credential: 409. AuthOff
+	// has no credential to revoke: 401, as whoami.
+	"DELETE /v1/credentials/current": {classAuth, "/v1/credentials/current", "", 409},
+	// Your sign-ins (issue #496): any caller lists its own, and ending one
+	// names a credential that does not exist, so it changes and audits
+	// nothing. AuthOff has no caller whose they could be: 401 on both, as
+	// whoami (special-cased below).
+	"GET /v1/credentials/mine":         {classAuth, "/v1/credentials/mine", "", 200},
+	"DELETE /v1/credentials/mine/{id}": {classAuth, "/v1/credentials/mine/9999", "", 404},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
 	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
-	"POST /v1/principals/{id}/credentials/revoke-all": {classOp, "/v1/principals/9999/credentials/revoke-all", "", 404},
+	"POST /v1/principals/{id}/credentials/revoke-all": {classSelf, "/v1/principals/9999/credentials/revoke-all", "", 404},
 	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
 	"GET /v1/hooks":                                   {classOp, "/v1/hooks", "", 200},
 	"DELETE /v1/hooks/{id}":                           {classOp, "/v1/hooks/9999", "", 404},
@@ -230,12 +261,74 @@ var routeExpectations = map[string]routeExpectation{
 	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
 	// (special-cased below). Issuing one writes no audit row.
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
+	// Invites (issue #437). Chosen to change and audit nothing: an empty
+	// create is a 400, the close names an invite that does not exist, and
+	// preview and redeem send no code, which is the invite_invalid 404 before
+	// anything is looked up or audited. People only: an agent gets 403 and
+	// AuthOff 401 on the three authenticated routes (both special-cased
+	// below).
+	"POST /v1/invites":         {classAuth, "/v1/invites", `{}`, 400},
+	"GET /v1/invites":          {classAuth, "/v1/invites", "", 200},
+	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
+	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
+	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	// Operator administration of invites (issue #438). Each names an invite
+	// or a principal that does not exist, or sets the pause switch to the
+	// value it has, so it changes and audits nothing. Like the routes above,
+	// AuthOff gets 401 (special-cased below).
+	"GET /v1/invites/{id}/principals":           {classOp, "/v1/invites/9999/principals", "", 404},
+	"POST /v1/invites/{id}/disable-joiners":     {classOp, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
+	"POST /v1/principals/{id}/disable-invitees": {classOp, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
+	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
+	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Sign-in links (issue #493). The create names a principal that does not
+	// exist, and preview and redeem send no code, which is the
+	// sign_in_link_invalid 404 before anything is looked up or audited.
+	// AuthOff gets 401 on the create and the close (special-cased below).
+	"POST /v1/principals/{id}/sign-in-links": {classOp, "/v1/principals/9999/sign-in-links", `{}`, 404},
+	"POST /v1/sign-in-links/preview":         {classExempt, "/v1/sign-in-links/preview", `{}`, 404},
+	"POST /v1/sign-in-links/redeem":          {classExempt, "/v1/sign-in-links/redeem", `{}`, 404},
+	// Closing one names a link that does not exist: 404, nothing audited.
+	"DELETE /v1/sign-in-links/{id}": {classOp, "/v1/sign-in-links/9999", "", 404},
+	// Problem reports (issue #446). An empty report is a 400 before anything
+	// is stored or audited; the operator routes name a report that does not
+	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
+	// (both special-cased below).
+	"POST /v1/reports":     {classAuth, "/v1/reports", `{}`, 400},
+	"GET /v1/reports":      {classOp, "/v1/reports", "", 200},
+	"GET /v1/reports/{id}": {classOp, "/v1/reports/9999", "", 404},
+	"PUT /v1/reports/{id}": {classOp, "/v1/reports/9999", `{"state":"filed","issue":"https://example.com/issues/1"}`, 404},
+	// Operator administration of principals (issue #445). The hide names a
+	// principal that does not exist, the bulk hide selects nobody (a 400
+	// before anything is read), and the list only reads. The bulk hide, like
+	// the bulk disables, needs a caller to leave out: AuthOff gets 401
+	// (special-cased below).
+	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
+	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
+	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
 // which are humans-only and never anonymous.
 func isFileRoute(pattern string) bool {
 	return strings.Contains(pattern, "/v2/files/") || strings.HasSuffix(pattern, "/files")
+}
+
+// isInviteRoute reports whether pattern is one of the authenticated invite
+// routes (issues #437 and #438); preview and redeem are exempt and not among
+// them.
+func isInviteRoute(pattern string) bool {
+	switch pattern {
+	case "POST /v1/invites", "GET /v1/invites", "DELETE /v1/invites/{id}",
+		"GET /v1/invites/{id}/principals", "POST /v1/invites/{id}/disable-joiners",
+		"POST /v1/principals/{id}/disable-invitees", "PUT /v1/principals/{id}/invite-permission",
+		"GET /v1/invites/settings", "PUT /v1/invites/settings",
+		// Making a sign-in link (issue #493) starts as the invite routes do.
+		"POST /v1/principals/{id}/sign-in-links", "DELETE /v1/sign-in-links/{id}":
+		return true
+	}
+	return false
 }
 
 func routeMethod(pattern string) string {
@@ -290,7 +383,9 @@ func TestRouteTable(t *testing.T) {
 // route not on the explicit exempt list answers 401 without a credential.
 func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
-	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true}
+	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
+		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true,
+		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
 
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]
@@ -339,7 +434,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -353,18 +448,36 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "POST /v1/runs/{id}/interventions" {
 				agentWant = http.StatusForbidden
 			}
+			// Read state is for people (issue #351): an agent is refused before
+			// any channel is looked at.
+			if strings.HasSuffix(rt.pattern, "/read-state") {
+				agentWant = http.StatusForbidden
+			}
+			// Invites are for people (issue #437), and so are problem
+			// reports (issue #446).
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
+				agentWant = http.StatusForbidden
+			}
+			// Signing out (issue #439) succeeds for any member and revokes
+			// the credential it was sent with, so it runs on a fixture of its
+			// own and the other routes' callers stay signed in.
+			g := f
+			if rt.pattern == "DELETE /v1/credentials/current" {
+				memberWant, agentWant = http.StatusNoContent, http.StatusNoContent
+				g = newAuthFixture(t, AuthRequired)
+			}
 			cases := []struct {
 				who   string
 				token string
 				want  int
 			}{
 				{"unauthenticated", "", http.StatusUnauthorized},
-				{"member human", f.aliceTok, memberWant},
-				{"member agent", f.botTok, agentWant},
-				{"operator", f.rootTok, exp.allowed},
+				{"member human", g.aliceTok, memberWant},
+				{"member agent", g.botTok, agentWant},
+				{"operator", g.rootTok, exp.allowed},
 			}
 			for _, c := range cases {
-				rec := f.do(t, method, exp.path, c.token, exp.body)
+				rec := g.do(t, method, exp.path, c.token, exp.body)
 				if rec.Code != c.want {
 					t.Errorf("%s: status = %d, want %d; body %s", c.who, rec.Code, c.want, rec.Body)
 				}
@@ -383,10 +496,11 @@ func TestAuthOffUnchanged(t *testing.T) {
 			exp := routeExpectations[rt.pattern]
 			t.Run(fmt.Sprintf("%q/%s", mode, rt.pattern), func(t *testing.T) {
 				want := exp.allowed
-				if rt.pattern == "GET /v1/whoami" {
-					want = http.StatusUnauthorized // new route; no caller to report
+				if rt.pattern == "GET /v1/whoami" || rt.pattern == "DELETE /v1/credentials/current" ||
+					rt.pattern == "GET /v1/credentials/mine" || rt.pattern == "DELETE /v1/credentials/mine/{id}" {
+					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to list or revoke
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				if isFileRoute(rt.pattern) {
@@ -395,8 +509,20 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
+				if strings.HasSuffix(rt.pattern, "/read-state") {
+					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
+				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential
+				}
+				if isInviteRoute(rt.pattern) {
+					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
+				}
+				if rt.pattern == "POST /v1/reports" {
+					want = http.StatusUnauthorized // like whoami: no one to say who reported
+				}
+				if rt.pattern == "POST /v1/principals/hide" {
+					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {
@@ -409,12 +535,13 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 			})
 		}
-		// Bootstrap writes 2 audit events, alice's and bot's credentials 1 each,
-		// the fixture's three member_added events, and the fixture agent's
+		// Bootstrap writes 3 audit events (principal_created among them,
+		// issue #445), alice's and bot's credentials 1 each, the fixture's
+		// three member_added events, and the fixture agent's
 		// manifest_created; no request may add to that (in particular no
 		// access_denied).
-		if n := len(f.audit(t)); n != 8 {
-			t.Errorf("mode %q: audit events = %d, want 8", mode, n)
+		if n := len(f.audit(t)); n != 9 {
+			t.Errorf("mode %q: audit events = %d, want 9", mode, n)
 		}
 	}
 }
@@ -660,9 +787,12 @@ func TestWhoAmI(t *testing.T) {
 		token string
 		want  schema.WhoAmIResponseV1
 	}{
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember}},
+		// An operator may always invite (issue #437); a member may not until
+		// granted the right, and an agent never. People hold voice unless an
+		// invite withheld it; an agent never does (issue #468).
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true)}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true)}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -670,8 +800,36 @@ func TestWhoAmI(t *testing.T) {
 			if rec.Code != 200 {
 				t.Fatalf("status = %d", rec.Code)
 			}
-			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); got != tt.want {
-				t.Errorf("whoami = %+v, want %+v", got, tt.want)
+			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("whoami = %s, want %s", rec.Body, inviteJSON(t, tt.want))
+			}
+		})
+	}
+}
+
+// TestVersionAgrees checks that /healthz and whoami report the one version the
+// server was configured with (issue #425).
+func TestVersionAgrees(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	tests := []struct {
+		name, path, token string
+		version           func(t *testing.T, rec *httptest.ResponseRecorder) string
+	}{
+		{"healthz", "/healthz", "", func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			return decodeBody[schema.Health](t, rec).Version
+		}},
+		{"whoami", "/v1/whoami", f.aliceTok, func(t *testing.T, rec *httptest.ResponseRecorder) string {
+			return decodeBody[schema.WhoAmIResponseV1](t, rec).ServerVersion
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, "GET", tt.path, tt.token, "")
+			if rec.Code != 200 {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			if got := tt.version(t, rec); got != "v1.2.3-test" {
+				t.Errorf("version = %q, want v1.2.3-test", got)
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -23,6 +24,9 @@ type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
 	token      string
+	// pingInterval and pingTimeout are the socket watchdog's (watchConn);
+	// zero means the defaults. Unexported so tests can shorten them.
+	pingInterval, pingTimeout time.Duration
 }
 
 // ErrUnauthenticated matches the error returned when the server answers 401.
@@ -101,7 +105,54 @@ func (c *Client) dial(ctx context.Context, endpoint string) (*websocket.Conn, *h
 		return nil, resp, err
 	}
 	conn.SetReadLimit(schema.MaxMessageFrameBytes)
+	c.watchConn(ctx, conn)
 	return conn, resp, nil
+}
+
+const (
+	// socketPingInterval and socketPingTimeout make the watchdog notice a
+	// connection that died without a FIN (Wi-Fi off, packets dropped) in at
+	// most their sum, 30 s, inside the 60 s of silence the protocol allows
+	// (schema.HeartbeatTimeoutSeconds). The server pings every 25 s too, but
+	// a client cannot count on that: a proxy may not forward it.
+	socketPingInterval = 20 * time.Second
+	socketPingTimeout  = 10 * time.Second
+)
+
+// watchConn pings the server on an interval and closes conn when a ping gets
+// no pong in time, which ends the caller's read with an error and so starts
+// its reconnect. The library answers pongs from its read loop, so every
+// caller of dial is reading while this runs: a receive callback that blocks
+// for about socketPingTimeout fails the ping and ends the subscription, as
+// the server's own ping would within 35 s. It stops with ctx, or at the
+// first failed ping, which is also what a connection closed by the caller
+// gives.
+func (c *Client) watchConn(ctx context.Context, conn *websocket.Conn) {
+	interval, timeout := c.pingInterval, c.pingTimeout
+	if interval <= 0 {
+		interval = socketPingInterval
+	}
+	if timeout <= 0 {
+		timeout = socketPingTimeout
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			pctx, cancel := context.WithTimeout(ctx, timeout)
+			err := conn.Ping(pctx)
+			cancel()
+			if err != nil {
+				_ = conn.CloseNow()
+				return
+			}
+		}
+	}()
 }
 
 // ListMessages returns one forward page of v1 messages from channel.
@@ -450,12 +501,36 @@ func (c *Client) PostMessageV2(ctx context.Context, channel string, authorID int
 	return result.Message, nil
 }
 
+// MessagesPage says which page of messages ListMessagesV2 asks for. The zero
+// value is the first page, ascending. After is the largest id held (ascending
+// reads); NewestFirst asks for the newest messages first and Before, the
+// smallest id held, pages back from there (zero is from the newest). The server
+// refuses After with NewestFirst and Before without it.
+type MessagesPage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
 // ListMessagesV2 returns one forward page of the v2 messages in channel that
 // the caller may see.
 func (c *Client) ListMessagesV2(ctx context.Context, channel string, after int64, limit int) (schema.ListMessagesResponseV2, error) {
+	return c.ListMessagesV2Page(ctx, channel, MessagesPage{After: after}, limit)
+}
+
+// ListMessagesV2Page returns one page of the v2 messages in channel that the
+// caller may see: ascending by id from page.After, or newest first below
+// page.Before.
+func (c *Client) ListMessagesV2Page(ctx context.Context, channel string, page MessagesPage, limit int) (schema.ListMessagesResponseV2, error) {
 	endpoint := c.resolve("v2", "channels", channel, "messages")
 	query := endpoint.Query()
-	query.Set("after", strconv.FormatInt(after, 10))
+	if page.NewestFirst {
+		query.Set("order", "desc")
+		if page.Before > 0 {
+			query.Set("before", strconv.FormatInt(page.Before, 10))
+		}
+	} else {
+		query.Set("after", strconv.FormatInt(page.After, 10))
+	}
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
 	var result schema.ListMessagesResponseV2
@@ -614,6 +689,30 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 // is one request to a public route; the caller's ordinary credential decides
 // whether the server allows it.
 
+// ListReadState returns the caller's read state in every channel they are in:
+// how far they have read and how many messages they may see after that. It is
+// for people only; an agent gets human_required and a server with
+// authentication off gets read_state_require_auth.
+func (c *Client) ListReadState(ctx context.Context) (schema.ListReadStateResponseV1, error) {
+	var result schema.ListReadStateResponseV1
+	if err := c.roundTrip(ctx, "list read state", http.MethodGet, c.resolve("v1", "read-state"), nil, &result); err != nil {
+		return schema.ListReadStateResponseV1{}, err
+	}
+	return result, nil
+}
+
+// MarkRead moves the caller's read mark in channel forward to lastReadID and
+// returns the stored state. The server never moves it back, and takes an id
+// above the newest message the caller may see as that message.
+func (c *Client) MarkRead(ctx context.Context, channel string, lastReadID int64) (schema.ReadStateV1, error) {
+	var result schema.ReadStateV1
+	endpoint := c.resolve("v1", "channels", channel, "read-state")
+	if err := c.roundTrip(ctx, "mark read", http.MethodPut, endpoint, schema.MarkReadRequestV1{LastReadID: lastReadID}, &result); err != nil {
+		return schema.ReadStateV1{}, err
+	}
+	return result, nil
+}
+
 // CreateChannel creates a channel. The caller becomes its only member.
 func (c *Client) CreateChannel(ctx context.Context, name string) (schema.ChannelV0, error) {
 	var result schema.CreateChannelResponse
@@ -633,6 +732,17 @@ func (c *Client) CreatePrincipal(ctx context.Context, kind schema.PrincipalKind,
 	return result.Principal, nil
 }
 
+// RenamePrincipal changes a principal's name: the caller's own, or anyone's
+// for an operator (issue #441).
+func (c *Client) RenamePrincipal(ctx context.Context, id int64, name string) (schema.PrincipalV0, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "name")
+	var result schema.RenamePrincipalResponseV1
+	if err := c.roundTrip(ctx, "rename principal", http.MethodPut, endpoint, schema.RenamePrincipalRequestV1{Name: name}, &result); err != nil {
+		return schema.PrincipalV0{}, err
+	}
+	return result.Principal, nil
+}
+
 // DisablePrincipal switches a principal off and revokes its credentials.
 func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")
@@ -643,6 +753,65 @@ func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
 func (c *Client) EnablePrincipal(ctx context.Context, id int64) error {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "enable")
 	return c.roundTrip(ctx, "enable principal", http.MethodPost, endpoint, nil, nil)
+}
+
+// PrincipalListFilter narrows ListPrincipals. A zero field matches everyone,
+// except State: empty is everyone not hidden.
+type PrincipalListFilter struct {
+	State      string
+	NamePrefix string
+	Kind       string
+	InviteID   int64
+	// Before and Limit page the list; zero leaves them to the server.
+	Before int64
+	Limit  int
+}
+
+// ListPrincipals returns one page of every principal, newest first, as an
+// operator sees them (issue #445).
+func (c *Client) ListPrincipals(ctx context.Context, filter PrincipalListFilter) (schema.ListPrincipalsResponseV1, error) {
+	endpoint := c.resolve("v1", "principals")
+	query := endpoint.Query()
+	for name, value := range map[string]string{"state": filter.State, "name_prefix": filter.NamePrefix, "kind": filter.Kind} {
+		if value != "" {
+			query.Set(name, value)
+		}
+	}
+	if filter.InviteID > 0 {
+		query.Set("invite_id", strconv.FormatInt(filter.InviteID, 10))
+	}
+	if filter.Before > 0 {
+		query.Set("before", strconv.FormatInt(filter.Before, 10))
+	}
+	if filter.Limit > 0 {
+		query.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	endpoint.RawQuery = query.Encode()
+	var result schema.ListPrincipalsResponseV1
+	if err := c.roundTrip(ctx, "list principals", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListPrincipalsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// HidePrincipal disables and hides a principal, which frees its name.
+func (c *Client) HidePrincipal(ctx context.Context, id int64) (schema.HidePrincipalResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "hide")
+	var result schema.HidePrincipalResponseV1
+	if err := c.roundTrip(ctx, "hide principal", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.HidePrincipalResponseV1{}, err
+	}
+	return result, nil
+}
+
+// HidePrincipals hides every principal a request selects, or with a dry run
+// says whom it would.
+func (c *Client) HidePrincipals(ctx context.Context, request schema.HidePrincipalsRequestV1) (schema.HidePrincipalsResponseV1, error) {
+	var result schema.HidePrincipalsResponseV1
+	if err := c.roundTrip(ctx, "hide principals", http.MethodPost, c.resolve("v1", "principals", "hide"), request, &result); err != nil {
+		return schema.HidePrincipalsResponseV1{}, err
+	}
+	return result, nil
 }
 
 // CreateCredential issues a credential for a principal. The response carries
@@ -676,6 +845,14 @@ func (c *Client) RevokeCredential(ctx context.Context, credentialID int64) error
 func (c *Client) PutChannelMember(ctx context.Context, channel string, principalID int64) error {
 	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
 	return c.roundTrip(ctx, "add channel member", http.MethodPut, endpoint, nil, nil)
+}
+
+// PutChannelMemberDecide is PutChannelMember with the right to decide the
+// channel's approvals set (issue #450): a new member is added with it, an
+// existing one has it changed.
+func (c *Client) PutChannelMemberDecide(ctx context.Context, channel string, principalID int64, canDecide *bool) error {
+	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))
+	return c.roundTrip(ctx, "add channel member", http.MethodPut, endpoint, schema.PutChannelMemberRequestV1{CanDecide: canDecide}, nil)
 }
 
 // RemoveChannelMember takes principalID off channel. It is idempotent.

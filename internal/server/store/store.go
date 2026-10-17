@@ -468,13 +468,203 @@ END`,
 )`,
 		`CREATE INDEX interventions_by_run ON interventions (run_id, id)`,
 	},
+	// 22: Search knows the channel (issue #235). The index of migration 15 had
+	// no notion of a channel, so a search first found every message anywhere
+	// with the words and only then kept the caller's channel: its cost grew
+	// with the whole database. The index gets a second column, fts_channel,
+	// holding the token "c<channel id>" (one whole token to the unicode61
+	// tokenizer), and the search requires it, so FTS5 intersects the word's
+	// postings with the channel's. An external-content table reads its columns
+	// from the content table by name, so messages gets a virtual generated
+	// column of that name: nothing is stored twice and the two cannot differ.
+	// The old table and trigger are dropped and the index is rebuilt, so every
+	// message that exists is indexed again, scoped ones included, as before.
+	// Messages are never updated or deleted, as in migration 15. The generated
+	// column appears in SELECT * on messages: a later migration that rebuilds
+	// the table must name its columns, never copy it with a bare SELECT *.
+	{
+		`ALTER TABLE messages ADD COLUMN fts_channel TEXT GENERATED ALWAYS AS ('c' || channel_id) VIRTUAL`,
+		`DROP TRIGGER messages_fts_insert`,
+		`DROP TABLE messages_fts`,
+		`CREATE VIRTUAL TABLE messages_fts USING fts5(body, fts_channel, content='messages', content_rowid='id')`,
+		`CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+	INSERT INTO messages_fts (rowid, body, fts_channel) VALUES (new.id, new.body, new.fts_channel);
+END`,
+		`INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')`,
+	},
+	// 23: Read marks (issue #351). How far one person has read one channel:
+	// the id of the newest message they marked, per principal and not per
+	// credential, so a person's two clients share it. The mark is a plain
+	// number and holds no message content; what is unread is worked out when
+	// asked, by the visibility function. The mark only moves forward (the
+	// upsert in MarkRead keeps the larger id). A row outlives the person's
+	// membership of the channel, so rejoining picks the mark up again.
+	{
+		`CREATE TABLE read_marks (
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	last_read_id INTEGER NOT NULL CHECK (last_read_id >= 0),
+	updated_at   INTEGER NOT NULL,
+	PRIMARY KEY (principal_id, channel_id)
+)`,
+	},
+	// 24: Invites (issue #436, ADR-008 §4). An invite is a second way to get
+	// a credential: whoever holds its code joins as a new human principal
+	// with the channels and grants the invite names. Only the SHA-256 of the
+	// code is stored, as for credentials. max_uses NULL means uncapped (an
+	// open link's default); a personal invite always has max_uses 1. The
+	// invite row stays after it is used up, closed or expired: the account
+	// records which invite and inviter it came through.
+	//
+	// principals gains the invite that made it and its maker, the right to
+	// invite (nobody holds it until granted; operators can always invite) and
+	// voice_allowed (every existing principal keeps voice, as today). The new
+	// columns reference rows that may not exist yet, so they are nullable and
+	// ADD COLUMN-safe. server_settings holds switches an operator flips at
+	// runtime; invites_paused is the first.
+	{
+		`CREATE TABLE invites (
+	id                     INTEGER PRIMARY KEY,
+	kind                   TEXT    NOT NULL CHECK (kind IN ('personal', 'open')),
+	code_hash              TEXT    NOT NULL UNIQUE,
+	created_by             INTEGER NOT NULL REFERENCES principals (id),
+	created_at             INTEGER NOT NULL,
+	expires_at             INTEGER NOT NULL,
+	max_uses               INTEGER CHECK (max_uses IS NULL OR max_uses >= 1),
+	uses                   INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
+	closed_at              INTEGER,
+	closed_by              INTEGER REFERENCES principals (id),
+	voice                  INTEGER NOT NULL DEFAULT 0 CHECK (voice IN (0, 1)),
+	may_invite             INTEGER NOT NULL DEFAULT 0 CHECK (may_invite IN (0, 1)),
+	credential_lifetime_ms INTEGER NOT NULL CHECK (credential_lifetime_ms > 0),
+	CHECK (kind = 'open' OR COALESCE(max_uses, 0) = 1)
+)`,
+		`CREATE INDEX invites_by_creator ON invites (created_by, kind)`,
+		`CREATE TABLE invite_channels (
+	invite_id  INTEGER NOT NULL REFERENCES invites (id),
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	PRIMARY KEY (invite_id, channel_id)
+)`,
+		`ALTER TABLE principals ADD COLUMN invited_by INTEGER REFERENCES principals (id)`,
+		`ALTER TABLE principals ADD COLUMN invite_id INTEGER REFERENCES invites (id)`,
+		`ALTER TABLE principals ADD COLUMN may_invite INTEGER NOT NULL DEFAULT 0 CHECK (may_invite IN (0, 1))`,
+		`ALTER TABLE principals ADD COLUMN voice_allowed INTEGER NOT NULL DEFAULT 1 CHECK (voice_allowed IN (0, 1))`,
+		`CREATE INDEX principals_by_invite ON principals (invite_id) WHERE invite_id IS NOT NULL`,
+		`CREATE TABLE server_settings (
+	key        TEXT    PRIMARY KEY,
+	value      TEXT    NOT NULL,
+	updated_at INTEGER NOT NULL
+)`,
+	},
+	// 25: Who may decide a channel's approvals (issue #450). Until now any
+	// human member could, which stops being safe once people join through
+	// invites. can_decide is per membership; every existing membership keeps
+	// the right (the column default), as does a member an operator adds
+	// without saying otherwise. A member who joins through an invite is
+	// inserted with 0.
+	{
+		`ALTER TABLE channel_members ADD COLUMN can_decide INTEGER NOT NULL DEFAULT 1 CHECK (can_decide IN (0, 1))`,
+	},
+	// 26: Renewable credentials (issue #439). renew_ms, when set, is how far
+	// past a use the credential's expiry moves: a request that authenticates
+	// with it sets expires_at to now + renew_ms, at most once a day
+	// (ResolveCredentialDetail). NULL is a fixed expiry, or none, which every
+	// existing credential keeps. A renewable credential always has an expiry,
+	// so one left unused runs out.
+	{
+		`ALTER TABLE credentials ADD COLUMN renew_ms INTEGER CHECK (renew_ms IS NULL OR (renew_ms > 0 AND expires_at IS NOT NULL))`,
+	},
+	// 27: Name keys (issue #441). name_key and name_skel are a principal
+	// name's two keys (names.KeysOf): case-folded and reduced to its UTS #39
+	// confusable skeleton, folding first and mapping first. Two names that
+	// share either key are one name, and every write that sets a name
+	// refuses a key someone else holds (claimNameTx). The check is in the
+	// writing transaction, not a UNIQUE index, because a database may
+	// already hold two names with one key ("Alice" and "alice"); those are
+	// kept, and the Go step logs them. The keys are computed in Go, so the
+	// step fills them for every existing row, and the triggers refuse a row
+	// written without them: no path that creates or renames a principal can
+	// forget them.
+	{
+		`ALTER TABLE principals ADD COLUMN name_key TEXT`,
+		`ALTER TABLE principals ADD COLUMN name_skel TEXT`,
+		`CREATE INDEX principals_by_name_key ON principals (name_key)`,
+		`CREATE INDEX principals_by_name_skel ON principals (name_skel)`,
+		`CREATE TRIGGER principals_name_key_insert BEFORE INSERT ON principals
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'principals.name_key and name_skel are required');
+END`,
+		`CREATE TRIGGER principals_name_key_update BEFORE UPDATE OF name, name_key, name_skel ON principals
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'principals.name_key and name_skel are required');
+END`,
+	},
+	// 28: Hidden principals (issue #445). Deleting an account means disabling
+	// and hiding it: hidden_at is when it was hidden, NULL for every existing
+	// principal. A hidden principal is always disabled, which the CHECK holds
+	// to; enabling it clears both. Names starting with "hidden-" are reserved
+	// for hidden principals from now on, and the Go step logs any principal
+	// that already has one: it keeps its name.
+	{
+		`ALTER TABLE principals ADD COLUMN hidden_at INTEGER CHECK (hidden_at IS NULL OR disabled_at IS NOT NULL)`,
+	},
+	// 29 (problemReportsMigration): Problem reports (issue #446). One row per
+	// report a person sent. document is the report as the operator reads it
+	// (schema.ProblemReportV1, JSON); the columns beside it are what a list
+	// shows and filters on, and what changes when an operator files it.
+	// Nothing existing changes, so nothing is backfilled.
+	{
+		`CREATE TABLE problem_reports (
+	id             INTEGER PRIMARY KEY,
+	principal_id   INTEGER NOT NULL REFERENCES principals (id),
+	created_at     INTEGER NOT NULL,
+	state          TEXT    NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'filed')),
+	client_name    TEXT    NOT NULL,
+	client_version TEXT    NOT NULL,
+	server_version TEXT    NOT NULL,
+	often          TEXT    NOT NULL,
+	document       TEXT    NOT NULL,
+	issue          TEXT,
+	filed_at       INTEGER,
+	filed_by       INTEGER REFERENCES principals (id),
+	CHECK ((state = 'filed') = (issue IS NOT NULL AND filed_at IS NOT NULL))
+)`,
+		`CREATE INDEX problem_reports_by_principal ON problem_reports (principal_id, created_at)`,
+	},
+	// 30: Sign-in links (issue #493). Number 30 on main, after problem
+	// reports (29, issue #446). An operator makes a one-time code that
+	// signs an existing person back in: whoever uses it gets a new credential
+	// for principal_id. Only the SHA-256 of the code is stored, as for
+	// invites. used_at and credential_id are set together by the one use;
+	// closed_at is set when the person, or the operator who made it, is
+	// disabled. The row stays afterwards, for the record.
+	{
+		`CREATE TABLE sign_in_links (
+	id            INTEGER PRIMARY KEY,
+	code_hash     TEXT    NOT NULL UNIQUE,
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	created_by    INTEGER NOT NULL REFERENCES principals (id),
+	created_at    INTEGER NOT NULL,
+	expires_at    INTEGER NOT NULL,
+	used_at       INTEGER,
+	credential_id INTEGER REFERENCES credentials (id),
+	closed_at     INTEGER,
+	CHECK ((used_at IS NULL) = (credential_id IS NULL))
+)`,
+		`CREATE INDEX sign_in_links_by_principal ON sign_in_links (principal_id)`,
+		`CREATE INDEX sign_in_links_by_creator ON sign_in_links (created_by)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
 // after its SQL statements, for the rare change SQL cannot express. It is
 // keyed by the migration's 1-based number (the schema version it produces).
 var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
-	10: hashPlaintextHooks,
+	10:                hashPlaintextHooks,
+	nameKeyMigration:  fillNameKeys,
+	hiddenAtMigration: reportReservedNames,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
@@ -484,6 +674,33 @@ type Store struct {
 	// it to a statement that fails, to exercise the path where a transaction
 	// cannot be ended and the connection must be discarded.
 	rollbackSQL string
+	// runsEnded, when set, is told which runs a committed transaction failed
+	// because their session ended (issue #405).
+	runsEnded func([]EndedRun)
+	// voiceRoomPrefix starts the name of each new voice room; empty means
+	// the default. See SetVoiceRoomPrefix.
+	voiceRoomPrefix string
+}
+
+// EndedRun names a run that ended with its session: the store changed it
+// without SetRunState, so the server must be told to push it.
+type EndedRun struct {
+	ID, ChannelID int64
+}
+
+// OnRunsEnded sets the function the store calls, after the commit and never
+// inside a transaction, with the runs a session-ending call failed. Set it
+// before the store is used from more than one goroutine. There is one such
+// function: a later call replaces the earlier one, so one store serves one
+// Server.
+func (s *Store) OnRunsEnded(fn func([]EndedRun)) { s.runsEnded = fn }
+
+// announceRunsEnded tells the OnRunsEnded function about runs, if there are
+// any. Callers reach it only after their transaction has committed.
+func (s *Store) announceRunsEnded(runs []EndedRun) {
+	if len(runs) > 0 && s.runsEnded != nil {
+		s.runsEnded(runs)
+	}
 }
 
 // Open opens (creating if necessary) the database at path, enables WAL mode

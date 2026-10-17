@@ -1,0 +1,616 @@
+/* A stylesheet file, never inline styles: conchd serves the page with
+   style-src 'self'. */
+body {
+  margin: 2rem;
+  font-family: system-ui, sans-serif;
+}
+
+:focus-visible {
+  outline: 3px solid #1a5fb4;
+  outline-offset: 2px;
+}
+
+.signin form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 28rem;
+}
+
+.hint {
+  color: #555;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.version {
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.notice {
+  min-height: 1.5em;
+  margin: 0;
+  color: #a51d2d;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.lobby {
+  display: grid;
+  /* One column no wider than the window, whatever is in it: an item that is
+     wider wraps or shrinks rather than widening the page (issue #467). */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto;
+  min-height: calc(100vh - 4rem);
+}
+
+.lobby header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.signout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.change-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.change-name form:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.change-name p {
+  margin: 0;
+}
+
+/* "Your sign-ins" (issue #496): one button in the account area; the list
+   opens in place below it, no wider than the header, and a long label wraps
+   rather than widening the page. */
+.signins {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.signins-panel p {
+  margin: 0.25rem 0;
+  max-width: 32rem;
+}
+
+.signin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.signin-list li {
+  padding: 0.25rem 0;
+}
+
+/* "Report a problem" (issue #446): one button in the header; the form opens
+   below it, no wider than the window. */
+.report {
+  position: relative;
+}
+
+.report-panel:not([hidden]) {
+  position: absolute;
+  right: 0;
+  z-index: 1;
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: 80vh;
+  overflow: auto;
+  padding: 0.75rem;
+  background: #fff;
+  border: 1px solid #ccc;
+}
+
+.report-panel form {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.report-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.report-preview {
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  background: #f6f6f6;
+  padding: 0.5rem;
+}
+
+.areas {
+  display: grid;
+  grid-template-columns: 14rem 1fr 16rem;
+  gap: 1rem;
+  border-top: 1px solid #ccc;
+  padding-top: 1rem;
+}
+
+.channel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.channel-list button {
+  width: 100%;
+  text-align: left;
+}
+
+.channel-list button[aria-current='true'] {
+  font-weight: bold;
+}
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  border-top: 1px solid #ccc;
+  padding-top: 0.5rem;
+  font-size: 0.9rem;
+}
+
+/* An address or a version breaks anywhere rather than run off the screen. */
+.status > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Narrow windows lose the right panel first: its body folds away and the
+   Members button stays. */
+@media (max-width: 899px) {
+  .areas {
+    grid-template-columns: 12rem 1fr;
+  }
+
+  .panel {
+    grid-column: 1 / -1;
+  }
+}
+
+/* A phone (issue #467): everything in one column, channels, then the open
+   channel, then the panel, with a narrower margin and the header's controls
+   wrapping onto lines of their own. A control added to the header joins the
+   wrap: it needs no rule here. */
+@media (max-width: 599px) {
+  body {
+    margin: 1rem;
+  }
+
+  .lobby {
+    min-height: calc(100vh - 2rem);
+  }
+
+  .lobby header {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.5rem 1rem;
+  }
+
+  .lobby header h1 {
+    margin: 0;
+  }
+
+  .areas {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .change-name form:not([hidden]) {
+    flex-wrap: wrap;
+  }
+
+  .change-name input {
+    flex: 1 1 8rem;
+    min-width: 0;
+  }
+
+  .audience-row select {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* The Report a problem panel (issue #511) spans the lobby, still opening
+     below its button: anchored to the button, it ran off the left edge when
+     the wrapped header put the button near the left. */
+  .lobby {
+    position: relative;
+  }
+
+  .report {
+    position: static;
+  }
+
+  .report-panel:not([hidden]) {
+    left: 0;
+    right: 0;
+    width: auto;
+  }
+
+  /* Big enough for a finger. */
+  .lobby button {
+    min-height: 2.75rem;
+  }
+}
+
+.conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.log {
+  overflow-y: auto;
+  max-height: 60vh;
+  min-height: 8rem;
+  border: 1px solid #ccc;
+  padding: 0.5rem;
+}
+
+/* A body is shown as typed, line breaks included. */
+.messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message {
+  padding: 0.15rem 0;
+}
+
+.audience,
+.kind,
+.state {
+  color: #555;
+}
+
+.pending {
+  opacity: 0.8;
+}
+
+.stale {
+  margin: 0;
+  color: #8a4b00;
+}
+
+.approval-card {
+  display: inline-block;
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  white-space: normal;
+}
+
+.composer {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.composer textarea {
+  font: inherit;
+}
+
+.jump {
+  align-self: flex-start;
+}
+
+/* Members panel and run detail. */
+.conversation-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.conversation-body[hidden] {
+  display: none;
+}
+
+.ag-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ag-panel li {
+  padding: 0.15rem 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-sessions,
+.ag-runs {
+  padding-left: 1rem;
+}
+
+.ag-badge {
+  border: 1px solid #888;
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  font-size: 0.8rem;
+}
+
+.ag-status,
+.ag-kind {
+  color: #555;
+}
+
+.ag-run {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-run dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0;
+}
+
+.ag-run dd {
+  margin: 0;
+}
+
+.ag-activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.ag-offset,
+.ag-gap {
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+
+.ag-iv {
+  font-style: italic;
+}
+
+.ag-data {
+  margin: 0.25rem 0 0.25rem 1rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ag-activity summary {
+  cursor: pointer;
+}
+
+/* Bodies, reasons and outcomes are shown as written, line breaks included. */
+.ag-prose {
+  white-space: pre-wrap;
+}
+
+.audience-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.whisper-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.whisper-person {
+  white-space: nowrap;
+}
+
+.voice p {
+  margin: 0;
+}
+
+.voice-controls,
+.voice-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.voice .talk {
+  min-height: 3rem;
+  min-width: 8rem;
+  touch-action: none;
+  user-select: none;
+}
+
+.voice .talk[aria-pressed='true'] {
+  outline: 3px solid #0a6;
+}
+
+.voice-roster {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+
+.voice-roster .speaking {
+  font-weight: bold;
+}
+
+/* Screen share (issue #444): the sharer's controls and the watch view. The
+   picture is never wider than its column, so a phone's screen fits it, and
+   fills the screen when made full screen. */
+.voice-share {
+  margin: 0.6rem 0;
+}
+
+.voice-share label {
+  overflow-wrap: anywhere;
+}
+
+.share-view {
+  margin: 0.6rem 0;
+}
+
+.share-frame {
+  background: #000;
+}
+
+.share-frame video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+
+.share-frame:fullscreen video {
+  height: 100%;
+  max-height: none;
+}
+
+.share-frame .hint {
+  color: #ddd;
+  padding: 0.4rem;
+}
+
+.channel-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.channel-list .unread {
+  min-width: 1.4rem;
+  padding: 0 0.4rem;
+  border-radius: 0.7rem;
+  background: #0b57d0;
+  color: #fff;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* An invite link's landing page (issue #440): one column, which fits a phone. */
+.invite {
+  max-width: 36rem;
+  overflow-wrap: anywhere;
+}
+
+.invite-preview {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.invite-preview dt {
+  font-weight: bold;
+}
+
+.invite-preview dd {
+  margin: 0;
+}
+
+.invite-channels {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.invite input[type='text'] {
+  font: inherit;
+  padding: 0.4rem;
+}
+
+.invite button {
+  min-height: 2.5rem;
+}
+
+@media (max-width: 480px) {
+  .invite-preview {
+    grid-template-columns: 1fr;
+  }
+
+  .invite-preview dd {
+    margin-bottom: 0.4rem;
+  }
+}
+
+/* "Invite someone", in the lobby's right panel. */
+.invites {
+  margin: 0.5rem 0;
+}
+
+.invite-form {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.invite-form fieldset {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+.invite-link {
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.invite-link p {
+  margin: 0 0 0.5rem;
+}
+
+.invite-link input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.invite-link .actions {
+  margin-top: 0.5rem;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.invite-list li {
+  padding: 0.15rem 0;
+}
+
+.invite-state {
+  font-weight: bold;
+}
+
+/* The question a sign-out asks before it revokes anything (issue #493). */
+.signout-confirm p {
+  margin: 0 0 0.5rem;
+  max-width: 32rem;
+}

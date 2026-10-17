@@ -24,9 +24,18 @@ type Client struct {
 	mu        sync.Mutex
 }
 
-// New constructs a client using http.DefaultClient.
+// New constructs a client that refuses redirects. Go re-sends the
+// Authorization header to a redirect target on the same hostname, even on
+// another port or from https to http, so following one would hand the agent's
+// bearer to whatever a misconfigured front proxy points at. A redirect comes
+// back as the 3xx response and surfaces as a status error.
+//
+// There is no client timeout: await_decision is a long poll, and every call
+// is already bounded by its caller's context.
 func New(baseURL, token string) *Client {
-	return &Client{baseURL: baseURL, token: token, http: http.DefaultClient}
+	return &Client{baseURL: baseURL, token: token, http: &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
 }
 
 // Initialize performs the MCP handshake.
@@ -192,4 +201,213 @@ func excerpt(body []byte) string {
 		return line[:limit] + "…"
 	}
 	return line
+}
+
+// validator is a schema document that can check its own structure.
+type validator interface{ Validate() error }
+
+// decodeValid decodes a tool's structured content into a schema document and
+// checks it, so a caller never acts on a document the schema would refuse.
+func decodeValid[T validator](tool string, raw json.RawMessage) (T, error) {
+	out, err := Decode[T](raw)
+	if err != nil {
+		return out, fmt.Errorf("decode %s result: %w", tool, err)
+	}
+	if err := out.Validate(); err != nil {
+		return out, fmt.Errorf("%s result: %w", tool, err)
+	}
+	return out, nil
+}
+
+// arguments turns a schema request into tool arguments, with the fields the
+// request does not carry (the id of the thing it is about) added. The request
+// is encoded as the schema writes it, so the shape never differs from REST's.
+func arguments(request any, extra map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, len(fields)+len(extra))
+	for name, value := range fields {
+		out[name] = value
+	}
+	for name, value := range extra {
+		out[name] = value
+	}
+	return out, nil
+}
+
+// RegisterSession registers this runtime as a session of the agent.
+func (c *Client) RegisterSession(ctx context.Context, req schema.CreateSessionRequestV1) (schema.SessionV1, error) {
+	if err := req.Validate(); err != nil {
+		return schema.SessionV1{}, err
+	}
+	args, err := arguments(req, nil)
+	if err != nil {
+		return schema.SessionV1{}, err
+	}
+	raw, err := c.CallTool(ctx, "register_session", args)
+	if err != nil {
+		return schema.SessionV1{}, err
+	}
+	return decodeValid[schema.SessionV1]("register_session", raw)
+}
+
+// Heartbeat keeps one of the agent's own sessions alive.
+func (c *Client) Heartbeat(ctx context.Context, sessionID int64) (schema.SessionV1, error) {
+	raw, err := c.CallTool(ctx, "heartbeat", map[string]any{"session_id": sessionID})
+	if err != nil {
+		return schema.SessionV1{}, err
+	}
+	return decodeValid[schema.SessionV1]("heartbeat", raw)
+}
+
+// EndSession ends one of the agent's own sessions.
+func (c *Client) EndSession(ctx context.Context, sessionID int64) error {
+	_, err := c.CallTool(ctx, "end_session", map[string]any{"session_id": sessionID})
+	return err
+}
+
+// StartRun starts a run on one of the agent's own sessions.
+func (c *Client) StartRun(ctx context.Context, sessionID int64, req schema.CreateRunRequestV1) (schema.RunV1, error) {
+	if err := req.Validate(); err != nil {
+		return schema.RunV1{}, err
+	}
+	args, err := arguments(req, map[string]any{"session_id": sessionID})
+	if err != nil {
+		return schema.RunV1{}, err
+	}
+	raw, err := c.CallTool(ctx, "start_run", args)
+	if err != nil {
+		return schema.RunV1{}, err
+	}
+	return decodeValid[schema.RunV1]("start_run", raw)
+}
+
+// UpdateRun moves one of the agent's own runs to another state.
+func (c *Client) UpdateRun(ctx context.Context, runID int64, req schema.SetRunStateRequestV1) (schema.RunV1, error) {
+	if err := req.Validate(); err != nil {
+		return schema.RunV1{}, err
+	}
+	args, err := arguments(req, map[string]any{"run_id": runID})
+	if err != nil {
+		return schema.RunV1{}, err
+	}
+	raw, err := c.CallTool(ctx, "update_run", args)
+	if err != nil {
+		return schema.RunV1{}, err
+	}
+	return decodeValid[schema.RunV1]("update_run", raw)
+}
+
+// PostActivity adds one entry to the activity stream of one of the agent's own
+// runs.
+func (c *Client) PostActivity(ctx context.Context, runID int64, req schema.AppendActivityRequestV1) (schema.AgentActivityV1, error) {
+	if err := req.Validate(); err != nil {
+		return schema.AgentActivityV1{}, err
+	}
+	args, err := arguments(req, map[string]any{"run_id": runID})
+	if err != nil {
+		return schema.AgentActivityV1{}, err
+	}
+	raw, err := c.CallTool(ctx, "post_activity", args)
+	if err != nil {
+		return schema.AgentActivityV1{}, err
+	}
+	return decodeValid[schema.AgentActivityV1]("post_activity", raw)
+}
+
+// PollInterventions reads the interventions made on the runs of one of the
+// agent's own sessions, oldest first, in the given state (empty for any) and
+// after the given id.
+func (c *Client) PollInterventions(ctx context.Context, sessionID int64, state schema.InterventionState, after int64) (schema.ListInterventionsResponseV1, error) {
+	args := map[string]any{"session_id": sessionID}
+	if state != "" {
+		args["state"] = state
+	}
+	if after > 0 {
+		args["after"] = after
+	}
+	raw, err := c.CallTool(ctx, "poll_interventions", args)
+	if err != nil {
+		return schema.ListInterventionsResponseV1{}, err
+	}
+	list, err := Decode[schema.ListInterventionsResponseV1](raw)
+	if err != nil {
+		return list, fmt.Errorf("decode poll_interventions result: %w", err)
+	}
+	for _, iv := range list.Interventions {
+		if err := iv.Validate(); err != nil {
+			return schema.ListInterventionsResponseV1{}, fmt.Errorf("poll_interventions result: %w", err)
+		}
+	}
+	return list, nil
+}
+
+// AnswerIntervention answers an intervention on one of the agent's own runs.
+func (c *Client) AnswerIntervention(ctx context.Context, interventionID int64, req schema.AckInterventionRequestV1) (schema.InterventionV1, error) {
+	if err := req.Validate(); err != nil {
+		return schema.InterventionV1{}, err
+	}
+	args, err := arguments(req, map[string]any{"intervention_id": interventionID})
+	if err != nil {
+		return schema.InterventionV1{}, err
+	}
+	raw, err := c.CallTool(ctx, "ack_intervention", args)
+	if err != nil {
+		return schema.InterventionV1{}, err
+	}
+	return decodeValid[schema.InterventionV1]("ack_intervention", raw)
+}
+
+// RequestApproval raises an approval through the request_approval tool. The
+// requester is the authenticated agent: the server sets it, so the field is
+// not sent (the request carries it only so that it validates as a whole).
+func (c *Client) RequestApproval(ctx context.Context, req schema.CreateApprovalRequestV1) (schema.RequestApprovalOutput, error) {
+	if err := req.Validate(); err != nil {
+		return schema.RequestApprovalOutput{}, err
+	}
+	args, err := arguments(req, nil)
+	if err != nil {
+		return schema.RequestApprovalOutput{}, err
+	}
+	delete(args, "requester_id")
+	raw, err := c.CallTool(ctx, "request_approval", args)
+	if err != nil {
+		return schema.RequestApprovalOutput{}, err
+	}
+	out, err := Decode[schema.RequestApprovalOutput](raw)
+	if err != nil {
+		return out, fmt.Errorf("decode request_approval result: %w", err)
+	}
+	if out.ID <= 0 || !out.State.Valid() {
+		return schema.RequestApprovalOutput{}, fmt.Errorf("request_approval result: id %d, state %q", out.ID, out.State)
+	}
+	return out, nil
+}
+
+// AwaitDecision waits up to timeoutMS (the server clamps it) for an approval to
+// resolve.
+func (c *Client) AwaitDecision(ctx context.Context, approvalID, timeoutMS int64) (schema.AwaitDecisionOutput, error) {
+	raw, err := c.CallTool(ctx, "await_decision", map[string]any{"approval_id": approvalID, "timeout_ms": timeoutMS})
+	if err != nil {
+		return schema.AwaitDecisionOutput{}, err
+	}
+	out, err := Decode[schema.AwaitDecisionOutput](raw)
+	if err != nil {
+		return out, fmt.Errorf("decode await_decision result: %w", err)
+	}
+	if !out.State.Valid() {
+		return schema.AwaitDecisionOutput{}, fmt.Errorf("await_decision result: state %q", out.State)
+	}
+	if out.Resolution != nil {
+		if err := out.Resolution.Validate(); err != nil {
+			return schema.AwaitDecisionOutput{}, fmt.Errorf("await_decision result: %w", err)
+		}
+	}
+	return out, nil
 }

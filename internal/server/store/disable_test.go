@@ -319,7 +319,7 @@ func TestLastOperatorGuard(t *testing.T) {
 
 	// A second operator who cannot sign in does not make it safe: the guard
 	// asks for another enabled operator holding a live credential.
-	if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, role, created_at) VALUES ('human', 'op2', 'operator', 1)`); err != nil {
+	if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1)`); err != nil {
 		t.Fatal(err)
 	}
 	op2, err := f.s.PrincipalByID(ctx, f.op.ID+countPrincipalsAfter(t, f.s, f.op.ID))
@@ -466,7 +466,7 @@ func TestLastOperatorGuardConcurrent(t *testing.T) {
 	for range 10 {
 		ctx := context.Background()
 		f := newDisableFixture(t)
-		if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, role, created_at) VALUES ('human', 'op2', 'operator', 1)`); err != nil {
+		if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1)`); err != nil {
 			t.Fatal(err)
 		}
 		var op2 int64

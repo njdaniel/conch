@@ -42,7 +42,7 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 // sessions end with it (issue #265), with the given session cause. The caller
 // must hold the write lock (withImmediateTx) so the set it reads is the set it
 // revokes.
-func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason, sessionCause string, now time.Time) (int, error) {
+func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason, sessionCause string, now time.Time, ended *[]EndedRun) (int, error) {
 	type live struct {
 		id    int64
 		label string
@@ -84,7 +84,7 @@ func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, 
 			credentialDetail(c.id, c.label)+" reason="+reason, now); err != nil {
 			return 0, err
 		}
-		if err := endCredentialSessionsTx(ctx, tx, actor, c.id, sessionCause, now); err != nil {
+		if err := endCredentialSessionsTx(ctx, tx, actor, c.id, sessionCause, now, ended); err != nil {
 			return 0, err
 		}
 	}
@@ -107,10 +107,13 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 }
 
 // DisablePrincipal switches principalID off in one transaction: it sets
-// disabled_at, revokes every live credential, and appends principal_disabled
-// plus one credential_revoked per credential (all attributed to actor, none
-// containing token material). A disabled principal cannot authenticate and
-// cannot be issued credentials.
+// disabled_at, revokes every live credential, closes every open invite the
+// principal made and every open sign-in link for or by it, and appends
+// principal_disabled plus one credential_revoked per credential, one
+// invite_closed (reason=creator_disabled) per invite and one
+// sign_in_link_closed per link (all attributed to actor, none containing
+// token material). A disabled
+// principal cannot authenticate and cannot be issued credentials.
 //
 // It is idempotent: disabling an already-disabled principal changes nothing,
 // writes no audit event, and reports changed == false. It returns
@@ -119,74 +122,97 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // the same BEGIN IMMEDIATE transaction as the update, so two concurrent
 // disables of the last two operators serialize and exactly one succeeds.
 func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
+	var runs []EndedRun
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		role, disabled, err := principalState(ctx, tx, principalID)
-		if err != nil {
-			return err
-		}
-		if disabled {
-			return nil
-		}
+		runs = nil
 		now := credentialNow().Truncate(time.Millisecond)
-		if role == RoleOperator {
-			// Another enabled operator is not enough: it must also hold a live
-			// credential, or nobody could sign in to undo this.
-			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
-			if err != nil {
-				return err
-			}
-			if others == 0 {
-				return ErrLastOperator
-			}
-		}
-		res, err := tx.ExecContext(ctx,
-			"UPDATE principals SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL", now.UnixMilli(), principalID)
-		if err != nil {
-			return fmt.Errorf("store: disable principal: %w", err)
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return fmt.Errorf("store: disable principal: %w", err)
-		} else if n != 1 {
-			return nil
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
-			return err
-		}
-		// Every session of the principal ends first, whatever credential it
-		// was made with, so each is recorded as ended by the disabling and not
-		// by the revocations that follow (issue #265).
-		if err := endPrincipalSessionsTx(ctx, tx, actor, principalID, SessionEndedPrincipalDisabled, now); err != nil {
-			return err
-		}
-		if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "principal disabled", SessionEndedPrincipalDisabled, now); err != nil {
-			return err
-		}
-		changed = true
-		return nil
+		changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs)
+		return err
 	})
 	if err != nil {
 		return false, err
 	}
+	s.announceRunsEnded(runs)
 	return changed, nil
+}
+
+// disablePrincipalTx is DisablePrincipal inside the caller's IMMEDIATE
+// transaction: hiding a principal (issue #445) disables it this way first, in
+// its own transaction. The runs its ended sessions failed are added to runs,
+// for the caller to announce after the commit.
+func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time, runs *[]EndedRun) (bool, error) {
+	role, disabled, err := principalState(ctx, tx, principalID)
+	if err != nil {
+		return false, err
+	}
+	if disabled {
+		return false, nil
+	}
+	if role == RoleOperator {
+		// Another enabled operator is not enough: it must also hold a live
+		// credential, or nobody could sign in to undo this.
+		others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+		if err != nil {
+			return false, err
+		}
+		if others == 0 {
+			return false, ErrLastOperator
+		}
+	}
+	res, err := tx.ExecContext(ctx,
+		"UPDATE principals SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL", now.UnixMilli(), principalID)
+	if err != nil {
+		return false, fmt.Errorf("store: disable principal: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, fmt.Errorf("store: disable principal: %w", err)
+	} else if n != 1 {
+		return false, nil
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
+		return false, err
+	}
+	// Every session of the principal ends first, whatever credential it
+	// was made with, so each is recorded as ended by the disabling and not
+	// by the revocations that follow (issue #265).
+	if err := endPrincipalSessionsTx(ctx, tx, actor, principalID, SessionEndedPrincipalDisabled, now, runs); err != nil {
+		return false, err
+	}
+	if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "principal disabled", SessionEndedPrincipalDisabled, now, runs); err != nil {
+		return false, err
+	}
+	// Redemption already refuses a disabled maker's invites; closing them
+	// makes the invite list say so too (issue #438), and enabling the
+	// principal again does not revive them.
+	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, "", InviteCloseCreatorDisabled, now); err != nil {
+		return false, err
+	}
+	// Likewise the sign-in links for them or made by them (issue #493).
+	if err := closeSignInLinksTx(ctx, tx, actor, principalID, now); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // EnablePrincipal clears disabled_at and appends principal_enabled. It revives
 // no credential: the ones revoked by DisablePrincipal stay revoked and new
-// ones must be issued. Idempotent: enabling an enabled principal writes
-// nothing and reports changed == false. It returns ErrPrincipalNotFound for an
-// unknown id.
+// ones must be issued. A hidden principal is unhidden too (issue #445):
+// hidden_at is cleared and principal_unhidden appended, but its old name and
+// its memberships are not restored. Idempotent: enabling an enabled principal
+// writes nothing and reports changed == false. It returns
+// ErrPrincipalNotFound for an unknown id.
 func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		_, disabled, err := principalState(ctx, tx, principalID)
+		p, err := principalByIDTx(ctx, tx, principalID)
 		if err != nil {
 			return err
 		}
-		if !disabled {
+		if p.DisabledAt == nil {
 			return nil
 		}
 		now := credentialNow().Truncate(time.Millisecond)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE principals SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL", principalID)
+			"UPDATE principals SET disabled_at = NULL, hidden_at = NULL WHERE id = ? AND disabled_at IS NOT NULL", principalID)
 		if err != nil {
 			return fmt.Errorf("store: enable principal: %w", err)
 		}
@@ -196,7 +222,13 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 			return nil
 		}
 		changed = true
-		return appendAuditEventTx(ctx, tx, actor, "principal_enabled", principalActor(principalID), "", now)
+		if err := appendAuditEventTx(ctx, tx, actor, "principal_enabled", principalActor(principalID), "", now); err != nil {
+			return err
+		}
+		if p.HiddenAt == nil {
+			return nil
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditPrincipalUnhidden, principalActor(principalID), "", now)
 	})
 	if err != nil {
 		return false, err
@@ -214,7 +246,9 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // operator holds a live credential.
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
 	var n int
+	var runs []EndedRun
 	err := s.withImmediateTx(ctx, func(tx execer) error {
+		runs = nil
 		role, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
 			return err
@@ -229,7 +263,7 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 				return ErrLastOperator
 			}
 		}
-		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now); err != nil {
+		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now, &runs); err != nil {
 			return err
 		}
 		return appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now)
@@ -237,5 +271,6 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 	if err != nil {
 		return 0, err
 	}
+	s.announceRunsEnded(runs)
 	return n, nil
 }

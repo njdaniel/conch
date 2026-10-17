@@ -2,9 +2,12 @@ name: Release
 
 # Tag-triggered: only Nick pushes v* tags (releases are Tier-H, ADR-000), so
 # the tag push is the sign-off act. Procedure: .claude/skills/release/.
-# Re-runs the full gate plus the two canaries, dogfood-check (P1) and
-# p2-hardening-check (P2); a release does not ship when either fails. Builds
-# both binaries and creates a DRAFT release — publishing stays human.
+# Re-runs the full gate plus the three canaries, dogfood-check (P1),
+# p2-hardening-check (P2) and p3-local-check (P3); a release does not ship
+# when any fails. Builds both binaries. A plain tag (v1.2.3) creates a DRAFT
+# release that Nick publishes; a tag with a pre-release suffix
+# (v0.1.0-alpha.1) is published at once as a GitHub pre-release, since
+# pushing that tag is itself Nick's sign-off for a test build.
 
 on:
   push:
@@ -45,7 +48,10 @@ jobs:
           verify: false # network-dependent; see ci.yml
 
       - name: go test
-        run: go test -race ./...
+        # internal/server alone takes 7–10 minutes under -race on a runner,
+        # past go test's default 10-minute timeout per package (#471);
+        # making it faster is #472.
+        run: go test -race -timeout 25m ./...
 
       # schema-compat is a diff-based PR/main gate; a tag has no base to
       # diff against, and everything tagged already passed it pre-merge.
@@ -61,23 +67,66 @@ jobs:
       - name: p2-hardening-check
         run: go run ./e2e/p2-hardening -skip-dogfood
 
+      # The automated P3 suite (issue #284). It builds the web client, so it
+      # needs the Node that web/.nvmrc pins, as the p3-local-check job in
+      # ci.yml does. P3-13 runs the real Claude Code command only with
+      # --real-adapter, which this step does not pass.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: p3-local-check
+        run: go run ./e2e/p3-local
+
+      # conchd embeds the web client (issue #347): the build goes to
+      # internal/web/dist (the Node setup above is the pinned one) and every
+      # conchd target is built with -tags conchweb. conch is unchanged.
+      # What is embedded must pass the web gates first: the dependency
+      # allow-list, exact versions and licences, with the client's lint and
+      # tests (the Go side's depgate runs above).
+      - name: web-check
+        run: make web-check
+
+      - name: Build the web client for embedding
+        run: make web-embed
+
       - name: Build binaries
         run: |
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" \
+              go build -tags conchweb -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/conchd_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conchd
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -trimpath -ldflags "-s -w" \
+              go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/conch_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conch
           done
           (cd dist && sha256sum ./* > checksums.txt)
 
-      - name: Create draft release
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --draft --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Draft — Nick publishes. dogfood-check and p2-hardening-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
+          # A tag with a semver pre-release suffix (v0.1.0-alpha.1) is
+          # published at once, marked a pre-release, with generated notes; a
+          # plain tag stays a draft that Nick publishes.
+          case "$GITHUB_REF_NAME" in
+            *-*)
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --prerelease --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
+                --notes "Pre-release. $checks
+
+          $web"
+              ;;
+            *)
+              gh release create "$GITHUB_REF_NAME" dist/* \
+                --draft --verify-tag --title "$GITHUB_REF_NAME" \
+                --notes "Draft — Nick publishes. $checks
+
+          $web"
+              ;;
+          esac

@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly backup of Conch instance %i
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

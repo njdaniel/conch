@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/livekit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -19,9 +22,62 @@ func newTestServer(t *testing.T) *Server {
 	return newTestServerWithConfig(t, Config{AuthMode: AuthOff})
 }
 
+// testDBPaths holds the database file of each server newTestServerWithConfig
+// made, for the few tests that must set up what no route can, such as a
+// second operator (issue #438).
+var testDBPaths sync.Map // *Server -> string
+
+// migratedDB is the file of a database with every migration applied, made
+// once per test binary. Migrating a fresh database takes about a third of a
+// second under -race, and the package builds about a thousand test servers;
+// each starts from a copy of this file instead (issue #472). store.Open still
+// runs on the copy, permission checks and version check included; the
+// migrations themselves are tested in the store package.
+var migratedDB struct {
+	once sync.Once
+	data []byte
+	err  error
+}
+
+// newTestDBPath returns the path of a database, in a fresh temporary
+// directory, that is already migrated to the current schema version.
+func newTestDBPath(t *testing.T) string {
+	t.Helper()
+	migratedDB.once.Do(func() {
+		dir, err := os.MkdirTemp("", "conch-server-test-")
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		path := filepath.Join(dir, "conch.db")
+		st, err := store.Open(context.Background(), path)
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		// Closing the last connection checkpoints the write-ahead log into
+		// the file, so the file alone is the whole database.
+		if err := st.Close(); err != nil {
+			migratedDB.err = err
+			return
+		}
+		migratedDB.data, migratedDB.err = os.ReadFile(path) // #nosec G304 -- a file this helper just made in its own temporary directory
+	})
+	if migratedDB.err != nil {
+		t.Fatalf("make the migrated test database: %v", migratedDB.err)
+	}
+	path := filepath.Join(t.TempDir(), "conch.db")
+	if err := os.WriteFile(path, migratedDB.data, 0o600); err != nil {
+		t.Fatalf("copy the migrated test database: %v", err)
+	}
+	return path
+}
+
 func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
 	t.Helper()
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	path := newTestDBPath(t)
+	st, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -33,7 +89,9 @@ func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
 	cfg.DataDir = t.TempDir()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Version = "v1.2.3-test"
-	return New(cfg, st)
+	srv := New(cfg, st)
+	testDBPaths.Store(srv, path)
+	return srv
 }
 
 func TestHealthzOK(t *testing.T) {
@@ -65,8 +123,69 @@ func TestHealthzOK(t *testing.T) {
 	}
 }
 
+// TestHealthzVoice: /healthz says what the presence poller knows of LiveKit,
+// and a voice outage never makes the server degraded or the answer 503: the
+// core works without voice (issue #446, ADR-002).
+func TestHealthzVoice(t *testing.T) {
+	lk := livekit.Config{URL: "ws://lk.invalid", APIURL: "http://lk.invalid", APIKey: "k", APISecret: livekit.NewSecret("s")}
+	tests := []struct {
+		name            string
+		cfg             livekit.Config
+		contacted, down bool
+		want            schema.HealthVoice
+	}{
+		{"not configured", livekit.Config{}, false, false, schema.HealthVoiceNotConfigured},
+		{"configured, not answered yet", lk, false, false, schema.HealthVoiceUnavailable},
+		{"configured and answering", lk, true, false, schema.HealthVoiceOK},
+		{"configured and down", lk, true, true, schema.HealthVoiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, LiveKit: tt.cfg})
+			srv.voice.mu.Lock()
+			srv.voice.contacted, srv.voice.down = tt.contacted, tt.down
+			srv.voice.mu.Unlock()
+
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 whatever voice says", rec.Code)
+			}
+			var h schema.Health
+			if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+				t.Fatal(err)
+			}
+			if h.Voice != tt.want || h.Status != schema.HealthOK || h.DB != schema.HealthOK {
+				t.Errorf("health = %+v, want status ok, db ok, voice %s", h, tt.want)
+			}
+		})
+	}
+}
+
+// A real outage, as the poller finds it: LiveKit's address answers nothing,
+// one sweep marks voice down, and /healthz says unavailable with a 200.
+func TestHealthzVoiceOutage(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, LiveKit: livekit.Config{
+		URL: "ws://lk.invalid", APIURL: deadURL, APIKey: "k", APISecret: livekit.NewSecret("s"),
+	}})
+	srv.voice.runSweep(context.Background())
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var h schema.Health
+	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || h.Status != schema.HealthOK || h.Voice != schema.HealthVoiceUnavailable {
+		t.Errorf("healthz = %d %+v, want 200 ok with voice unavailable", rec.Code, h)
+	}
+}
+
 func TestHealthzDegradedWhenStoreClosed(t *testing.T) {
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	st, err := store.Open(context.Background(), newTestDBPath(t))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

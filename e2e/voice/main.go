@@ -22,6 +22,11 @@
 //     channel. It builds conch-voice with the pinned Rust toolchain
 //     (scripts/voice-toolchain.sh); without that toolchain the scenario alone
 //     is skipped, and the last line says so.
+//   - Within the live half, the screen share (issue #443, share.go): a member
+//     claims the room's share and an lk participant publishes a screen and
+//     its sound on the same connection, another subscribes to them, the share
+//     is stopped and its tracks disappear; publishing those sources without a
+//     claim is refused by LiveKit.
 //
 // Also checked throughout: the join token's own claims (claims.go); that no
 // token, secret or room name appears in anything conchd sends to a client
@@ -33,25 +38,36 @@
 // skip is a failure. An image or lk that is not the pinned one fails everywhere. It
 // prints one "voice-check: PASS" line when everything ran. A SIGINT or SIGTERM
 // stops the run and removes what it started.
+//
+// Two subcommands are not part of the check: fetch-lk and loadtest are the Go
+// half of scripts/alpha-loadtest.sh (issue #448, loadtest.go).
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
 func main() {
+	// Here because they reuse the pinned lk download and the relay.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "fetch-lk":
+			os.Exit(fetchLKMain(os.Args[2:]))
+		case "loadtest":
+			os.Exit(loadtestMain(os.Args[2:]))
+		}
+	}
 	os.Exit(realMain())
 }
 
@@ -283,8 +299,8 @@ func expectRefusal(what string, a api, method, path string, status int, code str
 
 type live struct {
 	h     *harness
-	srv   *livekitServer
-	adm   *lkAdmin
+	srv   *lkit.Server
+	adm   *lkit.Admin
 	d     *conchdProc
 	lkBin string
 	ogg   string
@@ -299,50 +315,22 @@ type live struct {
 	afterSweep        func() error // checks to repeat once a sweep has run
 	bridgeRoom        string
 	bridgeSubject     string
-	aliceHL           *headless
+	aliceHL           *lkit.Headless
 }
 
-// prepareLive checks what the live half needs. It returns a reason to skip
-// when the machine cannot run it (no Docker, no network), and an error when it
-// could but something is wrong: a pulled image or a downloaded lk that is not
-// the one pinned in this program is not a missing network, and fails
-// everywhere, CI or not.
+// prepareLive checks what the live half needs (lkit.Kit.Prepare) and adds this
+// program's own: the silent microphone file and the conch-voice binary. It
+// returns a reason to skip when the machine cannot run it (no Docker, no
+// network), and an error when it could but something is wrong: a pulled image
+// or a downloaded lk that is not the one pinned is not a missing network, and
+// fails everywhere, CI or not.
 func prepareLive(ctx context.Context, h *harness) (*live, string, error) {
-	if goos := runtime.GOOS; goos != "linux" {
-		return nil, "the live half runs LiveKit on the Docker host network, which only Linux has (this is " + goos + ")", nil
+	lkBin, reason, err := h.kit.Prepare(ctx)
+	if err != nil || reason != "" {
+		return nil, reason, err
 	}
-	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if out, err := docker(pctx, "info", "--format", "{{.ServerVersion}}"); err != nil {
-		return nil, "Docker is not available: " + oneLine(out, err), nil
-	}
-	ictx, icancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer icancel()
-	if out, err := docker(ictx, "pull", "--quiet", livekitImage); err != nil {
-		if ctx.Err() != nil {
-			return nil, "", errInterrupted
-		}
-		if looksOffline(out) {
-			return nil, "cannot pull the LiveKit image (no network?): " + oneLine(out, err), nil
-		}
-		return nil, "", fmt.Errorf("cannot pull the pinned LiveKit image %s: %s", livekitImage, oneLine(out, err))
-	}
-	dir, err := h.mkdir("lkbin-")
-	if err != nil {
-		return nil, "", err
-	}
-	lkBin, err := fetchLK(ictx, dir)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, "", errInterrupted
-		}
-		if errors.Is(err, errUnreachable) {
-			return nil, "cannot download lk " + lkVersion + " (no network?): " + err.Error(), nil
-		}
-		return nil, "", fmt.Errorf("lk %s: %w", lkVersion, err)
-	}
-	ogg := filepath.Join(dir, "silence.ogg")
-	if err := writeSilentOpus(ogg, 900); err != nil {
+	ogg := filepath.Join(filepath.Dir(lkBin), "silence.ogg")
+	if err := lkit.WriteSilentOpus(ogg, 900); err != nil {
 		return nil, "", err
 	}
 	voiceBin, voiceSkip, err := h.buildVoiceClient()
@@ -355,41 +343,16 @@ func prepareLive(ctx context.Context, h *harness) (*live, string, error) {
 	return &live{h: h, lkBin: lkBin, ogg: ogg, voiceBin: voiceBin, voiceSkip: voiceSkip}, "", nil
 }
 
-// looksOffline reports whether a failed pull is about reaching the registry,
-// as opposed to what the registry answered.
-func looksOffline(out string) bool {
-	out = strings.ToLower(out)
-	for _, w := range []string{"no such host", "timeout", "timed out", "connection refused", "network is unreachable",
-		"temporary failure", "tls handshake", "dial tcp", "no route to host", "i/o timeout", "could not resolve",
-		"unexpected eof", "toomanyrequests", "rate limit", "deadline exceeded", "cannot connect to the docker daemon"} {
-		if strings.Contains(out, w) {
-			return true
-		}
-	}
-	return false
-}
-
-func oneLine(out string, err error) string {
-	s := strings.TrimSpace(out)
-	if s == "" {
-		s = err.Error()
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return truncate(s, 160)
-}
-
 func (l *live) run(ctx context.Context) error {
 	h := l.h
-	srv, err := h.startLiveKit(ctx)
+	srv, err := h.kit.StartLiveKit(ctx)
 	if err != nil {
 		return err
 	}
-	l.srv, l.adm = srv, srv.admin()
-	h.say("ok   LiveKit %s is up on %s (container %s, auto_create off)", "v1.13.7", srv.apiURL, srv.name)
+	l.srv, l.adm = srv, srv.Admin()
+	h.say("ok   LiveKit %s is up on %s (container %s, auto_create off)", "v1.13.7", srv.APIURL, srv.Name)
 
-	d, err := h.startConchd("live", srv.settings())
+	d, err := h.startConchd("live", settingsOf(srv))
 	if err != nil {
 		return err
 	}
@@ -406,6 +369,7 @@ func (l *live) run(ctx context.Context) error {
 		{"never issued", l.neverIssued},
 		{"credential expiring by itself", l.credentialExpires},
 		{"conch-voice clients", l.voiceClients},
+		{"screen share", l.screenShare},
 		{"LiveKit down", l.liveKitDown},
 	}
 	for _, s := range steps {
@@ -446,8 +410,8 @@ func presenceOf(viewer *person, id int64) (listed, talking bool, saw string, err
 func (l *live) lkGone(room string, id int64) (bool, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	parts, err := l.adm.listParticipants(ctx, room)
-	if roomNotFound(err) {
+	parts, err := l.adm.ListParticipants(ctx, room)
+	if lkit.RoomNotFound(err) {
 		return true, "the room does not exist"
 	}
 	if err != nil {
@@ -463,12 +427,12 @@ func (l *live) lkGone(room string, id int64) (bool, string) {
 
 // lkHas asks LiveKit whether identity p<id> is in room. False means only
 // "not seen": use lkGone to assert that someone is absent.
-func (l *live) lkHas(room string, id int64) (bool, lkParticipant, string) {
+func (l *live) lkHas(room string, id int64) (bool, lkit.Participant, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	parts, err := l.adm.listParticipants(ctx, room)
+	parts, err := l.adm.ListParticipants(ctx, room)
 	if err != nil {
-		return false, lkParticipant{}, err.Error()
+		return false, lkit.Participant{}, err.Error()
 	}
 	var idents []string
 	for _, p := range parts {
@@ -477,7 +441,7 @@ func (l *live) lkHas(room string, id int64) (bool, lkParticipant, string) {
 			return true, p, ""
 		}
 	}
-	return false, lkParticipant{}, fmt.Sprintf("LiveKit lists %v", idents)
+	return false, lkit.Participant{}, fmt.Sprintf("LiveKit lists %v", idents)
 }
 
 // exitText describes how a command ended, for a message.
@@ -493,7 +457,7 @@ func identity(id int64) string { return fmt.Sprintf("p%d", id) }
 func (l *live) lkRooms() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return l.adm.listRooms(ctx)
+	return l.adm.ListRooms(ctx)
 }
 
 func contains(list []string, s string) bool {
@@ -532,7 +496,7 @@ func (l *live) waitAudit(what, action, subject, actor string, want int) error {
 }
 
 // joinHeadless joins lk with the token in grant, which conchd issued.
-func (l *live) joinHeadless(grant schema.VoiceRoomGrant) (*headless, error) {
-	hostPort := strings.TrimPrefix(l.srv.wsURL, "ws://")
+func (l *live) joinHeadless(grant schema.VoiceRoomGrant) (*lkit.Headless, error) {
+	hostPort := strings.TrimPrefix(l.srv.WSURL, "ws://")
 	return l.h.startHeadless(l.lkBin, l.ogg, hostPort, grant.Token)
 }

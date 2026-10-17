@@ -19,7 +19,7 @@ import (
 
 type stubAPI struct{}
 
-func (stubAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
+func (stubAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
 	return schema.ListMessagesResponseV2{}, nil
 }
 func (stubAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
@@ -72,6 +72,13 @@ func (stubAPI) CreateIntervention(context.Context, int64, schema.CreateIntervent
 }
 func (stubAPI) ListInterventions(context.Context, int64, int64, int) (schema.ListInterventionsResponseV1, error) {
 	return schema.ListInterventionsResponseV1{}, nil
+}
+
+func (stubAPI) ListReadState(context.Context) (schema.ListReadStateResponseV1, error) {
+	return schema.ListReadStateResponseV1{}, nil
+}
+func (stubAPI) MarkRead(context.Context, string, int64) (schema.ReadStateV1, error) {
+	return schema.ReadStateV1{}, nil
 }
 
 var errNoSessions = errors.New("no sessions on the stub")
@@ -233,7 +240,7 @@ func (a *listAPI) ListChannels(context.Context) (schema.ListChannelsResponse, er
 	return a.resp, a.err
 }
 
-func (a *listAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
+func (a *listAPI) ListMessagesV2Page(_ context.Context, channel string, _ cli.MessagesPage, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.listed = append(a.listed, channel)
 	a.mu.Unlock()
@@ -626,7 +633,7 @@ func newResubAPI() *resubAPI {
 	return &resubAPI{backfills: map[string]int{}, subscribes: map[string]int{}, started: make(chan string, 16)}
 }
 
-func (a *resubAPI) ListMessagesV2(_ context.Context, channel string, _ int64, _ int) (schema.ListMessagesResponseV2, error) {
+func (a *resubAPI) ListMessagesV2Page(_ context.Context, channel string, _ cli.MessagesPage, _ int) (schema.ListMessagesResponseV2, error) {
 	a.mu.Lock()
 	a.backfills[channel]++
 	a.mu.Unlock()
@@ -1095,8 +1102,8 @@ func (a *scopeAPI) ListNets(context.Context, string) (schema.ListNetsResponseV1,
 	return schema.ListNetsResponseV1{Nets: a.roster}, a.netsErr
 }
 
-func (a *scopeAPI) ListMessagesV2(context.Context, string, int64, int) (schema.ListMessagesResponseV2, error) {
-	a.record("ListMessagesV2")
+func (a *scopeAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
+	a.record("ListMessagesV2Page")
 	return schema.ListMessagesResponseV2{}, nil
 }
 
@@ -1548,7 +1555,7 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	enter(m, "hi")
-	for _, name := range []string{"ListMessagesV2", "SubscribeV2After", "PostMessageV2"} {
+	for _, name := range []string{"ListMessagesV2Page", "SubscribeV2After", "PostMessageV2"} {
 		if api.count(name) != 1 {
 			t.Errorf("%s calls = %d, want 1", name, api.count(name))
 		}
@@ -1557,7 +1564,7 @@ func TestMessagesUseOnlyV2(t *testing.T) {
 	// TUI cannot call them; the compile-time check above ties API to the
 	// real client.
 	for _, c := range api.callNames() {
-		if !strings.HasSuffix(c, "V2") && c != "SubscribeV2After" && c != "ListNets" {
+		if !strings.HasSuffix(c, "V2") && c != "ListMessagesV2Page" && c != "SubscribeV2After" && c != "ListNets" {
 			t.Errorf("unexpected call %s", c)
 		}
 	}
@@ -2709,5 +2716,37 @@ func TestMembersDoNotChangeMessageMerging(t *testing.T) {
 	got := m.messages["ops"]
 	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 2 {
 		t.Errorf("messages = %+v", got)
+	}
+}
+
+// An approval this person may see but not decide (issue #450) carries a
+// [view] badge and cannot be opened for a decision; another one can.
+func TestViewOnlyApprovalCannotBeDecided(t *testing.T) {
+	mk := func(id int64, title string) schema.ApprovalV1 {
+		return schema.ApprovalV1{
+			ID: id, RequesterID: 42, Title: title, Quorum: 1, State: schema.ApprovalStatePending,
+			Deadline:  schema.NewTimestamp(time.Now().Add(time.Hour)),
+			CreatedAt: schema.NewTimestamp(time.Now()),
+			Options:   []schema.Option{{ID: "approve", Label: "Approve", Kind: schema.OptionKindApprove}},
+		}
+	}
+	m := NewModel(context.Background(), stubAPI{}, 42, []string{"general"})
+	m.width, m.height = 80, 24
+	m.mode = modeInbox
+	next, _ := m.Update(approvalsLoaded{approvals: []schema.ApprovalV1{mk(1, "theirs"), mk(2, "mine")}, readOnly: []int64{1}})
+	m = next.(Model)
+	if v := m.View(); !strings.Contains(v, "[view]") || strings.Count(v, "[view]") != 1 {
+		t.Errorf("want one [view] badge:\n%s", v)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.mode != modeInbox || m.inboxStatus != "view only: you may not decide this" {
+		t.Fatalf("enter on a view-only approval: mode %v, status %q", m.mode, m.inboxStatus)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if next.(Model).mode != modeDecision {
+		t.Errorf("enter on a decidable approval: mode %v, want decision", next.(Model).mode)
 	}
 }

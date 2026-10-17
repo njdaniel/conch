@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -138,6 +139,11 @@ func TestBootstrapOperator(t *testing.T) {
 	if who.Name != "nick" || who.Role != schema.RoleOperator || who.Kind != schema.PrincipalHuman {
 		t.Errorf("whoami = %+v", who)
 	}
+	// The operator's creation is audited like any other (issue #445).
+	created, err := st.LastAuditEvent(context.Background(), store.AuditPrincipalCreated)
+	if err != nil || created.Actor != "system" || created.Subject != fmt.Sprintf("principal:%d", who.ID) || created.Detail != "kind=human" {
+		t.Errorf("principal_created = %+v, %v", created, err)
+	}
 	ts.Close()
 	_ = st.Close()
 
@@ -175,6 +181,19 @@ func TestBootstrapOperatorNameCollision(t *testing.T) {
 	}
 	if after := dbCounts(t, dir); after != before {
 		t.Errorf("database changed: %v -> %v", before, after)
+	}
+}
+
+// A name reserved for hidden accounts (issue #445) is refused, saying so, and
+// nothing is written.
+func TestBootstrapOperatorReservedName(t *testing.T) {
+	dir := t.TempDir()
+	stdout, _, err := bootstrap(t, dir, "HIDDEN-1")
+	if err == nil || !strings.Contains(err.Error(), "names beginning with hidden- are reserved") || stdout != "" {
+		t.Errorf("err = %v, stdout = %q", err, stdout)
+	}
+	if got := dbCounts(t, dir); got != [3]int{} {
+		t.Errorf("database after the refusal = %v, want empty", got)
 	}
 }
 
@@ -335,5 +354,38 @@ func TestRunServePartialLiveKitFailsBeforeDatabase(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("data dir was created (stat err %v); serve should fail before opening anything", statErr)
+	}
+}
+
+func TestParseServeArgsRoomPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: "conch-"},
+		{name: "flag", args: []string{"--livekit-room-prefix", "alpha-"}, want: "alpha-"},
+		{name: "env", env: "beta-", want: "beta-"},
+		{name: "flag wins over env", args: []string{"--livekit-room-prefix", "alpha-"}, env: "beta-", want: "alpha-"},
+		{name: "invalid flag", args: []string{"--livekit-room-prefix", "Alpha"}, wantErr: true},
+		{name: "invalid env", env: "no-dash", wantErr: true},
+		{name: "empty flag", args: []string{"--livekit-room-prefix="}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCHD_LIVEKIT_ROOM_PREFIX", tt.env)
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--livekit-room-prefix") || !strings.Contains(err.Error(), "end with '-'") {
+					t.Fatalf("err = %v, want one line naming the flag and the rule", err)
+				}
+				return
+			}
+			if err != nil || opts.livekitRoomPrefix != tt.want {
+				t.Fatalf("prefix = %q, %v; want %q", opts.livekitRoomPrefix, err, tt.want)
+			}
+		})
 	}
 }

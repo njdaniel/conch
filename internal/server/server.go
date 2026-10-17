@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -51,8 +53,11 @@ type Config struct {
 	// it to DefaultMaxUploadBytes; the zero value here is off.
 	MaxUploadBytes int64
 	// WebDir, when set, is a built web client served at /app/ (see
-	// static.go). Empty means no /app/ routes exist.
+	// static.go). It wins over WebFS. With neither, no /app/ routes exist.
 	WebDir string
+	// WebFS, when set and WebDir is not, is the web client embedded in the
+	// binary (internal/web), rooted at the directory holding index.html.
+	WebFS fs.FS
 	// AllowedOrigins are extra origins the WebSocket upgrade accepts besides
 	// the server's own, so a dev server on another port can connect. Empty
 	// keeps the same-origin check. See ParseAllowedOrigins.
@@ -63,6 +68,15 @@ type Config struct {
 	// to start unless stale is shorter than offline.
 	SessionStale   time.Duration
 	SessionOffline time.Duration
+	// TrustedProxies are the reverse proxies whose X-Forwarded-For conchd
+	// believes, for the invite routes' per-address rate limits (see
+	// clientaddr.go). Empty, the header is never read and the client is the
+	// connection's peer.
+	TrustedProxies []netip.Prefix
+	// InviteAllowance is how many outstanding personal invites one inviter
+	// who is not an operator may hold. Zero or less means
+	// store.DefaultPersonalInviteAllowance.
+	InviteAllowance int
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -107,6 +121,9 @@ type Server struct {
 	// credRecheckInterval is how often an authenticated WebSocket re-checks
 	// its own credential. Unexported so tests can shorten it before serving.
 	credRecheckInterval time.Duration
+	// pingInterval and pingTimeout are the socket keepalive's (keepalive.go);
+	// zero means the defaults. Unexported so tests can shorten them.
+	pingInterval, pingTimeout time.Duration
 	// limits counts agents' uses against their manifest rate limits and
 	// denials coalesces repeated access_denied rows (issue #80). Both are in
 	// memory only. now is their clock; tests replace it before serving.
@@ -145,6 +162,22 @@ type Server struct {
 	// point of a replay. Both are unexported and set by tests before serving.
 	replayPageSize int
 	replayHooks    wsReplayHooks
+	// beforeDecide, when a test sets it, runs between the decision handler's
+	// own membership and right checks and the deciding transaction, so a test
+	// can land a revoke in that gap (issue #453). Nil in conchd.
+	beforeDecide func()
+	// inviteLimits is the invite routes' rate limits (invite_limits.go), in
+	// memory only; its clock is now. Tests replace it with setInviteLimits
+	// before serving.
+	inviteLimits *inviteLimiter
+	// diag is each principal's recent request ids and socket closes, and
+	// connLogs thins the connection log (issue #446). Both are in memory
+	// only.
+	diag     diagRing
+	connLogs connLogLimiter
+	// reportLimits is the problem-report rate limit (reports.go), in memory
+	// only; its clock is now. Tests replace it before serving.
+	reportLimits *reportLimiter
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -174,17 +207,24 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(defaultInviteLimits()), reportLimits: newReportLimiter(defaultReportLimit())}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	// Runs that end with their session change without SetRunState, so the
+	// store reports them here, after its commit (issue #405).
+	st.OnRunsEnded(func(runs []store.EndedRun) {
+		for _, r := range runs {
+			s.events.notifyRun(r.ChannelID, r.ID)
+		}
+	})
 	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
 		s.routeByPattern[rt.pattern] = rt
-		s.mux.Handle(rt.pattern, s.guard(rt))
+		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
 	if s.VoiceConfigured() {
@@ -204,6 +244,9 @@ func New(cfg Config, st *store.Store) *Server {
 	} else {
 		slog.Warn("auth: authentication is OFF: every endpoint is open to anyone who can reach this port, and request bodies are trusted for identity; use this for local development only")
 	}
+	// Outside authentication, so every answer has a request id, a refusal
+	// included (issue #446).
+	handler = s.requestIDMiddleware(handler)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
@@ -307,12 +350,15 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // handleHealth serves GET /healthz: 200 with a schema.Health body when the
-// store is reachable, 503 with status "degraded" when it is not.
+// store is reachable, 503 with status "degraded" when it is not. Voice is
+// reported but never decides either: it is optional, and the core works
+// without it (ADR-002).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	h := schema.Health{
 		Status:  schema.HealthOK,
 		Version: s.cfg.Version,
 		DB:      schema.HealthOK,
+		Voice:   s.voice.health(),
 	}
 	code := http.StatusOK
 

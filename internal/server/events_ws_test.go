@@ -31,12 +31,15 @@ type eventFrame struct {
 	run          schema.RunV1
 	activity     schema.AgentActivityV1
 	intervention schema.InterventionV1
+	members      schema.ChannelMembersV1
 }
 
 func (fr eventFrame) String() string {
 	switch fr.schema {
 	case schema.SessionRosterSchemaV1:
 		return fmt.Sprintf("roster%+v", fr.roster)
+	case schema.ChannelMembersSchemaV1:
+		return fmt.Sprintf("members%+v", fr.members)
 	case schema.RunSchemaV1:
 		return fmt.Sprintf("run%+v", fr.run)
 	case schema.AgentActivitySchemaV1:
@@ -112,6 +115,10 @@ func (c *eventsClient) next() eventFrame {
 	case schema.InterventionSchemaV1:
 		if err = json.Unmarshal(raw, &fr.intervention); err == nil {
 			verr = fr.intervention.Validate()
+		}
+	case schema.ChannelMembersSchemaV1:
+		if err = json.Unmarshal(raw, &fr.members); err == nil {
+			verr = fr.members.Validate()
 		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)

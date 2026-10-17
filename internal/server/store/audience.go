@@ -21,9 +21,9 @@ import (
 // scoped to a net or to an explicit list of principals. Who a scoped message
 // reached is decided once, at post time, and stored in message_recipients.
 //
-// This file is the only place that reads message rows. ListVisibleMessages is
-// the one visibility function: every list in every protocol version, and the
-// MCP read tool, go through it, so there is exactly one place where a scoped
+// This file is the only place that reads message rows. ListVisibleMessagesPage
+// (and ListVisibleMessages, its ascending form) is the one visibility function:
+// every list in every protocol version, and the MCP read tool, go through it, so there is exactly one place where a scoped
 // message can be handed to someone it was not meant for. A structural test
 // (TestMessageReadsStayInTheVisibilityFunction) fails if another file in the
 // server reads the messages table.
@@ -86,12 +86,41 @@ var ChannelWideOnly = Reader{}
 //   - Operators get no exemption. Oversight of scoped traffic is the audit
 //     log, not a read bypass.
 func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) ([]Message, error) {
+	return s.ListVisibleMessagesPage(ctx, channelID, reader, MessagePage{After: afterID}, limit)
+}
+
+// MessagePage says which messages ListVisibleMessagesPage reads. The zero
+// value is the first page, ascending. After is the largest id already held
+// (ascending reads); Before is the smallest (newest-first reads, where zero
+// means from the newest). A page has one direction, so After with NewestFirst,
+// or Before without it, is an error rather than a guess.
+type MessagePage struct {
+	After, Before int64
+	NewestFirst   bool
+}
+
+// ListVisibleMessagesPage is ListVisibleMessages with a direction: up to limit
+// visible messages of channelID, ascending with id greater than page.After, or
+// with page.NewestFirst descending with id less than page.Before (all of them
+// when it is zero). The visibility rule is the one documented above and is in
+// the same statement, before the limit, in either direction.
+func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, reader Reader, page MessagePage, limit int) ([]Message, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list messages: limit must be positive, got %d", limit)
 	}
+	if (page.NewestFirst && page.After != 0) || (!page.NewestFirst && page.Before != 0) {
+		return nil, errors.New("store: list messages: after goes with ascending reads and before with newest-first ones")
+	}
+	if page.After < 0 || page.Before < 0 {
+		return nil, errors.New("store: list messages: a cursor is never negative")
+	}
+	before := page.Before
+	if before == 0 {
+		before = math.MaxInt64
+	}
 	scoped, predArgs := visibilityArgs(reader)
-	rows, err := s.db.QueryContext(ctx, listSQL(scoped),
-		append(append([]any{channelID, afterID}, predArgs...), limit)...)
+	rows, err := s.db.QueryContext(ctx, listSQL(scoped, page.NewestFirst),
+		append(append([]any{channelID, page.After, before}, predArgs...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
 	}
@@ -102,6 +131,48 @@ func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader
 		return nil, fmt.Errorf("store: list messages in channel %d: %w", channelID, err)
 	}
 	return msgs, nil
+}
+
+// CountVisibleMessagesAfter returns how many messages in channelID with ID
+// greater than afterID reader may see, counting no further than limit (so a
+// result equal to limit means "at least that many"). It is the unread count of
+// a read mark (issue #351). It embeds the same visibility condition as
+// ListVisibleMessages, in the same statement, so a message the reader cannot
+// see is not counted, and a count is never a way to learn that a hidden
+// message exists. The cap is applied inside the statement, so the work is
+// bounded by it however long the channel has gone unread.
+func (s *Store) CountVisibleMessagesAfter(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: count messages: limit must be positive, got %d", limit)
+	}
+	if afterID < 0 {
+		return 0, errors.New("store: count messages: a cursor is never negative")
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	var n int
+	err := s.db.QueryRowContext(ctx, countSQL(scoped),
+		append(append([]any{channelID, afterID}, predArgs...), limit)...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count messages in channel %d: %w", channelID, err)
+	}
+	return n, nil
+}
+
+// newestVisibleMessageID returns the id of the newest message in channelID
+// that reader may see, or 0 when there is none. MarkRead clamps a mark to it,
+// so a mark can never point past what the reader has seen, nor be used to
+// probe for the ids of messages they cannot see.
+func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, reader Reader) (int64, error) {
+	scoped, predArgs := visibilityArgs(reader)
+	var id int64
+	err := s.db.QueryRowContext(ctx, newestSQL(scoped), append([]any{channelID}, predArgs...)...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: newest message in channel %d: %w", channelID, err)
+	}
+	return id, nil
 }
 
 // messageColumns is the column list scanMessages reads.
@@ -126,9 +197,25 @@ const (
 	visibleToAnyReader = `m.audience_kind IS NULL`
 
 	listHead = `SELECT ` + messageColumns + ` FROM messages m
-		 WHERE m.channel_id = ? AND m.id > ? AND `
+		 WHERE m.channel_id = ? AND m.id > ? AND m.id < ? AND `
 	listTail = `
 		 ORDER BY m.id ASC LIMIT ?`
+	// The newest-first read is the same statement walked backwards: both
+	// bounds are always written so the planner sees one range on the
+	// channel index, and only the direction differs.
+	listDescTail = `
+		 ORDER BY m.id DESC LIMIT ?`
+
+	countHead = `SELECT COUNT(*) FROM (SELECT 1 FROM messages m
+		 WHERE m.channel_id = ? AND m.id > ? AND `
+	countTail = `
+		 LIMIT ?)`
+	newestHead = `SELECT m.id FROM messages m
+		 WHERE m.channel_id = ? AND `
+	// Newest first and stopping at the first visible row, so the cost is the
+	// hidden messages at the top of the channel and not the whole channel.
+	newestTail = `
+		 ORDER BY m.id DESC LIMIT 1`
 
 	searchHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
@@ -146,11 +233,29 @@ func visibilityArgs(reader Reader) (scoped bool, args []any) {
 	return false, nil
 }
 
-func listSQL(scoped bool) string {
-	if scoped {
-		return listHead + visibleToScopedReader + listTail
+func listSQL(scoped, newestFirst bool) string {
+	tail := listTail
+	if newestFirst {
+		tail = listDescTail
 	}
-	return listHead + visibleToAnyReader + listTail
+	if scoped {
+		return listHead + visibleToScopedReader + tail
+	}
+	return listHead + visibleToAnyReader + tail
+}
+
+func countSQL(scoped bool) string {
+	if scoped {
+		return countHead + visibleToScopedReader + countTail
+	}
+	return countHead + visibleToAnyReader + countTail
+}
+
+func newestSQL(scoped bool) string {
+	if scoped {
+		return newestHead + visibleToScopedReader + newestTail
+	}
+	return newestHead + visibleToAnyReader + newestTail
 }
 
 func searchSQL(scoped bool) string {
@@ -222,7 +327,7 @@ func (s *Store) SearchVisibleMessages(ctx context.Context, channelID int64, read
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: search messages: limit must be positive, got %d", limit)
 	}
-	match := ftsAllWords(words)
+	match := ftsInChannel(channelID, words)
 	if match == "" {
 		return nil, nil
 	}
@@ -240,6 +345,19 @@ func (s *Store) SearchVisibleMessages(ctx context.Context, channelID int64, read
 		return nil, fmt.Errorf("store: search messages in channel %d: %w", channelID, err)
 	}
 	return msgs, nil
+}
+
+// ftsInChannel builds the FTS5 query of a search: the channel's token, and
+// every word, each confined to its own column. The channel clause is written
+// from an integer; the words are ftsAllWords's. The words are confined to the
+// body column so that a word a caller types can never match the channel token.
+// It is empty when there is nothing to search for.
+func ftsInChannel(channelID int64, words []string) string {
+	all := ftsAllWords(words)
+	if all == "" {
+		return ""
+	}
+	return fmt.Sprintf(`fts_channel : "c%d" AND body : (%s)`, channelID, all)
 }
 
 // ftsAllWords builds an FTS5 query that requires every word, each as a quoted
@@ -1081,6 +1199,112 @@ func ownedRunTx(ctx context.Context, tx execer, runID, credentialID int64, reade
 		return Run{}, fmt.Errorf("store: read run %d: %w", runID, err)
 	}
 	return run, nil
+}
+
+// countOpenRunsTx is how many runs of session sessionID have not ended. It
+// reads no run's content, only how many there are, and is here because this
+// is the one file that reads the runs table. CreateRun asks it inside its
+// transaction.
+// openRunStates are the states of a run that has not ended; a terminal state
+// sets ended_at (the table's CHECK ties them), so the two are the same set.
+var openRunStates = [5]schema.RunState{schema.RunStateQueued, schema.RunStateStarting, schema.RunStateRunning, schema.RunStateBlocked, schema.RunStateWaiting}
+
+func countOpenRunsTx(ctx context.Context, tx execer, sessionID int64) (int, error) {
+	var n int
+	// By the open states, not ended_at: runs_by_session (session_id, state)
+	// then answers from the index alone, touching only open runs instead of
+	// the session's whole history, inside the write lock.
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM runs WHERE session_id = ? AND state IN (?, ?, ?, ?, ?)", sessionID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4]).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count open runs of session %d: %w", sessionID, err)
+	}
+	return n, nil
+}
+
+// countOpenRunsOfCredentialTx is how many runs have not ended on the sessions
+// of credential credentialID that have not ended, live and offline alike
+// (issue #402). Offline sessions' runs stay open and a session cannot be told
+// to forget them, so a bound on live sessions alone would let new sessions
+// pile new runs on top. Ended sessions are left out: ending one ends its runs
+// in the same transaction, so they hold none, except runs left open by a
+// session that ended before #402. Those could never be freed (the session
+// cannot be ended again, and a run the agent no longer sees cannot be ended
+// by it), so counting them could lock the credential out for good; leaving
+// ended sessions out also keeps the walk to the sessions still in use.
+// CreateRun asks it inside its transaction.
+func countOpenRunsOfCredentialTx(ctx context.Context, tx execer, credentialID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs r JOIN sessions s ON s.id = r.session_id
+		 WHERE s.credential_id = ? AND s.ended_at IS NULL AND r.state IN (?, ?, ?, ?, ?)`, credentialID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4]).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count open runs of credential %d: %w", credentialID, err)
+	}
+	return n, nil
+}
+
+// endSessionRunsTx ends every run of session sessionID that has not ended:
+// state failed, outcome RunOutcomeSessionEnded, ended_at now (never before the
+// run's started_at), and one run_ended event each, in the caller's
+// transaction. The agent can no longer see these runs, so left open they
+// would hold a slot of the credential's bound for good (issue #402). It
+// appends each run it ended to *ended, for the caller to announce once the
+// transaction has committed (issue #405).
+func endSessionRunsTx(ctx context.Context, tx execer, actor string, sessionID int64, now time.Time, ended *[]EndedRun) error {
+	type open struct{ id, principalID, channelID int64 }
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, principal_id, channel_id FROM runs WHERE session_id = ? AND state IN (?, ?, ?, ?, ?) ORDER BY id", sessionID,
+		openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
+	if err != nil {
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	var found []open
+	for rows.Next() {
+		var o open
+		if err := rows.Scan(&o.id, &o.principalID, &o.channelID); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: scan open run: %w", err)
+		}
+		found = append(found, o)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: list open runs of session %d: %w", sessionID, err)
+	}
+	for _, o := range found {
+		res, err := tx.ExecContext(ctx,
+			"UPDATE runs SET state = ?, outcome = ?, ended_at = max(started_at, ?) WHERE id = ? AND state IN (?, ?, ?, ?, ?)",
+			string(schema.RunStateFailed), RunOutcomeSessionEnded, now.UnixMilli(), o.id,
+			openRunStates[0], openRunStates[1], openRunStates[2], openRunStates[3], openRunStates[4])
+		if err != nil {
+			return fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("store: end run %d with its session: %w", o.id, err)
+		} else if n != 1 {
+			return fmt.Errorf("store: end run %d with its session: affected %d rows", o.id, n)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditRunEnded, runSubject(o.id),
+			fmt.Sprintf("state=%s cause=session_ended session=%d principal=%d channel=%d", schema.RunStateFailed, sessionID, o.principalID, o.channelID), now); err != nil {
+			return err
+		}
+		*ended = append(*ended, EndedRun{ID: o.id, ChannelID: o.channelID})
+	}
+	return nil
+}
+
+// countRunActivityTx is how many activity entries run runID holds, for
+// AppendRunActivity, inside its transaction.
+func countRunActivityTx(ctx context.Context, tx execer, runID int64) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM run_activity WHERE run_id = ?", runID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count activity of run %d: %w", runID, err)
+	}
+	return n, nil
 }
 
 // RunPage says which runs ListVisibleRuns reads. The zero value is the first

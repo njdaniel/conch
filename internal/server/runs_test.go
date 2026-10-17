@@ -790,13 +790,21 @@ func TestSessionStatusFromRuns(t *testing.T) {
 			if s := validSession(t, rec); s.Status != tt.want || s.OutcomeUnknown {
 				t.Errorf("after reviving: %+v", s)
 			}
-			// Ending the session changes no run either.
+			// Ending the session fails the runs still open (issue #402) and
+			// leaves the ended ones as they were.
 			if rec := f.do(t, "DELETE", sessionPath(sess, ""), f.botTok, ""); rec.Code != http.StatusNoContent {
 				t.Fatal(rec.Code)
 			}
 			for _, r := range validRunList(t, f.do(t, "GET", "/v1/runs?channel=general", f.botTok, "")).Runs {
-				if states[r.ID] != r.State {
-					t.Errorf("ending the session moved run %d from %s to %s", r.ID, states[r.ID], r.State)
+				want := states[r.ID]
+				if !schema.RunStateTerminal(want) {
+					want = schema.RunStateFailed
+					if r.Outcome != store.RunOutcomeSessionEnded || r.EndedAt == nil {
+						t.Errorf("ending the session left run %d with outcome %q, ended %v", r.ID, r.Outcome, r.EndedAt)
+					}
+				}
+				if want != r.State {
+					t.Errorf("ending the session moved run %d from %s to %s, want %s", r.ID, states[r.ID], r.State, want)
 				}
 			}
 		})
@@ -986,4 +994,49 @@ func TestRunReportsSpendRunsManage(t *testing.T) {
 	// Without post in the channel likewise.
 	f.grant(t, f.bot.ID, schema.Capabilities(), nil, map[int64][]schema.ChannelPermission{f.general.ID: {schema.ChannelPermissionRead}})
 	assertErrorBody(t, f.setState(t, f.botTok, run.ID, schema.RunStateCompleted), http.StatusForbidden, "forbidden")
+}
+
+// A session holds at most store.MaxOpenRunsPerSession runs that have not
+// ended: the next start is 429 too_many_runs and stores nothing, another
+// session is unaffected, and ending a run frees a slot.
+func TestRunOpenBoundOverTheRoute(t *testing.T) {
+	f := newRunFixture(t)
+	sess := f.session(t, f.botTok)
+	var first schema.RunV1
+	for i := range store.MaxOpenRunsPerSession {
+		run := f.start(t, f.botTok, sess, "general", 0, "t")
+		if i == 0 {
+			first = run
+		}
+	}
+	before := len(f.listedRunIDs(t, f.botTok, "general"))
+	assertErrorBody(t, f.do(t, "POST", sessionPath(sess, "/runs"), f.botTok, runBody("general", 0, "one too many")),
+		http.StatusTooManyRequests, schema.ErrorCodeTooManyRuns)
+	if got := len(f.listedRunIDs(t, f.botTok, "general")); got != before {
+		t.Errorf("runs listed = %d, want %d: the refused start stored one", got, before)
+	}
+	f.start(t, f.botTok, f.session(t, f.botTok), "general", 0, "another session")
+	f.mustState(t, f.botTok, first.ID, schema.RunStateCancelled)
+	f.start(t, f.botTok, sess, "general", 0, "into the freed slot")
+	assertErrorBody(t, f.do(t, "POST", sessionPath(sess, "/runs"), f.botTok, runBody("general", 0, "full again")),
+		http.StatusTooManyRequests, schema.ErrorCodeTooManyRuns)
+}
+
+// fillActivity gives run runID n entries through the store, the same
+// transaction a report uses, so a bound of ten thousand is reached without
+// ten thousand HTTP requests. It still takes seconds (minutes under -race),
+// so only the one test that needs it calls it.
+func (f *runFixture) fillActivity(t *testing.T, runID int64, n int) {
+	t.Helper()
+	reader := store.Reader{PrincipalID: f.bot.ID, Scoped: true}
+	_, cred, err := f.srv.store.ResolveCredentialDetail(t.Context(), f.botTok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range n {
+		if _, err := f.srv.store.AppendRunActivity(t.Context(), runID, cred, reader,
+			store.ActivityParams{Kind: schema.ActivityKindCommandStarted, Summary: "fill"}, time.Now()); err != nil {
+			t.Fatalf("fill: %v", err)
+		}
+	}
 }

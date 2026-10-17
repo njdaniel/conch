@@ -1,0 +1,50 @@
+{
+  "did": "Joined voice and pressed the talk key",
+  "expected": "The others to hear me",
+  "happened": "Nobody heard anything and voice said it was reconnecting",
+  "often": "sometimes",
+  "client": {
+    "name": "conch-web",
+    "version": "v0.1.0-alpha.2",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/141.0",
+    "platform": "Linux x86_64",
+    "screen": "1280x800",
+    "voice": "reconnecting"
+  },
+  "diagnostics": [
+    {
+      "at": "2026-10-16T09:00:00.000Z",
+      "kind": "socket_open",
+      "socket": "messages"
+    },
+    {
+      "at": "2026-10-16T09:01:00.000Z",
+      "kind": "socket_close",
+      "socket": "messages",
+      "code": 1006
+    },
+    {
+      "at": "2026-10-16T09:01:01.000Z",
+      "kind": "reconnect",
+      "socket": "messages",
+      "attempt": 1
+    },
+    {
+      "at": "2026-10-16T09:01:02.000Z",
+      "kind": "http_failure",
+      "code": 503,
+      "error": "voice_unavailable",
+      "request_id": "3f9a0c1d2b4e5f60"
+    },
+    {
+      "at": "2026-10-16T09:01:03.000Z",
+      "kind": "voice_state",
+      "state": "unavailable"
+    },
+    {
+      "at": "2026-10-16T09:01:04.000Z",
+      "kind": "device_error",
+      "name": "NotAllowedError"
+    }
+  ]
+}

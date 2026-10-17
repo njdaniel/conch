@@ -174,9 +174,16 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 		return
 	}
 
-	after, err := nonNegativeQueryInt64(r, "after", 0)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	// v0 has no order: it ignores order and before, as it always has.
+	var page store.MessagePage
+	var err error
+	if version == apiV0 {
+		page.After, err = nonNegativeQueryInt64(r, "after", 0)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	} else if page, ok = messageOrder(w, r); !ok {
 		return
 	}
 	parsedLimit, err := nonNegativeQueryInt64(r, "limit", defaultMessageLimit)
@@ -195,15 +202,20 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 			writeError(w, http.StatusBadRequest, "invalid_request", "thread must be a positive integer")
 			return
 		}
+		// A thread is the root and then its replies, in order.
+		if page.NewestFirst {
+			writeError(w, http.StatusBadRequest, "invalid_request", "thread cannot be read with order=desc")
+			return
+		}
 	}
 
 	// Fetch one extra row so the response only advertises a next page when one
 	// is currently available.
 	var stored []store.Message
 	if thread > 0 {
-		stored, err = s.store.ListThreadMessages(ctx, channel.ID, readerFor(r, version), thread, after, limit+1)
+		stored, err = s.store.ListThreadMessages(ctx, channel.ID, readerFor(r, version), thread, page.After, limit+1)
 	} else {
-		stored, err = s.store.ListVisibleMessages(ctx, channel.ID, readerFor(r, version), after, limit+1)
+		stored, err = s.store.ListVisibleMessagesPage(ctx, channel.ID, readerFor(r, version), page, limit+1)
 	}
 	if errors.Is(err, store.ErrThreadNotFound) {
 		writeThreadNotFound(w)
@@ -218,7 +230,11 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 	nextAfter := int64(0)
 	if len(stored) > limit {
 		stored = stored[:limit]
-		nextAfter = stored[len(stored)-1].ID
+		// next_after is for the ascending read; a newest-first client pages
+		// back by the smallest id it holds.
+		if !page.NewestFirst {
+			nextAfter = stored[len(stored)-1].ID
+		}
 	}
 	switch version {
 	case apiV2:
@@ -244,6 +260,44 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, version ap
 		Messages:  messages,
 		NextAfter: nextAfter,
 	})
+}
+
+// messageOrder reads order, after and before for a v1 or v2 message list into
+// the store's page, as runOrder does for runs: order is asc (the default) or
+// desc; after goes only with asc and before only with desc, so any other mix,
+// both cursors included, is a 400, and desc with no before is the newest page.
+// An empty value is no value. It writes the 400 and returns false when the
+// parameters are bad.
+func messageOrder(w http.ResponseWriter, r *http.Request) (store.MessagePage, bool) {
+	query := r.URL.Query()
+	var page store.MessagePage
+	switch query.Get("order") {
+	case "", "asc":
+	case "desc":
+		page.NewestFirst = true
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request", "order must be asc or desc")
+		return page, false
+	}
+	if page.NewestFirst && query.Get("after") != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "after goes with order=asc; page back with before")
+		return page, false
+	}
+	if !page.NewestFirst && query.Get("before") != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "before goes with order=desc")
+		return page, false
+	}
+	var err error
+	if page.NewestFirst {
+		page.Before, err = nonNegativeQueryInt64(r, "before", 0)
+	} else {
+		page.After, err = nonNegativeQueryInt64(r, "after", 0)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return page, false
+	}
+	return page, true
 }
 
 // maxSearchQueryBytes bounds the q of a message search.
