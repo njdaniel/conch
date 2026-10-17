@@ -1,0 +1,16 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "state",
+  "seq": 8,
+  "phase": "reconnecting",
+  "reason": "server_unreachable",
+  "retry_in_ms": 4000,
+  "capture": "on",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected"
+  ],
+  "ptt": "ready"
+}
