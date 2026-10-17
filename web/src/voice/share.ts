@@ -30,6 +30,12 @@
 // the one removed gets no session, or has the claim refused, and the share
 // ends. A capture the browser has ended, a share stopped meanwhile, and any
 // other reason are not resumed.
+//
+// A room renewed while the share is being published (issue #535), whether a
+// first share or one being resumed, is a renewal like any other: the capture
+// is taken off that connection at once (blanked, and a publish under way
+// taken down when it completes; sdk.ts), and is published on the next. One wait (resumeLimit) covers the whole of it,
+// however many times the room is renewed before the share is back.
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import type { Clock } from '../state/feed';
@@ -179,6 +185,10 @@ export class ScreenShare {
   // renewed. Kept apart from told, which a claim granted again clears: a
   // resume cut short by another lost connection is tried again.
   private renewal = false;
+  // Whether the share is between rooms: from the renewal that took it off the
+  // air until it is shared again or ends. The resume timer runs for the whole
+  // of it, so a room renewed again meanwhile does not start the wait over.
+  private interrupted = false;
 
   constructor(api: ShareApi, onChange: (state: ShareState) => void, clock: Clock) {
     this.api = api;
@@ -254,7 +264,13 @@ export class ScreenShare {
     try {
       await room.publishScreen();
     } catch {
+      // Taken over meanwhile (a stop, or the room renewed, which kept the
+      // capture for the next connection): not this step's to end.
       if (mine !== this.attempt) return;
+      if (this.renewed()) {
+        this.suspend();
+        return;
+      }
       await room.stopScreen();
       await this.releaseHeld(channel);
       if (mine === this.attempt) this.set({ kind: 'idle', ended: 'failed' });
@@ -328,7 +344,7 @@ export class ScreenShare {
   presence(holder: Holder, ended?: VoiceShareEnded): void {
     if (ended !== undefined && this.claimed !== null && sameInstant(ended.started_at, this.claimed)) {
       this.told = toldEnd(ended.reason);
-      if (this.told === 'rotated' && (this.state.kind === 'sharing' || this.state.kind === 'resuming')) this.renewal = true;
+      if (this.told === 'rotated' && (this.onAir() || this.state.kind === 'resuming')) this.renewal = true;
       if (this.state.kind === 'idle' && this.state.ended === 'server') this.set({ kind: 'idle', ended: this.told });
     }
     if (holder !== 'me') this.held = false;
@@ -346,14 +362,15 @@ export class ScreenShare {
       return;
     }
     if (this.renewed()) this.suspend();
-    else if (this.seen && (this.state.kind === 'sharing' || this.state.kind === 'publishing')) void this.serverEnded();
+    else if (this.seen && this.onAir()) void this.serverEnded();
   }
 
   // lost is the connection ending (connection.ts), before it is closed. A
-  // share whose room was deleted, or that presence has said was renewed, is
-  // kept for the next connection; any other ends, as before.
+  // share published or being published whose room was deleted, or that
+  // presence has said was renewed, is kept for the next connection; any other
+  // ends, as before.
   lost(roomDeleted: boolean): Promise<void> {
-    if (this.state.kind === 'sharing' && (roomDeleted || this.renewed())) this.suspend();
+    if (this.onAir() && (roomDeleted || this.renewed())) this.suspend();
     // A resume under way on the connection going stops where it is; the next
     // connection resumes again.
     else if (this.state.kind === 'resuming') this.attempt++;
@@ -396,10 +413,16 @@ export class ScreenShare {
     if (this.state.kind === 'resuming') void this.giveUp(this.told ?? 'lost');
   }
 
-  // renewed reports whether the server ended the published share because its
-  // room was renewed.
+  // onAir reports whether the share is published, or being published, on the
+  // connection: the states a renewal takes it from (issue #535).
+  private onAir(): boolean {
+    return this.state.kind === 'sharing' || this.state.kind === 'publishing';
+  }
+
+  // renewed reports whether the server ended the share published or being
+  // published because its room was renewed.
   private renewed(): boolean {
-    return this.state.kind === 'sharing' && this.told === 'rotated';
+    return this.onAir() && this.told === 'rotated';
   }
 
   // suspend begins waiting to resume: the capture goes on, and is stopped if
@@ -408,16 +431,25 @@ export class ScreenShare {
   // The capture is taken off the old connection at once. The room conchd
   // retired may live on for a while (its deletion can fail, and the sweep
   // retries for up to 30 s), and someone removed from the channel may still
-  // be in it: nothing is shown there once conchd has ended the share.
+  // be in it: nothing is shown there once conchd has ended the share. A
+  // publish still under way there sends only a blanked capture, and is taken
+  // down when it completes (sdk.ts keepScreen).
+  //
+  // A share renewed again before it was back (issue #535) carries on with
+  // what is left of the first wait, and one whose wait ran out while it was
+  // being published ends here.
   private suspend(): void {
     this.attempt++;
     this.set({ kind: 'resuming' });
-    this.resumeTimer = this.clock.setTimeout(() => {
-      this.resumeTimer = null;
-      if (this.state.kind === 'resuming') void this.giveUp(this.told ?? 'lost');
-    }, resumeLimit);
+    if (!this.interrupted) {
+      this.interrupted = true;
+      this.resumeTimer = this.clock.setTimeout(() => {
+        this.resumeTimer = null;
+        if (this.state.kind === 'resuming') void this.giveUp(this.told ?? 'lost');
+      }, resumeLimit);
+    }
     this.keepCapture();
-    if (this.kept === null) void this.giveUp(this.told ?? 'lost');
+    if (this.kept === null || this.resumeTimer === null) void this.giveUp(this.told ?? 'lost');
   }
 
   // resume claims the share again and publishes the kept capture on the new
@@ -463,14 +495,31 @@ export class ScreenShare {
     }
     this.kept = null;
     kept.onEnded = null;
-    this.clearResumeTimer();
+    // Claimed in the new room: the renewal that ended the last room's share
+    // is spent, and only presence saying this claim's room was renewed too
+    // resumes it again. The resume timer runs on while it is published.
+    this.renewal = false;
     this.set({ kind: 'publishing' });
+    let adopted = false;
     try {
       room.adoptScreen(kept);
+      adopted = true;
       await room.publishScreen();
     } catch {
-      kept.stop();
+      // Taken over meanwhile: stopped (the capture with it), or the room
+      // renewed again, which kept the capture for the next connection, still
+      // running (issue #535). The renewal is known before the publish fails
+      // for it: the SDK reports a deleted room (lost) before it fails a
+      // publish under way, and the connection is closed only after lost.
       if (mine !== this.attempt) return;
+      // Presence said the room was renewed, before the room withdrew
+      // anything: the capture is kept from the connection that has it.
+      if (adopted && this.renewed()) {
+        this.suspend();
+        return;
+      }
+      kept.stop();
+      this.endInterruption();
       await room.stopScreen();
       await this.releaseHeld(channel);
       if (mine === this.attempt) this.set({ kind: 'idle', ended: 'failed' });
@@ -478,7 +527,7 @@ export class ScreenShare {
     }
     if (mine !== this.attempt) return;
     // The share carried on: what ended the last room's is not about this one.
-    this.renewal = false;
+    this.endInterruption();
     this.told = null;
     this.set({ kind: 'sharing', audio: kept.audio, resumed: true });
   }
@@ -498,7 +547,7 @@ export class ScreenShare {
 
   // dropKept stops a kept capture and the wait for it.
   private dropKept(): void {
-    this.clearResumeTimer();
+    this.endInterruption();
     const kept = this.kept;
     this.kept = null;
     if (kept === null) return;
@@ -506,9 +555,11 @@ export class ScreenShare {
     kept.stop();
   }
 
-  private clearResumeTimer(): void {
+  // endInterruption ends the wait to resume: the share is back, or over.
+  private endInterruption(): void {
     if (this.resumeTimer !== null) this.clock.clearTimeout(this.resumeTimer);
     this.resumeTimer = null;
+    this.interrupted = false;
   }
 
   // reconnected claims the share again after the SDK reconnected, as conchd

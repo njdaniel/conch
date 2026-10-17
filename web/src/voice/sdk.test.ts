@@ -62,11 +62,22 @@ interface Stub {
   // sources are granted. Without it the SDK refuses a share's publish at
   // once, as the real one does.
   shareGranted: boolean;
+  // Issue #535: when set, the next share publish the SDK accepts waits for
+  // the test to settle it, pending as the SDK has it.
+  sharePublish: Deferred<undefined> | null;
+  // When set, the next share publish waits before the SDK has it as pending
+  // (the SDK waits out a reconnect first): an unpublish meanwhile finds
+  // nothing.
+  shareGate: Deferred<undefined> | null;
+  // The share publishes the SDK has as pending, by track, and the track of
+  // each entry of published.
+  pending: Map<unknown, Promise<unknown>>;
+  owners: Map<object, unknown>;
 }
 interface StubScreenTrack {
   source: string;
   stopped: number;
-  mediaStreamTrack: { readyState: string; getSettings: () => { channelCount?: number }; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
+  mediaStreamTrack: { readyState: string; enabled: boolean; getSettings: () => { channelCount?: number }; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
   stop: () => void;
 }
 interface StubRemotePub {
@@ -106,6 +117,10 @@ const state = vi.hoisted((): Stub => {
     remote: new Map(),
     unpublishHangs: false,
     shareGranted: true,
+    sharePublish: null,
+    shareGate: null,
+    pending: new Map(),
+    owners: new Map(),
   };
 });
 
@@ -129,6 +144,7 @@ vi.mock('livekit-client', () => {
       stopped: 0,
       mediaStreamTrack: {
         readyState: 'live',
+        enabled: true,
         getSettings: () => ({ channelCount: 2 }),
         addEventListener: (type, fn) => {
           if (type === 'ended') listeners.push(fn);
@@ -157,8 +173,27 @@ vi.mock('livekit-client', () => {
             return Promise.reject(new PublishTrackError('failed to publish track, insufficient permissions', 403));
           }
           state.calls.push(`publish ${options.source}`);
-          state.published.push({ source: options.source, options });
-          return Promise.resolve({ source: track.source });
+          const source = options.source;
+          const gate = state.shareGate;
+          state.shareGate = null;
+          const held = state.sharePublish;
+          state.sharePublish = null;
+          const finish = () => {
+            state.pending.delete(track);
+            const entry = { source, options };
+            state.published.push(entry);
+            state.owners.set(entry, track);
+            return { source: track.source };
+          };
+          // Had as pending, as by the SDK, only once past the gate; one not
+          // held completes at once.
+          const pend = () => {
+            if (held === null) return Promise.resolve(finish());
+            const done = held.promise.then(finish);
+            state.pending.set(track, done);
+            return done;
+          };
+          return gate === null ? pend() : gate.promise.then(pend);
         }
         state.calls.push('publish');
         if (state.publishFails) return Promise.reject(new Error('publish refused'));
@@ -174,9 +209,20 @@ vi.mock('livekit-client', () => {
       unpublishTrack: (track: StubScreenTrack, stop: boolean) => {
         state.calls.push(`unpublish ${track.source}`);
         if (state.unpublishHangs) return new Promise(() => undefined);
-        if (stop) track.stop();
-        // The SDK tells the room, as it does for every unpublish.
-        state.handlers.get('ltu')?.({ source: track.source, track });
+        // As the SDK: a publish it has as pending is waited for, a track
+        // with no publication is left as it is, and a publication taken
+        // down is told to the room at once.
+        const take = (): undefined => {
+          const i = state.published.findIndex((e) => state.owners.get(e) === track);
+          if (i < 0) return undefined;
+          state.published.splice(i, 1);
+          if (stop) track.stop();
+          state.handlers.get('ltu')?.({ source: track.source, track });
+          return undefined;
+        };
+        const pending = state.pending.get(track);
+        if (pending !== undefined) return pending.then(take, take);
+        take();
         return Promise.resolve(undefined);
       },
     };
@@ -299,6 +345,10 @@ beforeEach(() => {
   state.remote.clear();
   state.unpublishHangs = false;
   state.shareGranted = true;
+  state.sharePublish = null;
+  state.shareGate = null;
+  state.pending.clear();
+  state.owners.clear();
   vi.stubGlobal(
     'AudioContext',
     class {
@@ -828,6 +878,109 @@ describe('sharing a screen', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Issue #535: the room renewed again while a share waited for its grant.
+  // The capture is kept for the next connection: the wait ends, nothing is
+  // stopped, and nothing is published on this one, even once the grant comes.
+  it('a capture kept while it waited for the grant is not stopped, and a grant after it publishes nothing', async () => {
+    vi.useFakeTimers();
+    try {
+      const { next, outcome } = await grantedLate();
+      const kept = next.keepScreen();
+      await settle();
+      expect(outcome.value).toBe('failed to publish track, insufficient permissions');
+      grant();
+      await settle();
+      expect(state.published).toEqual([]);
+      expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+      expect(kept?.live()).toBe(true);
+      await next.close();
+      expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+
+      // Published on the connection after.
+      const third = await connected();
+      if (kept === null) throw new Error('nothing kept');
+      third.adoptScreen(kept);
+      await third.publishScreen();
+      expect(state.published.map((p) => p.source)).toEqual(['screen_share', 'screen_share_audio']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Issue #535: a capture kept while its picture's publish was under way. It
+  // is blanked at once, its publish is taken down when it completes, its
+  // sound is not published, nothing is reported as the server's end, and it
+  // is sent as captured again once the next connection adopts it.
+  async function keptMidPublish(hold: 'pending' | 'not yet pending') {
+    const ends: string[] = [];
+    const room = await connected((cause) => ends.push(cause));
+    await room.pickScreen('motion');
+    const held = deferred<undefined>();
+    if (hold === 'pending') state.sharePublish = held;
+    else state.shareGate = held;
+    let outcome = 'pending';
+    void room.publishScreen().then(
+      () => {
+        outcome = 'published';
+      },
+      (err: unknown) => {
+        outcome = err instanceof Error ? err.message : String(err);
+      },
+    );
+    await settle();
+    expect(state.calls).toEqual(['pick', 'publish screen_share']);
+    const kept = room.keepScreen();
+    expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled), 'blanked at once').toEqual([false, false]);
+    held.resolve(undefined);
+    await settle();
+    vi.runAllTimers();
+    expect(outcome).toBe('voice share taken off this connection');
+    expect(state.published, 'nothing left published on the old connection').toEqual([]);
+    expect(state.calls.filter((c) => c.startsWith('publish'))).toEqual(['publish screen_share']);
+    // Asked of the SDK twice: by the keep, and by the publish once it was done.
+    expect(state.calls.filter((c) => c === 'unpublish screen_share').length).toBe(2);
+    expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+    expect(ends).toEqual([]);
+    expect(kept?.live()).toBe(true);
+    await room.close();
+    expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+
+    const next = await connected();
+    if (kept === null) throw new Error('nothing kept');
+    next.adoptScreen(kept);
+    expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled), 'sent as captured again').toEqual([true, true]);
+    await next.publishScreen();
+    expect(state.published.map((p) => p.source)).toEqual(['screen_share', 'screen_share_audio']);
+  }
+
+  it('a capture kept while the SDK had its publish pending is blanked, taken down when it completes, and sent again on the next connection', async () => {
+    vi.useFakeTimers();
+    try {
+      await keptMidPublish('pending');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The unpublish that kept it finds no publication then, and does nothing.
+  it('a capture kept before the SDK had its publish as pending is taken down by the publish itself', async () => {
+    vi.useFakeTimers();
+    try {
+      await keptMidPublish('not yet pending');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a first share is sent as captured, and a stop is not a blanking', async () => {
+    const room = await connected();
+    await room.pickScreen('detail');
+    await room.publishScreen();
+    expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled)).toEqual([true, true]);
+    await room.stopScreen();
+    expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled)).toEqual([true, true]);
   });
 });
 
