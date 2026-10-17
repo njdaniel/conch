@@ -5,8 +5,9 @@
 // link is the one place the page shows an invite code, once, to its maker.
 // Voice is offered only to someone who holds it, and a member sees how many
 // more personal invites they may make, both as whoami says (issue #468).
-import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { Glyph } from './Icons';
 import { serverLine, waitWords } from './Invite';
 import { inviteLink } from './route';
 import type { ChannelV0 } from './schema/channel';
@@ -78,6 +79,7 @@ export function InvitePanel({
 }) {
   const operator = me.role === 'operator';
   const [open, setOpen] = useState(false);
+  const toggle = useRef<HTMLButtonElement>(null);
   const [kind, setKind] = useState<InviteKind>('personal');
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [voice, setVoice] = useState(false);
@@ -191,16 +193,30 @@ export function InvitePanel({
   return (
     <section className="invites" aria-label="Invites">
       <button
+        ref={toggle}
         type="button"
+        className="icon-button"
         aria-expanded={open}
         aria-controls="invites-body"
         onClick={() => {
           setOpen(!open);
         }}
       >
-        Invite someone
+        <Glyph name="invite" />
+        <span className="label">Invite someone</span>
       </button>
-      <div id="invites-body" hidden={!open}>
+      {/* It opens over the page (issue #536): Escape closes it, as it does
+          Settings and Members, and focus goes back to its button. */}
+      <div
+        id="invites-body"
+        hidden={!open}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || event.defaultPrevented) return;
+          event.preventDefault();
+          setOpen(false);
+          toggle.current?.focus();
+        }}
+      >
         {link === null ? null : (
           <div className="invite-link" role="group" aria-label="New invite link">
             <p>

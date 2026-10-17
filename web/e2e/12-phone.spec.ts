@@ -36,13 +36,17 @@ for (const [size, options] of phones) {
     await expectFits(page, 'the composer with the whisper picker open');
     await page.getByLabel('To:').selectOption({ label: '#general' });
 
+    // The account form and Report a problem are in Settings (issue #536).
+    const settings = page.getByRole('button', { name: 'Settings' });
+    await settings.tap();
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+    await expectFits(page, 'the lobby with Settings open');
     await page.getByRole('button', { name: 'Change your name' }).tap();
     await expect(page.getByLabel('New name')).toBeVisible();
     await expectFits(page, 'the lobby with the account form open');
     await page.getByRole('button', { name: 'Change your name' }).tap();
 
-    // The Report a problem panel (issue #511): its button can land anywhere
-    // in the wrapped header, and the panel stays on the screen wherever it is.
+    // The Report a problem panel (issue #511) stays on the screen.
     const report = page.getByRole('button', { name: 'Report a problem' });
     await report.tap();
     await expect(report).toHaveAttribute('aria-expanded', 'true');
@@ -51,6 +55,8 @@ for (const [size, options] of phones) {
     await expectOnScreen(page, page.locator(`[id="${(await report.getAttribute('aria-controls')) ?? ''}"]`), 'the report panel');
     await report.tap();
     await expect(page.getByRole('form', { name: 'Report a problem' })).toBeHidden();
+    await page.getByRole('dialog', { name: 'Settings' }).getByRole('button', { name: 'Close', exact: true }).tap();
+    await expect(settings).toBeFocused();
 
     // The members panel starts closed on a narrow screen.
     const members = page.getByRole('button', { name: 'Members' });

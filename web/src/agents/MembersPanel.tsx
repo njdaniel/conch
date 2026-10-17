@@ -3,6 +3,7 @@
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
 import { useEffect, useState } from 'react';
+import { Avatar } from '../Icons';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
@@ -69,8 +70,8 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen }: {
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
   return (
-    <li className="ag-agent">
-      <button type="button" aria-expanded={expanded} onClick={onToggle}>
+    <li className={`ag-agent state-${entry.state}`}>
+      <button type="button" className="quiet" aria-expanded={expanded} onClick={onToggle}>
         <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-badge">Agent</span> <span className="ag-name">{entry.name}</span>
       </button>{' '}
       <span className="ag-status">{entry.status}</span>
@@ -144,7 +145,8 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
       ) : (
         <ul aria-label="People">
           {joined.people.map((p) => (
-            <li key={p.id}>
+            <li key={p.id} className={`ag-person state-${p.state}`}>
+              <Avatar id={p.id} name={p.name} />
               <span className="ag-name">{p.name}</span>
               {p.live > 1 ? <span> ({p.live})</span> : null} <span className="ag-status">{p.state}</span>
             </li>

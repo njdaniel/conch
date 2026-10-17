@@ -1,14 +1,36 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { Avatar, Glyph } from './Icons';
 import { ServerVersion } from './ServerVersion';
+import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
 
-// Below this width the right panel starts closed (it collapses first).
-const wide = '(min-width: 900px)';
+// At this width and wider the members panel is a column beside the
+// conversation; below it, a panel drawn over the page (issue #536). The same
+// width is in app.css.
+const wide = '(min-width: 1100px)';
 
-function startsOpen(): boolean {
+function isWide(): boolean {
   return typeof window.matchMedia !== 'function' || window.matchMedia(wide).matches;
+}
+
+// useWide follows the window across the breakpoint. Only classes and focus
+// follow it: nothing is mounted or unmounted, so a call or a share carries on.
+function useWide(): boolean {
+  const [wideNow, setWide] = useState(isWide);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(wide);
+    const change = () => {
+      setWide(query.matches);
+    };
+    query.addEventListener('change', change);
+    return () => {
+      query.removeEventListener('change', change);
+    };
+  }, []);
+  return wideNow;
 }
 
 // What signing out costs, said before it is done (issue #493). A person who
@@ -20,12 +42,15 @@ const signOutQuestion = {
   everywhere: `Sign out on every device, this browser included? ${signOutWarning}`,
 } as const;
 
-// The lobby: channels on the left, the open channel in the middle, a
-// collapsible panel on the right, a status line at the bottom. The middle is
-// the conversation the caller gives it; the panel is the caller's too (who is here and what is running).
+// The lobby: a top bar (who, which server, the connection, Invite, Members,
+// Settings), channels on the left, the open channel in the middle, the
+// members panel on the right, and the voice strip across the bottom. The
+// middle is the conversation the caller gives it; the panel is the caller's
+// too (who is here and what is running).
 export function Lobby({
   origin,
   name,
+  me = 0,
   channels,
   unread,
   connection,
@@ -44,76 +69,255 @@ export function Lobby({
 }: {
   readonly origin: string;
   readonly name: string;
+  // The signed-in principal's id, for the colour of their initial.
+  readonly me?: number;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
-  // The voice section: kept by the caller, which owns the voice client.
+  // The voice section: kept by the caller, which owns the voice client. It is
+  // rendered in one place only, the strip, whatever the window's width.
   readonly voice: ReactNode;
   // "Invite someone" (issue #440), or null for a person who may not invite.
   readonly invites: ReactNode;
-  // The caller's own account: changing their name (issue #441). There is no
-  // settings page yet, so it sits in the header.
+  // The caller's own account: changing their name (issue #441), in Settings.
   readonly account?: ReactNode;
-  // "Your sign-ins" (issue #496), beside it. Ending this browser's own sign-in
-  // is signing out, so the section is handed endThis, which asks the
-  // sign-out's question below.
+  // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
+  // sign-in is signing out, so the section is handed endThis, which asks the
+  // sign-out's question.
   readonly signIns?: (endThis: () => void) => ReactNode;
-  // "Report a problem" (issue #446): in the header beside the sign-outs, and
+  // "Report a problem" (issue #446): in Settings beside the sign-outs, and
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
-  // Sign out everywhere (issue #439), and why it last failed, if it did. A1
-  // added no settings panel, so both live in the header.
+  // Sign out everywhere (issue #439), and why it last failed, if it did.
   readonly onSignOutEverywhere: () => void;
   readonly signOutProblem: string | null;
 }) {
-  const [panelOpen, setPanelOpen] = useState(startsOpen);
+  const [panelOpen, setPanelOpen] = useState(isWide);
+  const wideNow = useWide();
+  // A column left open would cover the page once the window narrows: it
+  // closes, and Members opens it again.
+  const [wasWide, setWasWide] = useState(wideNow);
+  if (wasWide !== wideNow) {
+    setWasWide(wideNow);
+    if (!wideNow) setPanelOpen(false);
+  }
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
+  const [stage, setStage] = useState<HTMLElement | null>(null);
   const cancel = useRef<HTMLButtonElement>(null);
+  const membersButton = useRef<HTMLButtonElement>(null);
+  const membersBody = useRef<HTMLDivElement>(null);
+  const settingsButton = useRef<HTMLButtonElement>(null);
+  const settingsHeading = useRef<HTMLHeadingElement>(null);
+  // The members panel is drawn over the page below the wide breakpoint, and
+  // then behaves as one: focus goes into it, and back to Members after.
+  const membersOver = panelOpen && !wideNow;
+
   // The question takes focus on its safe answer, so Enter keeps the account.
   useEffect(() => {
     if (confirming !== null) cancel.current?.focus();
   }, [confirming]);
+  // Focus in the members column when the window narrows would be lost as the
+  // column closes: it goes to Members first.
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(wide);
+    const narrowed = () => {
+      if (!query.matches && membersBody.current?.contains(document.activeElement) === true) membersButton.current?.focus();
+    };
+    query.addEventListener('change', narrowed);
+    return () => {
+      query.removeEventListener('change', narrowed);
+    };
+  }, []);
+  // Focus goes back to Settings once the panel has closed: until then the
+  // button is inert behind it, and cannot take focus.
+  const settingsClosed = useRef(false);
+  useEffect(() => {
+    if (settingsOpen) settingsHeading.current?.focus();
+    else if (settingsClosed.current) {
+      settingsClosed.current = false;
+      settingsButton.current?.focus();
+    }
+  }, [settingsOpen]);
+  useEffect(() => {
+    if (membersOver) membersBody.current?.focus();
+  }, [membersOver]);
+
+  function closeSettings() {
+    setSettingsOpen(false);
+    setConfirming(null);
+    settingsClosed.current = true;
+  }
+  function closeMembers() {
+    setPanelOpen(false);
+    membersButton.current?.focus();
+  }
+  // Escape closes the panel focus is in, and the panel's button gets focus.
+  const onEscape = (close: () => void) => (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    event.preventDefault();
+    close();
+  };
 
   return (
     <div className="lobby">
-      <header>
-        <h1>Conch</h1>
-        {account}
-        {signIns?.(() => {
-          setConfirming('here');
-        })}
-        <div className="signout">
-          {confirming === null ? (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirming('here');
-                }}
-                aria-describedby="signout-note"
-              >
-                Sign out
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirming('everywhere');
-                }}
-                aria-describedby="signout-note"
-              >
-                Sign out everywhere
+      {/* While Settings is open the rest of the page is inert: the panel is
+          modal, and focus cannot wander behind its backdrop. */}
+      <header className="topbar" inert={settingsOpen}>
+        <h1 className="brand">Conch</h1>
+        <div role="status" aria-label="Status" className="status">
+          <Avatar id={me} name={name} />
+          <span className="status-who">{name}</span>
+          <span className="status-server">{origin}</span>
+          <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
+        </div>
+        <div className="topbar-actions">
+          {invites}
+          <button
+            ref={membersButton}
+            type="button"
+            className="icon-button"
+            aria-expanded={panelOpen}
+            aria-controls="members-body"
+            onClick={() => {
+              setPanelOpen(!panelOpen);
+            }}
+          >
+            <Glyph name="members" />
+            <span className="label">Members</span>
+          </button>
+          <button
+            ref={settingsButton}
+            type="button"
+            className="icon-button"
+            aria-expanded={settingsOpen}
+            aria-controls="settings-panel"
+            onClick={() => {
+              if (settingsOpen) closeSettings();
+              else setSettingsOpen(true);
+            }}
+          >
+            <Glyph name="settings" />
+            <span className="label">Settings</span>
+          </button>
+        </div>
+      </header>
+      <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen}>
+        <nav aria-label="Channels" className="channels">
+          <h2>Channels</h2>
+          {channels.loaded ? (
+            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} onOpen={onOpen} />
+          ) : connection === 'reconnecting' ? (
+            <div className="problem">
+              <p className="empty">Cannot reach the server</p>
+              <button type="button" onClick={onRetry}>
+                Try again
               </button>
               {report}
-              <span id="signout-note" className="hint">
+            </div>
+          ) : (
+            <p className="empty">Loading channels…</p>
+          )}
+        </nav>
+        <main className="centre">
+          <div ref={setStage} className="stage" />
+          <section aria-label="Conversation" className="conversation">
+            {channels.lost === undefined ? null : (
+              <p role="alert" className="banner">
+                You no longer have access to #{channels.lost}
+              </p>
+            )}
+            {conversation}
+          </section>
+        </main>
+        <aside aria-label="Members panel" className="panel">
+          <div
+            ref={membersBody}
+            id="members-body"
+            hidden={!panelOpen}
+            tabIndex={panelOpen ? 0 : undefined}
+            aria-label="Members list"
+            role="region"
+            onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
+          >
+            {membersOver ? (
+              <button type="button" className="icon-button close" onClick={closeMembers}>
+                <Glyph name="close" />
+                <span className="label">Close</span>
+              </button>
+            ) : null}
+            {panel}
+          </div>
+        </aside>
+        {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
+      </div>
+      <div className="dock" inert={settingsOpen}>
+        <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+      </div>
+      {settingsOpen ? <div className="backdrop" onClick={closeSettings} /> : null}
+      <div
+        id="settings-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-heading"
+        className="drawer" hidden={!settingsOpen} onKeyDown={onEscape(closeSettings)}>
+        <div className="drawer-head">
+          <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
+            Settings
+          </h2>
+          <button type="button" className="icon-button close" onClick={closeSettings}>
+            <Glyph name="close" />
+            <span className="label">Close</span>
+          </button>
+        </div>
+        <section aria-label="Account" className="drawer-section">
+          <p className="who">
+            <Avatar id={me} name={name} />
+            <span>
+              Signed in as <strong>{name}</strong>
+              <br />
+              <span className="hint">{origin}</span>
+            </span>
+          </p>
+          {account}
+          {signIns?.(() => {
+            setConfirming('here');
+          })}
+        </section>
+        <section aria-label="Sign out" className="drawer-section signout">
+          {confirming === null ? (
+            <>
+              <div className="actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirming('here');
+                  }}
+                  aria-describedby="signout-note"
+                >
+                  Sign out
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirming('everywhere');
+                  }}
+                  aria-describedby="signout-note"
+                >
+                  Sign out everywhere
+                </button>
+              </div>
+              <p id="signout-note" className="hint">
                 Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
                 Either way, you will need a new link from an operator to come back into this account.
-              </span>
+              </p>
             </>
           ) : (
             <div role="group" aria-labelledby="signout-question" className="signout-confirm">
@@ -121,6 +325,7 @@ export function Lobby({
               <div className="actions">
                 <button
                   type="button"
+                  className="danger"
                   onClick={() => {
                     const which = confirming;
                     setConfirming(null);
@@ -147,55 +352,12 @@ export function Lobby({
               {signOutProblem}
             </p>
           )}
-        </div>
-      </header>
-      <div className="areas">
-        <nav aria-label="Channels" className="channels">
-          <h2>Channels</h2>
-          {channels.loaded ? (
-            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} onOpen={onOpen} />
-          ) : connection === 'reconnecting' ? (
-            <div>
-              <p className="empty">Cannot reach the server</p>
-              <button type="button" onClick={onRetry}>
-                Try again
-              </button>
-              {report}
-            </div>
-          ) : (
-            <p className="empty">Loading channels…</p>
-          )}
-        </nav>
-        <section aria-label="Conversation" className="conversation">
-          {channels.lost === undefined ? null : (
-            <p role="alert">You no longer have access to #{channels.lost}</p>
-          )}
-          {conversation}
         </section>
-        <aside aria-label="Members panel" className="panel">
-          {voice}
-          {invites}
-          <button
-            type="button"
-            aria-expanded={panelOpen}
-            aria-controls="members-body"
-            onClick={() => {
-              setPanelOpen(!panelOpen);
-            }}
-          >
-            Members
-          </button>
-          <div id="members-body" hidden={!panelOpen} tabIndex={panelOpen ? 0 : undefined} aria-label="Members list" role="region">
-            {panel}
-          </div>
-        </aside>
+        <section aria-label="Help" className="drawer-section">
+          {report}
+          <ServerVersion className="hint" />
+        </section>
       </div>
-      <footer role="status" aria-label="Status" className="status">
-        <span>{name}</span>
-        <span>{origin}</span>
-        <span>{connectionLabel(connection)}</span>
-        <ServerVersion />
-      </footer>
     </div>
   );
 }

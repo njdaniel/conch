@@ -45,6 +45,8 @@ async function signInAndOpen() {
   render(<App origin={origin} />);
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  // Your sign-ins are in Settings (issue #536).
+  fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   const toggle = await screen.findByRole('button', { name: 'Your sign-ins' });
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(toggle);
@@ -79,6 +81,7 @@ describe('your sign-ins', () => {
     render(<App origin={origin} />);
     fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: 'Your sign-ins' });
     // Nothing is read until the person asks.
     expect(reads(calls)).toEqual([]);

@@ -311,7 +311,9 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Deafened');
       await voice.getByRole('button', { name: 'Undeafen' }).click();
 
-      // Open microphone: the steady tone opens it, and it is reported.
+      // Open microphone, under Voice options (issue #536): the steady tone
+      // opens it, and it is reported.
+      await voice.getByRole('button', { name: 'Voice options' }).click();
       await voice.getByLabel('Open microphone').check();
       await expect(voice.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('value', /[1-9]|0\.[1-9]/, { timeout: 10_000 });
       await expect(voice).toContainText('Transmitting', { timeout: 10_000 });
@@ -340,6 +342,8 @@ test.describe('with LiveKit', () => {
         await voice.getByRole('button', { name: 'Mute' }).tap();
         await expect(voice).toContainText('Muted.');
         await voice.getByRole('button', { name: 'Unmute' }).tap();
+        await voice.getByRole('button', { name: 'Voice options' }).tap();
+        await expectFits(a.page, `${size}: the voice panel with its options open`);
         await voice.getByLabel('Open microphone').tap();
         await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
         await expectFits(a.page, `${size}: the voice panel, open microphone`);

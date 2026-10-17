@@ -4,10 +4,13 @@
 // "tap to play sound" step, and the sharer's side says what is happening. No
 // SDK, no network, no device.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { useSyncExternalStore } from 'react';
+import { useSyncExternalStore, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult, VoiceSessionResult } from '../api';
+import { windowOf } from '../fakewindow';
+import { Lobby } from '../Lobby';
 import type { VoicePresenceV1 } from '../schema/voice';
+import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, settle } from './fakes';
@@ -89,7 +92,8 @@ const people: ReadonlyMap<number, Person> = new Map([
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 
-function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome) {
+// wrap puts the panel where the page puts it, for a test of the layout.
+function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome, wrap?: (panel: ReactNode) => ReactNode) {
   const rooms: StubRoom[] = [];
   const client = new VoiceClient({
     clock: new FakeClock(),
@@ -133,14 +137,15 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
     };
     return <VoicePanel voice={control} viewer={7} people={people} viewed="general" />;
   }
-  const view = render(<Panel />);
+  const tree = () => (wrap === undefined ? <Panel /> : wrap(<Panel />));
+  const view = render(tree());
   // A presence document from the socket: the panel shows it, the client reads it.
   const seen = (p: VoicePresenceV1) => {
     snapshot = { kind: 'presence', presence: p };
     act(() => {
       client.presence(p);
     });
-    view.rerender(<Panel />);
+    view.rerender(tree());
   };
   return { client, rooms, joins, seen, view };
 }
@@ -148,6 +153,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const voice = () => screen.getByRole('region', { name: 'Voice' });
@@ -266,6 +272,7 @@ describe('sharing', () => {
     expect(await within(voice()).findByText(/only a tab shares its sound/)).toBeTruthy();
     // And that a whole screen or this window would show this page and its chat.
     expect(within(voice()).getByText(/entire screen or this browser window shows this page too, chat included/)).toBeTruthy();
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Voice options' }));
     fireEvent.click(within(voice()).getByLabelText('Video or a game'));
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
@@ -281,6 +288,8 @@ describe('sharing', () => {
     t.client.join('general');
     await act(settle);
     t.seen(presence(8));
+    // No picker can open while bea shares, so the notes about it wait (issue #536).
+    expect(within(voice()).queryByText(/only a tab shares its sound/)).toBeNull();
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(await within(voice()).findByText('bea is sharing. One person shares at a time.')).toBeTruthy();
@@ -359,5 +368,62 @@ describe('sharing', () => {
     await act(settle);
     expect(await within(voice()).findByText(/cannot share a screen.*You can still watch/)).toBeTruthy();
     expect(within(voice()).queryByRole('button', { name: 'Share screen' })).toBeNull();
+  });
+});
+
+// Issue #536: in the lobby the watch view is drawn on the stage above the
+// conversation, and opening panels or narrowing the window never mounts it
+// again, so the picture and the sound carry on.
+describe('in the lobby', () => {
+  it('draws the watch view on the stage, and keeps it attached while panels open and the window narrows', async () => {
+    const size = windowOf(true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))),
+    );
+    const t = setup([], chrome, (panel) => (
+      <Lobby
+        origin="http://127.0.0.1:8080"
+        name="ada"
+        me={7}
+        channels={initialChannels}
+        unread={new Map()}
+        connection="connected"
+        conversation={<p>the conversation</p>}
+        panel={<p>Nobody</p>}
+        voice={panel}
+        invites={null}
+        onOpen={() => undefined}
+        onRetry={() => undefined}
+        onSignOut={() => undefined}
+        onSignOutEverywhere={() => undefined}
+        signOutProblem={null}
+      />
+    ));
+    const attached = vi.spyOn(t.client, 'attachShare');
+    t.client.join('general', { watchOnly: true });
+    await act(settle);
+    t.seen(presence(8, true));
+    fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(view.closest('.stage')).not.toBeNull();
+    expect(voice().contains(view)).toBe(false);
+    const video = view.querySelector('video');
+    expect(video).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.keyDown(screen.getByRole('dialog', { name: 'Settings' }), { key: 'Escape' });
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Voice options' }));
+    size.resize(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    fireEvent.keyDown(screen.getByRole('region', { name: 'Members list' }), { key: 'Escape' });
+    size.resize(true);
+
+    expect(screen.getByRole('region', { name: 'Shared screen' }).querySelector('video')).toBe(video);
+    expect(attached.mock.calls.map(([sink]) => sink?.video ?? null)).toEqual([video]);
+    expect(t.rooms).toHaveLength(1);
+    expect(t.rooms[0]?.watching.at(-1)).toBe(true);
+    expect(t.client.snapshot().phase).toBe('connected');
   });
 });

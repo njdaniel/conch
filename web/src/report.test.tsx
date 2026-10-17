@@ -40,8 +40,10 @@ async function signInAndOpen() {
   await screen.findByText('v0.1.0-alpha.2');
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  const header = (await screen.findByRole('button', { name: 'Sign out' })).closest('header');
-  if (header === null) throw new Error('no header');
+  // In Settings, beside the sign-outs (issue #536).
+  fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+  const header = screen.getByRole('dialog', { name: 'Settings' });
+  expect(within(header).getByRole('button', { name: 'Sign out' })).toBeDefined();
   const toggle = within(header).getByRole('button', { name: 'Report a problem' });
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(toggle);
@@ -150,10 +152,11 @@ describe('report a problem', () => {
     expect(within(notice).getByRole('button', { name: 'Try again' })).toBeDefined();
     fireEvent.click(within(notice).getByRole('button', { name: 'Report a problem' }));
     expect(within(notice).getByRole('form', { name: 'Report a problem' })).toBeDefined();
-    // And in the header, beside the sign-outs.
-    const header = screen.getByRole('button', { name: 'Sign out everywhere' }).closest('header');
-    if (header === null) throw new Error('no header');
-    expect(within(header).getByRole('button', { name: 'Report a problem' })).toBeDefined();
+    // And in Settings, beside the sign-outs (issue #536).
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const settings = screen.getByRole('dialog', { name: 'Settings' });
+    expect(within(settings).getByRole('button', { name: 'Sign out everywhere' })).toBeDefined();
+    expect(within(settings).getByRole('button', { name: 'Report a problem' })).toBeDefined();
   });
 
   it('builds a report the server takes even when the page knows little of itself', () => {

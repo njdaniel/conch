@@ -394,6 +394,21 @@ describe('invite someone', () => {
     expect(screen.queryByRole('region', { name: 'Invites' })).toBeNull();
   });
 
+  // Issue #536: the form opens over the page, so Escape closes it.
+  it('closes on Escape, and focus goes back to Invite someone', async () => {
+    serve({ ...as(memberToken, inviter, channelList('general')), 'GET /v1/invites': () => json({ invites: [] }) });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const button = within(panel).getByRole('button', { name: 'Invite someone' });
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.keyDown(within(panel).getByRole('checkbox', { name: '#general' }), { key: 'Escape' });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(within(panel).queryByRole('button', { name: 'Make invite' })).toBeNull();
+    expect(document.activeElement).toBe(button);
+    await act(async () => {});
+  });
+
   it('lets a member make a personal invite to their own channels, copy the link once, see it listed and close it', async () => {
     let listed = [inviteOf(5, 2, { uses: 1 })];
     const calls = serve({

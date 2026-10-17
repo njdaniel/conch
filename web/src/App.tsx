@@ -440,6 +440,7 @@ export function App({ origin }: { readonly origin: string }) {
         <Lobby
           origin={origin}
           name={auth.principal.name}
+          me={auth.principal.id}
           channels={channels}
           unread={unread}
           connection={connection}

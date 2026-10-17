@@ -323,7 +323,8 @@ describe('the sign-out warning', () => {
       'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }),
       'POST /v1/principals/2/credentials/revoke-all': () => json({ revoked: 1 }),
     });
-    // Said beside the buttons before anything is pressed.
+    // Said beside the buttons, in Settings (issue #536), before anything is pressed.
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: button });
     expect(document.getElementById('signout-note')?.textContent).toContain('you will need a new link from an operator to come back into this account');
 

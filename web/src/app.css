@@ -1,94 +1,687 @@
 /* A stylesheet file, never inline styles: conchd serves the page with
-   style-src 'self'. */
+   style-src 'self'. One dark theme (issue #536, docs/design/browser-ui-polish.md);
+   every colour is a token below, and every text/background pair the page uses
+   is checked at 4.5:1 or more. */
+:root {
+  --bg: #111416;
+  --surface: #171b1e;
+  --raised: #1f2428;
+  --hover: #272d32;
+  --border: #323a40;
+  --border-strong: #6f7b83;
+  --text: #e8ece9;
+  --muted: #a7b0ab;
+  --accent: #6fd69b;
+  --accent-hover: #8ee3b1;
+  --accent-bg: #183324;
+  --on-accent: #0d1912;
+  --danger: #ff8a80;
+  --danger-bg: #3a1c1c;
+  --warn: #e8c06a;
+  --focus: #8ec5ff;
+  --hue-0: #4c6b57;
+  --hue-1: #7a5846;
+  --hue-2: #4a5f80;
+  --hue-3: #67577c;
+  --hue-4: #6e5f37;
+  --hue-5: #7b4c5c;
+  --shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
+  --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --small: 0.8125rem;
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.5rem;
+  --s6: 2rem;
+  --radius-sm: 6px;
+  --radius: 10px;
+  color-scheme: dark;
+}
+
 body {
-  margin: 2rem;
-  font-family: system-ui, sans-serif;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.45 var(--font);
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+}
+
+a {
+  color: var(--accent);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.9em;
 }
 
 :focus-visible {
-  outline: 3px solid #1a5fb4;
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
-.signin form {
-  display: grid;
-  gap: 0.5rem;
-  max-width: 28rem;
+/* A heading given focus so that a screen reader starts there is not a
+   control: no ring. */
+h1[tabindex='-1']:focus,
+h2[tabindex='-1']:focus {
+  outline: none;
+}
+
+/* Visually hidden: still read out, and still in the text of the element. */
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .hint {
-  color: #555;
-  font-size: 0.9rem;
+  color: var(--muted);
+  font-size: var(--small);
   margin: 0;
 }
 
 .version {
-  color: #555;
-  font-size: 0.9rem;
+  color: var(--muted);
+  font-size: var(--small);
 }
 
 .notice {
   min-height: 1.5em;
   margin: 0;
-  color: #a51d2d;
+  color: var(--danger);
+}
+
+.empty {
+  color: var(--muted);
+  margin: 0;
 }
 
 .actions {
   display: flex;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: var(--s2);
 }
+
+/* ---------------------------------------------------------------- controls */
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button.quiet {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.danger {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+button[aria-pressed='true'] {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.icon {
+  flex: none;
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+select,
+textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'],
+meter {
+  accent-color: var(--accent);
+}
+
+fieldset {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+legend {
+  padding: 0 var(--s1);
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+label {
+  overflow-wrap: anywhere;
+}
+
+/* A person's initial in a circle; the letter is CSS, read from the element. */
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.avatar::before {
+  content: attr(data-initial);
+}
+
+.hue-0 {
+  background: var(--hue-0);
+}
+
+.hue-1 {
+  background: var(--hue-1);
+}
+
+.hue-2 {
+  background: var(--hue-2);
+}
+
+.hue-3 {
+  background: var(--hue-3);
+}
+
+.hue-4 {
+  background: var(--hue-4);
+}
+
+.hue-5 {
+  background: var(--hue-5);
+}
+
+/* Pills: unread counts, states, badges. */
+.chip,
+.tag,
+.audience,
+.kind,
+.ag-badge,
+.channel-list .unread {
+  display: inline-block;
+  padding: 0 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- sign-in */
+
+/* Sign-in, an invite, a sign-in link and the operator warning: one card. */
+.signin {
+  max-width: 30rem;
+  margin: 8vh auto var(--s6);
+  padding: var(--s6);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow-wrap: anywhere;
+}
+
+.signin h1 {
+  margin: 0 0 var(--s3);
+  font-size: 1.6rem;
+}
+
+.signin form {
+  display: grid;
+  gap: var(--s2);
+}
+
+.signin form button {
+  justify-self: start;
+}
+
+.signin form button[type='submit'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.signin .actions {
+  margin: var(--s3) 0;
+}
+
+/* ---------------------------------------------------------------- lobby */
 
 .lobby {
   display: grid;
   /* One column no wider than the window, whatever is in it: an item that is
      wider wraps or shrinks rather than widening the page (issue #467). */
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto 1fr auto;
-  min-height: calc(100vh - 4rem);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
+  height: 100dvh;
 }
 
-.lobby header {
+.topbar {
+  position: relative;
   display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+  padding: var(--s2) var(--s4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  padding-right: var(--s3);
+  border-right: 1px solid var(--border);
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.brand::before {
+  content: '';
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50% 50% 50% 0;
+  background: var(--accent);
+}
+
+/* Who, which server, and the connection (UX-01). Each part shrinks with an
+   ellipsis rather than widen the bar; all of it stays in the text read out. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.status > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status .avatar {
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 0.8rem;
+}
+
+.status-who {
+  font-weight: 600;
+}
+
+.status-server {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.conn {
+  flex: none;
+  font-size: var(--small);
+}
+
+.conn::before {
+  content: '';
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.conn-connected {
+  color: var(--accent);
+}
+
+.conn-reconnecting {
+  color: var(--warn);
+}
+
+.conn-connecting,
+.conn-signedOut {
+  color: var(--muted);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
+  flex: none;
+}
+
+.areas {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr) 17rem;
+  min-height: 0;
+}
+
+.areas.side-closed {
+  grid-template-columns: 15rem minmax(0, 1fr);
+}
+
+.side-closed .panel {
+  display: none;
+}
+
+.channels,
+.panel {
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.channels {
+  padding: var(--s4) var(--s3);
+  border-right: 1px solid var(--border);
+}
+
+.channels h2,
+.ag-panel > h3:first-child {
+  margin-top: 0;
+}
+
+.channels h2 {
+  margin-left: var(--s2);
+}
+
+.channels h2,
+.ag-panel h3 {
+  margin: var(--s4) 0 var(--s2);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.problem {
+  display: grid;
+  gap: var(--s2);
+  justify-items: start;
+}
+
+.problem .empty {
+  color: var(--warn);
+}
+
+.channel-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.channel-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.channel-list button {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.95rem;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+/* The # is not part of the button's name ('#' / '' gives it no alt text). */
+.channel-list button::before {
+  content: '#';
+  content: '#' / '';
+  margin-right: 0.15rem;
+}
+
+.channel-list button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--raised);
+}
+
+.channel-list button[aria-current='true'] {
+  color: var(--text);
+  font-weight: 600;
+  background: var(--accent-bg);
+  border-left-color: var(--accent);
+}
+
+.channel-list .unread {
+  min-width: 1.4rem;
+  text-align: center;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.centre {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* Should the stage and the conversation not both fit, the column scrolls:
+     nothing is ever drawn under the voice strip. */
+  overflow-y: auto;
+}
+
+.conversation {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel {
+  padding: var(--s4);
+  border-left: 1px solid var(--border);
+}
+
+.panel .close {
+  float: right;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgb(0 0 0 / 0.55);
+}
+
+.dock {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: var(--s2) var(--s4);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.icon-button {
+  padding: 0.35rem 0.6rem;
+}
+
+/* Settings: a panel over the right side of the page. */
+.drawer:not([hidden]) {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  width: min(26rem, 100vw);
+  box-sizing: border-box;
+  padding: 0 var(--s5) var(--s5);
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
+  padding: var(--s3) 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 
-.signout {
+.drawer-head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.drawer-section {
+  display: grid;
+  gap: var(--s3);
+  padding-bottom: var(--s4);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.drawer-section:last-child {
+  border-bottom: 0;
+}
+
+.who {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--s3);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.banner {
+  margin: var(--s2) var(--s4) 0;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.banner.stale {
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.banner.problem p {
+  margin: 0;
 }
 
 .change-name {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--s2);
 }
 
 .change-name form:not([hidden]) {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--s2);
+}
+
+.change-name input {
+  flex: 1 1 8rem;
+  min-width: 0;
 }
 
 .change-name p {
   margin: 0;
+  flex-basis: 100%;
 }
 
-/* "Your sign-ins" (issue #496): one button in the account area; the list
-   opens in place below it, no wider than the header, and a long label wraps
-   rather than widening the page. */
+/* "Your sign-ins" (issue #496): a list that wraps a long label rather than
+   widening the panel. */
 .signins {
   min-width: 0;
   max-width: 100%;
 }
 
 .signins-panel p {
-  margin: 0.25rem 0;
-  max-width: 32rem;
+  margin: var(--s1) 0;
 }
 
 .signin-list {
@@ -99,25 +692,28 @@ body {
 }
 
 .signin-list li {
-  padding: 0.25rem 0;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--border);
 }
 
-/* "Report a problem" (issue #446): one button in the header; the form opens
-   below it, no wider than the window. */
+.signin-here {
+  color: var(--accent);
+}
+
+/* The question a sign-out asks before it revokes anything (issue #493). */
+.signout-confirm p {
+  margin: 0 0 var(--s2);
+}
+
+/* "Report a problem" (issue #446): its form opens in place, in Settings and
+   where the page says it cannot reach the server. */
 .report {
-  position: relative;
+  min-width: 0;
 }
 
 .report-panel:not([hidden]) {
-  position: absolute;
-  right: 0;
-  z-index: 1;
-  width: min(32rem, calc(100vw - 2rem));
-  max-height: 80vh;
-  overflow: auto;
-  padding: 0.75rem;
-  background: #fff;
-  border: 1px solid #ccc;
+  margin-top: var(--s2);
+  scroll-margin: var(--s3);
 }
 
 .report-panel form {
@@ -127,7 +723,6 @@ body {
 
 .report-panel textarea {
   width: 100%;
-  box-sizing: border-box;
 }
 
 .report-preview {
@@ -136,241 +731,390 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 0.8rem;
-  background: #f6f6f6;
-  padding: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--s2);
 }
 
-.areas {
-  display: grid;
-  grid-template-columns: 14rem 1fr 16rem;
-  gap: 1rem;
-  border-top: 1px solid #ccc;
-  padding-top: 1rem;
-}
+/* ---------------------------------------------------------------- conversation */
 
-.channel-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.channel-list button {
-  width: 100%;
-  text-align: left;
-}
-
-.channel-list button[aria-current='true'] {
-  font-weight: bold;
-}
-
-.status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1.5rem;
-  border-top: 1px solid #ccc;
-  padding-top: 0.5rem;
-  font-size: 0.9rem;
-}
-
-/* An address or a version breaks anywhere rather than run off the screen. */
-.status > * {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-/* Narrow windows lose the right panel first: its body folds away and the
-   Members button stays. */
-@media (max-width: 899px) {
-  .areas {
-    grid-template-columns: 12rem 1fr;
-  }
-
-  .panel {
-    grid-column: 1 / -1;
-  }
-}
-
-/* A phone (issue #467): everything in one column, channels, then the open
-   channel, then the panel, with a narrower margin and the header's controls
-   wrapping onto lines of their own. A control added to the header joins the
-   wrap: it needs no rule here. */
-@media (max-width: 599px) {
-  body {
-    margin: 1rem;
-  }
-
-  .lobby {
-    min-height: calc(100vh - 2rem);
-  }
-
-  .lobby header {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    gap: 0.5rem 1rem;
-  }
-
-  .lobby header h1 {
-    margin: 0;
-  }
-
-  .areas {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .change-name form:not([hidden]) {
-    flex-wrap: wrap;
-  }
-
-  .change-name input {
-    flex: 1 1 8rem;
-    min-width: 0;
-  }
-
-  .audience-row select {
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  /* The Report a problem panel (issue #511) spans the lobby, still opening
-     below its button: anchored to the button, it ran off the left edge when
-     the wrapped header put the button near the left. */
-  .lobby {
-    position: relative;
-  }
-
-  .report {
-    position: static;
-  }
-
-  .report-panel:not([hidden]) {
-    left: 0;
-    right: 0;
-    width: auto;
-  }
-
-  /* Big enough for a finger. */
-  .lobby button {
-    min-height: 2.75rem;
-  }
-}
-
-.conversation {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  min-width: 0;
-}
-
-.log {
-  overflow-y: auto;
-  max-height: 60vh;
-  min-height: 8rem;
-  border: 1px solid #ccc;
-  padding: 0.5rem;
-}
-
-/* A body is shown as typed, line breaks included. */
-.messages {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.message {
-  padding: 0.15rem 0;
-}
-
-.audience,
-.kind,
-.state {
-  color: #555;
-}
-
-.pending {
-  opacity: 0.8;
-}
-
-.stale {
-  margin: 0;
-  color: #8a4b00;
-}
-
-.approval-card {
-  display: inline-block;
-  border: 1px solid #888;
-  border-radius: 4px;
-  padding: 0.4rem 0.6rem;
-  white-space: normal;
-}
-
-.composer {
-  display: grid;
-  gap: 0.25rem;
-}
-
-.composer textarea {
-  font: inherit;
-}
-
-.jump {
-  align-self: flex-start;
-}
-
-/* Members panel and run detail. */
 .conversation-body {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 0.5rem;
   min-width: 0;
+  min-height: 0;
 }
 
 .conversation-body[hidden] {
   display: none;
 }
 
-.ag-panel ul {
+.conv-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.conv-head h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.hash {
+  color: var(--muted);
+  font-size: 1.3rem;
+}
+
+.log-wrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 6rem;
+}
+
+.log {
+  flex: 1;
+  /* Its messages never make the column taller: it scrolls instead. */
+  contain: size;
+  overflow-y: auto;
+  padding: var(--s2) var(--s2) var(--s3);
+}
+
+.log > .hint,
+.log > p {
+  margin: var(--s2);
+  text-align: center;
+}
+
+.older {
+  display: flex;
+  margin: var(--s2) auto;
+}
+
+.messages {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.ag-panel li {
-  padding: 0.15rem 0;
+.message {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  column-gap: var(--s3);
+  padding: 0.4rem var(--s2) 0.15rem;
+  border-radius: var(--radius-sm);
+}
+
+.message:hover,
+.message:focus {
+  background: var(--raised);
+}
+
+.message > .avatar {
+  grid-row: 1 / span 2;
+}
+
+.message > :not(.avatar) {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* A message drawn under the one before it, by the same author: no initial,
+   no header on screen (both are still read out). */
+.message.cont {
+  padding-top: 0;
+}
+
+.message.cont > .avatar {
+  visibility: hidden;
+  height: 0;
+}
+
+.message.cont > .msg-head {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The header in the text is "badge time name [agent]:"; on screen it reads
+   name, agent, time, audience. */
+.msg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s2);
+  min-width: 0;
+}
+
+.msg-head .author {
+  order: 1;
+  font-weight: 600;
   overflow-wrap: anywhere;
+}
+
+.msg-head .kind {
+  order: 2;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.msg-head time {
+  order: 3;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.msg-head .audience {
+  order: 4;
+  background: var(--raised);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+/* A body is shown as typed, line breaks included. */
+.body {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.state {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.state.failed {
+  color: var(--danger);
+}
+
+.state.unconfirmed {
+  color: var(--warn);
+}
+
+.pending .body {
+  color: var(--muted);
+}
+
+.msg-actions {
+  display: flex;
+  gap: var(--s2);
+  margin: var(--s1) 0;
+}
+
+.approval-card {
+  display: grid;
+  gap: 0.15rem;
+  max-width: 36rem;
+  margin: var(--s1) 0;
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  white-space: normal;
+}
+
+.jump {
+  position: absolute;
+  bottom: var(--s3);
+  left: 50%;
+  z-index: 2;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+}
+
+.composer {
+  display: grid;
+  gap: 0.35rem;
+  padding: var(--s2) var(--s4) var(--s3);
+}
+
+.audience-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  color: var(--muted);
+  font-size: var(--small);
+  min-width: 0;
+}
+
+.audience-row select {
+  min-width: 0;
+  padding: 0.15rem 0.4rem;
+  font-size: var(--small);
+}
+
+.composer.narrowed .composer-label {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s2);
+  padding: 0.3rem 0.3rem 0.3rem var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.composer-box:focus-within {
+  border-color: var(--accent);
+}
+
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 30vh;
+  padding: 0.35rem 0;
+  resize: none;
+  background: transparent;
+  border: 0;
+}
+
+.composer textarea:focus-visible {
+  outline: none;
+}
+
+.composer-box:has(textarea:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.whisper-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+}
+
+.whisper-person {
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- members */
+
+.ag-panel ul {
+  list-style: none;
+  margin: 0 0 var(--s4);
+  padding: 0;
+}
+
+.ag-panel li {
+  padding: 0.2rem 0;
+  overflow-wrap: anywhere;
+}
+
+.ag-person {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--s2);
+}
+
+.ag-person .avatar {
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 0.8rem;
+}
+
+.ag-name {
+  font-weight: 600;
+}
+
+/* The state is a word; the dot before it only repeats it. */
+.ag-person .ag-status::before,
+.ag-agent > .ag-status::before {
+  content: '';
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 0.3rem;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.state-online > .ag-status {
+  color: var(--accent);
+}
+
+.state-online > .ag-status::before {
+  background: var(--accent);
+}
+
+.state-stale > .ag-status {
+  color: var(--warn);
+}
+
+.state-stale > .ag-status::before {
+  background: var(--warn);
+}
+
+.ag-agent > button {
+  min-height: 0;
+  padding: 0.15rem 0.3rem;
 }
 
 .ag-sessions,
 .ag-runs {
-  padding-left: 1rem;
+  padding-left: var(--s4);
 }
 
 .ag-badge {
-  border: 1px solid #888;
-  border-radius: 3px;
-  padding: 0 0.25rem;
-  font-size: 0.8rem;
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 .ag-status,
 .ag-kind {
-  color: #555;
+  color: var(--muted);
 }
 
 .ag-run {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--s2);
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s3) var(--s4);
   overflow-wrap: anywhere;
+}
+
+.ag-run header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.ag-run h2 {
+  margin: 0;
 }
 
 .ag-run dl {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 0.15rem 1rem;
+  gap: 0.15rem var(--s4);
   margin: 0;
+}
+
+.ag-run dt {
+  color: var(--muted);
 }
 
 .ag-run dd {
@@ -387,7 +1131,7 @@ body {
 
 .ag-offset,
 .ag-gap {
-  color: #555;
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -396,7 +1140,7 @@ body {
 }
 
 .ag-data {
-  margin: 0.25rem 0 0.25rem 1rem;
+  margin: var(--s1) 0 var(--s1) var(--s4);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -410,79 +1154,246 @@ body {
   white-space: pre-wrap;
 }
 
-.audience-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: baseline;
-}
-
-.whisper-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-  margin: 0;
-}
-
-.whisper-person {
-  white-space: nowrap;
-}
+/* ---------------------------------------------------------------- voice */
 
 .voice p {
   margin: 0;
 }
 
-.voice-controls,
-.voice-mode {
+.voice-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0.4rem 0;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+}
+
+.voice-state {
+  min-width: 0;
+}
+
+.voice-phase {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.voice-phase::before {
+  content: '';
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  vertical-align: 0.05rem;
+}
+
+.phase-connected .voice-phase::before {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.phase-connecting .voice-phase::before,
+.phase-reconnecting .voice-phase::before {
+  border-color: var(--warn);
+}
+
+.voice-sub {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.sending .voice-tx {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.chip {
+  background: var(--raised);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.voice-roster {
+  display: flex;
+  flex: 1 1 12rem;
+  gap: var(--s2);
+  min-width: 0;
+  margin: 0;
+  padding: 4px;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.voice-roster li {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem 0.15rem 0.15rem;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.875rem;
+}
+
+.voice-roster .avatar {
+  width: 1.6rem;
+  height: 1.6rem;
+  font-size: 0.75rem;
+}
+
+.voice-roster .speaking {
+  border-color: var(--accent);
+}
+
+.voice-roster .speaking .avatar {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+
+.tag {
+  padding: 0 0.4rem;
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.voice-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
 }
 
 .voice .talk {
-  min-height: 3rem;
-  min-width: 8rem;
+  min-height: 2.75rem;
+  min-width: 9rem;
+  border-color: var(--accent);
   touch-action: none;
   user-select: none;
 }
 
-.voice .talk[aria-pressed='true'] {
-  outline: 3px solid #0a6;
+.open-mic {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
 }
 
-.voice-roster {
-  list-style: none;
-  margin: 0.4rem 0 0;
-  padding: 0;
+.voice .sharing {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
-.voice-roster .speaking {
-  font-weight: bold;
+.voice-notes {
+  display: grid;
+  gap: 0.15rem;
+  margin-top: var(--s1);
 }
 
-/* Screen share (issue #444): the sharer's controls and the watch view. The
-   picture is never wider than its column, so a phone's screen fits it, and
-   fills the screen when made full screen. */
-.voice-share {
-  margin: 0.6rem 0;
+.voice-notes:empty {
+  display: none;
 }
 
-.voice-share label {
+.sharing-note {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.voice-options:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  align-items: flex-start;
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+
+.voice-options > .hint {
+  flex-basis: 100%;
+}
+
+.voice-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+}
+
+.threshold {
+  display: grid;
+  gap: var(--s1);
+  font-size: var(--small);
+}
+
+/* Screen share (issue #444): the watch view, on the stage above the
+   conversation. The picture is never wider than its column, and fills the
+   screen when made full screen.
+
+   While a share is watched the centre column is two rows: the conversation
+   gets at least what its header, a few lines and the composer need, whatever
+   the fonts make that, and the stage gets the rest, its picture shrinking to
+   fit (issue #536). Nothing is reserved by a fixed height. */
+.centre:has(> .stage:not(:empty)) {
+  display: grid;
+  grid-template-rows: minmax(0, auto) minmax(min-content, 1fr);
+}
+
+.stage:empty {
+  display: none;
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* With very little room the picture is as small as it goes; the stage then
+     scrolls, so its controls are still reachable. */
+  overflow-y: auto;
+  padding: var(--s3) var(--s4) 0;
+}
+
+/* Its title and controls keep their height; the picture's row gives way,
+   down to 4rem. */
+.share-view {
+  display: grid;
+  flex: 0 1 auto;
+  grid-template-rows: auto minmax(3rem, 1fr);
+  grid-auto-rows: auto;
+  /* It may be shorter than its picture: the picture's row is what gives. */
+  min-height: 0;
+  padding: var(--s2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.share-view p {
+  margin: 0;
+}
+
+.share-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s1) var(--s2);
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
-.share-view {
-  margin: 0.6rem 0;
-}
-
 .share-frame {
-  background: #000;
+  position: relative;
+  min-height: 0;
+  background: #000000;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 
 .share-frame video {
   display: block;
   width: 100%;
-  max-height: 70vh;
+  height: 100%;
+  max-height: 40vh;
   object-fit: contain;
 }
 
@@ -492,40 +1403,46 @@ body {
 }
 
 .share-frame .hint {
-  color: #ddd;
+  position: absolute;
+  inset: auto 0 0;
   padding: 0.4rem;
+  color: #dddddd;
 }
 
-.channel-list li {
+.share-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem;
+  gap: var(--s2);
+  padding-top: var(--s2);
 }
 
-.channel-list .unread {
-  min-width: 1.4rem;
-  padding: 0 0.4rem;
-  border-radius: 0.7rem;
-  background: #0b57d0;
-  color: #fff;
-  font-size: 0.8rem;
-  text-align: center;
+.volume {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 0.875rem;
 }
+
+/* ---------------------------------------------------------------- invites */
 
 /* An invite link's landing page (issue #440): one column, which fits a phone. */
 .invite {
   max-width: 36rem;
-  overflow-wrap: anywhere;
 }
 
 .invite-preview {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 0.25rem 1rem;
+  gap: var(--s1) var(--s4);
+  margin: var(--s4) 0;
+  padding: var(--s3) var(--s4);
+  background: var(--raised);
+  border-radius: var(--radius-sm);
 }
 
 .invite-preview dt {
-  font-weight: bold;
+  color: var(--muted);
 }
 
 .invite-preview dd {
@@ -538,15 +1455,6 @@ body {
   padding: 0;
 }
 
-.invite input[type='text'] {
-  font: inherit;
-  padding: 0.4rem;
-}
-
-.invite button {
-  min-height: 2.5rem;
-}
-
 @media (max-width: 480px) {
   .invite-preview {
     grid-template-columns: 1fr;
@@ -557,60 +1465,311 @@ body {
   }
 }
 
-/* "Invite someone", in the lobby's right panel. */
+/* "Invite someone", in the top bar: its form opens below the button. */
 .invites {
-  margin: 0.5rem 0;
+  position: relative;
+}
+
+#invites-body:not([hidden]) {
+  position: absolute;
+  top: calc(100% + var(--s2));
+  right: 0;
+  z-index: 30;
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: 75vh;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: var(--s4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+#invites-body h3 {
+  margin: var(--s3) 0 var(--s2);
+  font-size: 0.95rem;
 }
 
 .invite-form {
   display: grid;
-  gap: 0.5rem;
-  margin: 0.5rem 0;
+  gap: var(--s2);
 }
 
 .invite-form fieldset {
   display: grid;
-  gap: 0.25rem;
-  margin: 0;
+  gap: var(--s1);
 }
 
 .invite-link {
-  border: 1px solid #888;
-  border-radius: 4px;
-  padding: 0.5rem;
+  display: grid;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
 }
 
 .invite-link p {
-  margin: 0 0 0.5rem;
+  margin: 0;
 }
 
 .invite-link input {
   width: 100%;
-  box-sizing: border-box;
-  font: inherit;
-}
-
-.invite-link .actions {
-  margin-top: 0.5rem;
 }
 
 .invite-list {
   list-style: none;
-  margin: 0 0 0.5rem;
+  margin: 0 0 var(--s2);
   padding: 0;
   overflow-wrap: anywhere;
 }
 
 .invite-list li {
-  padding: 0.15rem 0;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .invite-state {
-  font-weight: bold;
+  font-weight: 600;
 }
 
-/* The question a sign-out asks before it revokes anything (issue #493). */
-.signout-confirm p {
-  margin: 0 0 0.5rem;
-  max-width: 32rem;
+/* ---------------------------------------------------------------- sizes */
+
+/* Below the wide breakpoint the members panel is drawn over the right side
+   of the page, opened with Members (UX-22: the right panel goes first). */
+@media (max-width: 1099px) {
+  .areas,
+  .areas.side-closed {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+
+  .panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 26;
+    width: min(22rem, 88vw);
+    box-sizing: border-box;
+    box-shadow: var(--shadow);
+  }
+}
+
+@media (max-width: 1099px) and (prefers-reduced-motion: no-preference) {
+  .panel {
+    animation: slide-in 160ms ease-out;
+  }
+}
+
+/* A phone (issue #467): one column. The channels are one row that scrolls
+   sideways within itself; the top bar's buttons show their icons, their
+   names hidden but still read out; the voice strip wraps. */
+@media (max-width: 699px) {
+  .areas,
+  .areas.side-closed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .topbar {
+    gap: var(--s2);
+    padding: var(--s2) var(--s3);
+  }
+
+  .brand {
+    padding-right: var(--s2);
+  }
+
+  /* Hidden on screen, still read out (as .vh). */
+  .status .avatar,
+  .status-server,
+  .topbar .label,
+  .channels h2,
+  .send .label,
+  .voice-controls button:not(.sharing, .danger) .label,
+  .share-controls .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .channels {
+    padding: var(--s2) var(--s3);
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .channel-list {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .channel-list li {
+    flex: none;
+  }
+
+  .channel-list button {
+    max-width: 14rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-left: 0;
+    border-bottom: 3px solid transparent;
+  }
+
+  .channel-list button[aria-current='true'] {
+    border-bottom-color: var(--accent);
+  }
+
+  .conv-head {
+    padding: var(--s2) var(--s3);
+  }
+
+  .composer {
+    padding: var(--s2) var(--s3);
+  }
+
+  .stage {
+    padding: var(--s2) var(--s2) 0;
+  }
+
+  /* Voice options open scroll inside the strip rather than take the screen. */
+  .dock {
+    max-height: 40vh;
+    padding: var(--s2) var(--s3);
+  }
+
+  .voice-controls {
+    width: 100%;
+    margin-left: 0;
+    gap: 0.35rem;
+  }
+
+  .voice .talk {
+    flex: 1 1 6rem;
+    min-width: 6rem;
+  }
+
+  .volume {
+    flex: 1 1 6rem;
+  }
+
+  .volume input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  /* While a share is watched on a phone, the picture, a few lines of the
+     conversation and the composer share the column: the channel's name is
+     already in the row above, so its heading is only read out. */
+  .centre:has(> .stage:not(:empty)) .conv-head {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .centre:has(> .stage:not(:empty)) .log-wrap {
+    min-height: 3rem;
+  }
+
+  .share-view {
+    padding: var(--s1);
+  }
+
+  .share-title {
+    padding-bottom: var(--s1);
+    font-size: 0.875rem;
+  }
+
+  .share-controls {
+    padding-top: var(--s1);
+  }
+
+  #invites-body:not([hidden]) {
+    position: fixed;
+    top: 3.5rem;
+    left: var(--s2);
+    right: var(--s2);
+    width: auto;
+  }
+
+  .signin {
+    margin: 0;
+    min-height: 100vh;
+    box-sizing: border-box;
+    padding: var(--s5) var(--s4);
+    border: 0;
+    border-radius: 0;
+  }
+
+  /* Big enough for a finger. */
+  .lobby button {
+    min-height: 2.75rem;
+  }
+}
+
+/* A short window (200% zoom of a laptop's screen is about 720×450): the page
+   scrolls as a document rather than squeezing each column into the window.
+   The conversation keeps a height of its own, so it still scrolls and loads
+   older messages as before. */
+@media (max-height: 560px) {
+  .lobby {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .share-frame video {
+    max-height: 60vh;
+  }
+
+  .log-wrap {
+    flex: none;
+    height: 70vh;
+    min-height: 12rem;
+  }
+
+  .dock {
+    max-height: none;
+  }
+}
+
+/* The talk key needs a keyboard; on a touch screen Hold to talk is the way,
+   and Voice options still says what the key does. */
+@media (pointer: coarse) {
+  .talk-key-note {
+    display: none;
+  }
+}
+
+/* Only what is drawn over the page slides in: a column moving would widen
+   the page while it moved. */
+@media (prefers-reduced-motion: no-preference) {
+  .drawer:not([hidden]) {
+    animation: slide-in 160ms ease-out;
+  }
+
+  .voice-roster .speaking .avatar {
+    animation: speaking 1.2s ease-in-out infinite;
+  }
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(1.5rem);
+    opacity: 0;
+  }
+}
+
+@keyframes speaking {
+  50% {
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 6px var(--accent);
+  }
 }

@@ -4,6 +4,7 @@
 // so a small view or a phone gets a smaller layer than a full screen, and a
 // closed view gets none. It asks for no device.
 import { useEffect, useRef, useState } from 'react';
+import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
 
 // A video element Safari on iPhone can put full screen: it has no
@@ -93,7 +94,8 @@ export function ShareView({
 
   return (
     <section aria-label="Shared screen" className="share-view">
-      <p>
+      <p className="share-title">
+        <Glyph name="screen" />
         {name} is sharing{audio ? ', with sound' : ''}
       </p>
       <div ref={box} className="share-frame">
@@ -101,20 +103,24 @@ export function ShareView({
         {state.shareTracks.video ? null : <p className="hint">Waiting for the picture</p>}
       </div>
       <audio ref={sound} autoPlay />
-      <div className="voice-controls">
-        <button type="button" onClick={fullscreen}>Full screen</button>
+      <div className="share-controls">
         <button type="button" aria-pressed={muted} onClick={() => { setMuted(!muted); }}>
-          {muted ? 'Unmute share' : 'Mute share'}
+          <Glyph name="speaker" />
+          <span className="label">{muted ? 'Unmute share' : 'Mute share'}</span>
         </button>
-        <label>
-          Share volume
+        <label className="volume">
+          <span className="label">Share volume</span>
           <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { setVolume(Number(e.target.value)); }} />
         </label>
+        <button type="button" onClick={fullscreen}>
+          <Glyph name="fullscreen" />
+          <span className="label">Full screen</span>
+        </button>
         <button type="button" onClick={() => { client.watch(false); }}>Stop watching</button>
+        {blocked && hasSound ? (
+          <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button>
+        ) : null}
       </div>
-      {blocked && hasSound ? (
-        <button type="button" onClick={tapToPlay}>Tap to play sound</button>
-      ) : null}
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
     </section>
   );

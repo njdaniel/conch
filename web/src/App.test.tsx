@@ -67,7 +67,8 @@ describe('sign-in', () => {
     render(<App origin={origin} />);
     expect(await screen.findByText('v0.1.0-alpha.1')).toBeDefined();
     signIn();
-    await screen.findByRole('button', { name: 'Sign out' });
+    // In the lobby, the version is in Settings (issue #536).
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     expect(await screen.findByText('v0.1.0-alpha.1')).toBeDefined();
   });
 
@@ -78,9 +79,10 @@ describe('sign-in', () => {
     const fetchMock = serve({ ...asMember, '/healthz': handler });
     render(<App origin={origin} />);
     signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: 'Sign out' });
     // Both pages have asked by now; the lobby's request has settled once
-    // its footer has rendered, with or without a version.
+    // its settings have rendered, with or without a version.
     await waitFor(() => {
       expect(fetchMock.mock.calls.filter(([input]) => input === '/healthz').length).toBeGreaterThanOrEqual(2);
     });
@@ -363,6 +365,7 @@ describe('lobby', () => {
     const fetchMock = serve({ ...asMember, '/v1/credentials/current': (a) => new Response(null, { status: a === `Bearer ${secret}` ? 204 : 401 }) });
     render(<App origin={origin} />);
     signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     const out = await screen.findByRole('button', { name: 'Sign out' });
     expect(out.getAttribute('aria-describedby')).toBe('signout-note');
     expect(document.getElementById('signout-note')?.textContent).toContain('Sign out ends this sign-in');
@@ -386,6 +389,7 @@ describe('lobby', () => {
     });
     render(<App origin={origin} />);
     signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
     // Sign out asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
@@ -397,6 +401,7 @@ describe('lobby', () => {
     const fetchMock = serve({ ...asMember, '/v1/principals/2/credentials/revoke-all': () => json({ revoked: 2 }) });
     render(<App origin={origin} />);
     signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
     // Sign out everywhere asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out everywhere' }));
@@ -413,6 +418,7 @@ describe('lobby', () => {
     serve({ ...asMember, '/v1/principals/2/credentials/revoke-all': handler });
     render(<App origin={origin} />);
     signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
     // Sign out everywhere asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out everywhere' }));
