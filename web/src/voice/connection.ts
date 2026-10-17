@@ -18,14 +18,19 @@
 // It also holds the screen share (issue #444): the sharer's state machine
 // (share.ts), whether this page watches someone else's share, and the
 // elements a watched share plays into.
+//
+// When the room is renewed (rotated, issue #516) every page reconnects to the
+// new one, and a share in progress is resumed by its sharer (share.ts). A page
+// watching it keeps watching: the share went with the room, so it waits a
+// while for the same person's share to come back instead of letting go.
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { TransmitGate, type GateMode, type GateOptions } from './gate';
-import { principalOf, sharer } from './presence';
+import { occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { idleShare, ScreenShare, type ScreenEnd, type ShareContent, type ShareRoom, type ShareState } from './share';
+import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareContent, type ShareRoom, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -170,6 +175,12 @@ export class VoiceClient {
   // This person, from the identity of the last session.
   private me: number | null = null;
   private sink: ShareSink | null = null;
+  // Who presence last showed sharing, and whose share this page watches.
+  // awaiting is the timer of a watched share that went with its room: the
+  // watching ends if the share is not back by then.
+  private holder: number | null = null;
+  private watched: number | null = null;
+  private awaiting: unknown = null;
   // The gate's changes, carried out one after another: a press's wait for its
   // answer, then a release's report. talk numbers the run of them a
   // connection makes (a drop abandons it); edge counts the gate's changes, so
@@ -184,9 +195,13 @@ export class VoiceClient {
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
-    this.share = new ScreenShare({ claim: env.claimShare, release: env.stopShare }, (share) => {
-      this.set({ share });
-    });
+    this.share = new ScreenShare(
+      { claim: env.claimShare, release: env.stopShare },
+      (share) => {
+        this.set({ share });
+      },
+      env.clock,
+    );
     this.reports = new ReportQueue({
       send: (state, signal) => {
         const channel = this.channel;
@@ -257,6 +272,8 @@ export class VoiceClient {
 
   // watch subscribes to the room's share, or lets it go.
   watch(on: boolean): void {
+    this.endAwaiting();
+    this.watched = on ? this.holder : null;
     this.room?.setWatching(on);
     this.set(on ? { watching: true } : { watching: false, shareTracks: noTracks });
   }
@@ -274,7 +291,43 @@ export class VoiceClient {
   presence(p: VoicePresenceV1): void {
     const holder = sharer(p);
     this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other', p.share_ended);
-    if (holder === null && this.state.watching) this.watch(false);
+    this.holder = holder?.principal ?? null;
+    if (this.state.watching) this.follow(holder?.principal ?? null, occupants(p).some((o) => o.principal === this.me));
+  }
+
+  // follow keeps a watching page on the share it watches. A share gone while
+  // this person is still listed in the room has ended. A share gone with
+  // this person (the room was renewed, and everyone left it) is waited for:
+  // the same person's share coming back is watched as before, anyone else's
+  // is not.
+  private follow(holder: number | null, listed: boolean): void {
+    if (holder !== null) {
+      const waited = this.awaiting !== null;
+      this.endAwaiting();
+      if (waited && holder !== this.watched) this.watch(false);
+      else this.watched = holder;
+      return;
+    }
+    if (this.awaiting !== null) return;
+    if (listed || this.watched === null) {
+      this.watch(false);
+      return;
+    }
+    this.awaitShare();
+  }
+
+  // awaitShare waits for a watched share that went with its room.
+  private awaitShare(): void {
+    if (this.awaiting !== null) return;
+    this.awaiting = this.env.clock.setTimeout(() => {
+      this.awaiting = null;
+      this.watch(false);
+    }, resumeLimit);
+  }
+
+  private endAwaiting(): void {
+    if (this.awaiting !== null) this.env.clock.clearTimeout(this.awaiting);
+    this.awaiting = null;
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
@@ -296,6 +349,8 @@ export class VoiceClient {
     const room = this.room;
     this.room = null;
     this.channel = null;
+    this.endAwaiting();
+    this.watched = null;
     this.set({ phase: 'idle', channel: null, why: null, transmitting: false, level: 0, speaking: new Set(), reportNote: null, watching: false, shareTracks: noTracks });
     if (room !== null) await room.close().catch(() => undefined);
   }
@@ -418,8 +473,9 @@ export class VoiceClient {
     }
   }
 
-  // drop ends the current connection and acts on `next`.
-  private drop(next: Next): void {
+  // drop ends the current connection and acts on `next`. roomDeleted: LiveKit
+  // deleted the room, as conchd does when it renews one.
+  private drop(next: Next, roomDeleted = false): void {
     const mine = ++this.attempt;
     this.clearTimers();
     this.gate.setBlocked(true);
@@ -428,8 +484,14 @@ export class VoiceClient {
     this.talk++;
     this.steps = Promise.resolve();
     this.reports.reset();
-    // A share does not outlive its connection: the next one starts without it.
-    void this.share.stop('lost');
+    // A share does not outlive its connection: the next one starts without it,
+    // unless its room was renewed, when the next connection resumes it. A
+    // client that stops resumes nothing.
+    if (next.kind === 'stop') void this.share.stop('lost');
+    else void this.share.lost(roomDeleted);
+    // A watched share goes with a deleted room, and is waited for, whether
+    // presence has said so yet or not.
+    if (roomDeleted && next.kind !== 'stop' && this.state.watching && this.watched !== null) this.awaitShare();
     const room = this.room;
     this.room = null;
     this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks });
@@ -440,6 +502,7 @@ export class VoiceClient {
   private act(next: Next, mine: number): void {
     switch (next.kind) {
       case 'stop':
+        this.share.abandon();
         this.set({ phase: 'stopped', why: next.why });
         break;
       case 'new_session':
@@ -500,7 +563,7 @@ export class VoiceClient {
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt) return;
-        this.drop(afterDisconnect(cause));
+        this.drop(afterDisconnect(cause), cause === 'room_deleted');
       },
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
@@ -542,6 +605,7 @@ export class VoiceClient {
     this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish });
     this.applyBlock();
     this.watchLevel(mine, room);
+    this.share.connected(channel, room);
     // A connection that lasts starts the retry wait over.
     this.env.clock.setTimeout(() => {
       if (mine === this.attempt && this.now() - this.connectedAt >= healthyAfter) this.failures = 0;

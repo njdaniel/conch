@@ -11,7 +11,7 @@ import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, settle } from './fakes';
-import type { Captured, ShareFeatures } from './share';
+import type { Captured, KeptScreen, ShareFeatures } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -49,6 +49,8 @@ class StubRoom implements Room {
     return Promise.resolve();
   };
   stopScreen = (): Promise<void> => Promise.resolve();
+  keepScreen = (): KeptScreen | null => ({ audio: true, live: () => true, onEnded: null, stop: () => undefined });
+  adoptScreen = (): void => undefined;
 }
 
 const session: VoiceSessionResult = {
@@ -292,7 +294,8 @@ describe('sharing', () => {
       ['operator', 'An operator stopped your share.'],
       ['left', 'You left voice, so your share ended.'],
       ['access_lost', 'Your share ended: you no longer have voice in this channel.'],
-      ['rotated', 'Your share ended because the voice room was renewed. Share again once you are back in voice.'],
+      // Not an end while the capture lasts: the share is resumed (issue #516).
+      ['rotated', 'The voice room was renewed. Resuming your share…'],
       ['idle', 'Your share ended because nothing was shared for a while.'],
     ] as const) {
       const t = setup();
@@ -305,6 +308,32 @@ describe('sharing', () => {
       t.seen({ ...presence(null), share_ended: { reason, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } });
       await act(settle);
       expect(await within(voice()).findByText(text), reason).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  // Issue #516: the room renewed under the share.
+  it('the sharer is told the share is being resumed, then that it carried on, or why it could not', async () => {
+    const renewed = { ...presence(null), rooms: [{ participants: [] }], share_ended: { reason: 'rotated' as const, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } };
+    for (const [answer, text] of [
+      [granted, 'The voice room was renewed, and your share carried on in the new one.'],
+      [busy, 'bea is sharing. One person shares at a time.'],
+    ] as const) {
+      const t = setup([granted, granted, answer]);
+      t.client.join('general');
+      await act(settle);
+      fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
+      await act(settle);
+      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      t.seen(presence(7));
+      t.seen(renewed);
+      expect(await within(voice()).findByText('The voice room was renewed. Resuming your share…')).toBeTruthy();
+      if (answer === busy) t.seen({ ...presence(8), share_ended: renewed.share_ended });
+      act(() => {
+        t.rooms[0]?.events?.onDisconnected('room_deleted');
+      });
+      await act(settle);
+      expect(await within(voice()).findByText(text), text).toBeTruthy();
       cleanup();
     }
   });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { VoiceClient, reconnectLimit, reportWait, type Room, type RoomEvents, type ShareSink } from './connection';
-import type { Captured } from './share';
+import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
 const token = 'join-token-secret-value';
@@ -74,6 +74,23 @@ class StubRoom implements Room {
   stopScreen = (): Promise<void> => {
     this.calls.push('stop');
     return Promise.resolve();
+  };
+  // Issue #516: a capture handed from one connection to the next.
+  keptLive = true;
+  keepScreen = (): KeptScreen | null => {
+    this.calls.push('keep');
+    const calls = this.calls;
+    return {
+      audio: this.pickAudio,
+      live: () => this.keptLive,
+      onEnded: null,
+      stop: () => {
+        calls.push('stop kept');
+      },
+    };
+  };
+  adoptScreen = (): void => {
+    this.calls.push('adopt');
   };
 }
 
@@ -553,7 +570,8 @@ describe('sharing through the client', () => {
     await joined(t);
     t.client.startShare('motion');
     await settle();
-    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    // Removed from the room, which goes on: not a renewal (issue #516).
+    t.rooms[0]?.events?.onDisconnected('participant_removed');
     await settle();
     expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
     expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'lost' });
@@ -609,6 +627,96 @@ describe('sharing through the client', () => {
     t.client.join('general');
     t.client.startShare('detail');
     expect(t.shares).toEqual([]);
+  });
+});
+
+// Issue #516: the room renewed under a share.
+const renewedPresence = (endedFor7 = false): VoicePresenceV1 => ({
+  ...presenceWith(null),
+  // Everyone left the old room; nobody is in the new one yet.
+  rooms: [{ participants: [] }],
+  ...(endedFor7 ? { share_ended: { reason: 'rotated' as const, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } } : {}),
+});
+
+describe('a share across a renewed room', () => {
+  it('is resumed on the new connection: claimed again and the same capture published, with no picker', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.startShare('detail');
+    await settle();
+    t.client.presence(presenceWith(7));
+    t.client.presence(renewedPresence(true));
+    expect(t.client.snapshot().share).toEqual({ kind: 'resuming' });
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish', 'keep']);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.rooms[1]?.calls).toEqual(['adopt', 'publish']);
+    expect(t.shares).toEqual(['claim general', 'claim general', 'claim general']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'sharing', audio: true, resumed: true });
+  });
+
+  it('a sharer who was the one removed gets no session: nothing is claimed again and the capture stops', async () => {
+    const t = setup([okSession(), { ok: false, failure: 'unauthorized' }]);
+    await joined(t);
+    t.client.startShare('detail');
+    await settle();
+    t.client.presence(presenceWith(7));
+    t.client.presence(renewedPresence(true));
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(t.rooms).toHaveLength(1);
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish', 'keep', 'stop kept']);
+    expect(t.shares).toEqual(['claim general', 'claim general']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it("a page watching it keeps watching while the same person's share comes back", async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.presence(presenceWith(8));
+    t.client.watch(true);
+    t.client.presence(renewedPresence());
+    expect(t.client.snapshot().watching).toBe(true);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    // In the new room, before the share is back.
+    t.client.presence(presenceWith(null));
+    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.rooms[1]?.watching).toEqual([true]);
+    t.client.presence(presenceWith(8));
+    expect(t.client.snapshot().watching).toBe(true);
+    // Back for good: a share that ends now has ended.
+    t.clock.advance(resumeLimit);
+    expect(t.client.snapshot().watching).toBe(true);
+    t.client.presence(presenceWith(null));
+    expect(t.client.snapshot().watching).toBe(false);
+  });
+
+  it("a watching page lets go if the share does not come back in time, or someone else's comes instead", async () => {
+    const late = setup([okSession(), okSession()]);
+    await joined(late);
+    late.client.presence(presenceWith(8));
+    late.client.watch(true);
+    late.client.presence(renewedPresence());
+    late.clock.advance(resumeLimit - 1);
+    expect(late.client.snapshot().watching).toBe(true);
+    late.clock.advance(1);
+    expect(late.client.snapshot().watching).toBe(false);
+
+    const other = setup([okSession(), okSession()]);
+    await joined(other);
+    other.client.presence(presenceWith(8));
+    other.client.watch(true);
+    // The room deleted before presence said anything.
+    other.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    other.client.presence({
+      ...presenceWith(null),
+      rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true }] }],
+    });
+    expect(other.client.snapshot().watching).toBe(false);
   });
 });
 
