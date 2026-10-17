@@ -29,9 +29,11 @@
 //   - The media half (media.go): B cannot get a session for A's room, a B
 //     token bent to name A's room is refused by LiveKit, and a B viewer
 //     subscribed to everything in B's room is told nothing of A's.
-//   - Revocation (revoke.go): a tester holding every socket variant, a
-//     LiveKit participant and the share is disabled, then everyone from A's
-//     open link, then the link is closed. Each is timed and held to its
+//   - Revocation (revoke.go): a second credential of a tester's, holding
+//     every socket variant, is revoked alone, and the sockets of her first
+//     stay open; then the tester, holding every socket variant, a LiveKit
+//     participant and the share, is disabled, then everyone from A's open
+//     link, then the link is closed. Each is timed and held to its
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.

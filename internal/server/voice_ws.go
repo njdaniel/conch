@@ -24,7 +24,8 @@ import (
 // subscription is registered before membership is checked (a removal that
 // commits during the checks then closes it), and an open socket re-checks its
 // credential and membership on an interval and is closed at once when the
-// principal is removed, disabled or signed out.
+// principal is removed, disabled or signed out, or the credential it was
+// opened with is revoked.
 func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.URL.Query().Get("channel")
@@ -36,10 +37,13 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	var credID int64
 	var hasCred bool
 	channel, caller, ok := s.voicePresenceChannel(w, r, name, func(ch store.Channel, caller store.Principal) bool {
-		sub = s.voice.subscribe(ch.ID, caller.ID)
-		// A disable that committed after the middleware resolved the token
-		// but before the subscription registered has run its drop already.
+		// The subscription carries the credential, so that revoking that
+		// one credential closes it at once (issue #519).
 		credID, hasCred = credentialIDFrom(ctx)
+		sub = s.voice.subscribe(ch.ID, caller.ID, credID)
+		// A disable or a revoke that committed after the middleware
+		// resolved the token but before the subscription registered has
+		// run its drop already.
 		if hasCred {
 			live, err := s.store.CredentialLive(ctx, credID)
 			if err != nil {
@@ -101,6 +105,14 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 		}
 		if bytes.Equal(raw, last) {
 			return true
+		}
+		// A drop that came while the frame was built (a revoke, a disable,
+		// a removal) stops it here, as on the events socket (issue #519).
+		select {
+		case <-sub.dropped:
+			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			return false
+		default:
 		}
 		wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 		err = countFrame(ctx, conn.Write(wctx, websocket.MessageText, raw))

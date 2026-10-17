@@ -400,26 +400,31 @@ func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 	}()
 	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer tlsServer.Close()
+	// Every case but the one about a timeout gets a timeout no loaded machine
+	// reaches, so the cause it expects is what actually happens: with the
+	// short one, a slow TLS handshake was classified as a timeout (#329).
+	const short, long = 300 * time.Millisecond, 30 * time.Second
 	tests := []struct {
-		name   string
-		server string
-		want   string // the whole cause
+		name    string
+		server  string
+		want    string // the whole cause
+		timeout time.Duration
 	}{
-		{"connection refused", "http://" + refusedAddr, "connection refused"},
-		{"connection refused, credentials in the URL", "http://alice:hunter2@" + refusedAddr, "connection refused"},
-		{"timeout", hang.URL, "timeout"},
-		{"redirect to a dead address", redirect.URL, "connection refused"},
-		{"a host that does not resolve", "http://alice:hunter2@ntfy-host-grep-me.invalid", "name lookup failed"},
-		{"a certificate we do not trust", tlsServer.URL, "TLS failure"},
-		{"TLS spoken to a plain HTTP port", "https://" + strings.TrimPrefix(hang.URL, "http://"), ""},
-		{"a Location that echoes the path and cannot be parsed", badLocation.URL, "request failed"},
-		{"a redirect to a host named after the path", hostFromPath.URL, "name lookup failed"},
-		{"a redirect loop", loop.URL, "too many redirects"},
-		{"not HTTP at all, echoing the request", "http://" + echo.Addr().String(), "request failed"},
+		{"connection refused", "http://" + refusedAddr, "connection refused", long},
+		{"connection refused, credentials in the URL", "http://alice:hunter2@" + refusedAddr, "connection refused", long},
+		{"timeout", hang.URL, "timeout", short},
+		{"redirect to a dead address", redirect.URL, "connection refused", long},
+		{"a host that does not resolve", "http://alice:hunter2@ntfy-host-grep-me.invalid", "name lookup failed", long},
+		{"a certificate we do not trust", tlsServer.URL, "TLS failure", long},
+		{"TLS spoken to a plain HTTP port", "https://" + strings.TrimPrefix(hang.URL, "http://"), "", long},
+		{"a Location that echoes the path and cannot be parsed", badLocation.URL, "request failed", long},
+		{"a redirect to a host named after the path", hostFromPath.URL, "name lookup failed", long},
+		{"a redirect loop", loop.URL, "too many redirects", long},
+		{"not HTTP at all, echoing the request", "http://" + echo.Addr().String(), "request failed", long},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n, err := NewNtfyNotifier(NtfyConfig{Server: tt.server, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: 300 * time.Millisecond})
+			n, err := NewNtfyNotifier(NtfyConfig{Server: tt.server, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: tt.timeout})
 			if err != nil {
 				t.Fatal(err)
 			}
