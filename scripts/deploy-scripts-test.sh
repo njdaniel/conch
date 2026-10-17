@@ -63,7 +63,7 @@ trap cleanup EXIT
 # --- static checks ---------------------------------------------------------
 
 if command -v shellcheck >/dev/null; then
-    shellcheck "$deploy"/*.sh scripts/deploy-scripts-test.sh || fail "shellcheck"
+    shellcheck "$deploy"/*.sh scripts/deploy-scripts-test.sh scripts/dev-stack.sh || fail "shellcheck"
     ok "shellcheck"
 else
     skip shellcheck
