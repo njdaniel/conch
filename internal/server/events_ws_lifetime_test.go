@@ -46,11 +46,20 @@ func TestEventsClosesWhenAccessIsLost(t *testing.T) {
 			reason: "no longer a member of this channel",
 		},
 		{
-			name: "credential revoked, found by the re-check",
+			name: "credential revoked through the API",
 			act: func(t *testing.T, f *runFixture) {
 				id := f.credentialID(t, f.bobTok)
 				if rec := f.do(t, "DELETE", fmt.Sprintf("/v1/credentials/%d", id), f.rootTok, ""); rec.Code != http.StatusNoContent {
 					t.Fatalf("revoke = %d %s", rec.Code, rec.Body)
+				}
+			},
+			reason: reasonCredentialInvalid,
+		},
+		{
+			name: "credential revoked behind the server's back, found by the re-check",
+			act: func(t *testing.T, f *runFixture) {
+				if err := f.srv.store.RevokeCredential(context.Background(), "system", f.credentialID(t, f.bobTok)); err != nil {
+					t.Fatal(err)
 				}
 			},
 			reason: reasonCredentialInvalid,
@@ -218,7 +227,7 @@ func TestEventsHub(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newEventsHub()
-			subs := [2]*eventsSub{h.subscribe(general, 10), h.subscribe(other, 11)}
+			subs := [2]*eventsSub{h.subscribe(general, 10, 0), h.subscribe(other, 11, 0)}
 			// Each is owed its first roster from the start (subscribe).
 			for i, sub := range subs {
 				if roster, refs := pending(t, sub); !roster || len(refs) != 0 {
@@ -237,7 +246,7 @@ func TestEventsHub(t *testing.T) {
 
 	t.Run("a full queue drops the subscriber and the writer carries on", func(t *testing.T) {
 		h := newEventsHub()
-		slow, fine := h.subscribe(general, 10), h.subscribe(general, 11)
+		slow, fine := h.subscribe(general, 10, 0), h.subscribe(general, 11, 0)
 		for i := range eventsQueueMax + 1 {
 			h.notifyActivity(general, 7, int64(i+1))
 			fine.take() // this one keeps up
@@ -256,7 +265,7 @@ func TestEventsHub(t *testing.T) {
 
 	t.Run("dropping a principal leaves the others", func(t *testing.T) {
 		h := newEventsHub()
-		a, b, c := h.subscribe(general, 10), h.subscribe(other, 10), h.subscribe(general, 11)
+		a, b, c := h.subscribe(general, 10, 0), h.subscribe(other, 10, 0), h.subscribe(general, 11, 0)
 		h.dropPrincipal(general, 10)
 		for sub, wantDropped := range map[*eventsSub]bool{a: true, b: false, c: false} {
 			select {
@@ -284,11 +293,31 @@ func TestEventsHub(t *testing.T) {
 		}
 	})
 
+	t.Run("dropping a credential leaves the principal's others", func(t *testing.T) {
+		h := newEventsHub()
+		a, b := h.subscribe(general, 10, 100), h.subscribe(other, 10, 100)
+		c, anon := h.subscribe(general, 10, 101), h.subscribe(general, 0, 0)
+		h.dropCredential(100)
+		h.dropCredential(0) // no credential matches nothing
+		for sub, wantDropped := range map[*eventsSub]bool{a: true, b: true, c: false, anon: false} {
+			select {
+			case <-sub.dropped:
+				if !wantDropped {
+					t.Errorf("subscriber of credential %d on channel %d was dropped", sub.credentialID, sub.channelID)
+				}
+			default:
+				if wantDropped {
+					t.Errorf("subscriber of credential %d on channel %d was not dropped", sub.credentialID, sub.channelID)
+				}
+			}
+		}
+	})
+
 	t.Run("shutdown drops everyone and refuses more", func(t *testing.T) {
 		h := newEventsHub()
-		sub := h.subscribe(general, 10)
+		sub := h.subscribe(general, 10, 0)
 		h.closeAll()
-		for name, s := range map[string]*eventsSub{"registered": sub, "late": h.subscribe(general, 11)} {
+		for name, s := range map[string]*eventsSub{"registered": sub, "late": h.subscribe(general, 11, 0)} {
 			select {
 			case <-s.dropped:
 			default:

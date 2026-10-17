@@ -271,7 +271,7 @@ func TestVoicePollerUnentitled(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 			room := f.inUse(t, f.ops)
-			sub := f.srv.voice.subscribe(f.ops.ID, f.ids["ann"])
+			sub := f.srv.voice.subscribe(f.ops.ID, f.ids["ann"], 0)
 			defer sub.cancel()
 			f.pass(t) // first contact: available, empty
 			<-sub.wake
@@ -1001,7 +1001,7 @@ func TestVoicePresenceSocketRefusals(t *testing.T) {
 func TestVoicePollerSlowSubscriberNeverBlocks(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	room := f.inUse(t, f.ops)
-	sub := f.srv.voice.subscribe(f.ops.ID, f.ids["ann"])
+	sub := f.srv.voice.subscribe(f.ops.ID, f.ids["ann"], 0)
 	defer sub.cancel()
 	for i := range 200 {
 		if i%2 == 0 {
