@@ -26,4 +26,16 @@ type WhoAmIResponseV1 struct {
 	// whether to offer it (issue #436). True for an operator and for a member
 	// granted the right; omitted when false, and by a server that predates it.
 	MayInvite bool `json:"may_invite,omitempty"`
+	// VoiceAllowed says whether the caller may use voice, so a client offers
+	// it only to those who hold it (issue #468). The server always sends it:
+	// true unless the person's invite withheld voice, and false for an agent,
+	// which never uses voice. It is a pointer so that a server that predates
+	// it, which omits it, is told apart from one that says false.
+	VoiceAllowed *bool `json:"voice_allowed,omitempty"`
+	// InvitesRemaining is how many more personal invites the caller may make
+	// now: the server's per-inviter allowance less their open personal
+	// invites, never below zero (issue #468). Present only for a person who
+	// may invite and is not an operator, since operators have no allowance;
+	// omitted for everyone else, never sent as 0 in their place.
+	InvitesRemaining *int64 `json:"invites_remaining,omitempty"`
 }

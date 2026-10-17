@@ -1,10 +1,14 @@
 // The voice section. Every state says what is true: not set up, not in voice,
 // connecting, connected, reconnecting, unavailable, or stopped with the reason.
-import { useEffect } from 'react';
+// It also holds the screen share (issue #444): sharing, with what sound, why a
+// share ended, and watching someone else's.
+import { useEffect, useState } from 'react';
 import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
 import { keyLabel } from './keys';
-import { occupants } from './presence';
+import { occupants, sharer } from './presence';
+import { endedNote, ownPageNote, sharedNote, soundNote, type ShareContent } from './share';
+import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
 
 const phaseLabel: Record<Phase, string> = {
@@ -71,6 +75,9 @@ export function VoicePanel({
   const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
   const canJoin = voice.secure && presence?.available !== false && presence !== null;
+  const holder = sharer(presence);
+  // Someone else's share, which this page may watch.
+  const theirs = holder !== null && holder.principal !== viewer ? holder : null;
 
   return (
     <section aria-label="Voice" className="voice">
@@ -97,9 +104,15 @@ export function VoicePanel({
             {state.muted ? 'Muted. ' : ''}
             {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
             {state.listenOnly ? 'Listen only. ' : ''}
+            {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
             {state.transmitting ? 'Transmitting' : 'Not transmitting'}
           </p>
-          <fieldset className="voice-mode" disabled={state.listenOnly}>
+          {state.watchOnly && !state.listenOnly ? (
+            <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
+              Use microphone
+            </button>
+          ) : null}
+          <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
             <legend>Microphone</legend>
             <label>
               <input type="radio" name="voice-mode" checked={state.mode === 'ptt'} onChange={() => { client.setMode('ptt'); }} />
@@ -116,7 +129,7 @@ export function VoicePanel({
                 type="button"
                 className="talk"
                 aria-pressed={state.transmitting}
-                disabled={state.listenOnly}
+                disabled={state.listenOnly || state.watchOnly}
                 onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
                 onPointerUp={() => { client.release(); }}
                 onPointerCancel={() => { client.release(); }}
@@ -151,10 +164,27 @@ export function VoicePanel({
             The talk key works only while this tab has focus. On Linux, conch-voice has a global talk key. On a phone, audio continues
             only while the page is open on screen.
           </p>
+          <ShareControls voice={voice} holderName={holder === null ? null : nameOf(people, holder.principal, viewer)} />
+          {theirs === null ? null : state.watching ? (
+            <ShareView client={client} state={state} name={nameOf(people, theirs.principal, viewer)} audio={theirs.sharingAudio} />
+          ) : (
+            <div className="voice-share">
+              <p>
+                {nameOf(people, theirs.principal, viewer)} is sharing a screen{theirs.sharingAudio ? ', with sound' : ''}.
+              </p>
+              <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>Watch</button>
+            </div>
+          )}
         </>
       ) : (
         <>
-          <button type="button" onClick={voice.join} disabled={!canJoin}>Join voice</button>
+          <div className="voice-controls">
+            <button type="button" onClick={voice.join} disabled={!canJoin}>Join voice</button>
+            <button type="button" onClick={voice.watchOnly} disabled={!canJoin}>Watch only</button>
+          </div>
+          {theirs === null ? null : (
+            <p className="hint">{nameOf(people, theirs.principal, viewer)} is sharing a screen. Join, or watch only, to see it.</p>
+          )}
           {!voice.secure ? (
             <p className="hint">Voice needs a secure page: use https, or localhost.</p>
           ) : presence?.available === false ? (
@@ -172,10 +202,77 @@ export function VoicePanel({
               {nameOf(people, o.principal, viewer)}
               {o.transmitting ? ' (transmitting)' : ''}
               {speaking.has(o.principal) ? ' (speaking)' : ''}
+              {o.sharing ? ' (sharing)' : ''}
             </li>
           ))}
         </ul>
       )}
     </section>
   );
+}
+
+// ShareControls is the sharer's side: what sound a share will carry, the
+// button, what is happening, and why the last share ended.
+function ShareControls({ voice, holderName }: { readonly voice: VoiceControl; readonly holderName: string | null }) {
+  const { state, client, features } = voice;
+  const [content, setContent] = useState<ShareContent>('detail');
+  const share = state.share;
+  if (state.listenOnly) return null;
+  if (!features.canShare) {
+    return (
+      <div className="voice-share">
+        <p className="hint">{soundNote(features)}</p>
+      </div>
+    );
+  }
+  switch (share.kind) {
+    case 'sharing':
+      return (
+        <div className="voice-share">
+          <p role="status">{sharedNote(share.audio, features)}</p>
+          <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
+        </div>
+      );
+    case 'claiming':
+    case 'picking':
+    case 'publishing':
+      return (
+        <div className="voice-share">
+          <p role="status">{share.kind === 'picking' ? 'Choose what to share in the browser\'s window.' : 'Starting your share…'}</p>
+          <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
+        </div>
+      );
+    case 'stopping':
+      return (
+        <div className="voice-share">
+          <p role="status">Stopping your share…</p>
+        </div>
+      );
+    case 'idle':
+      return (
+        <div className="voice-share">
+          <fieldset className="voice-mode">
+            <legend>Share your screen</legend>
+            <label>
+              <input type="radio" name="share-content" checked={content === 'detail'} onChange={() => { setContent('detail'); }} />
+              Text and pictures
+            </label>
+            <label>
+              <input type="radio" name="share-content" checked={content === 'motion'} onChange={() => { setContent('motion'); }} />
+              Video or a game
+            </label>
+          </fieldset>
+          <p className="hint">{soundNote(features)}</p>
+          <p className="hint">{ownPageNote}</p>
+          <button type="button" onClick={() => { client.startShare(content); }} disabled={state.phase !== 'connected'}>
+            Share screen
+          </button>
+          {share.ended === null ? null : (
+            <p role="status" className="hint">
+              {endedNote(share.ended, holderName)}
+            </p>
+          )}
+        </div>
+      );
+  }
 }

@@ -101,6 +101,14 @@ type InviteOptions struct {
 	Allowance int
 }
 
+// allowance is the per-inviter allowance these options set.
+func (o InviteOptions) allowance() int {
+	if o.Allowance <= 0 {
+		return DefaultPersonalInviteAllowance
+	}
+	return o.Allowance
+}
+
 // InviteFilter selects invites for ListInvites. A zero field matches all.
 type InviteFilter struct {
 	CreatedBy int64
@@ -333,6 +341,35 @@ func usableInviteTx(ctx context.Context, tx execer, codeHash string, now time.Ti
 	return r, kept, dropped, nil
 }
 
+// outstandingPersonalInvitesTx counts creatorID's personal invites that are
+// still open at now: not closed, not used up and not expired. It is the one
+// rule the allowance is counted by, for CreateInvite and InvitesRemaining
+// alike, so what whoami says is left and what CreateInvite allows cannot
+// disagree.
+func outstandingPersonalInvitesTx(ctx context.Context, tx execer, creatorID int64, now time.Time) (int, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM invites
+		 WHERE created_by = ? AND kind = 'personal' AND closed_at IS NULL AND expires_at > ? AND uses < max_uses`,
+		creatorID, now.UnixMilli()).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count outstanding personal invites: %w", err)
+	}
+	return n, nil
+}
+
+// InvitesRemaining reports how many more personal invites principalID may
+// make at now under opts: the allowance less their open personal invites,
+// never below zero (an operator may have lowered the allowance since). It
+// does not ask whether they may invite at all, and operators have no
+// allowance: the caller decides whether the number applies.
+func (s *Store) InvitesRemaining(ctx context.Context, principalID int64, opts InviteOptions, now time.Time) (int, error) {
+	outstanding, err := outstandingPersonalInvitesTx(ctx, s.db, principalID, now.Truncate(time.Millisecond))
+	if err != nil {
+		return 0, fmt.Errorf("store: invites remaining: %w", err)
+	}
+	return max(opts.allowance()-outstanding, 0), nil
+}
+
 // CreateInvite makes an invite for creatorID and returns it with its code,
 // which is shown only here. It validates req, applies the defaults for what it
 // leaves out, and checks in one IMMEDIATE transaction with the insert that:
@@ -356,10 +393,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 	if err := req.Validate(now); err != nil {
 		return schema.CreateInviteResponseV1{}, fmt.Errorf("%w: %w", ErrInviteRequestInvalid, err)
 	}
-	allowance := opts.Allowance
-	if allowance <= 0 {
-		allowance = DefaultPersonalInviteAllowance
-	}
+	allowance := opts.allowance()
 	expires := req.EffectiveExpiry(now).Truncate(time.Millisecond)
 	mayInvite := req.EffectiveMayInvite()
 	lifetimeMs := req.EffectiveCredentialLifetime().Milliseconds()
@@ -440,12 +474,9 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		}
 
 		if req.Kind == schema.InviteKindPersonal && !isOperator {
-			var outstanding int
-			if err := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM invites
-				 WHERE created_by = ? AND kind = 'personal' AND closed_at IS NULL AND expires_at > ? AND uses < max_uses`,
-				creatorID, now.UnixMilli()).Scan(&outstanding); err != nil {
-				return fmt.Errorf("store: create invite: count outstanding: %w", err)
+			outstanding, err := outstandingPersonalInvitesTx(ctx, tx, creatorID, now)
+			if err != nil {
+				return fmt.Errorf("store: create invite: %w", err)
 			}
 			if outstanding >= allowance {
 				return ErrInviteAllowanceExceeded

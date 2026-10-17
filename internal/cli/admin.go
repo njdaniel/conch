@@ -38,6 +38,9 @@ type adminOpts struct {
 	// invite holds the flags of `invite` and of the principal commands that
 	// administer invites (issue #438).
 	invite inviteOpts
+	// markdown and limit are the flags of `reports` (issue #446).
+	markdown bool
+	limit    int
 	// principal holds the flags of `principal list` and `principal hide`
 	// (issue #445).
 	principal principalOpts
@@ -147,9 +150,13 @@ var adminCommands = []adminCommand{
 	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
 	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
 		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
+	// Problem reports (issue #446), in admin_report.go.
+	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
+	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
+	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite"
+const adminGroups = "channel|principal|credential|member|manifest|invite|reports"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {

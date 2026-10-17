@@ -25,6 +25,7 @@ export function Lobby({
   voice,
   invites,
   account,
+  report,
   onOpen,
   onRetry,
   onSignOut,
@@ -45,6 +46,9 @@ export function Lobby({
   // The caller's own account: changing their name (issue #441). There is no
   // settings page yet, so it sits in the header.
   readonly account?: ReactNode;
+  // "Report a problem" (issue #446): in the header beside the sign-outs, and
+  // again where the page says it cannot reach the server.
+  readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
@@ -67,6 +71,7 @@ export function Lobby({
           <button type="button" onClick={onSignOutEverywhere} aria-describedby="signout-note">
             Sign out everywhere
           </button>
+          {report}
           <span id="signout-note" className="hint">
             Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
           </span>
@@ -88,6 +93,7 @@ export function Lobby({
               <button type="button" onClick={onRetry}>
                 Try again
               </button>
+              {report}
             </div>
           ) : (
             <p className="empty">Loading channels…</p>

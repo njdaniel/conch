@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -275,6 +276,14 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Problem reports (issue #446). An empty report is a 400 before anything
+	// is stored or audited; the operator routes name a report that does not
+	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
+	// (both special-cased below).
+	"POST /v1/reports":     {classAuth, "/v1/reports", `{}`, 400},
+	"GET /v1/reports":      {classOp, "/v1/reports", "", 200},
+	"GET /v1/reports/{id}": {classOp, "/v1/reports/9999", "", 404},
+	"PUT /v1/reports/{id}": {classOp, "/v1/reports/9999", `{"state":"filed","issue":"https://example.com/issues/1"}`, 404},
 	// Operator administration of principals (issue #445). The hide names a
 	// principal that does not exist, the bulk hide selects nobody (a 400
 	// before anything is read), and the list only reads. The bulk hide, like
@@ -426,8 +435,9 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") {
 				agentWant = http.StatusForbidden
 			}
-			// Invites are for people (issue #437).
-			if isInviteRoute(rt.pattern) {
+			// Invites are for people (issue #437), and so are problem
+			// reports (issue #446).
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -488,6 +498,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isInviteRoute(rt.pattern) {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
+				}
+				if rt.pattern == "POST /v1/reports" {
+					want = http.StatusUnauthorized // like whoami: no one to say who reported
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
@@ -756,10 +769,11 @@ func TestWhoAmI(t *testing.T) {
 		want  schema.WhoAmIResponseV1
 	}{
 		// An operator may always invite (issue #437); a member may not until
-		// granted the right, and an agent never.
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
+		// granted the right, and an agent never. People hold voice unless an
+		// invite withheld it; an agent never does (issue #468).
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true)}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true)}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -767,8 +781,8 @@ func TestWhoAmI(t *testing.T) {
 			if rec.Code != 200 {
 				t.Fatalf("status = %d", rec.Code)
 			}
-			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); got != tt.want {
-				t.Errorf("whoami = %+v, want %+v", got, tt.want)
+			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("whoami = %s, want %s", rec.Body, inviteJSON(t, tt.want))
 			}
 		})
 	}

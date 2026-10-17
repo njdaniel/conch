@@ -1,0 +1,32 @@
+{
+  "id": 7,
+  "state": "open",
+  "created_at": "2026-10-16T09:02:00.000Z",
+  "principal_id": 12,
+  "server_version": "v0.1.0-alpha.2",
+  "voice": "ok",
+  "did": "Joined voice in raid-night",
+  "expected": "To hear Alice",
+  "happened": "Her microphone cut out",
+  "often": "once",
+  "client": {
+    "name": "conch",
+    "version": "dev-0123456789ab",
+    "platform": "linux/amd64"
+  },
+  "diagnostics": [],
+  "server": {
+    "requests": [],
+    "socket_closes": []
+  },
+  "redact": {
+    "channels": [
+      "general",
+      "raid-night"
+    ],
+    "principals": [
+      "Alice",
+      "root"
+    ]
+  }
+}

@@ -32,6 +32,12 @@ export default defineConfig({
   // prompt is answered, and the microphone plays a steady tone from a file, so
   // no test needs a real device. The local-IP flag keeps WebRTC to the LiveKit
   // on 127.0.0.1 from hiding host candidates behind mDNS names.
+  //
+  // Screen share (issue #444) runs on the same fake devices: the screen picker
+  // is answered with a fake screen, 1920x1080 at 30 fps with a fake sound
+  // track (checked on the pinned Chromium), so no test needs a real display.
+  // The auto-select flag answers the picker the same way should a run use
+  // Chromium's real picker (a headed run).
   projects: [
     {
       name: 'chromium',
@@ -42,6 +48,7 @@ export default defineConfig({
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
             `--use-file-for-fake-audio-capture=${toneFile()}`,
+            '--auto-select-desktop-capture-source=Entire screen',
             '--disable-features=WebRtcHideLocalIpsWithMdns',
           ],
         },
