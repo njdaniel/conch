@@ -1099,7 +1099,7 @@ func fetchLK(ctx context.Context, dir string) (string, error) {
 			continue
 		}
 		path := filepath.Join(dir, "lk")
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700) // #nosec G302 G304 -- a path under this program's temp dir; the downloaded lk must be executable
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700) // #nosec G302 G304 G703 -- a fixed name in a directory the caller chose (this program's temp dir, or fetch-lk's argument); the downloaded lk must be executable
 		if err != nil {
 			return "", err
 		}
@@ -1135,6 +1135,12 @@ func (h *harness) startLK(lkBin, lkHostPort, token string, filter func(context.C
 	if err != nil {
 		return nil, err
 	}
+	return h.startLKVia(lkBin, rl, options...)
+}
+
+// startLKVia is startLK through a relay already started, which it owns from
+// then on: stopping the participant closes it.
+func (h *harness) startLKVia(lkBin string, rl *relay, options ...string) (*headless, error) {
 	dir, err := h.mkdir("lk-")
 	if err != nil {
 		rl.Close()
