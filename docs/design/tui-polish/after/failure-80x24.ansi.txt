@@ -1,0 +1,24 @@
+␛[1mCONCH␛[0m  ␛[1m␛[36m[Chat]␛[0m ␛[90mInbox␛[39m ␛[90mAgents␛[39m ␛[90mRuns␛[39m             ␛[33m○ text unavailable␛[39m · ␛[90mhelp: F1, /help
+␛[36m╭─␛[1m␛[39m ▸ CHANNELS ␛[0m␛[36m───╮␛[90m╭─␛[1m␛[39m MESSAGES ␛[0m␛[90m────────────────────────────────────────────────╮␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39mCannot read the channel list from http://127.0.0.1:29199.  ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39mcli: list channels: Get "http://127.0.0.1:29199/v1/channels␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m": dial tcp 127.0.0.1:29199: connect: connection refused   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39mTo use another server, quit (esc) and start conch with CONC␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39mH_SERVER=<url>.                                            ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                                           ␛[90m│␛[39m
+␛[36m╰────────────────╯␛[90m╰───────────────────────────────────────────────────────────╯␛[39m
+(no channel) > ␛[1m␛[36m▌␛[0m
+␛[90mmembers: unavailable␛[39m
+␛[90mwhoami: cli: whoa…  ↑/↓ channels • ←/→ focus • enter send • tab inbox • esc quit

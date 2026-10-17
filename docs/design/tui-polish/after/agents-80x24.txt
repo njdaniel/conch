@@ -1,0 +1,24 @@
+CONCH 127.0.0.1:291…  Chat Inbox [Agents] Runs alice · ● text live · help: F1, ?
+╭─ CHANNELS ─────╮╭─ ▸ AGENTS · general ──────────────────────────────────────╮
+│› general       ││› ▾ [agent] rex  running · task: fix the flaky ingest test…│
+│  ops 2         ││    #1 running · none · task: fix the flaky ingest test · …│
+│  movie-night   ││      run #2 running · task: fix the flaky ingest test · 1…│
+│  design-review ││      run #1 completed · task: nightly lint · 15m ago      │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+│                ││                                                           │
+╰────────────────╯╰───────────────────────────────────────────────────────────╯
+
+alice | agents:…  ↑/↓ agents • enter sessions • r runs • tab channels • esc quit

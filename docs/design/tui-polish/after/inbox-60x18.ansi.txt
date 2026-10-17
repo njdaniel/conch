@@ -1,0 +1,18 @@
+␛[36m╭─␛[1m␛[39m ▸ APPROVALS ␛[0m␛[36m──╮␛[90m╭─␛[1m␛[39m DETAILS ␛[0m␛[90m─────────────────────────────╮␛[39m
+␛[36m│␛[1m› ␛[0m6: Restart th…␛[36m│␛[90m│␛[1m␛[36mRestart the ingest workers on staging␛[0m  ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39mRequester: 6  Deadline: Oct 17 22:42   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                       ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│┊ ␛[39mTwo ingest tests fail under load. Res␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│┊ ␛[39mtarting the workers clears the stuck ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│┊ ␛[39mqueue.                               ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│┊ ␛[39mRisk: about 30 s of delayed messages ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│┊ ␛[39mon staging.                          ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                       ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m  - Restart now                        ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m  - Wait for the fix                   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                       ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                       ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m                                       ␛[90m│␛[39m
+␛[36m╰────────────────╯␛[90m╰───────────────────────────────────────╯␛[39m
+
+␛[90malice | inbox loaded  enter decide • tab agents • esc quit␛[39m

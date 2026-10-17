@@ -1,0 +1,18 @@
+╭─ ▸ CHANNELS ───╮╭─ # general ───────────────────────────╮
+│› general       ││      ┊ 1. ship the parser behind a    │
+│  ops 2         ││      ┊ flag                           │
+│  movie-night   ││      ┊ 2. keep the old path for a week│
+│  design-review ││      ┊ 3. alice owns the rollout      │
+│                ││15:42 dave: 日本語の名前とテキストも表 │
+│                ││      ┊ 示できますか？幅の広い文字はセ │
+│                ││      ┊ ル二つ分です。                 │
+│                ││15:42 bob: \[31mred?[0m evil and a     │
+│                ││      ┊ bell  and [net:alpha] a fake   │
+│                ││      ┊ badge                          │
+│                ││15:42 alice: \[whisper:2,3] not a real │
+│                ││      ┊ whisper either                 │
+╰────────────────╯╰───────────────────────────────────────╯
+general > ▌
+online: bob alice(3) · agents: rex ●
+you: in #general voice from another client · voice: +2
+alice | connected  enter send • tab inbox • esc quit

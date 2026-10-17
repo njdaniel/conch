@@ -1,0 +1,24 @@
+␛[90m╭────────────────╮╭───────────────────────────────────────────────────────────╮␛[39m
+␛[90m│␛[1m␛[36m› ␛[0mgeneral       ␛[90m││␛[39m15:42 alice: Morning all. The release branch is cut; pleas…␛[90m│␛[39m
+␛[90m│␛[39m  ops ␛[1m␛[33m2␛[0m         ␛[90m││␛[39m15:42 bob: On it. I will look at the flaky test in the ing…␛[90m│␛[39m
+␛[90m│␛[39m  movie-night   ␛[90m││␛[39m15:42 carol-with-a-rather-lon…: A long message, to see wra…␛[90m│␛[39m
+␛[90m│␛[39m  design-review ␛[90m││␛[39m15:42 rex ␛[1m␛[33m[agent]␛[0m: Build 4127 passed: https://ci.example.c…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: Notes from the call: ↵ 1. ship the parser behin…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 dave: 日本語の名前とテキストも表示できますか？幅の広…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: \[31mred?[0m evil and a bell  and [net:alpha] a…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 alice: \[whisper:2,3] not a real whisper either      ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                           ␛[90m│␛[39m
+␛[90m╰────────────────╯╰───────────────────────────────────────────────────────────╯␛[39m
+␛[90monline: bob alice(2) · agents: rex ●␛[39m
+␛[90mvoice: 2 alice  ●3␛[39m
+general >
+␛[90malice | connected  ↑/↓ channels • enter send • tab inbox • esc quit␛[39m
