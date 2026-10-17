@@ -43,6 +43,9 @@ function setup(claims: ShareClaimResult[] = []) {
     live: true,
     // When set, the next claim waits for the test to answer it.
     claim: null as Deferred<ShareClaimResult> | null,
+    // Issue #535: when set, the next publish waits for the test to settle it
+    // (a share waiting for LiveKit's grant).
+    publish: null as Deferred<undefined> | null,
   };
   const clock = new FakeClock();
   const stub: ShareRoom = {
@@ -53,6 +56,9 @@ function setup(claims: ShareClaimResult[] = []) {
     },
     publishScreen: () => {
       calls.push('publish');
+      const held = room.publish;
+      room.publish = null;
+      if (held !== null) return held.promise;
       return room.publishFails ? Promise.reject(new Error('refused')) : Promise.resolve();
     },
     stopScreen: () => {
@@ -690,6 +696,243 @@ describe('resuming a share after the room was renewed', () => {
     t.share.connected('general', t.stub);
     await settle();
     expect(t.calls).toEqual(['keep', 'claim general', 'claim general', 'adopt', 'publish']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+  });
+});
+
+// Issue #535: a room renewed while the share is being published (waiting for
+// LiveKit's grant), whether a first share or one being resumed, is resumed on
+// the next connection like a share renewed while published; any other end is
+// as before, and one wait covers every renewal until the share is back.
+describe('a room renewed while the share is being published', () => {
+  const first = '2026-10-16T00:00:00.000Z';
+  const again: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:01:00.000Z', audio: true } };
+  const third: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:02:00.000Z', audio: true } };
+  const notAllowed: ShareClaimResult = { ok: false, failure: 'invalid', status: 403, code: 'voice_not_allowed' };
+  const ended = (reason: VoiceShareEndReason, startedAt: string): VoiceShareEnded => ({ reason, started_at: startedAt, ended_at: '2026-10-16T00:03:00.000Z' });
+
+  // resumedPublishing: a share renewed once, and claimed again in the new
+  // room, where its publish waits for the grant.
+  async function resumedPublishing(claims: ShareClaimResult[] = [granted, granted, again, third]) {
+    const t = await sharing(setup(claims));
+    t.share.presence('me');
+    t.share.presence('none', ended('rotated', first));
+    await t.share.lost(true);
+    const publish = deferred<undefined>();
+    t.room.publish = publish;
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'publishing' });
+    expect(t.calls).toEqual(['keep', 'claim general', 'adopt', 'publish']);
+    // The new room's presence shows the share.
+    t.share.presence('me');
+    t.calls.length = 0;
+    // claimed: the claim being published; next: the one claimed to resume it.
+    return { ...t, publish, claimed: '2026-10-16T00:01:00.000Z', next: '2026-10-16T00:02:00.000Z' };
+  }
+
+  // firstPublishing: a first share, picked and claimed again, whose publish
+  // waits for the grant.
+  async function firstPublishing(claims: ShareClaimResult[] = [granted, granted, again]) {
+    const t = setup(claims);
+    const publish = deferred<undefined>();
+    t.room.publish = publish;
+    void t.share.start('general', t.stub, 'detail');
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'publishing' });
+    expect(t.calls).toEqual(['claim general', 'pick detail', 'claim general', 'publish']);
+    t.share.presence('me');
+    t.calls.length = 0;
+    return { ...t, publish, claimed: first, next: '2026-10-16T00:01:00.000Z' };
+  }
+
+  const shares = [
+    ['a resumed share', resumedPublishing],
+    ['a first share', firstPublishing],
+  ] as const;
+
+  // The orders the sharer's page can learn of the renewal in: presence
+  // saying so while the old room is still up, the room deleted first, or
+  // presence saying why while it still shows the share (an older picture),
+  // and the publish failing before anything else.
+  for (const [what, publishing] of shares) {
+    for (const order of ['presence first', 'room deleted first', 'told, then the publish failed'] as const) {
+      it(`${what} renewed while it waited for its grant is resumed on the next connection (${order})`, async () => {
+        const t = await publishing();
+        if (order === 'told, then the publish failed') {
+          t.share.presence('me', ended('rotated', t.claimed));
+          expect(t.share.current).toEqual({ kind: 'publishing' });
+          t.publish.reject(new Error('failed to publish track, insufficient permissions'));
+          await settle();
+          expect(t.share.current).toEqual({ kind: 'resuming' });
+          expect(t.calls).toEqual(['keep']);
+        }
+        if (order === 'presence first') {
+          t.share.presence('none', ended('rotated', t.claimed));
+          // Taken off the old connection at once, still capturing: nothing
+          // stopped, nothing released (the claim ended with the room).
+          expect(t.share.current).toEqual({ kind: 'resuming' });
+          expect(t.calls).toEqual(['keep']);
+        }
+        await t.share.lost(true);
+        expect(t.share.current).toEqual({ kind: 'resuming' });
+        expect(t.calls).toEqual(['keep']);
+        // The publish under way on the old connection fails, as the adapter
+        // makes it once the capture is kept: the share still waits to resume.
+        t.publish.reject(new Error('voice share taken off this connection'));
+        await settle();
+        expect(t.share.current).toEqual({ kind: 'resuming' });
+        expect(t.calls).toEqual(['keep']);
+        t.share.connected('general', t.stub);
+        await settle();
+        if (order === 'room deleted first') {
+          // Only a renewal is resumed: nothing until presence says it was.
+          expect(t.calls).toEqual(['keep']);
+          t.share.presence('none', ended('rotated', t.claimed));
+          await settle();
+        }
+        expect(t.calls).toEqual(['keep', 'claim general', 'adopt', 'publish']);
+        expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+        // The share resumed is the newest claim's.
+        await t.share.stop('self');
+        expect(t.released).toEqual([t.next]);
+      });
+    }
+
+    it(`${what} ended any other way while it waited for its grant ends as before`, async () => {
+      for (const reason of ['operator', 'access_lost', 'idle', 'left', 'self'] as const) {
+        const t = await publishing();
+        t.share.presence('none', ended(reason, t.claimed));
+        await settle();
+        expect(t.calls, reason).toEqual(['stop screen']);
+        expect(t.share.current, reason).toEqual({ kind: 'idle', ended: reason });
+        t.publish.reject(new Error('refused'));
+        await t.share.lost(true);
+        t.share.connected('general', t.stub);
+        await settle();
+        expect(t.calls, reason).toEqual(['stop screen']);
+      }
+
+      // The browser's own stop control, and a connection lost without its
+      // room being deleted.
+      const browser = await publishing();
+      browser.share.ended('browser');
+      await settle();
+      expect(browser.calls).toEqual(['stop screen', 'release general']);
+      expect(browser.share.current).toEqual({ kind: 'idle', ended: 'browser' });
+      const lost = await publishing();
+      await lost.share.lost(false);
+      expect(lost.calls).toEqual(['stop screen', 'release general']);
+      expect(lost.share.current).toEqual({ kind: 'idle', ended: 'lost' });
+
+      // A publish refused with no renewal said: the share could not start.
+      const refused = await publishing();
+      refused.publish.reject(new Error('failed to publish track, insufficient permissions'));
+      await settle();
+      expect(refused.calls.filter((c) => c !== 'stop kept')).toEqual(['stop screen', 'release general']);
+      expect(refused.share.current).toEqual({ kind: 'idle', ended: 'failed' });
+    });
+
+    it(`${what} renewed while it waited, then refused in the next room or signed out, stops the capture`, async () => {
+      for (const [answer, end] of [
+        [busy, 'busy'],
+        [notAllowed, 'failed'],
+      ] as const) {
+        const t = await publishing(what === 'a first share' ? [granted, granted, answer] : [granted, granted, again, answer]);
+        t.share.presence('none', ended('rotated', t.claimed));
+        await t.share.lost(true);
+        t.share.connected('general', t.stub);
+        await settle();
+        expect(t.calls, end).toEqual(['keep', 'claim general', 'stop kept']);
+        expect(t.share.current, end).toEqual({ kind: 'idle', ended: end });
+      }
+
+      const out = await publishing();
+      out.share.presence('none', ended('rotated', out.claimed));
+      await out.share.lost(true);
+      out.share.abandon();
+      await settle();
+      out.share.connected('general', out.stub);
+      await settle();
+      expect(out.calls).toEqual(['keep', 'stop kept']);
+      expect(out.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    });
+
+    // Security review of #516 (F1): a capture is never published after stop
+    // or leave.
+    it(`${what} renewed while it waited, then stopped or left, is never published again`, async () => {
+      for (const cause of ['self', 'left'] as const) {
+        const t = await publishing();
+        t.share.presence('none', ended('rotated', t.claimed));
+        await t.share.stop(cause);
+        t.publish.reject(new Error('voice share taken off this connection'));
+        await t.share.lost(true);
+        t.share.connected('general', t.stub);
+        await settle();
+        expect(t.calls, cause).toEqual(['keep', 'stop kept']);
+        expect(t.share.current, cause).toEqual({ kind: 'idle', ended: cause });
+      }
+    });
+  }
+
+  it('one wait covers both renewals: the second carries on with what is left of the first', async () => {
+    const t = await sharing(setup([granted, granted, again, third]));
+    t.share.presence('me');
+    t.share.presence('none', ended('rotated', first));
+    await t.share.lost(true);
+    t.clock.advance(30_000);
+    t.room.publish = deferred();
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'publishing' });
+    t.clock.advance(10_000);
+    t.share.presence('none', ended('rotated', '2026-10-16T00:01:00.000Z'));
+    await t.share.lost(true);
+    t.clock.advance(resumeLimit - 40_000 - 1);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    t.clock.advance(1);
+    await settle();
+    expect(t.calls.slice(-2)).toEqual(['keep', 'stop kept']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('a share whose wait ran out while it was being published ends at the next renewal', async () => {
+    const t = await sharing(setup([granted, granted, again, third]));
+    t.share.presence('me');
+    t.share.presence('none', ended('rotated', first));
+    await t.share.lost(true);
+    t.clock.advance(30_000);
+    t.room.publish = deferred();
+    t.share.connected('general', t.stub);
+    await settle();
+    // The wait runs out while the publish waits for the grant: it carries on.
+    t.clock.advance(20_000);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'publishing' });
+    t.share.presence('none', ended('rotated', '2026-10-16T00:01:00.000Z'));
+    await settle();
+    expect(t.calls.slice(-2)).toEqual(['keep', 'stop kept']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('a share back in a room has the whole wait again at its next renewal', async () => {
+    const t = await sharing(setup([granted, granted, again, third]));
+    t.share.presence('me');
+    t.share.presence('none', ended('rotated', first));
+    await t.share.lost(true);
+    t.clock.advance(40_000);
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+    t.share.presence('me');
+    t.share.presence('none', ended('rotated', '2026-10-16T00:01:00.000Z'));
+    await t.share.lost(true);
+    t.clock.advance(resumeLimit - 1);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    t.share.connected('general', t.stub);
+    await settle();
     expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
   });
 });
