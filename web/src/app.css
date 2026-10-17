@@ -40,6 +40,9 @@ body {
 
 .lobby {
   display: grid;
+  /* One column no wider than the window, whatever is in it: an item that is
+     wider wraps or shrinks rather than widening the page (issue #467). */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
   min-height: calc(100vh - 4rem);
 }
@@ -138,10 +141,17 @@ body {
 
 .status {
   display: flex;
-  gap: 1.5rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
   border-top: 1px solid #ccc;
   padding-top: 0.5rem;
   font-size: 0.9rem;
+}
+
+/* An address or a version breaks anywhere rather than run off the screen. */
+.status > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Narrow windows lose the right panel first: its body folds away and the
@@ -153,6 +163,53 @@ body {
 
   .panel {
     grid-column: 1 / -1;
+  }
+}
+
+/* A phone (issue #467): everything in one column, channels, then the open
+   channel, then the panel, with a narrower margin and the header's controls
+   wrapping onto lines of their own. A control added to the header joins the
+   wrap: it needs no rule here. */
+@media (max-width: 599px) {
+  body {
+    margin: 1rem;
+  }
+
+  .lobby {
+    min-height: calc(100vh - 2rem);
+  }
+
+  .lobby header {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.5rem 1rem;
+  }
+
+  .lobby header h1 {
+    margin: 0;
+  }
+
+  .areas {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .change-name form:not([hidden]) {
+    flex-wrap: wrap;
+  }
+
+  .change-name input {
+    flex: 1 1 8rem;
+    min-width: 0;
+  }
+
+  .audience-row select {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Big enough for a finger. */
+  .lobby button {
+    min-height: 2.75rem;
   }
 }
 

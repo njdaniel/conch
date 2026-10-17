@@ -37,6 +37,11 @@ describe('credential handling', () => {
     // with (current(), #439 review M1), so none can fall through to another
     // one that happens to be stored.
     expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(3);
+    // Storage is read for the token in four functions only: readToken (the
+    // search), current (is the pinned one still stored), dropToken (is it
+    // still the one to drop) and stillStored (is restore's unchecked one
+    // still stored, issue #469). A new reader trips this.
+    expect(code.match(/getItem\(tokenKey\)/g)?.length ?? 0).toBe(4);
     expect(code).not.toMatch(/export\s+(async\s+)?function\s+((read|write|drop)Token|sendAs|current|forget)\b/);
     // The pin is set in four places only: signIn, continueAsOperator,
     // restore, and redeemInvite (issue #440), which keeps the credential an

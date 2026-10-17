@@ -1,10 +1,11 @@
 // A8 (issue #440): invites in the browser. The operator makes invites through
 // the API, as with curl or conch; each person opens the link in a browser of
-// their own, at desktop and phone sizes. This spec runs last, so the people it
-// adds to the fixture channels touch no other spec.
+// their own, at desktop and phone sizes. This spec runs after the others but
+// 12-phone, which counts nobody, so the people it adds to the fixture channels
+// touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { invitesOf, makeInvite } from './api';
-import { channelButton, expect, statusLine, test } from './fixtures';
+import { channelButton, expect, expectFits, statusLine, test } from './fixtures';
 import { call, inviteUrl, principalId, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
@@ -179,16 +180,15 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
 
 // The test does not sign out: that would revoke the world's operator
 // credential. It adds the operator to general, which the panel offers, since
-// an operator's own channels are the ones the page lists. It runs at desktop
-// size: the lobby itself does not yet fit a phone's width (its status line and
-// conversation lay the page out wider than the screen), which is outside this
-// issue; the landing page, which must, is tried at phone size above.
+// an operator's own channels are the ones the page lists. It runs at phone
+// size, where the lobby fits the screen (issue #467), and checks that the
+// panel, with every control an operator gets, fits too.
 test('A8 an operator makes an open link with its defaults, and closes it', async ({ meet, world }) => {
   const operatorId = await principalId(world, world.tokens.operator);
   const added = await call(world, world.tokens.operator, 'PUT', `/v1/channels/general/members/${String(operatorId)}`);
   expect(added.status).toBeLessThan(300);
 
-  const { page } = await meet(desktop);
+  const { page } = await meet(phone);
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Sign in' }).click();
@@ -202,6 +202,11 @@ test('A8 an operator makes an open link with its defaults, and closes it', async
   await expect(panel.getByRole('checkbox', { name: 'Limit the number of people' })).not.toBeChecked();
   await expect(panel.getByRole('checkbox', { name: 'Joiners may invite others' })).not.toBeChecked();
   await panel.getByRole('checkbox', { name: '#general' }).check();
+  // With a cap's field shown too, then without it again.
+  await panel.getByRole('checkbox', { name: 'Limit the number of people' }).check();
+  await expect(panel.getByRole('spinbutton')).toBeVisible();
+  await expectFits(page, 'the operator\'s invite form');
+  await panel.getByRole('checkbox', { name: 'Limit the number of people' }).uncheck();
   const before = Date.now();
   await panel.getByRole('button', { name: 'Make invite' }).click();
   await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
@@ -221,6 +226,7 @@ test('A8 an operator makes an open link with its defaults, and closes it', async
   const list = panel.getByRole('list', { name: 'Your invites' });
   const item = list.getByRole('listitem').filter({ hasText: 'Open link' }).filter({ hasText: 'Open ·' });
   await expect(item).toHaveCount(1);
+  await expectFits(page, 'the operator\'s invite panel with a new link');
   await item.getByRole('button', { name: 'Close' }).click();
   await expect(list.getByRole('listitem').filter({ hasText: 'Open link' }).first()).toContainText('Closed');
   const closed = (await invitesOf(world, world.tokens.operator)).find((i) => i.id === open.id);

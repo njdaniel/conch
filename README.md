@@ -920,11 +920,11 @@ With Caddy and nginx absent from the machine that wrote this recipe, the two con
 
 An invite is the second way into a server, beside an operator issuing a credential (ADR-008 §4). Whoever holds its code joins as a new human member, with the channels and the grants the invite names, and gets their first credential. There is no public signup.
 
-- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time.
+- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time, and `whoami` tells them how many more they may make now (`"invites_remaining"`; absent for operators, who have no allowance, and for anyone who may not invite).
 - **Open links** are for operators only: anyone with the link may join until it expires (default 24 hours, at most 7 days) or is closed, with an optional cap on uses (`max_uses`; none by default).
 - **An invite grants only what its maker holds:** a person may name only channels they are in, and grant voice only if they have it. Only an operator grants the right to invite in turn (`"may_invite": true` on the invite), so nobody who joins can make accounts that make accounts unless an operator chose that. An invite is never an operator and never an agent.
 - **Joiners do not decide approvals.** A membership made by an invite does not carry the right to decide the channel's approvals; the joiner sees them read-only, and is refused `403 decision_not_permitted` if they try. An operator grants it per member with `conch admin member decide <channel> <principal-id>` (`PUT /v1/channels/{channel}/members/{principal_id}` with `{"can_decide":true}`).
-- **Voice is a grant.** A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
+- **Voice is a grant.** `whoami` says whether the caller holds it (`"voice_allowed"`; always false for an agent). A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
 
 The flow, with `curl` (an operator's token in `$TOKEN`; preview and redeem need none):
 

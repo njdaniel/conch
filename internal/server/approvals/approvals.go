@@ -91,6 +91,7 @@ type Notifier interface {
 type backing interface {
 	CreateApproval(ctx context.Context, p store.ApprovalParams) (store.Approval, error)
 	CastDecision(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error)
+	CastMemberDecision(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error)
 	ApprovalByID(ctx context.Context, id int64) (store.Approval, error)
 	ResolutionByApprovalID(ctx context.Context, approvalID int64) (schema.ApprovalResolutionV1, error)
 	ListOpenApprovals(ctx context.Context) ([]store.Approval, error)
@@ -230,9 +231,25 @@ func (m *Manager) Create(ctx context.Context, params store.ApprovalParams) (stor
 
 // Decide casts one principal's decision (audit: decision_cast). When the
 // decision meets quorum the approval resolves (audit: approval_resolved), its
-// timers stop, and the resolution notification fires.
+// timers stop, and the resolution notification fires. It is the decision of a
+// server without authentication; a verified caller's goes through
+// DecideAsMember.
 func (m *Manager) Decide(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error) {
-	d, r, err := m.store.CastDecision(ctx, approvalID, principalID, optionID, reason)
+	return m.decide(ctx, approvalID, principalID, optionID, reason, m.store.CastDecision)
+}
+
+// DecideAsMember is Decide for a verified caller (issue #453): the decider's
+// membership and right are checked again in the deciding transaction, and
+// quorum counts only the decisions of members who hold the right now
+// (store.CastMemberDecision).
+func (m *Manager) DecideAsMember(ctx context.Context, approvalID, principalID int64, optionID, reason string) (schema.Decision, *schema.ApprovalResolutionV1, error) {
+	return m.decide(ctx, approvalID, principalID, optionID, reason, m.store.CastMemberDecision)
+}
+
+func (m *Manager) decide(ctx context.Context, approvalID, principalID int64, optionID, reason string,
+	cast func(context.Context, int64, int64, string, string) (schema.Decision, *schema.ApprovalResolutionV1, error),
+) (schema.Decision, *schema.ApprovalResolutionV1, error) {
+	d, r, err := cast(ctx, approvalID, principalID, optionID, reason)
 	if err != nil {
 		return schema.Decision{}, nil, err
 	}

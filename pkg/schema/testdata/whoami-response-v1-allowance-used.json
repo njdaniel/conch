@@ -1,0 +1,9 @@
+{
+  "id": 4,
+  "kind": "human",
+  "name": "river",
+  "role": "member",
+  "may_invite": true,
+  "voice_allowed": true,
+  "invites_remaining": 0
+}
