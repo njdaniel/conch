@@ -276,6 +276,15 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Sign-in links (issue #493). The create names a principal that does not
+	// exist, and preview and redeem send no code, which is the
+	// sign_in_link_invalid 404 before anything is looked up or audited.
+	// AuthOff gets 401 on the create and the close (special-cased below).
+	"POST /v1/principals/{id}/sign-in-links": {classOp, "/v1/principals/9999/sign-in-links", `{}`, 404},
+	"POST /v1/sign-in-links/preview":         {classExempt, "/v1/sign-in-links/preview", `{}`, 404},
+	"POST /v1/sign-in-links/redeem":          {classExempt, "/v1/sign-in-links/redeem", `{}`, 404},
+	// Closing one names a link that does not exist: 404, nothing audited.
+	"DELETE /v1/sign-in-links/{id}": {classOp, "/v1/sign-in-links/9999", "", 404},
 	// Problem reports (issue #446). An empty report is a 400 before anything
 	// is stored or audited; the operator routes name a report that does not
 	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
@@ -308,7 +317,9 @@ func isInviteRoute(pattern string) bool {
 	case "POST /v1/invites", "GET /v1/invites", "DELETE /v1/invites/{id}",
 		"GET /v1/invites/{id}/principals", "POST /v1/invites/{id}/disable-joiners",
 		"POST /v1/principals/{id}/disable-invitees", "PUT /v1/principals/{id}/invite-permission",
-		"GET /v1/invites/settings", "PUT /v1/invites/settings":
+		"GET /v1/invites/settings", "PUT /v1/invites/settings",
+		// Making a sign-in link (issue #493) starts as the invite routes do.
+		"POST /v1/principals/{id}/sign-in-links", "DELETE /v1/sign-in-links/{id}":
 		return true
 	}
 	return false
@@ -367,7 +378,8 @@ func TestRouteTable(t *testing.T) {
 func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
-		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true}
+		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true,
+		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
 
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]

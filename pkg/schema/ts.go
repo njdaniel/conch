@@ -120,6 +120,17 @@ var TSTypes = []TSType{
 	{Value: DisableInviteesRequestV1{}, Family: "disable-invitees-request-v1"},
 	{Value: InvitePermissionRequestV1{}, Family: "invite-permission-request-v1"},
 	{Value: InviteSettingsV1{}, Family: "invite-settings-v1"},
+	// Sign-in links (issue #493): the landing page of a link an operator made
+	// asks whose account it opens, then uses it. The page never makes one.
+	{Value: SignInLinkPreviewRequestV1{}, Family: "sign-in-link-preview-request-v1"},
+	{Value: SignInLinkPreviewV1{}, Family: "sign-in-link-preview-v1"},
+	{Value: RedeemSignInLinkRequestV1{}, Family: "redeem-sign-in-link-request-v1"},
+	{Value: RedeemSignInLinkResponseV1{}, Family: "redeem-sign-in-link-response-v1"},
+	// How the browser suite's operator makes one, as `conch admin principal
+	// sign-in-link` does.
+	{Value: SignInLinkV1{}, Family: "sign-in-link-v1"},
+	{Value: CreateSignInLinkRequestV1{}, Family: "create-sign-in-link-request-v1"},
+	{Value: CreateSignInLinkResponseV1{}, Family: "create-sign-in-link-response-v1"},
 	// Signing out everywhere (issue #439): the page revokes every credential
 	// of its own principal. Signing out of one credential has no body.
 	{Value: RevokeAllCredentialsResponseV1{}, Family: "revoke-all-credentials-response-v1"},

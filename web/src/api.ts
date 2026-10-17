@@ -30,6 +30,7 @@ import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema
 import { listChannelMembersResponseV1, listChannelsResponse, type ChannelMemberV1, type ChannelV0 } from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
+import { redeemSignInLinkResponseV1, signInLinkPreviewV1, type RedeemSignInLinkRequestV1, type SignInLinkPreviewRequestV1, type SignInLinkPreviewV1 } from './schema/signin';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
@@ -507,8 +508,8 @@ async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteRe
   return { ok: false, failure: 'invalid' };
 }
 
-// sendOpen posts a JSON body with no credential at all, for the two invite
-// routes that take none. It is null when there was no answer.
+// sendOpen posts a JSON body with no credential at all, for the invite and
+// sign-in link routes that take none. It is null when there was no answer.
 async function sendOpen(path: string, body: unknown): Promise<Response | null> {
   let res: Response;
   try {
@@ -584,23 +585,64 @@ export async function redeemInvite(inviteCode: string, name: string): Promise<Re
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemInviteResponseV1);
   if (!redeemed.ok) return redeemed;
-  const held: Held = { token: redeemed.value.token, place: 'lasting' };
+  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id);
+}
+
+// keepRedeemed keeps the credential an invite or a sign-in link gave, as
+// signIn keeps a member's, to last, and pins it; then whoami says who the
+// page now is, which must be the principal the answer named.
+async function keepRedeemed(token: string, principal: number): Promise<RedeemResult> {
+  const held: Held = { token, place: 'lasting' };
   if (!writeToken(held.token, held.place)) {
-    // The account exists and its credential works, but cannot be kept here:
-    // it is revoked (if the server answers) rather than left alive.
+    // The credential works, but cannot be kept here: it is revoked (if the
+    // server answers) rather than left alive.
     await sendAs(held, 'DELETE', '/v1/credentials/current');
     return { ok: false, failure: 'unkept' };
   }
   pinned = { token: held.token, place: held.place };
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
-  if (who.value.role === 'operator') {
-    // An invite never makes an operator. Should the server ever say
-    // otherwise, an operator credential is not left to last in this browser.
+  if (who.value.role === 'operator' || who.value.id !== principal) {
+    // Neither an invite nor a sign-in link is for an operator. Should the
+    // server ever say otherwise, or name someone else, the credential is
+    // revoked on the server (best effort, as when it cannot be kept) and
+    // not left to last in this browser.
+    await sendAs(held, 'DELETE', '/v1/credentials/current');
     forget(held);
     return { ok: false, failure: 'invalid' };
   }
   return who;
+}
+
+// Sign-in links (issue #493). An operator makes one for a person who signed
+// out, so they can come back into the same account. Like an invite's, its
+// code is the proof: preview and redeem need no credential, and the code
+// travels in a POST body only and is kept nowhere.
+
+// previewSignInLink asks whose account a sign-in link opens, without using
+// it.
+export async function previewSignInLink(signInCode: string): Promise<InviteResult<SignInLinkPreviewV1>> {
+  const request: SignInLinkPreviewRequestV1 = { code: signInCode };
+  const res = await sendOpen('/v1/sign-in-links/preview', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, signInLinkPreviewV1);
+}
+
+// redeemSignInLink uses a sign-in link: the new credential is kept to last
+// and pinned, as an invite's is. It is refused, before anything is sent,
+// while this browser holds any other sign-in (heldElsewhere), for the reasons
+// redeemInvite is: the page signs that one out first, revoking it.
+export async function redeemSignInLink(signInCode: string): Promise<RedeemResult> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
+  pinned = null;
+  const request: RedeemSignInLinkRequestV1 = { code: signInCode };
+  const res = await sendOpen('/v1/sign-in-links/redeem', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const redeemed = await readBody(res, redeemSignInLinkResponseV1);
+  if (!redeemed.ok) return redeemed;
+  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id);
 }
 
 // createInvite makes an invite. The answer carries its code, shown once to

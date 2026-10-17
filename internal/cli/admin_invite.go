@@ -348,3 +348,65 @@ func adminInviteStatus(ctx context.Context, r *adminRun) error {
 	}
 	return r.sayInviteSettings(s)
 }
+
+// Sign-in links (issue #493). A sign-in link's code is a secret like an
+// invite's: `principal sign-in-link` prints it once, inside the link, alone
+// on standard output, so that LINK=$(conch admin principal sign-in-link 7)
+// works. No other output, error or log line carries it.
+
+func bindSignInLink(fs *flag.FlagSet, o *adminOpts) {
+	fs.StringVar(&o.principal.expires, "expires", "", "when it stops working: a duration such as 24h or 2d, or an RFC 3339 time (default 24h, at most 7d)")
+}
+
+// signInLink is the address the person opens to sign back in. The code is in
+// the fragment, which a browser never sends to a server.
+func (r *adminRun) signInLink(code string) string {
+	return r.client.resolve("app").String() + "/#/signin/" + code
+}
+
+// adminPrincipalSignInLink makes a one-time link that signs a member back
+// into their own account, and prints it.
+func adminPrincipalSignInLink(ctx context.Context, r *adminRun) error {
+	var req schema.CreateSignInLinkRequestV1
+	now := time.Now()
+	if r.opts.principal.expires != "" {
+		exp, err := parseInviteExpiry(r.opts.principal.expires, now)
+		if err != nil {
+			return fmt.Errorf("cli: admin principal sign-in-link: %w", err)
+		}
+		ts := schema.NewTimestamp(exp)
+		req.ExpiresAt = &ts
+	}
+	// The check the server makes, so a link too long-lived costs no request.
+	if err := req.Validate(now); err != nil {
+		return fmt.Errorf("cli: admin principal sign-in-link: %w", err)
+	}
+	resp, err := r.client.CreateSignInLink(ctx, r.id, req)
+	if err != nil {
+		return err
+	}
+	// The code is the one server string printed raw, so it is checked first.
+	// The error says nothing of what was received.
+	if schema.ValidateSignInLinkCode(resp.Code) != nil {
+		return errors.New("cli: admin principal sign-in-link: the server returned a code in an unexpected form; it was not printed")
+	}
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	if _, err := fmt.Fprintln(r.stdout, r.signInLink(resp.Code)); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(r.stderr, "sign-in link %d for principal %d, one use, expires %s\n",
+		resp.SignInLink.ID, resp.SignInLink.PrincipalID, formatTimestamp(resp.SignInLink.ExpiresAt))
+	return err
+}
+
+// adminSignInLinkClose closes a sign-in link so it no longer works: what an
+// operator does when one leaks. A link already used or closed is left as it
+// is, and the answer is the same.
+func adminSignInLinkClose(ctx context.Context, r *adminRun) error {
+	if err := r.client.CloseSignInLink(ctx, r.id); err != nil {
+		return err
+	}
+	return r.say("closed sign-in link %d\n", r.id)
+}

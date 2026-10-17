@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { heldLine } from './Invite';
-import { addressWithoutFragment, inviteFromHash, inviteLink, takeInviteFromAddress } from './route';
+import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
 
 const origin = 'http://127.0.0.1:8080';
 const inviteCode = `conch_inv_${'Q'.repeat(40)}x-_`;
@@ -130,7 +130,7 @@ describe('the invite route', () => {
     const replace = vi.spyOn(window.history, 'replaceState');
     const before = window.history.length;
     window.location.hash = `#/invite/${inviteCode}`;
-    expect(takeInviteFromAddress()).toBe(inviteCode);
+    expect(takeLinkFromAddress()).toEqual({ kind: 'invite', inviteCode });
     expect(replace).toHaveBeenCalledTimes(1);
     const url = String(replace.mock.calls[0]?.[2]);
     expect(url).not.toContain('#');
@@ -140,21 +140,21 @@ describe('the invite route', () => {
     // The entry the link made was replaced, not added to.
     expect(window.history.length).toBe(before + 1);
     // Nothing left to take, and no second call.
-    expect(takeInviteFromAddress()).toBeNull();
+    expect(takeLinkFromAddress()).toBeNull();
     expect(replace).toHaveBeenCalledTimes(1);
   });
 
   it('leaves any other address alone', () => {
     const replace = vi.spyOn(window.history, 'replaceState');
     window.location.hash = '#/c/general';
-    expect(takeInviteFromAddress()).toBeNull();
+    expect(takeLinkFromAddress()).toBeNull();
     expect(replace).not.toHaveBeenCalled();
     expect(window.location.hash).toBe('#/c/general');
   });
 
   it('takes out a link that looks like an invite but does not parse', () => {
     window.location.hash = '#/invite/a/b';
-    expect(takeInviteFromAddress()).toBeNull();
+    expect(takeLinkFromAddress()).toBeNull();
     expect(window.location.hash).toBe('');
   });
 

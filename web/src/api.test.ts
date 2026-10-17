@@ -474,7 +474,10 @@ describe('invites', () => {
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     expect(hasToken()).toBe(false);
     expect(await listChannels()).toEqual({ ok: false, failure: 'unauthorized' });
-    expect(calls.map((c) => c.path)).toEqual(['/v1/invites/redeem', '/v1/whoami']);
+    // It is revoked on the server too, with the credential redeeming gave
+    // (security review of #493).
+    expect(calls.map((c) => c.path)).toEqual(['/v1/invites/redeem', '/v1/whoami', '/v1/credentials/current']);
+    expect(calls[2]?.method).toBe('DELETE');
   });
 
   it('keeps the credential when whoami does not answer after redeeming', async () => {

@@ -10,9 +10,10 @@ import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeInviteFromAddress } from './route';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { SignIn } from './SignIn';
+import { SignInLink } from './SignInLink';
 import { authReducer, initialAuth } from './state/auth';
 import { channelsReducer, initialChannels } from './state/channels';
 import { connectionReducer } from './state/connection';
@@ -290,15 +291,23 @@ export function App({ origin }: { readonly origin: string }) {
     });
   }, [signedIn]);
 
-  // The code of an invite link (issue #440), held here in memory only: never
-  // stored, and dropped once it is used or the person goes back. It is taken
-  // out of the address before the first paint, and again when a link is
-  // pasted into a tab that is already open (a hashchange, no reload).
+  // The code of an invite link (issue #440) or a sign-in link (issue #493),
+  // held here in memory only: never stored, and dropped once it is used or
+  // the person goes back. It is taken out of the address before the first
+  // paint, and again when a link is pasted into a tab that is already open (a
+  // hashchange, no reload). The newest link wins.
   const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [signInCode, setSignInCode] = useState<string | null>(null);
   useLayoutEffect(() => {
     function take() {
-      const found = takeInviteFromAddress();
-      if (found !== null) setInviteCode(found);
+      const found = takeLinkFromAddress();
+      if (found?.kind === 'invite') {
+        setSignInCode(null);
+        setInviteCode(found.inviteCode);
+      } else if (found?.kind === 'signin') {
+        setInviteCode(null);
+        setSignInCode(found.signInCode);
+      }
     }
     take();
     window.addEventListener('hashchange', take);
@@ -307,8 +316,9 @@ export function App({ origin }: { readonly origin: string }) {
     };
   }, []);
 
-  // Continue as a new person: whoever is signed in is signed out properly
-  // first, their credential revoked, before the invite makes someone else.
+  // Continue as a new person, or as the person a sign-in link is for:
+  // whoever is signed in is signed out properly first, their credential
+  // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
     releaseSession();
     const told = await api.signOut();
@@ -317,11 +327,13 @@ export function App({ origin }: { readonly origin: string }) {
     return told;
   }, [releaseSession]);
 
-  // Joined: the code is dropped and the lobby opens on the first channel the
-  // invite granted. A redemption is a sign-in, so it takes a pasted
-  // credential's two steps. When whoami did not answer, it is asked again.
+  // Joined, or signed back in through a sign-in link: the code is dropped and
+  // the lobby opens, on the first channel an invite granted. A redemption is
+  // a sign-in, so it takes a pasted credential's two steps. When whoami did
+  // not answer, it is asked again.
   const joined = useCallback((who: WhoAmIResponseV1 | null, channel: string | undefined) => {
     setInviteCode(null);
+    setSignInCode(null);
     if (channel !== undefined) window.location.hash = hashForChannel(channel);
     dispatchAuth({ type: 'submit' });
     if (who !== null) {
@@ -366,6 +378,26 @@ export function App({ origin }: { readonly origin: string }) {
           setInviteCode(null);
         }}
         onJoined={joined}
+      />
+    );
+  }
+
+  // A sign-in link likewise, once a stored sign-in has been checked.
+  if (signInCode !== null && auth.phase !== 'restoring') {
+    const signedInAs = auth.phase === 'signedIn' || auth.phase === 'operatorWarning' ? auth.principal.name : null;
+    return (
+      <SignInLink
+        origin={origin}
+        signInCode={signInCode}
+        signedInAs={signedInAs}
+        unchecked={signedInAs === null && api.heldElsewhere()}
+        onSignOutFirst={leaveForInvite}
+        onBack={() => {
+          setSignInCode(null);
+        }}
+        onSignedIn={(who) => {
+          joined(who, undefined);
+        }}
       />
     );
   }

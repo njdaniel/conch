@@ -268,14 +268,20 @@ func (s *Server) refuseInviteRateLimited(w http.ResponseWriter, r *http.Request,
 // auditRedeemRefused records, thinned, that a well-formed code redeemed
 // nothing. The detail is the kind of refusal, never the code.
 func (s *Server) auditRedeemRefused(r *http.Request, reason string) {
-	write, count := s.inviteLimits.audits.admit(0, auditInviteRedeemRefused+"|"+reason, s.now())
+	s.auditCodeRefused(r, auditInviteRedeemRefused, reason)
+}
+
+// auditCodeRefused writes action, thinned, for a well-formed code an
+// anonymous route refused: an invite's, or a sign-in link's (issue #493).
+func (s *Server) auditCodeRefused(r *http.Request, action, reason string) {
+	write, count := s.inviteLimits.audits.admit(0, action+"|"+reason, s.now())
 	if !write {
 		return
 	}
 	actx := context.WithoutCancel(r.Context())
-	if _, err := s.store.AppendAuditEvent(actx, inviteAnonymousAuditActor, auditInviteRedeemRefused, inviteAuditSubject(r),
+	if _, err := s.store.AppendAuditEvent(actx, inviteAnonymousAuditActor, action, inviteAuditSubject(r),
 		fmt.Sprintf("reason=%s count=%d", reason, count)); err != nil {
-		slog.ErrorContext(actx, "invites: audit invite_redeem_refused failed", "error", err)
+		slog.ErrorContext(actx, "invites: audit refused code failed", "action", action, "error", err)
 	}
 }
 

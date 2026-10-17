@@ -916,6 +916,8 @@ describe('a long channel', () => {
     const release = gateOlder();
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    // Sign out asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
     fireEvent.change(await screen.findByLabelText('Credential'), { target: { value: secret } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     await screen.findByText('m500');

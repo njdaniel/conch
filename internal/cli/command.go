@@ -121,6 +121,8 @@ Usage:
   conch admin invite pause|resume|status [--server <url>] [--json]
   conch admin principal invite-permission [--server <url>] [--json] <id> on|off
   conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
+  conch admin principal sign-in-link [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin sign-in-link close [--server <url>] [--json] <id>
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
