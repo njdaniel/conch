@@ -940,6 +940,25 @@ mod tests {
         fn presence(name: &str) {
             round_trip::<VoicePresenceV1>(name, VoicePresenceV1::validate);
         }
+        // share_ended (issue #487) is only in the document of the person whose
+        // screen share ended. `conch-voice` does not share a screen, so it reads
+        // past the field as it reads past any it does not know; everything else
+        // must survive.
+        fn presence_of_a_sharer(name: &str) {
+            let mut want = fixture(name);
+            let typed: VoicePresenceV1 = serde_json::from_value(want.clone())
+                .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+            typed
+                .validate()
+                .unwrap_or_else(|e| panic!("{name} does not validate: {e}"));
+            let ended = want.as_object_mut().and_then(|o| o.remove("share_ended"));
+            assert!(ended.is_some(), "{name} has no share_ended");
+            assert_eq!(
+                serde_json::to_value(&typed).unwrap(),
+                want,
+                "{name} lost more than share_ended"
+            );
+        }
         fn report(name: &str) {
             round_trip::<VoiceTransmitReportV1>(name, VoiceTransmitReportV1::validate);
         }
@@ -959,6 +978,7 @@ mod tests {
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
             ("voice-presence-v1-sharing.json", presence),
+            ("voice-presence-v1-share-ended.json", presence_of_a_sharer),
             ("voice-share-v1.json", share),
             ("voice-transmit-report-v1-started.json", report),
             ("voice-transmit-report-v1-stopped.json", report),

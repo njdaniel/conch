@@ -20,8 +20,10 @@ import (
 // One shape travels the other way: the transmit report (issue #179), which a
 // client sends conchd when a press starts and stops. It was added later, also
 // as a new type, and is near the end of this file. The screen share (issue
-// #443) added the last: the claim a client is given when it may share, and two
-// optional fields of a participant in presence.
+// #443) added the claim a client is given when it may share, and two optional
+// fields of a participant in presence. Issue #487 added the last: why the
+// server ended a share, an optional field of the sharer's own presence, and the
+// parameter by which a release names the share it means.
 //
 // Room names and tokens are opaque strings. The schema checks that they are
 // present, never what they contain: a token is a credential conchd signed and
@@ -68,6 +70,12 @@ const (
 	// answer names nobody: who is sharing is in presence, for those who may
 	// read it.
 	ErrorCodeVoiceShareBusy = "voice_share_busy"
+	// ErrorCodeVoiceShareStale: a release named a share (VoiceShareClaimParam)
+	// that is no longer the caller's current one, and nothing was changed
+	// (HTTP 409, issue #487). The share it meant has ended already; whatever
+	// share the room has now, someone else's or a newer one of the caller's,
+	// goes on.
+	ErrorCodeVoiceShareStale = "voice_share_stale"
 )
 
 // VoiceRoomGrant is one room a voice session may join: the LiveKit room name,
@@ -312,12 +320,21 @@ type VoicePresenceV1 struct {
 	Available bool `json:"available"`
 	// Rooms lists the rooms the caller may see with their participants.
 	Rooms []VoicePresenceRoom `json:"rooms"`
+	// ShareEnded is why the reader's own last screen share ended (issue
+	// #487). It is in the document sent to the person who shared, and in no
+	// one else's: the same snapshot read by anyone else omits it, so their
+	// document is what it was before. It is kept until that person claims a
+	// share again, so it may describe a share that ended some time ago; a
+	// reader matches its started_at with the claim it held
+	// (VoiceShareV1.StartedAt). It never names who ended the share.
+	ShareEnded *VoiceShareEnded `json:"share_ended,omitempty"`
 }
 
 // Validate reports whether the snapshot is structurally well-formed: the v1
 // schema name, a positive channel_id, every room well-formed, no two rooms for
-// the same audience, and the configured/available/rooms states consistent
-// with each other.
+// the same audience, the configured/available/rooms states consistent with
+// each other, and a present share_ended well-formed, on a server with voice
+// configured.
 //
 // An unknown audience kind in any room fails the whole document, as it does
 // for a message (ADR-005: an audience a reader does not understand must never
@@ -347,6 +364,82 @@ func (p VoicePresenceV1) Validate() error {
 			return errors.New("schema: voice presence lists more than one room for the same audience")
 		}
 		seen[key] = struct{}{}
+	}
+	if p.ShareEnded != nil {
+		// A share needs voice. It does not need LiveKit to be reachable
+		// now: a share stopped during an outage has ended all the same.
+		if !p.Configured {
+			return errors.New("schema: voice presence cannot carry share_ended when not configured")
+		}
+		if err := p.ShareEnded.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// VoiceShareEndReason is why a screen share ended: the reason conchd records
+// on voice_share_stopped. The vocabulary is closed and case-sensitive; a value
+// outside it fails validation, so a new reason is a new version of the
+// presence document, as a new audience kind is.
+type VoiceShareEndReason string
+
+// Voice share end reasons (docs/design/voice-control-plane.md §12).
+const (
+	// VoiceShareEndSelf: the sharer stopped it.
+	VoiceShareEndSelf VoiceShareEndReason = "self"
+	// VoiceShareEndOperator: an operator stopped it. Which one is not said.
+	VoiceShareEndOperator VoiceShareEndReason = "operator"
+	// VoiceShareEndLeft: the sharer was no longer in the room.
+	VoiceShareEndLeft VoiceShareEndReason = "left"
+	// VoiceShareEndAccessLost: the sharer lost their place in the channel or
+	// their voice.
+	VoiceShareEndAccessLost VoiceShareEndReason = "access_lost"
+	// VoiceShareEndRotated: the room was replaced by a new one, which drops
+	// its share.
+	VoiceShareEndRotated VoiceShareEndReason = "rotated"
+	// VoiceShareEndIdle: nothing was shared for a while: no screen-share
+	// track soon enough after the claim, or none any more.
+	VoiceShareEndIdle VoiceShareEndReason = "idle"
+)
+
+// Valid reports whether r is a recognized end reason.
+func (r VoiceShareEndReason) Valid() bool {
+	switch r {
+	case VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft, VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceShareEnded is why the reader's own screen share ended, carried in
+// their presence alone (VoicePresenceV1.ShareEnded, issue #487). It names no
+// principal: the reader is the sharer, and who stopped it is not told.
+type VoiceShareEnded struct {
+	// Reason is why the share ended.
+	Reason VoiceShareEndReason `json:"reason"`
+	// StartedAt is the started_at of the share that ended, as its claim
+	// answered it (VoiceShareV1.StartedAt): which share this was.
+	StartedAt Timestamp `json:"started_at"`
+	// EndedAt is when conchd ended it (UTC, ms precision).
+	EndedAt Timestamp `json:"ended_at"`
+}
+
+// Validate reports whether the end is structurally well-formed: a known
+// reason, both times, and an end no earlier than the start.
+func (e VoiceShareEnded) Validate() error {
+	if !e.Reason.Valid() {
+		return fmt.Errorf("schema: voice share end reason %q is not one of self, operator, left, access_lost, rotated, idle", e.Reason)
+	}
+	if e.StartedAt.IsZero() {
+		return errors.New("schema: voice share end started_at is required")
+	}
+	if e.EndedAt.IsZero() {
+		return errors.New("schema: voice share end ended_at is required")
+	}
+	if e.EndedAt.Time().Before(e.StartedAt.Time()) {
+		return errors.New("schema: voice share end ended_at is before started_at")
 	}
 	return nil
 }
@@ -383,6 +476,23 @@ func (s VoiceShareV1) Validate() error {
 		return errors.New("schema: voice share started_at is required")
 	}
 	return nil
+}
+
+// VoiceShareClaimParam is the optional query parameter of DELETE
+// /v1/channels/{channel}/voice/share by which a release names the share it
+// means (issue #487): the started_at of the caller's own claim, as
+// VoiceShareV1 gave it. With it, the request ends that share only if it is
+// still the room's share and the caller's; otherwise it is refused 409
+// voice_share_stale and changes nothing, so a release sent late cannot end a
+// newer share, least of all someone else's. Without it the request is what it
+// always was: the sharer's stop, or an operator's stop of whoever shares.
+const VoiceShareClaimParam = "started_at"
+
+// ParseVoiceShareClaim reads the value of VoiceShareClaimParam: an RFC 3339
+// timestamp, normalized as every wire timestamp is (UTC, millisecond
+// precision), so that it compares equal to the started_at it was copied from.
+func ParseVoiceShareClaim(s string) (Timestamp, error) {
+	return parseTimestamp(s)
 }
 
 // VoiceTransmitState is what a transmit report says about the caller's own

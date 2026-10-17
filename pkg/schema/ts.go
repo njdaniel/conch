@@ -94,6 +94,8 @@ var TSTypes = []TSType{
 	{Value: VoiceSessionResponseV1{}, Family: "voice-session-response-v1"},
 	{Value: VoiceParticipant{}},
 	{Value: VoicePresenceRoom{}},
+	// Why the reader's own share ended (issue #487), in their presence alone.
+	{Value: VoiceShareEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Screen share (issue #443): the claim the page is given when the room's

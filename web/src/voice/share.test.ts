@@ -3,6 +3,7 @@
 // page says about sound for each browser. No SDK, no network, no device.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
+import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { settle } from './fakes';
 import { browserFeatures, endedNote, ownPageNote, ScreenShare, sharedNote, soundNote, type Captured, type ShareFeatures, type ShareRoom, type ShareState } from './share';
 
@@ -29,6 +30,8 @@ const unavailable: ShareClaimResult = { ok: false, failure: 'invalid', status: 5
 
 function setup(claims: ShareClaimResult[] = []) {
   const calls: string[] = [];
+  // The claim each release named, in order (issue #487).
+  const released: string[] = [];
   const states: ShareState[] = [];
   const room = {
     pick: null as Deferred<Captured> | null,
@@ -57,8 +60,9 @@ function setup(claims: ShareClaimResult[] = []) {
         calls.push(`claim ${channel}`);
         return Promise.resolve(claims.shift() ?? granted);
       },
-      release: (channel) => {
+      release: (channel, startedAt) => {
         calls.push(`release ${channel}`);
+        released.push(startedAt);
         return Promise.resolve();
       },
     },
@@ -66,7 +70,7 @@ function setup(claims: ShareClaimResult[] = []) {
       states.push(state);
     },
   );
-  return { share, stub, room, calls, states };
+  return { share, stub, room, calls, released, states };
 }
 
 async function sharing(t = setup()) {
@@ -320,6 +324,31 @@ describe('stopping a share', () => {
     });
   });
 
+  // Issue #487: every release names the claim it means, so conchd refuses one
+  // that comes after that claim ended, whatever this page believed.
+  describe('names the claim it releases', () => {
+    const later: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:20.000Z', audio: true } };
+
+    it('a stop names the claim held', async () => {
+      const t = await sharing();
+      await t.share.stop('self');
+      expect(t.released).toEqual(['2026-10-16T00:00:00.000Z']);
+    });
+
+    it('a claim that lapsed in the picker and was made anew is released by its new time', async () => {
+      const t = await sharing(setup([granted, later]));
+      await t.share.stop('self');
+      expect(t.released).toEqual(['2026-10-16T00:00:20.000Z']);
+    });
+
+    it('a picker closed without choosing names the first claim', async () => {
+      const t = setup();
+      t.room.pickFails = true;
+      await t.share.start('general', t.stub, 'detail');
+      expect(t.released).toEqual(['2026-10-16T00:00:00.000Z']);
+    });
+  });
+
   it('a stop when nothing is shared does nothing', async () => {
     const t = setup();
     await t.share.stop('self');
@@ -327,6 +356,101 @@ describe('stopping a share', () => {
     t.share.presence('none');
     expect(t.calls).toEqual([]);
     expect(t.share.current).toEqual({ kind: 'idle', ended: null });
+  });
+});
+
+// Issue #487: the sharer's own presence says why the server ended the share,
+// for the share of the last claim (by its started_at).
+describe('why the server ended it', () => {
+  const ended = (reason: VoiceShareEndReason, startedAt = '2026-10-16T00:00:00.000Z'): VoiceShareEnded => ({
+    reason,
+    started_at: startedAt,
+    ended_at: '2026-10-16T00:01:00.000Z',
+  });
+
+  it('presence that ends the share says why, for each reason', async () => {
+    for (const [reason, end] of [
+      ['operator', 'operator'],
+      ['access_lost', 'access_lost'],
+      ['rotated', 'rotated'],
+      ['idle', 'idle'],
+      ['left', 'left'],
+      ['self', 'self'],
+    ] as const) {
+      const t = await sharing();
+      t.share.presence('me');
+      t.share.presence('none', ended(reason));
+      await settle();
+      expect(t.share.current, reason).toEqual({ kind: 'idle', ended: end });
+      expect(t.calls, reason).toEqual(['stop screen']);
+    }
+  });
+
+  it('a reason that comes after the room withdrew the share is said then', async () => {
+    const t = await sharing();
+    t.share.ended('server');
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'server' });
+    t.share.presence('none', ended('operator'));
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'operator' });
+  });
+
+  it('a reason that came first is used when the room withdraws the share', async () => {
+    const t = await sharing();
+    // The frame and the withdrawal race; here the frame wins but still shows
+    // the share (an older picture), so only the withdrawal ends it.
+    t.share.presence('me', ended('idle'));
+    expect(t.share.current.kind).toBe('sharing');
+    t.share.ended('server');
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'idle' });
+  });
+
+  it('a reason about another share is not this one\'s', async () => {
+    const t = await sharing();
+    t.share.presence('me');
+    t.share.presence('none', ended('operator', '2026-10-15T23:00:00.000Z'));
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'server' });
+  });
+
+  it('the same moment written another way is the same share', async () => {
+    const t = await sharing();
+    t.share.presence('me');
+    t.share.presence('none', ended('operator', '2026-10-16T02:00:00.000+02:00'));
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'operator' });
+  });
+
+  it('the reason a last share ended does not colour the next one', async () => {
+    const later: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:02:00.000Z', audio: true } };
+    const t = await sharing(setup([granted, granted, later, later]));
+    t.share.presence('me');
+    t.share.presence('none', ended('operator'));
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'operator' });
+    await t.share.start('general', t.stub, 'detail');
+    // The document still carries the old reason while the new share runs.
+    t.share.presence('me', ended('operator'));
+    t.share.presence('none', ended('operator'));
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'server' });
+  });
+
+  it('a share this page stopped itself keeps its own words', async () => {
+    const t = await sharing();
+    await t.share.stop('left');
+    t.share.presence('none', ended('self'));
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'left' });
+  });
+
+  it('says each reason in its own words, and never names who stopped it', () => {
+    expect(endedNote('operator', null)).toBe('An operator stopped your share.');
+    expect(endedNote('left', null)).toBe('You left voice, so your share ended.');
+    expect(endedNote('access_lost', null)).toBe('Your share ended: you no longer have voice in this channel.');
+    expect(endedNote('rotated', null)).toBe('Your share ended because the voice room was renewed. Share again once you are back in voice.');
+    expect(endedNote('idle', null)).toBe('Your share ended because nothing was shared for a while.');
+    expect(endedNote('self', null)).toBe('You stopped sharing.');
   });
 });
 
