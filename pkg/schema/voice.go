@@ -19,7 +19,9 @@ import (
 //
 // One shape travels the other way: the transmit report (issue #179), which a
 // client sends conchd when a press starts and stops. It was added later, also
-// as a new type, and is at the end of this file.
+// as a new type, and is near the end of this file. The screen share (issue
+// #443) added the last: the claim a client is given when it may share, and two
+// optional fields of a participant in presence.
 //
 // Room names and tokens are opaque strings. The schema checks that they are
 // present, never what they contain: a token is a credential conchd signed and
@@ -61,6 +63,11 @@ const (
 	// (HTTP 403, issue #437). A non-member gets the unknown-channel 404
 	// instead, so this answer reveals nothing to someone outside.
 	ErrorCodeVoiceNotAllowed = "voice_not_allowed"
+	// ErrorCodeVoiceShareBusy: another principal holds the room's screen
+	// share, and a room has one share at a time (HTTP 409, issue #443). The
+	// answer names nobody: who is sharing is in presence, for those who may
+	// read it.
+	ErrorCodeVoiceShareBusy = "voice_share_busy"
 )
 
 // VoiceRoomGrant is one room a voice session may join: the LiveKit room name,
@@ -198,18 +205,35 @@ type VoiceParticipant struct {
 	Transmitting bool `json:"transmitting"`
 	// JoinedAt is when the participant connected (UTC, ms precision).
 	JoinedAt Timestamp `json:"joined_at"`
+	// Sharing is whether the participant holds the room's screen share
+	// (issue #443): conchd granted it and it has not ended. It is what conchd
+	// decided, not what LiveKit last showed, so it is true from the moment
+	// the claim is answered, before any track is published. Omitted when
+	// false, so a document with nobody sharing is what it was before.
+	Sharing bool `json:"sharing,omitempty"`
+	// SharingAudio is whether the share carries sound: the participant holds
+	// the share and a screen-share audio track was published on the last
+	// pass. Omitted when false.
+	SharingAudio bool `json:"sharing_audio,omitempty"`
 }
 
 // Validate reports whether the participant is structurally well-formed. A
-// participant who cannot publish cannot be transmitting: if presence ever
-// said so, either the grant or the observation is wrong, and a reader must
-// not be left to guess which.
+// participant who cannot publish cannot be transmitting or sharing: if
+// presence ever said so, either the grant or the observation is wrong, and a
+// reader must not be left to guess which. Sound of a share needs a share, so
+// sharing_audio needs sharing.
 func (p VoiceParticipant) Validate() error {
 	if p.PrincipalID <= 0 {
 		return fmt.Errorf("schema: voice participant principal_id must be positive, got %d", p.PrincipalID)
 	}
 	if p.Transmitting && !p.CanPublish {
 		return fmt.Errorf("schema: voice participant %d cannot be transmitting without can_publish", p.PrincipalID)
+	}
+	if p.Sharing && !p.CanPublish {
+		return fmt.Errorf("schema: voice participant %d cannot be sharing without can_publish", p.PrincipalID)
+	}
+	if p.SharingAudio && !p.Sharing {
+		return fmt.Errorf("schema: voice participant %d cannot have sharing_audio without sharing", p.PrincipalID)
 	}
 	if p.JoinedAt.IsZero() {
 		return errors.New("schema: voice participant joined_at is required")
@@ -233,10 +257,11 @@ type VoicePresenceRoom struct {
 }
 
 // Validate reports whether the room is structurally well-formed: a present
-// audience satisfies Audience.Validate, every participant is well-formed, and
-// no principal is listed twice. One principal holds one connection per room
-// (a second device displaces the first), so a duplicate is a conchd bug, not
-// a state. Order is not checked.
+// audience satisfies Audience.Validate, every participant is well-formed, no
+// principal is listed twice, and at most one participant is sharing. One
+// principal holds one connection per room (a second device displaces the
+// first), and a room has one screen share at a time, so either duplicate is a
+// conchd bug, not a state. Order is not checked.
 func (r VoicePresenceRoom) Validate() error {
 	if r.Audience != nil {
 		if err := r.Audience.Validate(); err != nil {
@@ -244,6 +269,7 @@ func (r VoicePresenceRoom) Validate() error {
 		}
 	}
 	seen := make(map[int64]struct{}, len(r.Participants))
+	sharer := int64(0)
 	for _, p := range r.Participants {
 		if err := p.Validate(); err != nil {
 			return err
@@ -252,6 +278,12 @@ func (r VoicePresenceRoom) Validate() error {
 			return fmt.Errorf("schema: voice room lists principal %d more than once", p.PrincipalID)
 		}
 		seen[p.PrincipalID] = struct{}{}
+		if p.Sharing {
+			if sharer != 0 {
+				return fmt.Errorf("schema: voice room lists principals %d and %d as sharing; a room has one share at a time", sharer, p.PrincipalID)
+			}
+			sharer = p.PrincipalID
+		}
 	}
 	return nil
 }
@@ -315,6 +347,40 @@ func (p VoicePresenceV1) Validate() error {
 			return errors.New("schema: voice presence lists more than one room for the same audience")
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+// VoiceShareV1 is the body of a successful POST
+// /v1/channels/{channel}/voice/share (issue #443; design note
+// docs/design/voice-control-plane.md §12): the room's screen share is now the
+// caller's, and LiveKit lets the caller's connection publish a screen and its
+// sound. Like the session response it is a REST body with no schema-name
+// field, versioned by the V1 type suffix.
+//
+// It carries no room name and no token: the share is granted to the
+// connection the caller already has, so nothing new is needed to publish.
+type VoiceShareV1 struct {
+	// PrincipalID is the principal who holds the share: the caller.
+	PrincipalID int64 `json:"principal_id"`
+	// StartedAt is when conchd granted the share (UTC, ms precision). Asking
+	// again while holding it answers with the same time.
+	StartedAt Timestamp `json:"started_at"`
+	// Audio is whether the share may carry sound: whether LiveKit lets the
+	// connection publish a screen-share audio track as well as the screen.
+	// Always written out, so a reader never has to know that an omitted
+	// value means false.
+	Audio bool `json:"audio"`
+}
+
+// Validate reports whether the share is structurally well-formed: a positive
+// principal_id and a started_at.
+func (s VoiceShareV1) Validate() error {
+	if s.PrincipalID <= 0 {
+		return fmt.Errorf("schema: voice share principal_id must be positive, got %d", s.PrincipalID)
+	}
+	if s.StartedAt.IsZero() {
+		return errors.New("schema: voice share started_at is required")
 	}
 	return nil
 }

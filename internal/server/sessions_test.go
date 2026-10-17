@@ -462,8 +462,10 @@ func TestSessionsRequireAuth(t *testing.T) {
 			assertErrorBody(t, f.do(t, c.method, c.path, "", c.body), http.StatusBadRequest, schema.ErrorCodeSessionsRequireAuth)
 		})
 	}
-	if n := len(f.audit(t)); n != 8 {
-		t.Errorf("audit rows = %d, want the 8 the fixture wrote", n)
+	// The bootstrap's three rows (principal_created among them, issue #445),
+	// two credentials, three memberships and a manifest.
+	if n := len(f.audit(t)); n != 9 {
+		t.Errorf("audit rows = %d, want the 9 the fixture wrote", n)
 	}
 }
 

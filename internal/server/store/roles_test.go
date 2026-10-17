@@ -51,7 +51,7 @@ func TestBootstrapOperatorFresh(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(actions, ",") != "operator_bootstrapped,credential_created" {
+	if strings.Join(actions, ",") != "principal_created,operator_bootstrapped,credential_created" {
 		t.Errorf("audit actions = %v", actions)
 	}
 }

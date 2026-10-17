@@ -114,6 +114,8 @@ fn presence() -> VoicePresenceV1 {
                 can_publish: true,
                 transmitting: true,
                 joined_at: stamp(),
+                sharing: false,
+                sharing_audio: false,
             }],
         }],
     }
