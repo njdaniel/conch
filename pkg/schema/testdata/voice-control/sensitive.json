@@ -1,0 +1,21 @@
+{
+  "description": "What must never appear on the control channel. fake_secrets are the stand-ins the helper's tests sign in and join with (the values voice/conch-voice/src/lib.rs's tests use): none may appear in any line either side writes, nor in any fixture here except the one conformance case that shows an unknown field named token being ignored. forbidden_field_fragments may not occur in the name of any field of any message of the protocol.",
+  "fake_secrets": [
+    "conch_FAKE_login_token_do_not_print",
+    "FAKE-join-token-do-not-print",
+    "FAKE-room-name-do-not-print",
+    "eyJGQUtFIjoiaGVhZGVyIn0.eyJGQUtFIjoiY2xhaW1zIn0.RkFLRS1zaWduYXR1cmU"
+  ],
+  "forbidden_field_fragments": [
+    "token",
+    "secret",
+    "password",
+    "room",
+    "livekit",
+    "authorization",
+    "bearer",
+    "cookie",
+    "url",
+    "identity"
+  ]
+}

@@ -1,0 +1,891 @@
+{
+  "description": "Conformance cases for the two readers: direction command is the helper reading the owner's lines (ParseVoiceControlCommand), direction event is the owner reading the helper's (ParseVoiceControlEvent). Each case is one line, given by line (text), line_hex (bytes) or line_file (a file under this directory holding the line with no line feed). want.result is accept (with the kind read, and for a hello whether it offers v1), refuse (with the code, and the id when the line had a usable one) or skip (an event of a kind this version does not know, which a reader ignores).",
+  "cases": [
+    {
+      "name": "set_mute",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "set_mute"
+      }
+    },
+    {
+      "name": "start, stored login",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start, CONCH_TOKEN login",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"http://127.0.0.1:8080\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"env\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start at a server under a path",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://example.org/conch\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a field it does not declare, named token: ignored, and never repeated",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false,\"token\":\"conch_FAKE_login_token_do_not_print\"}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "white space around the object, carriage return included",
+      "direction": "command",
+      "line": " {\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true} \r",
+      "want": {
+        "result": "accept",
+        "kind": "set_mute"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "command",
+      "line_file": "lines/command-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "command",
+      "line_file": "lines/command-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "the largest id",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"get_state\",\"id\":9007199254740991}",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "not JSON: a standalone line command",
+      "direction": "command",
+      "line": "leave",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "an empty line",
+      "direction": "command",
+      "line": "",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a JSON array",
+      "direction": "command",
+      "line": "[{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}]",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "two objects on one line",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a key given twice",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":false,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "not valid UTF-8",
+      "direction": "command",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f636f6e74726f6c2e7631222c226b696e64223a226765745f7374617465222c226964223a372c2278223a22c328227d",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a raw control character inside a string",
+      "direction": "command",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f636f6e74726f6c2e7631222c226b696e64223a226765745f7374617465222c226964223a372c2278223a221b227d",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "something after the object",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true} x",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a later version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no schema",
+      "direction": "command",
+      "line": "{\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "the schema in other case",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.V1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "the standalone --json output is not this protocol",
+      "direction": "command",
+      "line": "{\"event\":\"self\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[]}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no id",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "id 0",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":0,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "id as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":\"7\",\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "id with a fraction",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7.5,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "id past the largest",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":9007199254740992,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "there is no command to press or release the talk key",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"press\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "a toggle is not a command",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"mute\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "a kind in other case",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"Set_Mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "no kind",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_mute without muted",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_mute with muted as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":\"true\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_mute with muted null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "field names are matched in their exact case",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"Muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_deafen without deafened",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_deafen\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "start without deafened",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a host in upper case: not the key a login is stored under",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://Conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a trailing slash",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org/\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with user information in the address",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://someone@conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a query in the address",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org?x=1\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a server that is not http(s)",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"ws://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with an escape sequence in the channel",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\u001b[2Jgeneral\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a blank channel",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"  \",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with an unknown credential source",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"token\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with no principal",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":0,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "hello",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "accept",
+        "kind": "hello",
+        "offers_v1": true
+      }
+    },
+    {
+      "name": "hello offering a later version as well",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\",\"conch.voice_control.v2\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "accept",
+        "kind": "hello",
+        "offers_v1": true
+      }
+    },
+    {
+      "name": "hello offering only a later version: well-formed, and the owner must not start it",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v2\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "accept",
+        "kind": "hello",
+        "offers_v1": false
+      }
+    },
+    {
+      "name": "hello that is not the first event",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":2,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "hello offering nothing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "hello offering a version twice",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\",\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "hello offering something that is not a version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"v1\"],\"helper_version\":\"0.1.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "hello with an escape sequence in helper_version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0 \\u001b[31mred\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "hello with a helper_version that is too long",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack refusing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"stopping\"}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack refusing with no reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack accepting with a reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":true,\"error\":\"invalid\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack with a code that only a protocol_error may carry",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"not_started\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "state with a field it does not declare: ignored",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\",\"detail\":\"a field this version does not declare\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "event",
+      "line_file": "lines/event-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "event",
+      "line_file": "lines/event-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "an event of a kind this version does not know",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"roster\",\"seq\":7,\"participants\":[]}",
+      "want": {
+        "result": "skip",
+        "kind": "roster"
+      }
+    },
+    {
+      "name": "an event of a later version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a line of native output on the event descriptor",
+      "direction": "event",
+      "line": "NVIDIA: could not open the device file",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "an event with no kind",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"seq\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "an event with no seq",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting while muted",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":true,\"muted\":true,\"deafened\":false,\"blocked\":[\"muted\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting without a talk key",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting while capture is off",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"off\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting while reconnecting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"reconnecting\",\"capture\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "capture unavailable without no_microphone",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"unavailable\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "capture on with no_microphone",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"no_microphone\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "capture on while starting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "capture on after stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":9,\"phase\":\"stopped\",\"reason\":\"left\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "not connected but nothing blocks a press",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"reconnecting\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "muted without the muted block",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "the deafened block without deafened",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"deafened\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "block reasons out of order",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":true,\"blocked\":[\"muted\",\"deafened\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a block reason twice",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":false,\"blocked\":[\"muted\",\"muted\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "blocked null",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":null,\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "an unknown block reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"typing\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "an unknown phase",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"paused\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a reason while connected",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"reason\":\"room_deleted\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "stopped with a reason to reconnect",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":9,\"phase\":\"stopped\",\"reason\":\"room_deleted\",\"capture\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "failed with no reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":9,\"phase\":\"failed\",\"capture\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "reason null",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":9,\"phase\":\"failed\",\"capture\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\",\"reason\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "retry_in_ms without a reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":8,\"phase\":\"reconnecting\",\"retry_in_ms\":1000,\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "retry_in_ms past the largest",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":8,\"phase\":\"reconnecting\",\"reason\":\"voice_unavailable\",\"retry_in_ms\":600001,\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ptt lost without ptt_problem",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"key_device_lost\"],\"ptt\":\"lost\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ptt lost without the key_device_lost block",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"lost\",\"ptt_problem\":\"ended\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "the key device not yet tried while connected",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"unknown\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ptt_problem while ready",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\",\"ptt_problem\":\"ended\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "protocol_error",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"protocol_error\",\"seq\":2,\"code\":\"too_long\"}",
+      "want": {
+        "result": "accept",
+        "kind": "protocol_error"
+      }
+    },
+    {
+      "name": "protocol_error with a code an ack carries",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"protocol_error\",\"seq\":2,\"code\":\"unknown_kind\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}

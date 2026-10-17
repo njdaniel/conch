@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "protocol_error",
+  "seq": 2,
+  "code": "not_started"
+}

@@ -1,0 +1,25 @@
+{
+  "description": "The helper offers only a version the owner does not speak. The owner sends nothing and closes standard input; the helper, never started, exits 0 having written nothing more and opened no device.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v2"
+        ],
+        "helper_version": "0.1.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}
