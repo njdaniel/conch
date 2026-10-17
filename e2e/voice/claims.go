@@ -125,3 +125,109 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 	h.jtis[c.Jti] = true
 	return nil
 }
+
+// The screen share (issue #443) is not in any token conchd signs: the join
+// token above stays microphone only. A share is granted by conchd setting the
+// permission of the sharer's connection, and that grant is checked here in
+// the two places it can be seen: the permission LiveKit reports for the
+// connection, and the token LiveKit then sends the connection of its own.
+
+// shareSources is what a connection may publish: the microphone, and while it
+// holds the room's share the screen and its sound.
+func shareSources(share bool, names ...string) []any {
+	out := []any{names[0]}
+	if share {
+		out = append(out, names[1], names[2])
+	}
+	return out
+}
+
+// checkSharePermission checks the permission LiveKit's ListParticipants
+// reports for a participant against exactly the join grant, plus the two
+// screen-share sources while share is true. Every field is compared, so that
+// a grant conchd set wider than that (data, metadata, hidden, an empty source
+// list, which LiveKit reads as every source) is a failure.
+func checkSharePermission(perm map[string]any, share bool) error {
+	want := map[string]any{
+		"can_subscribe":            true,
+		"can_publish":              true,
+		"can_publish_data":         false,
+		"can_publish_sources":      shareSources(share, "MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"),
+		"hidden":                   false,
+		"recorder":                 false,
+		"can_update_metadata":      false,
+		"agent":                    false,
+		"can_subscribe_metrics":    false,
+		"can_manage_agent_session": false,
+	}
+	if !reflect.DeepEqual(perm, want) {
+		return fmt.Errorf("permission is %v, want exactly %v", perm, want)
+	}
+	return nil
+}
+
+// checkLiveKitToken checks a token LiveKit sent a connected participant after
+// conchd changed its permission: signed with the API secret this run chose,
+// for sub, and granting exactly the join grant for the one room plus the two
+// screen-share sources while share is true. LiveKit spells out three more
+// permissions as false once a permission has been set (measured on 1.13.7);
+// they are part of the exact grant. The token is never put in an error.
+func (h *harness) checkLiveKitToken(token string, lk *livekitSettings, sub, room string, share bool) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return errors.New("LiveKit's token is not a three-part JWT")
+	}
+	mac := hmac.New(sha256.New, []byte(lk.secret))
+	mac.Write([]byte(parts[0] + "." + parts[1]))
+	if !hmac.Equal([]byte(base64.RawURLEncoding.EncodeToString(mac.Sum(nil))), []byte(parts[2])) {
+		return errors.New("LiveKit's token is not signed with the configured API secret")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return errors.New("LiveKit's token payload is not base64url")
+	}
+	var c struct {
+		Sub   string         `json:"sub"`
+		Video map[string]any `json:"video"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return errors.New("LiveKit's token payload is not JSON")
+	}
+	if c.Sub != sub {
+		return fmt.Errorf("LiveKit's token is for %q, want %q", c.Sub, sub)
+	}
+	want := map[string]any{
+		"roomJoin":              true,
+		"room":                  room,
+		"canSubscribe":          true,
+		"canPublish":            true,
+		"canPublishData":        false,
+		"canPublishSources":     shareSources(share, "microphone", "screen_share", "screen_share_audio"),
+		"canUpdateOwnMetadata":  false,
+		"canSubscribeMetrics":   false,
+		"canManageAgentSession": false,
+	}
+	if !reflect.DeepEqual(c.Video, want) {
+		var diff []string
+		for k, v := range c.Video {
+			if k == "room" {
+				if v != room {
+					diff = append(diff, "room is not the granted room")
+				}
+				continue
+			}
+			if w, ok := want[k]; !ok {
+				diff = append(diff, fmt.Sprintf("extra grant %s=%v", k, v))
+			} else if !reflect.DeepEqual(w, v) {
+				diff = append(diff, fmt.Sprintf("%s=%v, want %v", k, v, w))
+			}
+		}
+		for k := range want {
+			if _, ok := c.Video[k]; !ok {
+				diff = append(diff, "missing grant "+k)
+			}
+		}
+		return fmt.Errorf("LiveKit's token does not grant exactly the join grant with share=%v: %s", share, strings.Join(diff, "; "))
+	}
+	return nil
+}

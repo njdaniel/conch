@@ -153,6 +153,89 @@ func TestRoomCalls(t *testing.T) {
 			wantBody:  map[string]any{"room": "conch-a", "identity": "p7"},
 			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
 		},
+		{
+			// The answer LiveKit 1.13.7 gave for a sharer (issue #443), cut
+			// to the fields that matter: a screen-share track, its sound,
+			// a microphone, and the permission the claim set.
+			name: "ListParticipants with a screen share, as 1.13.7 answers", method: "ListParticipants",
+			response: `{"participants":[{"sid":"PA_b9hhqMbkD4nb","identity":"p1","state":"ACTIVE","tracks":[
+				{"sid":"TR_AsNBahxDLSoR5e","type":"AUDIO","name":"screen-audio","muted":false,"source":"SCREEN_SHARE_AUDIO","stream":"screen"},
+				{"sid":"TR_AMkWnC56BPQM7j","type":"AUDIO","name":"mic","muted":true,"source":"MICROPHONE","stream":"camera"},
+				{"sid":"TR_VSczCNkHQB7ACE","type":"VIDEO","name":"demo","muted":false,"source":"SCREEN_SHARE","stream":"screen"}],
+				"joined_at":"1792188148","joined_at_ms":"1792188148934",
+				"permission":{"can_subscribe":true,"can_publish":true,"can_publish_data":false,"can_publish_sources":["MICROPHONE","SCREEN_SHARE","SCREEN_SHARE_AUDIO"],"hidden":false,"recorder":false,"can_update_metadata":false,"agent":false,"can_subscribe_metrics":false,"can_manage_agent_session":false},
+				"is_publisher":true,"kind":"STANDARD"}]}`,
+			call:      func(c *Client) (any, error) { return c.ListParticipants(context.Background(), "conch-a") },
+			wantBody:  map[string]any{"room": "conch-a"},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want: []Participant{{
+				Identity: "p1", JoinedAt: time.UnixMilli(1792188148934).UTC(),
+				MicrophonePublished: true, MicrophoneMuted: true,
+				ScreenSharePublished: true, ScreenShareAudioPublished: true, ShareSourcesGranted: true, CanPublish: true,
+			}},
+		},
+		{
+			// What a share's permission can look like: granted by name, by
+			// number, in camel case, or by an empty list (LiveKit reads it as
+			// every source; 1.13.7 lists a token that names no sources so);
+			// not granted when publishing is off, when only the microphone
+			// is named, or when no permission is reported. A share source
+			// counts whatever the track's type.
+			name: "ListParticipants permissions and share sources", method: "ListParticipants",
+			response: `{"participants":[
+				{"identity":"p1","permission":{"can_publish":true,"can_publish_sources":["MICROPHONE"]}},
+				{"identity":"p2","permission":{"can_publish":true,"can_publish_sources":[]}},
+				{"identity":"p3","permission":{"canPublish":true,"canPublishSources":["SCREEN_SHARE_AUDIO"]}},
+				{"identity":"p4","permission":{"can_publish":true,"can_publish_sources":[2,3]}},
+				{"identity":"p5","permission":{"can_publish":false,"can_publish_sources":["SCREEN_SHARE"]}},
+				{"identity":"p6","tracks":[{"type":"AUDIO","source":"SCREEN_SHARE"},{"type":1,"source":4}]},
+				{"identity":"p7","permission":{"can_publish":true}}]}`,
+			call:      func(c *Client) (any, error) { return c.ListParticipants(context.Background(), "conch-a") },
+			wantBody:  map[string]any{"room": "conch-a"},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want: []Participant{
+				{Identity: "p1", CanPublish: true},
+				{Identity: "p2", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p3", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p4", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p5"},
+				{Identity: "p6", ScreenSharePublished: true, ScreenShareAudioPublished: true},
+				{Identity: "p7", ShareSourcesGranted: true, CanPublish: true},
+			},
+		},
+		{
+			// The request conchd sends to grant a share. Every field of the
+			// permission is written out: LiveKit replaces it as a whole.
+			name: "UpdateParticipant granting the share", method: "UpdateParticipant",
+			response: `{"sid":"PA_b9hhqMbkD4nb","identity":"p7","state":"ACTIVE","permission":{"can_publish":true}}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7", Permission{CanPublish: true, ScreenShare: true})
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// And to withdraw it: exactly what the join token granted.
+			name: "UpdateParticipant withdrawing the share", method: "UpdateParticipant",
+			response: `{"identity":"p7"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7", Permission{CanPublish: true})
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"MICROPHONE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,6 +313,10 @@ func TestFailuresAreUnavailable(t *testing.T) {
 		"ListParticipants":  func(c *Client) error { _, err := c.ListParticipants(context.Background(), "r"); return err },
 		"RemoveParticipant": func(c *Client) error { return c.RemoveParticipant(context.Background(), "r", "p1") },
 		"DeleteRoom":        func(c *Client) error { return c.DeleteRoom(context.Background(), "r") },
+		"UpdateParticipant": func(c *Client) error {
+			_, err := c.UpdateParticipant(context.Background(), "r", "p1", Permission{CanPublish: true})
+			return err
+		},
 	}
 	for caseName, url := range failureCases(t) {
 		for opName, op := range ops {
@@ -524,6 +611,61 @@ func TestEvictReportsWhetherSomeoneWasRemoved(t *testing.T) {
 	}
 	if removed, err := testClient(t, present.URL).Evict(ctx, "", "p7"); err == nil || removed {
 		t.Errorf("Evict without a room = %v, %v", removed, err)
+	}
+}
+
+// UpdateParticipant tells "nobody by that identity" (LiveKit's own not_found,
+// as 1.13.7 answers it) from a change made, and believes a 200 only when it
+// names the participant. Everything else is ErrUnavailable and repeats
+// neither the body nor the secret.
+func TestUpdateParticipantAnswers(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		status     int
+		wantFound  bool
+		wantErr    bool
+	}{
+		{"changed", `{"sid":"PA_x","identity":"p7","permission":{}}`, 200, true, false},
+		{"participant not in the room", `{"code":"not_found","msg":"twirp error unknown: participant does not exist"}`, 404, false, false},
+		{"another participant named", `{"identity":"p8"}`, 200, false, true},
+		{"an empty object", `{}`, 200, false, true},
+		{"an HTML page", `<html>ok</html>`, 200, false, true},
+		{"unknown method", `{"code":"bad_route","msg":"no handler for path"}`, 404, false, true},
+		{"empty 404", ``, 404, false, true},
+		{"room admin refused", `{"code":"unauthenticated","msg":"permissions denied"}`, 401, false, true},
+		{"server error", `{"code":"internal","msg":"leaky detail"}`, 500, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := fakeLiveKit(t, tt.status, tt.body)
+			found, err := testClient(t, srv.URL).UpdateParticipant(context.Background(), "conch-a", "p7", Permission{CanPublish: true, ScreenShare: true})
+			if found != tt.wantFound || (err != nil) != tt.wantErr {
+				t.Fatalf("UpdateParticipant = %v, %v; want found %v, error %v", found, err, tt.wantFound, tt.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Errorf("err = %v, want ErrUnavailable", err)
+			}
+			for _, leak := range []string{"leaky", "bad_route", "s3cret-value", "conch-a"} {
+				if strings.Contains(err.Error(), leak) {
+					t.Errorf("error repeats %q: %v", leak, err)
+				}
+			}
+		})
+	}
+	srv, rec := fakeLiveKit(t, 200, `{"identity":"p7"}`)
+	c := testClient(t, srv.URL)
+	for name, call := range map[string]func() (bool, error){
+		"no room":     func() (bool, error) { return c.UpdateParticipant(context.Background(), "", "p7", Permission{}) },
+		"no identity": func() (bool, error) { return c.UpdateParticipant(context.Background(), "r", "", Permission{}) },
+	} {
+		if found, err := call(); found || err == nil || errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s: %v, %v; want a refusal that is not ErrUnavailable", name, found, err)
+		}
+	}
+	if rec.path != "" {
+		t.Errorf("a request was sent to %s", rec.path)
 	}
 }
 

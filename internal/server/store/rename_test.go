@@ -249,9 +249,10 @@ func TestRenamePrincipal(t *testing.T) {
 	if _, err := s.RenamePrincipal(ctx, "system", 999, "nobody", RenameLimits{}, now); !errors.Is(err, ErrPrincipalNotFound) {
 		t.Errorf("unknown principal = %v, want ErrPrincipalNotFound", err)
 	}
-	// A hidden account's name (issue #445) is keyed like any other.
+	// A hidden account's name (issue #445) is keyed like any other. Only a
+	// hide may write it: a rename to it is refused (TestReservedNames).
 	hidden := fmt.Sprintf("hidden-%d", bob.ID)
-	if _, err := s.RenamePrincipal(ctx, "system", bob.ID, hidden, RenameLimits{}, now); err != nil {
+	if _, err := s.HidePrincipal(ctx, "system", bob.ID, HideOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	var key string

@@ -53,6 +53,9 @@ type Principal struct {
 	// DisabledAt is when the principal was disabled (issue #101); nil means
 	// enabled. A disabled principal cannot authenticate.
 	DisabledAt *time.Time
+	// HiddenAt is when the principal was hidden (issue #445); nil means not
+	// hidden. A hidden principal is always disabled.
+	HiddenAt *time.Time
 	// InvitedBy and InviteID are the principal and the invite this account
 	// came through (issue #436); zero for an account no invite made.
 	InvitedBy int64
@@ -104,11 +107,29 @@ type AuditEvent struct {
 	CreatedAt time.Time
 }
 
-// CreatePrincipal registers a human or agent identity. Names are unique by
-// their key (issue #441): a name that clashes with an existing one, by case
-// or by look-alike characters, is ErrDuplicate; a name with nothing a reader
-// can see is ErrNameInvalid.
+// CreatePrincipal is CreatePrincipalAs without the audit row. It is for
+// seeding a store in tests; no route creates a principal through it
+// (TestCreatesAreAudited in the server package checks).
 func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name string) (Principal, error) {
+	return s.createPrincipal(ctx, "", kind, name)
+}
+
+// CreatePrincipalAs registers a human or agent identity and writes
+// principal_created (detail kind=<kind>), attributed to actor, in the
+// creating transaction (issue #445). Names are unique by their key (issue
+// #441): a name that clashes with an existing one, by case or by look-alike
+// characters, or that is reserved for hidden principals, is ErrDuplicate; a
+// name with nothing a reader can see is ErrNameInvalid.
+func (s *Store) CreatePrincipalAs(ctx context.Context, actor string, kind PrincipalKind, name string) (Principal, error) {
+	if actor == "" {
+		return Principal{}, errors.New("store: create principal: an actor is required")
+	}
+	return s.createPrincipal(ctx, actor, kind, name)
+}
+
+// createPrincipal is CreatePrincipalAs, with no audit row when actor is
+// empty.
+func (s *Store) createPrincipal(ctx context.Context, actor string, kind PrincipalKind, name string) (Principal, error) {
 	if kind != PrincipalHuman && kind != PrincipalAgent {
 		return Principal{}, fmt.Errorf("store: invalid principal kind %q", kind)
 	}
@@ -136,7 +157,10 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 		if id, err = res.LastInsertId(); err != nil {
 			return fmt.Errorf("store: create principal %q: %w", name, err)
 		}
-		return nil
+		if actor == "" {
+			return nil
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditPrincipalCreated, principalActor(id), "kind="+string(kind), now)
 	})
 	if err != nil {
 		return Principal{}, err
@@ -144,7 +168,10 @@ func (s *Store) CreatePrincipal(ctx context.Context, kind PrincipalKind, name st
 	return Principal{ID: id, Kind: kind, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: true}, nil
 }
 
-// CreateChannel creates a named channel. Names are unique.
+// CreateChannel creates a named channel with no members and no audit row. It
+// is for seeding a store in tests; the route creates channels through
+// CreateChannelAs (TestCreatesAreAudited in the server package checks).
+// Names are unique.
 func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error) {
 	// SQLite stores timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a create response exactly
@@ -241,11 +268,11 @@ func (s *Store) PrincipalByID(ctx context.Context, id int64) (Principal, error) 
 func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found bool, err error) {
 	var kind, role string
 	var createdAt int64
-	var disabledAt, invitedBy, inviteID sql.NullInt64
+	var disabledAt, hiddenAt, invitedBy, inviteID sql.NullInt64
 	err = q.QueryRowContext(ctx,
-		`SELECT id, kind, name, role, created_at, disabled_at, invited_by, invite_id, may_invite, voice_allowed
+		`SELECT id, kind, name, role, created_at, disabled_at, hidden_at, invited_by, invite_id, may_invite, voice_allowed
 		 FROM principals WHERE id = ?`, id,
-	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
+	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, false, nil
 	}
@@ -260,6 +287,10 @@ func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found
 	if disabledAt.Valid {
 		t := time.UnixMilli(disabledAt.Int64)
 		p.DisabledAt = &t
+	}
+	if hiddenAt.Valid {
+		t := time.UnixMilli(hiddenAt.Int64)
+		p.HiddenAt = &t
 	}
 	return p, true, nil
 }

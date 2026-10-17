@@ -60,6 +60,11 @@ func (s *Server) routeTable() []route {
 		// Transmit reports (issue #135): a client reports each press and
 		// release. Human members who hold a session; checked in the handler.
 		rt("POST /v1/channels/{channel}/voice/transmit", accessAuthenticated, hf(s.handleVoiceTransmit)),
+		// Screen share (issue #443): a member who holds a session claims the
+		// room's one share; the sharer or an operator (member or not) stops
+		// it. Checked in the handlers; see voice_share.go.
+		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
+		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a
@@ -109,6 +114,14 @@ func (s *Server) routeTable() []route {
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
+		// Deleting an account is disabling and hiding it (issue #445): one
+		// principal, or every principal from an invite or with a name
+		// prefix. The list shows them all, hidden ones on request. The bulk
+		// route has one segment fewer than the per-id ones, so the two never
+		// meet in the mux; POST /v0/principals is another version.
+		rt("POST /v1/principals/{id}/hide", accessOperator, hf(s.handleHidePrincipal)),
+		rt("POST /v1/principals/hide", accessOperator, hf(s.handleHidePrincipals)),
+		rt("GET /v1/principals", accessOperator, hf(s.handleListPrincipals)),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
