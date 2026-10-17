@@ -1,0 +1,36 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│run #2 · running                                                                                                      │
+│task: fix the flaky ingest test                                                                                       │
+│link: https://ci.example.com/jobs/4128                                                                                │
+│started: 15:42:27 (7m ago)                                                                                            │
+│duration: 7m32s so far                                                                                                │
+│activity (2)                                                                                                          │
+│  +0.0s            command_started go test ./internal/ingest/... -count=20                                            │
+│› +0.0s            ▸ command_finished go test ./internal/ingest/... → 2 of 20 failed                                  │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│m message · x cancel · pause (unsupported) · resume (unsupported)                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+alice | run #2  ↑/↓ timeline • enter data • g message • esc back

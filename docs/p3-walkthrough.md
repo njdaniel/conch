@@ -101,11 +101,12 @@ and P3-10 use.
 What should appear. In each client, signed in with its own credential, the
 channels you may use: `general` and `nets-demo` for `guest-test` and
 `browser-test`, plus `test-private` for `nick-test`. In `general`, the members
-line (TUI) or members panel (browser) names the people who are connected and the
+line (TUI; the people pane on a terminal of 120x30 or more) or members panel
+(browser) names the people who are connected and the
 agents with a status each: `worker-test` and `observer-test` online, not offline.
 These come from the server's real sessions: the ids and names are the ones
 `conch whoami` prints, not placeholders. Press `tab` in a TUI to cycle channels,
-inbox and agents; in the agents view each agent appears once, and `enter`
+inbox and agents (`F1` lists every key); in the agents view each agent appears once, and `enter`
 expands it to its session (client, runtime `fixture`, model `fixture`).
 
 ## P3-02 Send from each human client and from an agent
@@ -144,7 +145,7 @@ one in `tui-a`, are still there after switching channels and after roster update
    set -a; . <root>/tui-a2.env; set +a; <root>/bin/conch
    ```
 
-2. Look at the members line in `tui-b` or the browser.
+2. Look at the members line (or people pane) in `tui-b` or the browser.
 3. Quit `tui-a2` (`ctrl-c`). Start it again, then, from the command window, list
    `nick-test`'s credentials and revoke the one named `tui-a2`:
 
@@ -247,7 +248,7 @@ A completed run shows its outcome and offers no keys; the failed one shows
    pkill -STOP -f <root>/bin/conch-adapter
    ```
 
-2. Watch the members line or panel. Wait for the server's threshold (the agents
+2. Watch the members line, pane or panel. Wait for the server's threshold (the agents
    send a heartbeat every 10 seconds; the server marks a session stale after a few
    missed ones and offline after more).
 3. Let them go on:
