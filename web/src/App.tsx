@@ -337,7 +337,16 @@ export function App({ origin }: { readonly origin: string }) {
     dispatchAuth({ type: 'submit' });
     void api.signIn(credential).then((result) => {
       if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
+      else if (result.failure === 'stored') dispatchAuth({ type: 'recheck' });
       else dispatchAuth({ type: 'failed', failure: result.failure });
+    });
+  }, []);
+
+  // Forgetting a stored sign-in that could not be checked (issue #469): it is
+  // revoked if the server answers, then dropped, and signing in is open again.
+  const forgetStored = useCallback(() => {
+    void api.forgetStored().then((told) => {
+      dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
     });
   }, []);
 
@@ -376,6 +385,7 @@ export function App({ origin }: { readonly origin: string }) {
           notice={auth.phase === 'signedOut' ? auth.notice : null}
           checking={auth.phase === 'checking'}
           onSubmit={submit}
+          onForget={forgetStored}
         />
       );
     case 'operatorWarning':
