@@ -1,0 +1,24 @@
+CONCH 127.0.0.1…  [Chat] Inbox Agents Runs alice · ● text live · help: F1, /help
+╭─ ▸ CHANNELS ───╮╭─ # general ───────────────────────────────────────────────╮
+│› general       ││15:42 alice: Morning all. The release branch is cut;       │
+│  ops 2         ││      ┊ please keep main green today.                      │
+│  movie-night   ││15:42 bob: On it. I will look at the flaky test in the     │
+│  design-review ││      ┊ ingest suite first.                                │
+│                ││15:42 carol-with-a-rather-lon…: A long message, to see     │
+│                ││      ┊ wrapping: the parser rewrite touches the           │
+│                ││      ┊ tokenizer, the error recovery and the              │
+│                ││      ┊ pretty-printer, so reviews should look at each of  │
+│                ││      ┊ those separately rather than as one large diff,    │
+│                ││      ┊ and the benchmarks need a fresh baseline before    │
+│                ││      ┊ anyone compares numbers.                           │
+│                ││15:42 rex [agent]: Build 4127 passed:                      │
+│                ││      ┊ https://ci.example.com/jobs/4127/artifacts/very/lon│
+│                ││      ┊ g/path/that/does/not/break/at/spaces/report.html   │
+│                ││15:42 bob: Notes from the call:                            │
+│                ││      ┊ 1. ship the parser behind a flag                   │
+│                ││      ┊ 2. keep the old path for a week                    │
+╰────────────────╯╰───────────────────────────────── ↓ 3 newer · end: latest ─╯
+general > ▌
+online: bob alice(3) · agents: rex ●
+you: in #general voice from another client · voice: 2 alice  ●3 bob
+alice | connected  ↑/↓ channels • end latest • enter send • tab inbox • esc quit

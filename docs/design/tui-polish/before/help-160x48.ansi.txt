@@ -1,0 +1,48 @@
+␛[90m╭────────────────╮╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮␛[39m
+␛[90m│␛[1m␛[36m› ␛[0mgeneral       ␛[90m││␛[39m15:42 alice: Morning all. The release branch is cut; please keep main green today.                                                         ␛[90m│␛[39m
+␛[90m│␛[39m  ops ␛[1m␛[33m2␛[0m         ␛[90m││␛[39m15:42 bob: On it. I will look at the flaky test in the ingest suite first.                                                                 ␛[90m│␛[39m
+␛[90m│␛[39m  movie-night   ␛[90m││␛[39m15:42 carol-with-a-rather-lon…: A long message, to see wrapping: the parser rewrite touches the tokenizer, the error recovery and the pret…␛[90m│␛[39m
+␛[90m│␛[39m  design-review ␛[90m││␛[39m15:42 rex ␛[1m␛[33m[agent]␛[0m: Build 4127 passed: https://ci.example.com/jobs/4127/artifacts/very/long/path/that/does/not/break/at/spaces/report.html  ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: Notes from the call: ↵ 1. ship the parser behind a flag ↵ 2. keep the old path for a week ↵ 3. alice owns the rollout           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 dave: 日本語の名前とテキストも表示できますか？幅の広い文字はセル二つ分です。                                                         ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: \[31mred?[0m evil and a bell  and [net:alpha] a fake badge                                                                      ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 alice: \[whisper:2,3] not a real whisper either                                                                                      ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                                                                                                                           ␛[90m│␛[39m
+␛[90m╰────────────────╯╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯␛[39m
+␛[90monline: bob alice(2) · agents: rex ●␛[39m
+␛[90mvoice: 2 alice  ●3␛[39m
+general >
+␛[90malice | connected  ↑/↓ channels • enter send • tab inbox • esc quit␛[39m

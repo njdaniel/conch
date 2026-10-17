@@ -1,0 +1,48 @@
+CONCH 127.0.0.1:29199  [Chat] Inbox Agents Runs                                                          identity unknown · ○ text unavailable · help: F1, /help
+╭─ ▸ CHANNELS ─────────╮╭─ MESSAGES ────────────────────────────────────────────────────────────────────────────────────────────╮╭─ PEOPLE ───────────────────╮
+│                      ││Cannot read the channel list from http://127.0.0.1:29199.                                              ││people: unavailable         │
+│                      ││                                                                                                       ││                            │
+│                      ││cli: list channels: Get "http://127.0.0.1:29199/v1/channels": dial tcp 127.0.0.1:29199: connect: connec││                            │
+│                      ││tion refused                                                                                           ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││To use another server, quit (esc) and start conch with CONCH_SERVER=<url>.                             ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+│                      ││                                                                                                       ││                            │
+╰──────────────────────╯╰───────────────────────────────────────────────────────────────────────────────────────────────────────╯╰────────────────────────────╯
+(no channel) > ▌
+whoami: cli: whoami: Get "http://127.0.0.1:29199/v1/whoami": dial tcp 127.0.0.1:29199: connect: c…  ↑/↓ channels • ←/→ focus • enter send • tab inbox • esc quit

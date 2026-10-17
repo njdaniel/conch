@@ -1,0 +1,18 @@
+␛[36m╭─␛[1m␛[39m ▸ RUN #2 ␛[0m␛[36m───────────────────────────────────────────────╮
+│␛[39mrun #2 · running                                          ␛[36m│
+│␛[39mtask: fix the flaky ingest test                           ␛[36m│
+│␛[39mlink: https://ci.example.com/jobs/4128                    ␛[36m│
+│␛[39mstarted: 15:42:27 (16m ago)                               ␛[36m│
+│␛[39mduration: 16m37s so far                                   ␛[36m│
+│␛[90mactivity (2)␛[39m                                              ␛[36m│
+│␛[39m  +0.0s            command_started go test ./internal/ing…␛[36m│
+│␛[1m› ␛[0m+0.0s            ▸ command_finished go test ./internal/…␛[36m│
+│␛[39m                                                          ␛[36m│
+│␛[39m                                                          ␛[36m│
+│␛[39m                                                          ␛[36m│
+│␛[39m                                                          ␛[36m│
+│␛[39m                                                          ␛[36m│
+│␛[90mm message · x cancel · pause (unsupported) · resume (unsu…␛[36m│
+╰──────────────────────────────────────────────────────────╯
+␛[39m
+␛[90malice | run #2  ↑/↓ timeline • enter data • esc back␛[39m

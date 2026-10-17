@@ -1,0 +1,18 @@
+╭─ ▸ CHANNELS ───╮╭─ MESSAGES ────────────────────────────╮
+│                ││Cannot read the channel list from http:│
+│                ││//127.0.0.1:29199.                     │
+│                ││                                       │
+│                ││cli: list channels: Get "http://127.0.0│
+│                ││.1:29199/v1/channels": dial tcp 127.0.0│
+│                ││.1:29199: connect: connection refused  │
+│                ││                                       │
+│                ││To use another server, quit (esc) and s│
+│                ││tart conch with CONCH_SERVER=<url>.    │
+│                ││                                       │
+│                ││                                       │
+│                ││                                       │
+│                ││                                       │
+╰────────────────╯╰───────────────────────────────────────╯
+(no channel) > ▌
+members: unavailable
+cannot read the channel …  enter send • tab inbox • esc quit

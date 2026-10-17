@@ -206,9 +206,11 @@ type Model struct {
 	// the selected approval changes.
 	bodyOffset int
 	// scroll is how many lines the message pane is scrolled up from the newest
-	// message of the selected channel; 0 follows the newest. It is counted from
+	// line of the selected channel; 0 follows the newest. It is counted from
 	// the bottom so that a message arriving while it is above 0 can move it
-	// along (addMessages) and the lines on screen stay where they are.
+	// along (addMessages) and the lines on screen stay where they are. A
+	// message can take several lines; a resize, which wraps them again, keeps
+	// the same message at the bottom (scrollAnchor).
 	scroll int
 	// loadingChannels is true while the channel list is being fetched from the
 	// server; the model has no channels until channelsLoaded arrives.
@@ -304,6 +306,13 @@ type Model struct {
 	rs readState
 	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
 	clockTicking bool
+	// focus is the pane of the chat view the arrow keys move. Like the draft
+	// and the selection it is not about the terminal, so a resize keeps it.
+	focus paneFocus
+	// help is true while the help overlay is open (help.go), and helpTop is
+	// its first line on screen when it is longer than the pane.
+	help    bool
+	helpTop int
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -396,10 +405,28 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// A history read scrolled up keeps the same message at the bottom of
+		// the pane, however its lines wrap at the new width.
+		message, below, anchored := m.scrollAnchor()
 		m.width, m.height = msg.Width, msg.Height
+		if anchored {
+			m = m.scrollTo(message, below)
+		}
 	case tea.MouseMsg:
 		return m.mouse(msg)
 	case tea.KeyMsg:
+		if m.help {
+			next, handled := m.helpKey(msg.String())
+			if handled {
+				return next, nil
+			}
+			// ctrl+c: the help is closed, and the key goes on to the view.
+			m = next
+		}
+		if m.opensHelp(msg.String()) {
+			m.help, m.helpTop = true, 0
+			return m, nil
+		}
 		if m.mode == modeRun {
 			return m.runKey(msg)
 		}
@@ -439,9 +466,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = modeChannels
 				return m, m.markReading()
 			}
+		case "shift+tab":
+			// The views in the other direction. A decision in progress is
+			// left with esc, as tab does not leave it either.
+			switch m.mode {
+			case modeChannels:
+				m.mode = modeAgents
+				return m, nil
+			case modeAgents:
+				m.mode = modeInbox
+				m.setStatus(modeInbox, "loading approvals…")
+				return m, m.loadApprovals()
+			case modeRuns:
+				m.mode = modeAgents
+				return m, nil
+			case modeInbox:
+				m.mode = modeChannels
+				return m, m.markReading()
+			}
+		case "left", "right":
+			// The chat view's two panes; anywhere else the arrows have no
+			// sideways meaning.
+			if m.mode == modeChannels {
+				m.focus = focusChannels
+				if msg.String() == "right" {
+					m.focus = focusMessages
+				}
+			}
+			return m, nil
+		case "home", "end":
+			if m.mode == modeChannels {
+				if msg.String() == "end" {
+					return m.scrolled(-m.scroll)
+				}
+				channel := m.current()
+				return m.scrolled(m.historyHeight(channel, m.messages[channel]))
+			}
 		case "up":
 			switch m.mode {
 			case modeChannels:
+				if m.focus == focusMessages {
+					return m.scrolled(1)
+				}
 				return m.selectChannel(-1)
 			case modeInbox:
 				m.selApproval = max(0, m.selApproval-1)
@@ -456,6 +522,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down":
 			switch m.mode {
 			case modeChannels:
+				if m.focus == focusMessages {
+					return m.scrolled(-1)
+				}
 				return m.selectChannel(1)
 			case modeInbox:
 				if len(m.approvals) > 0 {
@@ -1063,378 +1132,25 @@ func min(a, b int) int {
 	return b
 }
 
-var (
-	borderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
-	activeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	badgeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-	statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-)
-
-// View renders a compact two-pane layout that fits an 80x24 terminal.
-func (m Model) View() string {
-	if w, h := m.size(); w < minWidth || h < minHeight {
-		return tooSmallScreen(w, h)
-	}
-	l := m.layout()
-	width, height := l.width, l.height
-	leftWidth, rightWidth, contentHeight := l.leftW, l.rightW, l.contentH
-	voice := ""
-	if l.members != "" {
-		voice = statusStyle.Width(width).Render(l.members) + "\n"
-	}
-	if l.voice != "" {
-		voice += statusStyle.Width(width).Render(l.voice) + "\n"
-	}
-
-	var panes string
-	switch m.mode {
-	case modeInbox, modeDecision:
-		if width < minApprovalWidth || height < minApprovalHeight {
-			return tooSmall(width, height)
-		}
-		inbox := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(m.inboxLines(leftWidth-2, contentHeight), "\n"))
-		var detailsLines []string
-		if d, ok := m.selectedDetails(); ok {
-			detailsLines = d.lines
-		}
-		details := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(detailsLines, "\n"))
-		panes = lipgloss.JoinHorizontal(lipgloss.Top, inbox, details)
-	case modeAgents:
-		panes = m.agentsPanes(l)
-	case modeRuns:
-		panes = m.runsPanes(l)
-	case modeRun:
-		panes = borderStyle.Width(width - 2).Height(contentHeight).Render(strings.Join(m.runLines(width-2, contentHeight), "\n"))
-	default:
-		channels := borderStyle.Width(leftWidth - 2).Height(contentHeight).Render(strings.Join(m.channelLines(leftWidth), "\n"))
-		messageLines := make([]string, 0, len(m.messages[m.current()]))
-		for _, message := range m.messages[m.current()] {
-			messageLines = append(messageLines, m.messageLine(m.current(), message, rightWidth))
-		}
-		if len(messageLines) == 0 && m.channelsErr != nil {
-			messageLines = m.channelsErrLines(rightWidth - 2)
-		}
-		if len(messageLines) == 0 {
-			messageLines = append(messageLines, statusStyle.Render("No messages"))
-		}
-		visible := l.messageRows()
-		if len(messageLines) > visible {
-			end := len(messageLines) - min(m.scroll, len(messageLines)-visible)
-			messageLines = messageLines[end-visible : end]
-		}
-		messages := borderStyle.Width(rightWidth - 2).Height(contentHeight).Render(strings.Join(messageLines, "\n"))
-		panes = lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
-	}
-
-	var inputStr string
-	if m.mode == modeDecision || m.mode == modeChannels {
-		prompt := ">"
-		if m.mode == modeChannels {
-			prompt = m.promptWithin(width / 2)
-		}
-		inputStr = lipgloss.NewStyle().Width(width).Render(prompt + " " + clipTail(m.input, width-utf8.RuneCountInString(prompt)-2))
-	} else {
-		inputStr = lipgloss.NewStyle().Width(width).Render("")
-		if m.mode == modeRun {
-			inputStr = lipgloss.NewStyle().Width(width).Render(fitCells(m.runPrompt(width), width))
-		}
-	}
-
-	var statusKeys string
-	switch m.mode {
-	case modeDecision:
-		statusKeys = "  ↑/↓ options • enter confirm • esc cancel"
-	case modeRun:
-		statusKeys = "  ↑/↓ timeline • enter data • g message • esc back"
-	case modeAgents:
-		statusKeys = "  ↑/↓ agents • enter sessions • r runs • tab channels • esc quit"
-	case modeRuns:
-		statusKeys = "  ↑/↓ runs • enter open • f filter • a agents • esc quit"
-	case modeInbox:
-		statusKeys = "  ↑/↓ approvals • enter decide • tab agents • esc quit"
-	default:
-		statusKeys = "  ↑/↓ channels • enter send • tab inbox • esc quit"
-	}
-
-	status := m.status()
-	if m.mode == modeChannels {
-		// One line whatever the message holds: on a narrow terminal it is the
-		// message that is cut, never the key hints.
-		status = fitCells(status, width-cellWidth(statusKeys)) + statusKeys
-		if name := sanitize(m.userName); name != "" {
-			// The name gets the room the status and key hints leave; when they
-			// already fill the line the name goes, never the hints. lipgloss's
-			// Width only pads, so without this clip a long name wraps and breaks
-			// the layout.
-			if room := width - utf8.RuneCountInString(status) - 3; room > 0 {
-				status = clip(name, room) + " | " + status
-			}
-		}
-	} else {
-		if name := sanitize(m.userName); name != "" {
-			status = name + " | " + status
-		}
-		// One line whatever it holds, so the panes are never pushed up off
-		// the screen: the message is what is cut, never the key hints.
-		status = fitCells(sanitize(status), width-cellWidth(statusKeys)) + statusKeys
-		status = fitCells(status, width)
-	}
-	// One row at the smallest terminal too, where the key hints alone are
-	// wider than the screen.
-	status = statusStyle.Width(width).Render(fitCells(status, width))
-	return panes + "\n" + voice + inputStr + "\n" + status
-}
-
-// channelsErrLines says, in a pane of the given inner width, why there are no
-// channels: the server asked, its error in full, and how to choose another.
-// The TUI takes no flags, so CONCH_SERVER is the way.
-func (m Model) channelsErrLines(width int) []string {
-	from := "the server"
-	if s, ok := m.api.(interface{ Server() string }); ok {
-		from = s.Server()
-	}
-	paragraphs := []string{"Cannot read the channel list from " + from + ".", m.channelsErr.Error()}
-	if !errors.Is(m.channelsErr, cli.ErrUnauthenticated) {
-		paragraphs = append(paragraphs, "To use another server, quit (esc) and start conch with CONCH_SERVER=<url>.")
-	}
-	var lines []string
-	for i, p := range paragraphs {
-		if i > 0 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, wrapCells(sanitize(p), width)...)
-	}
-	return lines
-}
-
-// channelLines is the channel list in a pane of the given outer width.
-func (m Model) channelLines(leftWidth int) []string {
-	lines := make([]string, len(m.channels))
-	for i, channel := range m.channels {
-		badge := m.unreadBadge(channel)
-		room := leftWidth - 4
-		if badge != "" {
-			room -= 1 + len(badge)
-		}
-		name := fitCells(sanitize(channel), room)
-		prefix := "  "
-		if i == m.selected {
-			prefix = activeStyle.Render("› ")
-		}
-		lines[i] = prefix + name
-		if badge != "" {
-			lines[i] += " " + badgeStyle.Render(badge)
-		}
-	}
-	if len(lines) == 0 && m.loadingChannels {
-		lines = append(lines, statusStyle.Render("loading…"))
-	}
-	return lines
-}
-
-// agentsPanes is the Agents view: the channel list beside the agents from
-// 80x24 up, the agents alone, full width, below it.
-func (m Model) agentsPanes(l layout) string {
-	if l.width < fullWidth || l.height < fullHeight {
-		lines, sel := m.agentLines(l.width - 2)
-		return borderStyle.Width(l.width - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
-	}
-	channels := borderStyle.Width(l.leftW - 2).Height(l.contentH).Render(strings.Join(m.channelLines(l.leftW), "\n"))
-	lines, sel := m.agentLines(l.rightW - 2)
-	agents := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
-	return lipgloss.JoinHorizontal(lipgloss.Top, channels, agents)
-}
-
-// runsPanes is the Runs view: laid out as the Agents view is.
-func (m Model) runsPanes(l layout) string {
-	if l.width < fullWidth || l.height < fullHeight {
-		lines, sel := m.runsLines(l.width - 2)
-		return borderStyle.Width(l.width - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
-	}
-	channels := borderStyle.Width(l.leftW - 2).Height(l.contentH).Render(strings.Join(m.channelLines(l.leftW), "\n"))
-	lines, sel := m.runsLines(l.rightW - 2)
-	runs := borderStyle.Width(l.rightW - 2).Height(l.contentH).Render(strings.Join(agentsWindow(lines, sel, l.contentH), "\n"))
-	return lipgloss.JoinHorizontal(lipgloss.Top, channels, runs)
-}
-
-// size is the terminal size, or 80x24 before the first WindowSizeMsg.
-func (m Model) size() (width, height int) {
-	width, height = m.width, m.height
-	if width <= 0 {
-		width = 80
-	}
-	if height <= 0 {
-		height = 24
-	}
-	return width, height
-}
-
-// paneWidths is the outer width of the left and right panes; together with
-// the gap between them they fill the terminal's width.
-func paneWidths(width int) (left, right int) {
-	left = 18
-	if width < 60 {
-		left = 14
-	}
-	return left, width - left - 1
-}
-
-// layout is where everything is on the screen. View draws from it and mouse
-// finds what was clicked with it, so the two cannot disagree. Rows and columns
-// are 0-based screen cells.
-//
-// The two panes sit side by side from row 0, each in a rounded border: the
-// border is row 0 and row contentH+1, and for the left pane column 0 and
-// leftW-1; a pane's content is inside it. Under them come the voice line, if
-// there is one, the input line and the status line.
-type layout struct {
-	width, height int
-	// leftW and rightW are the outer widths of the panes.
-	leftW, rightW int
-	// contentH is the number of content rows of each pane.
-	contentH int
-	// voice is the voice line, "" when there is none.
-	voice string
-	// members is the members line, "" outside the channels view.
-	members string
-}
-
-func (m Model) layout() layout {
-	width, height := m.size()
-	l := layout{width: width, height: height}
-	l.leftW, l.rightW = paneWidths(width)
-	// The voice line, when there is one, takes a row from the panes rather
-	// than adding one to the screen, and it is one row however many people
-	// are in voice, so the layout does not move as the roster changes.
-	if m.mode == modeChannels {
-		l.voice = m.voiceLine(width)
-		l.members = m.membersLine(width)
-	}
-	l.contentH = height - 4
-	if l.voice != "" {
-		l.contentH--
-	}
-	if l.members != "" {
-		l.contentH--
-	}
-	if l.contentH < 4 {
-		l.contentH = 4
-	}
-	return l
-}
-
-// messageRows is how many message lines the message pane shows at once.
-func (l layout) messageRows() int { return l.contentH - 1 }
-
-// leftContent is the content row of the left pane at (x, y), if it is inside it.
-func (l layout) leftContent(x, y int) (row int, ok bool) {
-	if x < 1 || x > l.leftW-2 || y < 1 || y > l.contentH {
-		return 0, false
-	}
-	return y - 1, true
-}
-
-// rightContent is the content row of the right pane at (x, y), if it is inside it.
-func (l layout) rightContent(x, y int) (row int, ok bool) {
-	if x < l.leftW+1 || x > l.leftW+l.rightW-2 || y < 1 || y > l.contentH {
-		return 0, false
-	}
-	return y - 1, true
-}
-
-// inLeft and inRight say whether (x, y) is on that pane, its border included.
-func (l layout) inLeft(x, y int) bool {
-	return x >= 0 && x < l.leftW && y >= 0 && y < l.contentH+2
-}
-
-func (l layout) inRight(x, y int) bool {
-	return x >= l.leftW && x < l.leftW+l.rightW && y >= 0 && y < l.contentH+2
-}
-
-// mouse handles one mouse event. The mouse only selects and scrolls: it never
-// sends a message, casts a decision or quits. The one command it can return is
-// the one selecting a channel starts (its history and subscription).
-func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Action != tea.MouseActionPress {
-		return m, nil
-	}
-	if m.mode == modeAgents || m.mode == modeRun || m.mode == modeRuns {
-		// Lists and a pane that are read with the keys; there is nothing to click.
-		return m, nil
-	}
-	if m.mode != modeChannels {
-		// Below this size View shows tooSmall, with nothing to point at.
-		if width, height := m.size(); width < minApprovalWidth || height < minApprovalHeight {
-			return m, nil
-		}
-	}
-	l := m.layout()
-	switch msg.Button {
-	case tea.MouseButtonLeft:
-		return m.click(l, msg.X, msg.Y)
-	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
-		step := 1
-		if msg.Button == tea.MouseButtonWheelDown {
-			step = -1
-		}
-		switch m.mode {
-		case modeChannels:
-			if l.inRight(msg.X, msg.Y) {
-				return m.scrolled(step)
-			}
-		case modeInbox:
-			if l.inLeft(msg.X, msg.Y) {
-				m.selApproval = min(max(0, m.selApproval-step), max(0, len(m.approvals)-1))
-				m.bodyOffset = 0
-			}
-		}
-	}
-	return m, nil
-}
-
-// click selects what is at (x, y), as the arrow keys would.
-func (m Model) click(l layout, x, y int) (tea.Model, tea.Cmd) {
-	switch m.mode {
-	case modeChannels:
-		if row, ok := l.leftContent(x, y); ok && row < len(m.channels) {
-			return m.selectChannel(row - m.selected)
-		}
-	case modeInbox:
-		if row, ok := l.leftContent(x, y); ok {
-			if i, ok := m.approvalAt(row, l.contentH); ok {
-				m.selApproval = i
-				m.bodyOffset = 0
-			}
-		}
-	case modeDecision:
-		if row, ok := l.rightContent(x, y); ok {
-			if d, ok := m.selectedDetails(); ok {
-				if i, ok := d.optionRows[row]; ok {
-					m.selOption = i
-				}
-			}
-		}
-	}
-	return m, nil
-}
-
-// scrollMessages moves the message pane up by lines (down when negative),
-// stopping at the oldest and at the newest message.
-func (m Model) scrollMessages(lines int) Model {
-	top := max(0, len(m.messages[m.current()])-m.layout().messageRows())
-	m.scroll = min(max(min(m.scroll, top)+lines, 0), top)
-	return m
-}
-
 // addMessages merges incoming into channel's history. While the pane is
-// scrolled up, messages that arrive push the scroll along with them, so the
-// lines on screen do not move.
+// scrolled up, messages that arrive push the scroll along with them by the
+// lines they take, so the lines on screen do not move.
 func (m *Model) addMessages(channel string, incoming []schema.MessageV2) {
-	before := len(m.messages[channel])
-	m.messages[channel] = mergeMessages(m.messages[channel], incoming)
 	if channel == m.current() && m.scroll > 0 {
-		m.scroll += len(m.messages[channel]) - before
+		held := make(map[int64]bool, len(m.messages[channel])+len(incoming))
+		for _, message := range m.messages[channel] {
+			held[message.ID] = true
+		}
+		var fresh []schema.MessageV2
+		for _, message := range incoming {
+			if !held[message.ID] {
+				held[message.ID] = true
+				fresh = append(fresh, message)
+			}
+		}
+		m.scroll += m.historyHeight(channel, fresh)
 	}
+	m.messages[channel] = mergeMessages(m.messages[channel], incoming)
 }
 
 // The smallest terminal the inbox and decision views are laid out for. On a
@@ -1563,8 +1279,8 @@ func (m Model) selectedDetails() (details, bool) {
 		width < minApprovalWidth || height < minApprovalHeight {
 		return details{}, false
 	}
-	_, rightWidth := paneWidths(width)
-	return m.approvalDetails(m.approvals[m.selApproval], rightWidth-2, height-4)
+	l := m.layout()
+	return m.approvalDetails(m.approvals[m.selApproval], l.rightW-2, l.contentH)
 }
 
 // approvalDetails lays out app in rows lines of at most cols cells. The
@@ -1790,39 +1506,32 @@ func wrapCells(s string, width int) []string {
 	return append(lines, b.String())
 }
 
-func clip(value string, width int) string {
-	if width < 1 {
-		return ""
-	}
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	if width == 1 {
-		return "…"
-	}
-	return string(runes[:width-1]) + "…"
-}
+// clip is value in at most width cells, its end cut and marked with "…".
+func clip(value string, width int) string { return fitCells(value, width) }
 
+// clipTail is value in at most width cells, its start cut and marked with
+// "…": the end of a draft is where the typing is.
 func clipTail(value string, width int) string {
 	if width < 1 {
 		return ""
 	}
-	runes := []rune(value)
-	if len(runes) <= width {
+	if cellWidth(value) <= width {
 		return value
 	}
-	if width == 1 {
-		return "…"
+	runes := []rune(value)
+	used, start := 0, len(runes)
+	for start > 0 && used+runeCells(runes[start-1]) <= width-1 {
+		start--
+		used += runeCells(runes[start])
 	}
-	return "…" + string(runes[len(runes)-width+1:])
+	return "…" + string(runes[start:])
 }
 
 // whisperNotice mirrors the plain CLI's note: a whisper is discretion, not
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1853,6 +1562,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.netCommand(rest)
 	case "/w":
 		return m.whisperCommand(rest)
+	case "/help":
+		m.input = ""
+		m.help, m.helpTop = true, 0
+		return m, nil
 	default:
 		m.setStatus(modeChannels, fmt.Sprintf("unknown command %q; %s", sanitize(name), slashHint))
 		return m, nil
@@ -2127,10 +1840,12 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 	}
 }
 
-// messageLine renders one message on exactly one line of at most width cells:
+// messageLine renders one message on exactly one line of at most width-2
+// cells (the pane's border), the body cut to fit:
 //
 //	[scope] HH:MM name [agent] [payload]: body
 //
+// It is the first line of messageBlock for a message whose body fits on it.
 // A message body or an author name must not be able to pass for a scope badge,
 // the agent badge or the payload badge. That is guaranteed three ways, none of
 // which depends on colour (a pipe, NO_COLOR or a monochrome terminal show no
@@ -2138,73 +1853,21 @@ func (m Model) scopeText(channel string, a *schema.Audience) string {
 //  1. Position: the scope badge is the first thing on the line, before the
 //     time and the author. Every other line starts with the time or the author,
 //     and the body is always rendered after the author, never at column 0.
+//     messageBlock starts every further line of a body with spaces and
+//     contMark, so none of them starts where a message does either.
 //  2. One line: sanitize removes line breaks and every control character, so
 //     neither can start a second line (or an escape sequence) of its own.
 //  3. Escape: a body or a name that starts with "[" is shown with a leading
 //     backslash, and a name has any later "[" escaped too, so neither reads as
 //     a badge, least of all as the "[agent]" badge that follows a name.
 func (m Model) messageLine(channel string, message schema.MessageV2, width int) string {
-	inner := width - 2 // the pane's border
-	var scope, payload string
-	if text := m.scopeText(channel, message.Audience); text != "" {
-		scope = "[" + fitCells(text, width/3) + "]"
+	h := m.head(channel, message, width)
+	if !h.fits {
+		// Not even the head fits (a very narrow pane): as much of it as does,
+		// and no body, so the line is still one row.
+		return h.short
 	}
-	if message.Payload != nil {
-		payload = "[" + fitCells(sanitize(message.Payload.Schema), width/3) + "]"
-	}
-	when := m.messageTime(message)
-	name, agent := m.authorName(channel, message.AuthorID)
-	agentBadge := ""
-	if agent {
-		agentBadge = "[agent]"
-	}
-	// fixed is what the line spends on everything but the name and the body:
-	// the badges, the time, the separators and ": ".
-	fixed := func(when string) int {
-		n := 2
-		for _, part := range []string{scope, when, agentBadge, payload} {
-			if part != "" {
-				n += cellWidth(part) + 1
-			}
-		}
-		return n
-	}
-	// The name gets what the rest leaves, at most 24 cells. When that is under
-	// 4 the time goes first: the name is what says who is speaking.
-	nameCells := min(24, inner-fixed(when))
-	if nameCells < 4 && when != "" {
-		when = ""
-		nameCells = min(24, inner-fixed(when))
-	}
-	name = fitCells(name, nameCells)
-
-	body := sanitize(message.Body)
-	if strings.HasPrefix(body, "[") {
-		body = "\\" + body
-	}
-	plain := strings.Join(nonEmpty(scope, when, name, agentBadge, payload), " ")
-	if cellWidth(plain)+2 > inner {
-		// Not even the prefix fits (a very narrow pane): keep as much of it as
-		// does, unstyled, and no body, so the line is still one row.
-		return fitCells(plain+": ", inner)
-	}
-	var out strings.Builder
-	for _, part := range []struct {
-		text  string
-		badge bool
-	}{{scope, true}, {when, false}, {name, false}, {agentBadge, true}, {payload, true}} {
-		switch {
-		case part.text == "":
-		case part.badge:
-			out.WriteString(badgeStyle.Render(part.text) + " ")
-		default:
-			out.WriteString(part.text + " ")
-		}
-	}
-	// The space after the last part is the one before ": " in the format, and
-	// ": " itself follows the name or badge directly.
-	line := strings.TrimSuffix(out.String(), " ") + ": "
-	return line + fitCells(body, inner-cellWidth(plain)-2)
+	return h.styled + fitCells(escapeBadge(sanitize(message.Body)), width-2-h.cells)
 }
 
 func nonEmpty(parts ...string) []string {
@@ -2286,11 +1949,11 @@ func safeName(name string) string {
 // terminal too narrow for even that, the net is what stays.
 func (m Model) promptWithin(maxWidth int) string {
 	full := m.prompt()
-	if m.target == nil || utf8.RuneCountInString(full) <= maxWidth {
+	if m.target == nil || cellWidth(full) <= maxWidth {
 		return clip(full, maxWidth)
 	}
 	suffix := "/" + sanitize(m.target.name) + " >"
-	room := maxWidth - utf8.RuneCountInString(suffix)
+	room := maxWidth - cellWidth(suffix)
 	if room < 1 {
 		room = 1
 	}

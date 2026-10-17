@@ -1,0 +1,18 @@
+╭─ ▸ HELP · Chat ─────────────────────────────────────────╮
+│ type, enter  write a message and send it to the         │
+│              audience the prompt names                  │
+│ backspace    delete the last character of the draft     │
+│ /net NAME    send plain messages to net NAME; /net      │
+│              alone: the whole channel                   │
+│ /w IDS TEXT  whisper TEXT once to the principal ids IDS │
+│              (3,5)                                      │
+│ //TEXT       send TEXT that starts with /               │
+│ /help        this help                                  │
+│ ↑/↓          focus on channels: open the channel above  │
+│              or below                                   │
+│              focus on messages: scroll the history a    │
+╰──────────────────── ↓ 19 more · ↑/↓ scroll · esc close ─╯
+general >
+online: bob alice(2) · agents: rex ●
+you: in #general voice from another client · voice: +2
+alice | connected  esc close help

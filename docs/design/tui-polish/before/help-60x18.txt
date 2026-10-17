@@ -1,0 +1,18 @@
+╭────────────────╮╭───────────────────────────────────────╮
+│› general       ││15:42 alice: Morning all. The release …│
+│  ops 2         ││15:42 bob: On it. I will look at the f…│
+│  movie-night   ││15:42 carol-with-a-rather-lon…: A long…│
+│  design-review ││15:42 rex [agent]: Build 4127 passed: …│
+│                ││15:42 bob: Notes from the call: ↵ 1. s…│
+│                ││15:42 dave: 日本語の名前とテキストも表…│
+│                ││15:42 bob: \[31mred?[0m evil and a bel…│
+│                ││15:42 alice: \[whisper:2,3] not a real…│
+│                ││                                       │
+│                ││                                       │
+│                ││                                       │
+│                ││                                       │
+╰────────────────╯╰───────────────────────────────────────╯
+online: bob alice(2) · agents: rex ●
+voice: 2 alice  ●3
+general >
+connected  ↑/↓ channels • enter send • tab inbox • esc quit

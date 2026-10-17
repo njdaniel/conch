@@ -1,0 +1,36 @@
+␛[1mCONCH␛[0m ␛[90m127.0.0.1:29180␛[39m  ␛[1m␛[36m[Chat]␛[0m ␛[90mInbox␛[39m ␛[90mAgents␛[39m ␛[90mRuns␛[39m                                    ␛[1malice␛[0m · ␛[32m● text live␛[39m · ␛[90mhelp: F1, /help
+␛[36m╭─␛[1m␛[39m ▸ CHANNELS ␛[0m␛[36m─────────╮␛[90m╭─␛[1m␛[39m # general ␛[0m␛[90m───────────────────────────────────────────────────╮╭─␛[1m␛[39m PEOPLE · 2 online ␛[0m␛[90m────────╮␛[39m
+␛[36m│␛[1m› general␛[0m             ␛[36m│␛[90m│15:42␛[39m ␛[1malice␛[0m: Morning all. The release branch is cut; please    ␛[90m││␛[39m● alice (you)      ␛[90monline ×2│␛[39m
+␛[36m│␛[39m  ops ␛[1m␛[33m2␛[0m               ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mkeep main green today.                                 ␛[90m││␛[39m● bob                 ␛[90monline│␛[39m
+␛[36m│␛[39m  movie-night         ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: On it. I will look at the flaky test in the ingest  ␛[90m││␛[39m○ admin              ␛[90moffline│␛[39m
+␛[36m│␛[39m  design-review       ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39msuite first.                                           ␛[90m││␛[39m○ carol-with-a-rath… ␛[90moffline│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1mcarol-with-a-rather-lon…␛[0m: A long message, to see         ␛[90m││␛[39m○ dave               ␛[90moffline│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mwrapping: the parser rewrite touches the tokenizer,    ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mthe error recovery and the pretty-printer, so reviews  ␛[90m││␛[1m␛[39mAGENTS␛[0m                      ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mshould look at each of those separately rather than as ␛[90m││␛[39m● rex ␛[1m␛[33m[agent]␛[0m ␛[90mrunning␛[39m       ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mone large diff, and the benchmarks need a fresh        ␛[90m││  task: fix the flaky inges…│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mbaseline before anyone compares numbers.               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1mrex␛[0m ␛[1m␛[33m[agent]␛[0m: Build 4127 passed:                          ␛[90m││␛[1m␛[39mVOICE · general room␛[0m        ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mhttps://ci.example.com/jobs/4127/artifacts/very/long/pa␛[90m││␛[39m  alice (you)               ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mth/that/does/not/break/at/spaces/report.html           ␛[90m││␛[39m● bob                ␛[1m␛[36mtalking␛[0m␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: Notes from the call:                                ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m1. ship the parser behind a flag                       ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m2. keep the old path for a week                        ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m3. alice owns the rollout                              ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1mdave␛[0m: 日本語の名前とテキストも表示できますか？幅の広い文 ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m字はセル二つ分です。                                   ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: \[31mred?[0m evil and a bell  and [net:alpha] a     ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mfake badge                                             ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│15:42␛[39m ␛[1malice␛[0m: \[whisper:2,3] not a real whisper either          ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m│␛[39m                      ␛[36m│␛[90m│␛[39m                                                               ␛[90m││␛[39m                            ␛[90m│␛[39m
+␛[36m╰──────────────────────╯␛[90m╰───────────────────────────────────────────────────────────────╯╰────────────────────────────╯␛[39m
+general > ␛[1m␛[36m▌␛[0m
+␛[90myou: in #general voice from another client · voice: 2 alice  ●3 bob␛[39m
+␛[90malice | signed in as alice  ↑/↓ channels • ←/→ focus • enter send • tab inbox • esc quit␛[39m
