@@ -289,7 +289,6 @@ func TestModelChannelsLoaded(t *testing.T) {
 		wantStatus string
 	}{
 		{name: "populated", msg: channelsLoaded{channels: ch("ops", "dev")}, wantList: []string{"ops", "dev"}},
-		{name: "api error", msg: channelsLoaded{err: errors.New("boom")}, wantList: []string{"general"}, wantStatus: "channel list: boom"},
 		{name: "zero channels", msg: channelsLoaded{channels: []schema.ChannelV0{}}, wantList: []string{"general"}, wantStatus: "no channels on server"},
 	}
 	for _, tt := range tests {
@@ -348,6 +347,93 @@ func TestModelChannelsLoaded(t *testing.T) {
 			}
 			if s := ended.(Model).status(); s != wantEnded {
 				t.Errorf("status after subscription end = %q, want %q", s, wantEnded)
+			}
+		})
+	}
+}
+
+// serverListAPI is a listAPI that names its server, as *cli.Client does.
+type serverListAPI struct {
+	*listAPI
+	server string
+}
+
+func (a serverListAPI) Server() string { return a.server }
+
+// A channel list that cannot be read is said plainly, in the message pane:
+// the server asked, the whole error and how to choose another server. No
+// stand-in channel is opened, and nothing is loaded from one (issue #522).
+func TestChannelListFailureSaysWhatFailed(t *testing.T) {
+	refused := errors.New(`cli: list channels: Get "http://127.0.0.1:8080/v1/channels": dial tcp 127.0.0.1:8080: connect: connection refused`)
+	tests := []struct {
+		name       string
+		api        API
+		err        error
+		wantStatus string
+		wantShown  []string
+		wantHidden []string
+	}{
+		{
+			name: "refused", api: serverListAPI{listAPI: &listAPI{}, server: "http://127.0.0.1:8080"}, err: refused,
+			wantStatus: "cannot read the channel list",
+			wantShown: []string{
+				"Cannot read the channel list from http://127.0.0.1:8080.",
+				refused.Error(),
+				"To use another server, quit (esc) and start conch with CONCH_SERVER=<url>.",
+			},
+			wantHidden: []string{"general", "No messages"},
+		},
+		{
+			name: "server unnamed", api: &listAPI{}, err: errors.New("boom"),
+			wantStatus: "cannot read the channel list",
+			wantShown:  []string{"Cannot read the channel list from the server.", "boom", "CONCH_SERVER=<url>"},
+			wantHidden: []string{"general"},
+		},
+		{
+			name: "not logged in", api: serverListAPI{listAPI: &listAPI{}, server: "http://h:1"}, err: &cli.UnauthenticatedError{Server: "http://h:1"},
+			wantStatus: "not logged in to http://h:1: run 'conch login'",
+			wantShown:  []string{"Cannot read the channel list from http://h:1.", "not logged in to http://h:1: run 'conch login'"},
+			// Another server would not help: the login is what is missing.
+			wantHidden: []string{"general", "CONCH_SERVER"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := NewModel(context.Background(), tt.api, 7, nil)
+			updated, cmd := model.Update(channelsLoaded{err: tt.err})
+			got := updated.(Model)
+			if len(got.channels) != 0 || got.current() != "" {
+				t.Fatalf("channels = %v, want none", got.channels)
+			}
+			if cmd != nil {
+				t.Errorf("a failed channel list started %v, want nothing loaded", runCmd(cmd))
+			}
+			if got.status() != tt.wantStatus {
+				t.Errorf("status = %q, want %q", got.status(), tt.wantStatus)
+			}
+			// Wide enough that no line of the explanation wraps.
+			sized, _ := got.Update(tea.WindowSizeMsg{Width: 260, Height: 30})
+			view := sized.(Model).View()
+			for _, want := range tt.wantShown {
+				if !strings.Contains(view, want) {
+					t.Errorf("view lacks %q:\n%s", want, view)
+				}
+			}
+			for _, hidden := range tt.wantHidden {
+				if strings.Contains(view, hidden) {
+					t.Errorf("view shows %q:\n%s", hidden, view)
+				}
+			}
+			// A narrow screen wraps the explanation instead of cutting it off.
+			narrow, _ := got.Update(tea.WindowSizeMsg{Width: 60, Height: 30})
+			if flat := strings.Join(strings.Fields(strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(narrow.(Model).View())), ""); !strings.Contains(flat, strings.Join(strings.Fields(tt.err.Error()), "")) {
+				t.Errorf("narrow view lost part of the error %q:\n%s", tt.err, narrow.(Model).View())
+			}
+			// Keys on a model with no channels stay harmless.
+			current := sized
+			for _, key := range []tea.KeyMsg{{Type: tea.KeyUp}, {Type: tea.KeyDown}, {Type: tea.KeyRunes, Runes: []rune("hi")}, {Type: tea.KeyEnter}, {Type: tea.KeyTab}, {Type: tea.KeyTab}, {Type: tea.KeyTab}} {
+				current, _ = current.Update(key)
+				_ = current.View()
 			}
 		})
 	}
@@ -979,7 +1065,7 @@ func TestStatusBelongsToMode(t *testing.T) {
 			[]tea.Msg{key(tea.KeyTab), key(tea.KeyTab), key(tea.KeyTab)},
 			approvalsLoaded{err: errors.New("boom")}, "loading…", tab, "loading approvals…"},
 		{"4 channelsLoaded error in inbox", noChannels, tab,
-			channelsLoaded{err: errors.New("boom")}, "loading approvals…", toChannels, "channel list: boom"},
+			channelsLoaded{err: errors.New("boom")}, "loading approvals…", toChannels, "cannot read the channel list"},
 		{"4 channelsLoaded empty in inbox", noChannels, tab,
 			channelsLoaded{channels: []schema.ChannelV0{}}, "loading approvals…", toChannels, "no channels on server"},
 	}

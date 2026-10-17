@@ -60,7 +60,8 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	return c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
+	return resp, explainUnreachable(c.Server(), err)
 }
 
 // WhoAmI returns the principal the client's credential resolves to.
@@ -102,7 +103,7 @@ func (c *Client) dialOptions() *websocket.DialOptions {
 func (c *Client) dial(ctx context.Context, endpoint string) (*websocket.Conn, *http.Response, error) {
 	conn, resp, err := websocket.Dial(ctx, endpoint, c.dialOptions())
 	if err != nil {
-		return nil, resp, err
+		return nil, resp, explainUnreachable(c.Server(), err)
 	}
 	conn.SetReadLimit(schema.MaxMessageFrameBytes)
 	c.watchConn(ctx, conn)

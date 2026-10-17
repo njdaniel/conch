@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -22,7 +23,10 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-const defaultServer = "http://127.0.0.1:8080"
+// defaultServer is the server used when nothing names one: no --server, no
+// CONCH_SERVER, and not exactly one stored login. A variable so tests can point
+// it at a port nothing listens on.
+var defaultServer = "http://127.0.0.1:8080"
 
 // Run dispatches a conch command using the supplied standard output streams.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, version string) error {
@@ -220,7 +224,9 @@ Scope:
   line on standard error and exits nonzero.
 
 Environment:
-  CONCH_SERVER      server URL (default http://127.0.0.1:8080)
+  CONCH_SERVER      server URL. Without --server or CONCH_SERVER, a command uses
+                    the server of the stored login when exactly one is stored
+                    (and CONCH_TOKEN is not set), else http://127.0.0.1:8080.
   CONCH_TOKEN       bearer token; overrides the stored login
   CONCH_CONFIG_DIR  directory that holds the stored login (credentials.json), used
                     as given; must be an absolute path. conch login creates it
@@ -575,11 +581,68 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
+// serverEnvOr is the server a command uses when --server is not given:
+// CONCH_SERVER, then the server of the only stored login, then defaultServer.
+// With several logins none is preferred; a refused connection then names them
+// (explainUnreachable). With CONCH_TOKEN set the stored login is not the one in
+// use, and choosing its server would send that token somewhere it was never
+// meant for, so the stored login picks nothing.
 func serverEnvOr() string {
 	if value := os.Getenv("CONCH_SERVER"); value != "" {
 		return value
 	}
+	if strings.TrimSpace(os.Getenv(tokenEnv)) == "" {
+		if servers := storedServers(); len(servers) == 1 {
+			return servers[0]
+		}
+	}
 	return defaultServer
+}
+
+// DefaultServer is the server conch uses when no --server is given, by the
+// rule of serverEnvOr. The TUI, which takes no flags, starts with it.
+func DefaultServer() string { return serverEnvOr() }
+
+// unreachableError is a failed connection to the default server while logins
+// are stored for other servers: the person most likely meant one of those, and
+// the bare network error would not tell them so.
+type unreachableError struct {
+	err    error
+	server string
+	stored []string
+}
+
+func (e *unreachableError) Error() string {
+	return fmt.Sprintf("%v (nothing answered at %s; logins are stored for %s: choose one with --server <url> or CONCH_SERVER=<url>)",
+		e.err, e.server, strings.Join(e.stored, ", "))
+}
+
+func (e *unreachableError) Unwrap() error { return e.err }
+
+// explainUnreachable adds the stored logins to err when err is a failure to
+// connect to server, server is the default, CONCH_SERVER did not choose it,
+// and a login is stored for some other server. Any other error is returned as
+// it is. A flag that names the default explicitly gets the same note; it is
+// as true then.
+func explainUnreachable(server string, err error) error {
+	var op *net.OpError
+	if err == nil || !errors.As(err, &op) || op.Op != "dial" ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if os.Getenv("CONCH_SERVER") != "" {
+		return err
+	}
+	if want, nerr := NormalizeServer(defaultServer); nerr != nil || server != want {
+		return err
+	}
+	stored := storedServers()
+	for _, s := range stored {
+		if s != server {
+			return &unreachableError{err: err, server: server, stored: stored}
+		}
+	}
+	return err
 }
 
 func runApprovals(ctx context.Context, args []string, stdout, stderr io.Writer) error {
