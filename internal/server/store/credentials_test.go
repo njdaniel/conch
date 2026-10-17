@@ -441,7 +441,7 @@ func TestListCredentialsOrderAndShape(t *testing.T) {
 
 func TestCredentialPersistsAcrossRestart(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "conch.db")
+	path := newTestDBPath(t)
 	s, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
