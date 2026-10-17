@@ -146,10 +146,20 @@ export function App({ origin }: { readonly origin: string }) {
   const principal = auth.phase === 'signedIn' ? auth.principal : null;
   const selected = signedIn ? channels.selected : null;
   const channelId = channels.channels.find((c) => c.name === selected)?.id ?? null;
+  // The browser's own session, the events socket and what the panel and run
+  // detail show from them. The member list it keeps current also names the
+  // authors in the conversation.
+  const agents = useAgents({
+    signedIn,
+    channel: channelId === null ? null : selected,
+    channelId,
+    onUnauthorized,
+  });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
     channelId,
     me: principal ?? { id: 0, name: '', kind: 'human' },
+    members: agents.members,
     getAfter,
     getOldest,
     dispatchChat,
@@ -183,14 +193,6 @@ export function App({ origin }: { readonly origin: string }) {
     onUnauthorized,
   });
 
-  // The browser's own session, the events socket and what the panel and run
-  // detail show from them.
-  const agents = useAgents({
-    signedIn,
-    channel: channelId === null ? null : selected,
-    channelId,
-    onUnauthorized,
-  });
   const now = useNow(signedIn);
 
   // Go to message: run detail closes, and once the conversation is on screen

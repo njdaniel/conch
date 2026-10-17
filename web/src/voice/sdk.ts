@@ -24,6 +24,13 @@
 // it. Adaptive stream asks LiveKit for the layer the watch view's size needs
 // (none while it is hidden), and dynacast lets a sharer stop encoding a layer
 // nobody receives.
+//
+// A share outlives a renewed room (issue #516): the capture is taken off the
+// old connection without being stopped (keepScreen) and published on the next
+// (adoptScreen), with the same options. The SDK would stop every local track
+// when the server ends a connection (a deleted room does), so it is told not
+// to stop a track it unpublishes: this adapter stops every track itself, on
+// stopScreen and on close.
 import {
   AudioPresets,
   DisconnectReason,
@@ -53,7 +60,7 @@ import type { DisconnectCause } from './disconnect';
 import type { Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import type { Captured, ShareContent } from './share';
+import type { Captured, KeptScreen, ShareContent } from './share';
 
 export { principalOf };
 
@@ -85,9 +92,10 @@ export function quietSdk(): void {
 
 quietSdk();
 
-// How the page joins a room: adaptive stream and dynacast on, and nothing
-// subscribed but by choice (wanted).
-export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true };
+// How the page joins a room: adaptive stream and dynacast on, nothing
+// subscribed but by choice (wanted), and no track stopped by the SDK when it
+// unpublishes one, so that a share's capture survives its room.
+export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: false };
 export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
 // wanted is the subscription choice for a remote track: a microphone always,
@@ -166,6 +174,31 @@ function causeOf(reason: DisconnectReason | undefined): DisconnectCause {
 }
 
 const isShare = (source: Track.Source) => source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio;
+
+// A share's capture between two connections: still capturing, published on
+// neither.
+class Kept implements KeptScreen {
+  readonly tracks: readonly LocalTrack[];
+  readonly audio: boolean;
+  onEnded: (() => void) | null = null;
+
+  constructor(tracks: readonly LocalTrack[]) {
+    this.tracks = tracks;
+    this.audio = tracks.some((t) => t.source === Track.Source.ScreenShareAudio);
+    const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
+    video?.mediaStreamTrack.addEventListener('ended', () => {
+      const ended = this.onEnded;
+      this.onEnded = null;
+      ended?.();
+    });
+  }
+
+  live = (): boolean => this.tracks.length > 0 && this.tracks.every((t) => t.mediaStreamTrack.readyState === 'live');
+
+  stop = (): void => {
+    for (const t of this.tracks) t.stop();
+  };
+}
 
 class LiveKitAdapter implements Room {
   private readonly room = new LiveKitRoom(roomOptions);
@@ -358,15 +391,46 @@ class LiveKitAdapter implements Room {
       for (const t of tracks) t.stop();
       throw new ClosedError();
     }
+    this.holdScreen(tracks);
+    return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
+  }
+
+  // holdScreen makes a capture this connection's share, picked here or kept
+  // from an earlier connection.
+  private holdScreen(tracks: LocalTrack[]): void {
     this.screen = tracks;
     this.captureEnded = false;
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
-    video?.mediaStreamTrack.addEventListener('ended', () => {
+    if (video === undefined) return;
+    video.mediaStreamTrack.addEventListener('ended', () => {
+      // Kept for another connection since: not this one's to report.
+      if (!this.screen.includes(video)) return;
       // A track stopped by script fires no ended event: this is the browser.
       this.captureEnded = true;
       if (!this.stoppingScreen && !this.closed) this.events?.onScreenEnded('browser');
     });
-    return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
+  }
+
+  keepScreen(): KeptScreen | null {
+    const tracks = this.screen;
+    this.screen = [];
+    if (tracks.length === 0) return null;
+    // Unpublished, if the room still has them, without being stopped: a
+    // connection closed with them published would stop them. This is not
+    // the server withdrawing the share, so it is not reported.
+    this.stoppingScreen = true;
+    try {
+      for (const track of tracks) void this.room.localParticipant.unpublishTrack(track, false).catch(() => undefined);
+    } finally {
+      this.stoppingScreen = false;
+    }
+    return new Kept(tracks);
+  }
+
+  adoptScreen(kept: KeptScreen): void {
+    this.ensureOpen();
+    if (!(kept instanceof Kept)) throw new Error('voice: not a capture this page kept');
+    this.holdScreen([...kept.tracks]);
   }
 
   async publishScreen(): Promise<void> {

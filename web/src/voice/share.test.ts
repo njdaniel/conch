@@ -4,8 +4,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
-import { settle } from './fakes';
-import { browserFeatures, endedNote, ownPageNote, ScreenShare, sharedNote, soundNote, type Captured, type ShareFeatures, type ShareRoom, type ShareState } from './share';
+import { FakeClock, settle } from './fakes';
+import { browserFeatures, endedNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -38,7 +38,13 @@ function setup(claims: ShareClaimResult[] = []) {
     pickFails: false,
     publishFails: false,
     audio: true,
+    // Issue #516: what keepScreen hands over, and whether its capture is live.
+    kept: null as KeptScreen | null,
+    live: true,
+    // When set, the next claim waits for the test to answer it.
+    claim: null as Deferred<ShareClaimResult> | null,
   };
+  const clock = new FakeClock();
   const stub: ShareRoom = {
     pickScreen: (content) => {
       calls.push(`pick ${content}`);
@@ -53,12 +59,30 @@ function setup(claims: ShareClaimResult[] = []) {
       calls.push('stop screen');
       return Promise.resolve();
     },
+    keepScreen: () => {
+      calls.push('keep');
+      const kept: KeptScreen = {
+        audio: room.audio,
+        live: () => room.live,
+        onEnded: null,
+        stop: () => {
+          calls.push('stop kept');
+        },
+      };
+      room.kept = kept;
+      return kept;
+    },
+    adoptScreen: () => {
+      calls.push('adopt');
+    },
   };
   const share = new ScreenShare(
     {
       claim: (channel) => {
         calls.push(`claim ${channel}`);
-        return Promise.resolve(claims.shift() ?? granted);
+        const held = room.claim;
+        room.claim = null;
+        return held === null ? Promise.resolve(claims.shift() ?? granted) : held.promise;
       },
       release: (channel, startedAt) => {
         calls.push(`release ${channel}`);
@@ -69,8 +93,9 @@ function setup(claims: ShareClaimResult[] = []) {
     (state) => {
       states.push(state);
     },
+    clock,
   );
-  return { share, stub, room, calls, released, states };
+  return { share, stub, room, calls, released, states, clock };
 }
 
 async function sharing(t = setup()) {
@@ -313,6 +338,7 @@ describe('stopping a share', () => {
           },
         },
         () => undefined,
+        new FakeClock(),
       );
       const started = share.start('general', t.stub, 'detail');
       await share.stop('self');
@@ -368,11 +394,12 @@ describe('why the server ended it', () => {
     ended_at: '2026-10-16T00:01:00.000Z',
   });
 
+  // 'rotated' is not an end while the capture lasts: the share is resumed
+  // (issue #516, below).
   it('presence that ends the share says why, for each reason', async () => {
     for (const [reason, end] of [
       ['operator', 'operator'],
       ['access_lost', 'access_lost'],
-      ['rotated', 'rotated'],
       ['idle', 'idle'],
       ['left', 'left'],
       ['self', 'self'],
@@ -451,6 +478,219 @@ describe('why the server ended it', () => {
     expect(endedNote('rotated', null)).toBe('Your share ended because the voice room was renewed. Share again once you are back in voice.');
     expect(endedNote('idle', null)).toBe('Your share ended because nothing was shared for a while.');
     expect(endedNote('self', null)).toBe('You stopped sharing.');
+  });
+});
+
+// Issue #516: a share whose room was renewed (rotated) is resumed on the next
+// connection, with the same capture and no picker, when conchd grants the
+// claim again; and is not otherwise.
+describe('resuming a share after the room was renewed', () => {
+  const rotated: VoiceShareEnded = { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' };
+  // The share claimed again in the new room is a new share.
+  const again: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:01:00.000Z', audio: true } };
+  const notAllowed: ShareClaimResult = { ok: false, failure: 'invalid', status: 403, code: 'voice_not_allowed' };
+
+  // renewed: a share under way, then presence saying its room was renewed,
+  // then the old connection going.
+  async function renewed(claims: ShareClaimResult[] = [granted, granted, again]) {
+    const t = await sharing(setup(claims));
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await t.share.lost(true);
+    return t;
+  }
+
+  it('keeps the capture off the old connection, and on the new one claims again and publishes it, with no picker', async () => {
+    const t = await renewed();
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    // Kept once, when presence said: nothing stopped, nothing released (the
+    // old claim ended with the room).
+    expect(t.calls).toEqual(['keep']);
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'adopt', 'publish']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+    expect(t.states.map((s) => s.kind).slice(-3)).toEqual(['resuming', 'publishing', 'sharing']);
+    // The resumed share is the new claim's: a stop names it.
+    await t.share.stop('self');
+    expect(t.released).toEqual(['2026-10-16T00:01:00.000Z']);
+  });
+
+  // Security review of #516: conchd says the room was renewed before it
+  // deletes it, and a deletion that fails leaves it up to 30 s, with anyone
+  // removed from the channel possibly still in it.
+  it('stops publishing in the old room as soon as presence says it was renewed, before any disconnect', async () => {
+    const t = await sharing(setup([granted, granted, again]));
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    expect(t.calls).toEqual(['keep']);
+    // The old connection still up: nothing is claimed or published on it.
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.calls).toEqual(['keep']);
+    // Its going changes nothing more.
+    await t.share.lost(true);
+    expect(t.calls).toEqual(['keep']);
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'adopt', 'publish']);
+  });
+
+  it('resumes across rooms renewed one after another', async () => {
+    const t = await renewed([granted, granted, noSession, again]);
+    // The room is renewed again between this connection and its claim.
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general']);
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    await t.share.lost(true);
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'claim general', 'adopt', 'publish']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+  });
+
+  it('rooms renewed one after another still give up at the limit', async () => {
+    const t = await renewed([granted, granted, noSession]);
+    t.share.connected('general', t.stub);
+    await settle();
+    t.clock.advance(resumeLimit);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'stop kept']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('a room deleted before presence said why waits for presence to say it was renewed', async () => {
+    const t = await sharing(setup([granted, granted, again]));
+    await t.share.lost(true);
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep']);
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'adopt', 'publish']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
+  });
+
+  it('a share ended for any other reason is not resumed', async () => {
+    for (const reason of ['operator', 'access_lost', 'idle', 'left', 'self'] as const) {
+      const t = await sharing(setup([granted, granted, again]));
+      await t.share.lost(true);
+      t.share.connected('general', t.stub);
+      t.share.presence('none', { ...rotated, reason });
+      await settle();
+      expect(t.calls, reason).toEqual(['keep', 'stop kept']);
+      expect(t.share.current, reason).toEqual({ kind: 'idle', ended: reason });
+    }
+  });
+
+  it('a connection lost without the room being deleted ends the share, as before', async () => {
+    const t = await sharing();
+    await t.share.lost(false);
+    expect(t.calls).toEqual(['stop screen', 'release general']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'lost' });
+  });
+
+  it('a capture the browser ended is not resumed', async () => {
+    // Ended before the old connection went: the capture was taken off it
+    // when presence said, and says so itself.
+    const before = await sharing();
+    before.share.presence('me');
+    before.share.presence('none', rotated);
+    before.room.live = false;
+    before.room.kept?.onEnded?.();
+    await settle();
+    expect(before.calls).toEqual(['keep', 'stop kept']);
+    expect(before.share.current).toEqual({ kind: 'idle', ended: 'browser' });
+
+    // Ended while kept: the capture says so.
+    const kept = await renewed();
+    kept.room.live = false;
+    kept.room.kept?.onEnded?.();
+    await settle();
+    expect(kept.calls).toEqual(['keep', 'stop kept']);
+    expect(kept.share.current).toEqual({ kind: 'idle', ended: 'browser' });
+    kept.share.connected('general', kept.stub);
+    await settle();
+    expect(kept.calls).toEqual(['keep', 'stop kept']);
+
+    // Found ended when the new connection is up.
+    const late = await renewed();
+    late.room.live = false;
+    late.share.connected('general', late.stub);
+    await settle();
+    expect(late.calls).toEqual(['keep', 'stop kept']);
+    expect(late.share.current).toEqual({ kind: 'idle', ended: 'browser' });
+  });
+
+  it('a share stopped while it waited is not resumed', async () => {
+    const t = await renewed();
+    await t.share.stop('self');
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'stop kept']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'self' });
+  });
+
+  it('a claim conchd refuses stops the capture and says why', async () => {
+    for (const [answer, end] of [
+      [busy, 'busy'],
+      [notAllowed, 'failed'],
+      [unavailable, 'unavailable'],
+    ] as const) {
+      const t = await renewed([granted, granted, answer]);
+      t.share.connected('general', t.stub);
+      await settle();
+      expect(t.calls, end).toEqual(['keep', 'claim general', 'stop kept']);
+      expect(t.share.current, end).toEqual({ kind: 'idle', ended: end });
+    }
+  });
+
+  // The sharer was the one removed: conchd gives them no session, so the
+  // client stops before any new connection, and nothing is claimed again.
+  it('a sharer whose client stops is not resumed, and is told the room was renewed', async () => {
+    const t = await renewed();
+    t.share.abandon();
+    await settle();
+    expect(t.calls).toEqual(['keep', 'stop kept']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'stop kept']);
+  });
+
+  it('stops the capture if the share is not resumed in time', async () => {
+    const t = await sharing();
+    await t.share.lost(true);
+    t.clock.advance(resumeLimit - 1);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    t.clock.advance(1);
+    await settle();
+    // Presence never said why: the old claim is let go, in case it lasts.
+    expect(t.calls).toEqual(['keep', 'stop kept', 'release general']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'lost' });
+  });
+
+  it('a resume cut short by another lost connection is made on the next', async () => {
+    const t = await renewed([granted, granted, again]);
+    // The first new connection goes while its claim is on its way.
+    const claim = deferred<ShareClaimResult>();
+    t.room.claim = claim;
+    t.share.connected('general', t.stub);
+    await settle();
+    await t.share.lost(false);
+    claim.resolve(again);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'resuming' });
+    expect(t.calls).toEqual(['keep', 'claim general']);
+    // conchd answers a holder who claims again with the share they hold.
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.calls).toEqual(['keep', 'claim general', 'claim general', 'adopt', 'publish']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, resumed: true });
   });
 });
 

@@ -163,6 +163,23 @@ help people and agents know when to speak, whom they are addressing, and who can
 
 Every command below has been run against real `bin/conchd`/`bin/conch` builds. Paths and IDs are examples — substitute your own.
 
+### The whole stack in one command
+
+To try the web client with voice and screen share on your own machine, `scripts/dev-stack.sh` does the steps below for you. It needs Go, Docker, and the Node in `web/.nvmrc` for the first build.
+
+```sh
+scripts/dev-stack.sh up       # build what is missing; start LiveKit (Docker) and conchd; make an operator and a channel
+scripts/dev-stack.sh token    # the operator credential, to paste at http://127.0.0.1:28080/app/
+scripts/dev-stack.sh invite   # a link for a second person: open it in a private window
+scripts/dev-stack.sh viewers 29 --fake-sharer   # optional load: simulated participants for 10 minutes
+scripts/dev-stack.sh stats    # LiveKit's and conchd's CPU and memory, and who is in voice
+scripts/dev-stack.sh down     # stop both; down --wipe also deletes the state
+```
+
+- It runs the same pinned LiveKit image as `e2e/voice`, limited by default to 2 CPUs and 4 GB, the alpha droplet's starting size, so what you see compares with it. `viewers` runs `scripts/alpha-loadtest.sh` on the other CPUs.
+- `conchd` and LiveKit's signalling port listen on `127.0.0.1`. LiveKit's media ports listen on every interface, as described in [Run LiveKit beside `conchd`](#run-livekit-beside-conchd).
+- The state (database, operator credential, LiveKit's key) is kept in `~/.cache/conch-dev`, never in the checkout. The script stops only what it started. `--help` lists the ports, CPUs and other settings you can change through the environment.
+
 ### 1. Build
 
 ```sh
@@ -1173,7 +1190,7 @@ Anyone in a channel's voice room may share a screen into it, one share per room 
 **In the browser.** While connected to a channel's voice, the Voice section offers *Share screen*, on every browser that has a screen picker (no iPhone or iPad browser does). Before the picker opens it says what sound the share will carry; afterwards it says whether sound was actually shared. The page connects, claims the share, opens the picker, claims again (the picker may have stayed open longer than `conchd` waits for a first track) and then publishes. The Conch tab itself is left out of the picker's choices, and the page warns that sharing the entire screen or the browser's window would still show it, chat included.
 
 - **Quality.** The picture is captured at up to 1080p and 30 fps and published with two smaller simulcast layers, 720p at 15 fps and 360p at 5 fps. The starting bitrates are 4 Mb/s, 1.5 Mb/s and 0.3 Mb/s; the bandwidth measurement of one sharer to 29 viewers refines them. *Text and pictures* keeps detail, *Video or a game* keeps motion. Sound is sent as music (no voice processing, stereo when the capture has two channels), and the whole system's sound leaves out what the Conch page itself plays, so the room's voices are not sent back to it.
-- **Stopping.** *Stop sharing*, the browser's own stop control and leaving voice each ask `conchd` to end the share, but only while presence still shows it as the sharer's: an operator's stop ends whoever holds the share, so a page whose claim lapsed (a picker left open) never sends one. If the server ends it (an operator, lost access, the room), the page stops publishing and says so; it cannot yet say which of those it was, since the API does not tell the sharer the reason. A share does not survive a reconnect through `conchd`: the page says so and the person shares again. A reconnect that the SDK makes by itself claims the share again.
+- **Stopping.** *Stop sharing*, the browser's own stop control and leaving voice each ask `conchd` to end the share, but only while presence still shows it as the sharer's: an operator's stop ends whoever holds the share, so a page whose claim lapsed (a picker left open) never sends one. If the server ends it (an operator, lost access, the room, nothing shared for a while), the page stops publishing and says which, from the reason the sharer's own presence carries (`share_ended`). A share does not survive a reconnect through `conchd`: the page says so and the person shares again. A reconnect that the SDK makes by itself claims the share again. A rotation is the exception: when anyone in the room is disabled, hidden or removed, `conchd` renews the room, which ends the share (`voice_share_stopped` with `reason=rotated`), and the sharer's page joins the new room, claims the share again and publishes the same capture without opening the picker (a new `voice_share_started`); viewers keep watching. The claim is `conchd`'s check as always, so a sharer who was the one removed does not get the share back, and a capture already stopped in the browser is not resumed.
 - **Watching.** Anyone in the room sees who is sharing, and *Watch* opens the share in the Voice section, with *Full screen*. The picture fits a phone's screen. The share's sound has its own volume and mute, apart from voice; deafen silences it too. Where the browser will not start sound by itself (phones), the view offers *Tap to play sound*. The page subscribes to a share only while it is watched, and the SDK asks LiveKit for the layer the view's size needs, so a small view or a phone receives a smaller layer than a full screen, and a closed view none.
 - **Watch only.** Beside *Join voice*, *Watch only* connects without the microphone: nothing is captured, the browser does not ask for it, and presence still lists the person. *Use microphone* captures and publishes it later, muted, as a full join does.
 
