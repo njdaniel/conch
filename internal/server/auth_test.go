@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -756,10 +757,11 @@ func TestWhoAmI(t *testing.T) {
 		want  schema.WhoAmIResponseV1
 	}{
 		// An operator may always invite (issue #437); a member may not until
-		// granted the right, and an agent never.
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test"}},
+		// granted the right, and an agent never. People hold voice unless an
+		// invite withheld it; an agent never does (issue #468).
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true)}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true)}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -767,8 +769,8 @@ func TestWhoAmI(t *testing.T) {
 			if rec.Code != 200 {
 				t.Fatalf("status = %d", rec.Code)
 			}
-			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); got != tt.want {
-				t.Errorf("whoami = %+v, want %+v", got, tt.want)
+			if got := decodeBody[schema.WhoAmIResponseV1](t, rec); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("whoami = %s, want %s", rec.Body, inviteJSON(t, tt.want))
 			}
 		})
 	}

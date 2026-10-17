@@ -3,6 +3,8 @@
 // open link, a use cap and the right to invite in turn: only an operator grants
 // that (issue #457), and the server refuses it to anyone else anyway. The new
 // link is the one place the page shows an invite code, once, to its maker.
+// Voice is offered only to someone who holds it, and a member sees how many
+// more personal invites they may make, both as whoami says (issue #468).
 import { useCallback, useEffect, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { serverLine, waitWords } from './Invite';
@@ -90,6 +92,9 @@ export function InvitePanel({
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no');
   const [invites, setInvites] = useState<readonly InviteV1[] | null>(null);
   const [listProblem, setListProblem] = useState<string | null>(null);
+  // whoami as last re-read here: what is left of the allowance changes with
+  // every invite made, closed, used or expired, and only the server counts it.
+  const [latest, setLatest] = useState<WhoAmIResponseV1 | null>(null);
 
   const meId = me.id;
   const refresh = useCallback(() => {
@@ -101,6 +106,11 @@ export function InvitePanel({
         setListProblem(null);
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else setListProblem('Could not load your invites.');
+    });
+    // Without an answer the count shown is the last one the server gave.
+    void api.whoAmI().then((result) => {
+      if (result.ok) setLatest(result.value);
+      else if (result.failure === 'unauthorized') onUnauthorized();
     });
   }, [meId, onUnauthorized]);
 
@@ -115,6 +125,12 @@ export function InvitePanel({
 
   if (me.may_invite !== true) return null;
 
+  const who = latest ?? me;
+  // A server that predates voice_allowed says nothing: offer voice, as
+  // before, and let the server refuse it (issue #468).
+  const voiceAllowed = who.voice_allowed !== false;
+  // Absent for an operator, who has no allowance.
+  const remaining = who.invites_remaining;
   const cappedUses = Number(cap);
   const capValid = Number.isInteger(cappedUses) && cappedUses >= 1;
   const canCreate = !busy && picked.size > 0 && !(operator && kind === 'open' && capped && !capValid);
@@ -126,7 +142,7 @@ export function InvitePanel({
     const request: CreateInviteRequestV1 = {
       kind,
       channels: channels.map((c) => c.name).filter((name) => picked.has(name)),
-      voice,
+      voice: voiceAllowed && voice,
       ...(chosen === undefined || chosen.isDefault === true ? {} : { expires_at: new Date(Date.now() + chosen.seconds * 1000).toISOString() }),
       ...(operator && kind === 'open' && capped ? { max_uses: cappedUses } : {}),
       ...(operator && mayInvite ? { may_invite: true } : {}),
@@ -257,16 +273,18 @@ export function InvitePanel({
               </label>
             ))}
           </fieldset>
-          <label>
-            <input
-              type="checkbox"
-              checked={voice}
-              onChange={(event) => {
-                setVoice(event.target.checked);
-              }}
-            />{' '}
-            Voice (only if you have it)
-          </label>
+          {voiceAllowed ? (
+            <label>
+              <input
+                type="checkbox"
+                checked={voice}
+                onChange={(event) => {
+                  setVoice(event.target.checked);
+                }}
+              />{' '}
+              Voice
+            </label>
+          ) : null}
           <label>
             Expires after{' '}
             <select
@@ -322,6 +340,9 @@ export function InvitePanel({
               Joiners may invite others
             </label>
           ) : null}
+          {remaining === undefined ? null : (
+            <p className="hint">{remaining === 1 ? '1 invite left' : `${String(remaining)} invites left`}</p>
+          )}
           <button type="submit" disabled={!canCreate} aria-busy={busy}>
             {busy ? 'Making the invite…' : 'Make invite'}
           </button>

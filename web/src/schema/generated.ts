@@ -25,6 +25,8 @@ export interface WhoAmIResponseV1 {
   role: PrincipalRole;
   server_version?: string;
   may_invite?: boolean;
+  voice_allowed?: boolean;
+  invites_remaining?: number;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -34,6 +36,8 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   role: principalRole,
   server_version: optional(str),
   may_invite: optional(bool),
+  voice_allowed: optional(bool),
+  invites_remaining: optional(int),
 });
 
 // schema.ChannelV0

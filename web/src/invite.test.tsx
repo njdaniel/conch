@@ -470,7 +470,7 @@ describe('invite someone', () => {
     window.localStorage.setItem(key, memberToken);
     render(<App origin={origin} />);
     const panel = await openPanel();
-    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice (only if you have it)' }));
+    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice' }));
     fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
     fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
     expect(await within(panel).findByText(line)).toBeDefined();
@@ -528,5 +528,71 @@ describe('invite someone', () => {
     const expires = Date.parse(body.expires_at ?? '');
     expect(expires - before).toBeGreaterThanOrEqual(60 * 60 * 1000 - 1000);
     expect(expires - before).toBeLessThanOrEqual(60 * 60 * 1000 + 5000);
+  });
+
+  // Issue #468: what whoami says of voice and of the allowance.
+  it('does not offer voice to a person who does not hold it', async () => {
+    const calls = serve({
+      ...as(memberToken, { ...inviter, voice_allowed: false, invites_remaining: 5 }, channelList('general')),
+      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+      'GET /v1/invites': () => json({ invites: [] }),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByText('5 invites left');
+    expect(within(panel).queryByRole('checkbox', { name: /voice/i })).toBeNull();
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: false });
+  });
+
+  it('offers voice to a person who holds it, and counts the invites left down as they make one and up as they close it', async () => {
+    let remaining = 2;
+    let listed: ReturnType<typeof inviteOf>[] = [];
+    const calls = serve({
+      'GET /v1/whoami': (c) =>
+        c.auth === `Bearer ${memberToken}` ? json({ ...inviter, voice_allowed: true, invites_remaining: remaining }) : json({}, 401),
+      'GET /v1/channels': () => json(channelList('general')),
+      'POST /v1/invites': () => {
+        remaining -= 1;
+        listed = [inviteOf(7, 2, { voice: true })];
+        return json({ invite: inviteOf(7, 2, { voice: true }), code: newCode }, 201);
+      },
+      'GET /v1/invites': () => json({ invites: listed }),
+      'DELETE /v1/invites/7': () => {
+        remaining += 1;
+        listed = listed.map((i) => ({ ...i, closed_at: '2026-10-16T00:00:00Z' }));
+        return new Response(null, { status: 204 });
+      },
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByText('2 invites left');
+
+    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    await within(panel).findByText('1 invite left');
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: true });
+
+    const list = await within(panel).findByRole('list', { name: 'Your invites' });
+    fireEvent.click(await within(list).findByRole('button', { name: 'Close' }));
+    await within(panel).findByText('2 invites left');
+  });
+
+  it('shows an operator no count, since operators have no allowance', async () => {
+    serve({
+      ...as(operatorToken, { ...operator, voice_allowed: true }, channelList('general')),
+      'GET /v1/invites': () => json({ invites: [inviteOf(3, 1)] }),
+    });
+    window.sessionStorage.setItem(key, operatorToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByRole('list', { name: 'Your invites' });
+    expect(within(panel).getByRole('checkbox', { name: 'Voice' })).toBeDefined();
+    expect(within(panel).queryByText(/invites? left/)).toBeNull();
   });
 });
