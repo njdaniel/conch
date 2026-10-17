@@ -56,7 +56,7 @@ What comes next is the [private communications alpha](docs/design/private-alpha.
 ([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)), and the work is tracked on the
 [Conch project board](https://github.com/users/njdaniel/projects/14) (private for now). Found a problem or have an
 idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose). Want to
-work on it? Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+work on it? Start with [CONTRIBUTING.md](CONTRIBUTING.md). Found a security problem? Report it privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## Client design and P3 planning
 
@@ -1258,7 +1258,7 @@ ops/report-to-issue.sh 7
 
 ## Contributing
 
-Setting up, the checks to run, and how issues, pull requests and reviews work are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Setting up, the checks to run, and how issues, pull requests and reviews work are in [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 
