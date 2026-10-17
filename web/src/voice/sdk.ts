@@ -2,12 +2,14 @@
 // small Room interface of connection.ts, and quiets the SDK's logging.
 //
 // The microphone is captured here with echo cancellation, noise suppression and
-// auto gain on, published once, and muted straight after publishing, as
-// conch-voice.md section 3 does: the SDK enables a track when it publishes it,
-// and again when it republishes after a long interruption, so the track is
-// muted after each unless the gate is open. The client counts as connected only
-// after that mute. A remote unmute (LiveKit's room API can ask for one) is
-// undone the same way while the gate is shut.
+// auto gain on, muted, published once, and muted again straight after
+// publishing, as conch-voice.md section 3 does: the SDK enables a track when it
+// publishes it, and again when it republishes after a long interruption, so the
+// track is muted after each unless the gate is open. The client counts as
+// connected only after that mute. A remote unmute (LiveKit's room API can ask
+// for one) is undone the same way while the gate is shut. The mute before
+// publishing is so that LiveKit never lists the microphone unmuted at a join
+// (issue #501; publishMicrophone).
 //
 // Leave can come at any point of a connection. Once the adapter is closed,
 // every step that resumes after an await stops, and a microphone or screen
@@ -275,6 +277,14 @@ class LiveKitAdapter implements Room {
     try {
       this.ensureOpen();
       this.track = track;
+      // Muted before it is published, so that LiveKit lists it muted from the
+      // first: published unmuted and muted after, it was listed unmuted for
+      // about 5 ms of every join (measured on the pinned LiveKit), and a pass
+      // of conchd's poller landing there recorded a transmission nobody had
+      // made (issue #501). The mute after publishing stays, as the second
+      // layer.
+      await track.mute();
+      this.ensureOpen();
       const publication = await room.localParticipant.publishTrack(track, { source: Track.Source.Microphone });
       this.ensureOpen();
       this.publication = publication;

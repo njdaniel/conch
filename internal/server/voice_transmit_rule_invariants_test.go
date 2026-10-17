@@ -27,17 +27,18 @@ import (
 type ruleInput int
 
 const (
-	inTalking ruleInput = iota // a pass that sees the microphone transmitting
-	inQuiet                    // a pass that sees the principal, not transmitting
-	inAbsent                   // a pass that does not find the principal
-	inUnread                   // a pass that learns nothing about the principal
-	inStarted                  // a report
-	inStopped                  // a report
-	inRemoved                  // removed by name, or the connection replaced
+	inTalking  ruleInput = iota // a pass that sees the microphone transmitting
+	inQuiet                     // a pass that sees the principal, not transmitting
+	inAbsent                    // a pass that does not find the principal
+	inUnread                    // a pass that learns nothing about the principal
+	inStarted                   // a report
+	inStopped                   // a report
+	inRemoved                   // removed by name
+	inReplaced                  // the connection replaced by a new one of the same identity
 	numRuleInputs
 )
 
-var ruleInputNames = [numRuleInputs]string{"talking", "quiet", "absent", "unread", "started", "stopped", "removed"}
+var ruleInputNames = [numRuleInputs]string{"talking", "quiet", "absent", "unread", "started", "stopped", "removed", "replaced"}
 
 // The two durations of §6, as the design note states them and not as the code
 // names them: the check is of the code against the note.
@@ -52,12 +53,14 @@ type ruleUnderCheck interface {
 	pass(at time.Time, seen map[int64]micObservation, skip map[int64]struct{}) map[int64][]transmitRow
 	report(at time.Time, pid int64, started bool) (transmitRow, uint64, bool)
 	leave(at time.Time, pid int64) []transmitRow
+	replace(at time.Time, pid int64) []transmitRow
 	drop(at time.Time) []transmitRow
 	unsettled() bool
 }
 
 // ruleLook is one look the rule had at the principal: a pass that read them,
-// or their removal, which the rule takes as a look that finds them gone.
+// or their removal or replacement, which the rule takes as a look that finds
+// them gone.
 type ruleLook struct {
 	at           time.Time
 	transmitting bool
@@ -83,6 +86,7 @@ type ruleTally struct {
 	noStopReport  int
 	leftClosed    int
 	oneRowForBoth int // one reason=left row closing both kinds
+	keptReplaced  int // a reported started kept across a replacement
 }
 
 func (a *ruleTally) add(b ruleTally) {
@@ -95,6 +99,7 @@ func (a *ruleTally) add(b ruleTally) {
 	a.noStopReport += b.noStopReport
 	a.leftClosed += b.leftClosed
 	a.oneRowForBoth += b.oneRowForBoth
+	a.keptReplaced += b.keptReplaced
 }
 
 // checkRuleInvariants feeds inputs to rule at the given times, drops it at the
@@ -223,7 +228,13 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 	for i, in := range inputs {
 		at := times[i]
 		var rows []transmitRow
-		isLook := in == inTalking || in == inQuiet || in == inAbsent || in == inRemoved
+		isLook := in == inTalking || in == inQuiet || in == inAbsent || in == inRemoved || in == inReplaced
+		// Issue #501: a connection replaced by a new one of the same identity
+		// has left, but a reported `started` received since the look before
+		// may be the new connection's, and is kept for it. Not when an
+		// unreported transmission is open (one reason=left row closes both),
+		// nor when the 2 s close is already due.
+		kept := in == inReplaced && reported && reportSince && !unreported && at.Sub(quietSince()) < section6NoStop
 		switch in {
 		case inTalking:
 			rows = rule.pass(at, map[int64]micObservation{pid: micTransmitting}, nil)[pid]
@@ -239,10 +250,15 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 			}
 		case inRemoved:
 			rows = rule.leave(at, pid)
+		case inReplaced:
+			rows = rule.replace(at, pid)
 		}
 
 		reportedBefore, unreportedBefore := reported, unreported
-		gone := in == inRemoved || (in == inAbsent && present)
+		gone := in == inRemoved || in == inReplaced || (in == inAbsent && present)
+		if kept && len(rows) > 0 {
+			bad(i, "a replacement that keeps a reported started wrote %d rows", len(rows))
+		}
 		closes, closedUnreported := 0, false
 		for _, r := range rows {
 			all = append(all, r)
@@ -346,8 +362,14 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 			bad(i, "an unreported transmission was closed by an unaccounted pass")
 		}
 		// "When a participant the poller had seen is gone ... every
-		// transmission still open for it ... is closed at once."
-		if gone && (reported || unreported) {
+		// transmission still open for it ... is closed at once." Except the
+		// started a replacement keeps, which it must.
+		switch {
+		case kept && !reported:
+			bad(i, "a reported started received since the look before was not kept across the replacement")
+		case kept:
+			tally.keptReplaced++
+		case gone && (reported || unreported):
 			bad(i, "something is still open after the principal was gone")
 		}
 		// The 2 s close comes on the first pass at or after 2 s that does not
@@ -442,7 +464,7 @@ func everyRuleSequence(maxLen int, visit func(inputs []ruleInput, times []time.T
 		}
 		for in := ruleInput(0); in < numRuleInputs; in++ {
 			step := 400 * time.Millisecond
-			if in == inStarted || in == inStopped || in == inRemoved {
+			if in == inStarted || in == inStopped || in == inRemoved || in == inReplaced {
 				step = 50 * time.Millisecond
 			}
 			inputs[depth], times[depth] = in, now.Add(step)
@@ -453,7 +475,7 @@ func everyRuleSequence(maxLen int, visit func(inputs []ruleInput, times []time.T
 }
 
 // TestTransmitRuleInvariantsExhaustive checks every sequence of up to seven
-// inputs (six with -short): 960,799 of them.
+// inputs (six with -short): 2,396,744 of them.
 func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
 	// Pure computation over the rule, with no server and nothing shared: it
 	// runs alongside the other parallel tests (issue #472).
@@ -495,6 +517,7 @@ func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
 		"a close for want of a stop report":       total.noStopReport,
 		"a close because the principal left":      total.leftClosed,
 		"one left row closing both kinds at once": total.oneRowForBoth,
+		"a started kept across a replacement":     total.keptReplaced,
 	} {
 		if n == 0 {
 			t.Errorf("no sequence reached: %s", name)
@@ -532,7 +555,7 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 			// Mostly passes that see the principal and reports; now and
 			// then an absence, a removal, a pass that reads nothing.
 			in := ruleInput(rng.Intn(int(numRuleInputs)))
-			if (in == inAbsent || in == inUnread || in == inRemoved) && rng.Intn(4) != 0 {
+			if (in == inAbsent || in == inUnread || in == inRemoved || in == inReplaced) && rng.Intn(4) != 0 {
 				in = [...]ruleInput{inTalking, inTalking, inQuiet, inStarted, inStopped}[rng.Intn(5)]
 			}
 			if seq%3 == 0 && rng.Intn(10) != 0 {
@@ -540,7 +563,7 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 			}
 			var step time.Duration
 			switch in {
-			case inStarted, inStopped, inRemoved:
+			case inStarted, inStopped, inRemoved, inReplaced:
 				step = time.Duration(rng.Intn(120)) * time.Millisecond
 			default:
 				step = min(voicePassGapMin+time.Duration(rng.ExpFloat64()*float64(voicePassGapMean)), voicePassGapMax).Truncate(time.Millisecond)
@@ -569,6 +592,7 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 		"a close for want of a stop report":               total.noStopReport,
 		"a close because the principal left":              total.leftClosed,
 		"one left row closing both kinds of transmission": total.oneRowForBoth,
+		"a started kept across a replacement":             total.keptReplaced,
 	} {
 		if n < 20 {
 			t.Errorf("reached only %d times: %s", n, name)
@@ -594,6 +618,10 @@ func (d *doctoredRule) pass(at time.Time, seen map[int64]micObservation, skip ma
 
 func (d *doctoredRule) leave(at time.Time, pid int64) []transmitRow {
 	return d.doctor(at, d.transmitLedger.leave(at, pid))
+}
+
+func (d *doctoredRule) replace(at time.Time, pid int64) []transmitRow {
+	return d.doctor(at, d.transmitLedger.replace(at, pid))
 }
 
 func (d *doctoredRule) drop(at time.Time) []transmitRow {
@@ -690,6 +718,20 @@ func TestRuleInvariantsCheckFindsABrokenRule(t *testing.T) {
 			}
 		})
 	}
+	// The rule as it was before issue #501, which took a replacement for a
+	// removal and so closed the new connection's `started` as left.
+	t.Run("a replacement closes a started the new connection made", func(t *testing.T) {
+		t.Parallel()
+		found := 0
+		everyRuleSequence(6, func(inputs []ruleInput, times []time.Time) {
+			if problems, _ := checkRuleInvariants(&replacedAsRemoved{}, inputs, times); len(problems) > 0 {
+				found++
+			}
+		})
+		if found == 0 {
+			t.Error("the check found nothing wrong with this rule in any sequence of up to six inputs")
+		}
+	})
 	// And undoctored, the same wrapper passes: the wrapper is not what the
 	// check objects to.
 	everyRuleSequence(6, func(inputs []ruleInput, times []time.Time) {
@@ -698,4 +740,12 @@ func TestRuleInvariantsCheckFindsABrokenRule(t *testing.T) {
 			t.Fatalf("the undoctored rule: %s\n  %s", ruleSequenceText(inputs, times), strings.Join(problems, "\n  "))
 		}
 	})
+}
+
+// replacedAsRemoved is the ledger with a replacement handled as a removal by
+// name.
+type replacedAsRemoved struct{ transmitLedger }
+
+func (r *replacedAsRemoved) replace(at time.Time, pid int64) []transmitRow {
+	return r.leave(at, pid)
 }

@@ -268,6 +268,38 @@ func (k *transmitTrack) observe(pid int64, at time.Time, mic micObservation, lef
 	return rows
 }
 
+// replace applies the leaving of a connection that a pass at `at` found
+// replaced by a new connection of the same identity (issue #501). It is a
+// leaving like any other, with one exception: a reported `started` that was
+// received since the previous pass is kept for the new connection.
+//
+// The previous pass saw the old connection, so the replacement came after it,
+// and so did any report the new connection made. Such a report cannot be told
+// from one the old connection made in the same gap: both name only the
+// principal. Closing it would close the new connection's press as `left` and
+// leave its microphone, once it opens, looking unreported. Keeping it costs
+// nothing in truth: the reported state is the principal's, the new connection
+// is the principal's, and a `started` the old connection made and nobody
+// follows up is closed by the 2 s rule like any other.
+//
+// The exception does not apply, and the old connection's leaving closes the
+// `started` as before, when an unreported transmission is open (the one
+// reason=left row then closes both kinds, as a reader of the log expects) or
+// when the 2 s rule is already due (that `started` is stale either way). With
+// the exception, the leaving writes nothing: there is nothing open to close,
+// and a pending lone pass is excused, since a report changed the state after
+// it and this look sees no transmission.
+func (k *transmitTrack) replace(pid int64, at time.Time) []transmitRow {
+	if !k.reported || !k.changedSincePass || k.open || at.Sub(k.quietFrom) >= voiceNoStopReportAfter {
+		return k.observe(pid, at, micAbsent, true)
+	}
+	// The old connection leaves; the reported state is not its to close.
+	k.reported = false
+	rows := k.observe(pid, at, micAbsent, true)
+	k.reported = true
+	return rows
+}
+
 // excused judges the lone unaccounted pass that is pending, given what the
 // pass after it saw. §6: it is excused when a report was received after the
 // pass before it and before the pass after it, and either one of those two
@@ -321,11 +353,17 @@ type transmitLedger struct {
 func (l *transmitLedger) observe(k *transmitTrack, pid int64, at time.Time, mic micObservation, left bool) []transmitRow {
 	was := k.reported
 	rows := k.observe(pid, at, mic, left)
+	l.number(k, was)
+	return rows
+}
+
+// number gives k's reported state the next change number if it is no longer
+// was.
+func (l *transmitLedger) number(k *transmitTrack, was bool) {
 	if k.reported != was {
 		l.changes++
 		k.change = l.changes
 	}
-	return rows
 }
 
 func (l *transmitLedger) track(pid int64) *transmitTrack {
@@ -407,13 +445,28 @@ func (l *transmitLedger) pass(at time.Time, seen map[int64]micObservation, skip 
 }
 
 // leave closes at `at` whatever is open for pid, with reason=left: pid was
-// removed by name, or its connection was replaced by another.
+// removed by name.
 func (l *transmitLedger) leave(at time.Time, pid int64) []transmitRow {
 	k := l.tracks[pid]
 	if k == nil {
 		return nil
 	}
 	return l.observe(k, pid, at, micAbsent, true)
+}
+
+// replace is leave for a connection that a pass found replaced by a new one of
+// the same identity: what the old connection had open is closed with
+// reason=left, except a reported `started` received since the previous pass,
+// which the new connection keeps (transmitTrack.replace).
+func (l *transmitLedger) replace(at time.Time, pid int64) []transmitRow {
+	k := l.tracks[pid]
+	if k == nil {
+		return nil
+	}
+	was := k.reported
+	rows := k.replace(pid, at)
+	l.number(k, was)
+	return rows
 }
 
 // drop closes at `at` whatever is open for anyone, with reason=left, and
