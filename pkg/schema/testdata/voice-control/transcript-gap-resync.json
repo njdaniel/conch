@@ -1,0 +1,192 @@
+{
+  "description": "Events 6 to 8 were dropped while the owner was not reading. The owner sees the gap in seq and asks for a snapshot.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1"
+        ],
+        "helper_version": "0.1.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "unknown"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 9,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "get_state",
+        "id": 2
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 10,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 11,
+        "id": 2,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 12,
+        "phase": "stopping",
+        "reason": "owner_lost",
+        "capture": "on",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 13,
+        "phase": "stopped",
+        "reason": "owner_lost",
+        "capture": "off",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}

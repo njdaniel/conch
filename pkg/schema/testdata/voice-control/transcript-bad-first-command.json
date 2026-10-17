@@ -1,0 +1,59 @@
+{
+  "description": "The first command is not a start. The helper reports the protocol error and fails before opening any device.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1"
+        ],
+        "helper_version": "0.1.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "set_mute",
+        "id": 1,
+        "muted": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "protocol_error",
+        "seq": 2,
+        "code": "not_started"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 3,
+        "phase": "failed",
+        "reason": "protocol_error",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "unknown"
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 1
+    }
+  ]
+}

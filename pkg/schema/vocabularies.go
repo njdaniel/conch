@@ -69,6 +69,48 @@ var Vocabularies = map[string][]string{
 		SessionStatusWaiting, SessionStatusFailed, SessionStatusStale, SessionStatusOffline,
 	),
 	"TradeSide": values(TradeSideBuy, TradeSideSell),
+	"VoiceControlBlock": values(
+		VoiceControlBlockNotConnected, VoiceControlBlockNoPublishGrant, VoiceControlBlockNoMicrophone,
+		VoiceControlBlockDeafened, VoiceControlBlockMuted, VoiceControlBlockKeyDeviceLost,
+		VoiceControlBlockMaxTransmit,
+	),
+	"VoiceControlCapture": values(VoiceControlCaptureOff, VoiceControlCaptureOn, VoiceControlCaptureUnavailable),
+	"VoiceControlCommandKind": values(
+		VoiceControlCommandStart, VoiceControlCommandSetMute, VoiceControlCommandSetDeafen,
+		VoiceControlCommandGetState, VoiceControlCommandLeave,
+	),
+	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
+	"VoiceControlErrorCode": values(
+		VoiceControlErrorTooLong, VoiceControlErrorMalformed, VoiceControlErrorUnknownSchema,
+		VoiceControlErrorUnknownKind, VoiceControlErrorInvalid, VoiceControlErrorIDNotIncreasing,
+		VoiceControlErrorNotStarted, VoiceControlErrorAlreadyStarted, VoiceControlErrorStopping,
+	),
+	"VoiceControlEventKind": values(
+		VoiceControlEventHello, VoiceControlEventAck, VoiceControlEventState, VoiceControlEventProtocolError,
+	),
+	"VoiceControlPhase": values(
+		VoiceControlPhaseStarting, VoiceControlPhaseConnecting, VoiceControlPhaseConnected,
+		VoiceControlPhaseReconnecting, VoiceControlPhaseStopping, VoiceControlPhaseStopped,
+		VoiceControlPhaseFailed,
+	),
+	"VoiceControlPTT": values(
+		VoiceControlPTTUnknown, VoiceControlPTTReady, VoiceControlPTTNotConfigured, VoiceControlPTTUnavailable, VoiceControlPTTLost,
+	),
+	"VoiceControlPTTProblem": values(
+		VoiceControlPTTProblemCannotOpen, VoiceControlPTTProblemRefused, VoiceControlPTTProblemReadFailed,
+		VoiceControlPTTProblemEnded, VoiceControlPTTProblemPartialRecord,
+	),
+	"VoiceControlReason": values(
+		VoiceControlReasonRoomDeleted, VoiceControlReasonParticipantRemoved, VoiceControlReasonConnectionLost,
+		VoiceControlReasonReconnectTimedOut, VoiceControlReasonConnectFailed, VoiceControlReasonServerUnreachable,
+		VoiceControlReasonVoiceUnavailable, VoiceControlReasonNoSession, VoiceControlReasonServerShutdown,
+		VoiceControlReasonLeft, VoiceControlReasonOwnerLost, VoiceControlReasonSignal,
+		VoiceControlReasonNotSignedIn, VoiceControlReasonIdentityMismatch, VoiceControlReasonBadEnvironment,
+		VoiceControlReasonBadConfig, VoiceControlReasonVoiceRequiresAuth, VoiceControlReasonNotAPerson,
+		VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
+		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
+		VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
+	),
 	"VoiceShareEndReason": values(
 		VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft,
 		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,

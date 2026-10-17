@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "set_mute",
+  "id": 2,
+  "muted": true
+}

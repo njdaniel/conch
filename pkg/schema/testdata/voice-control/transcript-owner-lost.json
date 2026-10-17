@@ -1,0 +1,153 @@
+{
+  "description": "The owner dies while the user holds the talk key: standard input ends. The gate shuts at once, capture stops and the helper exits, although the key device is still being read.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1"
+        ],
+        "helper_version": "0.1.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "unknown"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 6,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": true,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 7,
+        "phase": "stopping",
+        "reason": "owner_lost",
+        "capture": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 8,
+        "phase": "stopped",
+        "reason": "owner_lost",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "state",
+  "seq": 4,
+  "phase": "failed",
+  "reason": "identity_mismatch",
+  "capture": "off",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected",
+    "no_publish_grant",
+    "no_microphone"
+  ],
+  "ptt": "unknown"
+}
