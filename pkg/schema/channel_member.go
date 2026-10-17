@@ -1,9 +1,16 @@
 package schema
 
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
 // Channel membership wire shapes (issue #90, ADR-003). A member is a
 // principal on a channel's explicit member list. These shapes are additive and
 // carry no schema-name field: they are REST bodies, versioned by the V1 type
-// suffix.
+// suffix. ChannelMembersV1 is the exception: it travels on the events socket,
+// where every frame says what it is.
 
 // ChannelMemberV1 is one entry of a channel's member list. AddedBy is the
 // principal who added the member; it is omitted when unknown (memberships
@@ -29,6 +36,67 @@ type ChannelMemberV1 struct {
 // Members is always a JSON array, ordered by principal_id.
 type ListChannelMembersResponseV1 struct {
 	Members []ChannelMemberV1 `json:"members"`
+}
+
+// ChannelMembersSchemaV1 is the versioned name identifying the v1 members
+// document: a channel's whole member list, as the events socket sends it.
+const ChannelMembersSchemaV1 = "conch.channel_members.v1"
+
+// ChannelMembersV1 is a channel's member list as one reader may see it: the
+// entries GET /v1/channels/{channel}/members answers that reader with. The
+// events socket sends it when the list changes while the socket is open: a
+// member added or removed, hidden or renamed (issue #515). Like the roster it
+// is the whole state, not a delta, so a reader that misses one loses nothing.
+// Members is always a JSON array, ordered by principal_id.
+type ChannelMembersV1 struct {
+	// Schema is the document discriminator; always ChannelMembersSchemaV1.
+	Schema string `json:"schema"`
+	// ChannelID references the channel the list describes, by id as the
+	// roster names its channel.
+	ChannelID int64 `json:"channel_id"`
+	// Members lists every member of the channel.
+	Members []ChannelMemberV1 `json:"members"`
+}
+
+// Validate reports whether the document is structurally well-formed: the v1
+// schema name, a positive channel_id, a members list that is a list (empty is
+// fine, null is not), and every member listed once, with a positive
+// principal_id, a created_at, a name and a known kind. The server always fills
+// the name and kind, so this document requires them where the older REST
+// body does not. An agent never carries can_decide. Order is not checked.
+func (d ChannelMembersV1) Validate() error {
+	if d.Schema != ChannelMembersSchemaV1 {
+		return fmt.Errorf("schema: channel members schema must be %q, got %q", ChannelMembersSchemaV1, d.Schema)
+	}
+	if d.ChannelID <= 0 {
+		return fmt.Errorf("schema: channel members channel_id must be positive, got %d", d.ChannelID)
+	}
+	if d.Members == nil {
+		return errors.New("schema: channel members members must be a list")
+	}
+	seen := make(map[int64]struct{}, len(d.Members))
+	for _, m := range d.Members {
+		if m.PrincipalID <= 0 {
+			return fmt.Errorf("schema: channel member principal_id must be positive, got %d", m.PrincipalID)
+		}
+		if _, dup := seen[m.PrincipalID]; dup {
+			return fmt.Errorf("schema: channel members lists principal %d more than once", m.PrincipalID)
+		}
+		seen[m.PrincipalID] = struct{}{}
+		if m.CreatedAt.IsZero() {
+			return fmt.Errorf("schema: channel member %d created_at is required", m.PrincipalID)
+		}
+		if strings.TrimSpace(m.Name) == "" {
+			return fmt.Errorf("schema: channel member %d name is required", m.PrincipalID)
+		}
+		if m.Kind != PrincipalHuman && m.Kind != PrincipalAgent {
+			return fmt.Errorf("schema: channel member %d kind %q is not one of human, agent", m.PrincipalID, m.Kind)
+		}
+		if m.Kind == PrincipalAgent && m.CanDecide != nil {
+			return fmt.Errorf("schema: channel member %d is an agent and must not carry can_decide", m.PrincipalID)
+		}
+	}
+	return nil
 }
 
 // PutChannelMemberRequestV1 is the optional body of PUT

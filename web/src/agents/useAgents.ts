@@ -214,17 +214,24 @@ export function useAgents({
 
   // The members list: where each principal comes from. It is read again when
   // the socket comes back and when the roster names someone it does not hold.
+  // In between, the socket sends the whole list each time it changes (someone
+  // removed, hidden or renamed, #515), so the panel never has to ask.
   const [membersAttempt, setMembersAttempt] = useState(0);
+  // Counts the lists the socket has sent; a read asked before the latest one
+  // may be older than it, and is dropped.
+  const membersSent = useRef(0);
   useEffect(() => {
     setMembers([]);
   }, [channel]);
   useEffect(() => {
     if (channel === null) return;
     let live = true;
+    const asked = membersSent.current;
     void api.listMembers(channel).then((result) => {
       if (!live) return;
-      if (result.ok) setMembers(result.value);
-      else if (result.failure === 'unauthorized') onUnauthorized();
+      if (result.ok) {
+        if (asked === membersSent.current) setMembers(result.value);
+      } else if (result.failure === 'unauthorized') onUnauthorized();
     });
     return () => {
       live = false;
@@ -322,6 +329,11 @@ export function useAgents({
             denials = firstDelay;
             healthy();
             dispatch({ type: 'roster', channelId: id, sessions: frame.roster.sessions });
+            break;
+          case 'members':
+            if (frame.members.channel_id !== id) return;
+            membersSent.current++;
+            setMembers(frame.members.members);
             break;
           case 'run':
             dispatch({ type: 'run', run: frame.run });

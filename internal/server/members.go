@@ -118,18 +118,29 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	resp := schema.ListChannelMembersResponseV1{Members: make([]schema.ChannelMemberV1, 0, len(members))}
-	// Who holds the right to decide approvals is shown to operators, and to
-	// each member about themselves: listing every approver to every member
-	// would tell someone whom to press for a decision (issue #450).
 	caller, authed := callerFrom(ctx)
-	seesRight := func(id int64) bool { return !authed || isOperator(caller) || caller.ID == id }
+	var viewer *store.Principal
+	if authed {
+		viewer = &caller
+	}
+	writeJSON(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: memberDocs(members, viewer)})
+}
+
+// memberDocs is a channel's member list as viewer sees it, nil for a caller
+// with authentication off. The REST list and the events socket's members
+// document (issue #515) both come from it, so neither shows more than the
+// other. Who holds the right to decide approvals is shown to operators, and
+// to each member about themselves: listing every approver to every member
+// would tell someone whom to press for a decision (issue #450).
+func memberDocs(members []store.ChannelMember, viewer *store.Principal) []schema.ChannelMemberV1 {
+	seesRight := func(id int64) bool { return viewer == nil || isOperator(*viewer) || viewer.ID == id }
+	docs := make([]schema.ChannelMemberV1, 0, len(members))
 	for _, m := range members {
 		var canDecide *bool
 		if seesRight(m.PrincipalID) {
 			canDecide = canDecideField(m)
 		}
-		resp.Members = append(resp.Members, schema.ChannelMemberV1{
+		docs = append(docs, schema.ChannelMemberV1{
 			PrincipalID: m.PrincipalID,
 			AddedBy:     m.AddedBy,
 			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
@@ -138,7 +149,7 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 			CanDecide:   canDecide,
 		})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return docs
 }
 
 // handlePutChannelMember serves PUT /v1/channels/{channel}/members/{principal_id}
@@ -204,7 +215,7 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	// subscription outlives the principal's membership.
 	s.hub.DropPrincipal(channel.ID, principalID)
 	// The events sockets: theirs close, and the rest are told the roster
-	// lost them (events_ws.go).
+	// and the member list lost them (events_ws.go).
 	s.events.dropPrincipal(channel.ID, principalID)
 	s.events.notifyChannelRoster(channel.ID)
 	// Voice: close their presence sockets and remove them from the channel's

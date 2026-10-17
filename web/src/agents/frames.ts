@@ -3,12 +3,14 @@
 // page looks at it; a frame of a schema this client does not know is skipped
 // (a newer server may send more), and so is one that does not validate.
 import { activitySchema, agentActivityV1, type AgentActivityV1 } from '../schema/activity';
+import { channelMembersSchema, channelMembersV1, type ChannelMembersV1 } from '../schema/channel';
 import { interventionSchema, interventionV1, type InterventionV1 } from '../schema/intervention';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
 
 export type EventFrame =
   | { readonly kind: 'roster'; readonly roster: SessionRosterV1 }
+  | { readonly kind: 'members'; readonly members: ChannelMembersV1 }
   | { readonly kind: 'run'; readonly run: RunV1 }
   | { readonly kind: 'activity'; readonly entry: AgentActivityV1 }
   | { readonly kind: 'intervention'; readonly intervention: InterventionV1 };
@@ -25,6 +27,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
   switch ((doc as { schema?: unknown }).schema) {
     case sessionRosterSchema:
       return sessionRosterV1(doc).length === 0 ? { kind: 'roster', roster: doc as SessionRosterV1 } : null;
+    case channelMembersSchema:
+      return channelMembersV1(doc).length === 0 ? { kind: 'members', members: doc as ChannelMembersV1 } : null;
     case runSchema:
       return runV1(doc).length === 0 ? { kind: 'run', run: doc as RunV1 } : null;
     case activitySchema:

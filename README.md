@@ -163,6 +163,23 @@ help people and agents know when to speak, whom they are addressing, and who can
 
 Every command below has been run against real `bin/conchd`/`bin/conch` builds. Paths and IDs are examples — substitute your own.
 
+### The whole stack in one command
+
+To try the web client with voice and screen share on your own machine, `scripts/dev-stack.sh` does the steps below for you. It needs Go, Docker, and the Node in `web/.nvmrc` for the first build.
+
+```sh
+scripts/dev-stack.sh up       # build what is missing; start LiveKit (Docker) and conchd; make an operator and a channel
+scripts/dev-stack.sh token    # the operator credential, to paste at http://127.0.0.1:28080/app/
+scripts/dev-stack.sh invite   # a link for a second person: open it in a private window
+scripts/dev-stack.sh viewers 29 --fake-sharer   # optional load: simulated participants for 10 minutes
+scripts/dev-stack.sh stats    # LiveKit's and conchd's CPU and memory, and who is in voice
+scripts/dev-stack.sh down     # stop both; down --wipe also deletes the state
+```
+
+- It runs the same pinned LiveKit image as `e2e/voice`, limited by default to 2 CPUs and 4 GB, the alpha droplet's starting size, so what you see compares with it. `viewers` runs `scripts/alpha-loadtest.sh` on the other CPUs.
+- `conchd` and LiveKit's signalling port listen on `127.0.0.1`. LiveKit's media ports listen on every interface, as described in [Run LiveKit beside `conchd`](#run-livekit-beside-conchd).
+- The state (database, operator credential, LiveKit's key) is kept in `~/.cache/conch-dev`, never in the checkout. The script stops only what it started. `--help` lists the ports, CPUs and other settings you can change through the environment.
+
 ### 1. Build
 
 ```sh

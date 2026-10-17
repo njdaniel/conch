@@ -52,6 +52,7 @@ var TSTypes = []TSType{
 	{Value: ListChannelsResponse{}, Family: "list-channels-response"},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
+	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
 
 	// Messages, and the ticket that opens the socket that streams them.
 	{Value: Payload{}},
