@@ -25,9 +25,10 @@ const (
 	wsWriteTimeout = 5 * time.Second
 	// defaultCredentialRecheckInterval is how often an authenticated socket
 	// re-checks the credential it connected with (issue #101). It bounds how
-	// long a socket outlives the revocation or expiry of that one credential;
-	// disabling a principal or revoking all its credentials closes sockets
-	// immediately through the hub and does not wait for this.
+	// long a socket outlives the expiry of that credential; revoking it
+	// (issue #519), revoking all the principal's credentials or disabling the
+	// principal closes sockets immediately through the hubs and does not wait
+	// for this.
 	defaultCredentialRecheckInterval = 30 * time.Second
 	// wsRecheckTimeout bounds one liveness read so a stuck store cannot pin
 	// the stream loop.
@@ -140,25 +141,28 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	if caller, ok := callerFrom(ctx); ok {
 		principalID = caller.ID
 	}
+	// The credential is the subscription's too, so that revoking that one
+	// credential closes it at once (DropCredential, issue #519).
+	credID, hasCred := credentialIDFrom(ctx)
 	var sub0 *hub.Subscription
 	var sub1 *hub.SubscriptionV1
 	var sub2 *hub.SubscriptionV2
 	switch version {
 	case apiV2:
-		sub2 = s.hub.SubscribeV2(channel.ID, principalID, wsSendBuffer)
+		sub2 = s.hub.SubscribeV2(channel.ID, principalID, credID, wsSendBuffer)
 		defer sub2.Cancel()
 	case apiV1:
-		sub1 = s.hub.SubscribeV1(channel.ID, principalID, wsSendBuffer)
+		sub1 = s.hub.SubscribeV1(channel.ID, principalID, credID, wsSendBuffer)
 		defer sub1.Cancel()
 	default:
-		sub0 = s.hub.Subscribe(channel.ID, principalID, wsSendBuffer)
+		sub0 = s.hub.Subscribe(channel.ID, principalID, credID, wsSendBuffer)
 		defer sub0.Cancel()
 	}
 	// Same ordering argument for the credential: a disable that committed
 	// after the middleware resolved the token but before this subscription
-	// registered would have run DropPrincipalAll past it. Re-checking now,
-	// after subscribing, closes that window. The failure is the standard 401.
-	credID, hasCred := credentialIDFrom(ctx)
+	// registered would have run DropPrincipalAll past it, and a revoke of
+	// the credential DropCredential. Re-checking now, after subscribing,
+	// closes that window. The failure is the standard 401.
 	if hasCred {
 		live, err := s.store.CredentialLive(ctx, credID)
 		if err != nil {
