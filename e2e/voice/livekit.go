@@ -329,7 +329,14 @@ type relay struct {
 	srv      *http.Server
 	ln       net.Listener
 	upstream string // host:port of LiveKit
+	secure   bool   // LiveKit is reached over TLS (wss and https), as on a deployment
 	token    string // the token conchd issued
+	// mint, when set, stands in for token: each request the client makes is
+	// admitted on the token mint returns for the one the client presented.
+	// The load test (loadtest.go) uses it to admit every participant that
+	// lk load-test starts, through one relay, each on a token conchd issued
+	// to a principal of its own.
+	mint func(ctx context.Context, clientToken string) (string, error)
 	// filter, when set, sees every frame the client sends LiveKit before
 	// LiveKit does, and returns what is sent instead. It may block, which
 	// holds back that frame and every one after it. The screen-share
@@ -351,28 +358,47 @@ func (r *relay) issuedTokens() []string {
 // startRelay starts a relay that admits its client on conchdToken alone.
 // filter is nil for a relay that passes the client's frames on unchanged.
 func startRelay(upstreamHostPort, conchdToken string, filter func(context.Context, []byte) []byte) (*relay, error) {
+	return serveRelay(&relay{upstream: upstreamHostPort, token: conchdToken, filter: filter})
+}
+
+// relayTokenKey carries the token the relay chose for a plain HTTP request
+// to the reverse proxy's Rewrite.
+type relayTokenKey struct{}
+
+// serveRelay starts r on a loopback port of its own.
+func serveRelay(r *relay) (*relay, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	r := &relay{ln: ln, upstream: upstreamHostPort, token: conchdToken, filter: filter}
+	r.ln = ln
 	rp := &httputil.ReverseProxy{
 		// lk retries after LiveKit stops; that is expected, not output.
 		ErrorLog: log.New(io.Discard, "", 0),
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Scheme = r.scheme("http")
 			pr.Out.URL.Host = r.upstream
 			pr.Out.Host = r.upstream
-			r.swap(pr.Out.URL, pr.Out.Header)
+			token, _ := pr.In.Context().Value(relayTokenKey{}).(string)
+			r.swap(pr.Out.URL, pr.Out.Header, token)
 		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		token := r.token
+		if r.mint != nil {
+			var err error
+			if token, err = r.mint(req.Context(), clientToken(req)); err != nil {
+				// The error says what went wrong; it never carries a token.
+				http.Error(w, "relay: "+err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+		}
 		if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-			r.serveSocket(w, req)
+			r.serveSocket(w, req, token)
 			return
 		}
-		rp.ServeHTTP(w, req)
+		rp.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), relayTokenKey{}, token)))
 	})
 	r.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() { _ = r.srv.Serve(ln) }()
@@ -381,27 +407,48 @@ func startRelay(upstreamHostPort, conchdToken string, filter func(context.Contex
 
 func (r *relay) url() string { return "ws://" + r.ln.Addr().String() }
 
+// scheme is the upstream scheme for plain, "http" or "ws": its TLS form when
+// LiveKit is reached over TLS.
+func (r *relay) scheme(plain string) string {
+	if r.secure {
+		return plain + "s"
+	}
+	return plain
+}
+
+// clientToken is the token the client presented, in the query or the
+// Authorization header, where LiveKit reads it; "" when there is none.
+func clientToken(req *http.Request) string {
+	if t := req.URL.Query().Get("access_token"); t != "" {
+		return t
+	}
+	if t, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer "); ok {
+		return t
+	}
+	return ""
+}
+
 // swap puts conchd's token where the client put its own.
-func (r *relay) swap(u *url.URL, h http.Header) {
+func (r *relay) swap(u *url.URL, h http.Header, token string) {
 	q := u.Query()
 	if q.Has("access_token") {
-		q.Set("access_token", r.token)
+		q.Set("access_token", token)
 		u.RawQuery = q.Encode()
 	}
 	if h.Get("Authorization") != "" {
-		h.Set("Authorization", "Bearer "+r.token)
+		h.Set("Authorization", "Bearer "+token)
 	}
 }
 
-func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request) {
+func (r *relay) serveSocket(w http.ResponseWriter, req *http.Request, token string) {
 	out := req.URL
 	hdr := http.Header{}
 	if a := req.Header.Get("Authorization"); a != "" {
 		hdr.Set("Authorization", a)
 	}
 	u := *out
-	u.Scheme, u.Host = "ws", r.upstream
-	r.swap(&u, hdr)
+	u.Scheme, u.Host = r.scheme("ws"), r.upstream
+	r.swap(&u, hdr, token)
 	up, resp, err := websocket.Dial(req.Context(), u.String(), &websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
 		status := http.StatusBadGateway
