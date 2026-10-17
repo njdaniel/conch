@@ -1,0 +1,14 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "state",
+  "seq": 8,
+  "phase": "reconnecting",
+  "capture": "on",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected"
+  ],
+  "ptt": "ready"
+}

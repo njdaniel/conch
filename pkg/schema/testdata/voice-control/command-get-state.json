@@ -1,0 +1,5 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "get_state",
+  "id": 4
+}

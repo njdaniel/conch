@@ -1,0 +1,11 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "start",
+  "id": 1,
+  "server": "http://127.0.0.1:8080",
+  "channel": "ops",
+  "principal_id": 12,
+  "credential": "env",
+  "muted": true,
+  "deafened": false
+}
