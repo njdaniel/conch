@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -26,9 +27,56 @@ func newTestServer(t *testing.T) *Server {
 // second operator (issue #438).
 var testDBPaths sync.Map // *Server -> string
 
+// migratedDB is the file of a database with every migration applied, made
+// once per test binary. Migrating a fresh database takes about a third of a
+// second under -race, and the package builds about a thousand test servers;
+// each starts from a copy of this file instead (issue #472). store.Open still
+// runs on the copy, permission checks and version check included; the
+// migrations themselves are tested in the store package.
+var migratedDB struct {
+	once sync.Once
+	data []byte
+	err  error
+}
+
+// newTestDBPath returns the path of a database, in a fresh temporary
+// directory, that is already migrated to the current schema version.
+func newTestDBPath(t *testing.T) string {
+	t.Helper()
+	migratedDB.once.Do(func() {
+		dir, err := os.MkdirTemp("", "conch-server-test-")
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		path := filepath.Join(dir, "conch.db")
+		st, err := store.Open(context.Background(), path)
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		// Closing the last connection checkpoints the write-ahead log into
+		// the file, so the file alone is the whole database.
+		if err := st.Close(); err != nil {
+			migratedDB.err = err
+			return
+		}
+		migratedDB.data, migratedDB.err = os.ReadFile(path) // #nosec G304 -- a file this helper just made in its own temporary directory
+	})
+	if migratedDB.err != nil {
+		t.Fatalf("make the migrated test database: %v", migratedDB.err)
+	}
+	path := filepath.Join(t.TempDir(), "conch.db")
+	if err := os.WriteFile(path, migratedDB.data, 0o600); err != nil {
+		t.Fatalf("copy the migrated test database: %v", err)
+	}
+	return path
+}
+
 func newTestServerWithConfig(t *testing.T, cfg Config) *Server {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "conch.db")
+	path := newTestDBPath(t)
 	st, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -137,7 +185,7 @@ func TestHealthzVoiceOutage(t *testing.T) {
 }
 
 func TestHealthzDegradedWhenStoreClosed(t *testing.T) {
-	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	st, err := store.Open(context.Background(), newTestDBPath(t))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
