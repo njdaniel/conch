@@ -1165,6 +1165,34 @@ export const revokeAllCredentialsResponseV1 = object<RevokeAllCredentialsRespons
   revoked: int,
 });
 
+// schema.OwnCredentialV1
+export interface OwnCredentialV1 {
+  id: number;
+  label: string;
+  created_at: string;
+  expires_at?: string;
+  renews?: boolean;
+  current?: boolean;
+}
+
+export const ownCredentialV1 = object<OwnCredentialV1>({
+  id: int,
+  label: str,
+  created_at: timestamp,
+  expires_at: optional(timestamp),
+  renews: optional(bool),
+  current: optional(bool),
+});
+
+// schema.ListOwnCredentialsResponseV1
+export interface ListOwnCredentialsResponseV1 {
+  credentials: OwnCredentialV1[];
+}
+
+export const listOwnCredentialsResponseV1 = object<ListOwnCredentialsResponseV1>({
+  credentials: array(ownCredentialV1),
+});
+
 // schema.CreatePrincipalRequest
 export interface CreatePrincipalRequest {
   kind: PrincipalKind;

@@ -111,6 +111,13 @@ func (s *Server) routeTable() []route {
 		// request came with. More specific than the route above, so the mux
 		// never hands "current" to it as an id.
 		rt("DELETE /v1/credentials/current", accessAuthenticated, hf(s.handleRevokeCurrentCredential)),
+		// Your sign-ins (issue #496): the caller lists its own live
+		// credentials and ends any one of them by id; another's id is 404,
+		// as one never issued (checked in the store). There is no GET of one
+		// credential, and ending one has a segment more than the operator's
+		// revoke above, so neither route meets another in the mux.
+		rt("GET /v1/credentials/mine", accessAuthenticated, hf(s.handleListOwnCredentials)),
+		rt("DELETE /v1/credentials/mine/{id}", accessAuthenticated, hf(s.handleRevokeOwnCredential)),
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
 		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),

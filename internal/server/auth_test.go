@@ -235,6 +235,12 @@ var routeExpectations = map[string]routeExpectation{
 	// The fixture's operator holds the only operator credential: 409. AuthOff
 	// has no credential to revoke: 401, as whoami.
 	"DELETE /v1/credentials/current": {classAuth, "/v1/credentials/current", "", 409},
+	// Your sign-ins (issue #496): any caller lists its own, and ending one
+	// names a credential that does not exist, so it changes and audits
+	// nothing. AuthOff has no caller whose they could be: 401 on both, as
+	// whoami (special-cased below).
+	"GET /v1/credentials/mine":         {classAuth, "/v1/credentials/mine", "", 200},
+	"DELETE /v1/credentials/mine/{id}": {classAuth, "/v1/credentials/mine/9999", "", 404},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
@@ -490,8 +496,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 			exp := routeExpectations[rt.pattern]
 			t.Run(fmt.Sprintf("%q/%s", mode, rt.pattern), func(t *testing.T) {
 				want := exp.allowed
-				if rt.pattern == "GET /v1/whoami" || rt.pattern == "DELETE /v1/credentials/current" {
-					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to revoke
+				if rt.pattern == "GET /v1/whoami" || rt.pattern == "DELETE /v1/credentials/current" ||
+					rt.pattern == "GET /v1/credentials/mine" || rt.pattern == "DELETE /v1/credentials/mine/{id}" {
+					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to list or revoke
 				}
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
