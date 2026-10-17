@@ -7,7 +7,10 @@
 //
 // A share carries on when the room is renewed under it (issue #516): another
 // member disabled renews the room, and the sharer's page claims the share
-// again and publishes the same capture in the new one, with no picker.
+// again and publishes the same capture in the new one, with no picker. It
+// does so with LiveKit's signal reaching the sharer late (issue #525), the
+// order a slow CI runner gave: conchd's answer to the claim is read before
+// LiveKit tells the page of the grant.
 //
 // What this cannot try: a real system's sound, macOS, Windows, Firefox,
 // Safari, iOS and Android. Those cells of the plan's section 2 are for a
@@ -55,6 +58,33 @@ const instrument = () => {
     return user(constraints);
   };
 };
+
+// A switch for LiveKit's signal to a page: once on, every socket the page
+// opens to LiveKit from then gets its frames from the server 500 ms late, in
+// order. Installed before the page loads: a route reaches only the sockets
+// made after it.
+interface LateSignal {
+  on: boolean;
+}
+
+async function routeSignal(page: Page, late: LateSignal): Promise<void> {
+  await page.routeWebSocket(/\/rtc/, (ws) => {
+    const server = ws.connectToServer();
+    const slow = late.on;
+    ws.onMessage((m) => {
+      server.send(m);
+    });
+    server.onMessage((m) => {
+      if (slow) {
+        setTimeout(() => {
+          ws.send(m);
+        }, 500);
+      } else {
+        ws.send(m);
+      }
+    });
+  });
+}
 
 interface Inbound {
   readonly frames: number;
@@ -115,11 +145,12 @@ test.describe('screen share with LiveKit', () => {
     readonly close: () => Promise<void>;
   }
 
-  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions): Promise<Someone> {
+  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal): Promise<Someone> {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     const watch = watchPage(page, vw);
     await page.addInitScript(instrument);
+    if (late !== undefined) await routeSignal(page, late);
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await channelButton(page, vw.channel).click();
@@ -281,7 +312,8 @@ test.describe('screen share with LiveKit', () => {
     const before = (await shareRows()).length;
     const dave = await vw.addMember('dave');
     const erin = await vw.addMember('erin');
-    const a = await person(browser, 'alice');
+    const late: LateSignal = { on: false };
+    const a = await person(browser, 'alice', undefined, late);
     const b = await person(browser, 'bob');
     const d = await person(browser, dave);
     const e = await person(browser, erin);
@@ -294,6 +326,9 @@ test.describe('screen share with LiveKit', () => {
 
       // Another member is disabled: the room is renewed, every page
       // reconnects, and the share is back without anyone doing anything.
+      // The sharer hears from the new room's LiveKit late, so the claim's
+      // grant reaches the page after conchd's answer (issue #525).
+      late.on = true;
       await vw.disable(dave);
       await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 30_000 });
       await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
