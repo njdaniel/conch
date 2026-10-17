@@ -1391,18 +1391,19 @@ func (p *voicePoller) snapshotLocked(channelID, viewer int64) schema.VoicePresen
 // slow socket costs the poller nothing, and several changes collapse into one
 // wake-up because the socket reads the whole state, not a delta.
 type voiceSub struct {
-	p           *voicePoller
-	channelID   int64
-	principalID int64
-	wake        chan struct{}
-	dropped     chan struct{}
-	gone        bool // guarded by p.mu
+	p            *voicePoller
+	channelID    int64
+	principalID  int64
+	credentialID int64 // the credential the socket was opened with; 0 for none
+	wake         chan struct{}
+	dropped      chan struct{}
+	gone         bool // guarded by p.mu
 }
 
 // subscribe registers a subscriber. After closeAll it returns one that is
 // already dropped.
-func (p *voicePoller) subscribe(channelID, principalID int64) *voiceSub {
-	sub := &voiceSub{p: p, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{})}
+func (p *voicePoller) subscribe(channelID, principalID, credentialID int64) *voiceSub {
+	sub := &voiceSub{p: p, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{})}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -1464,6 +1465,22 @@ func (p *voicePoller) dropPrincipalAll(principalID int64) {
 	defer p.mu.Unlock()
 	for sub := range p.subs {
 		if sub.principalID == principalID {
+			p.dropLocked(sub)
+		}
+	}
+}
+
+// dropCredential closes the presence subscriptions opened with credentialID,
+// on every channel: that one credential was revoked (issue #519). A zero
+// credential (no caller) matches nothing.
+func (p *voicePoller) dropCredential(credentialID int64) {
+	if credentialID == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for sub := range p.subs {
+		if sub.credentialID == credentialID {
 			p.dropLocked(sub)
 		}
 	}
@@ -1771,9 +1788,11 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, reason)
 }
 
-// voiceCredentialRevoked runs after one credential was revoked or replaced:
-// if a session was issued under it, its room is rotated.
-func (s *Server) voiceCredentialRevoked(ctx context.Context) {
+// voiceCredentialRevoked runs after credentialID was revoked or replaced: its
+// presence sockets close and, if a session was issued under it, its room is
+// rotated.
+func (s *Server) voiceCredentialRevoked(ctx context.Context, credentialID int64) {
+	s.voice.dropCredential(credentialID)
 	if s.lk == nil {
 		return
 	}

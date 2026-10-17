@@ -80,11 +80,11 @@ func TestBroadcastMessageV2AudienceFiltering(t *testing.T) {
 			h := New()
 			v2 := map[int64]*SubscriptionV2{}
 			for p := range tt.want {
-				v2[p] = h.SubscribeV2(1, p, 4)
+				v2[p] = h.SubscribeV2(1, p, 0, 4)
 			}
-			otherChannel := h.SubscribeV2(2, 5, 4)
-			legacy0 := h.Subscribe(1, 5, 4)
-			legacy1 := h.SubscribeV1(1, 5, 4)
+			otherChannel := h.SubscribeV2(2, 5, 0, 4)
+			legacy0 := h.Subscribe(1, 5, 0, 4)
+			legacy1 := h.SubscribeV1(1, 5, 0, 4)
 
 			h.BroadcastMessageV2(context.Background(), tt.msg, tt.recipients)
 
@@ -111,7 +111,7 @@ func TestBroadcastMessageV2AudienceFiltering(t *testing.T) {
 // The recipient list steers delivery and is never part of what is sent.
 func TestBroadcastMessageV2RecipientsNotOnTheWire(t *testing.T) {
 	h := New()
-	sub := h.SubscribeV2(1, 5, 4)
+	sub := h.SubscribeV2(1, 5, 0, 4)
 	msg := scopedMsg(10, &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3})
 	h.BroadcastMessageV2(context.Background(), msg, []int64{5, 4242, 4343})
 	got := <-sub.Messages()
@@ -130,9 +130,9 @@ func TestBroadcastMessageV2RecipientsNotOnTheWire(t *testing.T) {
 // reaches v2 subscriptions as the v2 envelope, so they hear all open traffic.
 func TestBroadcastMessageV1ReachesV2Subscribers(t *testing.T) {
 	h := New()
-	v2 := h.SubscribeV2(1, 5, 4)
-	anon := h.SubscribeV2(1, 0, 4)
-	v1 := h.SubscribeV1(1, 5, 4)
+	v2 := h.SubscribeV2(1, 5, 0, 4)
+	anon := h.SubscribeV2(1, 0, 0, 4)
+	v1 := h.SubscribeV1(1, 5, 0, 4)
 	h.BroadcastMessageV1(context.Background(), schema.MessageV1{Schema: schema.MessageSchemaV1, ID: 9, ChannelID: 1, AuthorID: 1, Body: "open"})
 	for name, sub := range map[string]*SubscriptionV2{"identified": v2, "anonymous": anon} {
 		got, _ := drainV2(sub)
@@ -150,9 +150,9 @@ func TestBroadcastMessageV1ReachesV2Subscribers(t *testing.T) {
 // stop delivery to the others.
 func TestBroadcastMessageV2SlowConsumer(t *testing.T) {
 	h := New()
-	slow := h.SubscribeV2(1, 5, 1)
-	fast := h.SubscribeV2(1, 6, 8)
-	outsider := h.SubscribeV2(1, 7, 1)
+	slow := h.SubscribeV2(1, 5, 0, 1)
+	fast := h.SubscribeV2(1, 6, 0, 8)
+	outsider := h.SubscribeV2(1, 7, 0, 1)
 	net := &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3}
 
 	for id := int64(1); id <= 3; id++ {
@@ -175,10 +175,10 @@ func TestBroadcastMessageV2SlowConsumer(t *testing.T) {
 // like v0 and v1; closing the hub closes them all.
 func TestV2SubscriptionsAreDropped(t *testing.T) {
 	h := New()
-	a := h.SubscribeV2(1, 5, 4)
-	b := h.SubscribeV2(1, 6, 4)
-	c := h.SubscribeV2(2, 5, 4)
-	anon := h.SubscribeV2(1, 0, 4)
+	a := h.SubscribeV2(1, 5, 0, 4)
+	b := h.SubscribeV2(1, 6, 0, 4)
+	c := h.SubscribeV2(2, 5, 0, 4)
+	anon := h.SubscribeV2(1, 0, 0, 4)
 	if n := h.DropPrincipal(1, 5); n != 1 {
 		t.Errorf("DropPrincipal = %d, want 1", n)
 	}
@@ -203,7 +203,7 @@ func TestV2SubscriptionsAreDropped(t *testing.T) {
 	if _, closed := drainV2(b); !closed {
 		t.Error("Close left a v2 subscription open")
 	}
-	late := h.SubscribeV2(1, 5, 4)
+	late := h.SubscribeV2(1, 5, 0, 4)
 	if _, closed := drainV2(late); !closed {
 		t.Error("a v2 subscription taken from a closed hub is open")
 	}
@@ -216,9 +216,9 @@ func TestV2SubscriptionsAreDropped(t *testing.T) {
 // BroadcastMessage, not here.
 func TestBroadcastReplyKeepsThreadRootOnV2(t *testing.T) {
 	h := New()
-	v1 := h.SubscribeV1(1, 7, 4)
-	v2 := h.SubscribeV2(1, 8, 4)
-	v2Other := h.SubscribeV2(2, 8, 4)
+	v1 := h.SubscribeV1(1, 7, 0, 4)
+	v2 := h.SubscribeV2(1, 8, 0, 4)
+	v2Other := h.SubscribeV2(2, 8, 0, 4)
 	reply := schema.MessageV2{Schema: schema.MessageSchemaV2, ID: 5, ChannelID: 1, AuthorID: 1, Body: "re", ThreadRootID: 3}
 	h.BroadcastReply(context.Background(), schema.MessageV1{Schema: schema.MessageSchemaV1, ID: 5, ChannelID: 1, AuthorID: 1, Body: "re"}, reply)
 	if got := drainV1(v1); !equalIDs(got, ids(5)) {

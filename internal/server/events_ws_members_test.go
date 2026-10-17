@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -216,4 +218,30 @@ func TestEventsMemberListSeesOnlyWhatRESTShows(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEventsMemberListBaselineIsReadBeforeTheFirstRoster: a member removed
+// while the first roster is being written still reaches the reader as a
+// members frame (issue #528). The client reads the list over REST once it has
+// that roster, so it may have read it before the removal; the socket must not
+// take the list after the removal as the one the reader already holds.
+func TestEventsMemberListBaselineIsReadBeforeTheFirstRoster(t *testing.T) {
+	f := newRunFixture(t)
+	base := wsTestServer(t, f.srv)
+	var once sync.Once
+	f.srv.eventsBeforeWrite = func() {
+		// The first write is the first roster: the removal commits while it
+		// goes out, through the store, so nothing else owes the reader a
+		// frame for it.
+		once.Do(func() {
+			if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.general.ID, f.rival.ID); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	c := dialEvents(t, base, "/v1/events/ws?channel=general", f.aliceTok)
+	if first := c.next(); first.schema != schema.SessionRosterSchemaV1 {
+		t.Fatalf("first frame = %v, want the roster", first)
+	}
+	c.until("the removal made while the first roster was written", isMembers(membersLack(f.rival.ID)))
 }

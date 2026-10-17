@@ -309,8 +309,8 @@ func TestOperatorCredentialViewUnchanged(t *testing.T) {
 	assertErrorBody(t, f.do(t, "GET", path, f.aliceTok, ""), http.StatusForbidden, "forbidden")
 }
 
-// Ending another sign-in closes the sockets it holds, at the credential
-// re-check, as an operator's revoke does; the caller's own stay open.
+// Ending another sign-in closes the sockets it holds, as an operator's revoke
+// does; the caller's own stay open.
 func TestRevokeOwnCredentialClosesItsSockets(t *testing.T) {
 	f := newMemberFixture(t)
 	f.srv.credRecheckInterval = 25 * time.Millisecond

@@ -90,9 +90,10 @@ func newEventsHub() *eventsHub {
 // eventsSub is one socket's subscription. Everything but the channels is
 // guarded by hub.mu.
 type eventsSub struct {
-	hub         *eventsHub
-	channelID   int64
-	principalID int64
+	hub          *eventsHub
+	channelID    int64
+	principalID  int64
+	credentialID int64 // the credential the socket was opened with
 	// wake has room for one signal: the writer only ever does a non-blocking
 	// send, and the subscriber takes everything queued when it wakes.
 	wake    chan struct{}
@@ -107,8 +108,8 @@ type eventsSub struct {
 // out through flush like every other, so it is sent only after a drop that
 // committed meanwhile has been seen and membership and the manifest have been
 // asked again. After closeAll it returns one that is already dropped.
-func (h *eventsHub) subscribe(channelID, principalID int64) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
+func (h *eventsHub) subscribe(channelID, principalID, credentialID int64) *eventsSub {
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
 	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -267,6 +268,23 @@ func (h *eventsHub) dropPrincipalAll(principalID int64) {
 	}
 }
 
+// dropCredential closes the events sockets opened with credentialID, on
+// every channel: that one credential was revoked (issue #519). The
+// principal's sockets through its other credentials stay. A zero credential
+// matches nothing.
+func (h *eventsHub) dropCredential(credentialID int64) {
+	if credentialID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.credentialID == credentialID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
 // closeAll drops every subscription and refuses new ones: shutdown.
 func (h *eventsHub) closeAll() {
 	h.mu.Lock()
@@ -335,9 +353,10 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe before the last checks: DropPrincipal-style drops close only
-	// what is registered, so a removal or a disable that committed after the
-	// checks above has either been seen below or closes this subscription.
-	sub := s.events.subscribe(channel.ID, caller.ID)
+	// what is registered, so a removal, a disable or a revoke of this
+	// credential that committed after the checks above has either been seen
+	// below or closes this subscription.
+	sub := s.events.subscribe(channel.ID, caller.ID, credID)
 	defer sub.cancel()
 	live, err := s.store.CredentialLive(ctx, credID)
 	if err != nil {
@@ -383,7 +402,8 @@ type eventsStream struct {
 	sessionID   int64  // the session to keep alive; 0 for none
 	lastRoster  []byte // the roster frame last sent
 	// lastMembers is the member list frame last sent, or, before any was,
-	// the list as it stood at the first roster: that one is not sent.
+	// the list as it stood before the first roster was written: that one is
+	// not sent.
 	lastMembers []byte
 	// rosterBuilt is when a roster was last built, for the roster floor;
 	// rosterLater fires when one owed meanwhile may be built, and is nil
@@ -415,6 +435,15 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			}
 		case <-keepAlive:
 			if e.s.keepSessionAlive(ctx, e.sessionID, e.credID) == sessionGone {
+				// A revoke or a disable ends the session too; when its
+				// drop has come, the close says why the credential went,
+				// not that the session did.
+				select {
+				case <-e.sub.dropped:
+					e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+					return
+				default:
+				}
 				// The session ended (DELETE, or the sweeper ending an
 				// expired credential's): nothing is left to keep alive.
 				// Closing tells the client, which reconnects and is
@@ -575,6 +604,16 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
+	// The list this reader is measured against is read before the first
+	// roster goes out (issue #528). The client reads the list over REST once
+	// it has that roster, so a change that commits after the write is one it
+	// may have missed: read afterwards, the baseline would already hold it,
+	// and the change would never be sent.
+	if e.lastMembers == nil {
+		if e.lastMembers, ok = e.membersFrame(ctx, viewer); !ok {
+			return false
+		}
+	}
 	if !bytes.Equal(raw, e.lastRoster) {
 		if !e.write(ctx, raw) {
 			return false
@@ -588,28 +627,34 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 // changed since the last one (issue #515). Everything that changes the list
 // already owes a roster (a member added or removed, hidden or renamed), so the
 // list is rebuilt with each roster, under the same floor; the roster alone
-// would miss a member who had no session. The list as it stood at the first
-// roster is kept but not sent: a client reads the list over REST once the
-// socket is live, as it always has, and learns here only what changed after.
+// would miss a member who had no session. The list as it stood before the
+// first roster was written is kept but not sent (sendRoster): a client reads
+// the list over REST once the socket is live, as it always has, and learns
+// here only what changed after.
 // A channel the change did not touch hears nothing.
 func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) bool {
-	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
-	if err != nil {
-		return e.failed(ctx, "list members", err)
-	}
-	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
-	raw, ok := e.encode(ctx, doc)
+	raw, ok := e.membersFrame(ctx, viewer)
 	if !ok {
 		return false
 	}
 	if bytes.Equal(raw, e.lastMembers) {
 		return true
 	}
-	if e.lastMembers != nil && !e.write(ctx, raw) {
+	if !e.write(ctx, raw) {
 		return false
 	}
 	e.lastMembers = raw
 	return true
+}
+
+// membersFrame is the encoded member list as viewer sees it now.
+func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal) ([]byte, bool) {
+	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
+	if err != nil {
+		return nil, e.failed(ctx, "list members", err)
+	}
+	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
+	return e.encode(ctx, doc)
 }
 
 // sendRef reads the document ref names with this reader's gates and sends it,
@@ -679,6 +724,15 @@ func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool)
 func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 	if hook := e.s.eventsBeforeWrite; hook != nil {
 		hook()
+	}
+	// The last point a drop can stop a frame (issue #519): one that was
+	// being built when a revoke, a disable or a removal dropped the
+	// subscription is not sent, and the socket closes saying why.
+	select {
+	case <-e.sub.dropped:
+		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+		return false
+	default:
 	}
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
