@@ -23,11 +23,25 @@
 //! - **`Reconnecting` is not connected.** The gate is forced shut from that moment until
 //!   `Reconnected`. If that has not come within the grace period (20 s) the loop closes the
 //!   connection itself and goes back to `conchd`.
-//! - **A press unmutes and a release mutes, and neither waits.** The unmute is called
-//!   before the gate is told to open, and the mute when the gate says it has shut, so the
-//!   track is unmuted for the whole of a transmission and for nothing else.
-//! - **Reports never hold up audio.** They are queued, in the order the machine produced
-//!   them, for the task in `reports.rs`.
+//! - **A press reports `started` before it unmutes, and a release mutes before it reports
+//!   `stopped`**, as the browser client does. `conchd`'s poller compares what it sees of
+//!   the track with the reports, and the other order let it see a press before its report
+//!   and record an honest press as unreported (§6, "Client side").
+//!   - A press queues `started` and waits for `conchd`'s answer, for at most
+//!     [`REPORT_WAIT`]. Then the track is unmuted and, straight after, the gate told to
+//!     open. Past the wait, or while the report is still being tried, the press goes ahead
+//!     all the same: audio never depends on `conchd` being reachable.
+//!   - A `started` answered 409 `voice_no_session` or 401 drops the connection instead,
+//!     before the track would open, and the policy decides what follows.
+//!   - A press released, or shut by a reason, while it waits never opens the track or the
+//!     gate, and its transmission is over at once.
+//!   - A release mutes when the gate says it has shut, release tail included, and only then
+//!     does the machine produce `stopped`.
+//!
+//!   So the track is unmuted for the whole of a transmission's audio and for nothing else.
+//! - **No other wait for a report.** Reports are queued, in the order the machine produced
+//!   them, for the task in `reports.rs`; nothing but a press's wait for its `started` is
+//!   held up by one.
 //! - **The machine fails closed, and so does the exit.** The machine gets a tick at its
 //!   deadline. Leaving, for whatever reason, shuts the gate first, waits a bounded time for
 //!   the gate to say so, and sends a final `stopped` if a press was open either way. A
@@ -55,7 +69,7 @@ use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
     PttOutput, TransmitReport,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::Error;
@@ -63,7 +77,7 @@ use crate::keydev::DeviceState;
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
 use crate::presence::{self, PresenceTimings, Roster};
 use crate::receive::{self, BoxedSink, MixCommand, MixStats};
-use crate::reports::{MakeClient, ReportEvent, ReportTimings, Reports};
+use crate::reports::{Answer, MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
 use crate::secrets::Scrubber;
 use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
@@ -118,6 +132,9 @@ pub struct Timings {
     /// How long, beyond the release tail, the gate is given to say it has shut when the
     /// client is leaving.
     pub gate_shut_grace: Duration,
+    /// How long a press waits for `conchd`'s answer to its `started` report before the track
+    /// opens all the same. [`REPORT_WAIT`] outside tests.
+    pub report_wait: Duration,
     /// How long the last reports are given to be delivered when the client is leaving.
     pub report_flush: Duration,
     /// How long the last lines of output are given to be written when the client is
@@ -145,6 +162,7 @@ impl Default for Timings {
             close_limit: Duration::from_secs(10),
             attempt_limit: Duration::from_secs(2),
             gate_shut_grace: Duration::from_millis(500),
+            report_wait: REPORT_WAIT,
             report_flush: Duration::from_secs(3),
             output_flush: Duration::from_secs(1),
             stats_every: Duration::from_secs(1),
@@ -198,6 +216,9 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one attempt at a transmit report may take. Reports queue behind one another,
 /// so this is short: `conchd` is normally a few milliseconds away.
 pub const REPORT_TIMEOUT: Duration = Duration::from_secs(1);
+/// The longest a press waits for `conchd`'s answer to its `started` report before the track
+/// opens anyway: the browser client's bound too (`reportWait` in its `connection.ts`).
+pub const REPORT_WAIT: Duration = Duration::from_secs(1);
 
 /// The ways this client reaches `conchd`.
 pub struct Conchd {
@@ -503,6 +524,32 @@ async fn sdk_event<T: Transport>(live: &mut Option<Live<T>>) -> Option<SdkEvent>
     }
 }
 
+/// A press whose `started` report is out: the track opens once `conchd` has answered it,
+/// or at `until`, whichever comes first.
+struct Opening {
+    /// The answer, once the report is queued.
+    answer: Option<oneshot::Receiver<Answer>>,
+    until: Instant,
+}
+
+/// What became of the report a press waits for: `None` if the wait ran out first, or the
+/// report queue went away without an answer. Never, if no press waits.
+async fn answered(opening: &mut Option<Opening>) -> Option<Answer> {
+    let Some(opening) = opening else {
+        return std::future::pending().await;
+    };
+    let answer = async {
+        match opening.answer.as_mut() {
+            Some(answer) => answer.await.ok(),
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        answer = answer => answer,
+        () = tokio::time::sleep_until(opening.until) => None,
+    }
+}
+
 async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -529,6 +576,8 @@ struct Session<T: Transport> {
     transmitter: Transmitter<Feed<T>>,
     receiver: receive::Receiver,
     reports: Reports,
+    /// A press that waits for its `started` to be answered before the track opens.
+    opening: Option<Opening>,
     rosters: mpsc::UnboundedReceiver<Roster>,
     phase: Phase<T>,
     live: Option<Live<T>>,
@@ -590,6 +639,7 @@ pub async fn join<T: Transport>(
         transmitter,
         receiver,
         reports,
+        opening: None,
         rosters,
         phase: Phase::Ask(None),
         live: None,
@@ -629,6 +679,9 @@ impl<T: Transport> Session<T> {
                 Some(event) = self.transmitter.events.recv() => self.on_transmit(event),
                 progress = progress(&mut self.phase) => self.on_progress(progress),
                 input = self.inputs.recv(), if self.inputs_open => self.on_input(input),
+                // After the inputs: a release that is already waiting ends the press before
+                // its track would open.
+                answer = answered(&mut self.opening) => self.on_answer(answer),
                 // The machine's own deadline: a press that has reached the transmit limit.
                 () = sleep_until(tick_at) => self.tell(PttInput::Tick),
                 () = sleep_until(grace_ends) => self.disconnected(Ended {
@@ -655,23 +708,45 @@ impl<T: Transport> Session<T> {
     }
 
     fn obey(&mut self, outputs: Vec<PttOutput>) {
+        // A press that ended while it waited for its answer, and so never opened the gate.
+        let mut never_opened = false;
         for output in outputs {
             match output {
+                PttOutput::Gate(GateCommand::Open) => {
+                    // Not yet: the gate opens once `conchd` has answered the `started` that
+                    // the machine produces with this, or once the wait for that is over.
+                    self.opening = Some(Opening {
+                        answer: None,
+                        until: Instant::now() + self.timings.report_wait,
+                    });
+                }
                 PttOutput::Gate(command) => {
-                    if command == GateCommand::Open {
-                        // Before the gate opens, so that no frame meets a muted track.
-                        self.with_track(MicTrack::unmute);
+                    let ends = matches!(command, GateCommand::Shut | GateCommand::ForceShut(_));
+                    let waited = ends && self.opening.take().is_some();
+                    never_opened |= waited;
+                    // The gate never opened for a press that waited, so a release has
+                    // nothing to shut; a reason is passed on all the same, so that the gate
+                    // holds the same reasons as the machine.
+                    if !(waited && command == GateCommand::Shut) {
+                        let _ = self.transmitter.commands.send(TxCommand::Gate(command));
                     }
-                    let _ = self.transmitter.commands.send(TxCommand::Gate(command));
                     if matches!(command, GateCommand::ForceShut(_)) {
                         // A forced shut has no release tail: nothing is left to send.
                         self.with_track(MicTrack::mute);
                     }
                 }
-                PttOutput::Report(report) => self.reports.push(match report {
-                    TransmitReport::Started => VoiceTransmitState::Started,
-                    TransmitReport::Stopped => VoiceTransmitState::Stopped,
-                }),
+                PttOutput::Report(TransmitReport::Started) => match self.opening.as_mut() {
+                    Some(opening) => {
+                        let (answered, answer) = oneshot::channel();
+                        self.reports
+                            .push_answered(VoiceTransmitState::Started, answered);
+                        opening.answer = Some(answer);
+                    }
+                    None => self.reports.push(VoiceTransmitState::Started),
+                },
+                PttOutput::Report(TransmitReport::Stopped) => {
+                    self.reports.push(VoiceTransmitState::Stopped);
+                }
                 PttOutput::PressIgnored(reason) => self.out.show(&Event::PressIgnored(reason)),
                 PttOutput::Status(status) => {
                     self.out.show(&Event::Own(status));
@@ -684,6 +759,53 @@ impl<T: Transport> Session<T> {
                     self.exit.get_or_insert(Ok(()));
                 }
             }
+        }
+        if never_opened {
+            // The gate will never say it shut, since it never opened: the press is over now,
+            // and is ended as one the gate shut, mute first and `stopped` after. Told once
+            // the machine's outputs above are carried out, so they are shown in order.
+            self.on_transmit(TxEvent::GateShut {
+                limit_reached: false,
+            });
+        }
+    }
+
+    /// `conchd` answered the `started` a press waits for, or the wait is over.
+    fn on_answer(&mut self, answer: Option<Answer>) {
+        let refused = match answer {
+            Some(Answer::NoSession) => Ended {
+                // As for a room that was deleted: `conchd` decides what follows.
+                outcome: Outcome::RoomDeleted,
+                reason: "no_session",
+                detail: None,
+            },
+            Some(Answer::Unauthorized) => Ended {
+                outcome: Outcome::NotSignedIn,
+                reason: "not_signed_in",
+                detail: None,
+            },
+            Some(Answer::Delivered | Answer::Settled) | None => {
+                if self.opening.take().is_some() {
+                    // Before the gate opens, so that no frame meets a muted track.
+                    self.with_track(MicTrack::unmute);
+                    let _ = self
+                        .transmitter
+                        .commands
+                        .send(TxCommand::Gate(GateCommand::Open));
+                }
+                return;
+            }
+        };
+        // `conchd` would not take this transmission as reported. The connection is dropped
+        // before the track opens: the machine is told it is not connected, which ends the
+        // press that waited.
+        self.disconnected(refused);
+        if self.opening.take().is_some() {
+            // There was no connection to drop, which cannot be while a press waits. The
+            // press is ended all the same, and its track never opens.
+            self.on_transmit(TxEvent::GateShut {
+                limit_reached: false,
+            });
         }
     }
 

@@ -14,8 +14,12 @@
 //!   that client held, and makes a new one. A request that was given up on can then not be
 //!   written later by a connection that came back to life, behind a report queued after it.
 //!
-//! Audio never waits for any of this. The queue has no bound and is filled from the session
-//! loop without waiting; nothing here is called from the transmit task.
+//! The queue has no bound and is filled from the session loop without waiting; nothing here
+//! is called from the transmit task. One thing waits for a report, and only for a while: a
+//! press reports `started` and opens the track once `conchd` has answered it, or after at
+//! most a second (`session.rs`). [`Reports::push_answered`] is how it learns of the answer.
+//! Nothing else waits for a report, and audio never depends on one: past that second the
+//! press goes ahead whatever became of it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,11 +73,28 @@ impl Default for ReportTimings {
     }
 }
 
+/// What `conchd` made of a report, as far as a press that waits for its `started` needs
+/// to know. Given once, at the first answer that settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// `conchd` answered 204: the report is recorded.
+    Delivered,
+    /// `conchd` answered 409 `voice_no_session`: it holds no session for this client in the
+    /// channel's room, and would record what follows as unreported.
+    NoSession,
+    /// `conchd` answered 401: it did not accept the login. Given at the first such answer,
+    /// although the report is tried again as any other failure is.
+    Unauthorized,
+    /// Settled some other way: answered 429, or given up on.
+    Settled,
+}
+
 /// Makes the task's client: a new one, with a connection pool of its own, each time.
 pub type MakeClient = Box<dyn Fn() -> Result<Client, ApiError> + Send>;
 
 enum Item {
-    Report(VoiceTransmitState),
+    /// A report, and who is to be told what `conchd` made of it, if anyone is.
+    Report(VoiceTransmitState, Option<oneshot::Sender<Answer>>),
     /// Answered when everything queued before it has been dealt with.
     Flush(oneshot::Sender<()>),
 }
@@ -119,7 +140,14 @@ impl Reports {
     /// Queues a report. Never waits.
     pub fn push(&self, state: VoiceTransmitState) {
         // The task ends only when this handle is dropped.
-        let _ = self.queue.send(Item::Report(state));
+        let _ = self.queue.send(Item::Report(state, None));
+    }
+
+    /// Queues a report, as [`Reports::push`], and tells `answered` what `conchd` made of it
+    /// once that is known. A report that is still being tried says nothing until it is
+    /// settled: whoever waits on it bounds the wait.
+    pub fn push_answered(&self, state: VoiceTransmitState, answered: oneshot::Sender<Answer>) {
+        let _ = self.queue.send(Item::Report(state, Some(answered)));
     }
 
     /// Waits until every report queued so far has been delivered or dropped, or `limit`
@@ -149,7 +177,7 @@ impl Task {
     async fn run(mut self) {
         while let Some(item) = self.items.recv().await {
             match item {
-                Item::Report(state) => self.deliver(state).await,
+                Item::Report(state, mut answered) => self.deliver(state, &mut answered).await,
                 Item::Flush(done) => {
                     let _ = done.send(());
                 }
@@ -158,7 +186,12 @@ impl Task {
     }
 
     /// Sends one report, and returns only when it has an answer or has been given up on.
-    async fn deliver(&mut self, state: VoiceTransmitState) {
+    /// `answered`, if there is one, is told as soon as that answer is known.
+    async fn deliver(
+        &mut self,
+        state: VoiceTransmitState,
+        answered: &mut Option<oneshot::Sender<Answer>>,
+    ) {
         let attempts = u32::try_from(self.timings.waits.len())
             .unwrap_or(u32::MAX)
             .saturating_add(1);
@@ -167,10 +200,16 @@ impl Task {
             let problem = match self.attempt(state).await {
                 Ok(()) => {
                     self.delivered.fetch_add(1, Ordering::Relaxed);
+                    tell(answered, Answer::Delivered);
                     return;
                 }
                 Err(error) => error,
             };
+            if let ApiError::Unauthenticated(_) = problem {
+                // Trying again will not make the login good: the press that waits is told
+                // now, and need not wait out the retries.
+                tell(answered, Answer::Unauthorized);
+            }
             let wait = self.timings.waits.get(attempt as usize - 1).copied();
             let (what, wait) = match (&problem, wait) {
                 (ApiError::NoSession(_), _) => (ReportProblem::NoSession, None),
@@ -199,6 +238,13 @@ impl Task {
                 Some(wait) => tokio::time::sleep(wait).await,
                 None => {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
+                    tell(
+                        answered,
+                        match what {
+                            ReportProblem::NoSession => Answer::NoSession,
+                            _ => Answer::Settled,
+                        },
+                    );
                     return;
                 }
             }
@@ -215,5 +261,13 @@ impl Task {
         let answer = client.transmit(&self.channel, state, None).await;
         self.client = Some(client);
         answer
+    }
+}
+
+/// Tells whoever waits for a report's answer, the first time only. One who stopped waiting
+/// is not told.
+fn tell(answered: &mut Option<oneshot::Sender<Answer>>, answer: Answer) {
+    if let Some(answered) = answered.take() {
+        let _ = answered.send(answer);
     }
 }
