@@ -185,6 +185,7 @@ var validators = map[string]func(string) bool{
 	"RunState":                 validOf[RunState](),
 	"SessionState":             validOf[SessionState](),
 	"SessionStatus":            validOf[SessionStatus](),
+	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 }
 

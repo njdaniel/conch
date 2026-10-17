@@ -110,7 +110,8 @@ export interface VoiceEnv {
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
   readonly claimShare: (channel: string) => Promise<ShareClaimResult>;
-  readonly stopShare: (channel: string) => Promise<unknown>;
+  // Releases the share whose claim started at startedAt (issue #487).
+  readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   readonly gate?: GateOptions;
 }
 
@@ -268,10 +269,11 @@ export class VoiceClient {
   }
 
   // presence is each presence document the voice socket sends: whether this
-  // person still holds the share, and whether anyone does.
+  // person still holds the share, whether anyone does, and, in this person's
+  // own document alone, why the server ended their last share.
   presence(p: VoicePresenceV1): void {
     const holder = sharer(p);
-    this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other');
+    this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other', p.share_ended);
     if (holder === null && this.state.watching) this.watch(false);
   }
 

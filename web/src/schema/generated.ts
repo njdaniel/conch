@@ -748,6 +748,31 @@ export const voicePresenceRoom = object<VoicePresenceRoom>({
   participants: array(voiceParticipant),
 });
 
+// schema.VoiceShareEndReason
+export type VoiceShareEndReason = 'self' | 'operator' | 'left' | 'access_lost' | 'rotated' | 'idle';
+
+export const voiceShareEndReason = vocab<VoiceShareEndReason>({
+  self: true,
+  operator: true,
+  left: true,
+  access_lost: true,
+  rotated: true,
+  idle: true,
+});
+
+// schema.VoiceShareEnded
+export interface VoiceShareEnded {
+  reason: VoiceShareEndReason;
+  started_at: string;
+  ended_at: string;
+}
+
+export const voiceShareEnded = object<VoiceShareEnded>({
+  reason: voiceShareEndReason,
+  started_at: timestamp,
+  ended_at: timestamp,
+});
+
 // schema.VoicePresenceV1
 export const voicePresenceV1Schema = 'conch.voice_presence.v1';
 
@@ -757,6 +782,7 @@ export interface VoicePresenceV1 {
   configured: boolean;
   available: boolean;
   rooms: VoicePresenceRoom[];
+  share_ended?: VoiceShareEnded;
 }
 
 export const voicePresenceV1 = object<VoicePresenceV1>({
@@ -765,6 +791,7 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   configured: bool,
   available: bool,
   rooms: array(voicePresenceRoom),
+  share_ended: optional(voiceShareEnded),
 });
 
 // schema.VoiceTransmitState

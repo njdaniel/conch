@@ -185,11 +185,12 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 // (configured and available false, no rooms) rather than failing; only a
 // caller who passed the membership check sees that.
 func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
-	channel, _, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
+	channel, caller, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
 	if !ok {
 		return
 	}
-	snap := s.voice.snapshot(channel.ID)
+	// The caller's own snapshot: why their last share ended is theirs alone.
+	snap := s.voice.snapshot(channel.ID, caller.ID)
 	if err := snap.Validate(); err != nil {
 		slog.ErrorContext(r.Context(), "voice: built an invalid presence document", "channel", channel.ID, "error", err)
 		writeInternalError(w)

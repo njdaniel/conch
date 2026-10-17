@@ -293,6 +293,11 @@ type voicePoller struct {
 
 	mu    sync.Mutex
 	rooms map[string]*voiceRoomState
+	// shareEnded is why each person's last screen share in a channel ended,
+	// shown in their own presence alone (voice_share.go). It outlives the
+	// room, since a rotation is one of the reasons, and goes when they claim
+	// a share in that channel again.
+	shareEnded map[voiceShareEndKey]schema.VoiceShareEnded
 	// removed remembers recent successful removals for audit de-duplication.
 	removed map[string]time.Time
 	// contacted is whether LiveKit has answered at least once; down is the
@@ -324,6 +329,7 @@ func newVoicePoller(s *Server) *voicePoller {
 		appendAudit:     s.store.AppendAuditEventAt,
 		wakeLoop:        make(chan struct{}, 1),
 		rooms:           make(map[string]*voiceRoomState),
+		shareEnded:      make(map[voiceShareEndKey]schema.VoiceShareEnded),
 		removed:         make(map[string]time.Time),
 		subs:            make(map[*voiceSub]struct{}),
 	}
@@ -1320,18 +1326,25 @@ func (p *voicePoller) writeEvent(ctx context.Context, e voiceEvent) error {
 // never contains a room name or a token. Participants last seen are not
 // reported while LiveKit cannot be reached (schema: not available implies no
 // rooms), and nothing is available until LiveKit has answered once.
-func (p *voicePoller) snapshot(channelID int64) schema.VoicePresenceV1 {
+//
+// viewer is who reads it. Everything in it is the same for every reader but
+// share_ended, which says why the viewer's own last share ended and is in
+// their snapshot alone; a zero viewer gets none.
+func (p *voicePoller) snapshot(channelID, viewer int64) schema.VoicePresenceV1 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.snapshotLocked(channelID)
+	return p.snapshotLocked(channelID, viewer)
 }
 
-func (p *voicePoller) snapshotLocked(channelID int64) schema.VoicePresenceV1 {
+func (p *voicePoller) snapshotLocked(channelID, viewer int64) schema.VoicePresenceV1 {
 	snap := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: channelID, Rooms: []schema.VoicePresenceRoom{}}
 	if p.s.lk == nil {
 		return snap
 	}
 	snap.Configured = true
+	if ended, ok := p.shareEnded[voiceShareEndKey{channelID: channelID, principalID: viewer}]; ok && viewer != 0 {
+		snap.ShareEnded = &ended
+	}
 	if !p.contacted || p.down {
 		return snap
 	}
@@ -1413,7 +1426,7 @@ func (s *voiceSub) current() (schema.VoicePresenceV1, bool) {
 	if s.gone {
 		return schema.VoicePresenceV1{}, false
 	}
-	return s.p.snapshotLocked(s.channelID), true
+	return s.p.snapshotLocked(s.channelID, s.principalID), true
 }
 
 func (p *voicePoller) dropLocked(sub *voiceSub) {
@@ -1586,7 +1599,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	// claim finds the room retired (claimShare).
 	var events []voiceEvent
 	if c := r.share; c != nil && !c.pending {
-		events = append(events, shareStoppedEvent(r.channelID, c.principalID, c.principalID, voiceShareStopRotated))
+		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
 	}
 	r.share = nil
 	// Every transmission still open in the room, reported or unreported, is
