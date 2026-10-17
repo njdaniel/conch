@@ -45,12 +45,61 @@ describe('the message store', () => {
   it('shows a message as Sending, then Sent in place of the server copy, matched by id', () => {
     let state = run({ type: 'sending', channel: 'ops', body: 'hi', at: 1 });
     expect(chatFor(state, 'ops').pending).toEqual([{ localId: 1, body: 'hi', at: 1, status: 'sending' }]);
-    // The live frame wins the race with the POST's answer.
-    state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi') });
+    // The live frame wins the race with the POST's answer, and stands in
+    // for the pending send at once: the message never shows twice (#490).
+    state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: true });
+    expect(ids(state)).toEqual([8]);
+    expect(chatFor(state, 'ops').pending).toEqual([]);
     state = chatReducer(state, { type: 'sent', channel: 'ops', localId: 1, message: msg(8, 'hi') });
     expect(ids(state)).toEqual([8]);
     expect(chatFor(state, 'ops').pending).toEqual([]);
     expect(chatFor(state, 'ops').sentIds.has(8)).toBe(true);
+  });
+
+  describe("a live frame of one's own before the POST's answer (#490)", () => {
+    const net = { kind: 'net', net_id: 4 } as const;
+    const whisper = (ids: number[]) => ({ kind: 'principals', principal_ids: ids }) as const;
+    const withAudience = (m: MessageV2, audience: MessageV2['audience']): MessageV2 => ({ ...m, audience });
+
+    it('takes the place of the oldest of two identical sends, and the later answers change nothing', () => {
+      let state = run({ type: 'sending', channel: 'ops', body: 'hi', at: 1 }, { type: 'sending', channel: 'ops', body: 'hi', at: 2 });
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: true });
+      expect(ids(state)).toEqual([8]);
+      expect(chatFor(state, 'ops').pending.map((p) => p.localId)).toEqual([2]);
+      state = chatReducer(state, { type: 'sent', channel: 'ops', localId: 1, message: msg(8, 'hi') });
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(9, 'hi'), own: true });
+      state = chatReducer(state, { type: 'sent', channel: 'ops', localId: 2, message: msg(9, 'hi') });
+      expect(ids(state)).toEqual([8, 9]);
+      expect(chatFor(state, 'ops').pending).toEqual([]);
+    });
+
+    it("never lets someone else's message with the same body stand in", () => {
+      let state = run({ type: 'sending', channel: 'ops', body: 'hi', at: 1 });
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi') });
+      expect(chatFor(state, 'ops').pending).toHaveLength(1);
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: false });
+      expect(chatFor(state, 'ops').pending).toHaveLength(1);
+    });
+
+    it('matches the audience: the whole channel, the same net, the same people in any order', () => {
+      let state = run(
+        { type: 'sending', channel: 'ops', body: 'hi', at: 1, audience: net },
+        { type: 'sending', channel: 'ops', body: 'hi', at: 2, audience: whisper([5, 3]) },
+      );
+      // The same body to the whole channel matches neither.
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(7, 'hi'), own: true });
+      expect(chatFor(state, 'ops').pending).toHaveLength(2);
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: withAudience(msg(8, 'hi'), whisper([3, 5])), own: true });
+      expect(chatFor(state, 'ops').pending.map((p) => p.localId)).toEqual([1]);
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: withAudience(msg(9, 'hi'), net), own: true });
+      expect(chatFor(state, 'ops').pending).toEqual([]);
+    });
+
+    it('leaves a failed send in place: it was not delivered, whatever arrives', () => {
+      let state = run({ type: 'sending', channel: 'ops', body: 'hi', at: 1 }, { type: 'sendFailed', channel: 'ops', localId: 1, outcome: 'failed' });
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: true });
+      expect(chatFor(state, 'ops').pending).toHaveLength(1);
+    });
   });
 
   it('replaces the local copy when the answer comes before the frame', () => {
