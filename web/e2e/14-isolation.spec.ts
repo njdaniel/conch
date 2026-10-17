@@ -208,6 +208,43 @@ sizes.forEach(([size, options], n) => {
   });
 });
 
+// Issue #515: someone taken out of the channel, or hidden, leaves the panel of
+// a member who has it open, within seconds and without a reload, and a hidden
+// account's old name leaves the page with it. amy never signs in, so she has
+// no session and her removal changes no roster: only the member list the
+// events socket sends can tell the page.
+test('A14 a member removed from the channel, or hidden, leaves the open page of another member without a reload', async ({ meet, world }) => {
+  const api = sharedApi(world);
+  const op = world.tokens.operator;
+  const tag = `a14-gone-${String(Date.now())}`;
+  const channel = `${tag}-alpha`;
+  await must(api, `create ${channel}`, op, 'POST', '/v0/channels', { name: channel });
+  const ann = await person(api, op, `${tag}-ann`, channel);
+  const abe = await person(api, op, `${tag}-abe`, channel);
+  const amy = await person(api, op, `${tag}-amy`, channel);
+  await must(api, `${abe.name} posts`, abe.token, 'POST', `/v2/channels/${channel}/messages`, { body: `${tag} said before` });
+
+  const { page } = await meet(desktop);
+  await signIn(page, world, ann.token, ann.name);
+  await channelButton(page, channel).click();
+  const said = messages(page).getByRole('listitem').filter({ hasText: `${tag} said before` });
+  await expect(said).toContainText(abe.name);
+  const members = await openMembers(page);
+  await expect(members).toContainText(abe.name);
+  await expect(members).toContainText(amy.name);
+
+  await must(api, `remove ${amy.name}`, op, 'DELETE', `/v1/channels/${channel}/members/${String(amy.id)}`);
+  await expect(members).not.toContainText(amy.name, { timeout: 5_000 });
+  await expect(members).toContainText(abe.name);
+
+  await must(api, `hide ${abe.name}`, op, 'POST', `/v1/principals/${String(abe.id)}/hide`);
+  await expect(members).not.toContainText(abe.name, { timeout: 5_000 });
+  // His message stays, by #<id> now, as a reload would show it.
+  await expect(said).toContainText(`#${String(abe.id)}`);
+  await expect(page.locator('body')).not.toContainText(abe.name);
+  await expect(members).toContainText(ann.name);
+});
+
 test.describe('with LiveKit', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
