@@ -31,7 +31,7 @@ function serve(routes: Record<string, Handler>) {
   return fetchMock;
 }
 
-const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok' });
+const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok', voice: 'not_configured' });
 
 const asMember: Record<string, Handler> = {
   '/v1/whoami': (a) => (a === `Bearer ${secret}` ? json(member) : json({}, 401)),
@@ -140,6 +140,51 @@ describe('sign-in', () => {
     signIn();
     await screen.findByText('Cannot reach the server');
     expect(window.sessionStorage.length).toBe(0);
+  });
+
+  // Issue #469: a stored sign-in the page could not check (no answer at
+  // load) is not overwritten by signing in; the page offers to forget it,
+  // revoking it if the server answers, and then signing in works.
+  it('will not sign in over a stored sign-in it could not check, and offers to forget it', async () => {
+    window.sessionStorage.setItem('conch.web.token', 'conch_stored_operator');
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('failed'))));
+    render(<App origin={origin} />);
+    await screen.findByText('Cannot reach the server');
+    let revoked: string | null = null;
+    serve({
+      ...asMember,
+      '/v1/credentials/current': (a) => {
+        revoked = a;
+        return new Response(null, { status: 204 });
+      },
+    });
+    signIn();
+    await screen.findByText(/holds another sign-in that could not be checked/);
+    expect(window.sessionStorage.getItem('conch.web.token')).toBe('conch_stored_operator');
+    expect(window.localStorage.length).toBe(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Forget the stored sign-in' }));
+    await waitFor(() => {
+      expect(revoked).toBe('Bearer conch_stored_operator');
+    });
+    await waitFor(() => {
+      expect(window.sessionStorage.length).toBe(0);
+    });
+    expect(screen.queryByRole('button', { name: 'Forget the stored sign-in' })).toBeNull();
+    signIn();
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
+  });
+
+  // #485 review: a credential another tab stored after this page loaded is
+  // checked as on load, not offered for forgetting.
+  it('checks a sign-in another tab made since this page loaded, rather than signing in over it', async () => {
+    serve(asMember);
+    render(<App origin={origin} />);
+    window.localStorage.setItem('conch.web.token', secret);
+    signIn('conch_someone_else');
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(screen.queryByRole('button', { name: 'Forget the stored sign-in' })).toBeNull();
+    expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
   });
 
   it('warns before continuing as an operator and stores nothing until told to', async () => {

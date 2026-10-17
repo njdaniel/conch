@@ -920,11 +920,11 @@ With Caddy and nginx absent from the machine that wrote this recipe, the two con
 
 An invite is the second way into a server, beside an operator issuing a credential (ADR-008 §4). Whoever holds its code joins as a new human member, with the channels and the grants the invite names, and gets their first credential. There is no public signup.
 
-- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time.
+- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time, and `whoami` tells them how many more they may make now (`"invites_remaining"`; absent for operators, who have no allowance, and for anyone who may not invite).
 - **Open links** are for operators only: anyone with the link may join until it expires (default 24 hours, at most 7 days) or is closed, with an optional cap on uses (`max_uses`; none by default).
 - **An invite grants only what its maker holds:** a person may name only channels they are in, and grant voice only if they have it. Only an operator grants the right to invite in turn (`"may_invite": true` on the invite), so nobody who joins can make accounts that make accounts unless an operator chose that. An invite is never an operator and never an agent.
 - **Joiners do not decide approvals.** A membership made by an invite does not carry the right to decide the channel's approvals; the joiner sees them read-only, and is refused `403 decision_not_permitted` if they try. An operator grants it per member with `conch admin member decide <channel> <principal-id>` (`PUT /v1/channels/{channel}/members/{principal_id}` with `{"can_decide":true}`).
-- **Voice is a grant.** A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
+- **Voice is a grant.** `whoami` says whether the caller holds it (`"voice_allowed"`; always false for an agent). A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
 
 The flow, with `curl` (an operator's token in `$TOKEN`; preview and redeem need none):
 
@@ -1153,6 +1153,45 @@ go run ./e2e/voice
 ```
 
 This proves both halves against real processes. The degraded half needs no LiveKit: `conchd` with no LiveKit settings, and with settings and nothing listening, each followed by the approval dogfood. The live half starts the pinned LiveKit image and removes it when done, and joins a headless participant with `lk` 2.19.0 on the token `conchd` issued. The participant joins and is seen, unmutes and mutes and is seen to, an outsider is refused, removing a member who held a session rotates the room and locks that member out, removing one who never had a session changes nothing, and LiveKit is stopped. Then three real `conch-voice` clients, each with a tone for a microphone, join one channel: each is heard by the other two only while it holds its key, every press is in the audit log as a reported pair, a false report is caught, a removed member's client stops while the others move to the new room, and they reconnect by themselves when LiveKit is restarted. A member claims a screen share and an `lk` participant publishes a screen and its sound, which another subscribes to; the share is stopped and its tracks disappear; publishing those without a claim is refused by LiveKit. It checks that no token, secret or room name reaches its output, `conchd`'s log, the audit log or anything a client wrote, and prints one `voice-check: PASS` line. It needs Docker on Linux and network access for the image and `lk`; without them the live half is skipped with one line and exit status 0. The `conch-voice` part also needs the pinned Rust toolchain (`./scripts/voice-toolchain.sh`, once); without it that part alone is skipped and the last line says so. With `CI` set any skip is a failure.
+
+## Diagnostics
+
+What `conchd` tells an operator about a problem, and how a tester's report of one becomes an issue (private alpha A13, issue #446).
+
+**Request ids.** Every answer carries `X-Request-Id`, 16 hex characters, new for every request; a refusal and a socket upgrade have one too. Every log line written for that request ends with `request_id=<id>`, so a tester who quotes the id (the web page records it for every failed call) leads straight to the lines that matter. An `X-Request-Id` the client sends is ignored, so nobody can choose the id of someone else's lines. Error bodies are unchanged.
+
+**What the log holds.** Each socket (`/v0/ws`, `/v1/ws`, `/v2/ws`, `/v1/events/ws`, `/v1/voice/ws`) writes one line when it opens and one when it closes:
+
+```text
+2026/10/16 09:00:00 INFO ws: socket opened route="GET /v2/ws" principal=12 credential=31 request_id=3f9a0c1d2b4e5f60
+2026/10/16 09:05:12 INFO ws: socket closed route="GET /v2/ws" principal=12 credential=31 duration=5m12.004s reason=keepalive_timeout frames=48 request_id=3f9a0c1d2b4e5f60
+```
+
+The reason is one of `client`, `server_shutdown`, `keepalive_timeout`, `revoked` (the credential was revoked or expired, or the principal disabled), `removed` (from the channel, or an agent's manifest no longer lets it read there), `slow_consumer`, `session_ended` and `error`. A client that reconnects in a loop does not fill the log: each credential gets five sockets a minute logged in full, and the rest are counted and written as one `ws: sockets summarised` line by the first socket after the minute.
+
+The log never holds a token, a socket ticket, an invite code, a voice room name, a channel name or message text: routes appear as their patterns (`POST /v2/channels/{channel}/messages`), and people and credentials by id.
+
+**`/healthz`.** `GET /healthz` needs no credential and answers `{"status","version","db","voice"}`. `status` and `db` are `ok`, or `degraded` with a `503` when the database cannot be reached. `voice` is `ok` (LiveKit answered the last time it was asked), `unavailable` (configured, but not answering, or not yet asked since the start) or `not_configured`. A voice outage never makes `status` degraded or the answer `503`: messaging, approvals and audit work without it.
+
+**Reporting a problem.** A tester uses "Report a problem" in the web page's header (also offered when the page cannot reach the server) or `conch report`. Both ask the bug template's questions, show exactly what will be sent, and send it only when asked to. The web page adds its version, the browser, the system, the window's size, its voice state and its last 100 diagnostic events, kept in memory only: sockets opened and closed with their codes, reconnect attempts, failed calls with their status, error code and request id, voice connection states and microphone errors by name. The page empties it whenever its sign-in ends (signing out, out everywhere, in another tab, or a `401`), so a shared browser never reports the last person's events. Nothing in them is a token, a ticket, an invite code, a room or channel name or message text; the server refuses an event of any other shape. `conchd` stores the report with its own version, the reporter, the time, the voice health and the reporter's last 20 request ids and socket closes, from memory. A report is at most 32 KiB, a person may send 10 an hour, and each is audited as `problem_reported` with its id alone.
+
+| Route | Who | Success | Refusals |
+| --- | --- | --- | --- |
+| `POST /v1/reports` | people (an agent gets `403 human_required`; authentication off, `401`) | `201`, `{"id","created_at"}` | `400 invalid_request`, `413 request_too_large`, `429 rate_limited` |
+| `GET /v1/reports` | operators | `200`, newest first, without the reports' text; `?limit=` | |
+| `GET /v1/reports/{id}` | operators | `200`, the whole report | `404 problem_report_not_found` |
+| `PUT /v1/reports/{id}` | operators | `200`, the report marked filed. Body `{"state":"filed","issue":"<url>"}` | `400 invalid_request`, `404 problem_report_not_found` |
+
+**From report to issue.** `conchd` never calls GitHub: the repository is public, and a report names channels, people and devices. An operator files one from their own machine:
+
+```sh
+bin/conch admin reports list                    # <id> <open|filed> <time> principal <id> <client> <version> server <version> <often> [issue]
+bin/conch admin reports show 7                  # who sent it, then the body
+bin/conch admin reports show 7 --markdown       # the issue body alone
+ops/report-to-issue.sh 7
+```
+
+`--markdown` writes the bug template's sections (what you did, what you expected, what happened instead, version, device, how often, diagnostics). It names no one. The operator's `GET /v1/reports/{id}` answer carries a `redact` list, every channel, net and principal name on the server (never stored with the report, and in no other answer), and every one of them is replaced by `[channel]` or `[person]` in everything the client wrote, whether or not the operator is in that channel; standard error says how many were taken out. Each of the tester's three answers is in a fenced code block longer than any run of backticks in it, so a mention, an issue link or HTML in it stays text. The browser appears as its family and major version (`Firefox 131`); the stored report keeps the full user agent. `ops/report-to-issue.sh` runs it, opens the result in `$EDITOR` to read and trim, refuses anything that still looks like a Conch credential, warns about anything that looks like a web, email or IP address, asks for a title and a yes, and only then runs `gh issue create --label type/bug --body-file …` and `conch admin reports file <id> <issue-url>`. The issue lands in the Project's Backlog with the bug template's label.
 
 ## License
 

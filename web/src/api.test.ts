@@ -4,6 +4,7 @@ import {
   closeInvite,
   continueAsOperator,
   createInvite,
+  forgetStored,
   hasToken,
   heldElsewhere,
   listChannels,
@@ -541,5 +542,91 @@ describe('invites', () => {
       code: 'invite_allowance_exceeded',
       message: 'you already have as many open personal invites as you may',
     });
+  });
+});
+
+// Issue #469: signing in, like redeeming, must not write over or beside a
+// stored credential that restore could not check (the server did not answer
+// at load). forgetStored ends that one first.
+describe('signing in over a sign-in that could not be checked', () => {
+  async function unchecked(storage: Storage, token: string): Promise<void> {
+    storage.setItem(key, token);
+    serve((): Response => {
+      throw new TypeError('Failed to fetch');
+    });
+    expect(await restore()).toEqual({ ok: false, failure: 'network' });
+  }
+
+  it.each([
+    // A: an operator's tab credential would win over the member's at the next load.
+    { scenario: 'A, an operator tab credential', storage: () => window.sessionStorage, token: operatorToken },
+    // B: another member's lasting credential would be overwritten, never revoked.
+    { scenario: 'B, a member lasting credential', storage: () => window.localStorage, token: otherMemberToken },
+  ])('is refused: $scenario', async ({ storage, token }) => {
+    await unchecked(storage(), token);
+    const calls = serve(whoami);
+    expect(await signIn(memberToken)).toEqual({ ok: false, failure: 'held' });
+    expect(calls).toEqual([]);
+    expect(storage().getItem(key)).toBe(token);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(1);
+  });
+
+  it('forgets the stored one, revoking it, and then signs in', async () => {
+    await unchecked(window.sessionStorage, operatorToken);
+    const calls = serve((c) => (c.method === 'DELETE' ? new Response(null, { status: 204 }) : whoami(c)));
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([{ path: '/v1/credentials/current', method: 'DELETE', auth: `Bearer ${operatorToken}` }]);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+    expect(heldElsewhere()).toBe(false);
+    const result = await signIn(memberToken);
+    expect(result.ok).toBe(true);
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+  });
+
+  it('forgets it here even when the server cannot be told, and says so', async () => {
+    await unchecked(window.localStorage, otherMemberToken);
+    serve((): Response => {
+      throw new TypeError('Failed to fetch');
+    });
+    expect(await forgetStored()).toBe(false);
+    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+  });
+
+  // #485 review: forgetting must touch only the credential restore could not
+  // check, never one another tab stored since.
+  it('does not take over or forget a sign-in another tab made after this page looked', async () => {
+    serve(whoami);
+    expect(await restore()).toEqual({ ok: false, failure: 'unauthorized' });
+    window.localStorage.setItem(key, otherMemberToken);
+    const calls = serve(whoami);
+    expect(await signIn(memberToken)).toEqual({ ok: false, failure: 'stored' });
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([]);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  it("forgets only this tab's unchecked credential, not the lasting one other tabs use", async () => {
+    window.localStorage.setItem(key, otherMemberToken);
+    await unchecked(window.sessionStorage, operatorToken);
+    const calls = serve((c) => (c.method === 'DELETE' ? new Response(null, { status: 204 }) : whoami(c)));
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([{ path: '/v1/credentials/current', method: 'DELETE', auth: `Bearer ${operatorToken}` }]);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  it('forgets nothing once the unchecked credential has been replaced', async () => {
+    await unchecked(window.localStorage, otherMemberToken);
+    window.localStorage.setItem(key, memberToken);
+    const calls = serve(whoami);
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([]);
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+  });
+
+  it('signs in as before when nothing is stored', async () => {
+    serve(whoami);
+    expect(heldElsewhere()).toBe(false);
+    expect((await signIn(memberToken)).ok).toBe(true);
   });
 });

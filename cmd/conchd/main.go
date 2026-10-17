@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
+	"log/slog"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -310,6 +312,19 @@ func embeddedWebName() string {
 	return "none"
 }
 
+// installRequestLogging makes every line logged for a request carry its
+// request_id (issue #446), and keeps the log reading as it always has: the
+// default handler, its format and its timestamps, written to w. Making the
+// wrapper the default would also route the log package through slog, and the
+// default handler writes through the log package, so that would loop; the log
+// package is pointed back at w with its usual flags.
+func installRequestLogging(w io.Writer) {
+	base := slog.Default().Handler()
+	slog.SetDefault(slog.New(server.LogHandler(base)))
+	log.SetOutput(w)
+	log.SetFlags(log.LstdFlags)
+}
+
 func runServe(args []string) error {
 	opts, err := parseServeArgs(args)
 	if err != nil {
@@ -329,6 +344,8 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	context.AfterFunc(ctx, stop)
+
+	installRequestLogging(os.Stderr)
 
 	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {

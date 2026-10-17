@@ -150,6 +150,13 @@ func (s *Server) routeTable() []route {
 		rt("PUT /v1/principals/{id}/invite-permission", accessOperator, hf(s.handleInvitePermission)),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessOperator, hf(s.handlePutInviteSettings)),
+		// Problem reports (issue #446). Sending one is for people (an agent
+		// gets 403 human_required, in the handler); reading and filing them
+		// is for operators. conchd never sends a report anywhere.
+		rt("POST /v1/reports", accessAuthenticated, hf(s.handleCreateReport)),
+		rt("GET /v1/reports", accessOperator, hf(s.handleListReports)),
+		rt("GET /v1/reports/{id}", accessOperator, hf(s.handleGetReport)),
+		rt("PUT /v1/reports/{id}", accessOperator, hf(s.handleUpdateReport)),
 		// Webhook ingest authenticates with its own URL token.
 		rt("POST /v1/hooks/{token}", accessExempt, hf(s.handleIngestHook)),
 		// Approval routes need a credential under AuthRequired but still trust

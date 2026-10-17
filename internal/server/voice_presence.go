@@ -1066,6 +1066,21 @@ func (p *voicePoller) fail(ctx context.Context, err error) {
 	slog.DebugContext(ctx, "voice: livekit still unreachable", "retry_in", wait)
 }
 
+// health is what /healthz says about voice (issue #446): the same view the
+// presence documents give, available only once LiveKit has answered and while
+// it still does.
+func (p *voicePoller) health() schema.HealthVoice {
+	if p.s.lk == nil {
+		return schema.HealthVoiceNotConfigured
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.contacted || p.down {
+		return schema.HealthVoiceUnavailable
+	}
+	return schema.HealthVoiceOK
+}
+
 // succeed records that LiveKit answered. It ends an outage and reports the
 // first contact; subscribers are told because availability changed.
 func (p *voicePoller) succeed() {
