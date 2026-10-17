@@ -209,6 +209,12 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin principal disable-invitees", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "principal", "disable-invitees", "--server", u, "9"}
 		}},
+		{key: "admin principal sign-in-link", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "principal", "sign-in-link", "--server", u, "9"}
+		}},
+		{key: "admin sign-in-link close", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "sign-in-link", "close", "--server", u, "9"}
+		}},
 		{key: "voice status", args: func(u, _ string) []string { return []string{"voice", "status", "--server", u, "general"} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
@@ -367,8 +373,13 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
 		case "GET /v1/invites/settings":
 			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
-		case "PUT /v1/principals/9/invite-permission":
+		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9":
 			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/principals/9/sign-in-links":
+			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{
+				SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 9, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts},
+				Code:       schema.SignInLinkCodePrefix + strings.Repeat("A", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix)),
+			})
 		case "GET /v1/channels/general/voice":
 			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
 				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}},

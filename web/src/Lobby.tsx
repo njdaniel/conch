@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ServerVersion } from './ServerVersion';
 import type { ChannelsState } from './state/channels';
@@ -10,6 +10,15 @@ const wide = '(min-width: 900px)';
 function startsOpen(): boolean {
   return typeof window.matchMedia !== 'function' || window.matchMedia(wide).matches;
 }
+
+// What signing out costs, said before it is done (issue #493). A person who
+// joined by invite has no password: once their sign-in is revoked, only an
+// operator can let them back into this account.
+export const signOutWarning = 'To come back into this account, you will need a new link from an operator.';
+const signOutQuestion = {
+  here: `Sign out of this browser? ${signOutWarning}`,
+  everywhere: `Sign out on every device, this browser included? ${signOutWarning}`,
+} as const;
 
 // The lobby: channels on the left, the open channel in the middle, a
 // collapsible panel on the right, a status line at the bottom. The middle is
@@ -58,6 +67,13 @@ export function Lobby({
   readonly signOutProblem: string | null;
 }) {
   const [panelOpen, setPanelOpen] = useState(startsOpen);
+  // Which sign-out is waiting for its yes, if one is.
+  const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  // The question takes focus on its safe answer, so Enter keeps the account.
+  useEffect(() => {
+    if (confirming !== null) cancel.current?.focus();
+  }, [confirming]);
 
   return (
     <div className="lobby">
@@ -65,16 +81,59 @@ export function Lobby({
         <h1>Conch</h1>
         {account}
         <div className="signout">
-          <button type="button" onClick={onSignOut} aria-describedby="signout-note">
-            Sign out
-          </button>
-          <button type="button" onClick={onSignOutEverywhere} aria-describedby="signout-note">
-            Sign out everywhere
-          </button>
-          {report}
-          <span id="signout-note" className="hint">
-            Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
-          </span>
+          {confirming === null ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirming('here');
+                }}
+                aria-describedby="signout-note"
+              >
+                Sign out
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirming('everywhere');
+                }}
+                aria-describedby="signout-note"
+              >
+                Sign out everywhere
+              </button>
+              {report}
+              <span id="signout-note" className="hint">
+                Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
+                Either way, you will need a new link from an operator to come back into this account.
+              </span>
+            </>
+          ) : (
+            <div role="group" aria-labelledby="signout-question" className="signout-confirm">
+              <p id="signout-question">{signOutQuestion[confirming]}</p>
+              <div className="actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const which = confirming;
+                    setConfirming(null);
+                    if (which === 'here') onSignOut();
+                    else onSignOutEverywhere();
+                  }}
+                >
+                  {confirming === 'here' ? 'Yes, sign out' : 'Yes, sign out everywhere'}
+                </button>
+                <button
+                  ref={cancel}
+                  type="button"
+                  onClick={() => {
+                    setConfirming(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           {signOutProblem === null ? null : (
             <p role="alert" className="notice">
               {signOutProblem}

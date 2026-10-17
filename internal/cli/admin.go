@@ -46,12 +46,16 @@ type adminOpts struct {
 	principal principalOpts
 }
 
-// principalOpts holds the flags of the principal list and hide commands.
+// principalOpts holds the flags of the principal list, hide and sign-in-link
+// commands.
 type principalOpts struct {
 	state    string
 	prefix   string
 	inviteID int64
 	yes      bool
+	// expires is when a sign-in link stops working (issue #493); empty is
+	// the server's default.
+	expires string
 }
 
 // adminRun is what a command's run function gets once its arguments are
@@ -150,13 +154,20 @@ var adminCommands = []adminCommand{
 	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
 	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
 		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
+	// A one-time link back into a member's account (issue #493), in
+	// admin_invite.go.
+	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ",
+		bind: bindSignInLink, run: adminPrincipalSignInLink},
+	// Closing one that leaked, by the link's id (the id `principal
+	// sign-in-link` prints), without disabling its person.
+	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|reports"
+const adminGroups = "channel|principal|credential|member|manifest|invite|reports|sign-in-link"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {

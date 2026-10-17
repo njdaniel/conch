@@ -112,3 +112,21 @@ func (c *Client) PutInviteSettings(ctx context.Context, settings schema.InviteSe
 	}
 	return result, nil
 }
+
+// CreateSignInLink makes a one-time link that signs a member back into their
+// own account (issue #493). The response carries its code, which the server
+// shows only once.
+func (c *Client) CreateSignInLink(ctx context.Context, principalID int64, request schema.CreateSignInLinkRequestV1) (schema.CreateSignInLinkResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "sign-in-links")
+	var result schema.CreateSignInLinkResponseV1
+	if err := c.roundTrip(ctx, "create sign-in link", http.MethodPost, endpoint, request, &result); err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	return result, nil
+}
+
+// CloseSignInLink closes a sign-in link so it can no longer be used.
+func (c *Client) CloseSignInLink(ctx context.Context, id int64) error {
+	endpoint := c.resolve("v1", "sign-in-links", strconv.FormatInt(id, 10))
+	return c.roundTrip(ctx, "close sign-in link", http.MethodDelete, endpoint, nil, nil)
+}

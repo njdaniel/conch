@@ -150,6 +150,15 @@ func (s *Server) routeTable() []route {
 		rt("PUT /v1/principals/{id}/invite-permission", accessOperator, hf(s.handleInvitePermission)),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessOperator, hf(s.handlePutInviteSettings)),
+		// Sign-in links (issue #493): an operator makes a one-time link that
+		// signs a member back into the same account. Preview and redeem are
+		// exempt, as an invite's are, and limited the same way. See
+		// sign_in_links.go.
+		rt("POST /v1/principals/{id}/sign-in-links", accessOperator, hf(s.handleCreateSignInLink)),
+		rt("POST /v1/sign-in-links/preview", accessExempt, hf(s.handlePreviewSignInLink)),
+		rt("POST /v1/sign-in-links/redeem", accessExempt, hf(s.handleRedeemSignInLink)),
+		// Closing one that leaked, without disabling its person.
+		rt("DELETE /v1/sign-in-links/{id}", accessOperator, hf(s.handleCloseSignInLink)),
 		// Problem reports (issue #446). Sending one is for people (an agent
 		// gets 403 human_required, in the handler); reading and filing them
 		// is for operators. conchd never sends a report anywhere.

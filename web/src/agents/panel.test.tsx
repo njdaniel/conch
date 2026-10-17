@@ -284,6 +284,8 @@ describe('the browser own session', () => {
   it('is ended on sign-out, with keepalive, before the credential goes', async () => {
     await openApp();
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    // Sign out asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
     await waitFor(() => {
       expect(server.deletes).toEqual([{ id: 100, keepalive: true }]);
     });

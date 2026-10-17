@@ -108,9 +108,11 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 
 // DisablePrincipal switches principalID off in one transaction: it sets
 // disabled_at, revokes every live credential, closes every open invite the
-// principal made, and appends principal_disabled plus one credential_revoked
-// per credential and one invite_closed (reason=creator_disabled) per invite
-// (all attributed to actor, none containing token material). A disabled
+// principal made and every open sign-in link for or by it, and appends
+// principal_disabled plus one credential_revoked per credential, one
+// invite_closed (reason=creator_disabled) per invite and one
+// sign_in_link_closed per link (all attributed to actor, none containing
+// token material). A disabled
 // principal cannot authenticate and cannot be issued credentials.
 //
 // It is idempotent: disabling an already-disabled principal changes nothing,
@@ -183,6 +185,10 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	// makes the invite list say so too (issue #438), and enabling the
 	// principal again does not revive them.
 	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, "", InviteCloseCreatorDisabled, now); err != nil {
+		return false, err
+	}
+	// Likewise the sign-in links for them or made by them (issue #493).
+	if err := closeSignInLinksTx(ctx, tx, actor, principalID, now); err != nil {
 		return false, err
 	}
 	return true, nil

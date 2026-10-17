@@ -374,6 +374,50 @@ describe('the invite code', () => {
   });
 });
 
+// A sign-in link's code (issue #493) is held as an invite's is, under the
+// name signInCode, by the modules that must hold it and no other. The page
+// never builds a sign-in link, so no URL holds it at all.
+const signInHolders = ['./App.tsx', './SignInLink.tsx', './api.ts', './route.ts'];
+const signInStored = /(setItem|getItem|removeItem)\([^)]*\bsignInCode\b/;
+const signInInTemplate = /\$\{[^}]*\bsignInCode\b[^}]*\}/g;
+const signInRendered = /(?<!=)>\s*\{[^}]*\bsignInCode\b|\b(?!signInCode=)[\w-]+=\{[^}]*\bsignInCode\b/;
+
+describe('the sign-in link code', () => {
+  it('is held only by src/api.ts, src/route.ts, App and the landing page', () => {
+    const holding = Object.entries(sources)
+      .filter(([, code]) => /\bsignInCode\b/.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(holding).toEqual(signInHolders);
+  });
+
+  it('goes to the server from src/api.ts alone', () => {
+    const calling = Object.entries(sources)
+      .filter(([, code]) => /\/v1\/sign-in-links/.test(code))
+      .map(([path]) => path);
+    expect(calling).toEqual(['./api.ts']);
+  });
+
+  it('is never stored, put in a URL or rendered', () => {
+    for (const [path, code] of Object.entries(sources)) {
+      expect(signInStored.test(code), path).toBe(false);
+      if (path.endsWith('.tsx')) expect(signInRendered.test(code), path).toBe(false);
+      expect(code.match(signInInTemplate) ?? [], path).toEqual([]);
+    }
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(signInStored.test('localStorage.setItem(key, signInCode)')).toBe(true);
+    for (const example of ['<p>{signInCode}</p>', '<input value={signInCode} />', '<a title={`#/signin/${signInCode}`}>']) {
+      expect(signInRendered.test(example), example).toBe(true);
+    }
+    expect('fetch(`/v1/sign-in-links/${signInCode}`)'.match(signInInTemplate)).toHaveLength(1);
+    for (const example of ['<SignInLink signInCode={signInCode} />', 'if (signInCode !== null) {']) {
+      expect(signInRendered.test(example), example).toBe(false);
+    }
+  });
+});
+
 // The diagnostic ring of "Report a problem" (issue #446). It is memory only,
 // only api.ts and the voice client record into it, and what they record names
 // no path, body, address, channel, room, token, ticket or invite code: those

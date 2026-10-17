@@ -367,6 +367,8 @@ describe('lobby', () => {
     expect(out.getAttribute('aria-describedby')).toBe('signout-note');
     expect(document.getElementById('signout-note')?.textContent).toContain('Sign out ends this sign-in');
     fireEvent.click(out);
+    // Sign out asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
     await screen.findByLabelText('Credential');
     const revoke = fetchMock.mock.calls.find(([input]) => input === '/v1/credentials/current');
     expect(revoke?.[1]?.method).toBe('DELETE');
@@ -385,6 +387,8 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    // Sign out asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
     await screen.findByText(/^Signed out in this browser, but the server could not be told/);
     expect(window.localStorage.getItem('conch.web.token')).toBeNull();
   });
@@ -394,6 +398,8 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
+    // Sign out everywhere asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out everywhere' }));
     await screen.findByText('Signed out everywhere: every sign-in of yours has ended');
     const call = fetchMock.mock.calls.find(([input]) => input === '/v1/principals/2/credentials/revoke-all');
     expect(call?.[1]?.method).toBe('POST');
@@ -408,6 +414,8 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
+    // Sign out everywhere asks first (issue #493).
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out everywhere' }));
     const alert = await screen.findByText(line);
     expect(alert.getAttribute('role')).toBe('alert');
     expect(screen.getByRole('navigation', { name: 'Channels' })).toBeDefined();

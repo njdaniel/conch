@@ -633,6 +633,29 @@ END`,
 )`,
 		`CREATE INDEX problem_reports_by_principal ON problem_reports (principal_id, created_at)`,
 	},
+	// 30: Sign-in links (issue #493). Number 30 on main, after problem
+	// reports (29, issue #446). An operator makes a one-time code that
+	// signs an existing person back in: whoever uses it gets a new credential
+	// for principal_id. Only the SHA-256 of the code is stored, as for
+	// invites. used_at and credential_id are set together by the one use;
+	// closed_at is set when the person, or the operator who made it, is
+	// disabled. The row stays afterwards, for the record.
+	{
+		`CREATE TABLE sign_in_links (
+	id            INTEGER PRIMARY KEY,
+	code_hash     TEXT    NOT NULL UNIQUE,
+	principal_id  INTEGER NOT NULL REFERENCES principals (id),
+	created_by    INTEGER NOT NULL REFERENCES principals (id),
+	created_at    INTEGER NOT NULL,
+	expires_at    INTEGER NOT NULL,
+	used_at       INTEGER,
+	credential_id INTEGER REFERENCES credentials (id),
+	closed_at     INTEGER,
+	CHECK ((used_at IS NULL) = (credential_id IS NULL))
+)`,
+		`CREATE INDEX sign_in_links_by_principal ON sign_in_links (principal_id)`,
+		`CREATE INDEX sign_in_links_by_creator ON sign_in_links (created_by)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

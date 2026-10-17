@@ -567,3 +567,9 @@ body {
 .invite-state {
   font-weight: bold;
 }
+
+/* The question a sign-out asks before it revokes anything (issue #493). */
+.signout-confirm p {
+  margin: 0 0 0.5rem;
+  max-width: 32rem;
+}

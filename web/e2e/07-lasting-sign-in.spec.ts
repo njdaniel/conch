@@ -88,6 +88,8 @@ test('A7 sign out everywhere ends every sign-in: the other tab lands on sign-in,
   await signIn(elsewhere.page, world, other, person.name);
 
   await here.page.getByRole('button', { name: 'Sign out everywhere' }).click();
+  // It asks first (issue #493).
+  await here.page.getByRole('button', { name: 'Yes, sign out everywhere' }).click();
   await expect(here.page.getByRole('alert')).toHaveText('Signed out everywhere: every sign-in of yours has ended');
   await expect(here.page.getByLabel('Credential')).toBeVisible();
 
@@ -116,6 +118,8 @@ test('A7 sign out revokes this credential on the server, and its next request is
   await signIn(page, world, first, person.name);
 
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  // It asks first (issue #493).
+  await page.getByRole('button', { name: 'Yes, sign out' }).click();
   await expect(page.getByLabel('Credential')).toBeVisible();
   expect((await call(world, first, 'GET', '/v1/whoami')).status).toBe(401);
   // Only that one: the person's other credential still works.

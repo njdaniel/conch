@@ -1052,6 +1052,83 @@ export const inviteSettingsV1 = object<InviteSettingsV1>({
   paused: bool,
 });
 
+// schema.SignInLinkPreviewRequestV1
+export interface SignInLinkPreviewRequestV1 {
+  code: string;
+}
+
+export const signInLinkPreviewRequestV1 = object<SignInLinkPreviewRequestV1>({
+  code: str,
+});
+
+// schema.SignInLinkPreviewV1
+export interface SignInLinkPreviewV1 {
+  name: string;
+}
+
+export const signInLinkPreviewV1 = object<SignInLinkPreviewV1>({
+  name: str,
+});
+
+// schema.RedeemSignInLinkRequestV1
+export interface RedeemSignInLinkRequestV1 {
+  code: string;
+}
+
+export const redeemSignInLinkRequestV1 = object<RedeemSignInLinkRequestV1>({
+  code: str,
+});
+
+// schema.RedeemSignInLinkResponseV1
+export interface RedeemSignInLinkResponseV1 {
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+}
+
+export const redeemSignInLinkResponseV1 = object<RedeemSignInLinkResponseV1>({
+  principal: principalV0,
+  credential: credentialV1,
+  token: str,
+});
+
+// schema.SignInLinkV1
+export interface SignInLinkV1 {
+  id: number;
+  principal_id: number;
+  created_by: number;
+  created_at: string;
+  expires_at: string;
+}
+
+export const signInLinkV1 = object<SignInLinkV1>({
+  id: int,
+  principal_id: int,
+  created_by: int,
+  created_at: timestamp,
+  expires_at: timestamp,
+});
+
+// schema.CreateSignInLinkRequestV1
+export interface CreateSignInLinkRequestV1 {
+  expires_at?: string;
+}
+
+export const createSignInLinkRequestV1 = object<CreateSignInLinkRequestV1>({
+  expires_at: optional(timestamp),
+});
+
+// schema.CreateSignInLinkResponseV1
+export interface CreateSignInLinkResponseV1 {
+  sign_in_link: SignInLinkV1;
+  code: string;
+}
+
+export const createSignInLinkResponseV1 = object<CreateSignInLinkResponseV1>({
+  sign_in_link: signInLinkV1,
+  code: str,
+});
+
 // schema.RevokeAllCredentialsResponseV1
 export interface RevokeAllCredentialsResponseV1 {
   revoked: number;
