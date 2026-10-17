@@ -41,8 +41,10 @@ import {
 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import { voicePresenceV1, voiceSessionResponseV1, type VoicePresenceV1, type VoiceSessionResponseV1, type VoiceTransmitReportV1, type VoiceTransmitState } from './schema/voice';
+import { createProblemReportResponseV1, type CreateProblemReportRequestV1, type CreateProblemReportResponseV1, type DiagnosticSocket } from './schema/report';
 import type { Validator } from './schema/validate';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
+import { forget as forgetDiagnostics, record } from './diagnostics';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -120,10 +122,13 @@ function current(): Held | null {
   return null;
 }
 
-// forget drops the credential held, from memory and from its storage.
+// forget drops the credential held, from memory and from its storage. The
+// diagnostic ring goes with it: the session it describes is over, and the next
+// person to sign in on this browser must not report the last one's events.
 function forget(held: Held): void {
   if (pinned?.token === held.token && pinned.place === held.place) pinned = null;
   dropToken(held);
+  forgetDiagnostics();
 }
 
 // readToken finds a credential left by an earlier load, for restore to check:
@@ -173,6 +178,29 @@ async function refusalCode(res: Response): Promise<string | undefined> {
   return undefined;
 }
 
+// Diagnostics (issue #446). Every call that fails is noted in the page's
+// diagnostic ring (diagnostics.ts) by its status, the server's error code and
+// the X-Request-Id of the answer, which the operator can find in conchd's log.
+// Never the path, which can name a channel, nor anything the call sent.
+
+// noteNoAnswer notes a call that got no answer at all.
+function noteNoAnswer(): void {
+  record({ kind: 'http_failure', status: 0, error: 'network' });
+}
+
+// noteRefusal notes an answer that was not a success. The body is read from a
+// copy, so the caller can still read it.
+async function noteRefusal(res: Response): Promise<void> {
+  let code: string | undefined;
+  try {
+    const body: unknown = await res.clone().json();
+    if (errorV0(body).length === 0) code = (body as { code: string }).code;
+  } catch {
+    // No document, or not one.
+  }
+  record({ kind: 'http_failure', status: res.status, requestId: res.headers.get('X-Request-Id'), ...(code === undefined ? {} : { error: code }) });
+}
+
 async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string }> {
   const code = await refusalCode(res);
   return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
@@ -187,8 +215,10 @@ async function get<T>(path: string, token: string, check: Validator<T>): Promise
       credentials: 'omit',
     });
   } catch {
+    noteNoAnswer();
     return { ok: false, failure: 'network' };
   }
+  if (!res.ok) await noteRefusal(res);
   if (res.status === 401) return { ok: false, failure: 'unauthorized' };
   if (!res.ok) return refused(res);
   let body: unknown;
@@ -247,8 +277,12 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
       ...(signal === undefined ? {} : { signal }),
     });
   } catch {
+    // A request its caller gave up on (a transmit report past its use) is
+    // not a failure of the server's.
+    if (signal?.aborted !== true) noteNoAnswer();
     return { kind: 'none' };
   }
+  if (!res.ok) await noteRefusal(res);
   if (res.status === 401) {
     forget(held);
     return { kind: 'unauthorized' };
@@ -258,6 +292,9 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
 
 const authedPost = (path: string, body?: unknown) => authedSend('POST', path, body);
 
+// The version of the server this page was first served by; see clientVersion.
+let pageVersion: string | null = null;
+
 // serverVersion reads the server's build version from GET /healthz, which
 // needs no credential. It is null when the server cannot be reached or does not
 // answer with a health document. A degraded server (503) still names its
@@ -266,10 +303,20 @@ export async function serverVersion(): Promise<string | null> {
   try {
     const res = await fetch('/healthz', { headers: { Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' });
     const body: unknown = await res.json();
-    return health(body).length === 0 ? (body as { version: string }).version : null;
+    if (health(body).length > 0) return null;
+    const version = (body as { version: string }).version;
+    pageVersion ??= version;
+    return version;
   } catch {
     return null;
   }
+}
+
+// clientVersion is the page's own build: the version the first serverVersion
+// read. A report sends it as the client's version, and the server adds its
+// own, which differs when the server was upgraded under an open page.
+export function clientVersion(): string | null {
+  return pageVersion;
 }
 
 // hasToken says whether this tab has a credential from an earlier load: its
@@ -367,9 +414,12 @@ export async function signOut(): Promise<boolean> {
   pending = null;
   const held = current();
   pinned = null;
+  forgetDiagnostics();
   if (held === null) return true;
   const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
   dropToken(held);
+  // Again: the revoke itself may have been noted, and is the last session's.
+  forgetDiagnostics();
   return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
 }
 
@@ -451,8 +501,9 @@ async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteRe
 // sendOpen posts a JSON body with no credential at all, for the two invite
 // routes that take none. It is null when there was no answer.
 async function sendOpen(path: string, body: unknown): Promise<Response | null> {
+  let res: Response;
   try {
-    return await fetch(path, {
+    res = await fetch(path, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -460,8 +511,11 @@ async function sendOpen(path: string, body: unknown): Promise<Response | null> {
       credentials: 'omit',
     });
   } catch {
+    noteNoAnswer();
     return null;
   }
+  if (!res.ok) await noteRefusal(res);
+  return res;
 }
 
 // previewInvite asks what an invite would grant, without using it.
@@ -587,6 +641,7 @@ export function onSignedOutElsewhere(callback: () => void): () => void {
     if (!lasting || pinned?.place !== 'lasting') return;
     // Still the credential this page signed in with: nothing changed for it.
     if (current() !== null) return;
+    forgetDiagnostics();
     callback();
   };
   window.addEventListener('storage', listener);
@@ -751,10 +806,21 @@ function socketUrl(path: string, query: Record<string, string>): string {
   return `${scheme}//${window.location.host}${path}?${new URLSearchParams(query).toString()}`;
 }
 
+// How many times each kind of socket has been tried since it was last open,
+// for the diagnostic ring: 0 while it is open or was never lost.
+const retries: Record<DiagnosticSocket, number> = { messages: 0, events: 0, voice: 0 };
+const lost: Record<DiagnosticSocket, boolean> = { messages: false, events: false, voice: false };
+
 // connect asks for a ticket with the credential and opens the socket that
 // `address` names, given the ticket. The ticket is single use, so a reconnect
-// calls this again.
-async function connect(address: (ticket: string) => string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+// calls this again. The diagnostic ring is told of each open, each close with
+// its code and each try after a loss, by `kind`, never by address: the
+// address holds the channel and the ticket.
+async function connect(kind: DiagnosticSocket, address: (ticket: string) => string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  if (lost[kind]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[kind] });
+  // Lost until it opens: a ticket refused or a socket that never opens is
+  // followed by another try.
+  lost[kind] = true;
   const ticket = await requestTicket();
   if (!ticket.ok) return ticket;
   let socket: WebSocket;
@@ -763,12 +829,19 @@ async function connect(address: (ticket: string) => string, events: SocketEvents
   } catch {
     return { ok: false, failure: 'network' };
   }
-  socket.onopen = events.onOpen;
+  socket.onopen = () => {
+    lost[kind] = false;
+    retries[kind] = 0;
+    record({ kind: 'socket_open', socket: kind });
+    events.onOpen();
+  };
   socket.onmessage = (event: MessageEvent) => {
     events.onFrame(event.data);
   };
   // An error is always followed by a close, which is what the feed acts on.
   socket.onclose = (event: CloseEvent) => {
+    lost[kind] = true;
+    record({ kind: 'socket_close', socket: kind, code: event.code });
     events.onClose(event.code, event.reason);
   };
   const handle: FeedSocket = {
@@ -786,13 +859,13 @@ async function connect(address: (ticket: string) => string, events: SocketEvents
 // heartbeat=1 asks for the server's heartbeat frames, which the feed's silence
 // watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
-  connect((ticket) => socketUrl('/v2/ws', { channel, after: String(after), heartbeat: '1', ticket }), events);
+  connect('messages', (ticket) => socketUrl('/v2/ws', { channel, after: String(after), heartbeat: '1', ticket }), events);
 
 // openEventsSocket opens the events stream of a channel (roster, runs,
 // activity, interventions) with the browser's own session, which the server
 // then keeps online while the socket is open.
 export function openEventsSocket(channel: string, session: number, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect((ticket) => socketUrl('/v1/events/ws', { channel, session: String(session), ticket }), events);
+  return connect('events', (ticket) => socketUrl('/v1/events/ws', { channel, session: String(session), ticket }), events);
 }
 
 // The browser's own session (UX-18): created after sign-in, ended on sign-out
@@ -959,5 +1032,16 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // openVoiceSocket opens the presence stream of a channel's voice with a ticket:
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect((ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
+  return connect('voice', (ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
+}
+
+// sendReport sends a problem report (issue #446) to the server's operator.
+// The answer is its id. A refusal says why as an invite call's does: the
+// server's code and line, and for rate_limited the seconds to wait.
+export async function sendReport(request: CreateProblemReportRequestV1): Promise<InviteResult<CreateProblemReportResponseV1>> {
+  const reply = await authedPost('/v1/reports', request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, createProblemReportResponseV1);
 }

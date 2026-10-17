@@ -8,6 +8,7 @@ import { Conversation } from './Conversation';
 import { Invite } from './Invite';
 import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
+import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeInviteFromAddress } from './route';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -421,6 +422,7 @@ export function App({ origin }: { readonly origin: string }) {
               />
             ) : null
           }
+          report={<ReportProblem onUnauthorized={onUnauthorized} />}
           voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
           invites={
             auth.principal.may_invite === true ? (

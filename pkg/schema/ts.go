@@ -145,6 +145,13 @@ var TSTypes = []TSType{
 	// it). Not a versioned payload, so it has no fixture family.
 	{Value: Health{}},
 
+	// Reporting a problem (issue #446): what the page sends, and the id it
+	// gets back. Reading reports is for operators, in the CLI.
+	{Value: ProblemReportClientV1{}},
+	{Value: DiagnosticEventV1{}},
+	{Value: CreateProblemReportRequestV1{}, Family: "create-problem-report-request-v1"},
+	{Value: CreateProblemReportResponseV1{}, Family: "create-problem-report-response-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }

@@ -1,0 +1,12 @@
+{
+  "did": "Ran conch tail on a channel",
+  "expected": "New messages to appear",
+  "happened": "It stopped after a minute",
+  "often": "once",
+  "client": {
+    "name": "conch",
+    "version": "dev-0123456789ab",
+    "platform": "linux/amd64"
+  },
+  "diagnostics": []
+}
