@@ -1,9 +1,10 @@
 //! `conch-voice`: the Conch voice client (ADR-006).
 //!
 //! Input: the command line and the environment. Output: what the library crate
-//! `conch_voice` documents, and an exit code: 0 after `quit`, the end of input or a signal;
-//! 2 for a mistake on the command line; 1 when the client stopped for a reason it printed;
-//! 101 for an internal error.
+//! `conch_voice` documents, and an exit code: 0 after `quit`, the end of input or a signal
+//! (for `managed`, after a final state of stopped); 2 for a mistake on the command line, or
+//! a `managed` with no event pipe; 1 when the client stopped for a reason it printed (for
+//! `managed`, a final state of failed); 101 for an internal error.
 //! Owns: the order things start in, and the exit. The logger is installed before anything
 //! else runs, so nothing the SDK logs can reach standard error unfiltered. The exit waits
 //! for nobody: what is still to be written to standard error is given half a second, and
@@ -21,6 +22,9 @@ use conch_voice::{LAST_WORDS_LIMIT, error_line, panic_line};
 use log::LevelFilter;
 
 fn main() {
+    // A managed helper's owner is the process that started it: recorded before anything
+    // else, so that an owner that dies at any moment after is noticed (`managed.rs`).
+    let parent = std::os::unix::process::parent_id();
     // First, before the command line is even read: from here on every log record in the
     // process goes through this logger, and nothing can install another.
     let scrubber = Scrubber::new();
@@ -50,6 +54,15 @@ fn main() {
         Invocation::Join(args) => {
             logger.set_level(args.log_level);
             conch_voice::join(args, &Environment::from_process(), Arc::clone(&scrubber))
+        }
+        Invocation::Managed(args) => {
+            logger.set_level(args.log_level);
+            conch_voice::managed(
+                args,
+                &Environment::from_process(),
+                Arc::clone(&scrubber),
+                parent,
+            )
         }
         Invocation::Devices => conch_voice::devices(),
         Invocation::Keys { device } => conch_voice::keys(device),

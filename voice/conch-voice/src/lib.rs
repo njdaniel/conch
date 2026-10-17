@@ -21,6 +21,12 @@
 //! login token is in anything this program writes, and nothing it does waits for what it
 //! writes to be read.
 //!
+//! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
+//! input is also its owner's commands on standard input, and the end of that input; its
+//! output is also one JSON event per line on file descriptor 3, where nothing else is
+//! written; and its channel, server and login come from its owner's start, not from the
+//! command line, `CONCH_SERVER` or `voice.toml`.
+//!
 //! Owns: the connection to the channel's voice room, for as long as `join` runs; the
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
@@ -39,6 +45,7 @@
 //!
 //! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
+//! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
 //! - [`secrets`] and [`logger`]: what keeps tokens and room names out of the output.
 //! - [`lines`]: the queue every line passes on its way to standard output or standard
@@ -62,6 +69,7 @@ pub mod keys;
 pub mod lines;
 pub mod livekit;
 pub mod logger;
+pub mod managed;
 pub mod output;
 pub mod pace;
 pub mod presence;
@@ -82,7 +90,9 @@ use conch_voice_audio::{CountingSink, ToneSource, WavSource};
 use tokio::sync::mpsc;
 
 use crate::audio::PipeWire;
-use crate::cli::{Environment, JoinArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE};
+use crate::cli::{
+    Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE,
+};
 pub use crate::error::Error;
 use crate::input::AtEnd;
 use crate::keydev::{DeviceRule, KeyTimings};
@@ -101,7 +111,7 @@ use crate::transmit::BoxedMic;
 /// is when a session first allows publishing: a client that may only listen never captures.
 /// `pipewire` is the connection, if the choice needs one, and `configured` the name
 /// `audio.input` gave.
-fn mic_opener(
+pub(crate) fn mic_opener(
     choice: MicChoice,
     pipewire: Option<PipeWire>,
     configured: Option<String>,
@@ -124,7 +134,7 @@ fn mic_opener(
 }
 
 /// What opens the speakers `--sink` chose, when the session starts.
-fn sink_opener(
+pub(crate) fn sink_opener(
     choice: SinkChoice,
     pipewire: Option<PipeWire>,
     configured: Option<String>,
@@ -265,6 +275,51 @@ pub fn join(
     // and the SDK panics when one is cancelled under it. That was seen against a real
     // LiveKit after a `DUPLICATE_IDENTITY` disconnect, whose teardown the SDK was still
     // finishing: the panic would have replaced the reason the client stopped for.
+    std::mem::forget(runtime);
+    result
+}
+
+/// `conch-voice managed`: opens the event pipe and writes the hello, then reads its owner's
+/// start and runs the session it names until it has left (`managed.rs`). It is for `main`
+/// to call once, with the parent's pid it recorded first, and to exit the process with what
+/// it returns: as for `join`, the runtime is left running.
+///
+/// # Errors
+///
+/// [`Error::EventPipe`] if file descriptor 3 is not a pipe that can be written, before
+/// anything else is done; otherwise what the owner was told in a failed state.
+pub fn managed(
+    args: &ManagedArgs,
+    environment: &Environment,
+    scrubber: Arc<Scrubber>,
+    parent: u32,
+) -> Result<(), Error> {
+    let events = managed::open_event_pipe()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Runtime)?;
+    let keys = match &args.test_key_device {
+        Some(pipe) => managed::KeySource::NamedPipe(pipe.clone()),
+        None => managed::KeySource::Configured,
+    };
+    let result = runtime.block_on(async {
+        let (inputs, received) = mpsc::unbounded_channel();
+        let host = managed::Host::new(
+            environment.clone(),
+            LiveKit::new(Arc::clone(&scrubber)),
+            scrubber,
+            managed::Devices::Choices {
+                mic: args.mic.clone(),
+                sink: args.sink.clone(),
+            },
+            keys,
+        );
+        managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
+        managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
+        managed::run(host, std::io::stdin(), Box::new(events), inputs, received).await
+    });
+    // As for `join`: the SDK's tasks are not cancelled under it.
     std::mem::forget(runtime);
     result
 }

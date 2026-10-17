@@ -15,8 +15,10 @@ use std::time::Duration;
 
 use conch_voice_api::{
     Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
-    ServerAddress, StreamEnd, Timestamp, VoiceParticipant, VoicePresenceRoom, VoicePresenceV1,
-    VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1, VoiceTransmitState,
+    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlCommand,
+    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlProtocolErrorV1, VoiceControlRefusal,
+    VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
+    VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_event,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
@@ -186,6 +188,30 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         debug("VoicePresenceV1", &presence()),
         debug("VoiceTransmitReportV1", &report),
         debug("VoiceTransmitState", &VoiceTransmitState::Stopped),
+        debug(
+            "WhoAmIResponseV1",
+            &serde_json::from_value::<WhoAmIResponseV1>(
+                json!({"id": 7, "kind": "human", "name": "someone", "role": "member"}),
+            )
+            .unwrap(),
+        ),
+        // The control protocol carries no secret by construction: a start that holds an
+        // unknown field named token keeps none of it, and a refused line is not repeated.
+        debug("VoiceControlCommand", &control_start_with_a_token()),
+        debug_and_display("VoiceControlRefusal", &control_refusal()),
+        debug(
+            "VoiceControlEvent",
+            &parse_event(control_hello().as_bytes()).unwrap(),
+        ),
+        debug("VoiceControlHelloV1", &VoiceControlHelloV1::v1("0.1.0")),
+        debug(
+            "VoiceControlAckV1",
+            &VoiceControlAckV1::new(3, 1, Some(VoiceControlErrorCode::Invalid)),
+        ),
+        debug(
+            "VoiceControlProtocolErrorV1",
+            &VoiceControlProtocolErrorV1::new(2, VoiceControlErrorCode::Malformed),
+        ),
     ];
     for shown in &all {
         assert!(!shown.text.is_empty(), "{}", shown.name);
@@ -226,6 +252,26 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
     assert_eq!(session.rooms[0].room.expose(), FAKE_ROOM);
     assert_eq!(session.rooms[0].token.expose(), FAKE_JOIN);
     assert_eq!(grant.token.expose(), FAKE_NET_JOIN);
+}
+
+fn control_start_with_a_token() -> VoiceControlCommand {
+    let line = json!({
+        "schema": "conch.voice_control.v1", "kind": "start", "id": 1,
+        "server": "https://conch.example.org", "channel": "general", "principal_id": 7,
+        "credential": "stored", "muted": false, "deafened": false, "token": FAKE_TOKEN,
+    });
+    parse_command(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_refusal() -> VoiceControlRefusal {
+    let line = json!({"schema": "conch.voice_control.v1", "kind": "set_mute", "id": 4, "muted": FAKE_TOKEN});
+    parse_command(line.to_string().as_bytes()).unwrap_err()
+}
+
+fn control_hello() -> String {
+    json!({"schema": "conch.voice_control.v1", "kind": "hello", "seq": 1,
+           "versions": ["conch.voice_control.v1"], "helper_version": "0.1.0", "note": FAKE_ROOM})
+    .to_string()
 }
 
 /// Collects one error per way the crate can fail while holding a secret.

@@ -48,7 +48,8 @@ pub struct LineQueue {
     /// the queue, which does not wait, so it keeps lines from several threads in order
     /// without making any of them wait for output.
     dropped: Mutex<u64>,
-    marker: Marker,
+    /// `None` for a queue that drops without saying so (`spawn_unmarked`).
+    marker: Option<Marker>,
 }
 
 impl LineQueue {
@@ -57,6 +58,20 @@ impl LineQueue {
     /// that stands in for dropped ones.
     #[must_use]
     pub fn spawn(out: Box<dyn Write + Send>, capacity: usize, marker: Marker) -> Self {
+        Self::start(out, capacity, Some(marker))
+    }
+
+    /// As [`LineQueue::spawn`], for lines that say for themselves when some are missing: a
+    /// line that meets a full queue is dropped and counted, and nothing is written in its
+    /// place. The managed helper's events are such lines: each has a number one greater
+    /// than the last, and a gap in the numbers is how its owner learns of a drop
+    /// (`docs/design/tui-voice.md` §3).
+    #[must_use]
+    pub fn spawn_unmarked(out: Box<dyn Write + Send>, capacity: usize) -> Self {
+        Self::start(out, capacity, None)
+    }
+
+    fn start(out: Box<dyn Write + Send>, capacity: usize, marker: Option<Marker>) -> Self {
         let (queue, items) = sync_channel(capacity);
         std::thread::spawn(move || write_all(out, &items));
         Self {
@@ -70,6 +85,12 @@ impl LineQueue {
     /// and the count is written, as the marker, before the next line there is room for.
     pub fn push(&self, line: String) {
         let mut dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.marker.is_none() {
+            if let Err(TrySendError::Full(_)) = self.queue.try_send(Item::Line(line)) {
+                *dropped = dropped.saturating_add(1);
+            }
+            return;
+        }
         if self.owe_nothing(&mut dropped)
             && let Err(TrySendError::Full(_)) = self.queue.try_send(Item::Line(line))
         {
@@ -83,10 +104,14 @@ impl LineQueue {
     /// Queues the marker for lines dropped so far, if there are any. True if nothing is
     /// owed any more; false if the queue is still full, and then the count stands.
     fn owe_nothing(&self, dropped: &mut u64) -> bool {
+        let Some(marker) = &self.marker else {
+            // Nothing is ever owed: the lines say for themselves that some are missing.
+            return true;
+        };
         if *dropped == 0 {
             return true;
         }
-        match self.queue.try_send(Item::Line((self.marker)(*dropped))) {
+        match self.queue.try_send(Item::Line(marker(*dropped))) {
             Err(TrySendError::Full(_)) => false,
             Ok(()) | Err(TrySendError::Disconnected(_)) => {
                 *dropped = 0;
@@ -95,7 +120,8 @@ impl LineQueue {
         }
     }
 
-    /// Lines dropped and not yet said to be.
+    /// Lines dropped and not yet said to be; for a queue that never says so, all the lines
+    /// it has dropped.
     #[must_use]
     pub fn dropped(&self) -> u64 {
         *self.dropped.lock().unwrap_or_else(PoisonError::into_inner)
@@ -416,6 +442,28 @@ pub(crate) mod tests {
         assert_eq!(
             writer.text(),
             "a\nb\nc\n(3 dropped)\nd\ne\nf\ng\n(1 dropped)\n"
+        );
+    }
+
+    #[test]
+    fn an_unmarked_queue_drops_what_does_not_fit_and_writes_nothing_in_its_place() {
+        let writer = Stallable::stalled();
+        let lines = LineQueue::spawn_unmarked(Box::new(writer.clone()), 2);
+        lines.push("a".into());
+        writer.until_waiting();
+        for line in ["b", "c", "lost", "lost", "lost"] {
+            lines.push(line.into());
+        }
+        assert_eq!(lines.dropped(), 3);
+        writer.stall(false);
+        writer.until_text("a\nb\nc\n");
+        lines.push("d".into());
+        assert!(lines.flush_blocking(Duration::from_secs(10)));
+        assert_eq!(writer.text(), "a\nb\nc\nd\n");
+        assert_eq!(
+            lines.dropped(),
+            3,
+            "the count stands; nothing was written for it"
         );
     }
 

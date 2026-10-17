@@ -11,6 +11,10 @@
 //! input decides how long a line is, and a line with no end must not be collected for
 //! ever: what is beyond the limit is discarded as it is read, up to the line's end, and the
 //! line counts as one that is not a command.
+//!
+//! [`read_bounded`] is that reading with its limit and its rule for a last line given: a
+//! managed helper reads its owner's control pipe with it (`managed.rs`), at the protocol's
+//! limit, and discards a last line that has no line feed.
 
 use std::io::{BufRead, BufReader, Read};
 
@@ -41,8 +45,57 @@ pub const MAX_LINE_BYTES: usize = 256;
 ///
 /// It holds at most one buffer of input at a time, however long a line is.
 pub fn read_lines(input: impl Read, mut take: impl FnMut(Input) -> bool) {
+    // A last line with no line break is a line all the same, as it is to a shell.
+    let ended = read_bounded(input, MAX_LINE_BYTES, LastLine::Counts, |line| {
+        take(command_of(line))
+    });
+    if ended == Ended::Input {
+        take(Input::Eof);
+    }
+}
+
+/// One line as [`read_bounded`] hands it over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bounded<'a> {
+    /// The whole line, without its line feed.
+    Line(&'a [u8]),
+    /// A line longer than the limit, of which no more than the limit was kept.
+    TooLong,
+}
+
+/// What becomes of a last line that has no line feed before the end of input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastLine {
+    /// It is a line all the same.
+    Counts,
+    /// It is discarded, not acted on: the rule of a managed helper's control pipe
+    /// (`docs/design/tui-voice.md` §3).
+    Discarded,
+}
+
+/// Why [`read_bounded`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The input ended, or could no longer be read.
+    Input,
+    /// Whoever took the lines asked for no more.
+    Taker,
+}
+
+/// Reads `input` one line at a time and hands each whole line to `take`, until the input
+/// ends or `take` returns false. Whatever writes to the input decides how long a line is,
+/// and a line with no end must not be collected for ever: at most `limit` bytes of a line
+/// are kept, and a longer one is handed over as [`Bounded::TooLong`], what was beyond the
+/// limit discarded as it was read. It holds one buffer of input and one line's limit at a
+/// time, however long a line is.
+pub fn read_bounded(
+    input: impl Read,
+    limit: usize,
+    last: LastLine,
+    mut take: impl FnMut(Bounded<'_>) -> bool,
+) -> Ended {
     let mut input = BufReader::new(input);
-    let mut line = Line::new();
+    let mut line = Line::with_limit(limit);
     loop {
         let buffered = match input.fill_buf() {
             Ok(buffered) if !buffered.is_empty() => buffered,
@@ -56,34 +109,41 @@ pub fn read_lines(input: impl Read, mut take: impl FnMut(Input) -> bool) {
         line.push(part);
         let read = part.len() + usize::from(ended);
         input.consume(read);
-        if ended && !take(line.finish()) {
-            return;
+        if ended && !line.end(&mut take) {
+            return Ended::Taker;
         }
     }
-    // A last line with no line break is a line all the same, as it is to a shell.
-    if line.begun() && !take(line.finish()) {
-        return;
+    if last == LastLine::Counts && line.begun() && !line.end(&mut take) {
+        return Ended::Taker;
     }
-    take(Input::Eof);
+    Ended::Input
 }
 
-/// One line as it is read: its first [`MAX_LINE_BYTES`] bytes, and whether there were more.
+/// One line as it is read: its first bytes, up to its limit, and whether there were more.
 struct Line {
     kept: Vec<u8>,
     too_long: bool,
+    limit: usize,
 }
 
 impl Line {
+    /// A line of the standalone commands, kept to [`MAX_LINE_BYTES`].
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_limit(MAX_LINE_BYTES)
+    }
+
+    fn with_limit(limit: usize) -> Self {
         Self {
-            kept: Vec::with_capacity(MAX_LINE_BYTES),
+            kept: Vec::with_capacity(limit),
             too_long: false,
+            limit,
         }
     }
 
     /// Takes the next part of the line. What does not fit under the limit is not kept.
     fn push(&mut self, part: &[u8]) {
-        let room = MAX_LINE_BYTES.saturating_sub(self.kept.len());
+        let room = self.limit.saturating_sub(self.kept.len());
         match part.get(..room) {
             Some(fits) if part.len() > room => {
                 self.kept.extend_from_slice(fits);
@@ -98,17 +158,37 @@ impl Line {
         !self.kept.is_empty() || self.too_long
     }
 
-    /// The line is complete: what it was, leaving this empty for the next. A line that
-    /// went beyond the limit is not a command, whatever it began with.
-    fn finish(&mut self) -> Input {
-        let command = std::str::from_utf8(&self.kept)
-            .ok()
-            .filter(|_| !self.too_long)
-            .and_then(|text| text.parse::<LineCommand>().ok());
+    /// The line is complete: `take` is shown it, and this is left empty for the next. A
+    /// line that went beyond the limit is shown as too long, whatever it began with.
+    fn end<R>(&mut self, take: impl FnOnce(Bounded<'_>) -> R) -> R {
+        let shown = if self.too_long {
+            Bounded::TooLong
+        } else {
+            Bounded::Line(&self.kept)
+        };
+        let result = take(shown);
         self.kept.clear();
         self.too_long = false;
-        command.map_or(Input::UnknownLine, Input::Line)
+        result
     }
+
+    /// The line is complete: the command it is, leaving this empty for the next.
+    #[cfg(test)]
+    fn finish(&mut self) -> Input {
+        self.end(command_of)
+    }
+}
+
+/// The standalone command a line is: one of the five, or not a command. A line that went
+/// beyond the limit is not a command, whatever it began with.
+fn command_of(line: Bounded<'_>) -> Input {
+    let command = match line {
+        Bounded::Line(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|text| text.parse::<LineCommand>().ok()),
+        Bounded::TooLong => None,
+    };
+    command.map_or(Input::UnknownLine, Input::Line)
 }
 
 /// What the end of standard input is sent as under `end`; anything else is sent as it is.
@@ -282,6 +362,49 @@ mod tests {
         assert!(line.too_long && line.begun());
         assert_eq!(line.finish(), Input::UnknownLine);
         assert!(!line.begun() && line.kept.capacity() == room);
+    }
+
+    fn bounded(input: &[u8], limit: usize, last: LastLine) -> (Vec<Option<String>>, Ended) {
+        let mut taken = Vec::new();
+        let ended = read_bounded(Cursor::new(input.to_vec()), limit, last, |line| {
+            taken.push(match line {
+                Bounded::Line(bytes) => Some(String::from_utf8(bytes.to_vec()).unwrap()),
+                Bounded::TooLong => None,
+            });
+            true
+        });
+        (taken, ended)
+    }
+
+    #[test]
+    fn a_bounded_reader_keeps_its_limit_and_its_rule_for_a_last_line() {
+        // Exactly at the limit is a line; one byte over is too long, and what follows it
+        // is read as ever.
+        let at = "x".repeat(16);
+        let over = "y".repeat(17);
+        let input = format!("{at}\n{over}\nnext\r\n");
+        let (taken, ended) = bounded(input.as_bytes(), 16, LastLine::Counts);
+        assert_eq!(taken, [Some(at.clone()), None, Some("next\r".into())]);
+        assert_eq!(ended, Ended::Input);
+
+        // A last line with no line feed counts for the standalone commands, and is
+        // discarded for the control pipe.
+        let (taken, _) = bounded(b"one\ntwo", 16, LastLine::Counts);
+        assert_eq!(taken, [Some("one".into()), Some("two".into())]);
+        let (taken, ended) = bounded(b"one\ntwo", 16, LastLine::Discarded);
+        assert_eq!(taken, [Some("one".into())]);
+        assert_eq!(ended, Ended::Input);
+        let (taken, _) = bounded(&[b'z'; 100], 16, LastLine::Discarded);
+        assert!(taken.is_empty(), "a long line with no end is not acted on");
+
+        // Whoever takes the lines can stop the reading, and is told it did.
+        let ended = read_bounded(
+            Cursor::new(b"a\nb\n".to_vec()),
+            16,
+            LastLine::Counts,
+            |_| false,
+        );
+        assert_eq!(ended, Ended::Taker);
     }
 
     #[test]

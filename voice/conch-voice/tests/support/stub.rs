@@ -1,7 +1,8 @@
 //! A stand-in for `conchd`, written by hand on tokio's listener (the pattern of
-//! `conch-voice-api`'s test support, copied and cut down, not imported): the three things
+//! `conch-voice-api`'s test support, copied and cut down, not imported): the things
 //! `conch-voice` asks of `conchd`, with every answer a test might need to arrange.
 //!
+//! - `GET /v1/whoami`: principal 7 (`p7`), a person allowed voice, or what the test planned.
 //! - `POST /v1/channels/{channel}/voice/session`: a session whose join token and room name
 //!   are numbered, so a test can tell which session a connection was made with.
 //! - `POST /v1/channels/{channel}/voice/transmit`: 204, or what the test planned.
@@ -28,6 +29,8 @@ pub const FAKE_JOIN: &str = "FAKE-join-token-do-not-print";
 pub const FAKE_ROOM: &str = "FAKE-room-name-do-not-print";
 /// The identity the stub gives the caller.
 pub const OWN_IDENTITY: &str = "p7";
+/// The principal that identity is, as whoami says it.
+pub const OWN_PRINCIPAL: i64 = 7;
 
 /// One request as the stub received it.
 #[derive(Debug, Clone)]
@@ -107,6 +110,8 @@ struct State {
     sessions_issued: u32,
     /// Answers to the next session requests; when empty, a session is issued.
     session_plan: VecDeque<Reply>,
+    /// Answers to the next whoami requests; when empty, principal 7.
+    whoami_plan: VecDeque<Reply>,
     can_publish: bool,
     /// A grant for a net, listed before the channel's own, in every session.
     with_net_grant: bool,
@@ -143,6 +148,7 @@ impl Stub {
             requests: Vec::new(),
             sessions_issued: 0,
             session_plan: VecDeque::new(),
+            whoami_plan: VecDeque::new(),
             can_publish: true,
             with_net_grant: false,
             livekit_url: "ws://livekit.invalid:7880".to_owned(),
@@ -184,6 +190,16 @@ impl Stub {
     /// The next session request gets this answer instead of a session.
     pub fn next_session(&self, reply: Reply) {
         self.lock().session_plan.push_back(reply);
+    }
+
+    /// The next whoami request gets this answer instead of principal 7.
+    pub fn next_whoami(&self, reply: Reply) {
+        self.lock().whoami_plan.push_back(reply);
+    }
+
+    /// How many whoami requests there have been.
+    pub fn whoami_requests(&self) -> usize {
+        self.requests_to("/v1/whoami").len()
     }
 
     /// Whether the sessions issued from now on allow publishing.
@@ -293,6 +309,21 @@ fn session(state: &mut State) -> Reply {
     )
 }
 
+/// What whoami says of a person allowed voice.
+pub fn whoami(principal_id: i64) -> Reply {
+    Reply::Json(
+        200,
+        serde_json::json!({
+            "id": principal_id,
+            "kind": "human",
+            "name": "someone",
+            "role": "member",
+            "voice_allowed": true,
+        })
+        .to_string(),
+    )
+}
+
 enum Routed {
     Reply(Reply),
     /// Upgrade to a WebSocket, answering this key.
@@ -324,6 +355,10 @@ fn route(state: &Mutex<State>, request: &Request, headers: &[(String, String)]) 
                 look(body["state"].as_str().unwrap_or_default());
             }
             Routed::Reply(state.transmit_plan.pop_front().unwrap_or(Reply::Empty(204)))
+        }
+        ("GET", "/v1/whoami") => {
+            let planned = state.whoami_plan.pop_front();
+            Routed::Reply(planned.unwrap_or_else(|| whoami(OWN_PRINCIPAL)))
         }
         ("GET", "/v1/voice/ws") => match header("sec-websocket-key") {
             Some(key) => Routed::Socket(key.to_owned()),
