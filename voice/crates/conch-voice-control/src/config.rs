@@ -17,8 +17,9 @@ use toml::de::{DeTable, DeValue};
 use crate::error::Error;
 use crate::keys::{KeyBindings, KeyCode};
 
-/// The server address when neither the file, `CONCH_SERVER` nor the command line gives one:
-/// the same default as `conch`.
+/// The server address when neither the command line, `CONCH_SERVER` nor the file gives one,
+/// and no single stored login stands in for them ([`Config::server_or`]): the same default
+/// as `conch`.
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
 /// How long the gate stays open after a release, so the last syllable is not cut.
 pub const DEFAULT_RELEASE_TAIL_MS: u32 = 100;
@@ -28,8 +29,8 @@ pub const DEFAULT_MAX_TRANSMIT_SECS: u32 = 120;
 /// The whole configuration, with defaults filled in where the design note states one.
 ///
 /// A field that is `None` was not set anywhere and has no fixed default: the caller decides
-/// (for `server`, `CONCH_SERVER` and then [`DEFAULT_SERVER`]; for a device, PipeWire's
-/// default; for a key, not bound).
+/// (for `server`, the only stored login's server and then [`DEFAULT_SERVER`], as
+/// [`Config::server_or`] says; for a device, PipeWire's default; for a key, not bound).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
     /// `server`: the address of `conchd`.
@@ -303,7 +304,22 @@ impl Config {
     /// The server address, or [`DEFAULT_SERVER`] if no layer set one.
     #[must_use]
     pub fn server_or_default(&self) -> &str {
-        self.server.as_deref().unwrap_or(DEFAULT_SERVER)
+        self.server_or(None)
+    }
+
+    /// The server address by `conch`'s rule (`serverEnvOr` in `internal/cli/command.go`):
+    /// the one a layer set, else `only_login`, else [`DEFAULT_SERVER`].
+    ///
+    /// `only_login` is the server of the stored login when exactly one is stored, and the
+    /// caller passes it only when `CONCH_TOKEN` is not set: that token is not the stored
+    /// login, and choosing the login's server would send it somewhere it was never meant
+    /// for. With several logins none is preferred, as in `conch`.
+    #[must_use]
+    pub fn server_or<'a>(&'a self, only_login: Option<&'a str>) -> &'a str {
+        self.server
+            .as_deref()
+            .or(only_login)
+            .unwrap_or(DEFAULT_SERVER)
     }
 
     /// The keys to hand to a [`crate::KeyDecoder`], as they stand after any overrides.
@@ -864,6 +880,47 @@ max_transmit_secs = 45
         config.apply(command_line, SOURCE).unwrap();
         assert_eq!(config.channel.as_deref(), Some("from-flag"));
         assert_eq!(config.server.as_deref(), Some("http://from-env.test"));
+    }
+
+    #[test]
+    fn a_server_any_layer_set_wins_over_the_only_login_and_that_over_the_default() {
+        // (the file's server, the only stored login's server, the server used)
+        let table = [
+            (None, None, DEFAULT_SERVER),
+            (None, Some("http://login.test:1"), "http://login.test:1"),
+            (Some("http://file.test"), None, "http://file.test"),
+            (
+                Some("http://file.test"),
+                Some("http://login.test:1"),
+                "http://file.test",
+            ),
+        ];
+        for (file, only_login, want) in table {
+            let text = file.map_or(String::new(), |server| format!("server = {server:?}\n"));
+            let config = Config::parse(&text, FILE).unwrap();
+            assert_eq!(
+                config.server_or(only_login),
+                want,
+                "{file:?} {only_login:?}"
+            );
+            // server_or_default is the rule with no login to stand in.
+            assert_eq!(config.server_or_default(), file.unwrap_or(DEFAULT_SERVER));
+        }
+        // A layer over the file wins over the login the same way.
+        let mut config = Config::default();
+        config
+            .apply(
+                ConfigOverrides {
+                    server: Some("http://from-env.test".to_owned()),
+                    ..ConfigOverrides::default()
+                },
+                SOURCE,
+            )
+            .unwrap();
+        assert_eq!(
+            config.server_or(Some("http://login.test:1")),
+            "http://from-env.test"
+        );
     }
 
     #[test]
