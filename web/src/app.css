@@ -381,6 +381,42 @@ body {
   font-weight: bold;
 }
 
+/* Screen share (issue #444): the sharer's controls and the watch view. The
+   picture is never wider than its column, so a phone's screen fits it, and
+   fills the screen when made full screen. */
+.voice-share {
+  margin: 0.6rem 0;
+}
+
+.voice-share label {
+  overflow-wrap: anywhere;
+}
+
+.share-view {
+  margin: 0.6rem 0;
+}
+
+.share-frame {
+  background: #000;
+}
+
+.share-frame video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+
+.share-frame:fullscreen video {
+  height: 100%;
+  max-height: none;
+}
+
+.share-frame .hint {
+  color: #ddd;
+  padding: 0.4rem;
+}
+
 .channel-list li {
   display: flex;
   align-items: center;

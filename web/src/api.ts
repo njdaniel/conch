@@ -40,7 +40,16 @@ import {
   type WhoAmIResponseV1,
 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
-import { voicePresenceV1, voiceSessionResponseV1, type VoicePresenceV1, type VoiceSessionResponseV1, type VoiceTransmitReportV1, type VoiceTransmitState } from './schema/voice';
+import {
+  voicePresenceV1,
+  voiceSessionResponseV1,
+  voiceShareV1,
+  type VoicePresenceV1,
+  type VoiceSessionResponseV1,
+  type VoiceShareV1,
+  type VoiceTransmitReportV1,
+  type VoiceTransmitState,
+} from './schema/voice';
 import type { Validator } from './schema/validate';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 
@@ -919,4 +928,46 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   return connect((ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
+}
+
+// Screen share (issue #444, voice-control-plane.md section 12). The page
+// connects to the room first, then claims the room's share, then publishes:
+// the join token allows the microphone alone, and the claim is what lets that
+// connection publish a screen and its sound.
+
+// A claim refused carries the status and the server's code, as a session
+// does: 409 voice_share_busy is someone else's share, 409 voice_no_session is
+// no connection to grant it to.
+export type ShareClaimResult =
+  | { readonly ok: true; readonly value: VoiceShareV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// claimVoiceShare claims the room's share for the caller, or claims it again
+// (after a reconnect), which keeps the share as it was.
+export async function claimVoiceShare(channel: string): Promise<ShareClaimResult> {
+  const reply = await authedPost(`${channelPath(channel)}/voice/share`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceShareV1(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// stopVoiceShare ends the caller's share. A share nobody holds is 204 too, so
+// stopping twice is harmless.
+export async function stopVoiceShare(channel: string): Promise<ApiResult<null>> {
+  const reply = await authedSend('DELETE', `${channelPath(channel)}/voice/share`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
 }

@@ -42,6 +42,20 @@ go-ahead to file the implementation issues in §5.
 
 This table shows what the browsers document today. Every browser cell says "expected" until it has been tried (A10, A11, A16), and "to check" where the documentation is unclear: macOS whole-screen sound in recent Chrome, and screen sharing from Android Chrome. Once tried, it becomes the tester-facing table.
 
+**What A11 (#444) tried, 2026-10-16.** The screen-share columns were tried only where this machine allows: Chromium on Linux, headless, in `make web-e2e` (`web/e2e/12-screen-share.spec.ts`), against the pinned LiveKit with Chromium's fake screen (1920x1080 at 30 fps) and its fake sound track. There, a share was published with its sound, a second browser watched it (frames and sound arriving) having asked for no microphone, a third was told who was sharing, and stopping by the sharer, by the browser's stop control, by leaving and by an operator each closed the view. A phone-wide window received a smaller simulcast layer than a full-screen desktop one. That covers the Linux row's share, share-sound (a captured sound track; a real tab's sound was not tried) and watch cells as far as a fake device can. Everything else is untried, because it needs a device or an OS this machine does not have:
+
+| Cell | Result |
+| --- | --- |
+| Linux, Chrome: share, sound, watch | tried with fake devices in headless Chromium (above); a real tab's sound untried |
+| macOS, Chrome or Edge: whole-screen sound ("to check") | untried: no macOS here |
+| Android, Chrome: sharing ("to check") | untried: no Android device here |
+| Windows, Chrome or Edge: share, tab and system sound, watch | untried: no Windows here |
+| Firefox or Safari: share without sound, watch | untried: only Chromium is installed for the browser suite |
+| iPhone or iPad: watch, "tap to play sound" | untried: no iOS device here |
+| Android: watch, "tap to play sound" | untried: no Android device here |
+
+These are left for a person with the devices (#474), whose results replace the "expected" and "to check" cells above.
+
 A talk key that works while a game has focus needs a desktop app. That is Electron (ADR-007), after the alpha.
 
 ## 3. Decided
