@@ -627,6 +627,13 @@ pub struct VoiceParticipant {
     pub transmitting: bool,
     /// When the participant connected.
     pub joined_at: Timestamp,
+    /// Whether the participant holds the room's screen share (issue #443). Absent, as from
+    /// a server that has no screen share, is false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub sharing: bool,
+    /// Whether the share carries sound. Never true without `sharing`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub sharing_audio: bool,
 }
 
 wire_object!(VoiceParticipant, "a voice participant object", unknown = ignored, {
@@ -634,7 +641,13 @@ wire_object!(VoiceParticipant, "a voice participant object", unknown = ignored, 
     can_publish: required,
     transmitting: required,
     joined_at: required,
+    sharing: optional,
+    sharing_audio: optional,
 });
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 impl VoiceParticipant {
     fn check(&self) -> Result<(), String> {
@@ -647,6 +660,18 @@ impl VoiceParticipant {
         if self.transmitting && !self.can_publish {
             return Err(format!(
                 "voice participant {} cannot be transmitting without can_publish",
+                self.principal_id
+            ));
+        }
+        if self.sharing && !self.can_publish {
+            return Err(format!(
+                "voice participant {} cannot be sharing without can_publish",
+                self.principal_id
+            ));
+        }
+        if self.sharing_audio && !self.sharing {
+            return Err(format!(
+                "voice participant {} cannot have sharing_audio without sharing",
                 self.principal_id
             ));
         }
@@ -679,6 +704,7 @@ impl VoicePresenceRoom {
             audience.check()?;
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut sharer = None;
         for participant in &self.participants {
             participant.check()?;
             if !seen.insert(participant.principal_id) {
@@ -686,6 +712,15 @@ impl VoicePresenceRoom {
                     "voice room lists principal {} more than once",
                     participant.principal_id
                 ));
+            }
+            if participant.sharing {
+                if let Some(first) = sharer {
+                    return Err(format!(
+                        "voice room lists principals {first} and {} as sharing; a room has one share at a time",
+                        participant.principal_id
+                    ));
+                }
+                sharer = Some(participant.principal_id);
             }
         }
         Ok(())
@@ -865,6 +900,23 @@ mod tests {
 
     /// Decodes a fixture into `T`, checks it with `validate`, encodes it again, and
     /// requires the JSON to equal the fixture.
+    /// `schema.VoiceShareV1`, the answer to claiming a screen share (issue #443).
+    /// `conch-voice` does not share a screen, so the client has no such type; this copy
+    /// is here so that the fixture is still read and written by a Rust type, as every
+    /// `voice-*` fixture is.
+    #[derive(Debug, Serialize)]
+    struct VoiceShareV1 {
+        principal_id: i64,
+        started_at: Timestamp,
+        audio: bool,
+    }
+
+    wire_object!(VoiceShareV1, "a voice share object", unknown = ignored, {
+        principal_id: required,
+        started_at: required,
+        audio: required,
+    });
+
     fn round_trip<T>(name: &str, validate: impl Fn(&T) -> Result<(), Error>)
     where
         T: DeserializeOwned + Serialize,
@@ -894,12 +946,20 @@ mod tests {
         fn error(name: &str) {
             round_trip::<ErrorBody>(name, |_| Ok(()));
         }
+        fn share(name: &str) {
+            round_trip::<VoiceShareV1>(name, |s| {
+                assert!(s.principal_id > 0 && !s.started_at.is_zero(), "{name}");
+                Ok(())
+            });
+        }
         vec![
             ("voice-session-response-v1.json", session),
             ("voice-session-response-v1-net.json", session),
             ("voice-presence-v1.json", presence),
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
+            ("voice-presence-v1-sharing.json", presence),
+            ("voice-share-v1.json", share),
             ("voice-transmit-report-v1-started.json", report),
             ("voice-transmit-report-v1-stopped.json", report),
             ("voice-transmit-report-v1-net.json", report),
@@ -1293,6 +1353,8 @@ mod tests {
             can_publish: true,
             transmitting: false,
             joined_at: Timestamp::parse("2026-10-09T12:00:31.000Z").unwrap(),
+            sharing: false,
+            sharing_audio: false,
         }
     }
 
@@ -1422,6 +1484,61 @@ mod tests {
                 "a principal twice in one room",
                 presence(vec![room(None, vec![participant(3), participant(3)])]),
                 Some("principal 3 more than once"),
+            ),
+            (
+                "one participant sharing with sound",
+                presence(vec![room(
+                    None,
+                    vec![
+                        VoiceParticipant {
+                            sharing: true,
+                            sharing_audio: true,
+                            ..participant(3)
+                        },
+                        participant(7),
+                    ],
+                )]),
+                None,
+            ),
+            (
+                "sharing without being able to publish",
+                presence(vec![room(
+                    None,
+                    vec![VoiceParticipant {
+                        can_publish: false,
+                        sharing: true,
+                        ..participant(3)
+                    }],
+                )]),
+                Some("cannot be sharing without can_publish"),
+            ),
+            (
+                "sound of a share without the share",
+                presence(vec![room(
+                    None,
+                    vec![VoiceParticipant {
+                        sharing_audio: true,
+                        ..participant(3)
+                    }],
+                )]),
+                Some("cannot have sharing_audio without sharing"),
+            ),
+            (
+                "two participants sharing in one room",
+                presence(vec![room(
+                    None,
+                    vec![
+                        VoiceParticipant {
+                            sharing: true,
+                            ..participant(3)
+                        },
+                        VoiceParticipant {
+                            sharing: true,
+                            ..participant(7)
+                        },
+                    ],
+                )]),
+                Some("principals 3 and 7 as sharing"),
             ),
             (
                 "two channel rooms",

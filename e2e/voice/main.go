@@ -22,6 +22,11 @@
 //     channel. It builds conch-voice with the pinned Rust toolchain
 //     (scripts/voice-toolchain.sh); without that toolchain the scenario alone
 //     is skipped, and the last line says so.
+//   - Within the live half, the screen share (issue #443, share.go): a member
+//     claims the room's share and an lk participant publishes a screen and
+//     its sound on the same connection, another subscribes to them, the share
+//     is stopped and its tracks disappear; publishing those sources without a
+//     claim is refused by LiveKit.
 //
 // Also checked throughout: the join token's own claims (claims.go); that no
 // token, secret or room name appears in anything conchd sends to a client
@@ -406,6 +411,7 @@ func (l *live) run(ctx context.Context) error {
 		{"never issued", l.neverIssued},
 		{"credential expiring by itself", l.credentialExpires},
 		{"conch-voice clients", l.voiceClients},
+		{"screen share", l.screenShare},
 		{"LiveKit down", l.liveKitDown},
 	}
 	for _, s := range steps {
