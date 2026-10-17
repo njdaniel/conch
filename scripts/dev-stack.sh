@@ -42,7 +42,7 @@ environment (defaults in brackets):
   CONCH_DEV_MEMORY     LiveKit's memory limit [4g]
   CONCH_DEV_CHANNEL    the channel made for you [general]
 
-needs: go, docker, curl, openssl, and the Node in web/.nvmrc for the first
+needs: go, docker, curl, openssl, ss (iproute2), and the Node in web/.nvmrc for the first
 build of the web client. viewers also needs taskset and the network (it
 downloads the pinned lk).
 EOF
@@ -71,8 +71,13 @@ image() {
     echo "$img"
 }
 
+# The recorded PID is conchd's only while a process by that name holds it: a
+# PID reused after a crash is someone else's, and is never signalled.
 conchd_running() {
-    [ -f "$state/conchd.pid" ] && kill -0 "$(cat "$state/conchd.pid")" 2>/dev/null
+    local pid
+    [ -f "$state/conchd.pid" ] || return 1
+    pid=$(cat "$state/conchd.pid")
+    [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = conchd ]
 }
 
 conch() {
@@ -115,13 +120,15 @@ room:
   auto_create: false
 EOF
         chmod 0644 "$state/livekit.yaml" # the container's user reads it
+        local img
+        img=$(image)
         say "starting LiveKit (CPUs $cpus, $memory)"
         # The secret reaches docker by name, never on a command line.
         LIVEKIT_KEYS="conch-dev: $(cat "$state/livekit.secret")" \
             docker run -d --name "$container" --network host \
-            --cpuset-cpus "$cpus" --memory "$memory" \
+            --cpuset-cpus "$cpus" --memory "$memory" --memory-swap "$memory" \
             -e LIVEKIT_KEYS -v "$state/livekit.yaml:/etc/livekit.yaml:ro" \
-            "$(image)" --config /etc/livekit.yaml --node-ip 127.0.0.1 >/dev/null
+            "$img" --config /etc/livekit.yaml --node-ip 127.0.0.1 >/dev/null
     fi
     for _ in $(seq 50); do
         curl -fsS "http://127.0.0.1:$lk_port/" >/dev/null 2>&1 && return
@@ -132,9 +139,11 @@ EOF
 }
 
 start_conchd() {
-    if [ ! -d "$state/data" ]; then
+    if [ ! -s "$state/operator.token" ]; then
+        [ ! -d "$state/data" ] || fail "$state/data exists but holds no operator credential; start again with: $0 down --wipe"
         mkdir "$state/data"
-        "$root/bin/conchd" bootstrap-operator --data "$state/data" --name operator > "$state/operator.token"
+        "$root/bin/conchd" bootstrap-operator --data "$state/data" --name operator > "$state/operator.token.new"
+        mv "$state/operator.token.new" "$state/operator.token"
     fi
     if ! conchd_running; then
         if ss -ltnH "( sport = :$port )" | grep -q .; then
@@ -161,9 +170,14 @@ up() {
     build
     start_livekit
     start_conchd
-    # Both are no-ops after the first run, and say so; neither is an error.
+    # After the first run the channel and the membership exist already; that
+    # refusal is expected, so the check that matters is the one after.
+    # bootstrap-operator makes the first principal of a new database, id 1.
     conch admin channel create "$channel" >/dev/null 2>&1 || true
     conch admin member add "$channel" 1 >/dev/null 2>&1 || true
+    curl -fsS -o /dev/null -H "Authorization: Bearer $(cat "$state/operator.token")" \
+        "$server/v1/channels/$channel/members" ||
+        fail "channel \"$channel\" could not be made or read; see $state/conchd.log (CONCH_DEV_CHANNEL?)"
     cat <<EOF
 
   Up. Open $server/app/ in Chrome and sign in with the operator credential:
@@ -207,13 +221,15 @@ viewers() {
     require_up
     local n=29
     if [ $# -gt 0 ] && [[ $1 =~ ^[0-9]+$ ]]; then n=$1; shift; fi
-    say "adding $n simulated participants on CPUs $(other_cpus) (Ctrl-C ends early and still cleans up)"
-    taskset -c "$(other_cpus)" "$root/scripts/alpha-loadtest.sh" --server "$server" \
+    local others
+    others=$(other_cpus)
+    say "adding $n simulated participants on CPUs $others (Ctrl-C ends early and still cleans up)"
+    taskset -c "$others" "$root/scripts/alpha-loadtest.sh" --server "$server" \
         --token-file "$state/operator.token" --channel "$channel" --viewers "$n" --duration 10m "$@"
 }
 
 stats() {
-    docker stats --no-stream --format "LiveKit: CPU {{.CPUPerc}} (100% is one core)   memory {{.MemUsage}}" "$container"
+    docker stats --no-stream --format "LiveKit: CPU {{.CPUPerc}} (100% is one core)   memory {{.MemUsage}}" "$container" || true
     if conchd_running; then
         ps -o '%cpu=,rss=' -p "$(cat "$state/conchd.pid")" |
             awk '{printf "conchd:  CPU %s%%   memory %.0f MiB\n", $1, $2 / 1024}'
@@ -224,6 +240,7 @@ stats() {
 down() {
     if conchd_running; then
         kill "$(cat "$state/conchd.pid")"
+        for _ in $(seq 50); do conchd_running || break; sleep 0.1; done
         say "conchd stopped"
     fi
     rm -f "$state/conchd.pid"
@@ -231,8 +248,14 @@ down() {
         docker rm -f "$container" >/dev/null
         say "LiveKit stopped"
     fi
-    if [ "${1:-}" = --wipe ]; then
-        rm -rf "$state"
+    # Only what this script writes, then the directory if that emptied it:
+    # CONCH_DEV_STATE may name a directory that holds other things.
+    if [ "${1:-}" = --wipe ] && [ -d "$state" ]; then
+        conchd_running && fail "conchd is still running; not deleting its data"
+        rm -rf "$state/data"
+        rm -f "$state"/operator.token "$state"/operator.token.new "$state"/livekit.secret \
+            "$state"/livekit.yaml "$state"/conchd.log "$state"/conchd.pid
+        rmdir "$state" 2>/dev/null || true
         say "state deleted"
     fi
 }
