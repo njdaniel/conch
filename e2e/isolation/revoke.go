@@ -22,9 +22,11 @@ import (
 // Revocation, timed (private-alpha.md §1, exit step 7). A tester holds every
 // socket variant, a LiveKit participant and the room's share; the operator
 //
-//  1. disables the tester,
-//  2. disables everyone who joined through A's open link, and
-//  3. closes the link,
+//  1. revokes a second credential of the tester's, which holds every socket
+//     variant too, and nothing else (issue #519),
+//  2. disables the tester,
+//  3. disables everyone who joined through A's open link, and
+//  4. closes the link,
 //
 // and each step is timed from the moment the operator's request is sent to
 // the moment each socket is seen closed and LiveKit no longer lists the
@@ -309,14 +311,29 @@ func (w *world) measure(what string, holders []holder, bounds voiceBounds, act f
 	return t, nil
 }
 
-// revoke runs the three steps and returns what they measured.
+// secondCredential has the operator issue m a second credential, and returns
+// m signed in with it. Its token and id are markers of A, as m's first are.
+func (w *world) secondCredential(m *member) (*member, error) {
+	var cred schema.CreateCredentialResponseV1
+	if err := w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/credentials", m.id), schema.CreateCredentialRequestV1{Label: "second sign-in"}, &cred); err != nil {
+		return nil, err
+	}
+	second := &member{name: m.name + " (second credential)", id: m.id, token: cred.Token, credID: cred.Credential.ID}
+	second.api = w.as(second)
+	w.h.secret(second.name, cred.Token)
+	w.marks.secret("an A credential", cred.Token)
+	w.marks.id("credential", second.name, second.credID)
+	return second, nil
+}
+
+// revoke runs the four steps and returns what they measured.
 func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	ann, abe, amy := w.a.people[0], w.a.people[1], w.a.people[2]
 	camp := w.a.main()
 	var out []timing
 
-	// 1. The tester: ann, who holds every socket variant and, with LiveKit,
-	// her lk participant and the share.
+	// The tester: ann, who holds every socket variant and, with LiveKit, her
+	// lk participant and the share.
 	room := ""
 	if v != nil {
 		room = v.room
@@ -330,7 +347,54 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, err
 	}
-	t, err := w.measure("disable the tester (ann)", []holder{tester}, bounds, func() error {
+
+	// 1. One of her credentials: ann signs in a second time and holds every
+	// socket variant with that credential too, and the operator revokes it
+	// alone. It holds no voice session, so the room is not rotated and her
+	// participant stays for step 2.
+	second, err := w.secondCredential(ann)
+	if err != nil {
+		return nil, err
+	}
+	feeds, err := openAll(second, camp)
+	if err != nil {
+		return nil, err
+	}
+	t, err := w.measure("revoke one of the tester's credentials (ann's second)", []holder{{m: second, sockets: feeds}}, bounds, func() error {
+		return w.op.call(http.MethodDelete, fmt.Sprintf("/v1/credentials/%d", second.credID), nil, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, t)
+	// The revoke closed its sockets before it answered, so one of her first
+	// credential's closed by mistake would have closed with them. Give that a
+	// second to show, then every one of them must still be open.
+	settle := time.NewTimer(time.Second)
+	select {
+	case <-settle.C:
+	case <-stopCtx.Done():
+		return nil, errInterrupted
+	}
+	for _, f := range tester.sockets {
+		if ended, _ := f.ended(); ended {
+			return nil, fmt.Errorf("%s closed when only her second credential was revoked", f.what)
+		}
+	}
+	for _, c := range []struct {
+		m    *member
+		want int
+	}{{second, http.StatusUnauthorized}, {ann, http.StatusOK}} {
+		if status, _, err := c.m.api.do(http.MethodGet, "/v1/whoami", nil); err != nil {
+			return nil, err
+		} else if status != c.want {
+			return nil, fmt.Errorf("%s after the second credential was revoked: whoami status %d, want %d", c.m.name, status, c.want)
+		}
+	}
+	w.h.say("ok   revoked 1/4: %s; the %d sockets of her other credential stay open", t, len(tester.sockets))
+
+	// 2. The tester herself.
+	t, err = w.measure("disable the tester (ann)", []holder{tester}, bounds, func() error {
 		return w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/disable", ann.id), nil, nil)
 	})
 	if err != nil {
@@ -360,9 +424,9 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err := w.staysOut([]holder{tester}, bounds); err != nil {
 		return nil, fmt.Errorf("after ann was disabled: %w", err)
 	}
-	w.h.say("ok   revoked 1/3: %s; she stays out", t)
+	w.h.say("ok   revoked 2/4: %s; she stays out", t)
 
-	// 2. Everyone from A's open link: abe and amy, each holding every socket
+	// 3. Everyone from A's open link: abe and amy, each holding every socket
 	// variant and a participant in A's room (the new one: disabling ann
 	// rotated it).
 	var joiners []holder
@@ -400,9 +464,9 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err := w.staysOut(joiners, bounds); err != nil {
 		return nil, fmt.Errorf("after the joiners were disabled: %w", err)
 	}
-	w.h.say("ok   revoked 2/3: %s; they stay out", t)
+	w.h.say("ok   revoked 3/4: %s; they stay out", t)
 
-	// 3. The link is closed: a new redeem, and a preview, are invalid.
+	// 4. The link is closed: a new redeem, and a preview, are invalid.
 	if err := w.op.call(http.MethodDelete, fmt.Sprintf("/v1/invites/%d", w.a.openInviteID), nil, nil); err != nil {
 		return nil, err
 	}
@@ -422,6 +486,6 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 			return nil, fmt.Errorf("%s with the closed link: %w", p.path, err)
 		}
 	}
-	w.h.say("ok   revoked 3/3: the open link is closed; redeeming and previewing it answer 404 invite_invalid")
+	w.h.say("ok   revoked 4/4: the open link is closed; redeeming and previewing it answer 404 invite_invalid")
 	return out, nil
 }

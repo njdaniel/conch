@@ -25,9 +25,9 @@ func TestSubscriptionV2Live(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := New()
-			sub := h.SubscribeV2(1, 7, 1)
+			sub := h.SubscribeV2(1, 7, 0, 1)
 			defer sub.Cancel()
-			other := h.SubscribeV2(2, 7, 1)
+			other := h.SubscribeV2(2, 7, 0, 1)
 			defer other.Cancel()
 			if !sub.Live() {
 				t.Fatal("a fresh subscription is not live")
@@ -41,7 +41,7 @@ func TestSubscriptionV2Live(t *testing.T) {
 
 	t.Run("one subscription's end leaves the others live", func(t *testing.T) {
 		h := New()
-		a, b := h.SubscribeV2(1, 7, 1), h.SubscribeV2(1, 8, 1)
+		a, b := h.SubscribeV2(1, 7, 0, 1), h.SubscribeV2(1, 8, 0, 1)
 		defer a.Cancel()
 		defer b.Cancel()
 		a.Cancel()
@@ -53,7 +53,7 @@ func TestSubscriptionV2Live(t *testing.T) {
 	t.Run("a subscription taken from a closed hub is not live", func(t *testing.T) {
 		h := New()
 		h.Close()
-		sub := h.SubscribeV2(1, 7, 1)
+		sub := h.SubscribeV2(1, 7, 0, 1)
 		defer sub.Cancel()
 		if sub.Live() {
 			t.Error("subscription from a closed hub is live")

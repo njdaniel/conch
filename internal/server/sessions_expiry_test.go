@@ -27,7 +27,7 @@ func TestSweepEndsSessionsOfExpiredCredential(t *testing.T) {
 	expiring := f.create(t, tok, humanBody)
 	keeper := f.create(t, f.aliceTok, humanBody)
 
-	sub := f.srv.events.subscribe(f.general.ID, f.alice.ID)
+	sub := f.srv.events.subscribe(f.general.ID, f.alice.ID, 0)
 	defer sub.cancel()
 	clock.Advance(time.Hour - time.Second)
 	f.heartbeat(t, tok, expiring.ID)

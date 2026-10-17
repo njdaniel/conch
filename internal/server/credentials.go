@@ -134,11 +134,9 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	// The old credential is revoked: a voice room it held a session for is
-	// rotated before the response is written (issue #161).
-	s.voiceCredentialRevoked(ctx)
-	// Rotating revokes the old credential, which ends its sessions.
-	s.events.notifyRosters()
+	// Rotating revokes the old credential: what follows is what follows a
+	// revoke.
+	s.credentialRevoked(ctx, id)
 	writeSecretJSON(w, http.StatusCreated, schema.RotateCredentialResponseV1{Credential: cred, Token: token})
 }
 
@@ -161,7 +159,7 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	s.credentialRevoked(ctx)
+	s.credentialRevoked(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -192,7 +190,7 @@ func (s *Server) handleRevokeCurrentCredential(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	s.credentialRevoked(ctx)
+	s.credentialRevoked(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -264,17 +262,23 @@ func (s *Server) handleRevokeOwnCredential(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	s.credentialRevoked(ctx)
+	s.credentialRevoked(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// credentialRevoked is what follows the revocation of one credential, by an
-// operator or by its holder. A voice room the credential held a session for
-// is rotated before the response is written, so a token LiveKit renewed for
-// it is useless (issue #161); it cannot fail the request. Revoking ended the
-// credential's sessions, so rosters are told. Open sockets on the credential
-// close at their next liveness re-check (defaultCredentialRecheckInterval).
-func (s *Server) credentialRevoked(ctx context.Context) {
-	s.voiceCredentialRevoked(ctx)
+// credentialRevoked is what follows the committed revocation of credential id,
+// by an operator or by its holder, or by a rotation that replaced it. Every
+// socket opened with it closes at once, in every family, with the revoked
+// reason (issue #519): the drops come first, before anything else here can
+// owe one of them a frame, and a frame already being built is stopped before
+// it is written. The principal's sockets through its other credentials stay.
+// A voice room the credential held a session for is rotated before the
+// response is written, so a token LiveKit renewed for it is useless (issue
+// #161); it cannot fail the request. Revoking ended the credential's
+// sessions, so rosters are told.
+func (s *Server) credentialRevoked(ctx context.Context, id int64) {
+	s.hub.DropCredential(id)
+	s.events.dropCredential(id)
+	s.voiceCredentialRevoked(ctx, id)
 	s.events.notifyRosters()
 }

@@ -90,9 +90,10 @@ func newEventsHub() *eventsHub {
 // eventsSub is one socket's subscription. Everything but the channels is
 // guarded by hub.mu.
 type eventsSub struct {
-	hub         *eventsHub
-	channelID   int64
-	principalID int64
+	hub          *eventsHub
+	channelID    int64
+	principalID  int64
+	credentialID int64 // the credential the socket was opened with
 	// wake has room for one signal: the writer only ever does a non-blocking
 	// send, and the subscriber takes everything queued when it wakes.
 	wake    chan struct{}
@@ -107,8 +108,8 @@ type eventsSub struct {
 // out through flush like every other, so it is sent only after a drop that
 // committed meanwhile has been seen and membership and the manifest have been
 // asked again. After closeAll it returns one that is already dropped.
-func (h *eventsHub) subscribe(channelID, principalID int64) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
+func (h *eventsHub) subscribe(channelID, principalID, credentialID int64) *eventsSub {
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
 	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -267,6 +268,23 @@ func (h *eventsHub) dropPrincipalAll(principalID int64) {
 	}
 }
 
+// dropCredential closes the events sockets opened with credentialID, on
+// every channel: that one credential was revoked (issue #519). The
+// principal's sockets through its other credentials stay. A zero credential
+// matches nothing.
+func (h *eventsHub) dropCredential(credentialID int64) {
+	if credentialID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.credentialID == credentialID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
 // closeAll drops every subscription and refuses new ones: shutdown.
 func (h *eventsHub) closeAll() {
 	h.mu.Lock()
@@ -335,9 +353,10 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe before the last checks: DropPrincipal-style drops close only
-	// what is registered, so a removal or a disable that committed after the
-	// checks above has either been seen below or closes this subscription.
-	sub := s.events.subscribe(channel.ID, caller.ID)
+	// what is registered, so a removal, a disable or a revoke of this
+	// credential that committed after the checks above has either been seen
+	// below or closes this subscription.
+	sub := s.events.subscribe(channel.ID, caller.ID, credID)
 	defer sub.cancel()
 	live, err := s.store.CredentialLive(ctx, credID)
 	if err != nil {
@@ -416,6 +435,15 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			}
 		case <-keepAlive:
 			if e.s.keepSessionAlive(ctx, e.sessionID, e.credID) == sessionGone {
+				// A revoke or a disable ends the session too; when its
+				// drop has come, the close says why the credential went,
+				// not that the session did.
+				select {
+				case <-e.sub.dropped:
+					e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+					return
+				default:
+				}
 				// The session ended (DELETE, or the sweeper ending an
 				// expired credential's): nothing is left to keep alive.
 				// Closing tells the client, which reconnects and is
@@ -696,6 +724,15 @@ func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool)
 func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 	if hook := e.s.eventsBeforeWrite; hook != nil {
 		hook()
+	}
+	// The last point a drop can stop a frame (issue #519): one that was
+	// being built when a revoke, a disable or a removal dropped the
+	// subscription is not sent, and the socket closes saying why.
+	select {
+	case <-e.sub.dropped:
+		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+		return false
+	default:
 	}
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
