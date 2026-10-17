@@ -15,7 +15,7 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
 2. `go run ./e2e/p2-hardening` passes locally against the release commit. It
    is the P2 exit gate (issue #81) and runs the P1 canary, `e2e/dogfood`, as
    its last step, so this one command is both. A release **does not ship**
-   when it fails. What it proves and how to read a failure: the README
+   when it fails. What it proves and how to read a failure: docs/manual.md
    section "The P2 hardening gate".
 3. The latest principal-review report shows no unresolved invariant drift
    (open drift → fix or get Nick's explicit acceptance first).

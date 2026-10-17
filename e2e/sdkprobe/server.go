@@ -47,7 +47,7 @@ type server struct {
 // startLiveKit runs the pinned image as e2e/voice does: on the host network,
 // signalling bound to localhost, automatic room creation off, the same room
 // timeouts. (The media TCP port listens on every interface whatever
-// bind_addresses says; see README "Voice".) The settings go in a file and the
+// bind_addresses says; see docs/manual.md "Voice".) The settings go in a file and the
 // key pair in the environment of the docker command, passed on by name, so
 // the secret is on no command line. The container is registered for removal
 // before it is started.

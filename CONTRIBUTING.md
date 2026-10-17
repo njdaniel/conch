@@ -1,6 +1,6 @@
 # Contributing to Conch
 
-Thanks for looking. Conch is pre-alpha (see the [README](README.md)), so expect things to move. This file is what you need on day one. The rules themselves live elsewhere, and where this file and they disagree, they win:
+Thanks for looking. Conch is in a private communications alpha (see the [README](README.md)), so expect things to move. This file is what you need on day one. The rules themselves live elsewhere, and where this file and they disagree, they win:
 
 - [CLAUDE.md](CLAUDE.md): the build rules. It is written for the AI agents the maintainer works with, but it binds every change, whoever or whatever wrote it.
 - [ADR-000](docs/adr/ADR-000-charter.md): the charter. What Conch is, what it will not be, and who decides what.
@@ -33,7 +33,7 @@ Then install the pre-commit hook once:
 make hooks-install   # every commit: gofmt, invisible characters, vet, lint, go test, schema and TypeScript checks, Go dependency gate, Rust leg
 ```
 
-`make check` does not skip the Rust or web leg when its toolchain is missing: it fails and names what to install. The [README's build section](README.md#1-build) says more about each leg.
+`make check` does not skip the Rust or web leg when its toolchain is missing: it fails and names what to install. The [manual's build section](docs/manual.md#1-build) says more about each leg.
 
 ## Build and run
 
@@ -44,7 +44,7 @@ scripts/dev-stack.sh token    # the operator credential, to paste at http://127.
 scripts/dev-stack.sh down     # stop it; down --wipe also deletes its state
 ```
 
-`scripts/dev-stack.sh --help` lists every command and setting. To do the same by hand, one step at a time, follow the [Quickstart](README.md#quickstart). `make p3-local` starts a disposable server with a small test community and `make p3-reset` removes it ([walkthrough](docs/p3-walkthrough.md)). `make web-build` builds the browser client and `make rust-build` builds `bin/conch-voice`.
+`scripts/dev-stack.sh --help` lists every command and setting. To do the same by hand, one step at a time, follow the [Quickstart](docs/manual.md#quickstart). `make p3-local` starts a disposable server with a small test community and `make p3-reset` removes it ([walkthrough](docs/p3-walkthrough.md)). `make web-build` builds the browser client and `make rust-build` builds `bin/conch-voice`.
 
 ## Checks
 
@@ -88,7 +88,7 @@ They are welcome, on the same terms as any other:
 
 ## Reporting bugs
 
-Use the [bug report form](https://github.com/njdaniel/conch/issues/new/choose). Leave out passwords, invite links and credentials (anything starting with `conch_`). If you are testing a running server, "Report a problem" in the web page and `conch report` collect the details for you ([Diagnostics](README.md#diagnostics)).
+Use the [bug report form](https://github.com/njdaniel/conch/issues/new/choose). Leave out passwords, invite links and credentials (anything starting with `conch_`). If you are testing a running server, "Report a problem" in the web page and `conch report` collect the details for you ([Diagnostics](docs/manual.md#diagnostics)).
 
 ## Reporting a security vulnerability
 

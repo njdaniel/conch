@@ -6,7 +6,7 @@ One droplet runs three things:
 
 - `conchd`, one instance per systemd unit `conchd@<name>`, each as its own user, on a loopback port;
 - Caddy, which holds the public names, gets and renews their certificates, and proxies to `conchd` and to LiveKit's signalling port;
-- LiveKit, in Docker from the digest-pinned image the README uses, for the audio.
+- LiveKit, in Docker from the digest-pinned image the manual uses, for the audio.
 
 Everything is parameterised by an **instance name** (`alpha` below) and a **domain** (`example.com` below, a placeholder: replace it everywhere). A second server is the steps in [A second instance](#a-second-instance), not a new design.
 
@@ -93,9 +93,9 @@ Release assets are named `conchd_<tag>_<os>_<arch>`, with a `checksums.txt`, and
 
 ## 4. LiveKit
 
-LiveKit runs in Docker, from the image the README pins by digest (`livekit/livekit-server:v1.13.7@sha256:...`). The version is named in `ops/deploy/livekit.service` and in the README: change both together, after reading the release notes.
+LiveKit runs in Docker, from the image the manual pins by digest (`livekit/livekit-server:v1.13.7@sha256:...`). The version is named in `ops/deploy/livekit.service` and in the manual: change both together, after reading the release notes.
 
-Each instance has its own LiveKit key pair ([README](../README.md#run-livekit-beside-conchd): one key per server). Keys live in one file, one `<key>: <secret>` line per instance, mode 0600:
+Each instance has its own LiveKit key pair ([manual](manual.md#run-livekit-beside-conchd): one key per server). Keys live in one file, one `<key>: <secret>` line per instance, mode 0600:
 
 ```sh
 umask 077

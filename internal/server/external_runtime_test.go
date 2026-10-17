@@ -103,7 +103,7 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 		run  schema.RunV1
 		iv   schema.InterventionV1
 	)
-	// Each step is one call a sender makes, in the order the README gives.
+	// Each step is one call a sender makes, in the order docs/manual.md gives.
 	steps := []struct {
 		name   string
 		token  string
