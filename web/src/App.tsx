@@ -337,6 +337,7 @@ export function App({ origin }: { readonly origin: string }) {
     dispatchAuth({ type: 'submit' });
     void api.signIn(credential).then((result) => {
       if (result.ok) dispatchAuth({ type: 'verified', principal: result.value });
+      else if (result.failure === 'stored') dispatchAuth({ type: 'recheck' });
       else dispatchAuth({ type: 'failed', failure: result.failure });
     });
   }, []);

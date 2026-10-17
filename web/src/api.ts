@@ -90,6 +90,20 @@ let pending: string | null = null;
 // another person's credential under this page's name.
 let pinned: Held | null = null;
 
+// unchecked is the credential restore found stored but could not check (the
+// server did not answer): neither pinned nor dropped. Only it may be forgotten
+// by forgetStored, and only while it is still the one stored (issue #469).
+let unchecked: Held | null = null;
+
+// stillStored says whether held is still the credential stored at its place.
+function stillStored(held: Held): boolean {
+  try {
+    return storageAt(held.place).getItem(tokenKey) === held.token;
+  } catch {
+    return false;
+  }
+}
+
 // current is the pinned credential while it is still the one stored at its
 // place, else nothing (and the pin is cleared).
 function current(): Held | null {
@@ -268,13 +282,17 @@ export function hasToken(): boolean {
 // once, to last. An operator's is held back until continueAsOperator, because
 // a browser is not the place for it. A rejected credential is stored nowhere.
 //
-// It is refused ('held') while this browser holds a sign-in that could not be
-// checked (the server was not reachable when the page loaded): signing in over
-// it would overwrite a member's credential without revoking it, or sit under
-// an operator's tab credential that the next load would prefer (issue #469).
-// forgetStored ends that one first.
-export async function signIn(candidate: string): Promise<ApiResult<WhoAmIResponseV1> | { readonly ok: false; readonly failure: 'held' }> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
+// It is refused ('held') while this browser holds the sign-in restore could
+// not check (the server was not reachable when the page loaded): signing in
+// over it would overwrite a member's credential without revoking it, or sit
+// under an operator's tab credential that the next load would prefer (issue
+// #469); forgetStored ends that one first. A credential stored since this page
+// looked (another tab signed in) is not this page's to replace or forget: the
+// answer is 'stored', and the page checks it as on load.
+export async function signIn(candidate: string): Promise<ApiResult<WhoAmIResponseV1> | { readonly ok: false; readonly failure: 'held' | 'stored' }> {
+  if (unchecked !== null && !stillStored(unchecked)) unchecked = null;
+  if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
+  if (hasToken()) return { ok: false, failure: 'stored' };
   pending = null;
   pinned = null;
   const result = await get('/v1/whoami', candidate, whoAmIResponseV1);
@@ -315,11 +333,13 @@ export interface Restored {
 export async function restore(): Promise<ApiResult<Restored>> {
   pending = null;
   pinned = null;
+  unchecked = null;
   const held = readToken();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const result = await get('/v1/whoami', held.token, whoAmIResponseV1);
   if (!result.ok) {
     if (result.failure === 'unauthorized') dropToken(held);
+    else unchecked = held;
     return result;
   }
   if (held.place === 'lasting' && result.value.role === 'operator') {
@@ -469,28 +489,18 @@ export function heldElsewhere(): boolean {
   return pending !== null || hasToken();
 }
 
-// forgetStored ends a stored sign-in that could not be checked: each stored
-// credential is revoked on the server if it answers (best effort), then
-// dropped here. It resolves to whether the server was told about every one
-// (true when none was stored).
+// forgetStored ends the sign-in restore could not check, and only that one:
+// it is revoked on the server if the server answers (best effort), then
+// dropped here, while it is still the credential stored. A credential another
+// tab stored since is never touched. It resolves to whether the server was
+// told (true when there was nothing to forget).
 export async function forgetStored(): Promise<boolean> {
-  pending = null;
-  pinned = null;
-  let told = true;
-  for (const place of places) {
-    let token: string | null = null;
-    try {
-      token = storageAt(place).getItem(tokenKey);
-    } catch {
-      // Refused storage holds nothing to forget.
-    }
-    if (token === null) continue;
-    const held: Held = { token, place };
-    const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
-    if (!(reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok))) told = false;
-    dropToken(held);
-  }
-  return told;
+  const held = unchecked;
+  unchecked = null;
+  if (held === null || !stillStored(held)) return true;
+  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
+  dropToken(held);
+  return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
 }
 
 // redeemInvite uses an invite to make a new member called name. The token in

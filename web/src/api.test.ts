@@ -568,6 +568,38 @@ describe('signing in over a sign-in that could not be checked', () => {
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
   });
 
+  // #485 review: forgetting must touch only the credential restore could not
+  // check, never one another tab stored since.
+  it('does not take over or forget a sign-in another tab made after this page looked', async () => {
+    serve(whoami);
+    expect(await restore()).toEqual({ ok: false, failure: 'unauthorized' });
+    window.localStorage.setItem(key, otherMemberToken);
+    const calls = serve(whoami);
+    expect(await signIn(memberToken)).toEqual({ ok: false, failure: 'stored' });
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([]);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  it("forgets only this tab's unchecked credential, not the lasting one other tabs use", async () => {
+    window.localStorage.setItem(key, otherMemberToken);
+    await unchecked(window.sessionStorage, operatorToken);
+    const calls = serve((c) => (c.method === 'DELETE' ? new Response(null, { status: 204 }) : whoami(c)));
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([{ path: '/v1/credentials/current', method: 'DELETE', auth: `Bearer ${operatorToken}` }]);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  it('forgets nothing once the unchecked credential has been replaced', async () => {
+    await unchecked(window.localStorage, otherMemberToken);
+    window.localStorage.setItem(key, memberToken);
+    const calls = serve(whoami);
+    expect(await forgetStored()).toBe(true);
+    expect(calls).toEqual([]);
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+  });
+
   it('signs in as before when nothing is stored', async () => {
     serve(whoami);
     expect(heldElsewhere()).toBe(false);

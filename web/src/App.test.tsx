@@ -175,6 +175,18 @@ describe('sign-in', () => {
     expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
   });
 
+  // #485 review: a credential another tab stored after this page loaded is
+  // checked as on load, not offered for forgetting.
+  it('checks a sign-in another tab made since this page loaded, rather than signing in over it', async () => {
+    serve(asMember);
+    render(<App origin={origin} />);
+    window.localStorage.setItem('conch.web.token', secret);
+    signIn('conch_someone_else');
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(screen.queryByRole('button', { name: 'Forget the stored sign-in' })).toBeNull();
+    expect(window.localStorage.getItem('conch.web.token')).toBe(secret);
+  });
+
   it('warns before continuing as an operator and stores nothing until told to', async () => {
     serve({ ...asMember, '/v1/whoami': () => json(operator) });
     render(<App origin={origin} />);
