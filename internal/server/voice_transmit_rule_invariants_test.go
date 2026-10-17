@@ -455,6 +455,9 @@ func everyRuleSequence(maxLen int, visit func(inputs []ruleInput, times []time.T
 // TestTransmitRuleInvariantsExhaustive checks every sequence of up to seven
 // inputs (six with -short): 960,799 of them.
 func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
+	// Pure computation over the rule, with no server and nothing shared: it
+	// runs alongside the other parallel tests (issue #472).
+	t.Parallel()
 	maxLen := 7
 	if testing.Short() {
 		maxLen = 6
@@ -506,6 +509,9 @@ func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
 // between. Long sequences are what reach the 3 s ration, both the excuse and
 // its refusal. The seed is fixed, so a failure is reproducible.
 func TestTransmitRuleInvariantsRandom(t *testing.T) {
+	// Pure computation over the rule, with no server and nothing shared: it
+	// runs alongside the other parallel tests (issue #472).
+	t.Parallel()
 	sequences := 20000
 	if testing.Short() {
 		sequences = 4000
@@ -601,6 +607,9 @@ func (d *doctoredRule) drop(at time.Time) []transmitRow {
 // finds the rule's own code wrong when that is changed is what the mutation
 // run in the pull request shows.)
 func TestRuleInvariantsCheckFindsABrokenRule(t *testing.T) {
+	// Pure computation over the rule, with no server and nothing shared: it
+	// runs alongside the other parallel tests (issue #472).
+	t.Parallel()
 	without := func(drop func(transmitRow) bool) func(time.Time, []transmitRow) []transmitRow {
 		return func(_ time.Time, rows []transmitRow) []transmitRow {
 			var out []transmitRow
@@ -669,6 +678,7 @@ func TestRuleInvariantsCheckFindsABrokenRule(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			found := 0
 			everyRuleSequence(6, func(inputs []ruleInput, times []time.Time) {
 				if problems, _ := checkRuleInvariants(&doctoredRule{doctor: tt.doctor}, inputs, times); len(problems) > 0 {

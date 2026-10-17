@@ -82,6 +82,9 @@ func ingestHook(t *testing.T, srv *Server, token, contentType, body string) *htt
 // schema.MaxPostRequestBytes is stored byte for byte whatever it is made of;
 // one byte more is refused.
 func TestHookIngestSizeLimitAppliesToWhatWasSent(t *testing.T) {
+	// Its own server and no package state; the large bodies make it slow
+	// under -race, so it overlaps the other parallel tests (issue #472).
+	t.Parallel()
 	srv := newTestServer(t)
 	channel, principal := createTestChannelAndPrincipal(t, srv)
 	const token = "hook-token"
