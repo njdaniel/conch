@@ -162,6 +162,10 @@ type Server struct {
 	// point of a replay. Both are unexported and set by tests before serving.
 	replayPageSize int
 	replayHooks    wsReplayHooks
+	// beforeDecide, when a test sets it, runs between the decision handler's
+	// own membership and right checks and the deciding transaction, so a test
+	// can land a revoke in that gap (issue #453). Nil in conchd.
+	beforeDecide func()
 	// inviteLimits is the invite routes' rate limits (invite_limits.go), in
 	// memory only; its clock is now. Tests replace it with setInviteLimits
 	// before serving.

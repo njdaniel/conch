@@ -95,6 +95,10 @@ func TestCastMemberDecisionChecksTheRightInTheTransaction(t *testing.T) {
 			_, err := f.s.RemoveChannelMember(ctx, "system", f.channelID, f.ann.ID)
 			return err
 		}, ErrNotFound},
+		{"disabled", func(f decideFixture) error {
+			_, err := f.s.DisablePrincipal(ctx, "system", f.ann.ID)
+			return err
+		}, ErrNoDecideRight},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDecideFixture(t, 1)
@@ -132,6 +136,12 @@ func TestCastMemberDecisionCountsOnlyCurrentHolders(t *testing.T) {
 			_, err := f.s.RemoveChannelMember(ctx, "system", f.channelID, f.ann.ID)
 			return err
 		}},
+		// Disabling is the answer to a compromised account; the account's
+		// earlier vote must not help resolve anything.
+		{"disabled", func(f decideFixture) error {
+			_, err := f.s.DisablePrincipal(ctx, "system", f.ann.ID)
+			return err
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDecideFixture(t, 2)
@@ -153,6 +163,14 @@ func TestCastMemberDecisionCountsOnlyCurrentHolders(t *testing.T) {
 			}
 			if r.Outcome != schema.OutcomeApproved || len(r.Decisions) != 3 {
 				t.Errorf("resolution = %+v; want approved with all 3 decisions", r)
+			}
+			var detail string
+			if err := f.s.db.QueryRowContext(ctx, "SELECT detail FROM audit_events WHERE action = ? AND subject = ?",
+				AuditApprovalResolved, approvalSubject(f.approvalID)).Scan(&detail); err != nil {
+				t.Fatal(err)
+			}
+			if detail != "outcome=approved option=approve decisions=3 counted=2" {
+				t.Errorf("approval_resolved detail = %q, want the 3 on record and the 2 that counted", detail)
 			}
 		})
 	}

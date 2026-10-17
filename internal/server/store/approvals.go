@@ -408,9 +408,13 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 			return fmt.Errorf("store: decide approval %d with option %q: %w", approvalID, optionID, ErrUnknownOption)
 		}
 		if members {
+			// A disabled principal holds no right, whatever their membership
+			// says: disabling is the answer to a compromised account.
 			var can int
 			err := tx.QueryRowContext(ctx,
-				"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?",
+				`SELECT m.can_decide AND p.disabled_at IS NULL FROM channel_members m
+				 JOIN principals p ON p.id = m.principal_id
+				 WHERE m.channel_id = ? AND m.principal_id = ?`,
 				a.ChannelID, principalID).Scan(&can)
 			switch {
 			case errors.Is(err, sql.ErrNoRows):
@@ -438,12 +442,13 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 
 		// Quorum: concurring decisions select the same option
 		// (approval-object.md §1). For members, only the decisions of those
-		// who hold the right now count (issue #453).
+		// who hold the right now, and are not disabled, count (issue #453).
 		count := "SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?"
 		args := []any{approvalID, optionID}
 		if members {
 			count = `SELECT COUNT(*) FROM approval_decisions d
 			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
+			 JOIN principals p ON p.id = d.principal_id AND p.disabled_at IS NULL
 			 WHERE d.approval_id = ? AND d.option_id = ?`
 			args = []any{a.ChannelID, approvalID, optionID}
 		}
@@ -455,7 +460,7 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 			return nil
 		}
 
-		r, err := resolveTx(ctx, tx, a, optionID, d.At.Time())
+		r, err := resolveTx(ctx, tx, a, optionID, concurring, d.At.Time())
 		if err != nil {
 			return err
 		}
@@ -471,7 +476,11 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 // resolveTx transitions an open approval to resolved inside an open
 // transaction: it derives the outcome from the winning option's kind, persists
 // the resolution event, and appends approval_resolved.
-func resolveTx(ctx context.Context, tx execer, a Approval, winningOptionID string, at time.Time) (*schema.ApprovalResolutionV1, error) {
+//
+// counted is how many concurring decisions met quorum. It can be fewer than
+// the decisions on record, which include those that no longer count (issue
+// #453), so the audit row says both.
+func resolveTx(ctx context.Context, tx execer, a Approval, winningOptionID string, counted int, at time.Time) (*schema.ApprovalResolutionV1, error) {
 	var outcome schema.Outcome
 	for _, o := range a.Options {
 		if o.ID != winningOptionID {
@@ -507,7 +516,7 @@ func resolveTx(ctx context.Context, tx execer, a Approval, winningOptionID strin
 	}
 	if err := appendAuditEventTx(ctx, tx,
 		"system", AuditApprovalResolved, approvalSubject(a.ID),
-		fmt.Sprintf("outcome=%s option=%s decisions=%d", outcome, winningOptionID, len(decisions)), at); err != nil {
+		fmt.Sprintf("outcome=%s option=%s decisions=%d counted=%d", outcome, winningOptionID, len(decisions), counted), at); err != nil {
 		return nil, err
 	}
 	return &r, nil

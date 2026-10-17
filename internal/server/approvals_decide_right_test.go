@@ -297,20 +297,23 @@ func TestRevokedDecisionNoLongerCountsFullChain(t *testing.T) {
 	id := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval.ID
 	path := fmt.Sprintf("/v1/approvals/%d/decisions", id)
 
-	// Notify.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// Notify: the request is announced once.
+	notifications := func() int {
 		mu.Lock()
-		n := len(notified)
-		mu.Unlock()
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the approval was never notified")
-		}
-		time.Sleep(10 * time.Millisecond)
+		defer mu.Unlock()
+		return len(notified)
 	}
+	waitNotified := func(want int, what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for notifications() < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s was never notified", what)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitNotified(1, "the approval")
 
 	// Alice decides, then loses the right.
 	if code := f.do(t, "POST", path, f.aliceTok, decisionBody(0)).Code; code != http.StatusOK {
@@ -332,6 +335,11 @@ func TestRevokedDecisionNoLongerCountsFullChain(t *testing.T) {
 	if state := decodeBody[schema.CastDecisionResponseV1](t, rec).State; state != schema.ApprovalStatePending {
 		t.Fatalf("state after the operator = %s; alice's decision no longer counts, so want pending", state)
 	}
+	// Nothing resolved, so nothing more is announced.
+	time.Sleep(200 * time.Millisecond)
+	if n := notifications(); n != 1 {
+		t.Fatalf("%d notifications while the approval is still pending, want only the request's", n)
+	}
 
 	// Resolve: carol, who holds the right, concurs.
 	rec = f.do(t, "POST", path, carolTok, decisionBody(0))
@@ -346,6 +354,8 @@ func TestRevokedDecisionNoLongerCountsFullChain(t *testing.T) {
 	if n := len(resp.Resolution.Decisions); n != 3 {
 		t.Errorf("resolution holds %d decisions, want all 3", n)
 	}
+	// Notify: the resolution is announced.
+	waitNotified(2, "the resolution")
 
 	// Audit: created, three decisions, resolved once, in order.
 	var chain []string
@@ -446,5 +456,44 @@ func TestInviteJoinerCannotDecide(t *testing.T) {
 		http.StatusForbidden, schema.ErrorCodeDecisionNotPermitted)
 	if a, err := f.srv.store.ApprovalByID(ctx, id); err != nil || a.State != schema.ApprovalStatePending {
 		t.Errorf("after the joiner's refusal approval = %+v, %v; want pending", a, err)
+	}
+}
+
+// A revoke that commits after the decision handler's own check, and before
+// the deciding transaction, still stops the decision (issue #453): the store
+// checks again, the answer is the same audited 403, and nothing is written.
+func TestRevokeInTheGapStopsTheDecision(t *testing.T) {
+	ctx := context.Background()
+	f := newAuthFixture(t, AuthRequired)
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(t, "POST", "/v1/approvals", f.aliceTok, createApprovalBody(general.ID, 0))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	id := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval.ID
+	f.srv.beforeDecide = func() {
+		if _, err := f.srv.store.SetChannelMemberCanDecide(ctx, "system", general.ID, f.alice.ID, false); err != nil {
+			t.Error(err)
+		}
+	}
+	assertErrorBody(t, f.do(t, "POST", fmt.Sprintf("/v1/approvals/%d/decisions", id), f.aliceTok, decisionBody(0)),
+		http.StatusForbidden, schema.ErrorCodeDecisionNotPermitted)
+	if a, err := f.srv.store.ApprovalByID(ctx, id); err != nil || a.State != schema.ApprovalStatePending {
+		t.Fatalf("approval = %+v, %v; want pending", a, err)
+	}
+	refused := false
+	for _, e := range f.audit(t) {
+		if e.Action == store.AuditDecisionCast {
+			t.Error("a decision was written in the gap")
+		}
+		if e.Action == "access_denied" && e.Actor == fmt.Sprintf("principal:%d", f.alice.ID) && strings.Contains(e.Detail, schema.ErrorCodeDecisionNotPermitted) {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Error("the refusal was not audited")
 	}
 }

@@ -297,6 +297,9 @@ func (s *Server) handleCastDecision(w http.ResponseWriter, r *http.Request) {
 	// transaction that writes the decision, and counts toward quorum only
 	// the decisions of members who hold the right now (issue #453): the check
 	// above answers early, this one cannot be raced by a revoke.
+	if s.beforeDecide != nil {
+		s.beforeDecide()
+	}
 	decide := s.approvals.Decide
 	caller, authed := callerFrom(ctx)
 	if authed {
