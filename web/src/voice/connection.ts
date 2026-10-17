@@ -7,6 +7,14 @@
 // The join token is passed to Room.connect and dropped. It is never stored,
 // logged or put in the DOM.
 //
+// A press reports `started` and waits for conchd's answer before the track
+// opens, and a release mutes the track before it reports `stopped` (issue
+// #495). conchd's poller compares what it sees of the microphone with the
+// reports; the other order let it see a press before its report, and record an
+// honest press as unreported. The wait is bounded (reportWait): past it, or if
+// the report is still being retried, the track opens anyway, so audio never
+// depends on conchd being reachable (conch-voice.md section 6, "Client side").
+//
 // It also holds the screen share (issue #444): the sharer's state machine
 // (share.ts), whether this page watches someone else's share, and the
 // elements a watched share plays into.
@@ -115,6 +123,10 @@ export const healthyAfter = 30_000;
 export const levelEvery = 50;
 // How long a Leave waits for the last report.
 const leaveDrain = 1000;
+// The longest a press waits for the answer to its `started` report before the
+// track opens anyway, and the longest the release of a press waits for the
+// track to mute before `stopped` is reported.
+export const reportWait = 1000;
 
 export const initialVoice: VoiceState = {
   phase: 'idle',
@@ -157,6 +169,13 @@ export class VoiceClient {
   // This person, from the identity of the last session.
   private me: number | null = null;
   private sink: ShareSink | null = null;
+  // The gate's changes, carried out one after another: a press's wait for its
+  // answer, then a release's report. talk numbers the run of them a
+  // connection makes (a drop abandons it); edge counts the gate's changes, so
+  // that a press released while it waited does not open the track.
+  private steps: Promise<void> = Promise.resolve();
+  private talk = 0;
+  private edge = 0;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
@@ -264,9 +283,13 @@ export class VoiceClient {
     // Leaving ends a share: it is stopped and conchd is told, while the
     // connection and the credential are still there.
     const sharing = this.share.stop('left');
+    // The release's `stopped` is queued once its mute is done.
+    await this.within(this.steps, leaveDrain);
     await this.reports.drain(leaveDrain);
     await sharing;
     if (mine !== this.attempt) return;
+    this.talk++;
+    this.steps = Promise.resolve();
     this.reports.reset();
     const room = this.room;
     this.room = null;
@@ -329,10 +352,48 @@ export class VoiceClient {
   }
 
   private onGate(open: boolean): void {
-    // The track follows the gate at once; the report does not hold it up.
-    void this.room?.setSending(open).catch(() => undefined);
-    this.reports.push(open ? 'started' : 'stopped');
+    const talk = this.talk;
+    const edge = ++this.edge;
+    if (open) {
+      this.steps = this.steps.then(() => this.opened(talk, edge));
+    } else {
+      // The track is muted at once, and `stopped` reported once it is.
+      const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined);
+      this.steps = this.steps.then(() => this.shut(talk, muted));
+    }
     this.set({ transmitting: open });
+  }
+
+  // opened reports `started` and opens the track once conchd has answered,
+  // or after reportWait, unless the gate has changed since or the connection
+  // has gone. A report that fails for good drops the connection first.
+  private async opened(talk: number, edge: number): Promise<void> {
+    if (talk !== this.talk) return;
+    const answered = new Promise<void>((resolve) => {
+      this.reports.push('started', resolve);
+    });
+    await this.within(answered, reportWait);
+    const room = this.room;
+    if (talk !== this.talk || edge !== this.edge || room === null) return;
+    await this.within(room.setSending(true), reportWait);
+  }
+
+  private async shut(talk: number, muted: Promise<void>): Promise<void> {
+    await this.within(muted, reportWait);
+    if (talk === this.talk) this.reports.push('stopped');
+  }
+
+  // within resolves when p settles, however it settles, or after ms.
+  private within(p: Promise<unknown>, ms: number): Promise<void> {
+    const clock = this.env.clock;
+    return new Promise((resolve) => {
+      const handle = clock.setTimeout(resolve, ms);
+      const done = () => {
+        clock.clearTimeout(handle);
+        resolve();
+      };
+      void p.then(done, done);
+    });
   }
 
   private onReport(event: ReportEvent): void {
@@ -360,6 +421,10 @@ export class VoiceClient {
     const mine = ++this.attempt;
     this.clearTimers();
     this.gate.setBlocked(true);
+    // Nothing the gate asked for on this connection is carried out from here:
+    // no track opens, and no `stopped` goes behind the reset.
+    this.talk++;
+    this.steps = Promise.resolve();
     this.reports.reset();
     // A share does not outlive its connection: the next one starts without it.
     void this.share.stop('lost');

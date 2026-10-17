@@ -35,6 +35,20 @@ describe('reports', () => {
     expect(t.overlapped()).toBe(false);
   });
 
+  it("tells each report's caller once it is answered, or dropped by a reset", async () => {
+    const t = setup(['rate_limited']);
+    const done: string[] = [];
+    t.queue.push('started', () => done.push('started'));
+    t.queue.push('stopped', () => done.push('stopped'));
+    expect(done).toEqual([]);
+    await settle();
+    expect(done).toEqual(['started', 'stopped']);
+    const held = setup([]);
+    held.queue.push('started', () => done.push('dropped'));
+    held.queue.reset();
+    expect(done).toEqual(['started', 'stopped', 'dropped']);
+  });
+
   it('a failed report is retried in place, before the next one', async () => {
     const t = setup(['failed', 'ok']);
     t.queue.push('started');

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, reconnectLimit, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, reconnectLimit, reportWait, type Room, type RoomEvents, type ShareSink } from './connection';
 import type { Captured } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -16,6 +16,11 @@ class StubRoom implements Room {
   connectError = false;
   connectArgs: { url: string; token: string; roomName: string; publish: boolean } | null = null;
   levelNow = 0;
+  // What happened, in order, across the room and the reports (issue #495).
+  log: string[] | null = null;
+  // When set, a mute waits for the test to let it finish.
+  holdMute = false;
+  heldMute: (() => void) | null = null;
   connect = (url: string, tok: string, name: string, publish: boolean, events: RoomEvents): Promise<void> => {
     this.connectArgs = { url, token: tok, roomName: name, publish };
     this.events = events;
@@ -23,6 +28,15 @@ class StubRoom implements Room {
   };
   setSending = (on: boolean): Promise<void> => {
     this.sending.push(on);
+    this.log?.push(on ? 'unmute' : 'mute');
+    if (!on && this.holdMute) {
+      return new Promise((resolve) => {
+        this.heldMute = () => {
+          this.log?.push('muted');
+          resolve();
+        };
+      });
+    }
     return Promise.resolve();
   };
   setDeafened = (on: boolean): void => {
@@ -74,11 +88,23 @@ const okSession = (canPublish = true): VoiceSessionResult => ({
 
 const claim: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:00.000Z', audio: true } };
 
-function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0) {
+// held: each report waits for the test to answer it (answer below), as a
+// slow conchd would.
+function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0, held = false) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
   const reports: string[] = [];
+  const log: string[] = [];
+  const waiting: ((a: TransmitAnswer) => void)[] = [];
+  // answer answers the oldest report still waiting.
+  const answer = async (a: TransmitAnswer = 'ok') => {
+    const next = waiting.shift();
+    if (next === undefined) throw new Error('no report is waiting');
+    log.push(`answered ${a}`);
+    next(a);
+    await settle();
+  };
   // What the share asked conchd, in order.
   const shares: string[] = [];
   const client = new VoiceClient(
@@ -91,10 +117,17 @@ function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: Tr
       },
       report: (_channel, state) => {
         reports.push(state);
+        log.push(`report ${state}`);
+        if (held) {
+          return new Promise((resolve) => {
+            waiting.push(resolve);
+          });
+        }
         return Promise.resolve(reportAnswers.shift() ?? 'ok');
       },
       newRoom: () => {
         const room = new StubRoom();
+        room.log = log;
         room.connectError = rooms.length < failFirst;
         rooms.push(room);
         return room;
@@ -110,7 +143,7 @@ function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: Tr
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, shares };
+  return { client, clock, rooms, asked, reports, shares, log, answer };
 }
 
 async function joined(t = setup()) {
@@ -214,12 +247,125 @@ describe('talking', () => {
     expect([...t.client.snapshot().speaking]).toEqual([3, 9]);
   });
 
-  it('audio does not wait for a report that never answers', async () => {
-    const t = setup();
-    t.client.join('general');
-    await settle();
+  it('audio does not depend on a report that never answers: the track opens after reportWait', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
+    await settle();
+    t.clock.advance(reportWait - 1);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([]);
+    t.clock.advance(1);
+    await settle();
     expect(t.rooms[0]?.sending).toEqual([true]);
+  });
+});
+
+// Issue #495: conchd's poller compares what it sees of the microphone with the
+// reports, so a press is reported before the track opens, and a release mutes
+// the track before it is reported.
+describe('the order of the track and the reports', () => {
+  it('a press opens the track only once conchd has answered its report, however slow', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    t.clock.advance(reportWait - 100);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([]);
+    await t.answer('ok');
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.log).toEqual(['report started', 'answered ok', 'unmute']);
+  });
+
+  it('a release mutes the track, and reports stopped only once it is muted', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    t.client.press();
+    await settle();
+    await t.answer('ok');
+    room.holdMute = true;
+    t.client.release();
+    t.clock.advance(100);
+    await settle();
+    expect(t.reports).toEqual(['started']);
+    room.heldMute?.();
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped']);
+    await t.answer('ok');
+    expect(t.log).toEqual(['report started', 'answered ok', 'unmute', 'mute', 'muted', 'report stopped', 'answered ok']);
+  });
+
+  it('a press released while its report waits never opens the track, and both reports go in order', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(100);
+    t.client.press();
+    t.clock.advance(50);
+    t.client.release();
+    t.clock.advance(100);
+    await settle();
+    await t.answer('ok');
+    await t.answer('ok');
+    await t.answer('ok');
+    await t.answer('ok');
+    expect(t.rooms[0]?.sending).toEqual([false, false]);
+    expect(t.reports).toEqual(['started', 'stopped', 'started', 'stopped']);
+  });
+
+  it('a rate-limited report still opens the track: the limit is shown, and audio does not depend on it', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    await t.answer('rate_limited');
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.client.snapshot().reportNote).toBe('rate_limited');
+  });
+
+  it('a report answered voice_no_session drops the connection before the track would open', async () => {
+    const t = await joined(setup([okSession(), okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    await t.answer('no_session');
+    await settle();
+    expect(t.asked).toHaveLength(2);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.rooms[1]?.sending).toEqual([]);
+  });
+
+  it('a Leave while a press waits mutes, sends both reports in order, and does not come back', async () => {
+    const t = await joined(setup([okSession(), okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    const leaving = t.client.leave();
+    await settle();
+    await t.answer('ok');
+    await t.answer('ok');
+    await leaving;
+    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.reports).toEqual(['started', 'stopped']);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.client.snapshot().phase).toBe('idle');
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.asked).toHaveLength(1);
+  });
+
+  it('a drop while a press waits abandons it: nothing opens or is reported on the next connection', async () => {
+    const t = await joined(setup([okSession(), okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.client.snapshot().phase).toBe('connected');
+    t.clock.advance(reportWait);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.rooms[1]?.sending).toEqual([]);
+    expect(t.reports).toEqual(['started']);
   });
 });
 
