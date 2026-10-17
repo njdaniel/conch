@@ -22,6 +22,8 @@ for (const [size, options] of phones) {
 
     const { page } = await meet(options);
     await signIn(page, world, phoneToken, person.name);
+    // In Settings (issue #536).
+    await page.getByRole('button', { name: 'Settings' }).tap();
     await page.getByRole('button', { name: 'Your sign-ins' }).tap();
     const region = page.getByRole('region', { name: 'Your sign-ins' });
     const items = region.getByRole('list', { name: 'Sign-ins' }).getByRole('listitem');

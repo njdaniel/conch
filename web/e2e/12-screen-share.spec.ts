@@ -119,6 +119,27 @@ async function inbound(page: Page): Promise<Inbound> {
   });
 }
 
+// expectComposerShown checks, as the page is (nothing is scrolled to it), that
+// the composer's box and Send lie wholly inside the window and that a tap on
+// each reaches it: nothing is drawn over them.
+async function expectComposerShown(page: Page, what: string): Promise<void> {
+  const window = page.viewportSize();
+  if (window === null) throw new Error('no window size');
+  for (const element of [page.getByLabel('Message #voice-room'), page.getByRole('button', { name: 'Send' })]) {
+    const box = await element.boundingBox();
+    if (box === null) throw new Error(`${what}: the composer has no box`);
+    const where = `${what}: at y ${String(box.y)}, ${String(box.height)} high, in a ${String(window.height)} px window`;
+    expect(box.y, where).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height, where).toBeLessThanOrEqual(window.height);
+    const reached = await element.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return at !== null && (at === el || el.contains(at));
+    });
+    expect(reached, `${what}: something is drawn over the composer`).toBe(true);
+  }
+}
+
 const micAsks = (page: Page) => page.evaluate(() => (window as unknown as { __micAsks: number }).__micAsks);
 
 test.describe('screen share with LiveKit', () => {
@@ -416,6 +437,61 @@ test.describe('screen share with LiveKit', () => {
       await expectClean(b);
     } finally {
       for (const p of [a, b, g, h]) await p.close();
+    }
+  });
+
+  // Issue #536: the watch view is drawn on the stage, apart from the voice
+  // strip. Folding the members column, opening Settings and the members
+  // panel, and narrowing and widening the window restart nothing: the same
+  // video element keeps receiving frames, on the same connections.
+  test('watching and voice carry on while panels open and close and the window narrows and widens', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob', { viewport: { width: 1440, height: 900 } });
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Join voice');
+      await share(a);
+      await watching(b);
+      const kept = () =>
+        b.page.evaluate(() => {
+          const w = window as unknown as { __kept?: Element | null; __pcs: RTCPeerConnection[] };
+          const video = document.querySelector('[aria-label="Shared screen"] video');
+          w.__kept ??= video;
+          return { same: video !== null && w.__kept === video, connections: w.__pcs.length };
+        });
+      const before = await kept();
+      expect(before.same).toBe(true);
+
+      await b.page.getByRole('button', { name: 'Members' }).click();
+      await b.page.getByRole('button', { name: 'Settings' }).click();
+      await b.page.keyboard.press('Escape');
+      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      await b.page.setViewportSize({ width: 390, height: 844 });
+      await b.page.getByRole('button', { name: 'Members' }).click();
+      await expect(b.page.getByRole('region', { name: 'Members list' })).toBeFocused();
+      await b.page.keyboard.press('Escape');
+      await expectFits(b.page, 'watching at phone width');
+      // With Voice options closed again, the composer is on the screen while
+      // watching, without scrolling to it.
+      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      await expectComposerShown(b.page, 'watching at 390×844');
+      await b.page.setViewportSize({ width: 360, height: 740 });
+      await expectFits(b.page, 'watching at 360×740');
+      await expectComposerShown(b.page, 'watching at 360×740');
+      await b.page.setViewportSize({ width: 768, height: 1024 });
+      await b.page.setViewportSize({ width: 1440, height: 900 });
+
+      expect(await kept()).toEqual(before);
+      const frames = (await inbound(b.page)).frames;
+      await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
+      await expect(voiceRegion(b.page)).toContainText('Connected in #voice-room');
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
+      await expectClean(a, 1);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
     }
   });
 

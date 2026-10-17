@@ -87,6 +87,8 @@ test('A7 sign out everywhere ends every sign-in: the other tab lands on sign-in,
   const elsewhere = await meet();
   await signIn(elsewhere.page, world, other, person.name);
 
+  // In Settings (issue #536).
+  await here.page.getByRole('button', { name: 'Settings' }).click();
   await here.page.getByRole('button', { name: 'Sign out everywhere' }).click();
   // It asks first (issue #493).
   await here.page.getByRole('button', { name: 'Yes, sign out everywhere' }).click();
@@ -117,6 +119,7 @@ test('A7 sign out revokes this credential on the server, and its next request is
   const { page } = await meet();
   await signIn(page, world, first, person.name);
 
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   // It asks first (issue #493).
   await page.getByRole('button', { name: 'Yes, sign out' }).click();

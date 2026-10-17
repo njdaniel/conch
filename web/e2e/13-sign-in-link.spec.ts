@@ -59,7 +59,9 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   const firstToken = await keepToken(laptop.page, secrets);
   const id = await principalId(world, firstToken);
 
-  // Sign out says what it costs before it does it, and Cancel keeps it all.
+  // Sign out, in Settings (issue #536), says what it costs before it does it,
+  // and Cancel keeps it all.
+  await laptop.page.getByRole('button', { name: 'Settings' }).click();
   await laptop.page.getByRole('button', { name: 'Sign out', exact: true }).click();
   const asked = laptop.page.getByRole('group', { name: /^Sign out of this browser\?/ });
   await expect(asked).toContainText('you will need a new link from an operator');

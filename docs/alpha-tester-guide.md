@@ -3,9 +3,9 @@
 Thank you for testing Conch. Conch is a place to chat, talk and share a screen with
 your group, in your web browser. Nothing needs installing.
 
-This guide is for the alpha's pre-release builds. Each build's version is shown at
-the bottom of the Conch page (for example `Version v0.1.0-alpha.1`). Please quote it
-whenever you tell us about a problem.
+This guide is for the alpha's pre-release builds. Each build's version is shown under
+**Settings** (the gear at the top right of the Conch page; for example
+`Version v0.1.0-alpha.1`). Please quote it whenever you tell us about a problem.
 
 A few parts of this guide are still being finished. They are marked like this:
 *(lands with #444)*. The marks come out once those parts are in a build; if your
@@ -52,8 +52,8 @@ example the same name in capitals, or with a zero for an "o"). What you typed st
 in the box, so you can change it and try again. Names that begin with `hidden-` are
 reserved.
 
-You can change your name later: **Change your name**, near the top of the page. You
-can change it up to five times a day. Your old messages then show your new name.
+You can change your name later: **Change your name**, under **Settings** (the gear at
+the top right of the page). You can change it up to five times a day. Your old messages then show your new name.
 
 ## 3. Stay signed in
 
@@ -64,7 +64,7 @@ can change it up to five times a day. Your old messages then show your new name.
 - A private or incognito window forgets you when it closes. So does a browser set to
   clear site data on exit. Use a normal window.
 
-At the top of the page there are two buttons:
+Under **Settings** (the gear at the top right of the page) there are two buttons:
 
 - **Sign out** ends your sign-in on this browser, in every tab.
 - **Sign out everywhere** ends every sign-in you have, on every device.
@@ -82,11 +82,12 @@ ended: it expired, or your access was removed. Tell the person running the test.
 
 ## 4. Chat
 
-- Your channels are listed on the left (at the top on a phone). A number after a
+- Your channels are listed on the left (in a row at the top on a phone). A number after a
   channel's name is how many messages you have not read yet.
 - Type in the box at the bottom of the conversation and press Enter to send.
-- The bar at the very bottom of the page shows your name, the server, the connection
-  and the version. The connection says **Connected** when all is well.
+- The bar at the top of the page shows your name, the server and the connection (on a
+  phone, your name and the connection). The connection says **Connected** when all is
+  well. **Members**, beside it, shows who is in the channel.
 - If your connection drops, it says **Reconnecting**, and the conversation says **This
   conversation may be out of date**. You do not need to do anything: when the
   connection comes back, Conch catches up on the messages you missed, each one once.
@@ -95,8 +96,8 @@ ended: it expired, or your access was removed. Tell the person running the test.
 
 ## 5. Voice and the microphone
 
-Voice is in the **Voice** section, with the member list. On a phone or a narrow
-window it is below the conversation.
+Voice is in the **Voice** strip along the bottom of the page. It says whether you are in
+voice, whether your microphone is in use, and who else is in voice.
 
 1. Open the channel you want to talk in, and choose **Join voice**.
 2. Your browser asks whether Conch may use your microphone. Choose **Allow**. If you
@@ -105,17 +106,17 @@ window it is below the conversation.
 3. You are in. Everyone in the channel's voice is listed. Whoever is talking is marked
    **(speaking)**.
 
-There are two ways to talk. Choose one under **Microphone**:
+There are two ways to talk. Choose one under **Voice options**, **Microphone**:
 
 - **Push to talk** (the first choice). Hold the talk key while you speak, and let go
   when you have finished. The talk key is the backtick key, `` ` ``, which on most
-  keyboards is just below Esc. **Change talk key** sets another. On a phone or a touch
+  keyboards is just below Esc. **Change talk key**, under **Voice options**, sets another. On a phone or a touch
   screen, press and hold **Hold to talk** instead.
   - The talk key works only while the Conch tab is the one in front, and not while you
     are typing in a box. Switching to another tab or app counts as letting go.
 - **Open microphone.** Your microphone opens by itself when you speak. Use the slider
-  next to the level meter: move it until the meter opens the microphone for your
-  voice but not for the noise around you.
+  under **Voice options** with the level meter in the strip: move it until the meter
+  opens the microphone for your voice but not for the noise around you.
 
 The other buttons:
 
@@ -138,9 +139,9 @@ You can share your screen with the others in a channel's voice. One person share
 a time.
 
 1. Join voice (section 5).
-2. Under **Share your screen**, choose **Text and pictures** (documents, code, slides)
-   or **Video or a game** (moving pictures).
-3. Read the note above the button: it says what sound your browser can share (see the
+2. Under **Voice options**, **Share your screen**, choose **Text and pictures**
+   (documents, code, slides) or **Video or a game** (moving pictures).
+3. Read the note under the buttons: it says what sound your browser can share (see the
    table below).
 4. Choose **Share screen**. Your browser asks what to share: a browser tab, a window or
    the whole screen.
@@ -172,8 +173,8 @@ true, so please tell us when it is not.
 
 ## 7. Watch a share, also on a phone *(lands with #444)*
 
-- When someone shares, the Voice section says who is sharing, and shows **Watch**.
-  Choose it to see the share.
+- When someone shares, the Voice strip says who is sharing, and shows **Watch**.
+  Choose it to see the share, above the conversation.
 - **Full screen** fills your screen. On a phone, the picture fits the screen.
 - The share's sound has its own volume and **Mute share**, apart from the voices.
   Deafen silences the share too.
@@ -206,8 +207,8 @@ happens on yours.
 When something goes wrong, report it from inside Conch. It takes a minute, and it
 sends us what we need to find the cause.
 
-1. Choose **Report a problem**, at the top of the page. It is also offered when the
-   page cannot reach the server.
+1. Choose **Report a problem**, under **Settings** (the gear at the top right of the
+   page). It is also offered when the page cannot reach the server.
 2. Answer the questions:
    - **What you did**;
    - **What you expected**;
@@ -227,7 +228,7 @@ Every report is read by the person running the test before anything from it is m
 public, and names are taken out.
 
 If you cannot reach Conch at all, tell the person running the test instead. Say what
-you did, what happened, the version from the bottom of the page if you saw it, and
+you did, what happened, the version from **Settings** if you saw it, and
 your device and browser.
 
 ## 10. What is known not to work yet

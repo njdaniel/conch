@@ -38,6 +38,8 @@ async function signInAndOpen() {
   render(<App origin={origin} />);
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  // Your name is in Settings (issue #536).
+  fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   const toggle = await screen.findByRole('button', { name: 'Change your name' });
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   fireEvent.click(toggle);
@@ -108,6 +110,7 @@ describe('change your name', () => {
     render(<App origin={origin} />);
     fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: 'Sign out' });
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Change your name' })).toBeNull();

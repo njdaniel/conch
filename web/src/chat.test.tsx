@@ -915,6 +915,8 @@ describe('a long channel', () => {
     await screen.findByText('m500');
     const release = gateOlder();
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+    // Signing out is in Settings (issue #536).
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     // Sign out asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));

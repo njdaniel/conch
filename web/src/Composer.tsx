@@ -1,4 +1,5 @@
 import { useRef, type KeyboardEvent } from 'react';
+import { Glyph } from './Icons';
 import type { Audience } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
 import type { Person } from './useLiveChannel';
@@ -96,7 +97,7 @@ export function Composer({
 
   return (
     <form
-      className="composer"
+      className={value === channelValue ? 'composer' : 'composer narrowed'}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -121,6 +122,9 @@ export function Composer({
           ))}
           <option value={whisperValue}>Whisper to…</option>
         </select>
+        <label htmlFor="composer-text" className="composer-label">
+          {label}
+        </label>
       </div>
       {whispering ? (
         <fieldset
@@ -150,7 +154,7 @@ export function Composer({
           ))}
         </fieldset>
       ) : null}
-      <label htmlFor="composer-text">{label}</label>
+      <div className="composer-box">
       <textarea
         id="composer-text"
         rows={2}
@@ -169,11 +173,13 @@ export function Composer({
           key(event);
         }}
       />
-      <button type="submit" disabled={!canSend}>
-        Send
+      <button type="submit" className="primary send" disabled={!canSend}>
+        <Glyph name="send" />
+        <span className="label">Send</span>
       </button>
-      {target.refusal === null ? null : <p role="alert">{target.refusal}</p>}
-      {target.note === null ? null : <p role="status">{target.note}</p>}
+      </div>
+      {target.refusal === null ? null : <p role="alert" className="notice">{target.refusal}</p>}
+      {target.note === null ? null : <p role="status" className="hint">{target.note}</p>}
     </form>
   );
 }

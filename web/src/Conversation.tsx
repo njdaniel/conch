@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Composer } from './Composer';
+import { Avatar } from './Icons';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { Audience, MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
@@ -46,28 +47,46 @@ function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; rea
   );
 }
 
+// How long after an author's message their next one is drawn under it,
+// without their name and time again (both stay in the text read out).
+const sameRun = 5 * 60 * 1000;
+
 function Line({
   time,
   author,
+  authorId,
   kind,
   badge,
   tag,
+  tone,
   children,
 }: {
   readonly time: string;
   readonly author: string;
+  readonly authorId: number;
   readonly kind: Person['kind'];
   readonly badge: string | null;
   readonly tag: string | null;
+  readonly tone?: 'failed' | 'unconfirmed';
   readonly children: ReactNode;
 }) {
-  // The badge comes first, as in the TUI, so a name or a body cannot pass for one.
+  // The badge comes first, as in the TUI, so a name or a body cannot pass for
+  // one. On screen the header reads name, agent, time, audience (app.css).
   return (
     <>
-      {badge === null ? null : <span className="audience">{badge} </span>}
-      <time>{time}</time> <span className="author">{author}</span>
-      {kind === 'agent' ? <span className="kind"> [agent]</span> : null}: <span className="body">{children}</span>
-      {tag === null ? null : <span className="state"> {tag}</span>}
+      <Avatar id={authorId} name={author} />
+      <div className="msg-head">
+        {badge === null ? null : <span className="audience">{badge} </span>}
+        <time>{time}</time> <span className="author">{author}</span>
+        {kind === 'agent' ? (
+          <span className="kind">
+            <span className="vh"> [</span>agent<span className="vh">]</span>
+          </span>
+        ) : null}
+        <span className="vh">: </span>
+      </div>
+      <span className="body">{children}</span>
+      {tag === null ? null : <span className={tone === undefined ? 'state' : `state ${tone}`}> {tag}</span>}
     </>
   );
 }
@@ -78,19 +97,23 @@ function Message({
   nets,
   viewer,
   sent,
+  cont,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
   readonly sent: boolean;
+  // Drawn under the author's message before it, without the header again.
+  readonly cont: boolean;
 }) {
   const approval = approvalOf(message);
   return (
-    <li className="message" data-message-id={message.id} tabIndex={-1}>
+    <li className={cont ? 'message cont' : 'message'} data-message-id={message.id} tabIndex={-1}>
       <Line
         time={clock(message.created_at)}
         author={nameOf(people, message.author_id)}
+        authorId={message.author_id}
         kind={people.get(message.author_id)?.kind ?? null}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
@@ -122,11 +145,19 @@ function Pending({
     : 'Not confirmed: check the conversation before retrying';
   return (
     <li className="message pending">
-      <Line time={clock(send.at)} author={me.name} kind={me.kind} badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)} tag={tag}>
+      <Line
+        time={clock(send.at)}
+        author={me.name}
+        authorId={viewer}
+        kind={me.kind}
+        badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
+        tag={tag}
+        {...(send.status === 'sending' ? {} : { tone: send.status })}
+      >
         {send.body}
       </Line>
       {send.status === 'sending' ? null : (
-        <>
+        <div className="msg-actions">
           {' '}
           <button
             type="button"
@@ -144,10 +175,24 @@ function Pending({
           >
             Dismiss
           </button>
-        </>
+        </div>
       )}
     </li>
   );
+}
+
+function audienceKey(audience: Audience | undefined): string {
+  if (audience === undefined) return '';
+  return audience.kind === 'net' ? `net ${String(audience.net_id)}` : `to ${audience.principal_ids.join(',')}`;
+}
+
+// continues says whether a message is drawn as part of the one before it: the
+// same author, the same audience, soon after, and neither an approval.
+function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
+  if (before === undefined || before.author_id !== message.author_id) return false;
+  if (audienceKey(before.audience) !== audienceKey(message.audience)) return false;
+  if (approvalOf(before) !== null || approvalOf(message) !== null) return false;
+  return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
 // How close to the bottom still counts as being at it, in pixels.
@@ -243,16 +288,22 @@ export function Conversation({
 
   return (
     <>
-      <h2>{channel}</h2>
-      {live === 'reconnecting' ? <p className="stale">This conversation may be out of date</p> : null}
+      <header className="conv-head">
+        <span className="hash" aria-hidden="true">
+          #
+        </span>
+        <h2>{channel}</h2>
+      </header>
+      {live === 'reconnecting' ? <p className="stale banner">This conversation may be out of date</p> : null}
       {chat.history === 'error' ? (
-        <div>
+        <div className="banner problem">
           <p>Cannot load the messages</p>
           <button type="button" onClick={onReload}>
             Try again
           </button>
         </div>
       ) : null}
+      <div className="log-wrap">
       <div
         ref={log}
         className="log"
@@ -270,13 +321,21 @@ export function Conversation({
         {chat.trimmed || (!chat.exhausted && !hasOlder && shown.length > 0) ? <p className="hint">older history is not loaded</p> : null}
         {chat.older === 'error' ? <p role="alert">Cannot load older messages</p> : null}
         {hasOlder ? (
-          <button type="button" disabled={loadingOlder} onClick={showOlder}>
+          <button type="button" className="quiet older" disabled={loadingOlder} onClick={showOlder}>
             Load older messages
           </button>
         ) : null}
         <ol className="messages">
-          {shown.map((message) => (
-            <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} sent={chat.sentIds.has(message.id)} />
+          {shown.map((message, i) => (
+            <Message
+              key={message.id}
+              message={message}
+              people={people}
+              nets={nets}
+              viewer={viewer}
+              sent={chat.sentIds.has(message.id)}
+              cont={continues(shown[i - 1], message)}
+            />
           ))}
           {chat.pending.map((send) => (
             <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
@@ -284,10 +343,11 @@ export function Conversation({
         </ol>
       </div>
       {unseen ? (
-        <button type="button" className="jump" onClick={jump}>
+        <button type="button" className="jump primary" onClick={jump}>
           Jump to latest
         </button>
       ) : null}
+      </div>
       {chat.dropped > 0 ? (
         <p className="hint">
           {String(chat.dropped)} unreadable {chat.dropped === 1 ? 'message was' : 'messages were'} ignored

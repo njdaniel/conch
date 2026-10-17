@@ -303,6 +303,8 @@ describe('the browser own session', () => {
 
   it('is ended on sign-out, with keepalive, before the credential goes', async () => {
     await openApp();
+    // Signing out is in Settings (issue #536).
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     // Sign out asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
