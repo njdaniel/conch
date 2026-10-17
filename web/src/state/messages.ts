@@ -74,7 +74,9 @@ export type ChatAction =
   | { readonly type: 'historyLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   | { readonly type: 'historyFailed'; readonly channel: string }
   // A message from the socket (already validated).
-  | { readonly type: 'received'; readonly channel: string; readonly message: MessageV2 }
+  // own: the message is the caller's, so it may stand for a pending send of
+  // theirs whose POST has not answered yet (issue #490).
+  | { readonly type: 'received'; readonly channel: string; readonly message: MessageV2; readonly own?: boolean }
   // A frame that was not a message of this schema or channel.
   | { readonly type: 'dropped'; readonly channel: string }
   | { readonly type: 'sending'; readonly channel: string; readonly body: string; readonly at: number; readonly audience?: Audience }
@@ -136,7 +138,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'historyFailed':
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':
-      return update(state, action.channel, (c) => hold(c, [action.message]));
+      return update(state, action.channel, (c) => {
+        // The live frame of a send of our own can come before the POST's
+        // answer: it takes the place of the oldest pending send it matches,
+        // so the message never shows twice (issue #490). The answer that
+        // follows then finds nothing to replace.
+        const twin = action.own === true ? c.pending.find((p) => p.status === 'sending' && sameSend(p, action.message)) : undefined;
+        if (twin === undefined) return hold(c, [action.message]);
+        return {
+          ...hold(c, [action.message]),
+          pending: c.pending.filter((p) => p.localId !== twin.localId),
+          sentIds: new Set(c.sentIds).add(action.message.id),
+        };
+      });
     case 'dropped':
       return update(state, action.channel, (c) => ({ ...c, dropped: c.dropped + 1 }));
     case 'sending':
@@ -238,4 +252,20 @@ export function parseFrame(data: unknown, channelId: number): MessageV2 | null {
   if (messageV2(body).length > 0) return null;
   const message = body as MessageV2;
   return message.channel_id === channelId ? message : null;
+}
+
+// sameSend says whether message is what pending sent: the same body to the
+// same audience (the whole channel, a net, or the same people in any order).
+function sameSend(pending: PendingSend, message: MessageV2): boolean {
+  if (pending.body !== message.body) return false;
+  const a = pending.audience;
+  const b = message.audience;
+  if (a === undefined || b === undefined) return a === b;
+  if (a.kind === 'net' && b.kind === 'net') return a.net_id === b.net_id;
+  if (a.kind === 'principals' && b.kind === 'principals') {
+    const x = [...a.principal_ids].sort((m, n) => m - n);
+    const y = [...b.principal_ids].sort((m, n) => m - n);
+    return x.length === y.length && x.every((v, i) => v === y[i]);
+  }
+  return false;
 }

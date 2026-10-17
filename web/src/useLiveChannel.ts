@@ -163,7 +163,7 @@ export function useLiveChannel({
         onFrame: (data) => {
           const message = parseFrame(data, id);
           if (message === null) dispatchChat({ type: 'dropped', channel });
-          else dispatchChat({ type: 'received', channel, message });
+          else dispatchChat({ type: 'received', channel, message, own: message.author_id === me.id });
         },
         onStatus,
       });
