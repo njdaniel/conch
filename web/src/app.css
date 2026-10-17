@@ -231,6 +231,23 @@ body {
     max-width: 100%;
   }
 
+  /* The Report a problem panel (issue #511) spans the lobby, still opening
+     below its button: anchored to the button, it ran off the left edge when
+     the wrapped header put the button near the left. */
+  .lobby {
+    position: relative;
+  }
+
+  .report {
+    position: static;
+  }
+
+  .report-panel:not([hidden]) {
+    left: 0;
+    right: 0;
+    width: auto;
+  }
+
   /* Big enough for a finger. */
   .lobby button {
     min-height: 2.75rem;

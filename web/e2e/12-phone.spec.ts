@@ -4,7 +4,7 @@
 // needs LiveKit to show its controls, is tried at phone size in 10-voice; the
 // operator's invite panel in 11-invites. This spec runs after both, so the
 // person it adds to the fixture channels touches no other spec.
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
 import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
 import { inviteUrl } from './world';
@@ -18,7 +18,7 @@ const longLine = (size: string) => `p467 ${size} ${'a line that goes on for a wh
 const unique = (label: string) => `p467-${label}-${String(Date.now())}`;
 
 for (const [size, options] of phones) {
-  test(`P467 at ${size} the lobby, a conversation, the account form and the members panel fit the screen`, async ({ meet, world }) => {
+  test(`P467 at ${size} the lobby, a conversation, the account form, the report panel and the members panel fit the screen`, async ({ meet, world }) => {
     for (const body of [longWord(size), longAddress(size), longLine(size)]) await post(world, world.tokens.nick, 'general', body);
     const { page } = await meet(options);
     await signIn(page, world, world.tokens.browser, 'browser-test');
@@ -40,6 +40,17 @@ for (const [size, options] of phones) {
     await expect(page.getByLabel('New name')).toBeVisible();
     await expectFits(page, 'the lobby with the account form open');
     await page.getByRole('button', { name: 'Change your name' }).tap();
+
+    // The Report a problem panel (issue #511): its button can land anywhere
+    // in the wrapped header, and the panel stays on the screen wherever it is.
+    const report = page.getByRole('button', { name: 'Report a problem' });
+    await report.tap();
+    await expect(report).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('form', { name: 'Report a problem' })).toBeVisible();
+    await expectFits(page, 'the lobby with the report panel open');
+    await expectOnScreen(page, page.locator(`[id="${(await report.getAttribute('aria-controls')) ?? ''}"]`), 'the report panel');
+    await report.tap();
+    await expect(page.getByRole('form', { name: 'Report a problem' })).toBeHidden();
 
     // The members panel starts closed on a narrow screen.
     const members = page.getByRole('button', { name: 'Members' });
@@ -92,6 +103,21 @@ for (const [size, options] of phones) {
     await panel.getByRole('button', { name: 'Done' }).tap();
     await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
   });
+}
+
+// expectOnScreen checks that an element, scrolled into view, lies wholly
+// inside the window. A box that starts left of the window's edge cannot be
+// scrolled to, so expectFits alone does not see it.
+async function expectOnScreen(page: Page, element: Locator, what: string): Promise<void> {
+  await element.scrollIntoViewIfNeeded();
+  const box = await element.boundingBox();
+  const screen = page.viewportSize();
+  if (box === null || screen === null) throw new Error(`${what} has no box on the screen`);
+  const where = `${what} is at x ${String(box.x)}, y ${String(box.y)}, ${String(box.width)}×${String(box.height)} on a ${String(screen.width)}×${String(screen.height)} screen`;
+  expect(box.x, where).toBeGreaterThanOrEqual(0);
+  expect(box.y, where).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width, where).toBeLessThanOrEqual(screen.width);
+  expect(box.y + box.height, where).toBeLessThanOrEqual(screen.height);
 }
 
 // keepToken hands the credential the invite gave this page to the fixture's
