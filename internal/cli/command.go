@@ -103,6 +103,9 @@ Usage:
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin principal rename [--server <url>] [--json] <id> <name>
+  conch admin principal list [--server <url>] [--json] [--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent]
+  conch admin principal hide [--server <url>] [--json] <id>
+  conch admin principal hide [--server <url>] [--json] --prefix <name-prefix>|--invite <id> [--kind human|agent] [--yes]
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
   conch admin credential revoke [--server <url>] [--json] <credential-id>

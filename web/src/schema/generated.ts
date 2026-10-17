@@ -1119,6 +1119,94 @@ export const renamePrincipalResponseV1 = object<RenamePrincipalResponseV1>({
   principal: principalV0,
 });
 
+// schema.PrincipalAdminV1
+export interface PrincipalAdminV1 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  role: PrincipalRole;
+  created_at: string;
+  disabled_at?: string;
+  hidden_at?: string;
+  invited_by?: number;
+  invite_id?: number;
+  live_credentials: number;
+}
+
+export const principalAdminV1 = object<PrincipalAdminV1>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  role: principalRole,
+  created_at: timestamp,
+  disabled_at: optional(timestamp),
+  hidden_at: optional(timestamp),
+  invited_by: optional(int),
+  invite_id: optional(int),
+  live_credentials: int,
+});
+
+// schema.ListPrincipalsResponseV1
+export interface ListPrincipalsResponseV1 {
+  principals: PrincipalAdminV1[];
+  next_before?: number;
+}
+
+export const listPrincipalsResponseV1 = object<ListPrincipalsResponseV1>({
+  principals: array(principalAdminV1),
+  next_before: optional(int),
+});
+
+// schema.HidePrincipalResponseV1
+export interface HidePrincipalResponseV1 {
+  principal: PrincipalAdminV1;
+}
+
+export const hidePrincipalResponseV1 = object<HidePrincipalResponseV1>({
+  principal: principalAdminV1,
+});
+
+// schema.HidePrincipalsRequestV1
+export interface HidePrincipalsRequestV1 {
+  invite_id?: number;
+  name_prefix?: string;
+  kind?: PrincipalKind;
+  dry_run?: boolean;
+}
+
+export const hidePrincipalsRequestV1 = object<HidePrincipalsRequestV1>({
+  invite_id: optional(int),
+  name_prefix: optional(str),
+  kind: optional(principalKind),
+  dry_run: optional(bool),
+});
+
+// schema.HiddenPrincipalV1
+export interface HiddenPrincipalV1 {
+  id: number;
+  name: string;
+}
+
+export const hiddenPrincipalV1 = object<HiddenPrincipalV1>({
+  id: int,
+  name: str,
+});
+
+// schema.HidePrincipalsResponseV1
+export interface HidePrincipalsResponseV1 {
+  dry_run: boolean;
+  count: number;
+  principals: HiddenPrincipalV1[];
+  remaining: number;
+}
+
+export const hidePrincipalsResponseV1 = object<HidePrincipalsResponseV1>({
+  dry_run: bool,
+  count: int,
+  principals: array(hiddenPrincipalV1),
+  remaining: int,
+});
+
 // schema.Health
 export interface Health {
   status: string;
