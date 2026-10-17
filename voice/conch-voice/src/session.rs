@@ -56,6 +56,12 @@
 //!   limit, past which the attempt has failed and the policy decides what follows.
 //! - **An error's text is scrubbed where it is put into a status line.** `conchd`'s words,
 //!   or a proxy's, are shown as the `detail` of a refused session or a failed report.
+//!
+//! The same loop runs a managed helper (`managed.rs`, [`serve`]). It is then given an
+//! [`Owner`] to tell, and its owner's commands as inputs: once each step of the loop has
+//! been applied in full the owner is sent a snapshot if anything it shows changed; a
+//! command's ack follows the snapshot its effect changed; and leaving, the owner going and
+//! a signal all shut the gate at once, with no release tail, before anything is said.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -64,16 +70,23 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use conch_voice_api::{Client, Error as ApiError, Secret, ServerAddress, VoiceTransmitState};
+use conch_voice_api::{
+    Client, Error as ApiError, Secret, ServerAddress, VoiceControlErrorCode, VoiceControlPhase,
+    VoiceControlReason, VoiceTransmitState,
+};
 use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
-    PttOutput, TransmitReport,
+    PttOutput, ShutReason, TransmitReport,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::Error;
 use crate::keydev::DeviceState;
+use crate::managed::{
+    Capture, Control, Ending, Handoff, KeyView, OWNER_LOST_STEP, Owner, PROTOCOL_ERROR,
+    REPORT_LIMIT, ROOM_LIMIT, Snapshot,
+};
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
 use crate::presence::{self, PresenceTimings, Roster};
 use crate::receive::{self, BoxedSink, MixCommand, MixStats};
@@ -107,8 +120,13 @@ pub enum Input {
     /// Standard input ended. It counts as `up` and then `quit`: a wrapper that dies after
     /// `down` must not leave the gate open.
     Eof,
-    /// SIGINT or SIGTERM. It counts as `quit`.
+    /// SIGINT or SIGTERM. It counts as `quit`; for a managed helper, as `leave`.
     Signal,
+    /// A command of a managed helper's owner, read and checked (`managed.rs`).
+    Control(Control),
+    /// A managed helper's owner is gone: its control pipe ended, or it is no longer the
+    /// helper's parent (`managed.rs`).
+    OwnerLost,
 }
 
 /// Every wait and limit of the loop. The defaults are the design's; tests shorten them.
@@ -590,6 +608,30 @@ struct Session<T: Transport> {
     frames_sent_shown: u64,
     /// Set when the loop is to end, with what `join` then returns.
     exit: Option<Result<(), Error>>,
+    /// A managed helper's owner, told the state and answered (`managed.rs`). `None` for
+    /// `join`, and nothing below it is used then.
+    owner: Option<Owner>,
+    /// Why a managed helper is ending, once it is: the reason its last states give.
+    ending: Option<Ending>,
+    /// What the key device's watcher last said, for the owner's `ptt`.
+    key_state: Option<DeviceState>,
+    /// Whether a talk key is bound on the key device, for the owner's `ptt`.
+    talk_key: bool,
+    /// The microphone, for the owner's `capture`.
+    mic: Mic,
+}
+
+/// Where the microphone is, as a managed helper's owner is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mic {
+    /// Not opened: no session has allowed publishing yet.
+    NotOpened,
+    /// Its stream is open.
+    Open,
+    /// It could not be opened, or there is none to open.
+    Unavailable,
+    /// Its stream was closed, as the session ended.
+    Closed,
 }
 
 /// Runs `conch-voice join` until `quit`, the end of input, a signal, or a stop.
@@ -607,60 +649,139 @@ pub async fn join<T: Transport>(
     inputs: mpsc::UnboundedReceiver<Input>,
     out: Output,
 ) -> Result<(), Error> {
-    let Settings {
-        channel,
-        open_mic,
-        open_sink,
-        sink_tones,
-        release_tail_ms,
-        max_transmit,
-        key_device,
-        unreachable_note,
-        timings,
-    } = settings;
-    let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
-    let receiver = receive::spawn(&sink_tones, open_sink()?)?;
-    let reports = Reports::spawn(
-        conchd.report_client,
-        channel.clone(),
-        timings.reports.clone(),
-    );
-    let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
-    let (ptt, first) = Ptt::new(max_transmit);
-    let mut session = Session {
-        channel,
-        release_tail: Duration::from_millis(u64::from(release_tail_ms)),
-        timings,
-        open_mic: Some(open_mic),
-        client: conchd.client,
-        transport: Arc::new(transport),
-        scrubber,
-        out,
-        key_device,
-        unreachable_note,
-        inputs,
-        inputs_open: true,
-        start: Instant::now(),
-        ptt,
-        policy: ConnectionPolicy::new(),
-        transmitter,
-        receiver,
-        reports,
-        opening: None,
-        rosters,
-        phase: Phase::Ask(None),
-        live: None,
-        shown: None,
-        frames_sent_shown: 0,
-        exit: None,
-    };
-    // The machine's first words: the gate is told why it is shut, and the first status.
-    session.obey(first);
+    let mut session = Session::new(settings, conchd, transport, scrubber, inputs, out)?;
     session.run().await;
     session.leave().await
 }
 
+/// Runs a managed helper's session (`managed.rs`) from the moment its identity, its
+/// configuration, its audio and its key device have been set up, until it has left: for
+/// leave, the owner going, a signal, or a stop. The owner is told every state and answered
+/// every command, and its last state is the final one. Nothing is shown on standard output.
+///
+/// # Errors
+///
+/// As [`join`]: what the owner was told in a failed state. An error before the loop began
+/// (the speakers could not be opened) is told as a failed state too.
+pub async fn serve<T: Transport>(
+    settings: Settings,
+    conchd: Conchd,
+    transport: T,
+    scrubber: Arc<Scrubber>,
+    inputs: mpsc::UnboundedReceiver<Input>,
+    handoff: Handoff,
+) -> Result<(), Error> {
+    // Standard output carries a managed helper's native noise, which its owner discards;
+    // nothing of this program's goes there.
+    let out = Output::new(false, Box::new(std::io::sink()));
+    let mut session = match Session::new(settings, conchd, transport, scrubber, inputs, out) {
+        Ok(session) => session,
+        Err(error) => {
+            handoff.fail(&error).await;
+            return Err(error);
+        }
+    };
+    let Handoff {
+        owner,
+        muted,
+        deafened,
+        key_state,
+        talk_key,
+    } = handoff;
+    session.owner = Some(owner);
+    session.key_state = key_state;
+    session.talk_key = talk_key;
+    // The machine as the start, and keys pressed while starting, left it.
+    if muted {
+        session.tell(PttInput::Line(LineCommand::Mute));
+    }
+    if deafened {
+        session.tell(PttInput::Line(LineCommand::Deafen));
+    }
+    match key_state {
+        Some(DeviceState::Ready) => session.tell(PttInput::KeyDevice(true)),
+        Some(DeviceState::Lost(_)) => {
+            session.tell(PttInput::KeyDevice(true));
+            session.tell(PttInput::KeyDevice(false));
+        }
+        Some(DeviceState::Missing(_)) | None => {}
+    }
+    // The first attempt now, so that the first state the owner is told is the connecting
+    // one, with the key device already tried.
+    session.on_progress(Progress::Ask);
+    session.settle(false);
+    session.run().await;
+    session.leave_managed().await
+}
+
 impl<T: Transport> Session<T> {
+    /// Starts the tasks a session needs and gives the machine its first words. The
+    /// speakers are opened here.
+    fn new(
+        settings: Settings,
+        conchd: Conchd,
+        transport: T,
+        scrubber: Arc<Scrubber>,
+        inputs: mpsc::UnboundedReceiver<Input>,
+        out: Output,
+    ) -> Result<Self, Error> {
+        let Settings {
+            channel,
+            open_mic,
+            open_sink,
+            sink_tones,
+            release_tail_ms,
+            max_transmit,
+            key_device,
+            unreachable_note,
+            timings,
+        } = settings;
+        let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
+        let receiver = receive::spawn(&sink_tones, open_sink()?)?;
+        let reports = Reports::spawn(
+            conchd.report_client,
+            channel.clone(),
+            timings.reports.clone(),
+        );
+        let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
+        let (ptt, first) = Ptt::new(max_transmit);
+        let mut session = Session {
+            channel,
+            release_tail: Duration::from_millis(u64::from(release_tail_ms)),
+            timings,
+            open_mic: Some(open_mic),
+            client: conchd.client,
+            transport: Arc::new(transport),
+            scrubber,
+            out,
+            key_device,
+            unreachable_note,
+            inputs,
+            inputs_open: true,
+            start: Instant::now(),
+            ptt,
+            policy: ConnectionPolicy::new(),
+            transmitter,
+            receiver,
+            reports,
+            opening: None,
+            rosters,
+            phase: Phase::Ask(None),
+            live: None,
+            shown: None,
+            frames_sent_shown: 0,
+            exit: None,
+            owner: None,
+            ending: None,
+            key_state: None,
+            talk_key: true,
+            mic: Mic::NotOpened,
+        };
+        // The machine's first words: the gate is told why it is shut, and the first status.
+        session.obey(first);
+        Ok(session)
+    }
+
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
@@ -705,6 +826,8 @@ impl<T: Transport> Session<T> {
                     let _ = self.receiver.commands.send(MixCommand::Stats);
                 }
             }
+            // The step has been applied in full: a managed owner is told what changed.
+            self.settle(false);
         }
     }
 
@@ -851,14 +974,31 @@ impl<T: Transport> Session<T> {
                 self.phase = Phase::Settled;
                 match failure {
                     Failure::Session(error) => match session_outcome(&error) {
-                        Some((outcome, reason)) => self.decide(Ended {
-                            outcome,
-                            reason,
-                            detail: Some(self.session_failure_text(&error)),
-                        }),
-                        None => self.exit = Some(Err(Error::Api(error))),
+                        Some((outcome, reason)) => {
+                            // A managed owner is told an invite that withheld voice for what
+                            // it is; `join` names it as it always has.
+                            if self.owner.is_some() && error.code() == Some("voice_not_allowed") {
+                                self.ending.get_or_insert(Ending::failed(
+                                    VoiceControlReason::VoiceNotAllowed,
+                                ));
+                            }
+                            self.decide(Ended {
+                                outcome,
+                                reason,
+                                detail: Some(self.session_failure_text(&error)),
+                            });
+                        }
+                        None => {
+                            self.ending
+                                .get_or_insert(Ending::failed(VoiceControlReason::InternalError));
+                            self.exit = Some(Err(Error::Api(error)));
+                        }
                     },
-                    Failure::NoChannelGrant => self.exit = Some(Err(Error::NoChannelGrant)),
+                    Failure::NoChannelGrant => {
+                        self.ending
+                            .get_or_insert(Ending::failed(VoiceControlReason::InternalError));
+                        self.exit = Some(Err(Error::NoChannelGrant));
+                    }
                     Failure::Sdk(error) => self.decide(Ended {
                         outcome: Outcome::ConnectFailed,
                         reason: "connect_failed",
@@ -913,10 +1053,12 @@ impl<T: Transport> Session<T> {
         match open() {
             Ok(Some(mic)) => {
                 let _ = self.transmitter.commands.send(TxCommand::Microphone(mic));
+                self.mic = Mic::Open;
                 self.tell(PttInput::Microphone(true));
             }
-            Ok(None) => {}
+            Ok(None) => self.mic = Mic::Unavailable,
             Err(error) => {
+                self.mic = Mic::Unavailable;
                 let detail = self.shown_text(&error);
                 self.out.show(&Event::Microphone { detail });
             }
@@ -949,6 +1091,11 @@ impl<T: Transport> Session<T> {
         match step {
             NextStep::Stop { message, exit_code } => {
                 self.show(Connection::Stopped { reason: message });
+                // For a managed owner: the reason, in the protocol's words.
+                let reason = VoiceControlReason::from_word(ended.reason)
+                    .filter(|reason| reason.is_failure())
+                    .unwrap_or(VoiceControlReason::InternalError);
+                self.ending.get_or_insert(Ending::failed(reason));
                 self.exit = Some(Err(Error::Stopped { message, exit_code }));
             }
             NextStep::AskNow => {
@@ -1151,17 +1298,211 @@ impl<T: Transport> Session<T> {
                 // The machine first: a device that went away is a release, and the gate
                 // does not wait for a line to be written.
                 self.tell(PttInput::KeyDevice(state.is_ready()));
+                self.key_state = Some(state);
                 let device = self.key_device.as_deref().unwrap_or_default();
                 self.out.show(&Event::KeyDevice { device, state });
             }
+            Some(Input::Signal) if self.owner.is_some() => {
+                self.begin_stopping(VoiceControlReason::Signal);
+            }
             Some(Input::Signal) => {
                 self.exit.get_or_insert(Ok(()));
+            }
+            Some(Input::Control(control)) => self.on_control(control),
+            Some(Input::OwnerLost) => self.begin_stopping(VoiceControlReason::OwnerLost),
+            // A managed helper's inputs end only with its owner.
+            Some(Input::Eof) | None if self.owner.is_some() => {
+                self.inputs_open = false;
+                self.begin_stopping(VoiceControlReason::OwnerLost);
             }
             Some(Input::Eof) | None => {
                 self.inputs_open = false;
                 self.tell(PttInput::Line(LineCommand::Up));
                 self.exit.get_or_insert(Ok(()));
             }
+        }
+    }
+
+    /// A command of the managed owner's. Each with an id is answered once, after the state
+    /// its effect changed.
+    fn on_control(&mut self, control: Control) {
+        match control {
+            Control::SetMute { id, muted } => self.set_state(id, ShutReason::Muted, muted),
+            Control::SetDeafen { id, deafened } => {
+                self.set_state(id, ShutReason::Deafened, deafened);
+            }
+            Control::GetState { id } => {
+                self.settle(true);
+                self.ack(id, None);
+            }
+            Control::Leave { id } => {
+                self.begin_stopping(VoiceControlReason::Left);
+                self.settle(false);
+                self.ack(id, None);
+            }
+            Control::Refused { id, code } => self.ack(id, Some(code)),
+            Control::Fatal { code } => {
+                if let Some(owner) = self.owner.as_mut() {
+                    owner.protocol_error(code);
+                }
+                // The owner sent what cannot be acted on: the session fails for it,
+                // whatever it was doing, and the next state the owner is told is the failed
+                // one (`settle` writes nothing more).
+                self.ending = Some(Ending::failed(VoiceControlReason::ProtocolError));
+                self.shut_now();
+                self.exit = Some(Err(Error::Managed(PROTOCOL_ERROR)));
+            }
+        }
+    }
+
+    /// `set_mute` or `set_deafen`: the machine's own toggle, given only when its state
+    /// differs from the one wanted, so that a second command changes nothing. Inside the
+    /// loop, so that a key pressed at the same moment is applied in order with it.
+    fn set_state(&mut self, id: i64, reason: ShutReason, wanted: bool) {
+        if self.stopping() {
+            self.ack(id, Some(VoiceControlErrorCode::Stopping));
+            return;
+        }
+        if self.ptt.status().blocked.contains(reason) != wanted {
+            let toggle = if reason == ShutReason::Muted {
+                LineCommand::Mute
+            } else {
+                LineCommand::Deafen
+            };
+            self.tell(PttInput::Line(toggle));
+        }
+        self.settle(false);
+        self.ack(id, None);
+    }
+
+    /// Whether a managed helper is on its way out: leaving, failing, or closing a
+    /// connection that ended for a reason the policy stops on.
+    fn stopping(&self) -> bool {
+        self.ending.is_some()
+            || matches!(&self.phase, Phase::Closing(_, ended) if ended.outcome.stops())
+    }
+
+    /// Leave, the owner gone, or a signal: the gate shuts at once, with no release tail,
+    /// and the loop ends. A connection that is closing because of something the policy
+    /// stops on keeps that reason: the session is failing already.
+    fn begin_stopping(&mut self, reason: VoiceControlReason) {
+        if self.ending.is_none() {
+            match &self.phase {
+                Phase::Closing(_, ended) if ended.outcome.stops() => {
+                    let ended = ended.clone();
+                    self.decide(ended);
+                }
+                _ => self.ending = Some(Ending::stopped(reason)),
+            }
+        }
+        self.shut_now();
+        self.exit.get_or_insert(Ok(()));
+    }
+
+    /// Nothing more is sent from this moment: the machine is told the connection is gone,
+    /// which forces the gate shut with no release tail, and the track is muted.
+    fn shut_now(&mut self) {
+        self.tell(PttInput::Connected(false));
+        self.with_track(MicTrack::mute);
+    }
+
+    fn ack(&mut self, id: i64, refusal: Option<VoiceControlErrorCode>) {
+        if let Some(owner) = self.owner.as_mut() {
+            owner.ack(id, refusal);
+        }
+    }
+
+    /// Tells a managed owner the state if it changed since the owner was last told, or
+    /// whatever it is if `force`.
+    fn settle(&mut self, force: bool) {
+        // After a protocol_error, the failed state is the next thing written (§5, rule 5).
+        let failing = self
+            .ending
+            .is_some_and(|ending| ending.reason == VoiceControlReason::ProtocolError);
+        if self.owner.is_none() || failing {
+            return;
+        }
+        let snapshot = self.snapshot();
+        if let Some(owner) = self.owner.as_mut() {
+            owner.state(&snapshot, force);
+        }
+    }
+
+    /// The state a managed owner is shown, as the loop has it now.
+    fn snapshot(&self) -> Snapshot {
+        let (phase, reason, retry_in) = self.managed_phase();
+        self.snapshot_in(phase, reason, retry_in)
+    }
+
+    fn snapshot_in(
+        &self,
+        phase: VoiceControlPhase,
+        reason: Option<VoiceControlReason>,
+        retry_in: Option<Duration>,
+    ) -> Snapshot {
+        let status = self.ptt.status();
+        let capture = match self.mic {
+            Mic::Open if status.blocked.contains(ShutReason::NoMicrophone) => Capture::Unavailable,
+            Mic::Open => Capture::On,
+            Mic::Unavailable => Capture::Unavailable,
+            Mic::NotOpened | Mic::Closed => Capture::Off,
+        };
+        let key = match (&self.key_device, self.key_state) {
+            (None, _) => KeyView::NotConfigured,
+            (Some(_), None) => KeyView::Unknown,
+            (Some(_), Some(state)) => KeyView::State {
+                state,
+                talk: self.talk_key,
+            },
+        };
+        Snapshot::new(phase, reason, retry_in, capture, status, key)
+    }
+
+    /// The phase a managed owner is shown, with its reason and how long until `conchd` is
+    /// asked again, from what the loop is doing.
+    fn managed_phase(
+        &self,
+    ) -> (
+        VoiceControlPhase,
+        Option<VoiceControlReason>,
+        Option<Duration>,
+    ) {
+        if let Some(ending) = self.ending {
+            return (VoiceControlPhase::Stopping, Some(ending.reason), None);
+        }
+        if let Phase::Closing(_, ended) = &self.phase {
+            // The connection has ended and is being left; what follows is the policy's.
+            let reason = VoiceControlReason::from_word(ended.reason);
+            if ended.outcome.stops() {
+                let reason = reason
+                    .filter(|reason| reason.is_failure())
+                    .unwrap_or(VoiceControlReason::InternalError);
+                return (VoiceControlPhase::Stopping, Some(reason), None);
+            }
+            let reason = reason.filter(|reason| reason.is_retry());
+            return (VoiceControlPhase::Reconnecting, reason, None);
+        }
+        match &self.shown {
+            None => (VoiceControlPhase::Starting, None, None),
+            Some(Connection::Connecting) => (VoiceControlPhase::Connecting, None, None),
+            Some(Connection::Connected) => (VoiceControlPhase::Connected, None, None),
+            Some(Connection::Reconnecting) => (VoiceControlPhase::Reconnecting, None, None),
+            Some(Connection::Waiting {
+                reason, retry_in, ..
+            }) => match VoiceControlReason::from_word(reason).filter(|r| r.is_retry()) {
+                Some(reason) => (
+                    VoiceControlPhase::Reconnecting,
+                    Some(reason),
+                    Some(*retry_in),
+                ),
+                None => (VoiceControlPhase::Reconnecting, None, None),
+            },
+            // Not reached: an ending is set before either is shown.
+            Some(Connection::Stopped { .. } | Connection::Closed) => (
+                VoiceControlPhase::Stopping,
+                Some(VoiceControlReason::InternalError),
+                None,
+            ),
         }
     }
 
@@ -1261,5 +1602,175 @@ impl<T: Transport> Session<T> {
             log::debug!("the last lines of output were not read before leaving");
         }
         result
+    }
+
+    /// A managed helper leaves (`docs/design/tui-voice.md` §8.2, §8.3): the gate is shut and
+    /// the microphone and the speakers closed at once, with no release tail; a press that
+    /// was open gets its `stopped`, given at most [`REPORT_LIMIT`]; the room is left, given
+    /// at most [`ROOM_LIMIT`], or [`OWNER_LOST_STEP`] once the owner is gone. The owner's
+    /// commands are answered meanwhile, and its last state is the final one.
+    async fn leave_managed(mut self) -> Result<(), Error> {
+        let mut result = self.exit.take().unwrap_or(Ok(()));
+        let mut ending = self.ending.unwrap_or(match result {
+            Ok(()) => Ending::stopped(VoiceControlReason::Left),
+            Err(_) => Ending::failed(VoiceControlReason::InternalError),
+        });
+
+        // Nothing more is sent, captured or played. The gate was shut when stopping began;
+        // this makes sure of it whatever else happened, and closes what is open.
+        let shut = TxCommand::Gate(GateCommand::ForceShut(ShutReason::NotConnected));
+        let _ = self.transmitter.commands.send(shut);
+        let _ = self.transmitter.commands.send(TxCommand::Detach);
+        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
+        self.mic = Mic::Closed;
+        self.with_track(MicTrack::mute);
+        // The mix task ends when its commands do, and the speakers close with it.
+        let (none, _) = mpsc::unbounded_channel();
+        drop(std::mem::replace(&mut self.receiver.commands, none));
+
+        // A press that was open is over: the machine produces its `stopped` once the gate
+        // says it has shut, which after a forced shut it says at once.
+        self.tell(PttInput::Line(LineCommand::Quit));
+        let gate_said = Instant::now() + self.timings.gate_shut_grace;
+        while self.ptt.transmission_under_way() {
+            match tokio::time::timeout_at(gate_said, self.transmitter.events.recv()).await {
+                Ok(Some(event)) => self.on_transmit(event),
+                Ok(None) | Err(_) => {
+                    log::warn!("the transmit gate did not report that it shut");
+                    self.reports.push(VoiceTransmitState::Stopped);
+                    break;
+                }
+            }
+        }
+
+        let room_limit = if ending.reason == VoiceControlReason::OwnerLost {
+            OWNER_LOST_STEP
+        } else {
+            ROOM_LIMIT
+        };
+        let attempt_limit = self.timings.attempt_limit.min(room_limit);
+        let live = self.live.take();
+        let phase = std::mem::replace(&mut self.phase, Phase::Settled);
+        let left = async move {
+            if let Some(live) = live {
+                let _ = tokio::time::timeout(room_limit, live.room.close()).await;
+            }
+            match phase {
+                Phase::Closing(closing, _) => {
+                    let _ = tokio::time::timeout(room_limit, closing).await;
+                }
+                // As for `join`: an attempt under way is given a moment to finish, so that
+                // the room it joins is left and its track is not abandoned unmuted.
+                Phase::Establishing(attempt) => {
+                    if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
+                        let _ = tokio::time::timeout(room_limit, joined.room.close()).await;
+                    }
+                }
+                Phase::Ask(_) | Phase::Settled => {}
+            }
+        };
+        // What a get_state is answered with meanwhile: on the way out, the gate shut and
+        // nothing captured.
+        let stopping = self.snapshot_in(VoiceControlPhase::Stopping, Some(ending.reason), None);
+        let mut owner = self.owner.take();
+        if ending.reason == VoiceControlReason::ProtocolError
+            && let Some(owner) = owner.take()
+        {
+            // A protocol_error is followed by the failed state and nothing else: it is
+            // written now, with the gate shut and nothing captured, and what is left to do
+            // is done without a word to the owner.
+            let last = self.snapshot_in(VoiceControlPhase::Failed, Some(ending.reason), None);
+            owner.finish(&last).await;
+        }
+        let mut cutoff: Option<Instant> = None;
+        {
+            let work = async { tokio::join!(self.reports.flush(REPORT_LIMIT), left) };
+            tokio::pin!(work);
+            loop {
+                tokio::select! {
+                    biased;
+                    (delivered, ()) = &mut work => {
+                        if !delivered {
+                            log::warn!("the last transmit reports were not delivered before leaving");
+                        }
+                        break;
+                    }
+                    () = sleep_until(cutoff) => {
+                        log::warn!("the owner is gone: leaving without waiting any longer");
+                        break;
+                    }
+                    input = self.inputs.recv(), if self.inputs_open => match input {
+                        Some(Input::Control(control)) => answer_while_stopping(
+                            owner.as_mut(),
+                            control,
+                            &stopping,
+                            &mut ending,
+                            &mut result,
+                        ),
+                        Some(Input::OwnerLost | Input::Eof) | None => {
+                            if input.is_none() {
+                                self.inputs_open = false;
+                            }
+                            // The tighter bounds of an owner that is gone apply from now.
+                            let sooner = Instant::now() + OWNER_LOST_STEP;
+                            cutoff = Some(cutoff.map_or(sooner, |at| at.min(sooner)));
+                        }
+                        Some(_) => {}
+                    },
+                }
+            }
+        }
+        // Commands already read are answered before the last state, which nothing follows.
+        while let Ok(input) = self.inputs.try_recv() {
+            if let Input::Control(control) = input {
+                answer_while_stopping(owner.as_mut(), control, &stopping, &mut ending, &mut result);
+            }
+        }
+        let last = if ending.failed {
+            VoiceControlPhase::Failed
+        } else {
+            VoiceControlPhase::Stopped
+        };
+        let last = self.snapshot_in(last, Some(ending.reason), None);
+        if let Some(owner) = owner {
+            owner.finish(&last).await;
+        }
+        if ending.failed && result.is_ok() {
+            result = Err(Error::Managed(PROTOCOL_ERROR));
+        }
+        result
+    }
+}
+
+/// A command that arrives while a managed helper is leaving: answered, and carried out only
+/// where that changes nothing. A line that cannot be acted on still fails the session.
+fn answer_while_stopping(
+    owner: Option<&mut Owner>,
+    control: Control,
+    stopping: &Snapshot,
+    ending: &mut Ending,
+    result: &mut Result<(), Error>,
+) {
+    let Some(owner) = owner else {
+        return;
+    };
+    match control {
+        Control::SetMute { id, .. } | Control::SetDeafen { id, .. } => {
+            owner.ack(id, Some(VoiceControlErrorCode::Stopping));
+        }
+        Control::GetState { id } => {
+            let mut now = stopping.clone();
+            now.reason = Some(ending.reason);
+            owner.state(&now, true);
+            owner.ack(id, None);
+        }
+        // A second leave: what it asks for is under way.
+        Control::Leave { id } => owner.ack(id, None),
+        Control::Refused { id, code } => owner.ack(id, Some(code)),
+        Control::Fatal { code } => {
+            owner.protocol_error(code);
+            *ending = Ending::failed(VoiceControlReason::ProtocolError);
+            *result = Err(Error::Managed(PROTOCOL_ERROR));
+        }
     }
 }

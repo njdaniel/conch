@@ -123,15 +123,25 @@ pub enum Error {
     /// `devices` or `keys` could not write to standard output.
     #[error("cannot write to standard output: {0}")]
     Output(#[source] std::io::Error),
+
+    /// `managed` was started without its event pipe: file descriptor 3 is not open, or is
+    /// not a pipe (`docs/design/tui-voice.md` §2). Nothing else was done.
+    #[error("managed: file descriptor 3 {0}; conch-voice managed is started by conch, not by hand")]
+    EventPipe(&'static str),
+
+    /// `managed` failed for a reason it told its owner, as a failed state, and that no
+    /// other error here describes. The sentence is this program's own.
+    #[error("managed: {0}")]
+    Managed(&'static str),
 }
 
 impl Error {
-    /// The exit code `main` ends with: 2 for a mistake on the command line, the policy's
-    /// code for a stop, and 1 otherwise.
+    /// The exit code `main` ends with: 2 for a mistake on the command line or a `managed`
+    /// with no event pipe, the policy's code for a stop, and 1 otherwise.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Usage(_) | Error::NoChannel | Error::NotATerminal => 2,
+            Error::Usage(_) | Error::NoChannel | Error::NotATerminal | Error::EventPipe(_) => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
         }

@@ -83,19 +83,25 @@ pub const BUFFER_LEN: usize = RECORDS_PER_READ * INPUT_EVENT_LEN;
 
 /// What may be opened as a key device.
 ///
-/// The binary only ever passes [`DeviceRule::EventDevice`]: it is written out where `join`,
-/// `keys` and `devices` are started (`lib.rs`), and no option on the command line and no
-/// key of the configuration file can choose another, because neither `cli::JoinArgs` nor
-/// `conch_voice_control::Config` has anywhere to hold one. (The configuration separately
-/// refuses a `keys.device` that is not written as a path under `/dev/input/`; this rule is
-/// about where the path leads and what was opened.)
+/// The binary passes [`DeviceRule::EventDevice`] for every device a person configures: it
+/// is written out where `join`, `keys`, `devices` and `managed` are started (`lib.rs`,
+/// `managed.rs`), and no key of the configuration file can choose another, because
+/// `conch_voice_control::Config` has nowhere to hold one. The one other rule the binary
+/// can be given is [`DeviceRule::NamedPipeForTests`], by `managed`'s hidden, test-only
+/// `--test-key-device`: a named pipe, which no keyboard is, so that option cannot read a
+/// keyboard either. (The configuration separately refuses a `keys.device` that is not
+/// written as a path under `/dev/input/`; this rule is about where the path leads and what
+/// was opened.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceRule {
     /// An event device: a character device named `event` and a number, directly in
     /// `/dev/input`. Nothing else.
     EventDevice,
-    /// Anything that can be opened. For tests, which read named pipes and temporary files
-    /// and never a keyboard. No code outside this file's own match on the rule names it.
+    /// A named pipe and nothing else, checked before and after it is opened: the stand-in
+    /// for a keyboard that `managed`'s test option reads, which the tests write records to.
+    NamedPipeForTests,
+    /// Anything that can be opened. For the library's own tests, which read named pipes
+    /// and temporary files and never a keyboard. Nothing in the binary names it.
     AnyFileForTests,
 }
 
@@ -112,6 +118,9 @@ pub enum Refusal {
     /// What was opened is not what the path named a moment before: the device was replaced
     /// in between, as when a keyboard is plugged in. The only refusal that is tried again.
     Changed,
+    /// It is not a named pipe, under the rule that reads nothing else
+    /// ([`DeviceRule::NamedPipeForTests`]).
+    NotANamedPipe,
 }
 
 impl fmt::Display for Refusal {
@@ -123,6 +132,7 @@ impl fmt::Display for Refusal {
             }
             Refusal::NotCharacterDevice => "it is not a character device",
             Refusal::Changed => "it changed while it was being opened",
+            Refusal::NotANamedPipe => "it is not a named pipe",
         })
     }
 }
@@ -352,6 +362,20 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
     let cannot = |error: io::Error| Problem::CannotOpen(OsError::from(&error));
     match rule {
         DeviceRule::AnyFileForTests => File::open(device).map_err(cannot),
+        DeviceRule::NamedPipeForTests => {
+            // Looked at before it is opened, and the open file again after: whatever is
+            // read is a pipe, never a device.
+            let named = std::fs::metadata(device).map_err(cannot)?;
+            if !named.file_type().is_fifo() {
+                return Err(Problem::Refused(Refusal::NotANamedPipe));
+            }
+            let file = File::open(device).map_err(cannot)?;
+            let opened = file.metadata().map_err(cannot)?;
+            if !opened.file_type().is_fifo() {
+                return Err(Problem::Refused(Refusal::NotANamedPipe));
+            }
+            Ok(file)
+        }
         DeviceRule::EventDevice => {
             let canonical = std::fs::canonicalize(device).map_err(cannot)?;
             // Of the resolved path itself: a link put there since is not followed.
@@ -699,6 +723,39 @@ mod tests {
             Err(Refusal::NotCharacterDevice)
         );
         assert_eq!(confirm(&null, &file), Err(Refusal::NotCharacterDevice));
+    }
+
+    /// The rule `managed`'s test option uses reads a named pipe and nothing else: not a
+    /// file, not a character device, so never a keyboard.
+    #[test]
+    fn the_named_pipe_rule_opens_a_named_pipe_and_nothing_else() {
+        let refused = Err(Problem::Refused(Refusal::NotANamedPipe));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(
+            open(&file, DeviceRule::NamedPipeForTests).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            open(Path::new("/dev/null"), DeviceRule::NamedPipeForTests).map(|_| ()),
+            refused
+        );
+        assert!(!Problem::Refused(Refusal::NotANamedPipe).retried());
+
+        let pipe = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !matches!(made, Ok(status) if status.success()) {
+            eprintln!("skipped the pipe: mkfifo is not available");
+            return;
+        }
+        // Opening a pipe to read waits for a writer, so one is opened beside it.
+        let writer = std::thread::spawn({
+            let pipe = pipe.clone();
+            move || std::fs::OpenOptions::new().write(true).open(pipe).unwrap()
+        });
+        assert!(open(&pipe, DeviceRule::NamedPipeForTests).is_ok());
+        drop(writer.join().unwrap());
     }
 
     #[test]

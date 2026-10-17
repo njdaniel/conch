@@ -87,6 +87,13 @@ enum Rule {
 }
 
 impl Outcome {
+    /// Whether the policy stops on this outcome, whatever came before it: trying again
+    /// cannot help. The others ask `conchd` again, at once or after a wait.
+    #[must_use]
+    pub fn stops(self) -> bool {
+        matches!(self.rule(), Rule::Stop(_))
+    }
+
     fn rule(self) -> Rule {
         match self {
             Outcome::NotSignedIn => Rule::Stop("not signed in: run `conch login` first"),
@@ -276,6 +283,12 @@ mod tests {
             assert!(distinct.insert(outcome), "{outcome:?} is listed twice");
             let mut policy = ConnectionPolicy::new();
             let step = policy.next(secs(100), outcome, LATEST);
+            // What a caller may know before it asks: whether the outcome is a stop.
+            assert_eq!(
+                outcome.stops(),
+                matches!(expected(outcome), First::Stop(_)),
+                "{outcome:?}"
+            );
             match expected(outcome) {
                 First::Stop(message) => {
                     assert_eq!(

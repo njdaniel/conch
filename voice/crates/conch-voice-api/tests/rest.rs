@@ -1,4 +1,4 @@
-//! The three REST calls against a stub `conchd`: what is sent, what a good answer becomes,
+//! The REST calls against a stub `conchd`: what is sent, what a good answer becomes,
 //! and one table per endpoint of every refusal and failure it can meet.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -344,6 +344,43 @@ async fn session_asks_as_conch_would_and_returns_the_validated_session() {
             .unwrap()
             .starts_with("conch-voice/")
     );
+}
+
+#[tokio::test]
+async fn whoami_asks_with_the_login_and_returns_the_principal() {
+    let body = json!({"id": 7, "kind": "human", "name": "someone", "role": "member",
+                      "voice_allowed": true, "later_field": [1]});
+    let stub = Stub::always(Reply::Json(200, body.to_string())).await;
+    let whoami = stub.client().whoami().await.unwrap();
+    assert_eq!(whoami.id, 7);
+    assert!(!whoami.is_agent());
+    assert_eq!(whoami.voice_allowed, Some(true));
+
+    let request = stub.only_request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.target, "/v1/whoami");
+    assert_eq!(request.header("authorization"), Some(FAKE_AUTHORIZATION));
+    assert_eq!(request.everything().matches(FAKE_TOKEN).count(), 1);
+}
+
+#[tokio::test]
+async fn whoami_refusals_and_failures_each_have_their_error() {
+    // A login conchd does not take is "not signed in", whatever the body says.
+    let stub = Stub::always(Reply::error(401, "unauthorized", "no")).await;
+    let error = stub.client().whoami().await.unwrap_err();
+    assert!(matches!(error, Error::Unauthenticated(_)), "{error:?}");
+    assert_no_secret(&error, "401");
+    // An answer of another shape is not a principal, and is not quoted.
+    let reflected =
+        json!({"id": FAKE_TOKEN, "kind": "human", "name": FAKE_TOKEN, "role": "member"});
+    let stub = Stub::always(Reply::Json(200, reflected.to_string())).await;
+    let error = stub.client().whoami().await.unwrap_err();
+    assert!(matches!(error, Error::Undecodable { .. }), "{error:?}");
+    assert_no_secret(&error, "an id that is not a number");
+    // Nothing listening.
+    let client = client_for(&closed_port().await, Duration::from_secs(5));
+    let error = client.whoami().await.unwrap_err();
+    assert!(matches!(error, Error::Connect { .. }), "{error:?}");
 }
 
 #[tokio::test]
