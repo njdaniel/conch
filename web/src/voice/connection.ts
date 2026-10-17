@@ -12,6 +12,11 @@ import type { Clock } from '../state/feed';
 import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { TransmitGate, type GateMode, type GateOptions } from './gate';
 import { ReportQueue, type ReportEvent } from './reports';
+import { record } from '../diagnostics';
+
+// The names a browser gives the failures of a microphone it was asked for
+// (DOMException names). Any other error of a connection is not a device's.
+const deviceErrors: ReadonlySet<string> = new Set(['NotAllowedError', 'NotFoundError', 'NotReadableError', 'OverconstrainedError', 'SecurityError', 'AbortError']);
 
 export interface RoomEvents {
   readonly onReconnecting: () => void;
@@ -131,6 +136,9 @@ export class VoiceClient {
   snapshot = (): VoiceState => this.state;
 
   private set(patch: Partial<VoiceState>): void {
+    // Each change of phase goes into the page's diagnostic ring (issue
+    // #446): the state alone, never the channel or the reason's words.
+    if (patch.phase !== undefined && patch.phase !== this.state.phase) record({ kind: 'voice_state', state: patch.phase });
     this.state = { ...this.state, ...patch };
     for (const l of [...this.listeners]) l();
   }
@@ -321,7 +329,12 @@ export class VoiceClient {
     };
     try {
       await room.connect(session.value.livekit_url, grant.token, grant.room, grant.can_publish, events);
-    } catch {
+    } catch (err: unknown) {
+      // A microphone refused or missing is said by the error's name alone.
+      // A DOMException is not an Error everywhere, so its name is read as a
+      // property.
+      const name = typeof err === 'object' && err !== null && 'name' in err ? err.name : undefined;
+      if (typeof name === 'string' && deviceErrors.has(name)) record({ kind: 'device_error', name });
       if (mine !== this.attempt) return;
       void room.close().catch(() => undefined);
       this.room = null;

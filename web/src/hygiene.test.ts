@@ -340,6 +340,61 @@ describe('the invite code', () => {
   });
 });
 
+// The diagnostic ring of "Report a problem" (issue #446). It is memory only,
+// only api.ts and the voice client record into it, and what they record names
+// no path, body, address, channel, room, token, ticket or invite code: those
+// are what an event must never hold. diagnostics.test.ts drives each kind
+// through the real code; these rules keep a later change from going around it.
+const ringRecorders = ['./api.ts', './voice/connection.ts'];
+const importsRecord = /import\s*\{[^}]*\brecord\b[^}]*\}\s*from\s*['"](\.\.?\/)+diagnostics['"]/;
+const storageNames = /localStorage|sessionStorage|indexedDB|document\.cookie|\bcaches\b/;
+// A recording call, to the end of its line (each is one line).
+const recordCall = /\brecord\(\{.*$/gm;
+const recordsForbidden = /path|body|url|address|ticket|token|channel|room|message|reason|why/i;
+
+describe('the diagnostic ring', () => {
+  it('is in memory only: neither the ring nor the form names a storage', () => {
+    for (const path of ['./diagnostics.ts', './Report.tsx']) {
+      expect(sources[path], path).toBeDefined();
+      expect(storageNames.test(withoutComments(sources[path] ?? '')), path).toBe(false);
+    }
+    // The ring needs nothing at run time but itself.
+    expect(withoutComments(sources['./diagnostics.ts'] ?? '')).not.toMatch(/^import (?!type\b)/m);
+  });
+
+  it('is recorded into by src/api.ts and the voice client alone', () => {
+    const recording = Object.entries(sources)
+      .filter(([, code]) => importsRecord.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(recording).toEqual(ringRecorders);
+  });
+
+  it('is told kinds, codes, states and names, never what was sent or where', () => {
+    let calls = 0;
+    for (const path of ringRecorders) {
+      for (const call of (sources[path] ?? '').match(recordCall) ?? []) {
+        calls++;
+        expect(recordsForbidden.test(call), `${path}: ${call}`).toBe(false);
+      }
+    }
+    // Every recording site was seen: two failures, an open, a close, a
+    // reconnect, a voice state and a device error.
+    expect(calls).toBe(7);
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(importsRecord.test("import { record } from './diagnostics';")).toBe(true);
+    expect(importsRecord.test("import { forget, record } from '../diagnostics';")).toBe(true);
+    expect(importsRecord.test("import { recent } from './diagnostics';")).toBe(false);
+    for (const bad of ["record({ kind: 'http_failure', status: 0, error: path })", 'record({ kind: "device_error", name: room.name })', "record({ kind: 'reconnect', socket: url, attempt: 1 })"]) {
+      expect(recordsForbidden.test(bad), bad).toBe(true);
+    }
+    expect(storageNames.test('window.sessionStorage.setItem(k, v)')).toBe(true);
+    expect(storageNames.test('indexedDB.open("x")')).toBe(true);
+  });
+});
+
 describe('the built bundle', () => {
   it('uses the screen API only as the SDK does, and storage only as the SDK and src/api.ts do', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });

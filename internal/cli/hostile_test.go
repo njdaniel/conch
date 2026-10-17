@@ -216,6 +216,14 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "login", stdin: "tok\n", args: func(u, _ string) []string { return []string{"login", "--server", u} }},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
+		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"report", "--server", u, "--did", "a", "--expected", "b", "--happened", "c", "--often", "once", "--yes"}
+		}},
+		{key: "admin reports list", args: func(u, _ string) []string { return []string{"admin", "reports", "list", "--server", u} }},
+		{key: "admin reports show", args: func(u, _ string) []string { return []string{"admin", "reports", "show", "--server", u, "9"} }},
+		{key: "admin reports file", args: func(u, _ string) []string {
+			return []string{"admin", "reports", "file", "--server", u, "9", "https://example.com/issues/1"}
+		}},
 	}
 }
 
@@ -377,12 +385,41 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.FileV1{Schema: schema.FileSchemaV1, ID: 1, Filename: hostile, MediaType: hostile, Size: 0, SHA256: hex.EncodeToString(empty[:]), CreatedAt: ts})
 		case "GET /v2/files/1":
 			w.WriteHeader(http.StatusOK)
+		case "POST /v1/reports":
+			write(w, http.StatusCreated, schema.CreateProblemReportResponseV1{ID: 9, CreatedAt: ts})
+		case "GET /v1/reports":
+			write(w, http.StatusOK, schema.ListProblemReportsResponseV1{Reports: []schema.ProblemReportSummaryV1{{
+				ID: 9, State: schema.ProblemReportState(hostile), CreatedAt: ts, PrincipalID: 42, ClientName: hostile, ClientVersion: hostile,
+				ServerVersion: hostile, Often: schema.ProblemReportOften(hostile), Issue: hostile,
+			}}})
+		case "GET /v1/reports/9", "PUT /v1/reports/9":
+			write(w, http.StatusOK, hostileReport(ts))
+		case "GET /v1/channels":
+			write(w, http.StatusOK, schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "general", CreatedAt: ts.Time()}}})
+		case "GET /v1/channels/general/members":
+			write(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: []schema.ChannelMemberV1{{PrincipalID: 42, Name: hostile, CreatedAt: ts}}})
 		default:
 			write(w, http.StatusNotFound, schema.Error{Code: "no_route", Message: key + hostile})
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// hostileReport is a problem report whose every string is hostile.
+func hostileReport(ts schema.Timestamp) schema.ProblemReportV1 {
+	return schema.ProblemReportV1{
+		ID: 9, State: schema.ProblemReportState(hostile), CreatedAt: ts, PrincipalID: 42, ServerVersion: hostile,
+		Voice: schema.HealthVoice(hostile), Did: hostile, Expected: hostile, Happened: hostile, Often: schema.ProblemReportOften(hostile),
+		Client: schema.ProblemReportClientV1{Name: hostile, Version: hostile, UserAgent: hostile, Platform: hostile, Screen: hostile, Voice: hostile, Share: hostile},
+		Diagnostics: []schema.DiagnosticEventV1{{At: ts, Kind: schema.DiagnosticEventKind(hostile), Socket: schema.DiagnosticSocket(hostile),
+			Error: hostile, RequestID: hostile, State: schema.DiagnosticVoiceStateName(hostile), Name: hostile}},
+		Server: schema.ProblemReportServerV1{
+			Requests:     []schema.ServerRequestTraceV1{{At: ts, RequestID: hostile, Route: hostile, Status: 200}},
+			SocketCloses: []schema.ServerSocketCloseV1{{At: ts, RequestID: hostile, Route: hostile, Reason: schema.SocketCloseReason(hostile)}},
+		},
+		Issue: "https://example.com/issues/1" + hostile,
+	}
 }
 
 // Every plain command is run against a server whose every string is hostile,

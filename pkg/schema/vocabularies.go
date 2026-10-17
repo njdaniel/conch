@@ -28,7 +28,17 @@ var Vocabularies = map[string][]string{
 		ChannelPermissionRead, ChannelPermissionPost, ChannelPermissionPostNet,
 		ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
 	),
+	"DiagnosticEventKind": values(
+		DiagnosticSocketOpen, DiagnosticSocketClose, DiagnosticReconnect,
+		DiagnosticHTTPFailure, DiagnosticVoiceState, DiagnosticDeviceError,
+	),
+	"DiagnosticSocket": values(DiagnosticSocketMessages, DiagnosticSocketEvents, DiagnosticSocketVoice),
+	"DiagnosticVoiceStateName": values(
+		DiagnosticVoiceIdle, DiagnosticVoiceConnecting, DiagnosticVoiceConnected,
+		DiagnosticVoiceReconnecting, DiagnosticVoiceUnavailable, DiagnosticVoiceStopped,
+	),
 	"EscalationTargetKind": values(EscalationTargetPrincipal, EscalationTargetNtfyTopic),
+	"HealthVoice":          values(HealthVoiceOK, HealthVoiceUnavailable, HealthVoiceNotConfigured),
 	"InviteKind":           values(InviteKindPersonal, InviteKindOpen),
 	"InviteeDepth":         values(InviteeDepthDirect, InviteeDepthAll),
 	"InterventionKind":     values(InterventionKindMessage, InterventionKindCancel, InterventionKindPause, InterventionKindResume),
@@ -41,6 +51,14 @@ var Vocabularies = map[string][]string{
 	"PrincipalKind":  values(PrincipalHuman, PrincipalAgent),
 	"PrincipalRole":  values(RoleOperator, RoleMember),
 	"PrincipalState": values(PrincipalStateActive, PrincipalStateDisabled, PrincipalStateHidden),
+	"ProblemReportOften": values(
+		ProblemReportOftenEveryTime, ProblemReportOftenSometimes, ProblemReportOftenOnce,
+	),
+	"ProblemReportState": values(ProblemReportStateOpen, ProblemReportStateFiled),
+	"SocketCloseReason": values(
+		SocketCloseClient, SocketCloseServerShutdown, SocketCloseKeepaliveTimeout, SocketCloseRevoked,
+		SocketCloseRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded, SocketCloseError,
+	),
 	"RunState": values(
 		RunStateQueued, RunStateStarting, RunStateRunning, RunStateBlocked,
 		RunStateWaiting, RunStateCompleted, RunStateFailed, RunStateCancelled,

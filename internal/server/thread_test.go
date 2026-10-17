@@ -268,7 +268,9 @@ type rawResponse struct {
 func (f *scopedFixture) raw(t *testing.T, method, path, token, body string) rawResponse {
 	t.Helper()
 	rec := f.do(t, method, path, token, body)
-	return rawResponse{rec.Code, rec.Header().Clone(), rec.Body.String()}
+	// Every header but the request id, which is random for every request and
+	// so says nothing about the message (issue #446).
+	return rawResponse{rec.Code, withoutRequestID(t, rec.Header()), rec.Body.String()}
 }
 
 // TestThreadAttemptsAreIndistinguishableFromAbsence: message ids are

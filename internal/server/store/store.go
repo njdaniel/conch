@@ -610,6 +610,29 @@ END`,
 	{
 		`ALTER TABLE principals ADD COLUMN hidden_at INTEGER CHECK (hidden_at IS NULL OR disabled_at IS NOT NULL)`,
 	},
+	// 29 (problemReportsMigration): Problem reports (issue #446). One row per
+	// report a person sent. document is the report as the operator reads it
+	// (schema.ProblemReportV1, JSON); the columns beside it are what a list
+	// shows and filters on, and what changes when an operator files it.
+	// Nothing existing changes, so nothing is backfilled.
+	{
+		`CREATE TABLE problem_reports (
+	id             INTEGER PRIMARY KEY,
+	principal_id   INTEGER NOT NULL REFERENCES principals (id),
+	created_at     INTEGER NOT NULL,
+	state          TEXT    NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'filed')),
+	client_name    TEXT    NOT NULL,
+	client_version TEXT    NOT NULL,
+	server_version TEXT    NOT NULL,
+	often          TEXT    NOT NULL,
+	document       TEXT    NOT NULL,
+	issue          TEXT,
+	filed_at       INTEGER,
+	filed_by       INTEGER REFERENCES principals (id),
+	CHECK ((state = 'filed') = (issue IS NOT NULL AND filed_at IS NOT NULL))
+)`,
+		`CREATE INDEX problem_reports_by_principal ON problem_reports (principal_id, created_at)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

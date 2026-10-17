@@ -71,6 +71,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
 	case "rename":
 		return runRename(ctx, args[1:], stdout, stderr)
+	case "report":
+		return runReport(ctx, args[1:], stdin, stdout, stderr, version)
 	case "version":
 		_, err := fmt.Fprintln(stdout, version)
 		return err
@@ -119,6 +121,9 @@ Usage:
   conch admin invite pause|resume|status [--server <url>] [--json]
   conch admin principal invite-permission [--server <url>] [--json] <id> on|off
   conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
+  conch admin reports list [--server <url>] [--json] [--limit <n>]
+  conch admin reports show [--server <url>] [--json] [--markdown] <id>
+  conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -128,6 +133,7 @@ Usage:
   conch logout [--server <url>]
   conch whoami [--server <url>]
   conch rename [--server <url>] [--json] <name>
+  conch report [--server <url>] [--did <text>] [--expected <text>] [--happened <text>] [--often every_time|sometimes|once] [--yes] [--json]
   conch version
 
 Scope:
@@ -193,6 +199,16 @@ Scope:
   taken counts as a try); an operator's rename of someone else counts toward
   neither. An agent's name is set by an operator. Each prints "renamed
   principal <id> to <name>", or with --json the response document.
+
+  report sends a problem report to the server's operator, in the bug
+  template's words: what you did, what you expected, what happened instead,
+  and how often. Answers not given as flags are asked for, one line each.
+  It shows exactly what will be sent and sends it only on "y" (or --yes);
+  the server adds its version and the ids of your recent requests. It prints
+  the report's number. admin reports (operators only) lists reports, shows
+  one (--markdown: as an issue body with channel and person names taken
+  out), and records the issue one was filed as. conchd never sends a report
+  anywhere; ops/report-to-issue.sh files one from the operator's machine.
 
   audit export (operators only) writes the audit trail to standard output as
   JSON Lines, one conch.audit_event.v1 object per line in ascending id order,

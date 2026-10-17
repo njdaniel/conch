@@ -1207,17 +1207,158 @@ export const hidePrincipalsResponseV1 = object<HidePrincipalsResponseV1>({
   remaining: int,
 });
 
+// schema.HealthVoice
+export type HealthVoice = 'ok' | 'unavailable' | 'not_configured';
+
+export const healthVoice = vocab<HealthVoice>({
+  ok: true,
+  unavailable: true,
+  not_configured: true,
+});
+
 // schema.Health
 export interface Health {
   status: string;
   version: string;
   db: string;
+  voice: HealthVoice;
 }
 
 export const health = object<Health>({
   status: str,
   version: str,
   db: str,
+  voice: healthVoice,
+});
+
+// schema.ProblemReportClientV1
+export interface ProblemReportClientV1 {
+  name: string;
+  version: string;
+  user_agent?: string;
+  platform: string;
+  screen?: string;
+  voice?: string;
+  share?: string;
+}
+
+export const problemReportClientV1 = object<ProblemReportClientV1>({
+  name: str,
+  version: str,
+  user_agent: optional(str),
+  platform: str,
+  screen: optional(str),
+  voice: optional(str),
+  share: optional(str),
+});
+
+// schema.DiagnosticEventKind
+export type DiagnosticEventKind =
+  | 'socket_open'
+  | 'socket_close'
+  | 'reconnect'
+  | 'http_failure'
+  | 'voice_state'
+  | 'device_error';
+
+export const diagnosticEventKind = vocab<DiagnosticEventKind>({
+  socket_open: true,
+  socket_close: true,
+  reconnect: true,
+  http_failure: true,
+  voice_state: true,
+  device_error: true,
+});
+
+// schema.DiagnosticSocket
+export type DiagnosticSocket = 'messages' | 'events' | 'voice';
+
+export const diagnosticSocket = vocab<DiagnosticSocket>({
+  messages: true,
+  events: true,
+  voice: true,
+});
+
+// schema.DiagnosticVoiceStateName
+export type DiagnosticVoiceStateName =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'unavailable'
+  | 'stopped';
+
+export const diagnosticVoiceStateName = vocab<DiagnosticVoiceStateName>({
+  idle: true,
+  connecting: true,
+  connected: true,
+  reconnecting: true,
+  unavailable: true,
+  stopped: true,
+});
+
+// schema.DiagnosticEventV1
+export interface DiagnosticEventV1 {
+  at: string;
+  kind: DiagnosticEventKind;
+  socket?: DiagnosticSocket;
+  code?: number;
+  error?: string;
+  request_id?: string;
+  attempt?: number;
+  state?: DiagnosticVoiceStateName;
+  name?: string;
+}
+
+export const diagnosticEventV1 = object<DiagnosticEventV1>({
+  at: timestamp,
+  kind: diagnosticEventKind,
+  socket: optional(diagnosticSocket),
+  code: optional(int),
+  error: optional(str),
+  request_id: optional(str),
+  attempt: optional(int),
+  state: optional(diagnosticVoiceStateName),
+  name: optional(str),
+});
+
+// schema.ProblemReportOften
+export type ProblemReportOften = 'every_time' | 'sometimes' | 'once';
+
+export const problemReportOften = vocab<ProblemReportOften>({
+  every_time: true,
+  sometimes: true,
+  once: true,
+});
+
+// schema.CreateProblemReportRequestV1
+export interface CreateProblemReportRequestV1 {
+  did: string;
+  expected: string;
+  happened: string;
+  often: ProblemReportOften;
+  client: ProblemReportClientV1;
+  diagnostics: DiagnosticEventV1[];
+}
+
+export const createProblemReportRequestV1 = object<CreateProblemReportRequestV1>({
+  did: str,
+  expected: str,
+  happened: str,
+  often: problemReportOften,
+  client: problemReportClientV1,
+  diagnostics: array(diagnosticEventV1),
+});
+
+// schema.CreateProblemReportResponseV1
+export interface CreateProblemReportResponseV1 {
+  id: number;
+  created_at: string;
+}
+
+export const createProblemReportResponseV1 = object<CreateProblemReportResponseV1>({
+  id: int,
+  created_at: timestamp,
 });
 
 // schema.Error

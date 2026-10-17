@@ -188,18 +188,11 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 		return
 	}
 
-	release, ok := s.admitSocket(w, r)
+	conn, ctx, done, ok := s.acceptSocket(w, r)
 	if !ok {
 		return
 	}
-	defer release()
-
-	conn, err := websocket.Accept(w, r, s.acceptOptions())
-	if err != nil {
-		// Accept has already written the HTTP error response.
-		slog.DebugContext(ctx, "ws: accept failed", "error", err)
-		return
-	}
+	defer done()
 	// Only an authenticated connection re-checks; a nil channel never fires,
 	// so AuthOff starts no timer.
 	var recheck <-chan time.Time
@@ -227,7 +220,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	for {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return
 		case <-recheck:
 			if !s.credentialStillValid(ctx, conn, credID) {
@@ -245,7 +238,7 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 				// 1011: RFC 6455 reserves StatusAbnormalClosure for reporting;
 				// it must not go out in a close frame. CloseNow guards against
 				// the close handshake blocking on an already-dead peer.
-				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return
 			}
@@ -257,7 +250,7 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 	for {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return
 		case <-recheck:
 			if !s.credentialStillValid(ctx, conn, credID) {
@@ -269,7 +262,7 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 				return
 			}
 			if err := writeWSMessageV1(ctx, conn, msg); err != nil {
-				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return
 			}
@@ -305,7 +298,7 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 	for {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return
 		case <-recheck:
 			if !s.credentialStillValid(ctx, conn, credID) {
@@ -320,7 +313,7 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				continue
 			}
 			if err := writeWSMessageV2(ctx, conn, msg); err != nil {
-				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return
 			}
@@ -364,7 +357,7 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 			return last, false
 		}
 		if ctx.Err() != nil {
-			_ = conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return last, false
 		}
 		if hook := s.replayHooks.beforePage; hook != nil {
@@ -373,7 +366,7 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 		msgs, err := s.store.ListVisibleMessages(ctx, channelID, readerFor(replay.r, apiV2), cursor, size)
 		if err != nil {
 			if ctx.Err() != nil {
-				_ = conn.Close(websocket.StatusNormalClosure, "")
+				closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 				return last, false
 			}
 			// A read that failed because the server is stopping is a
@@ -383,7 +376,7 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				return last, false
 			}
 			slog.ErrorContext(ctx, "ws: replay failed", "error", err)
-			_ = conn.Close(websocket.StatusInternalError, "replay failed")
+			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "replay failed")
 			return last, false
 		}
 		if hook := s.replayHooks.afterPage; hook != nil {
@@ -400,7 +393,7 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				return last, false
 			}
 			if err := writeWSMessageV2(ctx, conn, messageV2FromStore(m)); err != nil {
-				_ = conn.Close(websocket.StatusInternalError, "write failed")
+				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return last, false
 			}
@@ -415,19 +408,19 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 func writeWSMessage(ctx context.Context, conn *websocket.Conn, msg schema.MessageV0) error {
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
-	return wsjson.Write(wctx, conn, msg)
+	return countFrame(ctx, wsjson.Write(wctx, conn, msg))
 }
 
 func writeWSMessageV2(ctx context.Context, conn *websocket.Conn, msg schema.MessageV2) error {
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
-	return wsjson.Write(wctx, conn, msg)
+	return countFrame(ctx, wsjson.Write(wctx, conn, msg))
 }
 
 func writeWSMessageV1(ctx context.Context, conn *websocket.Conn, msg schema.MessageV1) error {
 	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
 	defer cancel()
-	return wsjson.Write(wctx, conn, msg)
+	return countFrame(ctx, wsjson.Write(wctx, conn, msg))
 }
 
 // credentialStillValid re-reads the credential the connection authenticated
@@ -442,10 +435,10 @@ func (s *Server) credentialStillValid(ctx context.Context, conn *websocket.Conn,
 	switch {
 	case err != nil:
 		slog.ErrorContext(ctx, "ws: recheck credential failed", "error", err)
-		_ = conn.Close(websocket.StatusInternalError, "credential check failed")
+		closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "credential check failed")
 		return false
 	case !live:
-		_ = conn.Close(websocket.StatusPolicyViolation, reasonCredentialInvalid)
+		closeWS(ctx, conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
 		return false
 	}
 	return true
@@ -456,7 +449,7 @@ func (s *Server) credentialStillValid(ctx context.Context, conn *websocket.Conn,
 // from the channel, or falling too far behind.
 func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
 	if s.hub.Closed() {
-		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
 		return
 	}
 	// The request context may already be done; the reason is advisory, so
@@ -464,19 +457,19 @@ func (s *Server) closeDropped(ctx context.Context, conn *websocket.Conn, channel
 	bg := context.WithoutCancel(ctx)
 	if credID != 0 {
 		if live, err := s.store.CredentialLive(bg, credID); err == nil && !live {
-			_ = conn.Close(websocket.StatusPolicyViolation, reasonCredentialInvalid)
+			closeWS(ctx, conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
 			return
 		}
 	}
 	if principalID != 0 {
 		if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
-			_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+			closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 			return
 		}
 		if s.agentMayNoLongerRead(bg, principalID, channelID) {
-			_ = conn.Close(websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
+			closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "manifest no longer permits reading this channel")
 			return
 		}
 	}
-	_ = conn.Close(websocket.StatusPolicyViolation, "subscriber too slow")
+	closeWS(ctx, conn, schema.SocketCloseSlowConsumer, websocket.StatusPolicyViolation, "subscriber too slow")
 }

@@ -275,6 +275,14 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	// Problem reports (issue #446). An empty report is a 400 before anything
+	// is stored or audited; the operator routes name a report that does not
+	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
+	// (both special-cased below).
+	"POST /v1/reports":     {classAuth, "/v1/reports", `{}`, 400},
+	"GET /v1/reports":      {classOp, "/v1/reports", "", 200},
+	"GET /v1/reports/{id}": {classOp, "/v1/reports/9999", "", 404},
+	"PUT /v1/reports/{id}": {classOp, "/v1/reports/9999", `{"state":"filed","issue":"https://example.com/issues/1"}`, 404},
 	// Operator administration of principals (issue #445). The hide names a
 	// principal that does not exist, the bulk hide selects nobody (a 400
 	// before anything is read), and the list only reads. The bulk hide, like
@@ -426,8 +434,9 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") {
 				agentWant = http.StatusForbidden
 			}
-			// Invites are for people (issue #437).
-			if isInviteRoute(rt.pattern) {
+			// Invites are for people (issue #437), and so are problem
+			// reports (issue #446).
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -488,6 +497,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isInviteRoute(rt.pattern) {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
+				}
+				if rt.pattern == "POST /v1/reports" {
+					want = http.StatusUnauthorized // like whoami: no one to say who reported
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out

@@ -75,6 +75,44 @@ body {
   margin: 0;
 }
 
+/* "Report a problem" (issue #446): one button in the header; the form opens
+   below it, no wider than the window. */
+.report {
+  position: relative;
+}
+
+.report-panel:not([hidden]) {
+  position: absolute;
+  right: 0;
+  z-index: 1;
+  width: min(32rem, calc(100vw - 2rem));
+  max-height: 80vh;
+  overflow: auto;
+  padding: 0.75rem;
+  background: #fff;
+  border: 1px solid #ccc;
+}
+
+.report-panel form {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.report-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.report-preview {
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  background: #f6f6f6;
+  padding: 0.5rem;
+}
+
 .areas {
   display: grid;
   grid-template-columns: 14rem 1fr 16rem;

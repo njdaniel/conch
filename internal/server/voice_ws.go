@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // handleVoiceWS serves GET /v1/voice/ws?channel=<name>: it upgrades to a
@@ -60,17 +61,11 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	release, ok := s.admitSocket(w, r)
+	conn, ctx, done, ok := s.acceptSocket(w, r)
 	if !ok {
 		return
 	}
-	defer release()
-
-	conn, err := websocket.Accept(w, r, s.acceptOptions())
-	if err != nil {
-		slog.DebugContext(ctx, "voice ws: accept failed", "error", err)
-		return
-	}
+	defer done()
 	var recheck <-chan time.Time
 	if hasCred {
 		ticker := time.NewTicker(s.credRecheckInterval)
@@ -96,22 +91,22 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 		}
 		if err := snap.Validate(); err != nil {
 			slog.ErrorContext(ctx, "voice ws: built an invalid presence document", "channel", channelID, "error", err)
-			_ = conn.Close(websocket.StatusInternalError, "internal error")
+			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 			return false
 		}
 		raw, err := json.Marshal(snap)
 		if err != nil {
-			_ = conn.Close(websocket.StatusInternalError, "internal error")
+			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 			return false
 		}
 		if bytes.Equal(raw, last) {
 			return true
 		}
 		wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
-		err = conn.Write(wctx, websocket.MessageText, raw)
+		err = countFrame(ctx, conn.Write(wctx, websocket.MessageText, raw))
 		cancel()
 		if err != nil {
-			_ = conn.Close(websocket.StatusInternalError, "write failed")
+			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 			_ = conn.CloseNow()
 			return false
 		}
@@ -124,7 +119,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 	for {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close(websocket.StatusNormalClosure, "")
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
 			return
 		case <-recheck:
 			if !s.credentialStillValid(ctx, conn, credID) || !s.voiceStillMember(ctx, conn, channelID, principalID) {
@@ -151,10 +146,10 @@ func (s *Server) voiceStillMember(ctx context.Context, conn *websocket.Conn, cha
 	switch {
 	case err != nil:
 		slog.ErrorContext(ctx, "voice ws: recheck membership failed", "error", err)
-		_ = conn.Close(websocket.StatusInternalError, "membership check failed")
+		closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "membership check failed")
 		return false
 	case !member:
-		_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return false
 	}
 	return true
@@ -165,19 +160,19 @@ func (s *Server) voiceStillMember(ctx context.Context, conn *websocket.Conn, cha
 // the channel.
 func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
 	if s.voice.isClosed() {
-		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
 		return
 	}
 	bg := context.WithoutCancel(ctx)
 	if credID != 0 {
 		if live, err := s.store.CredentialLive(bg, credID); err == nil && !live {
-			_ = conn.Close(websocket.StatusPolicyViolation, reasonCredentialInvalid)
+			closeWS(ctx, conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
 			return
 		}
 	}
 	if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
-		_ = conn.Close(websocket.StatusPolicyViolation, "no longer a member of this channel")
+		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return
 	}
-	_ = conn.Close(websocket.StatusPolicyViolation, "presence subscription closed")
+	closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "presence subscription closed")
 }

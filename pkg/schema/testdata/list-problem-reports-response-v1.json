@@ -1,0 +1,25 @@
+{
+  "reports": [
+    {
+      "id": 8,
+      "state": "open",
+      "created_at": "2026-10-16T11:00:00.000Z",
+      "principal_id": 12,
+      "client_name": "conch",
+      "client_version": "dev-0123456789ab",
+      "server_version": "v0.1.0-alpha.2",
+      "often": "once"
+    },
+    {
+      "id": 7,
+      "state": "filed",
+      "created_at": "2026-10-16T09:02:00.000Z",
+      "principal_id": 12,
+      "client_name": "conch-web",
+      "client_version": "v0.1.0-alpha.2",
+      "server_version": "v0.1.0-alpha.2",
+      "often": "sometimes",
+      "issue": "https://github.com/example/conch/issues/900"
+    }
+  ]
+}

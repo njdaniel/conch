@@ -329,8 +329,10 @@ func TestHookRevokeEndToEnd(t *testing.T) {
 			if tc.rec.Code != unknown.Code || tc.rec.Body.String() != unknown.Body.String() {
 				t.Errorf("response = %d %q, want %d %q", tc.rec.Code, tc.rec.Body, unknown.Code, unknown.Body)
 			}
-			if !reflect.DeepEqual(tc.rec.Header(), unknown.Header()) {
-				t.Errorf("headers = %v, want %v", tc.rec.Header(), unknown.Header())
+			// Every header but the request id, which is random for every
+			// request and so says nothing about the token (issue #446).
+			if got, want := withoutRequestID(t, tc.rec.Header()), withoutRequestID(t, unknown.Header()); !reflect.DeepEqual(got, want) {
+				t.Errorf("headers = %v, want %v", got, want)
 			}
 		})
 	}

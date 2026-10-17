@@ -31,7 +31,7 @@ function serve(routes: Record<string, Handler>) {
   return fetchMock;
 }
 
-const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok' });
+const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok', voice: 'not_configured' });
 
 const asMember: Record<string, Handler> = {
   '/v1/whoami': (a) => (a === `Bearer ${secret}` ? json(member) : json({}, 401)),
