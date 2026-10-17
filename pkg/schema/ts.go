@@ -136,6 +136,10 @@ var TSTypes = []TSType{
 	// Signing out everywhere (issue #439): the page revokes every credential
 	// of its own principal. Signing out of one credential has no body.
 	{Value: RevokeAllCredentialsResponseV1{}, Family: "revoke-all-credentials-response-v1"},
+	// Your sign-ins (issue #496): the page lists the person's own live
+	// credentials and ends one by id. Ending one has no body.
+	{Value: OwnCredentialV1{}, Family: "own-credential-v1"},
+	{Value: ListOwnCredentialsResponseV1{}, Family: "list-own-credentials-response-v1"},
 	// How the browser suite's operator sets up a person of its own to sign
 	// out everywhere (issue #439). The page itself never sends these.
 	{Value: CreatePrincipalRequest{}, Family: "create-principal-request-v0"},

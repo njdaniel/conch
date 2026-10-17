@@ -3,12 +3,14 @@ import {
   claimVoiceShare,
   closeInvite,
   continueAsOperator,
+  endSignIn,
   createInvite,
   forgetStored,
   hasToken,
   heldElsewhere,
   listChannels,
   listInvites,
+  listSignIns,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
@@ -276,6 +278,42 @@ describe('signOutEverywhere', () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => new Response('{', { status: 200 }));
     expect(await signOutEverywhere(2)).toEqual({ ok: true, value: null });
+    expect(window.localStorage.getItem(key)).toBeNull();
+  });
+});
+
+describe('your sign-ins', () => {
+  const mine = { id: 9, label: 'sign-in link 3', created_at: '2026-10-17T09:30:00.000Z', renews: true, current: true };
+
+  it('lists them with the stored credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ credentials: [mine] }));
+    expect(await listSignIns()).toEqual({ ok: true, value: [mine] });
+    expect(calls).toEqual([{ path: '/v1/credentials/mine', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('refuses a list that is not the schema’s shape', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ credentials: [{ ...mine, id: 'nine' }] }));
+    expect(await listSignIns()).toEqual({ ok: false, failure: 'invalid' });
+  });
+
+  it.each([
+    { name: 'ended', answer: () => new Response(null, { status: 204 }), want: { ok: true, value: null } },
+    { name: 'no answer', answer: (): Response => { throw new TypeError('Failed to fetch'); }, want: { ok: false, failure: 'network' } },
+    { name: 'not the caller’s', answer: () => json({ code: 'credential_not_found', message: 'credential not found' }, 404), want: { ok: false, failure: 'invalid', code: 'credential_not_found' } },
+  ])('ends another by id: $name, and this credential is kept', async ({ answer, want }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(answer);
+    expect(await endSignIn(8)).toEqual(want);
+    expect(calls).toEqual([{ path: '/v1/credentials/mine/8', method: 'DELETE', auth: `Bearer ${memberToken}` }]);
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+  });
+
+  it('drops the credential on a 401, as every call does', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await endSignIn(8)).toEqual({ ok: false, failure: 'unauthorized' });
     expect(window.localStorage.getItem(key)).toBeNull();
   });
 });

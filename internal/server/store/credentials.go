@@ -214,6 +214,28 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 	if err != nil {
 		return nil, fmt.Errorf("store: list credentials: %w", err)
 	}
+	return scanCredentials(rows)
+}
+
+// ListLiveCredentials returns the credentials of a principal that can still
+// sign in: neither revoked nor expired. It is how a person sees their own
+// sign-ins (issue #496), newest first (ties by id descending). The result is
+// never nil; an unknown principal has none.
+func (s *Store) ListLiveCredentials(ctx context.Context, principalID int64) ([]schema.CredentialV1, error) {
+	now := credentialNow()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
+		 FROM credentials
+		 WHERE principal_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("store: list live credentials: %w", err)
+	}
+	return scanCredentials(rows)
+}
+
+// scanCredentials reads the rows of a credential listing and closes them.
+func scanCredentials(rows *sql.Rows) ([]schema.CredentialV1, error) {
 	defer func() { _ = rows.Close() }()
 
 	out := []schema.CredentialV1{}
@@ -326,7 +348,7 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 // audit event is appended in the same transaction as the first revocation.
 // It returns ErrCredentialNotFound for an unknown id.
 func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, "")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "")
 }
 
 // RevokeOwnCredential is RevokeCredential for a caller signing itself out
@@ -335,12 +357,27 @@ func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID
 // audit detail carries reason=self. The last operator guard applies as to any
 // revocation.
 func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, "self")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "self")
+}
+
+// RevokeCredentialOf is RevokeOwnCredential for a person ending one of their
+// sign-ins by id (issue #496): credentialID is revoked only if it belongs to
+// principalID, the caller. One that belongs to anyone else is
+// ErrCredentialNotFound, exactly as an id that was never issued, and nothing
+// is written. The audit detail carries reason=self, and the last operator
+// guard applies.
+func (s *Store) RevokeCredentialOf(ctx context.Context, actor string, principalID, credentialID int64) error {
+	if principalID <= 0 {
+		// Fail closed: with no owner, revokeCredential would revoke anyone's.
+		return ErrCredentialNotFound
+	}
+	return s.revokeCredential(ctx, actor, credentialID, principalID, "self")
 }
 
 // revokeCredential is RevokeCredential with a reason for the audit detail,
-// none when empty.
-func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID int64, reason string) error {
+// none when empty. An owner above zero limits it to that principal's
+// credentials: another's is ErrCredentialNotFound.
+func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason string) error {
 	var runs []EndedRun
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		runs = nil
@@ -356,6 +393,9 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return ErrCredentialNotFound
 		case err != nil:
 			return fmt.Errorf("store: revoke credential: read: %w", err)
+		}
+		if owner > 0 && principalID != owner {
+			return ErrCredentialNotFound
 		}
 		if revokedAt.Valid {
 			return nil

@@ -9,7 +9,7 @@
 // header, and never put in a URL, a log call, the DOM or an error: a failure
 // is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
-import { revokeAllCredentialsResponseV1 } from './schema/credential';
+import { listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type OwnCredentialV1 } from './schema/credential';
 import { errorV0, type ErrorV0 } from './schema/error';
 import { health } from './schema/health';
 import {
@@ -456,6 +456,26 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   } catch {
     // Fall through.
   }
+  return { ok: true, value: null };
+}
+
+// listSignIns reads the caller's own sign-ins (issue #496): the credentials of
+// theirs that still work, newest first, with the one this page uses marked
+// current. The server never sends a token in it.
+export async function listSignIns(): Promise<ApiResult<OwnCredentialV1[]>> {
+  const result = await authed('/v1/credentials/mine', listOwnCredentialsResponseV1);
+  return result.ok ? { ok: true, value: result.value.credentials } : result;
+}
+
+// endSignIn ends another of the caller's sign-ins by its id, so whatever
+// browser or client holds it is refused on its next request. This page's own
+// is ended by signOut instead, which also forgets it here. A refusal carries
+// the server's code: credential_not_found for an id that is not the caller's.
+export async function endSignIn(id: number): Promise<ApiResult<null>> {
+  const reply = await authedSend('DELETE', `/v1/credentials/mine/${String(id)}`);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
   return { ok: true, value: null };
 }
 
