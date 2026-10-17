@@ -35,6 +35,12 @@
 // A share is published only once LiveKit has told this connection that the
 // claim granted its sources (issue #525): conchd's answer to the claim can be
 // read first, and the SDK refuses a source its last permission does not name.
+//
+// A capture kept while its publish is under way (a room renewed mid-publish,
+// issue #535) is blanked at once: its tracks are disabled, so the old room is
+// sent black frames and silence until the capture is adopted by the next
+// connection. A track whose publish was under way is taken down when that
+// publish completes, and the share's other track is not published at all.
 import {
   AudioPresets,
   DisconnectReason,
@@ -181,6 +187,14 @@ class ClosedError extends Error {
   }
 }
 
+// Thrown by a share's publish whose capture was stopped, or kept for another
+// connection, while it was under way.
+class TakenError extends Error {
+  constructor() {
+    super('voice share taken off this connection');
+  }
+}
+
 function causeOf(reason: DisconnectReason | undefined): DisconnectCause {
   switch (reason) {
     case DisconnectReason.ROOM_DELETED:
@@ -307,8 +321,11 @@ class LiveKitAdapter implements Room {
         // server withdrew the share, unless the browser's own stop control
         // ended the capture. The SDK unpublishes an ended capture from inside
         // the same ended event that tells this adapter, and may do it first,
-        // so the cause is read once that event is over.
+        // so the cause is read once that event is over. A track no longer
+        // this connection's share (stopped, or kept for the next connection,
+        // and taken down once a publish under way completed) is not reported.
         if (pub.source !== Track.Source.ScreenShare || this.stoppingScreen || this.closed) return;
+        if (pub.track !== undefined && !this.screen.includes(pub.track)) return;
         window.setTimeout(() => {
           if (!this.captureEnded && !this.closed) events.onScreenEnded('server');
         }, 0);
@@ -446,6 +463,9 @@ class LiveKitAdapter implements Room {
     this.screen = [];
     this.wakeGrant();
     if (tracks.length === 0) return null;
+    // Blanked at once: a publish still under way here completes before it
+    // can be taken down, and sends only black frames and silence meanwhile.
+    for (const track of tracks) track.mediaStreamTrack.enabled = false;
     // Unpublished, if the room still has them, without being stopped: a
     // connection closed with them published would stop them. This is not
     // the server withdrawing the share, so it is not reported.
@@ -461,6 +481,8 @@ class LiveKitAdapter implements Room {
   adoptScreen(kept: KeptScreen): void {
     this.ensureOpen();
     if (!(kept instanceof Kept)) throw new Error('voice: not a capture this page kept');
+    // Sent again as captured, from this connection's publish on.
+    for (const track of kept.tracks) track.mediaStreamTrack.enabled = true;
     this.holdScreen([...kept.tracks]);
   }
 
@@ -488,6 +510,9 @@ class LiveKitAdapter implements Room {
   // does.
   private async publishGranted(track: LocalTrack, options: TrackPublishOptions, deadline: number): Promise<void> {
     for (;;) {
+      // Stopped or kept for another connection while an earlier track was
+      // published: not to publish here.
+      if (!this.screen.includes(track)) throw new TakenError();
       // Listened for before publishing: the grant may come while the SDK is
       // getting there.
       const changed = new Promise<void>((resolve) => {
@@ -495,7 +520,6 @@ class LiveKitAdapter implements Room {
       });
       try {
         await this.room.localParticipant.publishTrack(track, options);
-        return;
       } catch (err) {
         if (!(err instanceof PublishTrackError) || err.status !== 403) throw err;
         const left = deadline - performance.now();
@@ -503,7 +527,19 @@ class LiveKitAdapter implements Room {
         this.ensureOpen();
         // Stopped or kept for another connection meanwhile: not to publish.
         if (!this.screen.includes(track)) throw err;
+        continue;
       }
+      // Taken while the publish was on its way: taken down here. The
+      // unpublish that took it does so too if the SDK had the publish as
+      // pending by then, but finds nothing if it came before (the SDK
+      // registers a publish only after waiting out a reconnect), and the
+      // room conchd retired may live on for a while. A 403 publishes
+      // nothing, so the retry above has nothing to take down.
+      if (!this.screen.includes(track)) {
+        await this.room.localParticipant.unpublishTrack(track, false).catch(() => undefined);
+        throw new TakenError();
+      }
+      return;
     }
   }
 
