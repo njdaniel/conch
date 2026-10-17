@@ -10,7 +10,8 @@
 // again and publishes the same capture in the new one, with no picker. It
 // does so with LiveKit's signal reaching the sharer late (issue #525), the
 // order a slow CI runner gave: conchd's answer to the claim is read before
-// LiveKit tells the page of the grant.
+// LiveKit tells the page of the grant. A room renewed again while the share
+// waits for that grant in the new room is resumed once more (issue #535).
 //
 // What this cannot try: a real system's sound, macOS, Windows, Firefox,
 // Safari, iOS and Android. Those cells of the plan's section 2 are for a
@@ -363,6 +364,58 @@ test.describe('screen share with LiveKit', () => {
       for (const p of [b, d]) await expectClean(p);
     } finally {
       for (const p of [a, b, d, e]) await p.close();
+    }
+  });
+
+  // Issue #535. Two members disabled one after the other: the second renews
+  // the room while the sharer's page is publishing the share again in the
+  // first new room, waiting for LiveKit's grant (its signal is late, as in
+  // the test above). The share is not ended: it is resumed once more, in the
+  // room after, and the viewer still follows it.
+  test('a share carries on when a second member is disabled while it is being resumed', async ({ browser }) => {
+    const before = (await shareRows()).length;
+    const gina = await vw.addMember('gina');
+    const hugo = await vw.addMember('hugo');
+    const late: LateSignal = { on: false };
+    const a = await person(browser, 'alice', undefined, late);
+    const b = await person(browser, 'bob');
+    const g = await person(browser, gina);
+    const h = await person(browser, hugo);
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await join(g, 'Join voice');
+      await join(h, 'Join voice');
+      await share(a);
+      await watching(b);
+
+      // The resume's claim answered: the page now waits for LiveKit's grant,
+      // which comes late, and the second member is disabled meanwhile.
+      late.on = true;
+      const claimed = a.page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith('/voice/share') && r.status() === 200, { timeout: 30_000 });
+      await vw.disable(gina);
+      await claimed;
+      await vw.disable(hugo);
+
+      await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 45_000 });
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      expect(await picks(a.page), 'the picker is not opened again').toBe(1);
+      // Both renewals ended a share, the second the one being resumed when
+      // it came, and the share started again after each.
+      await expect
+        .poll(async () => (await shareRows()).slice(before).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim()), { timeout: 15_000 })
+        .toEqual(['voice_share_started', 'voice_share_stopped rotated', 'voice_share_started', 'voice_share_stopped rotated', 'voice_share_started']);
+      await expect(shareView(b.page)).toContainText('alice is sharing', { timeout: 30_000 });
+      await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
+      const frames = (await inbound(b.page)).frames;
+      await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
+
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
+      await expectClean(a, 1);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b, g, h]) await p.close();
     }
   });
 
