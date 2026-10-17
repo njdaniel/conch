@@ -27,6 +27,18 @@ go-ahead to file the implementation issues in §5.
 7. Nick revokes one tester and closes the open link. The tester is out at once, and the link no longer works.
 8. A tester reports a bug from inside the product with the build version and diagnostics. It becomes an issue in the backlog.
 
+**What A14 (#447) measured, 2026-10-17.** Steps 3 and 7 have a check of their own: `go run ./e2e/isolation`, run in CI as the `isolation-check` job. It runs two groups on one `conchd`, with the pinned LiveKit in Docker. A member of one group tries every route of the server against the other group's channels, people, messages, files, sessions, runs, approvals, invites and reports, and its sockets and LiveKit's media too. Every answer is the documented refusal (or, on a route that answers only about the caller, the caller's own data) and says nothing of the other group (the README lists the checks). Revocation is timed from the moment the operator's request is sent:
+
+| Step | Measured (loopback, five runs) | Bound the check holds |
+| --- | --- | --- |
+| Disable a tester holding every socket variant (eight), a LiveKit participant and the share | all eight sockets closed within 6.7 ms; LiveKit stopped listing the participant within 9.2 ms | 2 s per socket; 5.5 s for LiveKit |
+| Disable everyone from an open link (two joiners, sixteen sockets, two participants) | all sixteen sockets closed within 21 ms; both participants gone within 17.3 ms | the same |
+| Close the link | redeeming and previewing it answer `invite_invalid` at once | |
+
+The LiveKit bound is one pass of conchd's voice poller (`voicePassGapMax`, 1.5 s) plus a room rotation (`voiceEvictTimeout`, 4 s). The check reads both from `internal/server/voice_presence.go`, so the bound follows the code. In practice neither waits for the poller: the sockets are dropped and the room rotated inside the operator's request, before it answers, and the poller is the backstop. On the droplet, add the network round trip to these figures. After each step the check also requires the revoked to stay out: a socket ticket they kept is refused (401), a join grant they kept names a room LiveKit no longer has (404, because the room was rotated), and one poller pass later LiveKit lists them in no room.
+
+Message, file and principal ids are global sequences, so a member can infer another group's activity volume from id gaps; accepted for the alpha (see #500).
+
 ## 2. Platforms
 
 | | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share |

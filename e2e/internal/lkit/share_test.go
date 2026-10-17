@@ -1,4 +1,4 @@
-package main
+package lkit
 
 import (
 	"bytes"
@@ -55,7 +55,7 @@ func TestRewriteAddTrackSource(t *testing.T) {
 		{"nothing", nil, nil, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, rewrote := rewriteAddTrackSource(tt.in, shareTrackSource)
+			got, rewrote := RewriteAddTrackSource(tt.in, ShareTrackSource)
 			if rewrote != tt.rewrote || !bytes.Equal(got, tt.want) {
 				t.Errorf("rewrite = %x, %v; want %x, %v", got, rewrote, tt.want, tt.rewrote)
 			}

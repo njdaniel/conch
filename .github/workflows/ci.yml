@@ -512,3 +512,36 @@ jobs:
       - name: remove any leftover LiveKit container
         if: always()
         run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+  isolation-check:
+    # The private alpha's cross-group check (issue #447): two groups on one
+    # conchd, a route-table-driven matrix proving a member of one reaches
+    # nothing of the other over REST, the sockets and LiveKit's media (the
+    # pinned image in Docker, the pinned lk), and a revoked tester's sockets
+    # and LiveKit participant gone within their bounds. It runs on every pull
+    # request and every push to main, like check. CI=true makes a skip a
+    # failure: without Docker, the image or lk this job is red, not quietly
+    # green. A run takes well under a minute once the image and lk are
+    # fetched; the timeout leaves room for a slow pull.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      ISOLATION_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: isolation-check
+        run: go run ./e2e/isolation
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-isolation-check=$ISOLATION_CHECK_RUN" | xargs -r docker rm -f

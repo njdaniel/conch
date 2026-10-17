@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -19,7 +20,7 @@ import (
 // reason (an expired token is 401) would pass the test for the wrong reason,
 // so the answer is checked, not only the refusal.
 func (l *live) refusedRoomGone(ctx context.Context, what, token string) error {
-	conn, status, body, err := dialSignal(ctx, l.srv.wsURL, token)
+	conn, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, token)
 	if err == nil {
 		conn.Close()
 		return fmt.Errorf("%s was accepted: LiveKit admitted the removed member (HTTP %d); it should have refused because the room is gone", what, status)
@@ -72,20 +73,20 @@ func (l *live) removed(ctx context.Context) error {
 		return err
 	}
 	conchdToken := sb.Rooms[0].Token
-	conn1, status, body, err := dialSignal(ctx, l.srv.wsURL, conchdToken)
+	conn1, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, conchdToken)
 	if err != nil {
 		return fmt.Errorf("bob joining with conchd's token: HTTP %d %s", status, h.redact(body))
 	}
 	defer conn1.Close()
 	var lkToken string
 	if err := waitFor("LiveKit to send bob a token of its own", 30*time.Second, func() (bool, string) {
-		for _, t := range conn1.issuedTokens() {
+		for _, t := range conn1.IssuedTokens() {
 			if t != conchdToken {
 				lkToken = t
 				return true, ""
 			}
 		}
-		return false, fmt.Sprintf("%d JWTs seen, none new", len(conn1.issuedTokens()))
+		return false, fmt.Sprintf("%d JWTs seen, none new", len(conn1.IssuedTokens()))
 	}); err != nil {
 		return err
 	}
@@ -93,7 +94,7 @@ func (l *live) removed(ctx context.Context) error {
 
 	// Control: while bob is a member, the token LiveKit sent him admits him.
 	// Without this, the refusal below could be a refusal of anything.
-	conn2, status, body, err := dialSignal(ctx, l.srv.wsURL, lkToken)
+	conn2, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, lkToken)
 	if err != nil {
 		return fmt.Errorf("control: bob rejoining with LiveKit's own token while still a member: HTTP %d %s", status, h.redact(body))
 	}
@@ -179,7 +180,7 @@ func (l *live) removed(ctx context.Context) error {
 	if err := waitFor("everyone in the old room to be disconnected", 20*time.Second, func() (bool, string) {
 		bobGone, sawBob := l.lkGone(oldRoom, bobID)
 		aliceGone, sawAlice := l.lkGone(oldRoom, aliceID)
-		return bobGone && aliceGone && conn2.closed(), fmt.Sprintf("bob: %s; alice: %s; bob's connection closed=%v", sawBob, sawAlice, conn2.closed())
+		return bobGone && aliceGone && conn2.Closed(), fmt.Sprintf("bob: %s; alice: %s; bob's connection closed=%v", sawBob, sawAlice, conn2.Closed())
 	}); err != nil {
 		return err
 	}
@@ -196,7 +197,7 @@ func (l *live) removed(ctx context.Context) error {
 	}
 	// The headless client has done its part; its retries would only hit the
 	// same refusal.
-	l.aliceHL.stop()
+	l.aliceHL.Stop()
 
 	if err := expectRefusal("a removed member asking for a session", bob.api, http.MethodPost, "/v1/channels/bridge/voice/session", http.StatusNotFound, "channel_not_found"); err != nil {
 		return err
@@ -218,8 +219,8 @@ func (l *live) removed(ctx context.Context) error {
 	l.aliceHL, l.bridgeRoom = hl, newRoom
 	if err := waitForOrFail("LiveKit to list alice in the new room", 60*time.Second, func() (bool, string, error) {
 		ok, _, saw := l.lkHas(newRoom, aliceID)
-		if !ok && hl.exited() {
-			return false, "", errors.New("lk exited: " + hl.tail(h))
+		if !ok && hl.Exited() {
+			return false, "", errors.New("lk exited: " + hl.Tail())
 		}
 		return ok, saw, nil
 	}); err != nil {
@@ -325,7 +326,7 @@ func (l *live) removedNotConnected(ctx context.Context) error {
 	if err := l.expectRotation("dan's removal", before, l.bridgeSubject, store.VoiceRotateMemberRemoved, 30*time.Second); err != nil {
 		return err
 	}
-	l.aliceHL.stop()
+	l.aliceHL.Stop()
 	h.say("ok   removed while not connected: a holder who never joined still rotates the room, and his token is refused")
 	return nil
 }
@@ -403,14 +404,14 @@ func (l *live) rotationCase(ctx context.Context, c rotationCase) error {
 		return err
 	}
 	room, conchdToken := sess.Rooms[0].Room, sess.Rooms[0].Token
-	conn1, status, body, err := dialSignal(ctx, l.srv.wsURL, conchdToken)
+	conn1, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, conchdToken)
 	if err != nil {
 		return fmt.Errorf("the holder joining with conchd's token: HTTP %d %s", status, h.redact(body))
 	}
 	defer conn1.Close()
 	var lkToken string
 	if err := waitFor("LiveKit to send the holder a token of its own", 30*time.Second, func() (bool, string) {
-		for _, t := range conn1.issuedTokens() {
+		for _, t := range conn1.IssuedTokens() {
 			if t != conchdToken {
 				lkToken = t
 				return true, ""
@@ -422,7 +423,7 @@ func (l *live) rotationCase(ctx context.Context, c rotationCase) error {
 	}
 	h.secret("a LiveKit-issued token", lkToken)
 	// Control: LiveKit's token admits the holder while they are entitled.
-	conn2, status, body, err := dialSignal(ctx, l.srv.wsURL, lkToken)
+	conn2, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, lkToken)
 	if err != nil {
 		return fmt.Errorf("control: the holder rejoining with LiveKit's own token while entitled: HTTP %d %s", status, h.redact(body))
 	}
@@ -463,7 +464,7 @@ func (l *live) rotationCase(ctx context.Context, c rotationCase) error {
 	}
 	if err := waitFor("the holder to be disconnected and the room gone", 20*time.Second, func() (bool, string) {
 		gone, saw := l.lkGone(room, holder.id)
-		return gone && conn2.closed(), fmt.Sprintf("%s; connection closed=%v", saw, conn2.closed())
+		return gone && conn2.Closed(), fmt.Sprintf("%s; connection closed=%v", saw, conn2.Closed())
 	}); err != nil {
 		return err
 	}
@@ -520,7 +521,7 @@ func (l *live) neverIssued(ctx context.Context) error {
 		who   *person
 		grant schema.VoiceRoomGrant
 	}{{fay, sf.Rooms[0]}, {gus, sg.Rooms[0]}} {
-		conn, status, body, err := dialSignal(ctx, l.srv.wsURL, s.grant.Token)
+		conn, status, body, err := lkit.DialSignal(ctx, l.srv.WSURL, s.grant.Token)
 		if err != nil {
 			return fmt.Errorf("%s joining calm: HTTP %d %s", s.who.name, status, h.redact(body))
 		}
@@ -589,7 +590,7 @@ func (l *live) liveKitDown(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := l.srv.stop(ctx); err != nil {
+	if err := l.srv.Stop(ctx); err != nil {
 		return err
 	}
 	h.say("ok   LiveKit container stopped")
@@ -597,7 +598,7 @@ func (l *live) liveKitDown(ctx context.Context) error {
 	// dogfood run below starts) is still configured to call it. Hold it, so
 	// that nobody is given the port for a listener meanwhile: dogfood's ntfy
 	// stand-in asks the system for one (issue #245).
-	releasePort, err := holdDead(strings.TrimPrefix(l.srv.settings().url, "ws://"))
+	releasePort, err := holdDead(strings.TrimPrefix(settingsOf(l.srv).url, "ws://"))
 	if err != nil {
 		return err
 	}
@@ -613,7 +614,7 @@ func (l *live) liveKitDown(ctx context.Context) error {
 		return fmt.Errorf("posting a message with LiveKit down: %w (%s)", err, strings.TrimSpace(out))
 	}
 	h.say("ok   LiveKit down: session answers voice_unavailable, presence says unavailable, conch voice status exits nonzero, voice_enforcement_unavailable audited once, messaging works")
-	cfg := l.srv.settings()
+	cfg := settingsOf(l.srv)
 	return h.runDogfood("voice configured, LiveKit container stopped",
 		"CONCHD_LIVEKIT_URL="+cfg.url, "CONCHD_LIVEKIT_API_KEY="+cfg.key, "CONCHD_LIVEKIT_API_SECRET="+cfg.secret)
 }

@@ -731,6 +731,22 @@ This is the wider check, and the one to run before a release. It starts from a d
 
 It prints one `ok` line per step and ends with `p2-hardening-check: PASS`, or stops at the first failed step with `p2-hardening-check: FAIL: <phase>: <what>` and the end of `conchd`'s log, and exits nonzero. It needs Go, and on Linux bash. Two steps need Linux, the TUI one and the principal-review one; elsewhere each prints a `NOT RUN` line and the last line counts them, and with `CI` set that is a failure. `-skip-dogfood` leaves out the last step for a caller that runs `e2e/dogfood` itself. CI runs it on every pull request and every push to `main`, and the release workflow runs it on every tag.
 
+#### The cross-group isolation check
+
+```sh
+go run ./e2e/isolation
+```
+
+One server holds several groups in private channels of their own, and this checks that they stay apart. It starts a fresh `conchd` with two groups: A joins through an operator's open link, B through personal invites, one of them made by a B tester. Both chat, reply in threads, whisper, post to a net, upload a file, run an agent and ask for an approval and a report; A also talks in voice and shares a screen. Then:
+
+- **The matrix.** For every route in `internal/server/routes.go`, a B member tries A's channels, people, messages, files, sessions, runs, approvals, invites and reports by name and by id. It runs as an invited tester, as a member the operator made, and (for the agent routes) as B's agent. Each answer must be the documented refusal. No body or header may hold any name, id or piece of text of A's other than what was asked about. A's object and one that never existed must get the same answer. Naming an A member as the author, requester or decider is refused. A route with no row in the matrix fails the run, so a new route cannot skip the check.
+- **MCP.** B's agent calls the channel, session, run and intervention tools and the approval reads on A's objects. Each is refused as for a ghost.
+- **Sockets.** B holds every socket variant open on both its channels for the whole run. They carry B's own traffic and nothing of A's, checked once A is active and again at the end. Opening one for A's channel is refused before the upgrade.
+- **Media.** B cannot get a voice session for A's channel. LiveKit refuses a B token edited to name A's room. A B participant who subscribes to everything sees nothing of A's.
+- **Revocation.** An operator disables a tester who holds every socket variant, a LiveKit participant and the share. Then the operator disables everyone who joined through A's open link, and closes the link. The program measures how long each socket and participant takes to go and holds it to a bound: 2 s for a socket; for LiveKit, one voice poller pass plus a room rotation, read from the server's source. Afterwards the revoked stay out: a ticket or join grant they kept no longer works, and a poller pass later LiveKit lists them nowhere. After the link is closed, using it answers `invite_invalid`.
+
+It ends with `isolation-check: PASS` and the measured revocation times. The media half needs Docker, the pinned LiveKit image and the pinned `lk`, the same ones `e2e/voice` uses. Without them it is skipped with one line. With `CI` set, a skip is a failure. CI runs it on every pull request and every push to `main`.
+
 ### 7. Nets and whispers: the squad layout
 
 A message goes to the whole channel, to a **net** (a named subset of the channel's members) or, as a **whisper**, to a list of principals. Who can see it is fixed when it is posted: joining a net later shows nothing earlier, and leaving it hides nothing already received. A net's **members** listen and speak; its **monitors** only listen. Nets overlap, which is how a lead hears her squad and the command net at once. The server never delivers a scoped message to anyone outside its audience, on any read path: REST, WebSocket, MCP and the CLI.
