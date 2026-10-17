@@ -38,6 +38,9 @@
 // skip is a failure. An image or lk that is not the pinned one fails everywhere. It
 // prints one "voice-check: PASS" line when everything ran. A SIGINT or SIGTERM
 // stops the run and removes what it started.
+//
+// Two subcommands are not part of the check: fetch-lk and loadtest are the Go
+// half of scripts/alpha-loadtest.sh (issue #448, loadtest.go).
 package main
 
 import (
@@ -57,6 +60,15 @@ import (
 )
 
 func main() {
+	// Here because they reuse the pinned lk download and the relay.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "fetch-lk":
+			os.Exit(fetchLKMain(os.Args[2:]))
+		case "loadtest":
+			os.Exit(loadtestMain(os.Args[2:]))
+		}
+	}
 	os.Exit(realMain())
 }
 
