@@ -1,6 +1,7 @@
 // Everything the voice section runs on: the client, the talk key, the
 // presence of the channel on screen (one read before joining, the socket
-// after), and the page-level releases (blur, hidden, pagehide).
+// after, which the client also reads for the screen share), and the
+// page-level releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
@@ -9,6 +10,7 @@ import { VoiceClient, type VoiceState } from './connection';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { newLiveKitRoom } from './sdk';
+import { browserFeatures, type ShareFeatures } from './share';
 
 const realClock = {
   setTimeout: (run: () => void, ms: number) => window.setTimeout(run, ms),
@@ -49,10 +51,14 @@ export interface VoiceControl {
   readonly talkKey: string;
   readonly capturing: boolean;
   readonly secure: boolean;
+  // What this browser can share, and with what sound.
+  readonly features: ShareFeatures;
   readonly client: VoiceClient;
   readonly setTalkKey: (code: string) => void;
   readonly capture: (on: boolean) => void;
   readonly join: () => void;
+  // Joins to watch, without the microphone.
+  readonly watchOnly: () => void;
   readonly leave: () => void;
 }
 
@@ -65,6 +71,8 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
       createSession: api.createVoiceSession,
       report: api.reportVoiceTransmit,
       newRoom: newLiveKitRoom,
+      claimShare: api.claimVoiceShare,
+      stopShare: api.stopVoiceShare,
     });
   }
   const client = clientRef.current;
@@ -72,6 +80,7 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
   const [talkKey, setKey] = useState(readKey);
   const [capturing, setCapturing] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
+  const [features] = useState(browserFeatures);
 
   const joined = state.phase !== 'idle' && state.phase !== 'stopped' ? state.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
@@ -113,7 +122,9 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
       open: (c, _after, events) => api.openVoiceSocket(c, events),
       onFrame: (data) => {
         const presence = parsePresence(data);
-        if (presence !== null && live) setSnapshot({ kind: 'presence', presence });
+        if (presence === null || !live) return;
+        setSnapshot({ kind: 'presence', presence });
+        client.presence(presence);
       },
       onStatus: (status: FeedStatus) => {
         if (status === 'unauthorized') onUnauthorized();
@@ -124,7 +135,7 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
       live = false;
       feed.stop();
     };
-  }, [shown, joined, onUnauthorized]);
+  }, [shown, joined, onUnauthorized, client]);
 
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
@@ -168,6 +179,9 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
   const join = useCallback(() => {
     if (channel !== null) client.join(channel);
   }, [channel, client]);
+  const watchOnly = useCallback(() => {
+    if (channel !== null) client.join(channel, { watchOnly: true });
+  }, [channel, client]);
   const leave = useCallback(() => {
     void client.leave();
   }, [client]);
@@ -179,10 +193,12 @@ export function useVoice({ signedIn, channel, onUnauthorized }: { signedIn: bool
     talkKey,
     capturing,
     secure: window.isSecureContext,
+    features,
     client,
     setTalkKey,
     capture: setCapturing,
     join,
+    watchOnly,
     leave,
   };
 }

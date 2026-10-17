@@ -6,12 +6,18 @@
 //
 // The join token is passed to Room.connect and dropped. It is never stored,
 // logged or put in the DOM.
-import type { TransmitAnswer, VoiceSessionResult } from '../api';
-import type { VoiceTransmitState } from '../schema/voice';
+//
+// It also holds the screen share (issue #444): the sharer's state machine
+// (share.ts), whether this page watches someone else's share, and the
+// elements a watched share plays into.
+import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
+import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { TransmitGate, type GateMode, type GateOptions } from './gate';
+import { principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
+import { idleShare, ScreenShare, type ScreenEnd, type ShareContent, type ShareRoom, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -24,13 +30,38 @@ export interface RoomEvents {
   readonly onDisconnected: (cause: DisconnectCause) => void;
   // Principal ids of the active speakers, by the identity p<id>.
   readonly onSpeakers: (principals: readonly number[]) => void;
+  // This page's published share is gone (share.ts).
+  readonly onScreenEnded: (cause: ScreenEnd) => void;
+  // Which of a watched share's tracks have arrived.
+  readonly onShareTracks: (tracks: ShareTracks) => void;
+}
+
+export interface ShareTracks {
+  readonly video: boolean;
+  readonly audio: boolean;
+}
+
+// The elements a watched share plays into: its picture, and its sound, which
+// has a volume and a mute of its own.
+export interface ShareSink {
+  readonly video: HTMLVideoElement;
+  readonly audio: HTMLAudioElement;
 }
 
 // What the client needs of one LiveKit room connection.
-export interface Room {
-  // Resolves once the room is joined, the microphone track is published and
-  // muted. It rejects if any of that fails (a microphone refused included).
+export interface Room extends ShareRoom {
+  // Resolves once the room is joined and, when publish is set, the
+  // microphone track is published and muted. It rejects if any of that fails
+  // (a microphone refused included).
   connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents) => Promise<void>;
+  // Captures and publishes the microphone, muted, on a connection made
+  // without it (watch only).
+  publishMicrophone: () => Promise<void>;
+  // Subscribes to a share's picture and sound, or lets them go. Microphones
+  // are always subscribed.
+  setWatching: (on: boolean) => void;
+  // Plays a watched share into these elements, or into none.
+  attachShare: (sink: ShareSink | null) => void;
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
@@ -50,11 +81,18 @@ export interface VoiceState {
   readonly muted: boolean;
   readonly deafened: boolean;
   readonly listenOnly: boolean;
+  // Joined to watch: connected without the microphone, until asked for it.
+  readonly watchOnly: boolean;
   readonly transmitting: boolean;
   readonly level: number;
   readonly threshold: number;
   readonly speaking: ReadonlySet<number>;
   readonly reportNote: 'retrying' | 'rate_limited' | null;
+  readonly share: ShareState;
+  // Whether this page watches the room's share, and which of its tracks
+  // have arrived.
+  readonly watching: boolean;
+  readonly shareTracks: ShareTracks;
 }
 
 export interface VoiceEnv {
@@ -63,6 +101,8 @@ export interface VoiceEnv {
   readonly createSession: (channel: string) => Promise<VoiceSessionResult>;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
+  readonly claimShare: (channel: string) => Promise<ShareClaimResult>;
+  readonly stopShare: (channel: string) => Promise<unknown>;
   readonly gate?: GateOptions;
 }
 
@@ -84,12 +124,18 @@ export const initialVoice: VoiceState = {
   muted: false,
   deafened: false,
   listenOnly: false,
+  watchOnly: false,
   transmitting: false,
   level: 0,
   threshold: 0.1,
   speaking: new Set(),
   reportNote: null,
+  share: idleShare,
+  watching: false,
+  shareTracks: { video: false, audio: false },
 };
+
+const noTracks: ShareTracks = { video: false, audio: false };
 
 export class VoiceClient {
   private readonly env: VoiceEnv;
@@ -107,6 +153,10 @@ export class VoiceClient {
   private levelTimer: unknown = null;
   private connectedAt = 0;
   private now: () => number;
+  private readonly share: ScreenShare;
+  // This person, from the identity of the last session.
+  private me: number | null = null;
+  private sink: ShareSink | null = null;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
@@ -114,6 +164,9 @@ export class VoiceClient {
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
+    this.share = new ScreenShare({ claim: env.claimShare, release: env.stopShare }, (share) => {
+      this.set({ share });
+    });
     this.reports = new ReportQueue({
       send: (state, signal) => {
         const channel = this.channel;
@@ -143,12 +196,64 @@ export class VoiceClient {
     for (const l of [...this.listeners]) l();
   }
 
-  join(channel: string): void {
+  // join connects to a channel's voice. Watch only connects without the
+  // microphone: nothing is captured or published until useMicrophone.
+  join(channel: string, options: { readonly watchOnly?: boolean } = {}): void {
     if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
     this.channel = channel;
     this.failures = 0;
-    this.set({ phase: 'connecting', channel, why: null, reportNote: null });
+    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, watching: false, shareTracks: noTracks });
     void this.connect();
+  }
+
+  // useMicrophone ends watch only: the microphone is captured, published and
+  // muted, as on a full join, and the talk controls work from then on.
+  async useMicrophone(): Promise<void> {
+    const room = this.room;
+    if (!this.state.watchOnly || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
+    const mine = this.attempt;
+    this.set({ watchOnly: false });
+    try {
+      await room.publishMicrophone();
+    } catch {
+      if (mine !== this.attempt) return;
+      this.set({ watchOnly: true, why: 'The microphone could not be used' });
+      return;
+    }
+    if (mine === this.attempt) this.applyBlock();
+  }
+
+  // startShare shares a screen into the room this page is connected to.
+  startShare(content: ShareContent): void {
+    const channel = this.channel;
+    const room = this.room;
+    if (this.state.phase !== 'connected' || channel === null || room === null) return;
+    void this.share.start(channel, room, content);
+  }
+
+  stopShare(): void {
+    void this.share.stop('self');
+  }
+
+  // watch subscribes to the room's share, or lets it go.
+  watch(on: boolean): void {
+    this.room?.setWatching(on);
+    this.set(on ? { watching: true } : { watching: false, shareTracks: noTracks });
+  }
+
+  // attachShare plays a watched share into the view's elements, on this
+  // connection and on every one after it.
+  attachShare(sink: ShareSink | null): void {
+    this.sink = sink;
+    this.room?.attachShare(sink);
+  }
+
+  // presence is each presence document the voice socket sends: whether this
+  // person still holds the share, and whether anyone does.
+  presence(p: VoicePresenceV1): void {
+    const holder = sharer(p);
+    this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other');
+    if (holder === null && this.state.watching) this.watch(false);
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
@@ -156,13 +261,17 @@ export class VoiceClient {
     const mine = ++this.attempt;
     this.clearTimers();
     this.gate.setBlocked(true);
+    // Leaving ends a share: it is stopped and conchd is told, while the
+    // connection and the credential are still there.
+    const sharing = this.share.stop('left');
     await this.reports.drain(leaveDrain);
+    await sharing;
     if (mine !== this.attempt) return;
     this.reports.reset();
     const room = this.room;
     this.room = null;
     this.channel = null;
-    this.set({ phase: 'idle', channel: null, why: null, transmitting: false, level: 0, speaking: new Set(), reportNote: null });
+    this.set({ phase: 'idle', channel: null, why: null, transmitting: false, level: 0, speaking: new Set(), reportNote: null, watching: false, shareTracks: noTracks });
     if (room !== null) await room.close().catch(() => undefined);
   }
 
@@ -207,7 +316,7 @@ export class VoiceClient {
 
   private applyBlock(): void {
     const s = this.state;
-    this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly);
+    this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly || s.watchOnly);
   }
 
   private clearTimers(): void {
@@ -252,9 +361,11 @@ export class VoiceClient {
     this.clearTimers();
     this.gate.setBlocked(true);
     this.reports.reset();
+    // A share does not outlive its connection: the next one starts without it.
+    void this.share.stop('lost');
     const room = this.room;
     this.room = null;
-    this.set({ speaking: new Set(), level: 0, transmitting: false });
+    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -297,6 +408,7 @@ export class VoiceClient {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone' }, mine);
       return;
     }
+    this.me = principalOf(session.value.identity);
     const room = this.env.newRoom();
     this.room = room;
     const events: RoomEvents = {
@@ -317,6 +429,7 @@ export class VoiceClient {
         this.reconnectTimer = null;
         this.set({ phase: 'connected' });
         this.applyBlock();
+        void this.share.reconnected();
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt) return;
@@ -326,9 +439,21 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.set({ speaking: new Set(ids) });
       },
+      onScreenEnded: (cause) => {
+        if (mine !== this.attempt) return;
+        this.share.ended(cause);
+      },
+      onShareTracks: (tracks) => {
+        if (mine !== this.attempt) return;
+        this.set({ shareTracks: tracks });
+      },
     };
+    // What a share needs is set before connecting, so that a track that
+    // arrives with the connection already finds it.
+    room.setWatching(this.state.watching);
+    room.attachShare(this.sink);
     try {
-      await room.connect(session.value.livekit_url, grant.token, grant.room, grant.can_publish, events);
+      await room.connect(session.value.livekit_url, grant.token, grant.room, grant.can_publish && !this.state.watchOnly, events);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
       // A DOMException is not an Error everywhere, so its name is read as a

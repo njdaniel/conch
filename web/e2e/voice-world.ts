@@ -1,6 +1,6 @@
 // A community with voice for the browser suite (issue #442): a LiveKit server
 // from the same pinned image e2e/voice runs, in Docker, and a conchd of its own
-// configured for it, with two members in one channel. The shared p3-local
+// configured for it, with three members in one channel. The shared p3-local
 // server has no LiveKit and stays as it is; this one lives beside it, in its
 // own directory, and is removed by stop().
 //
@@ -60,6 +60,9 @@ export interface VoiceWorld {
   readonly channel: string;
   readonly alice: Member;
   readonly bob: Member;
+  // A third member, for the screen share (issue #444): one shares, one
+  // watches, and this one is told who is sharing.
+  readonly carol: Member;
   // Every secret of this world, for the check that none shows on a page: the
   // credentials and the LiveKit secret, and every join token and room name a
   // page was given (added by watchPage as the sessions are answered).
@@ -71,6 +74,8 @@ export interface VoiceWorld {
   // The audit trail as the operator exports it: one line per event.
   audit: () => Promise<{ actor: string; action: string; subject: string; detail: string }[]>;
   removeFromChannel: (member: Member) => Promise<void>;
+  // An operator stops the channel's screen share (issue #444); the status.
+  stopShareAsOperator: () => Promise<number>;
   stopLiveKit: () => void;
   startLiveKit: () => Promise<void>;
   stop: () => void;
@@ -172,7 +177,8 @@ room:
     };
     const alice = await member('alice');
     const bob = await member('bob');
-    const secrets = [operator, alice.token, bob.token, secret];
+    const carol = await member('carol');
+    const secrets = [operator, alice.token, bob.token, carol.token, secret];
     let fromSessions = 0;
 
     return {
@@ -182,6 +188,7 @@ room:
       channel,
       alice,
       bob,
+      carol,
       secrets,
       sessionSecrets: () => fromSessions,
       addSecret: (value) => {
@@ -201,6 +208,7 @@ room:
         const r = await api(operator, 'DELETE' as const, `/v1/channels/${channel}/members/${String(m.id)}`);
         if (r.status < 200 || r.status > 299) throw new Error(`remove ${m.name}: status ${String(r.status)}`);
       },
+      stopShareAsOperator: async () => (await api(operator, 'DELETE', `/v1/channels/${channel}/voice/share`)).status,
       stopLiveKit: () => {
         docker(['stop', '-t', '1', container]);
       },

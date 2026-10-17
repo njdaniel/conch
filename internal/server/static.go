@@ -22,9 +22,9 @@ import (
 const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 // webPermissionsPolicy limits the powers the page may use: its own origin may
-// capture a microphone (browser voice, #442) and nothing else; no camera and no
-// screen capture until screen share is built.
-const webPermissionsPolicy = "microphone=(self), camera=(), display-capture=()"
+// capture a microphone (browser voice, #442) and a screen (screen share, #444),
+// and nothing else: no camera, and no frame of another origin may do either.
+const webPermissionsPolicy = "microphone=(self), camera=(), display-capture=(self)"
 
 // webCSPFor is webCSP for a server whose voice is at livekitURL. With voice not
 // configured (an empty or unusable URL) it is webCSP unchanged. Otherwise
