@@ -1,4 +1,4 @@
-//! The three REST calls voice needs, and what `conchd` answers them with.
+//! The REST calls voice needs, and what `conchd` answers them with.
 //!
 //! The reference is `internal/cli/client.go`. Like it, this client sends the login token
 //! as a bearer credential in the `Authorization` header and nowhere else, builds each
@@ -23,7 +23,7 @@ use crate::error::{Error, MAX_TEXT_CHARS, Scrubber, causes};
 use crate::server::{ServerAddress, query_escape};
 use crate::types::{
     Audience, ErrorBody, Secret, VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitReportV1,
-    VoiceTransmitState,
+    VoiceTransmitState, WhoAmIResponseV1,
 };
 
 /// The most of any response body that is read: the Go client's bound on an error body,
@@ -131,6 +131,17 @@ impl Client {
     /// The time every request is given.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// `GET /v1/whoami`: the principal this client's login resolves to. A managed
+    /// `conch-voice` asks it before it asks for a session or opens any device, and goes no
+    /// further unless the answer is the account its owner named.
+    ///
+    /// Refusals: [`Error::Unauthenticated`] for a login `conchd` does not accept.
+    pub async fn whoami(&self) -> Result<WhoAmIResponseV1, Error> {
+        let url = self.url(&["v1", "whoami"], None)?;
+        let response = self.send(self.http.get(url)).await?;
+        self.document(response, "whoami").await
     }
 
     /// `POST /v1/channels/{channel}/voice/session`: asks for a voice session, and returns

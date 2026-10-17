@@ -91,6 +91,13 @@ fn each_refusal_of_a_session_is_its_own_outcome() {
             Outcome::NotAPerson,
             "stop",
         ),
+        // An invite that withheld voice: the same stop, under the same name, so that
+        // `join`'s output is what it was (a managed helper names it to its owner itself).
+        (
+            ApiError::Forbidden(refusal(403, "voice_not_allowed")),
+            Outcome::NotAPerson,
+            "stop",
+        ),
         (
             ApiError::ChannelNotFound(refusal(404, "channel_not_found")),
             Outcome::NotAMember,
@@ -137,6 +144,9 @@ fn each_refusal_of_a_session_is_its_own_outcome() {
         let (mapped, name) = session_outcome(&error).unwrap_or_else(|| panic!("{error}"));
         assert_eq!(mapped, outcome, "{error}");
         assert!(!name.is_empty());
+        if error.code() == Some("voice_not_allowed") {
+            assert_eq!(name, "not_a_person");
+        }
         assert_eq!(first_step(mapped), step, "{error}");
     }
 }

@@ -568,3 +568,73 @@ func TestCredentialsConfigDirIsNeverChanged(t *testing.T) {
 		t.Errorf("the refused directory holds %d entries, want none", len(entries))
 	}
 }
+
+// TestConfigDirExported: ConfigDir is configDir, error and all, so that what
+// the TUI hands a voice helper is what conch itself reads.
+func TestConfigDirExported(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    func(base string) string
+		wantErr bool
+	}{
+		{name: "the user configuration directory", env: "", want: func(base string) string { return filepath.Join(base, "conch") }},
+		{name: "CONCH_CONFIG_DIR as given", env: "/work/profile-a", want: func(string) string { return "/work/profile-a" }},
+		{name: "a relative CONCH_CONFIG_DIR is an error", env: "profile-a", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			base, _ := userConfigDir()
+			t.Setenv(configDirEnv, tt.env)
+			got, err := ConfigDir()
+			if tt.wantErr {
+				if err == nil || got != "" {
+					t.Fatalf("ConfigDir() = %q, %v; want an error", got, err)
+				}
+				return
+			}
+			if err != nil || got != tt.want(base) {
+				t.Fatalf("ConfigDir() = %q, %v; want %q", got, err, tt.want(base))
+			}
+		})
+	}
+}
+
+// TestLoadCredentialSource: the token is LoadToken's, and fromEnv says
+// whether it came from CONCH_TOKEN, which decides how a voice helper is told
+// to find it.
+func TestLoadCredentialSource(t *testing.T) {
+	const server = "http://a:1"
+	tests := []struct {
+		name        string
+		stored      string
+		env         string
+		wantToken   string
+		wantFromEnv bool
+	}{
+		{name: "nothing"},
+		{name: "the stored login", stored: "stored-tok", wantToken: "stored-tok"},
+		{name: "CONCH_TOKEN over the stored login", stored: "stored-tok", env: "env-tok", wantToken: "env-tok", wantFromEnv: true},
+		{name: "CONCH_TOKEN alone, trimmed", env: "  env-tok\n", wantToken: "env-tok", wantFromEnv: true},
+		{name: "white space only is no CONCH_TOKEN", stored: "stored-tok", env: "  ", wantToken: "stored-tok"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			if tt.stored != "" {
+				if err := SaveToken(server, tt.stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(tokenEnv, tt.env)
+			token, fromEnv, err := LoadCredential(server)
+			if err != nil || token != tt.wantToken || fromEnv != tt.wantFromEnv {
+				t.Fatalf("LoadCredential = %q, %v, %v; want %q, %v", token, fromEnv, err, tt.wantToken, tt.wantFromEnv)
+			}
+			if plain, err := LoadToken(server); err != nil || plain != token {
+				t.Fatalf("LoadToken = %q, %v; LoadCredential said %q", plain, err, token)
+			}
+		})
+	}
+}

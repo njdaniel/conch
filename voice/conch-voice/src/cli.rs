@@ -6,7 +6,10 @@
 //! options replace hardware: a tone or a WAV file as the microphone, a sink that counts
 //! instead of playing, and standard input instead of a key device. `conch-voice devices`
 //! lists the audio devices and helps set the key device up; `conch-voice keys <device>`
-//! helps with the keys.
+//! helps with the keys. `conch-voice managed` is what `conch` starts to run voice inside
+//! its TUI (`managed.rs`): it takes no channel, server or login on its command line, and
+//! its own test options are hidden from the help and never read from anywhere but the
+//! command line.
 //!
 //! Which keyboard is read, and for which keys, comes from `[keys]` in the configuration
 //! file and from nowhere else. How a device is checked before it is read is not a setting
@@ -143,11 +146,28 @@ pub struct JoinArgs {
     pub stdin_keys: bool,
 }
 
+/// What `managed` was given on the command line. Every field but the log level is for
+/// tests: `conch` passes none of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedArgs {
+    /// `--log-level`.
+    pub log_level: LevelFilter,
+    /// `--mic`, test only.
+    pub mic: MicChoice,
+    /// `--sink`, test only.
+    pub sink: SinkChoice,
+    /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
+    /// of the key device `voice.toml` names, with the keys it binds.
+    pub test_key_device: Option<PathBuf>,
+}
+
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Invocation {
     /// `conch-voice join`.
     Join(JoinArgs),
+    /// `conch-voice managed`.
+    Managed(ManagedArgs),
     /// `conch-voice devices`.
     Devices,
     /// `conch-voice keys <device>`.
@@ -163,7 +183,10 @@ pub fn version_line() -> String {
     format!("conch-voice {}", version())
 }
 
-fn version() -> String {
+/// This binary's version and the audio frame it is built for, as a managed helper's hello
+/// gives it: printable ASCII, well under the protocol's 64 bytes.
+#[must_use]
+pub fn version() -> String {
     format!(
         "{} ({SAMPLE_RATE} Hz, {FRAME_MS} ms frames)",
         conch_voice_api::VERSION
@@ -220,6 +243,47 @@ pub fn command() -> Command {
                 .default_value("warn")
                 .help("off, error, warn, info, debug or trace; the SDK's own records are written at warn and error only, whatever is asked"),
         );
+    let managed = Command::new("managed")
+        .about("Run voice for conch's TUI, which starts this itself and drives it over private pipes")
+        .long_about(
+            "Runs one voice session for the conch TUI, which starts this as its own child \
+             process and drives it over its standard input and file descriptor 3 \
+             (docs/design/tui-voice.md). It is not for running by hand: without file \
+             descriptor 3 it exits at once. The channel, the server and the login come from \
+             conch; the key device and the audio devices from voice.toml, as for join.",
+        )
+        .arg(
+            Arg::new("log-level")
+                .long("log-level")
+                .value_name("LEVEL")
+                .value_parser(log_level)
+                .default_value("warn")
+                .help("off, error, warn, info, debug or trace, written to standard error"),
+        )
+        .arg(
+            Arg::new("mic")
+                .long("mic")
+                .value_name("SOURCE")
+                .value_parser(MicChoice::from_str)
+                .hide(true)
+                .help("Test only: tone:<hz>, wav:<path> or none instead of PipeWire's microphone"),
+        )
+        .arg(
+            Arg::new("sink")
+                .long("sink")
+                .value_name("SINK")
+                .value_parser(sink_tones)
+                .hide(true)
+                .help("Test only: count or count:<hz>,... instead of PipeWire's speakers"),
+        )
+        .arg(
+            Arg::new("test-key-device")
+                .long("test-key-device")
+                .value_name("PIPE")
+                .value_parser(clap::value_parser!(PathBuf))
+                .hide(true)
+                .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
+        );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
         .long_about(
@@ -263,6 +327,7 @@ pub fn command() -> Command {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(join)
+        .subcommand(managed)
         .subcommand(devices)
         .subcommand(keys)
 }
@@ -281,6 +346,23 @@ where
     let matches = command().try_get_matches_from(args)?;
     let join = match matches.subcommand() {
         Some(("join", join)) => join,
+        Some(("managed", managed)) => {
+            return Ok(Invocation::Managed(ManagedArgs {
+                log_level: managed
+                    .get_one::<LevelFilter>("log-level")
+                    .copied()
+                    .unwrap_or(LevelFilter::Warn),
+                mic: managed
+                    .get_one::<MicChoice>("mic")
+                    .cloned()
+                    .unwrap_or(MicChoice::PipeWire),
+                sink: managed
+                    .get_one::<Vec<f32>>("sink")
+                    .cloned()
+                    .map_or(SinkChoice::PipeWire, SinkChoice::Count),
+                test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
+            }));
+        }
         Some(("devices", _)) => return Ok(Invocation::Devices),
         Some(("keys", keys)) => {
             if let Some(device) = keys.get_one::<PathBuf>("device") {
@@ -296,7 +378,7 @@ where
         _ => {
             return Err(command().error(
                 clap::error::ErrorKind::MissingSubcommand,
-                "a command is required: join, devices or keys",
+                "a command is required: join, managed, devices or keys",
             ));
         }
     };
@@ -371,7 +453,7 @@ pub struct Resolved {
 /// decides where the login token is sent, so a file that is not a regular file or that
 /// group or others can write is refused. Looked at before it is opened, because opening a
 /// FIFO waits for a writer. A symbolic link is followed: what counts is the file it names.
-fn read_config(path: &std::path::Path) -> Result<Config, Error> {
+pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -770,6 +852,61 @@ mod tests {
         }
         assert!(parse(["conch-voice"]).is_err());
         assert!(parse(["conch-voice", "listen"]).is_err());
+    }
+
+    #[test]
+    fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
+        assert_eq!(
+            parse(["conch-voice", "managed"]).unwrap(),
+            Invocation::Managed(ManagedArgs {
+                log_level: LevelFilter::Warn,
+                mic: MicChoice::PipeWire,
+                sink: SinkChoice::PipeWire,
+                test_key_device: None,
+            })
+        );
+        assert_eq!(
+            parse([
+                "conch-voice",
+                "managed",
+                "--log-level",
+                "debug",
+                "--mic",
+                "tone:440",
+                "--sink",
+                "count:440",
+                "--test-key-device",
+                "/tmp/FAKE-pipe",
+            ])
+            .unwrap(),
+            Invocation::Managed(ManagedArgs {
+                log_level: LevelFilter::Debug,
+                mic: MicChoice::Tone(440.0),
+                sink: SinkChoice::Count(vec![440.0]),
+                test_key_device: Some(PathBuf::from("/tmp/FAKE-pipe")),
+            })
+        );
+        // Nothing that names what to join, or where, or as whom.
+        for bad in [
+            &["general"][..],
+            &["--server", "http://127.0.0.1:9"],
+            &["--json"],
+            &["--stdin-keys"],
+            &["--token", "x"],
+        ] {
+            let mut line = vec!["conch-voice", "managed"];
+            line.extend(bad);
+            assert_eq!(parse(line).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+        let help = command()
+            .find_subcommand_mut("managed")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(help.contains("--log-level"), "{help}");
+        for hidden in ["--mic", "--sink", "--test-key-device"] {
+            assert!(!help.contains(hidden), "{hidden} is shown: {help}");
+        }
     }
 
     #[test]

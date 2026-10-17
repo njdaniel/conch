@@ -1,7 +1,8 @@
 //! Rust copies of the wire types the voice client uses.
 //!
 //! `pkg/schema` is the truth and these are copies of it (`voice.go`, `message_v2.go` for
-//! [`Audience`], `timestamp.go`, `message.go` for [`ErrorBody`]). The test at the end of
+//! [`Audience`], `timestamp.go`, `message.go` for [`ErrorBody`], `whoami.go` for
+//! [`WhoAmIResponseV1`]; the managed helper's control protocol is in `control.rs`). The test at the end of
 //! this file reads every golden fixture for these shapes from `pkg/schema/testdata`,
 //! decodes it, encodes it again and compares the JSON; it also fails when a `voice-*`
 //! fixture exists that no type here claims.
@@ -35,10 +36,11 @@ use crate::error::Error;
 /// nothing else, least of all from an array of its fields in order.
 ///
 /// Each field is named with its rule: `required` (absent is an error), `optional` (absent
-/// is the type's default), or `strict_audience` (an optional audience that refuses fields
-/// it does not declare). A key that is no field is `ignored` or `refused`, as the caller
-/// says. A field given twice is an error. None of the errors repeats anything from the
-/// document.
+/// is the type's default), `maybe` (an `Option` that is `None` when absent, and whose
+/// value, when present, must not be `null`), or `strict_audience` (an optional audience
+/// that refuses fields it does not declare). A key that is no field is `ignored` or
+/// `refused`, as the caller says. A field given twice is an error. None of the errors
+/// repeats anything from the document.
 macro_rules! wire_object {
     (
         $type:ident, $expecting:literal, unknown = $unknown:ident,
@@ -96,6 +98,10 @@ macro_rules! wire_object {
     };
     (@optional $field:ident $access:ident) => {
         $field.unwrap_or_default()
+    };
+    // The value was decoded as the `Option`'s inner type, so a `null` was refused there.
+    (@maybe $field:ident $access:ident) => {
+        $field
     };
     (@strict_audience $field:ident $access:ident) => {
         $crate::types::from_strict_audience($field)
@@ -876,6 +882,65 @@ wire_object!(ErrorBody, "an error document object", unknown = ignored, {
     message: required,
 });
 
+/// The body of `GET /v1/whoami`: the principal the login resolves to
+/// (`schema.WhoAmIResponseV1`). A managed `conch-voice` asks it before anything else, so
+/// that it joins as the account its owner named or not at all
+/// (`docs/design/tui-voice.md` §9).
+///
+/// Like the other answers this client reads, it tolerates fields it does not know, and
+/// the four the schema always writes must be there. `kind` and `role` are kept as the words
+/// `conchd` sent: a later kind of principal must not make the answer unreadable, and the
+/// one question asked of it ([`WhoAmIResponseV1::is_agent`]) needs no other word.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WhoAmIResponseV1 {
+    /// The principal's id.
+    pub id: i64,
+    /// `human` or `agent`.
+    pub kind: String,
+    /// The principal's name. Not shown by this client.
+    pub name: String,
+    /// `operator` or `member`.
+    pub role: String,
+    /// The version of the `conchd` that answered; absent from an older one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub server_version: String,
+    /// Whether the caller may make invites; absent when false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub may_invite: bool,
+    /// Whether the caller may use voice. `None` from a server that predates the field,
+    /// which is told apart from one that says false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_allowed: Option<bool>,
+    /// How many more personal invites the caller may make; present only for a member who
+    /// may invite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invites_remaining: Option<i64>,
+}
+
+wire_object!(WhoAmIResponseV1, "a whoami object", unknown = ignored, {
+    id: required,
+    kind: required,
+    name: required,
+    role: required,
+    server_version: optional,
+    may_invite: optional,
+    voice_allowed: optional,
+    invites_remaining: optional,
+});
+
+impl WhoAmIResponseV1 {
+    /// Whether the login is an agent's: agents have no voice.
+    pub fn is_agent(&self) -> bool {
+        self.kind == "agent"
+    }
+
+    /// Whether the server says the caller may not use voice. A server that predates the
+    /// field says nothing, and is not taken to refuse.
+    pub fn voice_withheld(&self) -> bool {
+        self.voice_allowed == Some(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -965,6 +1030,9 @@ mod tests {
         fn error(name: &str) {
             round_trip::<ErrorBody>(name, |_| Ok(()));
         }
+        fn whoami(name: &str) {
+            round_trip::<WhoAmIResponseV1>(name, |_| Ok(()));
+        }
         fn share(name: &str) {
             round_trip::<VoiceShareV1>(name, |s| {
                 assert!(s.principal_id > 0 && !s.started_at.is_zero(), "{name}");
@@ -984,7 +1052,52 @@ mod tests {
             ("voice-transmit-report-v1-stopped.json", report),
             ("voice-transmit-report-v1-net.json", report),
             ("error.json", error),
+            // What a managed conch-voice asks before it joins (issue #540).
+            ("whoami-response-v1.json", whoami),
+            ("whoami-response-v1-inviter.json", whoami),
+            ("whoami-response-v1-allowance-used.json", whoami),
+            ("whoami-response-v1-may-invite.json", whoami),
+            ("whoami-response-v1-no-voice.json", whoami),
         ]
+    }
+
+    #[test]
+    fn whoami_says_who_is_signed_in_and_whether_they_may_use_voice() {
+        let operator: WhoAmIResponseV1 =
+            serde_json::from_value(fixture("whoami-response-v1.json")).unwrap();
+        assert_eq!(operator.id, 1);
+        assert!(!operator.is_agent());
+        // A server that predates voice_allowed does not refuse voice by saying nothing.
+        assert_eq!(operator.voice_allowed, None);
+        assert!(!operator.voice_withheld());
+
+        let withheld: WhoAmIResponseV1 =
+            serde_json::from_value(fixture("whoami-response-v1-no-voice.json")).unwrap();
+        assert!(withheld.voice_withheld());
+
+        let agent: WhoAmIResponseV1 = serde_json::from_value(
+            json!({"id": 2, "kind": "agent", "name": "bot", "role": "member", "later": [1]}),
+        )
+        .unwrap();
+        assert!(agent.is_agent());
+        // A kind this client has not heard of is read, and is not an agent.
+        let later: WhoAmIResponseV1 = serde_json::from_value(
+            json!({"id": 3, "kind": "service", "name": "x", "role": "member"}),
+        )
+        .unwrap();
+        assert!(!later.is_agent());
+
+        for missing in ["id", "kind", "name", "role"] {
+            let mut doc = fixture("whoami-response-v1.json");
+            doc.as_object_mut().unwrap().remove(missing);
+            assert!(
+                serde_json::from_value::<WhoAmIResponseV1>(doc).is_err(),
+                "whoami without {missing}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<WhoAmIResponseV1>(json!([1, "human", "x", "member"])).is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! What the tests of `conch-voice join` stand on: a fake SDK ([`fake`]), a stub `conchd`
 //! ([`stub`]), and a [`Rig`] that runs the real session loop between them, with a tone for
-//! a microphone that never stops, and collects what it writes.
+//! a microphone that never stops, and collects what it writes. The tests of
+//! `conch-voice managed` stand on the same, run by [`managed::ManagedRig`].
 //!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit, and none sleeps for
 //! longer than the thing it waits for: every wait the loop makes is shortened through
@@ -11,6 +12,7 @@
 
 pub mod fake;
 pub mod keyboard;
+pub mod managed;
 pub mod stub;
 
 use std::io::Write;
