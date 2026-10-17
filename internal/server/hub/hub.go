@@ -29,28 +29,31 @@ type Hub struct {
 // Subscription is one subscriber's membership in a channel. Receive from
 // Messages; call Cancel when done.
 type Subscription struct {
-	hub         *Hub
-	channelID   int64
-	principalID int64
-	msgs        chan schema.MessageV0
+	hub          *Hub
+	channelID    int64
+	principalID  int64
+	credentialID int64
+	msgs         chan schema.MessageV0
 }
 
 // SubscriptionV1 is a typed-envelope channel subscription.
 type SubscriptionV1 struct {
-	hub         *Hub
-	channelID   int64
-	principalID int64
-	msgs        chan schema.MessageV1
+	hub          *Hub
+	channelID    int64
+	principalID  int64
+	credentialID int64
+	msgs         chan schema.MessageV1
 }
 
 // SubscriptionV2 is a subscription that understands scoped messages. It is
 // the only kind that can be delivered one, and only when its principal is a
 // recipient.
 type SubscriptionV2 struct {
-	hub         *Hub
-	channelID   int64
-	principalID int64
-	msgs        chan schema.MessageV2
+	hub          *Hub
+	channelID    int64
+	principalID  int64
+	credentialID int64
+	msgs         chan schema.MessageV2
 }
 
 // New returns an empty hub ready for subscriptions.
@@ -62,11 +65,11 @@ func New() *Hub {
 	}
 }
 
-// SubscribeV2 registers a MessageV2 subscription held by principalID (0 when
-// the connection has no authenticated caller, which then receives
-// channel-wide messages only).
-func (h *Hub) SubscribeV2(channelID, principalID int64, buffer int) *SubscriptionV2 {
-	sub := &SubscriptionV2{hub: h, channelID: channelID, principalID: principalID, msgs: make(chan schema.MessageV2, buffer)}
+// SubscribeV2 registers a MessageV2 subscription held by principalID through
+// credentialID (both 0 when the connection has no authenticated caller, which
+// then receives channel-wide messages only).
+func (h *Hub) SubscribeV2(channelID, principalID, credentialID int64, buffer int) *SubscriptionV2 {
+	sub := &SubscriptionV2{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, msgs: make(chan schema.MessageV2, buffer)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -103,10 +106,10 @@ func (s *SubscriptionV2) Cancel() {
 	s.hub.dropV2Locked(s)
 }
 
-// SubscribeV1 registers a MessageV1 subscription held by principalID (0 when
-// the connection has no authenticated caller).
-func (h *Hub) SubscribeV1(channelID, principalID int64, buffer int) *SubscriptionV1 {
-	sub := &SubscriptionV1{hub: h, channelID: channelID, principalID: principalID, msgs: make(chan schema.MessageV1, buffer)}
+// SubscribeV1 registers a MessageV1 subscription held by principalID through
+// credentialID (both 0 when the connection has no authenticated caller).
+func (h *Hub) SubscribeV1(channelID, principalID, credentialID int64, buffer int) *SubscriptionV1 {
+	sub := &SubscriptionV1{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, msgs: make(chan schema.MessageV1, buffer)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -132,14 +135,14 @@ func (s *SubscriptionV1) Cancel() {
 	s.hub.dropV1Locked(s)
 }
 
-// Subscribe registers a subscription held by principalID (0 when the
-// connection has no authenticated caller) for messages broadcast to channelID
-// from now on. buffer bounds the subscription's queue (see the slow-consumer
+// Subscribe registers a subscription held by principalID through
+// credentialID (both 0 when the connection has no authenticated caller) for
+// messages broadcast to channelID from now on. buffer bounds the subscription's queue (see the slow-consumer
 // policy on Hub). The hub closes the message channel when it drops the
 // subscription — on overflow or hub Close; a subscription taken from a closed
 // hub starts closed. Callers must Cancel the subscription when done.
-func (h *Hub) Subscribe(channelID, principalID int64, buffer int) *Subscription {
-	sub := &Subscription{hub: h, channelID: channelID, principalID: principalID, msgs: make(chan schema.MessageV0, buffer)}
+func (h *Hub) Subscribe(channelID, principalID, credentialID int64, buffer int) *Subscription {
+	sub := &Subscription{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, msgs: make(chan schema.MessageV0, buffer)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -334,6 +337,46 @@ func (h *Hub) DropPrincipalAll(principalID int64) int {
 	for _, members := range h.subsV2 {
 		for sub := range members {
 			if sub.principalID == principalID {
+				h.dropV2Locked(sub)
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// DropCredential closes every subscription, v0, v1 and v2, opened with
+// credentialID on any channel, and reports how many it closed. It is the hub
+// half of revoking one credential (issue #519): the principal's subscriptions
+// through its other credentials stay. As with DropPrincipal, a message
+// broadcast after it returns is never delivered to a dropped subscription,
+// and a zero credentialID (no credential) is a no-op.
+func (h *Hub) DropCredential(credentialID int64) int {
+	if credentialID == 0 {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, members := range h.subs {
+		for sub := range members {
+			if sub.credentialID == credentialID {
+				h.dropLocked(sub)
+				n++
+			}
+		}
+	}
+	for _, members := range h.subsV1 {
+		for sub := range members {
+			if sub.credentialID == credentialID {
+				h.dropV1Locked(sub)
+				n++
+			}
+		}
+	}
+	for _, members := range h.subsV2 {
+		for sub := range members {
+			if sub.credentialID == credentialID {
 				h.dropV2Locked(sub)
 				n++
 			}

@@ -36,10 +36,10 @@ func TestDropPrincipalAll(t *testing.T) {
 			v1 := map[int]*SubscriptionV1{}
 			for i, s := range tt.subs {
 				if s.v1 {
-					v1[i] = h.SubscribeV1(s.channel, s.principal, 4)
+					v1[i] = h.SubscribeV1(s.channel, s.principal, 0, 4)
 					defer v1[i].Cancel()
 				} else {
-					v0[i] = h.Subscribe(s.channel, s.principal, 4)
+					v0[i] = h.Subscribe(s.channel, s.principal, 0, 4)
 					defer v0[i].Cancel()
 				}
 			}
@@ -68,9 +68,9 @@ func TestDropPrincipalAll(t *testing.T) {
 // reaches the dropped principal but still reaches others.
 func TestDropPrincipalAllNothingDeliveredAfter(t *testing.T) {
 	h := New()
-	gone := h.Subscribe(1, 7, 4)
-	goneV1 := h.SubscribeV1(2, 7, 4)
-	kept := h.Subscribe(1, 8, 4)
+	gone := h.Subscribe(1, 7, 0, 4)
+	goneV1 := h.SubscribeV1(2, 7, 0, 4)
+	kept := h.Subscribe(1, 8, 0, 4)
 	h.DropPrincipalAll(7)
 	h.BroadcastMessage(context.Background(), schema.MessageV0{ID: 1, ChannelID: 1})
 	h.BroadcastMessageV1(context.Background(), schema.MessageV1{ID: 1, ChannelID: 2})
