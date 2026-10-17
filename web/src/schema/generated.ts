@@ -90,6 +90,21 @@ export const listChannelMembersResponseV1 = object<ListChannelMembersResponseV1>
   members: array(channelMemberV1),
 });
 
+// schema.ChannelMembersV1
+export const channelMembersV1Schema = 'conch.channel_members.v1';
+
+export interface ChannelMembersV1 {
+  schema: typeof channelMembersV1Schema;
+  channel_id: number;
+  members: ChannelMemberV1[];
+}
+
+export const channelMembersV1 = object<ChannelMembersV1>({
+  schema: vocab<typeof channelMembersV1Schema>({ [channelMembersV1Schema]: true }),
+  channel_id: int,
+  members: array(channelMemberV1),
+});
+
 // schema.Payload
 export interface Payload {
   schema: string;

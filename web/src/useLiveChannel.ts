@@ -2,11 +2,12 @@
 // the newest id held, and tells the page how the connection is. The history
 // comes first so the socket's `after` is known; a message posted in between is
 // replayed by the socket and, being the same id, is shown once.
-import { useCallback, useEffect, useRef, useState, type Dispatch } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from 'react';
 import * as api from './api';
 import { Feed, type FeedStatus } from './state/feed';
 import type { ConnectionAction } from './state/connection';
 import { parseFrame, type ChatAction } from './state/messages';
+import type { ChannelMemberV1 } from './schema/channel';
 import type { PrincipalKind } from './schema/principal';
 
 // loading: reading history or connecting for the first time. reconnecting: the
@@ -41,6 +42,7 @@ export function useLiveChannel({
   channel,
   channelId,
   me,
+  members,
   getAfter,
   getOldest,
   dispatchChat,
@@ -51,6 +53,10 @@ export function useLiveChannel({
   readonly channel: string | null;
   readonly channelId: number | null;
   readonly me: { readonly id: number; readonly name: string; readonly kind: PrincipalKind };
+  // The channel's members, as the people panel holds them (useAgents): read
+  // when the channel opens and kept current by the events socket, so a name
+  // that changes or leaves (a hidden account, #515) changes here too.
+  readonly members: readonly ChannelMemberV1[];
   readonly getAfter: (channel: string) => number;
   // The id to read below, or null when no older page is to be asked for now.
   readonly getOldest: (channel: string) => number | null;
@@ -60,7 +66,6 @@ export function useLiveChannel({
   readonly onLost: (channel: string) => void;
 }): Live {
   const [status, setStatus] = useState<LiveStatus>('loading');
-  const [people, setPeople] = useState<ReadonlyMap<number, Person>>(new Map());
   const [nets, setNets] = useState<ReadonlyMap<number, string>>(new Map());
   const [monitored, setMonitored] = useState<ReadonlySet<number>>(new Set());
   const [attempt, setAttempt] = useState(0);
@@ -79,19 +84,9 @@ export function useLiveChannel({
     let feed: Feed | null = null;
     let opened = false;
     setStatus('loading');
-    setPeople(new Map([[meId, { name: meName, kind: meKind }]]));
     setNets(new Map());
     setMonitored(new Set());
 
-    // Names are a convenience: without them an author reads as #<id>.
-    void api.listMembers(channel).then((result) => {
-      if (!live || !result.ok) return;
-      const named = new Map<number, Person>([[meId, { name: meName, kind: meKind }]]);
-      for (const m of result.value) {
-        if (m.name !== undefined) named.set(m.principal_id, { name: m.name, kind: m.kind ?? null });
-      }
-      setPeople(named);
-    });
     void api.listNets(channel).then((result) => {
       if (!live || !result.ok) return;
       setNets(new Map(result.value.map((n) => [n.id, n.name])));
@@ -175,7 +170,19 @@ export function useLiveChannel({
       live = false;
       feed?.stop();
     };
-  }, [channel, channelId, attempt, meId, meName, meKind, getAfter, dispatchChat, dispatchConnection, onUnauthorized, onLost]);
+  }, [channel, channelId, attempt, meId, getAfter, dispatchChat, dispatchConnection, onUnauthorized, onLost]);
+
+  // Names are a convenience: without them an author reads as #<id>. The
+  // viewer's own name is the one they are signed in with, which a rename of
+  // their own changes before the member list does.
+  const people = useMemo(() => {
+    const named = new Map<number, Person>();
+    for (const m of members) {
+      if (m.name !== undefined) named.set(m.principal_id, { name: m.name, kind: m.kind ?? null });
+    }
+    named.set(meId, { name: meName, kind: meKind });
+    return named;
+  }, [members, meId, meName, meKind]);
 
   const retry = useCallback(() => {
     setAttempt((n) => n + 1);

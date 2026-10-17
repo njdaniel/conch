@@ -150,6 +150,12 @@ interface Server {
   asks: { run: number; body: Json }[];
   askReply: () => Response;
   nextSession: number;
+  // The members list the read answers, how many reads there were, and, while
+  // holdMembers is set, the answers waiting until a test releases them.
+  members: Json;
+  membersReads: number;
+  holdMembers: boolean;
+  heldMembers: (() => void)[];
 }
 
 let server: Server;
@@ -178,6 +184,10 @@ function install() {
     asks: [],
     askReply: () => json({}, 500),
     nextSession: 100,
+    members,
+    membersReads: 0,
+    holdMembers: false,
+    heldMembers: [],
   };
   FakeSocket.all = [];
   vi.stubGlobal('WebSocket', FakeSocket);
@@ -233,7 +243,17 @@ function install() {
         return Promise.resolve(json({ interventions: server.interventions }));
       }
       const m = /^\/v[12]\/channels\/([^/]+)\/(members|nets|messages)$/.exec(path);
-      if (m?.[2] === 'members') return Promise.resolve(json(members));
+      if (m?.[2] === 'members') {
+        server.membersReads++;
+        // The answer is the list as it stands when the read is made.
+        const answer = json(server.members);
+        if (!server.holdMembers) return Promise.resolve(answer);
+        return new Promise<Response>((done) => {
+          server.heldMembers.push(() => {
+            done(answer);
+          });
+        });
+      }
       if (m?.[2] === 'nets') return Promise.resolve(json({ nets: [] }));
       if (m?.[2] === 'messages') return Promise.resolve(json({ messages: server.messages }));
       return Promise.resolve(json({}, 404));
@@ -414,6 +434,90 @@ describe('the panel', () => {
     expect(server.runListUrls).toHaveLength(1);
     const query = new URLSearchParams(server.runListUrls[0]);
     expect(Object.fromEntries(query)).toEqual({ channel: 'general', session: '12', order: 'desc', limit: '10' });
+  });
+});
+
+// The member list as the events socket sends it when it changes (#515).
+const memberList = (list: readonly Json[], channel_id = 7): Json => ({ schema: 'conch.channel_members.v1', channel_id, members: list });
+const without = (id: number): Json[] => members.members.filter((m) => m.principal_id !== id);
+
+// openSettled opens the app and shows a roster, and returns once the reads of
+// the members list that opening makes are in.
+async function openSettled(sessions: Json[] = [session(100, 2)]) {
+  const socket = await openApp();
+  await showRoster(socket, sessions);
+  await waitFor(() => {
+    expect(server.membersReads).toBeGreaterThanOrEqual(2);
+  });
+  await panel().findByText('<b>mallory</b>');
+  await act(async () => {});
+  return socket;
+}
+
+describe('the member list the socket sends', () => {
+  it('drops a member who left, without reading the list again', async () => {
+    const socket = await openSettled();
+    const reads = server.membersReads;
+    socket.send(memberList(without(4)));
+    await waitFor(() => {
+      expect(panel().queryByText('<b>mallory</b>')).toBeNull();
+    });
+    const people = panel().getByRole('list', { name: 'People' });
+    expect(within(people).getByText('ada')).toBeDefined();
+    expect(within(panel().getByRole('list', { name: 'Agents' })).getByText('ghost')).toBeDefined();
+    await act(async () => {});
+    expect(server.membersReads).toBe(reads);
+  });
+
+  it.each<[string, Json[], string]>([
+    // Hiding takes the account out of every channel (#445).
+    ['a hidden member', without(4), '#4'],
+    ['a renamed member', members.members.map((m) => (m.principal_id === 4 ? { ...m, name: 'mel' } : m)), 'mel'],
+  ])('shows no old name of %s, in the panel or on their messages', async (_, list, author) => {
+    server.messages = [{ schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 4, created_at: at, body: 'hello from four' }];
+    const socket = await openSettled();
+    const line = (await screen.findByText('hello from four')).closest('li') as HTMLElement;
+    expect(within(line).getByText('<b>mallory</b>')).toBeDefined();
+    socket.send(memberList(list));
+    await waitFor(() => {
+      expect(screen.queryByText('<b>mallory</b>')).toBeNull();
+    });
+    expect(within(line).getByText(author)).toBeDefined();
+  });
+
+  it('ignores a list that is for another channel', async () => {
+    const socket = await openSettled();
+    socket.send(memberList(without(4), 8));
+    await act(async () => {});
+    expect(panel().getByText('<b>mallory</b>')).toBeDefined();
+  });
+
+  it('ignores a list that does not validate', async () => {
+    const socket = await openSettled();
+    socket.send({ schema: 'conch.channel_members.v1', channel_id: 7, members: null });
+    await act(async () => {});
+    expect(panel().getByText('<b>mallory</b>')).toBeDefined();
+  });
+
+  it('keeps the list the socket sent over a read asked before it', async () => {
+    const socket = await openSettled();
+    // A roster naming someone the list lacks asks for the list again; that
+    // read is answered only after the socket's newer list.
+    server.holdMembers = true;
+    const reads = server.membersReads;
+    socket.send(roster([session(100, 2), session(110, 9)]));
+    await waitFor(() => {
+      expect(server.membersReads).toBe(reads + 1);
+    });
+    socket.send(memberList(without(4)));
+    await waitFor(() => {
+      expect(panel().queryByText('<b>mallory</b>')).toBeNull();
+    });
+    for (const release of server.heldMembers) release();
+    // The held answer resolves, and its read settles, before the check.
+    await act(async () => {});
+    await act(async () => {});
+    expect(panel().queryByText('<b>mallory</b>')).toBeNull();
   });
 });
 
