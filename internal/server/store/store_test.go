@@ -5,16 +5,79 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// migratedDB is the file of a database with every migration applied, made
+// once per test binary. Migrating a fresh database takes about a third of a
+// second under -race, and most tests here open a store only to use it; each
+// of those starts from a copy of this file instead (issue #498, as #472 did
+// for the server package). Open still runs on the copy, permission checks and
+// version check included. The tests of the migrations themselves never use
+// it: they build the schema version they name and migrate it with Open.
+var migratedDB struct {
+	once sync.Once
+	data []byte
+	err  error
+}
+
+// newTestDBPath returns the path of a database, in a fresh temporary
+// directory, that is already migrated to the current schema version.
+func newTestDBPath(t *testing.T) string {
+	t.Helper()
+	migratedDB.once.Do(func() {
+		dir, err := os.MkdirTemp("", "conch-store-test-")
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		path := filepath.Join(dir, "conch.db")
+		s, err := Open(context.Background(), path)
+		if err != nil {
+			migratedDB.err = err
+			return
+		}
+		// Closing the last connection checkpoints the write-ahead log into
+		// the file, so the file alone is the whole database.
+		if err := s.Close(); err != nil {
+			migratedDB.err = err
+			return
+		}
+		migratedDB.data, migratedDB.err = os.ReadFile(path) // #nosec G304 -- a file this helper just made in its own temporary directory
+	})
+	if migratedDB.err != nil {
+		t.Fatalf("make the migrated test database: %v", migratedDB.err)
+	}
+	path := filepath.Join(t.TempDir(), "conch.db")
+	if err := os.WriteFile(path, migratedDB.data, 0o600); err != nil {
+		t.Fatalf("copy the migrated test database: %v", err)
+	}
+	return path
+}
+
+// openTestStore opens a copy of the migrated test database.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "conch.db"))
+	return openTestStoreAt(t, newTestDBPath(t))
+}
+
+// openFreshTestStore opens a new, empty database file, so Open runs every
+// migration on it, for the tests about what migrating from nothing makes.
+func openFreshTestStore(t *testing.T) *Store {
+	t.Helper()
+	return openTestStoreAt(t, filepath.Join(t.TempDir(), "conch.db"))
+}
+
+func openTestStoreAt(t *testing.T, path string) *Store {
+	t.Helper()
+	s, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -27,7 +90,9 @@ func openTestStore(t *testing.T) *Store {
 }
 
 func TestMessagePayloadMigrationRoundTripAndAudit(t *testing.T) {
-	s := openTestStore(t)
+	// Migrated here from an empty file, not copied: this test is about what
+	// the migrations make.
+	s := openFreshTestStore(t)
 	ctx := context.Background()
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {

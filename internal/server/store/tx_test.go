@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +23,7 @@ type txStore struct {
 
 func openTxStore(t *testing.T, maxConns int) *txStore {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "conch.db")
+	path := newTestDBPath(t)
 	s, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
