@@ -383,7 +383,8 @@ type eventsStream struct {
 	sessionID   int64  // the session to keep alive; 0 for none
 	lastRoster  []byte // the roster frame last sent
 	// lastMembers is the member list frame last sent, or, before any was,
-	// the list as it stood at the first roster: that one is not sent.
+	// the list as it stood before the first roster was written: that one is
+	// not sent.
 	lastMembers []byte
 	// rosterBuilt is when a roster was last built, for the roster floor;
 	// rosterLater fires when one owed meanwhile may be built, and is nil
@@ -575,6 +576,16 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
+	// The list this reader is measured against is read before the first
+	// roster goes out (issue #528). The client reads the list over REST once
+	// it has that roster, so a change that commits after the write is one it
+	// may have missed: read afterwards, the baseline would already hold it,
+	// and the change would never be sent.
+	if e.lastMembers == nil {
+		if e.lastMembers, ok = e.membersFrame(ctx, viewer); !ok {
+			return false
+		}
+	}
 	if !bytes.Equal(raw, e.lastRoster) {
 		if !e.write(ctx, raw) {
 			return false
@@ -588,28 +599,34 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 // changed since the last one (issue #515). Everything that changes the list
 // already owes a roster (a member added or removed, hidden or renamed), so the
 // list is rebuilt with each roster, under the same floor; the roster alone
-// would miss a member who had no session. The list as it stood at the first
-// roster is kept but not sent: a client reads the list over REST once the
-// socket is live, as it always has, and learns here only what changed after.
+// would miss a member who had no session. The list as it stood before the
+// first roster was written is kept but not sent (sendRoster): a client reads
+// the list over REST once the socket is live, as it always has, and learns
+// here only what changed after.
 // A channel the change did not touch hears nothing.
 func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) bool {
-	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
-	if err != nil {
-		return e.failed(ctx, "list members", err)
-	}
-	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
-	raw, ok := e.encode(ctx, doc)
+	raw, ok := e.membersFrame(ctx, viewer)
 	if !ok {
 		return false
 	}
 	if bytes.Equal(raw, e.lastMembers) {
 		return true
 	}
-	if e.lastMembers != nil && !e.write(ctx, raw) {
+	if !e.write(ctx, raw) {
 		return false
 	}
 	e.lastMembers = raw
 	return true
+}
+
+// membersFrame is the encoded member list as viewer sees it now.
+func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal) ([]byte, bool) {
+	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
+	if err != nil {
+		return nil, e.failed(ctx, "list members", err)
+	}
+	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
+	return e.encode(ctx, doc)
 }
 
 // sendRef reads the document ref names with this reader's gates and sends it,
