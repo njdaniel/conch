@@ -686,13 +686,18 @@ func TestTransmitRuleExcuseNeedsAnEdgeOrTheRation(t *testing.T) {
 			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@1700 observed left",
 			"started@2010 reported", "stopped@2600 reported",
 		}},
-		{"after a replaced connection that was transmitting, the new one's first pass is an edge", []ruleStep{
+		// A replacement is the exception (issue #509): the pass that finds it
+		// sees the new connection, so nothing saw the microphone between the
+		// old connection's last pass and the new one's first. Not an edge:
+		// with the ration spent, the late `started` is recorded.
+		{"after a replaced connection that was transmitting, the new one's first pass is no edge", []ruleStep{
 			started(0), talking(500),
 			stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
 			replaced(2000), talking(2000), started(2010), talking(2500), stopped(2600), quiet(3000),
 		}, []string{
 			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@2000 observed left",
-			"started@2010 reported", "stopped@2600 reported",
+			"started@2010 reported", "unreported@2000 observed", "stopped@2500 observed reported",
+			"stopped@2600 reported",
 		}},
 		{"after leaving while transmitting, the first pass back is an edge", []ruleStep{
 			started(0), talking(500),
@@ -919,6 +924,83 @@ func TestTransmitRuleReplaced(t *testing.T) {
 		{"a stopped since the previous pass leaves nothing to keep", []ruleStep{
 			started(100), talking(500), stopped(700), replaced(1000), quiet(1000),
 		}, []string{"started@100 reported", "stopped@700 reported"}},
+	})
+}
+
+// TestTransmitRuleReplacedSpendsTheRation: a replacement is not a look at the
+// microphone, so it is no edge of a transmission. A lone unaccounted pass next
+// to one, on either side, is excused only the second way, once in 3 s (§6,
+// issue #509). Before, a client transmitting all along could report a false
+// `stopped` before a pass and `started` after it, and replace its connection
+// before the next pass: the replacement was taken for a pass that saw the
+// microphone not transmitting, and every such lone pass was excused at the
+// edge. The security review of #501 ran ten such cycles and got no unreported
+// row.
+func TestTransmitRuleReplacedSpendsTheRation(t *testing.T) {
+	runScenarios(t, []ruleScenario{
+		// The review's cycle: stopped just before a pass, started just after
+		// it, and a new connection before the next. The first is excused, by
+		// the ration; the second, 1 s later, is recorded. Its replacement
+		// then keeps nothing: an unreported transmission was open, and its
+		// one reason=left row closed both. From there the new connection
+		// transmits with the reported state `stopped`, two passes in a row,
+		// and each cycle is recorded.
+		{"a false stopped, a started, and a reconnect, every other pass", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), replaced(1500), talking(1500), // excused, by the ration
+			stopped(1990), talking(2000), started(2010), replaced(2500), talking(2500), // recorded
+			stopped(2990), talking(3000), started(3010), replaced(3500), talking(3500),
+			stopped(3990), talking(4000), started(4010), replaced(4500), talking(4500),
+			stopped(4990), quiet(5000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported",
+			"stopped@1990 reported", "started@2010 reported", "unreported@2000 observed", "stopped@2500 observed left",
+			"unreported@2500 observed", "started@3010 reported", "stopped@3500 observed left",
+			"unreported@3500 observed", "started@4010 reported", "stopped@4500 observed left",
+			"unreported@4500 observed", "stopped@5000 observed muted",
+		}},
+		// The same with the reconnect moved one place earlier: the new
+		// connection's first pass is the lone one, with the replacement as
+		// the look before it.
+		{"a false stopped, a reconnect, and a started, every other pass", []ruleStep{
+			started(0), talking(500),
+			stopped(990), replaced(1000), talking(1000), started(1010), talking(1500), // excused, by the ration
+			stopped(1990), replaced(2000), talking(2000), started(2010), talking(2500), // recorded
+			stopped(2990), replaced(3000), talking(3000), started(3010), talking(3500),
+			stopped(3990), quiet(4000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported",
+			"stopped@1990 reported", "started@2010 reported", "unreported@2000 observed", "stopped@2500 observed reported",
+			"stopped@2990 reported", "started@3010 reported", "unreported@3000 observed", "stopped@3500 observed reported",
+			"stopped@3990 reported",
+		}},
+		// Once in 3 s the second way still excuses it: an honest reload
+		// that happens to land next to a re-press is not recorded.
+		{"once in 3 s, a lone pass before a replacement is excused", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), replaced(1500), talking(1500),
+			stopped(1700), quiet(2000),
+		}, []string{"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@1700 reported"}},
+		{"and 3 s after it, again", []ruleStep{
+			started(0), talking(500),
+			stopped(990), talking(1000), started(1010), replaced(1500), talking(1500), // excused, by the ration
+			talking(2000), talking(2500), talking(3000), talking(3500),
+			stopped(3990), talking(4000), started(4010), replaced(4500), talking(4500), // 3 s after: excused
+			stopped(4700), quiet(5000),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported",
+			"stopped@3990 reported", "started@4010 reported", "stopped@4700 reported",
+		}},
+		// A pass that saw the microphone not transmitting is still an edge,
+		// replacement or not, and edges do not spend the ration.
+		{"a quiet pass before the lone one is still an edge", []ruleStep{
+			started(0), talking(500), stopped(990), talking(1000), started(1010), talking(1500), // the ration is spent at 1000
+			stopped(1600), quiet(2000), talking(2500), started(2510), replaced(3000), talking(3000),
+			stopped(3200), quiet(3500),
+		}, []string{
+			"started@0 reported", "stopped@990 reported", "started@1010 reported", "stopped@1600 reported",
+			"started@2510 reported", "stopped@3200 reported",
+		}},
 	})
 }
 

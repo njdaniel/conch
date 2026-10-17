@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,9 @@ type ruleUnderCheck interface {
 type ruleLook struct {
 	at           time.Time
 	transmitting bool
+	// replaced: the look found the connection replaced. It saw nothing of
+	// the microphone, so it is no edge of a transmission (issue #509).
+	replaced bool
 	// unaccounted: transmitting, with the reported state `stopped` at that
 	// instant according to the rows written so far.
 	unaccounted bool
@@ -87,6 +91,11 @@ type ruleTally struct {
 	leftClosed    int
 	oneRowForBoth int // one reason=left row closing both kinds
 	keptReplaced  int // a reported started kept across a replacement
+	// A lone pass that would have been at an edge had a replacement next to
+	// it counted as one, judged by the ration instead (issue #509): excused,
+	// and refused.
+	replacedRationExcused int
+	replacedRationDenied  int
 }
 
 func (a *ruleTally) add(b ruleTally) {
@@ -100,6 +109,8 @@ func (a *ruleTally) add(b ruleTally) {
 	a.leftClosed += b.leftClosed
 	a.oneRowForBoth += b.oneRowForBoth
 	a.keptReplaced += b.keptReplaced
+	a.replacedRationExcused += b.replacedRationExcused
+	a.replacedRationDenied += b.replacedRationDenied
 }
 
 // checkRuleInvariants feeds inputs to rule at the given times, drops it at the
@@ -186,7 +197,13 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 		// §6: "One unaccounted pass alone is also an unreported
 		// transmission ... unless it is excused."
 		near := p.reportBefore || (next != nil && next.reportBefore) || (next == nil && reportSince)
-		edge := prev == nil || !prev.transmitting || next == nil || !next.transmitting
+		// A look that saw the microphone not transmitting. A replacement saw
+		// nothing of it: the poller looks at the new connection in the same
+		// pass, and the old one may have transmitted until it was replaced
+		// (issue #509).
+		sawQuiet := func(l *ruleLook) bool { return !l.transmitting && !l.replaced }
+		edge := prev == nil || sawQuiet(prev) || next == nil || sawQuiet(next)
+		besideReplaced := (prev != nil && prev.replaced) || (next != nil && next.replaced)
 		switch {
 		case !near:
 			tally.loneRecorded++
@@ -205,6 +222,9 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 			// "... or no other pass was excused this second way in the
 			// previous 3 s": it was recorded, so one must have been.
 			tally.rationDenied++
+			if besideReplaced {
+				tally.replacedRationDenied++
+			}
 			within := false
 			for _, e := range excusedTimes {
 				if p.at.Sub(e) < section6Ration {
@@ -216,6 +236,9 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 			}
 		default:
 			tally.rationExcused++
+			if besideReplaced {
+				tally.replacedRationExcused++
+			}
 			for _, e := range excusedTimes {
 				if p.at.Sub(e) < section6Ration {
 					bad(i, "two lone passes excused the second way within 3 s: at %v and %v", e.Sub(ruleT0), p.at.Sub(ruleT0))
@@ -233,8 +256,10 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 		// has left, but a reported `started` received since the look before
 		// may be the new connection's, and is kept for it. Not when an
 		// unreported transmission is open (one reason=left row closes both),
-		// nor when the 2 s close is already due.
-		kept := in == inReplaced && reported && reportSince && !unreported && at.Sub(quietSince()) < section6NoStop
+		// nor when the 2 s close is already due. Issue #509: nor when the
+		// replacement itself records the lone pass before it, which opens an
+		// unreported transmission that the same reason=left row closes.
+		keepable := in == inReplaced && reported && reportSince && !unreported && at.Sub(quietSince()) < section6NoStop
 		switch in {
 		case inTalking:
 			rows = rule.pass(at, map[int64]micObservation{pid: micTransmitting}, nil)[pid]
@@ -256,6 +281,7 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 
 		reportedBefore, unreportedBefore := reported, unreported
 		gone := in == inRemoved || in == inReplaced || (in == inAbsent && present)
+		kept := keepable && !slices.ContainsFunc(rows, func(r transmitRow) bool { return r.action == transmitActionUnreported })
 		if kept && len(rows) > 0 {
 			bad(i, "a replacement that keeps a reported started wrote %d rows", len(rows))
 		}
@@ -347,7 +373,7 @@ func checkRuleInvariants(rule ruleUnderCheck, inputs []ruleInput, times []time.T
 			continue
 		}
 
-		look := ruleLook{at: at, transmitting: in == inTalking, unaccounted: in == inTalking && !reportedBefore, reportBefore: reportSince}
+		look := ruleLook{at: at, transmitting: in == inTalking, replaced: in == inReplaced, unaccounted: in == inTalking && !reportedBefore, reportBefore: reportSince}
 		looks = append(looks, look)
 		if n := len(looks) - 1; n > 0 {
 			judge(i, n-1, &looks[n])
@@ -508,7 +534,8 @@ func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
 		t.Errorf("checked %d sequences, want all %d of length 1 to %d", total.sequences, want, maxLen)
 	}
 	// Every part of the rule a short sequence can reach was reached. (A
-	// refusal of the second way needs ten inputs; the random test has them.)
+	// refusal of the second way needs ten inputs, or seven when replacements
+	// stand beside the lone passes; the random test has them.)
 	for name, n := range map[string]int{
 		"two unaccounted passes in a row":         total.twoInARow,
 		"a lone pass with no report near it":      total.loneRecorded,
@@ -518,6 +545,7 @@ func TestTransmitRuleInvariantsExhaustive(t *testing.T) {
 		"a close because the principal left":      total.leftClosed,
 		"one left row closing both kinds at once": total.oneRowForBoth,
 		"a started kept across a replacement":     total.keptReplaced,
+		"a ration excuse beside a replacement":    total.replacedRationExcused,
 	} {
 		if n == 0 {
 			t.Errorf("no sequence reached: %s", name)
@@ -539,38 +567,9 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 	if testing.Short() {
 		sequences = 4000
 	}
-	rng := rand.New(rand.NewSource(135))
 	var total ruleTally
 	failures := 0
-	inputs := make([]ruleInput, 60)
-	times := make([]time.Time, 60)
-	// A third of the sequences are built round the pattern that the second
-	// way of excusing exists for and is rationed against: transmitting on
-	// every pass, with `stopped` before every other pass and `started` after
-	// it. The rest are any inputs at all.
-	straddle := [...]ruleInput{inStarted, inTalking, inStopped, inTalking}
-	for seq := range sequences {
-		now := ruleT0
-		for i := range inputs {
-			// Mostly passes that see the principal and reports; now and
-			// then an absence, a removal, a pass that reads nothing.
-			in := ruleInput(rng.Intn(int(numRuleInputs)))
-			if (in == inAbsent || in == inUnread || in == inRemoved || in == inReplaced) && rng.Intn(4) != 0 {
-				in = [...]ruleInput{inTalking, inTalking, inQuiet, inStarted, inStopped}[rng.Intn(5)]
-			}
-			if seq%3 == 0 && rng.Intn(10) != 0 {
-				in = straddle[i%len(straddle)]
-			}
-			var step time.Duration
-			switch in {
-			case inStarted, inStopped, inRemoved, inReplaced:
-				step = time.Duration(rng.Intn(120)) * time.Millisecond
-			default:
-				step = min(voicePassGapMin+time.Duration(rng.ExpFloat64()*float64(voicePassGapMean)), voicePassGapMax).Truncate(time.Millisecond)
-			}
-			now = now.Add(step)
-			inputs[i], times[i] = in, now
-		}
+	randomRuleSequences(sequences, func(inputs []ruleInput, times []time.Time) {
 		problems, tally := checkRuleInvariants(&transmitLedger{}, inputs, times)
 		total.add(tally)
 		if len(problems) > 0 {
@@ -579,7 +578,7 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 				t.Errorf("%s\n  %s", ruleSequenceText(inputs, times), strings.Join(problems, "\n  "))
 			}
 		}
-	}
+	})
 	if failures > 5 {
 		t.Errorf("and %d more sequences with problems", failures-5)
 	}
@@ -593,12 +592,60 @@ func TestTransmitRuleInvariantsRandom(t *testing.T) {
 		"a close because the principal left":              total.leftClosed,
 		"one left row closing both kinds of transmission": total.oneRowForBoth,
 		"a started kept across a replacement":             total.keptReplaced,
+		"a lone pass beside a replacement, excused":       total.replacedRationExcused,
+		"a lone pass beside a replacement, refused":       total.replacedRationDenied,
 	} {
 		if n < 20 {
 			t.Errorf("reached only %d times: %s", n, name)
 		}
 	}
 	t.Logf("%+v", total)
+}
+
+// randomRuleSequences calls visit with n random sequences of 60 inputs, from a
+// fixed seed. The slices are reused between calls.
+//
+// A third of the sequences are built round a pattern that the second way of
+// excusing a lone pass is rationed against, all of them transmitting on every
+// pass. In equal parts: `stopped` before every other pass and `started` after
+// it, the pattern the second way exists for; the same with the connection
+// replaced before the pass after (issue #509, the cycle of the security review
+// of #501); and with it replaced before the pass between the two reports. The
+// rest are any inputs at all.
+func randomRuleSequences(n int, visit func(inputs []ruleInput, times []time.Time)) {
+	rng := rand.New(rand.NewSource(135))
+	inputs := make([]ruleInput, 60)
+	times := make([]time.Time, 60)
+	patterns := [...][]ruleInput{
+		{inStarted, inTalking, inStopped, inTalking},
+		{inStopped, inTalking, inStarted, inReplaced, inTalking},
+		{inStopped, inReplaced, inTalking, inStarted, inTalking},
+	}
+	for seq := range n {
+		pattern := patterns[seq/3%len(patterns)]
+		now := ruleT0
+		for i := range inputs {
+			// Mostly passes that see the principal and reports; now and
+			// then an absence, a removal, a pass that reads nothing.
+			in := ruleInput(rng.Intn(int(numRuleInputs)))
+			if (in == inAbsent || in == inUnread || in == inRemoved || in == inReplaced) && rng.Intn(4) != 0 {
+				in = [...]ruleInput{inTalking, inTalking, inQuiet, inStarted, inStopped}[rng.Intn(5)]
+			}
+			if seq%3 == 0 && rng.Intn(10) != 0 {
+				in = pattern[i%len(pattern)]
+			}
+			var step time.Duration
+			switch in {
+			case inStarted, inStopped, inRemoved, inReplaced:
+				step = time.Duration(rng.Intn(120)) * time.Millisecond
+			default:
+				step = min(voicePassGapMin+time.Duration(rng.ExpFloat64()*float64(voicePassGapMean)), voicePassGapMax).Truncate(time.Millisecond)
+			}
+			now = now.Add(step)
+			inputs[i], times[i] = in, now
+		}
+		visit(inputs, times)
+	}
 }
 
 // doctoredRule is the ledger with something done to the rows the poller's
@@ -732,6 +779,22 @@ func TestRuleInvariantsCheckFindsABrokenRule(t *testing.T) {
 			t.Error("the check found nothing wrong with this rule in any sequence of up to six inputs")
 		}
 	})
+	// The rule as it was before issue #509, which took a replacement for a
+	// look that saw the microphone not transmitting. What that breaks is the
+	// ration, and spending it twice takes more inputs than six: the random
+	// sequences have them.
+	t.Run("a replacement is taken for an edge", func(t *testing.T) {
+		t.Parallel()
+		found := 0
+		randomRuleSequences(3000, func(inputs []ruleInput, times []time.Time) {
+			if problems, _ := checkRuleInvariants(&replacedAsAnEdge{}, inputs, times); len(problems) > 0 {
+				found++
+			}
+		})
+		if found == 0 {
+			t.Error("the check found nothing wrong with this rule in 3000 random sequences")
+		}
+	})
 	// And undoctored, the same wrapper passes: the wrapper is not what the
 	// check objects to.
 	everyRuleSequence(6, func(inputs []ruleInput, times []time.Time) {
@@ -748,4 +811,28 @@ type replacedAsRemoved struct{ transmitLedger }
 
 func (r *replacedAsRemoved) replace(at time.Time, pid int64) []transmitRow {
 	return r.leave(at, pid)
+}
+
+// replacedAsAnEdge is the ledger with a replacement handled as it was after
+// issue #501 and before #509: it keeps a `started` as transmitTrack.replace
+// does, but looks as a removal does, as if it had seen the microphone not
+// transmitting.
+type replacedAsAnEdge struct{ transmitLedger }
+
+func (r *replacedAsAnEdge) replace(at time.Time, pid int64) []transmitRow {
+	k := r.tracks[pid]
+	if k == nil {
+		return nil
+	}
+	was := k.reported
+	var rows []transmitRow
+	if !k.reported || !k.changedSincePass || k.open || at.Sub(k.quietFrom) >= voiceNoStopReportAfter {
+		rows = k.observe(pid, at, micAbsent, true)
+	} else {
+		k.reported = false
+		rows = k.observe(pid, at, micAbsent, true)
+		k.reported = true
+	}
+	r.number(k, was)
+	return rows
 }
