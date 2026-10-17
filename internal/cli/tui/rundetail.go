@@ -993,10 +993,7 @@ func (m Model) goToMessage() (tea.Model, tea.Cmd) {
 		m.setStatus(modeChannels, "message #"+strconv.FormatInt(id, 10)+" is older than the history held")
 		return m, nil
 	}
-	rows := m.layout().messageRows()
-	// scroll counts messages up from the newest; the pane ends at the message
-	// half a page below the one wanted.
-	m.scroll = min(max(len(messages)-1-(at+rows/2), 0), max(0, len(messages)-rows))
+	m = m.centreOn(at)
 	m.setStatus(modeChannels, "run answers message #"+strconv.FormatInt(id, 10))
 	return m, nil
 }

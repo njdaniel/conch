@@ -1,0 +1,36 @@
+╭────────────────╮╭───────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                ││Cannot read the channel list from http://127.0.0.1:29199.                                          │
+│                ││                                                                                                   │
+│                ││cli: list channels: Get "http://127.0.0.1:29199/v1/channels": dial tcp 127.0.0.1:29199: connect: co│
+│                ││nnection refused                                                                                   │
+│                ││                                                                                                   │
+│                ││To use another server, quit (esc) and start conch with CONCH_SERVER=<url>.                         │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+│                ││                                                                                                   │
+╰────────────────╯╰───────────────────────────────────────────────────────────────────────────────────────────────────╯
+members: unavailable
+(no channel) >
+whoami: cli: whoami: Get "http://127.0.0.1:29199/v1/whoami": dial tcp…  ↑/↓ channels • enter send • tab inbox • esc quit

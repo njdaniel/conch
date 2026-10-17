@@ -1,0 +1,18 @@
+␛[90m╭────────────────╮╭───────────────────────────────────────╮␛[39m
+␛[90m│␛[1m␛[36m› ␛[0mgeneral       ␛[90m││␛[39m15:42 alice: Morning all. The release …␛[90m│␛[39m
+␛[90m│␛[39m  ops ␛[1m␛[33m2␛[0m         ␛[90m││␛[39m15:42 bob: On it. I will look at the f…␛[90m│␛[39m
+␛[90m│␛[39m  movie-night   ␛[90m││␛[39m15:42 carol-with-a-rather-lon…: A long…␛[90m│␛[39m
+␛[90m│␛[39m  design-review ␛[90m││␛[39m15:42 rex ␛[1m␛[33m[agent]␛[0m: Build 4127 passed: …␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: Notes from the call: ↵ 1. s…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 dave: 日本語の名前とテキストも表…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 bob: \[31mred?[0m evil and a bel…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m15:42 alice: \[whisper:2,3] not a real…␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m│␛[39m                ␛[90m││␛[39m                                       ␛[90m│␛[39m
+␛[90m╰────────────────╯╰───────────────────────────────────────╯␛[39m
+␛[90monline: bob alice(2) · agents: rex ●␛[39m
+␛[90mvoice: 2 alice  ●3␛[39m
+general >
+␛[90mconnected  ↑/↓ channels • enter send • tab inbox • esc quit␛[39m

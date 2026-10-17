@@ -1,0 +1,18 @@
+╭─ ▸ APPROVALS ──╮╭─ DETAILS ─────────────────────────────╮
+│› 6: Restart th…││Restart the ingest workers on staging  │
+│                ││Requester: 6  Deadline: Oct 17 22:42   │
+│                ││                                       │
+│                ││┊ Two ingest tests fail under load. Res│
+│                ││┊ tarting the workers clears the stuck │
+│                ││┊ queue.                               │
+│                ││┊ Risk: about 30 s of delayed messages │
+│                ││┊ on staging.                          │
+│                ││                                       │
+│                ││  - Restart now                        │
+│                ││  - Wait for the fix                   │
+│                ││                                       │
+│                ││                                       │
+│                ││                                       │
+╰────────────────╯╰───────────────────────────────────────╯
+
+alice | inbox loaded  enter decide • tab agents • esc quit

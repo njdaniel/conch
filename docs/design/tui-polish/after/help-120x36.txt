@@ -1,0 +1,36 @@
+CONCH 127.0.0.1:29180  [Chat] Inbox Agents Runs                                   alice · ● text live · help: esc closes
+╭─ ▸ HELP · Chat ─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ type, enter  write a message and send it to the audience the prompt names                                           │
+│ backspace    delete the last character of the draft                                                                 │
+│ /net NAME    send plain messages to net NAME; /net alone: the whole channel                                         │
+│ /w IDS TEXT  whisper TEXT once to the principal ids IDS (3,5)                                                       │
+│ //TEXT       send TEXT that starts with /                                                                           │
+│ /help        this help                                                                                              │
+│ ↑/↓          focus on channels: open the channel above or below                                                     │
+│              focus on messages: scroll the history a line                                                           │
+│ ←/→          move the focus between the channel list and the messages                                               │
+│ pgup/pgdn    scroll the history a page                                                                              │
+│ home/end     the oldest message held / back to the newest                                                           │
+│ tab          Inbox                                                                                                  │
+│ shift+tab    the view before                                                                                        │
+│ esc          quit                                                                                                   │
+│ F1           open or close this help; where the terminal keeps F1 for itself, /help in Chat and ? elsewhere         │
+│ ctrl+c       quit                                                                                                   │
+│                                                                                                                     │
+│ Mouse: a click selects or focuses and the wheel scrolls; a click never sends, decides or quits.                     │
+│                                                                                                                     │
+│ Voice is shown, not joined: browsing a channel never moves your voice, and this terminal has no talk key.           │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+│                                                                                                                     │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────── esc close ─╯
+general >
+you: in #general voice from another client · voice: 2 alice  ●3 bob
+alice | signed in as alice  esc close help

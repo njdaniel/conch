@@ -1,0 +1,24 @@
+␛[90m╭──────────────────────────────────────────────────────────────────────────────╮
+│␛[39mrun #2 · running                                                              ␛[90m│
+│␛[39mtask: fix the flaky ingest test                                               ␛[90m│
+│␛[39mlink: https://ci.example.com/jobs/4128                                        ␛[90m│
+│␛[39mstarted: 15:42:27 (8m ago)                                                    ␛[90m│
+│␛[39mduration: 8m18s so far                                                        ␛[90m│
+│activity (2)␛[39m                                                                  ␛[90m│
+│␛[39m  +0.0s            command_started go test ./internal/ingest/... -count=20    ␛[90m│
+│␛[1m␛[36m› ␛[0m+0.0s            ▸ command_finished go test ./internal/ingest/... → 2 of 20…␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│␛[39m                                                                              ␛[90m│
+│m message · x cancel · pause (unsupported) · resume (unsupported)␛[39m             ␛[90m│
+╰──────────────────────────────────────────────────────────────────────────────╯
+␛[39m
+␛[90malice | run #2  ↑/↓ timeline • enter data • g message • esc back␛[39m

@@ -1,0 +1,18 @@
+␛[36m╭─␛[1m␛[39m ▸ CHANNELS ␛[0m␛[36m───╮␛[90m╭─␛[1m␛[39m # general ␛[0m␛[90m───────────────────────────╮␛[39m
+␛[36m│␛[1m› general␛[0m       ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mshould look at each of those   ␛[90m│␛[39m
+␛[36m│␛[39m  ops ␛[1m␛[33m2␛[0m         ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mseparately rather than as one  ␛[90m│␛[39m
+␛[36m│␛[39m  movie-night   ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mlarge diff, and the benchmarks ␛[90m│␛[39m
+␛[36m│␛[39m  design-review ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mneed a fresh baseline before   ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39manyone compares numbers.       ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│15:42␛[39m ␛[1mrex␛[0m ␛[1m␛[33m[agent]␛[0m: Build 4127 passed:  ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mhttps://ci.example.com/jobs/412␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m7/artifacts/very/long/path/that␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m/does/not/break/at/spaces/repor␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39mt.html                         ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│15:42␛[39m ␛[1mbob␛[0m: Notes from the call:        ␛[90m│␛[39m
+␛[36m│␛[39m                ␛[36m│␛[90m│␛[39m      ␛[90m┊ ␛[39m1. ship the parser behind a    ␛[90m│␛[39m
+␛[36m╰────────────────╯␛[90m╰─────────────␛[1m␛[36m ↓ 3 newer · end: latest ␛[0m␛[90m─╯␛[39m
+general > ␛[1m␛[36m▌␛[0m
+␛[90monline: bob alice(2) · agents: rex ●␛[39m
+␛[90myou: in #general voice from another client · voice: +2␛[39m
+␛[90malice | connected  enter send • tab inbox • esc quit␛[39m

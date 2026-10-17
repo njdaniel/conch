@@ -1,0 +1,18 @@
+╭─ ▸ AGENTS · general ─────────────────────────────────────╮
+│› ▾ [agent] rex  running · task: fix the flaky ingest tes…│
+│    #1 running · none · task: fix the flaky ingest test ·…│
+│      run #2 running · task: fix the flaky ingest test · …│
+│      run #1 completed · task: nightly lint · 16m ago     │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯
+
+alice | agents: g…  enter sessions • tab channels • esc quit

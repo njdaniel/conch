@@ -1,0 +1,36 @@
+CONCH 127.0.0.1:29180  Chat Inbox [Agents] Runs                                        alice · ● text live · help: F1, ?
+╭─ CHANNELS ───────────╮╭─ ▸ AGENTS · general ────────────────────────────────────────────────────────────────────────╮
+│› general             ││› ▾ [agent] rex  running · task: fix the flaky ingest test · 9s ago                          │
+│  ops 2               ││    #1 running · none · task: fix the flaky ingest test · 9s ago                             │
+│  movie-night         ││      run #2 running · task: fix the flaky ingest test · 14m ago                             │
+│  design-review       ││      run #1 completed · task: nightly lint · 14m ago                                        │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+│                      ││                                                                                             │
+╰──────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+
+alice | agents: general  ↑/↓ agents • enter sessions • r runs • tab channels • esc quit
