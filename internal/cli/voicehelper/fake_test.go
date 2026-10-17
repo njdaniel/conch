@@ -138,6 +138,7 @@ type fakeOptions struct {
 	maxInFlight     int
 	failWith        string
 	failOn          string
+	linger          time.Duration
 }
 
 func parseFakeOptions(args []string) (fakeOptions, error) {
@@ -160,6 +161,7 @@ func parseFakeOptions(args []string) (fakeOptions, error) {
 	fs.IntVar(&o.maxInFlight, "max-in-flight", 0, "fail if more commands than this are unanswered")
 	fs.StringVar(&o.failWith, "fail-with", "", "once connected, fail with this reason")
 	fs.StringVar(&o.failOn, "fail-on", "", "on a command of kind, fail with reason (kind:reason), unanswered")
+	fs.DurationVar(&o.linger, "linger", 0, "after failing for -fail-on, wait this long before exiting")
 	return o, fs.Parse(args)
 }
 
@@ -278,6 +280,7 @@ func (f *fake) serve(cmds <-chan []byte, term <-chan os.Signal) int {
 			if kind, reason, ok := strings.Cut(f.o.failOn, ":"); ok && kind == string(cmd.Kind()) {
 				f.state(schema.VoiceControlPhaseStopping, schema.VoiceControlReason(reason))
 				f.state(schema.VoiceControlPhaseFailed, schema.VoiceControlReason(reason))
+				time.Sleep(f.o.linger)
 				return 1
 			}
 			if kind, code, ok := strings.Cut(f.o.refuse, ":"); ok && kind == string(cmd.Kind()) {

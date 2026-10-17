@@ -81,5 +81,9 @@ func runTUI(ctx context.Context) error {
 	// Mouse reporting is on unless CONCH_MOUSE=0: it takes the terminal's own
 	// text selection away (Shift+drag gets it back).
 	mouse := os.Getenv("CONCH_MOUSE") != "0"
-	return tui.Run(ctx, client, authorID, authenticated, channels, mouse, os.Stdin, os.Stdout)
+	// Voice joins as the same person on the same server: the login is passed
+	// on as it came (the stored one by name, or CONCH_TOKEN), and a TUI
+	// without one is told, when it asks, that voice needs a signed-in person.
+	voice := tui.VoiceSetupFor(server)
+	return tui.Run(ctx, client, authorID, authenticated, channels, mouse, &voice, os.Stdin, os.Stdout)
 }

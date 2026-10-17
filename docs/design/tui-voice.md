@@ -456,3 +456,15 @@ Decided here, where the issues left a choice:
 10. **Unknown commands are refused, not fatal; malformed lines are fatal** (§7).
 
 Needs review before #540 and #541 start: this note and the new types (#539's acceptance criterion). The shapes are new and additive, so under the schema-change skill they need no version bump; nothing published changes. No new dependency is proposed.
+
+## 19. Acceptance record (#542)
+
+What #542 built is §15: the `/voice` commands, the strip and the lifecycle, in `internal/cli/tui/voicectl.go`, driving the supervisor of §14. Where §15 leaves a word open: the strip says "hold the talk key to talk", not the key's name, because the key is bound in `voice.toml`, which only the helper reads; `/voice join <channel>` takes only a channel of the TUI's own list; the §11 check reads the presence of the channel on screen, so for that channel it warns only when presence shows this account in its voice, and for a channel named that is not on screen, whose presence it does not read, it always asks for the same repeat within 10 s ("this account may already be in #x's voice from another client"); and a server or identity change can happen only at start-up or through a `whoami` that names someone else, so it is the TUI's exit, a refused login (`whoami` or the message socket answering 401) and such a `whoami` that call `Close`. The exit waits, within the same bound, for a helper already being stopped by one of the other two, and no helper is started for a new account until the previous account's has been closed. `Join` and `Retry` wait, within their context, for a helper that has already ended (its final state read or its process gone) to be reaped, instead of answering that voice is busy.
+
+| Check | How | Status |
+| --- | --- | --- |
+| Commands, strip, refusals, text unaffected, nothing called in `Update` | `internal/cli/tui/voicectl_test.go`, with a stand-in supervisor | automated, in `go test ./...` |
+| The supervisor against a fake helper: two owners, kill and restart, stop bounds | `internal/cli/voicehelper` | automated, in `go test ./...` |
+| Real TUIs, their own `conch-voice`, `conchd` and LiveKit, tones and a counting sink: join, typing, talk key, mute, deafen, a second owner, the owner killed while transmitting, leave, quit while transmitting, one account in two TUIs, retry, removal | `go run ./e2e/voice managed` (Docker and the voice toolchain; not in CI) | automated, opt-in |
+| A real headset and talk key on the maintainer's Pop!_OS machine: press and release while typing and while another window has the focus, key device loss, quitting and `kill -9` while transmitting, the SSH note | [P3-15 in the walkthrough](../p3-walkthrough.md#p3-15-voice-in-the-tui-opt-in) | **pending**: not done; the synthetic runs are not this acceptance |
+

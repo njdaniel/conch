@@ -28,17 +28,28 @@ import (
 // ended on the way out, signals included; if the server cannot be reached then
 // it is left to the server's own staleness thresholds.
 //
+// voice, when not nil, gives the TUI its /voice commands (VoiceSetupFor). The
+// helper they start is the TUI's own and ends with it: on the way out, by a
+// key or ctx alike, Run stops it and waits, for at most the contract's
+// StopKill bound and a second, before it ends the session. If the TUI is
+// killed outright the helper notices its owner has gone and stops by itself.
+//
 // Being asked to stop is not a failure: once ctx has ended Run restores the
 // terminal and returns nil, as it does when the user quits with a key.
-func Run(ctx context.Context, api API, authorID int64, authenticated bool, channels []string, mouse bool, input io.Reader, output io.Writer) error {
+func Run(ctx context.Context, api API, authorID int64, authenticated bool, channels []string, mouse bool, voice *VoiceSetup, input io.Reader, output io.Writer) error {
 	model := NewModel(ctx, api, authorID, channels)
 	if authenticated {
 		model = model.WithCredential()
+	}
+	if voice != nil {
+		model = model.WithVoice(*voice)
 	}
 	// The TUI's own session ends with the program, whatever ended it: a key, or
 	// ctx on SIGINT or SIGTERM. It is ended after the terminal is given back,
 	// with a context of its own because ctx may be the thing that ended.
 	defer model.endOwnSession()
+	// Voice stops first (deferred last), the same way.
+	defer model.closeVoice()
 	_, err := tea.NewProgram(model, programOptions(ctx, input, output, mouse)...).Run()
 	if cause := ctx.Err(); cause != nil && errors.Is(err, cause) {
 		// Bubble Tea reports the end of its context as "program was killed:

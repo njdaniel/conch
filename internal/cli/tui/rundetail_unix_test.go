@@ -75,7 +75,7 @@ func TestRunDetailCancelOnAScreen(t *testing.T) {
 	defer func() { _ = keyboard.Close() }()
 	out := &screen{}
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, keys, out) }()
+	go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, nil, keys, out) }()
 
 	send := func(k string) {
 		t.Helper()

@@ -152,7 +152,9 @@ microphone is open: it cannot know what `conch-voice` or a browser is doing. The
 the room, `voice: 2 alice  ●3 bob`, with names from the channel's member list now as well as
 whoami. Browsing another channel changes which room is described, never where the person is
 speaking. #542 puts the join, leave and talk state in the strip's left part; the strip already has
-its row on every layout.
+its row on every layout. (Since #542 it does: see [tui-voice.md](tui-voice.md) §15 and §19. With
+no helper running the strip is as described here, except that `you: not in #general voice` reads
+`voice off · /voice join` in a TUI that can join.)
 
 ## Captures
 

@@ -28,7 +28,8 @@ everything (issue #284). That is what CI runs. P3-13 is not part of it unless yo
 add `--real-adapter` and have `claude` on your PATH; it then runs one real reply
 as you, which this walkthrough's last section describes. P3-14, below, is an extra
 row: Claude Code, Codex and a local model at once, run by you; its stubbed twin is
-part of the same automated run.
+part of the same automated run. P3-15, voice in the TUI, needs LiveKit and a
+headset, and has a program of its own.
 
 ## Start it
 
@@ -370,8 +371,11 @@ set -a; . <root>/tui-a.env; set +a; <root>/bin/conch whoami
 What should appear. Chat, the two scripted agents, approvals (`conch approvals
 list` works, and `agent-a` with the approval script raises one) and the audit log
 all work. Voice reports that it is not configured, and the clients show no voice
-controls that would work. The agents use fixture scripts: no model service is
-involved.
+controls that would work: in a TUI, `/voice join` ends in one line on the voice
+strip (`voice stopped: conch-voice not found…` when there is no `conch-voice`,
+`voice stopped: this server has no voice` when there is one), and the input, the
+messages and the people pane are as they were. The agents use fixture scripts: no
+model service is involved.
 
 ## P3-12 Reset
 
@@ -491,6 +495,61 @@ its own, as P3-13 is.
 
 The same row without any model, with a stub for each program, is part of
 `go run ./e2e/p3-local` (it is listed there as P3-14, "three runtimes at once, with stubs").
+
+## P3-15 Voice in the TUI, opt-in
+
+Voice from the terminal client itself (issue #542, [design](design/tui-voice.md)):
+`/voice join` in a TUI starts `conch-voice` as the TUI's own child, and you talk
+with the talk key `conch-voice` reads from your keyboard. This row needs what the
+rest of the walkthrough does not: LiveKit (Docker), the voice toolchain
+(`scripts/voice-toolchain.sh`), Linux with PipeWire, and, for its second half, a
+headset and a keyboard.
+
+**The synthetic half**, run by a program with no microphone, speaker or keyboard: `go run ./e2e/voice managed` (it needs Docker and `scripts/voice-toolchain.sh`, and is not part of the runner).
+
+It starts LiveKit and `conchd`, runs real TUIs on pseudo-terminals with tones for
+microphones and a named pipe for the keyboard, and counts what is heard with a plain
+`conch-voice join`. It ends with `voice-check: PASS` (or `SKIPPED` and why, without
+Docker or the toolchain). It checks joining another channel than the one on screen,
+that typing transmits nothing, mute, deafen, a second TUI, killing a TUI while its
+key is held, leaving, quitting while the key is held, one account in two TUIs, retry
+and a removal from the channel. It is not part of `go test ./...` or CI.
+
+**The real half**, by hand. Build `conch` and `conch-voice` from the same commit
+(`make build`; `. scripts/voice-env.sh && cd voice && cargo build --release -p
+conch-voice`), put `conch-voice` beside `conch` or set `CONCH_VOICE_HELPER` to its
+absolute path, and start a server with voice (`scripts/dev-stack.sh up`, then sign
+in with `conch login --server http://127.0.0.1:28080` using `scripts/dev-stack.sh
+token`). Set `[keys]` in `voice.toml` beside your login: `device` from `conch-voice
+devices`, `talk` from `conch-voice keys`. Have a second person in the same channel
+(the browser, from `scripts/dev-stack.sh invite`) to listen and talk back. Start
+`conch`, then:
+
+1. `/voice join` (another channel than the one on screen: `/voice join <channel>`, twice within 10 s). The strip reads `voice: #<channel> · mic on · hold the talk key to
+   talk`; the desktop's microphone indicator is on. Browse to another channel: the
+   strip still names the first.
+2. Hold the talk key while typing a message in the TUI: you are heard while it is
+   held (`TALKING`), not before and not after; the typed text is sent as text and
+   never transmits by itself.
+3. Hold the talk key while another window has the focus (a browser, an editor): it
+   works the same, and releasing it there stops the transmission.
+4. `/voice mute on`, then hold the key: nothing is heard. `/voice mute off`.
+   `/voice deafen on`: you hear nothing and the key does nothing; `/voice deafen off`.
+5. Unplug the keyboard that is the key device (or the receiver of a wireless one)
+   while not holding it, then while holding it. The strip says `talk key lost:
+   presses refused`, and holding the key never leaves you transmitting; plug it back
+   in and press again.
+6. Hold the key and quit the TUI (`esc`) while still holding it: the listener stops
+   hearing you at once, the microphone indicator goes off, and no `conch-voice`
+   process is left (`pgrep -a conch-voice` shows none of yours).
+7. Start `conch` again, `/voice join`, hold the key, and kill the TUI from another
+   terminal with `kill -9 <pid of conch>`: the same within 3 s.
+8. Over SSH from another machine, run `conch` there and `/voice help`: it says the
+   microphone, speakers and keyboard are those of the machine `conch` runs on.
+
+Record the result, dated, with the hardware and the desktop, in the acceptance
+record of [the design note](design/tui-voice.md#19-acceptance-record-542); until
+then this half is **pending**: the synthetic half is not the acceptance.
 
 ## From a guest
 

@@ -17,7 +17,8 @@ import (
 
 // VoiceAPI is the part of the client that follows a channel's voice presence
 // socket. It is optional: a model whose API does not provide it shows no voice
-// line at all. The TUI only reads presence; it never joins voice.
+// line at all. Presence is only read here; joining voice is the helper's
+// (voicectl.go), which this socket knows nothing of.
 type VoiceAPI interface {
 	SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV1) error) error
 }
@@ -308,8 +309,9 @@ func (m Model) roster(width int) string {
 }
 
 // selfInVoice reports what presence says of the person signed in here in the
-// voice rooms of the channel on screen: whether they are in one (from some
-// other client: this one never joins), whether they are transmitting there,
+// voice rooms of the channel on screen: whether they are in one (from another
+// client, unless this terminal's own helper is running), whether they are
+// transmitting there,
 // and whether presence says anything at all. It knows nothing of any other
 // channel's rooms, nor anything while presence is reconnecting or LiveKit
 // cannot be reached.
@@ -328,14 +330,36 @@ func (m Model) selfInVoice() (in, talking, known bool) {
 	return in, talking, true
 }
 
-// voiceStrip is the persistent voice row of the chat view, "" when the voice
-// line has nothing to show. It starts with what is known of the voice of the
-// person here in the channel on screen, and only that: they may be in another
-// channel's room, which this channel's presence does not show, and while
-// presence is down nothing is known. This terminal does not join voice, so in
-// a room means from another client. Then comes the voice line: who is in the
-// channel's room. Issue #542 puts the voice controls in the left part.
+// voiceStrip is the persistent voice row of the chat view, "" when there is
+// nothing to show.
+//
+// While this terminal has a helper, or has asked for one, the strip starts
+// with what the helper last confirmed (voiceSelf): the destination, which
+// browsing channels never changes, the voice connection, capture and
+// transmission, mute, deafen and the talk key. Then comes who is in the room
+// of the channel on screen, from presence, labelled with that channel when it
+// is not the destination.
+//
+// Otherwise it starts with what presence knows of the person here in the
+// channel on screen, and only that: they may be in another channel's room,
+// which this channel's presence does not show, and while presence is down
+// nothing is known. With no helper running, in a room means from another
+// client. Then comes the voice line: who is in the channel's room.
 func (m Model) voiceStrip(width int) string {
+	if mine := m.voiceSelf(); mine != "" {
+		label := "#" + sanitize(m.current()) + " room: "
+		if m.vc.voiceActive() && m.vc.status.Channel == m.current() {
+			label = "room: "
+		}
+		const prefix = "voice: "
+		room := width - cellWidth(mine) - 3 - cellWidth(label)
+		if room >= 8 {
+			if body := strings.TrimPrefix(m.voiceLine(room+len(prefix)), prefix); body != "" {
+				mine += " · " + label + body
+			}
+		}
+		return fitCells(mine, width)
+	}
 	if m.voiceLine(width) == "" {
 		return ""
 	}
@@ -343,6 +367,10 @@ func (m Model) voiceStrip(width int) string {
 	prefix := channel + " "
 	if in, talking, known := m.selfInVoice(); known {
 		mine := "you: not in " + channel + " voice"
+		if m.vc.owner != nil {
+			// This terminal can join: say how, instead.
+			mine = "voice off · /voice join"
+		}
 		if in {
 			mine = "you: in " + channel + " voice from another client"
 			if talking {
