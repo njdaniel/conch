@@ -58,6 +58,10 @@ interface Stub {
   remote: Map<string, { trackPublications: Map<string, StubRemotePub> }>;
   // When set, an unpublish never answers (a hung signalling connection).
   unpublishHangs: boolean;
+  // Issue #525: whether LiveKit has told this connection that the share's
+  // sources are granted. Without it the SDK refuses a share's publish at
+  // once, as the real one does.
+  shareGranted: boolean;
 }
 interface StubScreenTrack {
   source: string;
@@ -101,10 +105,18 @@ const state = vi.hoisted((): Stub => {
     published: [],
     remote: new Map(),
     unpublishHangs: false,
+    shareGranted: true,
   };
 });
 
 vi.mock('livekit-client', () => {
+  class PublishTrackError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  }
   const pub = (): StubPub => ({
     source: 'microphone',
     mute: () => (state.calls.push('mute'), Promise.resolve()),
@@ -140,6 +152,10 @@ vi.mock('livekit-client', () => {
       identity: 'p7',
       publishTrack: (track: { source?: string }, options?: { source?: string }) => {
         if (options?.source !== undefined && options.source !== 'microphone') {
+          if (!state.shareGranted) {
+            state.calls.push(`refused ${options.source}`);
+            return Promise.reject(new PublishTrackError('failed to publish track, insufficient permissions', 403));
+          }
           state.calls.push(`publish ${options.source}`);
           state.published.push({ source: options.source, options });
           return Promise.resolve({ source: track.source });
@@ -196,7 +212,9 @@ vi.mock('livekit-client', () => {
       LocalTrackPublished: 'ltp',
       LocalTrackUnpublished: 'ltu',
       TrackUnmuted: 'tum',
+      ParticipantPermissionsChanged: 'ppc',
     },
+    PublishTrackError,
     DisconnectReason: { ROOM_DELETED: 5, PARTICIPANT_REMOVED: 4, DUPLICATE_IDENTITY: 2, SERVER_SHUTDOWN: 3 },
     LogLevel: { warn: 3 },
     LoggerNames: { Default: 'livekit' },
@@ -247,7 +265,7 @@ vi.mock('livekit-client', () => {
   };
 });
 
-import { newLiveKitRoom, principalOf, sdkLog } from './sdk';
+import { grantWait, newLiveKitRoom, principalOf, sdkLog } from './sdk';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
@@ -280,6 +298,7 @@ beforeEach(() => {
   state.published.length = 0;
   state.remote.clear();
   state.unpublishHangs = false;
+  state.shareGranted = true;
   vi.stubGlobal(
     'AudioContext',
     class {
@@ -722,6 +741,93 @@ describe('sharing a screen', () => {
     expect(() => {
       room.adoptScreen({ audio: false, live: () => true, onEnded: null, stop: () => undefined });
     }).toThrow();
+  });
+
+  // Issue #525. conchd answers a claim once LiveKit has granted the share's
+  // sources, and LiveKit tells the connection on a socket of its own, which
+  // can be read after conchd's answer. A resume publishes straight after its
+  // claim, with no picker between: on a slow machine the SDK, still holding
+  // the join grant, refused the publish and the share ended as failed.
+  async function grantedLate() {
+    state.shareGranted = true;
+    const old = await connected();
+    await old.pickScreen('motion');
+    await old.publishScreen();
+    const kept = old.keepScreen();
+    await old.close();
+    if (kept === null) throw new Error('nothing kept');
+    const next = await connected();
+    next.adoptScreen(kept);
+    state.shareGranted = false;
+    state.published.length = 0;
+    const outcome = { value: 'pending' };
+    void next.publishScreen().then(
+      () => {
+        outcome.value = 'published';
+      },
+      (err: unknown) => {
+        outcome.value = err instanceof Error ? err.message : String(err);
+      },
+    );
+    await settle();
+    return { next, outcome };
+  }
+  const grant = () => {
+    state.shareGranted = true;
+    state.handlers.get('ppc')?.(undefined, state.room?.localParticipant);
+  };
+
+  it("publishes a resumed share once LiveKit has told this connection of the claim's grant, not before", async () => {
+    vi.useFakeTimers();
+    try {
+      const { outcome } = await grantedLate();
+      expect(outcome.value).toBe('pending');
+      expect(state.published).toEqual([]);
+      // Another participant's permission changing is not the grant.
+      state.handlers.get('ppc')?.(undefined, { identity: 'p8' });
+      await settle();
+      expect(outcome.value).toBe('pending');
+      vi.advanceTimersByTime(grantWait - 1);
+      grant();
+      await settle();
+      expect(outcome.value).toBe('published');
+      expect(state.published.map((p) => p.source)).toEqual(['screen_share', 'screen_share_audio']);
+      expect(state.screenTracks.map((t) => t.stopped)).toEqual([0, 0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a grant that never comes fails the publish in time, and a Leave ends the wait at once', async () => {
+    vi.useFakeTimers();
+    try {
+      const late = await grantedLate();
+      vi.advanceTimersByTime(grantWait - 1);
+      await settle();
+      expect(late.outcome.value).toBe('pending');
+      vi.advanceTimersByTime(1);
+      await settle();
+      expect(late.outcome.value).toBe('failed to publish track, insufficient permissions');
+      expect(state.published).toEqual([]);
+
+      const left = await grantedLate();
+      await left.next.close();
+      await settle();
+      expect(left.outcome.value).toBe('voice connection closed');
+      expect(state.published).toEqual([]);
+
+      // Stopped while it waited: the wait ends, and a grant after it
+      // publishes nothing.
+      const stopped = await grantedLate();
+      await stopped.next.stopScreen();
+      await settle();
+      expect(stopped.outcome.value).toBe('failed to publish track, insufficient permissions');
+      grant();
+      await settle();
+      expect(state.published).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
