@@ -92,7 +92,7 @@ Use the [bug report form](https://github.com/njdaniel/conch/issues/new/choose). 
 
 ## Reporting a security vulnerability
 
-**There is no private route for security reports yet**: the repository has no security policy. Until one is published, please do not put the details of a vulnerability in a public issue, pull request or discussion. Open an issue that says only that you have a security report and asks the maintainer for a private way to send it.
+Report it privately, through GitHub's **Report a vulnerability** button on the [Security tab](https://github.com/njdaniel/conch/security), not in a public issue, pull request or discussion. [SECURITY.md](SECURITY.md) says what is in scope, which versions are supported and what happens after a report.
 
 ## Licence
 
