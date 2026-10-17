@@ -509,9 +509,9 @@ type hubWatch struct {
 
 func newHubWatch(f *scopedFixture, principal int64) *hubWatch {
 	return &hubWatch{
-		v2: f.srv.hub.SubscribeV2(f.ops.ID, principal, 16),
-		v1: f.srv.hub.SubscribeV1(f.ops.ID, principal, 16),
-		v0: f.srv.hub.Subscribe(f.ops.ID, principal, 16),
+		v2: f.srv.hub.SubscribeV2(f.ops.ID, principal, 0, 16),
+		v1: f.srv.hub.SubscribeV1(f.ops.ID, principal, 0, 16),
+		v0: f.srv.hub.Subscribe(f.ops.ID, principal, 0, 16),
 	}
 }
 

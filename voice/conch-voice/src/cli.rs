@@ -14,8 +14,10 @@
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
 //! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`), the
-//! default. The login token is `CONCH_TOKEN`, or else what `conch login` stored for the
-//! server; this program never writes that file.
+//! default. For the server, the stored login comes before the default, as in `conch`: when
+//! exactly one login is stored and `CONCH_TOKEN` is not set, its server is used. The login
+//! token is `CONCH_TOKEN`, or else what `conch login` stored for the server; this program
+//! never writes that file.
 
 use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
@@ -23,15 +25,23 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::{Arg, ArgAction, Command};
-use conch_voice_api::{Secret, ServerAddress, TOKEN_ENV, default_config_dir, resolve_token};
+use conch_voice_api::{
+    Error as ApiError, Secret, ServerAddress, TOKEN_ENV, default_config_dir, resolve_token,
+    stored_servers,
+};
 use conch_voice_audio::{FRAME_MS, SAMPLE_RATE, SignalMeter};
-use conch_voice_control::{Config, ConfigOverrides, KeyBindings};
+use conch_voice_control::{Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings};
 use log::LevelFilter;
 
 use crate::error::Error;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
+
+/// How to name a server, said when the default was used while logins are stored for
+/// others.
+pub const CHOOSE_A_SERVER: &str =
+    "choose one with --server <url>, `server` in voice.toml, or CONCH_SERVER=<url>";
 
 /// The environment variable that moves the configuration directory, as for `conch`.
 pub const CONFIG_DIR_ENV: &str = "CONCH_CONFIG_DIR";
@@ -174,7 +184,7 @@ pub fn command() -> Command {
             Arg::new("server")
                 .long("server")
                 .value_name("URL")
-                .help("The address of conchd [default: $CONCH_SERVER, then the configuration file, then http://127.0.0.1:8080]"),
+                .help("The address of conchd [default: $CONCH_SERVER, then the configuration file, then the server of the stored login when exactly one is stored and CONCH_TOKEN is not set, then http://127.0.0.1:8080]"),
         )
         .arg(
             Arg::new("json")
@@ -244,7 +254,9 @@ pub fn command() -> Command {
              `conch login` wrote, used exactly as given (no `conch` is added); it must be an \
              absolute path. Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. \
              Use it to run two logins on one machine; `conch` reads the same variable.\n  \
-             CONCH_SERVER      The address of conchd.\n  \
+             CONCH_SERVER      The address of conchd. Without it, --server or `server` in \
+             voice.toml, the server of the stored login when exactly one is stored and \
+             CONCH_TOKEN is not set, else http://127.0.0.1:8080.\n  \
              CONCH_TOKEN       A login token, used instead of the stored one.",
         )
         .version(version)
@@ -350,6 +362,9 @@ pub struct Resolved {
     pub channel: String,
     /// The configuration, with every layer applied.
     pub config: Config,
+    /// When the server is the default, nothing answers there, and logins are stored for
+    /// other servers: what to add to the error, naming them ([`stored_elsewhere`]).
+    pub unreachable_note: Option<String>,
 }
 
 /// Reads `voice.toml`: a missing file is the default configuration. The file's `server`
@@ -432,18 +447,67 @@ pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, E
         .clone()
         .filter(|channel| !channel.is_empty())
         .ok_or(Error::NoChannel)?;
-    let server = ServerAddress::parse(config.server_or_default())?;
+    // With CONCH_TOKEN set the stored login is not the one in use, so it chooses nothing:
+    // its server never gets that token. White space alone is not a token, as for
+    // resolve_token.
+    let token_set = environment
+        .token
+        .as_ref()
+        .is_some_and(|token| !token.expose().trim().is_empty());
+    let stored = stored_servers(config_dir.as_deref());
+    let only_login = match stored.as_slice() {
+        [only] if !token_set => Some(only.key()),
+        _ => None,
+    };
+    let server = ServerAddress::parse(config.server_or(only_login))?;
+    let elsewhere = stored_elsewhere(&server, environment, &stored);
     let token = resolve_token(
         environment.token.as_ref().map(Secret::expose),
         &server,
         config_dir.as_deref(),
-    )?;
+    )
+    .map_err(|error| match (error, &elsewhere) {
+        (error @ ApiError::NotSignedIn { .. }, Some(note)) => Error::DefaultServer {
+            error,
+            note: note.clone(),
+        },
+        (error, _) => Error::Api(error),
+    })?;
+    let unreachable_note =
+        elsewhere.map(|note| format!("nothing answered at {}; {note}", server.key()));
     Ok(Resolved {
         server,
         token,
         channel,
         config,
+        unreachable_note,
     })
+}
+
+/// When `server` is the default and logins are stored for other servers, the note that
+/// names them all and says how to choose one; otherwise `None`. The rule of
+/// `explainUnreachable` in `internal/cli/command.go`: not when `CONCH_SERVER` is set, which
+/// chose deliberately, and not when the only login is the default's own. A server named
+/// on the command line or in `voice.toml` that is the default gets the note too: it is as
+/// true then.
+#[must_use]
+pub fn stored_elsewhere(
+    server: &ServerAddress,
+    environment: &Environment,
+    stored: &[ServerAddress],
+) -> Option<String> {
+    if environment.server.is_some() {
+        return None;
+    }
+    let default = ServerAddress::parse(DEFAULT_SERVER).ok()?;
+    if server.key() != default.key() || stored.iter().all(|login| login.key() == server.key()) {
+        return None;
+    }
+    let names: Vec<&str> = stored.iter().map(ServerAddress::key).collect();
+    Some(format!(
+        "logins are stored for {}: {CHOOSE_A_SERVER}",
+        names.join(", ")
+    ))
 }
 
 /// The device to watch and the keys to look for on it, if `join` is to watch one at all:
@@ -845,6 +909,240 @@ mod tests {
         std::fs::remove_file(&credentials).unwrap();
         let error = resolve(&join(&["general"]), &environment).unwrap_err();
         assert!(error.to_string().contains("conch login"), "{error}");
+    }
+
+    /// A credentials file in `dir` holding a login for each key, with the token
+    /// [`fake_token`] gives it.
+    fn store_logins(dir: &std::path::Path, keys: &[&str]) {
+        let logins: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|key| {
+                (
+                    (*key).to_owned(),
+                    serde_json::json!({"token": fake_token(key)}),
+                )
+            })
+            .collect();
+        let path = dir.join("credentials.json");
+        std::fs::write(&path, serde_json::Value::Object(logins).to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn fake_token(key: &str) -> String {
+        format!("conch_FAKE_token_for_{key}")
+    }
+
+    /// The order the server is chosen in (issue #523), which is `conch`'s (#522) with
+    /// `voice.toml` between `CONCH_SERVER` and the stored login: the command line,
+    /// `CONCH_SERVER`, the file, the only stored login's server unless `CONCH_TOKEN` is set,
+    /// then the default. And when the default is used while logins are stored for other
+    /// servers, what is said names them.
+    #[test]
+    fn the_server_is_chosen_in_conchs_order_and_a_default_with_other_logins_names_them() {
+        const DEFAULT: &str = "http://127.0.0.1:8080";
+        const A: &str = "http://a.test:1";
+        const B: &str = "http://b.test:2";
+        const C: &str = "http://c.test:3";
+        const ENV_TOKEN: &str = "conch_FAKE_token_from_env";
+        struct Case {
+            name: &'static str,
+            logins: &'static [&'static str],
+            flag: Option<&'static str>,
+            env: Option<&'static str>,
+            file: Option<&'static str>,
+            /// The value of CONCH_TOKEN.
+            token: Option<&'static str>,
+            /// The server used.
+            want: &'static str,
+            /// Whether there is no login for it, so that `resolve` fails.
+            not_signed_in: bool,
+            /// The servers the note names; empty for no note.
+            named: &'static [&'static str],
+        }
+        let case = |name| Case {
+            name,
+            logins: &[],
+            flag: None,
+            env: None,
+            file: None,
+            token: None,
+            want: DEFAULT,
+            not_signed_in: false,
+            named: &[],
+        };
+        let cases = [
+            Case {
+                not_signed_in: true,
+                ..case("nothing anywhere")
+            },
+            Case {
+                token: Some(ENV_TOKEN),
+                ..case("nothing but CONCH_TOKEN")
+            },
+            Case {
+                logins: &[A],
+                flag: Some(B),
+                token: Some(ENV_TOKEN),
+                want: B,
+                ..case("the command line")
+            },
+            Case {
+                logins: &[A],
+                env: Some(B),
+                token: Some(ENV_TOKEN),
+                want: B,
+                ..case("CONCH_SERVER")
+            },
+            Case {
+                logins: &[A],
+                flag: Some(C),
+                env: Some(B),
+                file: Some(B),
+                token: Some(ENV_TOKEN),
+                want: C,
+                ..case("the command line over CONCH_SERVER and the file")
+            },
+            Case {
+                logins: &[A],
+                env: Some(C),
+                file: Some(B),
+                token: Some(ENV_TOKEN),
+                want: C,
+                ..case("CONCH_SERVER over the file")
+            },
+            Case {
+                logins: &[A],
+                file: Some(B),
+                token: Some(ENV_TOKEN),
+                want: B,
+                ..case("the file over the only login")
+            },
+            Case {
+                logins: &[A],
+                want: A,
+                ..case("the only login")
+            },
+            Case {
+                logins: &[A],
+                token: Some(" \t\n"),
+                want: A,
+                ..case("the only login, with CONCH_TOKEN only white space")
+            },
+            Case {
+                logins: &[A],
+                token: Some(ENV_TOKEN),
+                named: &[A],
+                ..case("the only login, with CONCH_TOKEN: not chosen, and named")
+            },
+            Case {
+                logins: &[B, A],
+                not_signed_in: true,
+                named: &[A, B],
+                ..case("several logins: none chosen, all named")
+            },
+            Case {
+                logins: &[B, A],
+                token: Some(ENV_TOKEN),
+                named: &[A, B],
+                ..case("several logins, with CONCH_TOKEN")
+            },
+            Case {
+                logins: &[A, DEFAULT],
+                named: &[DEFAULT, A],
+                ..case("the default's own login among others")
+            },
+            Case {
+                logins: &[DEFAULT],
+                ..case("only the default's login")
+            },
+            Case {
+                logins: &[A, B],
+                flag: Some(B),
+                want: B,
+                ..case("several logins, the command line")
+            },
+            Case {
+                logins: &[A, B],
+                env: Some(A),
+                want: A,
+                ..case("several logins, CONCH_SERVER")
+            },
+            Case {
+                logins: &[A, B],
+                env: Some(DEFAULT),
+                token: Some(ENV_TOKEN),
+                ..case("several logins, CONCH_SERVER naming the default: chosen deliberately")
+            },
+            Case {
+                logins: &[A, B],
+                flag: Some(DEFAULT),
+                token: Some(ENV_TOKEN),
+                named: &[A, B],
+                ..case("several logins, the command line naming the default: as conch does")
+            },
+            Case {
+                logins: &[
+                    A,
+                    "not a url",
+                    "HTTP://B.test:2/",
+                    "http://\u{130}.test:4",
+                    "ftp://c.test",
+                ],
+                want: A,
+                ..case("keys conch login would not write are no logins")
+            },
+        ];
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            store_logins(dir.path(), case.logins);
+            if let Some(file) = case.file {
+                write_config(dir.path(), &format!("server = {file:?}\n"));
+            }
+            let mut environment = environment(dir.path());
+            environment.server = case.env.map(str::to_owned);
+            environment.token = case.token.map(Secret::new);
+            let mut line = vec!["general"];
+            if let Some(flag) = case.flag {
+                line.extend(["--server", flag]);
+            }
+            let note = (!case.named.is_empty()).then(|| {
+                format!(
+                    "logins are stored for {}: choose one with --server <url>, `server` in \
+                     voice.toml, or CONCH_SERVER=<url>",
+                    case.named.join(", ")
+                )
+            });
+            let name = case.name;
+
+            let result = resolve(&join(&line), &environment);
+            if case.not_signed_in {
+                let error = result.unwrap_err();
+                let mut want = format!("not signed in to {}: run 'conch login'", case.want);
+                match (&error, &note) {
+                    (Error::DefaultServer { .. }, Some(note)) => {
+                        want.push_str(&format!(" ({note})"));
+                    }
+                    (Error::Api(conch_voice_api::Error::NotSignedIn { .. }), None) => {}
+                    _ => panic!("{name}: {error:?}"),
+                }
+                assert_eq!(error.to_string(), want, "{name}");
+                assert_eq!(error.exit_code(), 1, "{name}");
+                continue;
+            }
+            let resolved = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(resolved.server.key(), case.want, "{name}");
+            let token = case
+                .token
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map_or_else(|| fake_token(case.want), str::to_owned);
+            assert_eq!(resolved.token.expose(), token, "{name}");
+            assert_eq!(
+                resolved.unreachable_note,
+                note.map(|note| format!("nothing answered at {DEFAULT}; {note}")),
+                "{name}"
+            );
+        }
     }
 
     #[test]

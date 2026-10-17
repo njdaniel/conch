@@ -59,10 +59,10 @@ func TestDropPrincipal(t *testing.T) {
 			v1 := map[int]*SubscriptionV1{}
 			for i, s := range tt.subs {
 				if s.v1 {
-					v1[i] = h.SubscribeV1(s.channel, s.principal, 4)
+					v1[i] = h.SubscribeV1(s.channel, s.principal, 0, 4)
 					defer v1[i].Cancel()
 				} else {
-					v0[i] = h.Subscribe(s.channel, s.principal, 4)
+					v0[i] = h.Subscribe(s.channel, s.principal, 0, 4)
 					defer v0[i].Cancel()
 				}
 			}
@@ -94,8 +94,8 @@ func TestDropPrincipal(t *testing.T) {
 func TestDropPrincipalRacesBroadcast(t *testing.T) {
 	for range 50 {
 		h := New()
-		sub := h.Subscribe(1, 7, 1000)
-		subV1 := h.SubscribeV1(1, 7, 1000)
+		sub := h.Subscribe(1, 7, 0, 1000)
+		subV1 := h.SubscribeV1(1, 7, 0, 1000)
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(1)
