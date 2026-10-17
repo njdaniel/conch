@@ -61,10 +61,9 @@ func runTUI(ctx context.Context) error {
 	// and cannot stop it half-way with the terminal still raw.
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM)
 	defer stop()
-	server := os.Getenv("CONCH_SERVER")
-	if server == "" {
-		server = "http://127.0.0.1:8080"
-	}
+	// The same rule as every subcommand without --server: CONCH_SERVER, then
+	// the only stored login's server, then the default.
+	server := cli.DefaultServer()
 	client, authenticated, err := cli.NewAuthClient(server)
 	if err != nil {
 		return err
