@@ -41,6 +41,13 @@
 //
 // Two subcommands are not part of the check: fetch-lk and loadtest are the Go
 // half of scripts/alpha-loadtest.sh (issue #448, loadtest.go).
+//
+// A third runs something else, and only when asked: `go run ./e2e/voice
+// managed` is the opt-in check of voice inside the TUI (issue #542,
+// managed.go). It starts no degraded half and none of the scenarios above:
+// LiveKit, conchd, real `conch` TUIs on pseudo-terminals and the conch-voice
+// helpers they start themselves, with tones for microphones and a named pipe
+// for the talk key.
 package main
 
 import (
@@ -66,12 +73,16 @@ func main() {
 			os.Exit(fetchLKMain(os.Args[2:]))
 		case "loadtest":
 			os.Exit(loadtestMain(os.Args[2:]))
+		case "managed":
+			os.Exit(realMain(runManaged))
 		}
 	}
-	os.Exit(realMain())
+	os.Exit(realMain(run))
 }
 
-func realMain() int {
+// realMain runs one check (run, or runManaged) with this program's harness,
+// signal handling and teardown.
+func realMain(check func(context.Context, *harness) (string, error)) int {
 	h, err := newHarness()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "voice-check: FAIL:", err)
@@ -100,7 +111,7 @@ func realMain() int {
 	}()
 
 	start := time.Now()
-	skipped, err := guardedRun(h)
+	skipped, err := guardedRun(h, check)
 	h.teardown()
 	switch {
 	case stopCtx.Err() != nil:
@@ -119,13 +130,13 @@ func realMain() int {
 
 // guardedRun is run and the final scan, turning a panic into a failure so
 // that realMain still tears everything down.
-func guardedRun(h *harness) (skipped string, err error) {
+func guardedRun(h *harness, check func(context.Context, *harness) (string, error)) (skipped string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
-	skipped, err = run(stopCtx, h)
+	skipped, err = check(stopCtx, h)
 	if err == nil {
 		err = h.scanAll()
 	}

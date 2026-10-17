@@ -75,7 +75,7 @@ func TestRunAgentsViewShowsRoster(t *testing.T) {
 	defer func() { _ = keyboard.Close() }()
 	out := &screen{}
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, keys, out) }()
+	go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, nil, keys, out) }()
 
 	// The members line, in the channels view.
 	if !out.waitFor("online: alice · agents: worker-test ●", 10*time.Second) {
@@ -131,7 +131,7 @@ func TestRunEndsItsSession(t *testing.T) {
 			defer func() { _ = keyboard.Close() }()
 			out := &screen{}
 			done := make(chan error, 1)
-			go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, keys, out) }()
+			go func() { done <- Run(ctx, api, 0, false, []string{"general"}, false, nil, keys, out) }()
 			if !out.waitFor("esc quit", 5*time.Second) {
 				t.Fatalf("the TUI never drew its key hints; output %q", out.String())
 			}

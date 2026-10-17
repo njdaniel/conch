@@ -29,7 +29,7 @@ func TestRunMouseReporting(t *testing.T) {
 			defer func() { _ = keyboard.Close() }()
 			out := &screen{}
 			done := make(chan error, 1)
-			go func() { done <- Run(ctx, stubAPI{}, 1, false, []string{"general"}, tt.mouse, keys, out) }()
+			go func() { done <- Run(ctx, stubAPI{}, 1, false, []string{"general"}, tt.mouse, nil, keys, out) }()
 			if !out.waitFor("esc quit", 5*time.Second) {
 				t.Fatalf("the TUI never drew its key hints; output %q", out.String())
 			}

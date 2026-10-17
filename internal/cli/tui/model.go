@@ -313,6 +313,12 @@ type Model struct {
 	// its first line on screen when it is longer than the pane.
 	help    bool
 	helpTop int
+	// helpTopic is what the help overlay shows: the keys of the view, or
+	// the voice pages that /voice help and /voice status open.
+	helpTopic helpTopic
+	// vc is voice: the supervisor of the conch-voice helper this TUI owns,
+	// and what it last said (voicectl.go).
+	vc voiceCtl
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -424,7 +430,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = next
 		}
 		if m.opensHelp(msg.String()) {
-			m.help, m.helpTop = true, 0
+			m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
 			return m, nil
 		}
 		if m.mode == modeRun {
@@ -633,6 +639,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.voiceEnded(msg)
 	case voiceRetryDue:
 		return m.voiceRetry(msg)
+	case voiceStatusMsg:
+		return m.voiceStatus(msg)
+	case voiceDone:
+		return m.voiceDone(msg)
+	case voicePage:
+		return m.openVoicePage(msg), nil
 	case sessionStarted:
 		return m.sessionStarted(msg)
 	case eventsRosterReceived:
@@ -665,12 +677,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.whoErr = msg.err
 			m.setStatus(modeChannels, whoErrText(msg.err))
+			if errors.Is(msg.err, cli.ErrUnauthenticated) {
+				// Signed out: the login no longer works, so voice stops.
+				return m.voiceSignedOut()
+			}
 			return m, nil
 		}
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
 		m.setStatus(modeChannels, "signed in as "+sanitize(msg.who.Name))
+		// A helper started for another account would speak as them.
+		return m.voiceIdentity(msg.who.ID)
 	case approvalsLoaded:
 		if msg.err != nil {
 			m.setStatus(modeInbox, msg.err.Error())
@@ -867,11 +885,13 @@ func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 	selected := msg.channel == m.current()
 	if errors.Is(msg.err, cli.ErrUnauthenticated) {
 		// Retrying cannot fix a missing login; the user must act, and
-		// re-selecting the channel will try again afterwards.
+		// re-selecting the channel will try again afterwards. Voice, which
+		// rests on the same login, stops.
 		if selected && m.notice == "" {
 			m.setStatus(modeChannels, msg.err.Error())
 		}
-		return m, wait
+		m, stop := m.voiceSignedOut()
+		return m, tea.Batch(wait, stop)
 	}
 	if msg.lived >= maxResubscribeDelay {
 		delete(m.backoff, msg.channel)
@@ -1531,7 +1551,7 @@ func clipTail(value string, width int) string {
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1564,8 +1584,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.whisperCommand(rest)
 	case "/help":
 		m.input = ""
-		m.help, m.helpTop = true, 0
+		m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
 		return m, nil
+	case "/voice":
+		return m.voiceCommand(rest)
 	default:
 		m.setStatus(modeChannels, fmt.Sprintf("unknown command %q; %s", sanitize(name), slashHint))
 		return m, nil

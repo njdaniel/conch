@@ -165,6 +165,9 @@ type Supervisor struct {
 	muted, deafened bool
 	diag            []string
 	last            exitInfo
+	// path is the helper last found and tried, links resolved; "" before
+	// the first.
+	path string
 }
 
 // New makes a supervisor for one signed-in profile. It starts nothing.
@@ -183,12 +186,17 @@ func New(p Profile, o Options) *Supervisor {
 // Join starts one helper for channel and returns once it has accepted the
 // start, within the hello and ack bounds. Capture can begin only after that,
 // and only by the helper's own rules. With a helper running or stopping it is
-// ErrBusy.
+// ErrBusy; one that has already ended (its final state read, or its process
+// gone) is first waited for until it has been reaped, within ctx.
 func (s *Supervisor) Join(ctx context.Context, channel string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
+	if err := s.awaitEndedLocked(ctx); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	switch {
 	case s.closed:
 		s.mu.Unlock()
@@ -315,6 +323,7 @@ func (s *Supervisor) launchLocked(channel string) (*run, error) {
 		}
 		return fail(newError(ReasonHelperNotFound, err.Error(), err))
 	}
+	s.path = path
 	r, err := s.spawnLocked(path, channel)
 	if err != nil {
 		return fail(newError(ReasonSpawnFailed, "conch-voice could not be started: "+err.Error(), err))
@@ -348,9 +357,14 @@ func (s *Supervisor) joinErrLocked(r *run) error {
 
 // Retry joins the last channel again after a failure that a new attempt
 // could fix, with the mute and deafen last confirmed. It is a new process
-// with a new handshake.
+// with a new handshake. Like Join, it first waits, within ctx, for a failed
+// helper that has ended to be reaped.
 func (s *Supervisor) Retry(ctx context.Context) error {
 	s.mu.Lock()
+	if err := s.awaitEndedLocked(ctx); err != nil {
+		s.mu.Unlock()
+		return err
+	}
 	switch {
 	case s.closed:
 		s.mu.Unlock()
@@ -365,6 +379,27 @@ func (s *Supervisor) Retry(ctx context.Context) error {
 	channel := s.lastChannel
 	s.mu.Unlock()
 	return s.Join(ctx, channel)
+}
+
+// awaitEndedLocked waits, with s.mu held and given up while waiting, for a
+// helper that has already ended to be reaped: one whose final state has been
+// read or whose process has exited, and which is only having its pipes
+// drained (at most drainGrace) or, if it hangs after its final state, the stop
+// escalation. A person who joins or retries as a failure is shown should not
+// be told that voice is busy. A helper still running, or one being stopped,
+// is not waited for: Join and Retry are ErrBusy for it. ctx bounds the wait.
+func (s *Supervisor) awaitEndedLocked(ctx context.Context) error {
+	for r := s.cur; r != nil && (r.waited || r.tr.final); r = s.cur {
+		s.mu.Unlock()
+		select {
+		case <-r.reaped:
+		case <-ctx.Done():
+			s.mu.Lock()
+			return ctx.Err()
+		}
+		s.mu.Lock()
+	}
+	return nil
 }
 
 // Leave stops the helper (design note §8.5) and returns once it has been
@@ -485,6 +520,16 @@ func (s *Supervisor) Diagnostics() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.diag)
+}
+
+// HelperPath is the helper this supervisor last found and tried to start, its
+// links resolved: what ran, or what could not be started, for a status view.
+// It is "" until a helper has been found; one that was not found or not
+// trusted leaves it as it was.
+func (s *Supervisor) HelperPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.path
 }
 
 // publishLocked offers the status to Updates, replacing one not yet read.

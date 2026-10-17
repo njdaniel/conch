@@ -1118,3 +1118,90 @@ func TestStartFailuresKeepTheTokenOut(t *testing.T) {
 		})
 	}
 }
+
+// TestHelperPath: the path a status view shows is the helper that was found
+// and started, links resolved, and a later helper that was not found leaves it
+// as it was.
+func TestHelperPath(t *testing.T) {
+	s := newSupervisor(t, storedProfile(t), Timings{})
+	if got := s.HelperPath(); got != "" {
+		t.Fatalf("before any join: %q, want none", got)
+	}
+	ctx := ctxFor(t)
+	if err := s.Join(ctx, testChannel); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(fakePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.HelperPath(); got != want {
+		t.Errorf("while running: %q, want %q", got, want)
+	}
+	if err := s.Leave(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.HelperPath(); got != want {
+		t.Errorf("after leaving: %q, want %q", got, want)
+	}
+	s.opts.HelperPath = filepath.Join(privateDir(t), "missing")
+	if err := s.Join(ctx, testChannel); reasonOf(err) != ReasonHelperNotFound {
+		t.Fatalf("join with a missing helper: %v", err)
+	}
+	if got := s.HelperPath(); got != want {
+		t.Errorf("after a helper was not found: %q, want %q", got, want)
+	}
+}
+
+// TestRetryWaitsForAnEndedHelper: a helper that has written its final state
+// and is only being reaped does not make Retry or Join busy; they wait for the
+// reap, within their context. One still running or being stopped stays
+// ErrBusy (TestJoinIsBusyUntilReaped).
+func TestRetryWaitsForAnEndedHelper(t *testing.T) {
+	failedButLingering := func(t *testing.T, linger string) (*Supervisor, context.Context) {
+		t.Helper()
+		s := newSupervisor(t, storedProfile(t), Timings{}, "-fail-on", "get_state:duplicate_identity", "-linger", linger)
+		ctx := ctxFor(t)
+		if err := s.Join(ctx, testChannel); err != nil {
+			t.Fatal(err)
+		}
+		// get_state is never answered: the fake fails instead, and the call
+		// returns only once the helper has been reaped.
+		go func() { _ = s.Refresh(ctx) }()
+		waitFor(t, s, "the failure", func(st Status) bool { return st.Phase == PhaseFailed })
+		if s.current() == nil {
+			t.Fatal("the failed helper was reaped before the test could try; lengthen -linger")
+		}
+		return s, ctx
+	}
+	tests := []struct {
+		name string
+		call func(*Supervisor, context.Context) error
+	}{
+		{"retry", (*Supervisor).Retry},
+		{"join", func(s *Supervisor, ctx context.Context) error { return s.Join(ctx, testChannel) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, ctx := failedButLingering(t, "400ms")
+			if err := tt.call(s, ctx); err != nil {
+				t.Fatalf("%s while the ended helper was being reaped: %v", tt.name, err)
+			}
+			if st := s.Status(); st.Gen != 2 {
+				t.Fatalf("status %+v, want the second helper", st)
+			}
+			if err := s.Leave(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("the wait is bounded by the context", func(t *testing.T) {
+		s, ctx := failedButLingering(t, "3s")
+		short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		if err := s.Retry(short); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("retry: %v, want the context's error", err)
+		}
+		waitReaped(t, s)
+	})
+}

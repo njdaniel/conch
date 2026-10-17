@@ -15,8 +15,27 @@ import (
 // helpEntry is one line of the help: the keys and what they do.
 type helpEntry struct{ keys, does string }
 
+// helpTopic is what the help overlay shows.
+type helpTopic int
+
+const (
+	// topicKeys is the key map of the view on screen: F1, ?, /help.
+	topicKeys helpTopic = iota
+	// topicVoice is the voice commands, the talk key and the SSH note:
+	// /voice help.
+	topicVoice
+	// topicVoiceStatus is everything voice is doing: /voice status.
+	topicVoiceStatus
+)
+
 // helpName is the name of the view the help is about, as the tabs name it.
 func (m Model) helpName() string {
+	switch m.helpTopic {
+	case topicVoice:
+		return "Voice"
+	case topicVoiceStatus:
+		return "Voice status"
+	}
 	switch m.mode {
 	case modeInbox:
 		return "Inbox"
@@ -35,6 +54,9 @@ func (m Model) helpName() string {
 // helpEntries is the key map of the view the user is in, the keys every view
 // shares last.
 func (m Model) helpEntries() []helpEntry {
+	if m.helpTopic == topicVoice {
+		return voiceHelpEntries()
+	}
 	var entries []helpEntry
 	switch m.mode {
 	case modeChannels:
@@ -44,6 +66,11 @@ func (m Model) helpEntries() []helpEntry {
 			{"/net NAME", "send plain messages to net NAME; /net alone: the whole channel"},
 			{"/w IDS TEXT", "whisper TEXT once to the principal ids IDS (3,5)"},
 			{"//TEXT", "send TEXT that starts with /"},
+		}
+		if m.vc.owner != nil {
+			entries = append(entries, helpEntry{"/voice …", "join, leave, mute and deafen voice; /voice help says how"})
+		}
+		entries = append(entries, []helpEntry{
 			{"/help", "this help"},
 			{"↑/↓", "focus on channels: open the channel above or below"},
 			{"", "focus on messages: scroll the history a line"},
@@ -51,7 +78,7 @@ func (m Model) helpEntries() []helpEntry {
 			{"pgup/pgdn", "scroll the history a page"},
 			{"home/end", "the oldest message held / back to the newest"},
 			{"tab", "Inbox"},
-		}
+		}...)
 	case modeInbox:
 		entries = []helpEntry{
 			{"↑/↓", "choose an approval"},
@@ -110,8 +137,15 @@ func (m Model) helpEntries() []helpEntry {
 // helpNotes are what the help says after the keys: the mouse, and what the
 // TUI does not do.
 func (m Model) helpNotes() []string {
+	if m.helpTopic == topicVoice {
+		return voiceHelpNotes()
+	}
 	notes := []string{"Mouse: a click selects or focuses and the wheel scrolls; a click never sends, decides or quits."}
-	if m.mode == modeChannels {
+	switch {
+	case m.mode != modeChannels:
+	case m.vc.owner != nil:
+		notes = append(notes, "Voice: /voice join joins the voice of the channel on screen, or of one you name; browsing a channel never moves your voice. You talk with the talk key conch-voice reads, never with a key typed here (/voice help).")
+	default:
 		notes = append(notes, "Voice is shown, not joined: browsing a channel never moves your voice, and this terminal has no talk key.")
 	}
 	return notes
@@ -149,6 +183,9 @@ func helpWidth(l layout, md mode) int {
 // helpBody is the whole help in lines of at most cols cells: the keys of the
 // view, then the notes.
 func (m Model) helpBody(cols int) []string {
+	if m.helpTopic == topicVoiceStatus {
+		return m.voiceStatusLines(cols)
+	}
 	entries := m.helpEntries()
 	keyW := 0
 	for _, e := range entries {
