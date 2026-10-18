@@ -40,10 +40,6 @@ import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
-// What is being shared: text and pictures, or video or a game. It becomes the
-// capture's content hint, which tells the encoder what to keep.
-export type ShareContent = 'detail' | 'motion';
-
 // What the browser's picker gave: the picture always, sound when the browser
 // offered it and the person ticked it.
 export interface Captured {
@@ -74,7 +70,7 @@ export interface KeptScreen {
 export interface ShareRoom {
   // Opens the browser's picker and keeps what was chosen, unpublished. Rejects
   // when nothing was chosen.
-  readonly pickScreen: (content: ShareContent) => Promise<Captured>;
+  readonly pickScreen: () => Promise<Captured>;
   // Publishes what was picked, with its simulcast layers.
   readonly publishScreen: () => Promise<void>;
   // Unpublishes and stops whatever was picked or published. Never rejects.
@@ -207,7 +203,7 @@ export class ScreenShare {
 
   // start claims the room's share, opens the picker, claims again and
   // publishes. It does nothing unless the last share is over.
-  async start(channel: string, room: ShareRoom, content: ShareContent): Promise<void> {
+  async start(channel: string, room: ShareRoom): Promise<void> {
     if (this.state.kind !== 'idle') return;
     const mine = ++this.attempt;
     this.channel = channel;
@@ -230,7 +226,7 @@ export class ScreenShare {
     this.set({ kind: 'picking' });
     let captured: Captured;
     try {
-      captured = await room.pickScreen(content);
+      captured = await room.pickScreen();
     } catch {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.

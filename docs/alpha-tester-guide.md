@@ -139,15 +139,13 @@ You can share your screen with the others in a channel's voice. One person share
 a time.
 
 1. Join voice (section 5).
-2. Under **Voice options**, **Share your screen**, choose **Text and pictures**
-   (documents, code, slides) or **Video or a game** (moving pictures).
-3. Read the note under the buttons: it says what sound your browser can share (see the
+2. Read the note under the buttons: it says what sound your browser can share (see the
    table below).
-4. Choose **Share screen**. Your browser asks what to share: a browser tab, a window or
+3. Choose **Share screen**. Your browser asks what to share: a browser tab, a window or
    the whole screen.
-5. To share sound, tick the browser's box for sharing audio (it may say "Share tab
+4. To share sound, tick the browser's box for sharing audio (it may say "Share tab
    audio" or "Share system audio").
-6. Afterwards, the page says whether sound is being shared.
+5. Afterwards, the page says whether sound is being shared.
 
 To stop, choose **Stop sharing**, or use the browser's own stop button. Leaving voice
 stops it too.

@@ -68,14 +68,31 @@ func TestMarkerScan(t *testing.T) {
 	}
 }
 
-// TestHeaderScan: response headers are scanned as text.
+// TestHeaderScan: response headers are scanned as text, but for a request id
+// that holds A's run tag by chance.
 func TestHeaderScan(t *testing.T) {
 	m := testMarkers()
-	if got := m.headerLeaks(http.Header{"Content-Type": {"application/json"}}, asked{}); len(got) != 0 {
-		t.Errorf("clean headers: leaks %q", got)
-	}
-	if got := m.headerLeaks(http.Header{"Content-Disposition": {`attachment; filename="alpha-3fa2c1-9be1c2d4.txt"`}}, asked{}); len(got) == 0 {
-		t.Error("a header with A's name: no leak found")
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+		leak   bool
+	}{
+		{"clean headers", http.Header{"Content-Type": {"application/json"}}, false},
+		{"A's name in a header", http.Header{"Content-Disposition": {`attachment; filename="alpha-3fa2c1-9be1c2d4.txt"`}}, true},
+		{"a request id holding A's run tag", http.Header{"X-Request-Id": {"0b3fa2c1d4e5f607"}}, false},
+		{"a request id holding A's run tag, among clean headers", http.Header{"Content-Type": {"application/json"}, "X-Request-Id": {"3fa2c10000000000"}}, false},
+		{"a request id beside A's name in another header", http.Header{"X-Request-Id": {"0b3fa2c1d4e5f607"}, "Content-Disposition": {`filename="alpha-3fa2c1-9be1c2d4.txt"`}}, true},
+		{"A's full name as the request id", http.Header{"X-Request-Id": {"alpha-3fa2c1-9be1c2d4"}}, true},
+		{"a request id one character too long", http.Header{"X-Request-Id": {"0b3fa2c1d4e5f6078"}}, true},
+		{"a second value that is not a request id", http.Header{"X-Request-Id": {"0b3fa2c1d4e5f607", "x-3fa2c1"}}, true},
+		{"a request id with A's text around it", http.Header{"X-Request-Id": {"0b3fa2c1d4e5f607 alpha-3fa2c1"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := m.headerLeaks(tc.header, asked{})
+			if leak := len(got) > 0; leak != tc.leak {
+				t.Errorf("leaks = %q, want a leak: %v", got, tc.leak)
+			}
+		})
 	}
 }
 
