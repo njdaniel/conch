@@ -311,9 +311,25 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Not transmitting');
       await a.page.mouse.up();
       await voice.getByRole('button', { name: 'Unmute' }).click();
-      await voice.getByRole('button', { name: 'Deafen' }).click();
-      await expect(voice).toContainText('Deafened');
-      await voice.getByRole('button', { name: 'Undeafen' }).click();
+
+      // Deafened is muted too (issue #591, F13): Mute shows pressed and is
+      // off, and Undeafen gives back the mute chosen before, in both orders.
+      const muteButton = (name: string) => voice.getByRole('button', { name, exact: true });
+      const deafenedMute = muteButton('Muted by deafen');
+      for (const muted of [false, true]) {
+        if (muted) await muteButton('Mute').click();
+        await voice.getByRole('button', { name: 'Deafen', exact: true }).click();
+        await expect(voice).toContainText('Deafened');
+        await expect(deafenedMute).toHaveAttribute('aria-pressed', 'true');
+        await expect(deafenedMute).toBeDisabled();
+        await voice.getByRole('button', { name: 'Undeafen', exact: true }).click();
+        await expect(deafenedMute).toHaveCount(0);
+        const after = muteButton(muted ? 'Unmute' : 'Mute');
+        await expect(after).toHaveAttribute('aria-pressed', String(muted));
+        await expect(after).toBeEnabled();
+      }
+      await muteButton('Unmute').click();
+      await expect(voice).not.toContainText('Muted.');
 
       // Open microphone, under Voice options (issue #536): the steady tone
       // opens it, and it is reported.
@@ -637,6 +653,57 @@ test.describe('with LiveKit', () => {
       await d.close();
       await a.context.close();
       await b.context.close();
+    }
+  });
+
+  // Issue #591 (F24): one person's credential open on two pages, one of them
+  // in voice. The other names them "You (on another device)" and says that
+  // joining there moves their voice; the one in voice names them "You", and
+  // never says "another device" of its own place, while it is in voice or
+  // after it leaves. A member of their own, made through the API: the
+  // others are in other tests' rooms.
+  test('a second page of someone in voice says they are in voice on another device', async ({ browser }) => {
+    const cy = await vw.addMember('cy');
+    const contexts = [await browser.newContext(), await browser.newContext()];
+    try {
+      const pages: Page[] = [];
+      for (const context of contexts) {
+        const page = await context.newPage();
+        await signIn(page, vw, cy.token, cy.name);
+        await channelButton(page, vw.channel).click();
+        pages.push(page);
+      }
+      const [first, second] = pages;
+      if (first === undefined || second === undefined) throw new Error('two pages');
+      // Whether the first page ever says "another device", from here on.
+      await first.evaluate(() => {
+        const w = window as unknown as { __elsewhere: boolean };
+        w.__elsewhere = false;
+        new MutationObserver(() => {
+          if (document.querySelector('[aria-label="Voice"]')?.textContent.includes('another device') === true) w.__elsewhere = true;
+        }).observe(document.body, { subtree: true, childList: true, characterData: true });
+      });
+      const here = voiceRegion(first);
+      const there = voiceRegion(second);
+      const said = 'You are in voice on another device. Joining here moves your voice to this device.';
+
+      await here.getByRole('button', { name: 'Join voice' }).click();
+      await expect(here).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(here.getByRole('list', { name: 'In voice' }).getByText('You', { exact: true })).toBeVisible();
+      await expect(there.getByRole('list', { name: 'In voice' }).getByText('You (on another device)', { exact: true })).toBeVisible();
+      await expect(there).toContainText(said);
+      await expect(there).toContainText('Not in voice');
+      // Nothing stops the join there.
+      await expect(there.getByRole('button', { name: 'Join voice in #voice-room', exact: true })).toBeEnabled();
+
+      await here.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(here).toContainText('Not in voice', { timeout: 10_000 });
+      await expect(there.getByRole('list', { name: 'In voice' }).getByText(/^You/)).toHaveCount(0);
+      await expect(there).not.toContainText(said);
+      await expect(here.getByRole('list', { name: 'In voice' }).getByText(/^You/)).toHaveCount(0);
+      expect(await first.evaluate(() => (window as unknown as { __elsewhere: boolean }).__elsewhere), 'the page in voice said "another device" of itself').toBe(false);
+    } finally {
+      for (const context of contexts) await context.close();
     }
   });
 
