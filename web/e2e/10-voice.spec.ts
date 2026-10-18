@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { channelButton, conversation, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
+import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
@@ -88,13 +88,13 @@ test.describe('with LiveKit', () => {
   });
 
   // before runs on the new page before it signs in, to watch it from the start.
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions, before?: (page: Page) => void) {
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void) {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     before?.(page);
-    const watch = watchPage(page, vw);
+    const watch = await watchPage(page, vw);
     await page.addInitScript(countBytes);
-    const m = vw[who];
+    const m = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, m.token, m.name);
     await channelButton(page, vw.channel).click();
     return { context, page, watch, member: m };
@@ -144,7 +144,12 @@ test.describe('with LiveKit', () => {
       expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);
       expect(said, 'a secret in the console').not.toContain(s);
     }
-    expect(p.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
+    expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
+    // Nor anything the browser reports as wrong that the person never sees
+    // (issue #595): a Permissions-Policy report, or a request to conchd the
+    // browser counts as failed, an answered one let go unread included.
+    expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
+    expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
   }
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
@@ -194,6 +199,49 @@ test.describe('with LiveKit', () => {
     } finally {
       await a.context.close();
       await b.context.close();
+    }
+  });
+
+  // Issue #595 (F25): Chromium logged every answered transmit report as a
+  // failed request (net::ERR_ABORTED), its 204's body left unread. Three
+  // presses of Hold to talk and a leave: each report is answered and audited,
+  // and the browser counts no request to conchd as failed. A member of this
+  // test alone, so the audit holds its reports and no other test's; the press
+  // waits for conchd to have seen the join, as the slow-report test's does.
+  test('three presses and a leave: every report is answered and audited, and no request fails', async ({ browser }) => {
+    const eli = await vw.addMember('eli');
+    const p = await person(browser, eli);
+    try {
+      const answers: number[] = [];
+      p.page.on('response', (res) => {
+        if (new URL(res.url()).pathname.endsWith('/voice/transmit')) answers.push(res.status());
+      });
+      const voice = voiceRegion(p.page);
+      const actor = `principal:${String(eli.id)}`;
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
+      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
+      const talk = voice.getByRole('button', { name: 'Hold to talk' });
+      for (let i = 1; i <= 3; i++) {
+        const box = await talk.boundingBox();
+        if (box === null) throw new Error('no talk button');
+        await p.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await p.page.mouse.down();
+        await expect(voice).toContainText('Transmitting');
+        await p.page.mouse.up();
+        await expect(voice).toContainText('Not transmitting');
+        await expect.poll(transmits, { timeout: 15_000 }).toEqual(Array<string[]>(i).fill(pair).flat());
+      }
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      expect(answers, 'every report answered').toEqual(Array<number>(6).fill(204));
+      expect((await vw.audit()).filter((e) => e.actor === actor && e.action === 'voice_transmit_unreported')).toEqual([]);
+      expect(p.watch.failed.filter((l) => l.includes('/voice/transmit')), 'transmit reports the browser counted as failed').toEqual([]);
+      await expectClean(p);
+    } finally {
+      await p.context.close();
     }
   });
 
@@ -355,7 +403,7 @@ test.describe('with LiveKit', () => {
     const b = await person(browser, 'bob');
     const context = await browser.newContext();
     const page = await context.newPage();
-    const watch = watchPage(page, vw);
+    const watch = await watchPage(page, vw);
     try {
       const voice = voiceRegion(page);
       const focused = (l: Locator) => l.evaluate((el) => el === document.activeElement);

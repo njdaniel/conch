@@ -211,6 +211,20 @@ async function noteRefusal(res: Response): Promise<void> {
   record({ kind: 'http_failure', status: res.status, requestId: res.headers.get('X-Request-Id'), ...(code === undefined ? {} : { error: code }) });
 }
 
+// discard reads an answer's body to its end and drops it, for a call whose
+// answer is its status alone. Chromium hands even a 204 a body, and logs a
+// request whose body is left unread, or is cancelled, as failed
+// (net::ERR_ABORTED) once the response is let go; read to the end, it is a
+// request finished (issue #595). A body that cannot be read changes nothing:
+// the status was the answer.
+async function discard(res: Response): Promise<void> {
+  try {
+    await res.arrayBuffer();
+  } catch {
+    // Read or not, the status stands.
+  }
+}
+
 async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string }> {
   const code = await refusalCode(res);
   return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
@@ -1095,7 +1109,10 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   if (reply.kind === 'none') return 'failed';
   if (reply.kind === 'unauthorized') return 'unauthorized';
   const status = reply.res.status;
-  if (status >= 200 && status < 300) return 'ok';
+  if (status >= 200 && status < 300) {
+    await discard(reply.res);
+    return 'ok';
+  }
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'failed';
   return 'no_session';
@@ -1164,5 +1181,6 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
+  await discard(reply.res);
   return { ok: true, value: null };
 }
