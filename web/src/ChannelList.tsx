@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
 
@@ -36,6 +36,39 @@ export function ChannelList({
   // The one button in the tab order: the open channel, or the first.
   const stop = selected ?? channels[0]?.name ?? null;
 
+  // The open channel is kept in sight, however it was opened: on a phone the
+  // list is one row that scrolls sideways, and it may be off screen. jsdom
+  // has no scrollIntoView.
+  useEffect(() => {
+    const el = selected === null ? undefined : buttons.current.get(selected);
+    if (el !== undefined && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [selected]);
+
+  // On a phone the row says there are more channels than it shows (issue
+  // #601): more-before while some lie off its left edge, more-after while
+  // some lie off its right. The stylesheet draws the fade. Measured on
+  // scroll, on resize, and whenever the channels or their counts change
+  // what the row holds. A pixel's slack keeps a fractional width from
+  // leaving a fade at the end.
+  const list = useRef<HTMLUListElement>(null);
+  const [more, setMore] = useState('');
+  useEffect(() => {
+    const el = list.current;
+    if (el === null) return;
+    const measure = () => {
+      const before = el.scrollLeft > 1;
+      const after = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setMore(`${before ? ' more-before' : ''}${after ? ' more-after' : ''}`);
+    };
+    measure();
+    el.addEventListener('scroll', measure, { passive: true });
+    window.addEventListener('resize', measure);
+    return () => {
+      el.removeEventListener('scroll', measure);
+      window.removeEventListener('resize', measure);
+    };
+  }, [channels, unread]);
+
   function move(event: KeyboardEvent, from: number) {
     const last = channels.length - 1;
     const to =
@@ -54,7 +87,7 @@ export function ChannelList({
     return <p className="empty">No channels yet: an operator needs to add you to one</p>;
   }
   return (
-    <ul className="channel-list">
+    <ul className={`channel-list${more}`} ref={list}>
       {channels.map((channel, i) => (
         <li key={channel.id}>
           <button

@@ -10,14 +10,24 @@ export function VoiceStatus({
   channel,
   viewer,
   people,
+  voiceAllowed,
+  reachable,
   onUnauthorized,
+  onOpen,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
+  // Whether the viewer may use voice: a human whose access includes it.
+  // Without it the page asks for no voice presence at all.
+  readonly voiceAllowed: boolean;
+  // Whether conchd is reached: the status line's Connected.
+  readonly reachable: boolean;
   readonly onUnauthorized: () => void;
+  // Opens a channel: the strip's way back to the channel voice is in.
+  readonly onOpen: (name: string) => void;
 }) {
-  const voice = useVoice({ signedIn, channel, onUnauthorized });
-  return <VoicePanel voice={voice} viewer={viewer} people={people} viewed={channel} />;
+  const voice = useVoice({ signedIn, channel, voiceAllowed, reachable, onUnauthorized });
+  return <VoicePanel voice={voice} viewer={viewer} people={people} viewed={channel} onOpen={onOpen} />;
 }

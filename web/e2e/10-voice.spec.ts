@@ -6,8 +6,8 @@
 //
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
-import type { BrowserContextOptions, Page } from '@playwright/test';
-import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
+import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
+import { channelButton, conversation, expect, expectFits, phones, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -87,9 +87,11 @@ test.describe('with LiveKit', () => {
     stopWorld?.();
   });
 
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions) {
+  // before runs on the new page before it signs in, to watch it from the start.
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions, before?: (page: Page) => void) {
     const context = await browser.newContext(options);
     const page = await context.newPage();
+    before?.(page);
     const watch = watchPage(page, vw);
     await page.addInitScript(countBytes);
     const m = vw[who];
@@ -149,7 +151,9 @@ test.describe('with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await expect(voiceRegion(a.page).getByRole('button', { name: 'Join voice' })).toBeEnabled();
+      // Both join buttons name the room they join (issue #584).
+      await expect(voiceRegion(a.page).getByRole('button', { name: 'Join voice in #voice-room', exact: true })).toBeEnabled();
+      await expect(voiceRegion(a.page).getByRole('button', { name: 'Watch only in #voice-room', exact: true })).toBeEnabled();
       await voiceRegion(a.page).getByRole('button', { name: 'Join voice' }).click();
       await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).click();
       for (const p of [a, b]) await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
@@ -353,6 +357,149 @@ test.describe('with LiveKit', () => {
       } finally {
         await a.context.close();
       }
+    }
+  });
+
+  // Issue #584: Join voice and Watch only name the room they join, in full on
+  // a desktop and read out in full on a phone; while another channel is on
+  // screen, the channel voice is in is a button back to it, which on a phone
+  // also brings it into the sideways row. Opening it joins nothing again.
+  test('the strip names the room it joins, and the channel voice is in is a way back to it', async ({ browser }) => {
+    // Channels of alice's after the voice world's, enough to push it off a
+    // phone's row.
+    const others = ['f04-book-club', 'f04-game-night', 'f04-after-hours', 'f04-film-club'];
+    const done = async (what: string, call: Promise<{ status: number }>) => {
+      const { status } = await call;
+      expect(status >= 200 && status < 300, `${what}: status ${String(status)}`).toBe(true);
+    };
+    for (const name of others) {
+      await done(`create ${name}`, vw.api(vw.operator, 'POST', '/v0/channels', { name }));
+      await done(`add alice to ${name}`, vw.api(vw.operator, 'PUT', `/v1/channels/${name}/members/${String(vw.alice.id)}`));
+    }
+    const last = others[others.length - 1] ?? '';
+    const sizes = [
+      ['1440×900', { viewport: { width: 1440, height: 900 } }],
+      phones[0],
+    ] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
+    for (const [size, options] of sizes) {
+      const phone = options.viewport.width < 700;
+      const a = await person(browser, 'alice', options);
+      try {
+        const voice = voiceRegion(a.page);
+        const press = (l: Locator) => (phone ? l.tap() : l.click());
+        let sessions = 0;
+        a.page.on('request', (r) => {
+          if (r.method() === 'POST' && r.url().endsWith('/voice/session')) sessions++;
+        });
+
+        const join = voice.getByRole('button', { name: 'Join voice in #voice-room', exact: true });
+        const watch = voice.getByRole('button', { name: 'Watch only in #voice-room', exact: true });
+        await expect(join, size).toBeEnabled();
+        await expect(watch, size).toHaveAccessibleDescription('Microphone off. You hear the room and can watch a share.');
+        await expect(voice.getByText('Microphone off. You hear the room and can watch a share.'), size).toBeVisible();
+        // The verbs are always on screen; the room's name is on a desktop,
+        // and only read out on a phone.
+        for (const [button, verb] of [[join, 'Join voice'], [watch, 'Watch only']] as const) {
+          await expect(button, size).toBeVisible();
+          await expect(button, size).toContainText(verb);
+          const box = await button.getByText('in #voice-room', { exact: true }).boundingBox();
+          if (phone) expect(box?.width ?? 0, `${size}: the room's name is hidden on screen`).toBeLessThanOrEqual(1);
+          else expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
+        }
+        await expectFits(a.page, `${size}: the strip before joining`);
+
+        await press(join);
+        await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+        // On the voice channel, its name is text: there is nowhere to go.
+        await expect(voice.getByRole('button', { name: '#voice-room', exact: true })).toHaveCount(0);
+        expect(sessions, `${size}: one voice session for the join`).toBe(1);
+
+        // Browsing never moves voice; the strip offers the way back.
+        await press(channelButton(a.page, last));
+        await expect(conversation(a.page).getByRole('heading', { name: last })).toBeVisible();
+        const back = voice.getByRole('button', { name: '#voice-room', exact: true });
+        await expect(back).toBeVisible();
+        await expect(voice).toContainText('Connected in #voice-room');
+        if (phone) {
+          // The voice channel scrolled out of the row.
+          await a.page.getByRole('navigation', { name: 'Channels' }).getByRole('list').evaluate((row) => {
+            row.scrollLeft = row.scrollWidth;
+          });
+          await expect(channelButton(a.page, vw.channel), `${size}: #voice-room is off screen`).not.toBeInViewport();
+        }
+
+        await press(back);
+        await expect(channelButton(a.page, vw.channel)).toHaveAttribute('aria-current', 'true');
+        await expect(conversation(a.page).getByRole('heading', { name: vw.channel })).toBeVisible();
+        if (phone) await expect(channelButton(a.page, vw.channel), `${size}: #voice-room is back on screen`).toBeInViewport();
+        // Still the same connection: connected all along, and no new session.
+        await expect(voice).toContainText('Connected in #voice-room');
+        await expect(voice).not.toContainText('Reconnecting');
+        await expect(back).toHaveCount(0);
+        await expect(voice.getByRole('list', { name: 'In voice' })).toContainText('You');
+        expect(sessions, `${size}: no new voice session`).toBe(1);
+        await expectFits(a.page, `${size}: the strip after going back`);
+
+        await press(voice.getByRole('button', { name: 'Leave voice' }));
+        await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      } finally {
+        await a.context.close();
+      }
+    }
+  });
+
+  // Issue #585 (F02): the roster of a channel not joined is live. Bob watches
+  // the strip without joining; alice joining and leaving shows within 3 s,
+  // with no channel opened again. Bob's page holds one presence socket all
+  // along, and asks for no session, no device and no LiveKit connection.
+  test('the roster of a channel not joined shows people arriving and leaving', async ({ browser }) => {
+    // Each presence socket bob's page opens: its channel, and whether it is
+    // still open.
+    const sockets: { channel: string | null; open: boolean }[] = [];
+    let sessions = 0;
+    const b = await person(browser, 'bob', undefined, (page) => {
+      page.on('websocket', (ws) => {
+        const url = new URL(ws.url());
+        if (url.pathname !== '/v1/voice/ws') return;
+        const s = { channel: url.searchParams.get('channel'), open: true };
+        sockets.push(s);
+        ws.on('close', () => {
+          s.open = false;
+        });
+      });
+      page.on('request', (r) => {
+        if (r.url().endsWith('/voice/session')) sessions++;
+      });
+    });
+    const a = await person(browser, 'alice');
+    try {
+      const bob = voiceRegion(b.page);
+      const alice = voiceRegion(a.page);
+      const listed = bob.getByRole('list', { name: 'In voice' }).getByText('alice', { exact: true });
+      // Live before anyone joins, and alice from another test is gone.
+      await expect(bob.getByRole('button', { name: 'Join voice in #voice-room', exact: true })).toBeEnabled();
+      await expect(listed).toHaveCount(0, { timeout: 60_000 });
+      const opened = sockets.length;
+
+      await alice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(alice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(listed).toHaveCount(1, { timeout: 3000 });
+      await expect(bob).toContainText('Not in voice');
+
+      await alice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(alice).toContainText('Not in voice', { timeout: 10_000 });
+      await expect(listed).toHaveCount(0, { timeout: 3000 });
+
+      // One presence socket, for the channel on screen, all along: none
+      // opened again for alice's coming and going.
+      expect(sockets.length, 'presence sockets opened while alice came and went').toBe(opened);
+      expect(sockets.filter((s) => s.open).map((s) => s.channel), 'presence sockets open').toEqual([vw.channel]);
+      expect(sessions, 'voice sessions bob asked for').toBe(0);
+      expect(await b.page.evaluate(() => (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs.length), 'peer connections on bob\'s page').toBe(0);
+      await expectClean(b);
+    } finally {
+      await a.context.close();
+      await b.context.close();
     }
   });
 

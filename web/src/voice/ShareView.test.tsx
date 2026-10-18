@@ -135,7 +135,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
         void client.leave();
       },
     };
-    return <VoicePanel voice={control} viewer={7} people={people} viewed="general" />;
+    return <VoicePanel voice={control} viewer={7} people={people} viewed="general" onOpen={() => undefined} />;
   }
   const tree = () => (wrap === undefined ? <Panel /> : wrap(<Panel />));
   const view = render(tree());
@@ -161,7 +161,7 @@ const voice = () => screen.getByRole('region', { name: 'Voice' });
 describe('watch only', () => {
   it('joins without the microphone, and asks for it only when the person chooses to talk', async () => {
     const t = setup();
-    fireEvent.click(within(voice()).getByRole('button', { name: 'Watch only' }));
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Watch only in #general' }));
     await act(settle);
     expect(t.joins).toEqual(['watch only']);
     expect(t.rooms[0]?.publish).toBe(false);
@@ -177,7 +177,7 @@ describe('watch only', () => {
   it('is offered beside Join voice, and says a share can be watched from it', async () => {
     const t = setup();
     t.seen(presence(8));
-    expect(within(voice()).getByRole('button', { name: 'Join voice' })).toBeTruthy();
+    expect(within(voice()).getByRole('button', { name: 'Join voice in #general' })).toBeTruthy();
     expect(await within(voice()).findByText('bea is sharing a screen. Join, or watch only, to see it.')).toBeTruthy();
   });
 });

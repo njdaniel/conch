@@ -51,11 +51,15 @@ export function VoicePanel({
   viewer,
   people,
   viewed,
+  onOpen,
 }: {
   readonly voice: VoiceControl;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
   readonly viewed: string | null;
+  // Opens a channel, as the channel list does: the way back to the one voice
+  // is in, from any other.
+  readonly onOpen: (name: string) => void;
 }) {
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
@@ -98,10 +102,25 @@ export function VoicePanel({
       </section>
     );
   }
+  if (!inVoice && snapshot.kind === 'not_allowed') {
+    // Nothing to join: the person's access has no voice. A stopped client
+    // still says why it stopped.
+    return (
+      <section aria-label="Voice" className="voice">
+        <div className="voice-state">
+          <p className="voice-phase">Not in voice</p>
+          <p className="hint">Your account does not include voice. Ask whoever invited you.</p>
+          {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
+        </div>
+      </section>
+    );
+  }
 
   const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
-  const canJoin = voice.secure && presence?.available !== false && presence !== null;
+  // Only on a live snapshot that says voice is up: not while loading, while
+  // the server cannot be reached, or after the socket was closed for good.
+  const canJoin = voice.secure && presence !== null && presence.available;
   const holder = sharer(presence);
   // Someone else's share, which this page may watch.
   const theirs = holder !== null && holder.principal !== viewer ? holder : null;
@@ -112,6 +131,24 @@ export function VoicePanel({
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
+  // Where voice is (UX-09): a button back to that channel while another is on
+  // screen, plain text while it is the one on screen.
+  const joined = inVoice ? state.channel : null;
+  const where =
+    joined === null ? null : joined === viewed ? (
+      ` in #${joined}`
+    ) : (
+      <>
+        {' in '}
+        <button type="button" className="voice-where" onClick={() => { onOpen(joined); }}>
+          #{joined}
+        </button>
+      </>
+    );
+  // Where Join voice and Watch only go: the channel on screen. On a phone the
+  // name is only read out, and the buttons show their verbs. With no channel
+  // on screen there is nowhere to name.
+  const dest = viewed === null ? null : <span className="dest">in #{viewed}</span>;
 
   return (
     <section aria-label="Voice" className={`voice phase-${state.phase}${state.transmitting ? ' sending' : ''}`}>
@@ -119,7 +156,7 @@ export function VoicePanel({
         <div className="voice-state">
           <p className="voice-phase">
             {phaseLabel[state.phase]}
-            {inVoice && state.channel !== null ? ` in #${state.channel}` : ''}
+            {where}
           </p>
           {inVoice ? (
             <p className="voice-sub">
@@ -207,10 +244,10 @@ export function VoicePanel({
             <>
               <button type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
                 <Glyph name="headphones" />
-                Join voice
+                Join voice {dest}
               </button>
-              <button type="button" onClick={voice.watchOnly} disabled={!canJoin}>
-                Watch only
+              <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
+                Watch only {dest}
               </button>
             </>
           )}
@@ -235,12 +272,15 @@ export function VoicePanel({
           </>
         ) : (
           <>
+            <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
             {theirs === null ? null : <p className="hint">{theirName} is sharing a screen. Join, or watch only, to see it.</p>}
             {!voice.secure ? (
               <p className="hint">Voice needs a secure page: use https, or localhost.</p>
             ) : presence?.available === false ? (
               <p className="hint">Voice is unavailable right now; chat still works.</p>
-            ) : snapshot.kind === 'unknown' ? (
+            ) : snapshot.kind === 'unreachable' ? (
+              <p className="hint">Voice status unavailable: the server cannot be reached.</p>
+            ) : snapshot.kind === 'gone' ? (
               <p className="hint">Voice status could not be read.</p>
             ) : null}
           </>
