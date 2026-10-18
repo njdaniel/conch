@@ -703,6 +703,7 @@ async fn malformed_and_oversized_lines_after_the_start_fail_the_session_and_clos
         rig.line(&at_limit);
         let at_limit_id = parse_command(&at_limit).unwrap().id();
         assert!(rig.ack(at_limit_id).await.ok);
+        let sent = Instant::now();
         rig.line(&line);
         assert_eq!(rig.exit_code().await, 1, "{code}");
         let events = rig.read();
@@ -721,6 +722,11 @@ async fn malformed_and_oversized_lines_after_the_start_fail_the_session_and_clos
                 Some(VoiceControlReason::ProtocolError)
             )
         );
+        // The helper ends having asked for both to close, and they close a moment later,
+        // within the bound that leaving has.
+        let capture = Duration::from_millis(conch_voice_api::VOICE_CONTROL_CAPTURE_STOP_MS);
+        within(capture, sent, || rig.mic_closed() >= 1).await;
+        within(capture, sent, || rig.sink_closed() >= 1).await;
         assert_eq!(rig.mic_closed(), 1, "{code}: capture was not closed");
         assert_eq!(rig.sink_closed(), 1, "{code}: playback was not stopped");
     }
