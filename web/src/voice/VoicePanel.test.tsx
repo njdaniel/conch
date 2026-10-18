@@ -2,13 +2,14 @@
 // and Watch only name the channel they join, Watch only says the room is
 // heard, and the channel voice is in is a way back to it while another is on
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VoicePresenceV1 } from '../schema/voice';
+import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { VoicePanel } from './VoicePanel';
+import { stoppedFor, VoicePanel } from './VoicePanel';
 
 const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
 
@@ -49,7 +50,7 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
   };
 }
 
-function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }) {
+function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }, people: ReadonlyMap<number, Person> = new Map()) {
   const calls: string[] = [];
   const opened: string[] = [];
   const voice = control(state, calls, snapshot);
@@ -57,16 +58,19 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
     <VoicePanel
       voice={voice}
       viewer={7}
-      people={new Map()}
+      people={people}
       viewed={viewed}
       onOpen={(name) => {
         opened.push(name);
       }}
     />,
   );
-  // Draws the same panel again with another state, as a phase change does.
-  const redraw = (next: VoiceState) => {
-    rerender(<VoicePanel voice={{ ...voice, state: next }} viewer={7} people={new Map()} viewed={viewed} onOpen={() => undefined} />);
+  // Draws the same panel again with another state, as a phase change does,
+  // and with another snapshot, as a presence frame does.
+  let shown = snapshot;
+  const redraw = (next: VoiceState, nextSnapshot: Snapshot = shown) => {
+    shown = nextSnapshot;
+    rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} people={people} viewed={viewed} onOpen={() => undefined} />);
   };
   return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
@@ -411,5 +415,183 @@ describe('the keyboard', () => {
     redraw(initialVoice);
     expect(document.activeElement).toBe(outside);
     outside.remove();
+  });
+});
+
+// Issue #591 (F13, F14, F15, F24): the strip's controls and notes say what is
+// true. Bob (3) is someone else; the viewer is 7.
+describe('what the strip says is true', () => {
+  const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+  const one = (principal: number, sharing = false) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing });
+  const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
+  const bobShares = room(one(7), one(3, true));
+  const nobodyShares = room(one(7), one(3));
+  const joined = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+
+  describe('Mute, deafened (F13)', () => {
+    for (const muted of [false, true]) {
+      it(`is pressed, off and named Muted by deafen while deafened, and ${muted ? 'muted' : 'not muted'} again on Undeafen`, () => {
+        const name = muted ? 'Unmute' : 'Mute';
+        const { voice, redraw } = panel(joined({ muted }), 'c');
+        expect(within(voice).getByRole('button', { name, pressed: muted }).hasAttribute('disabled')).toBe(false);
+
+        redraw(joined({ muted, deafened: true }));
+        expect(within(voice).queryByRole('button', { name })).toBeNull();
+        expect(within(voice).getByRole('button', { name: 'Muted by deafen', pressed: true }).hasAttribute('disabled')).toBe(true);
+
+        redraw(joined({ muted }));
+        expect(within(voice).getByRole('button', { name, pressed: muted }).hasAttribute('disabled')).toBe(false);
+      });
+    }
+  });
+
+  describe('Share screen while someone else shares (F14)', () => {
+    const said = 'bob is sharing. One person shares at a time.';
+
+    it('is off, and described as who shares; on again with no description once nobody else does', () => {
+      const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
+      const button = within(voice).getByRole('button', { name: 'Share screen', description: said });
+      expect(button.hasAttribute('disabled')).toBe(true);
+      const hint = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+      expect(hint?.textContent).toBe(said);
+      expect(voice.contains(hint)).toBe(true);
+
+      redraw(joined(), nobodyShares);
+      const again = within(voice).getByRole('button', { name: 'Share screen' });
+      expect(again.hasAttribute('disabled')).toBe(false);
+      expect(again.hasAttribute('aria-describedby')).toBe(false);
+      expect(voice.textContent).not.toContain(said);
+    });
+
+    it('says a refused claim once while the other share lasts, and not after it ends', () => {
+      const refused = joined({ share: { kind: 'idle', ended: 'busy' } });
+      const { voice, redraw } = panel(refused, 'c', bobShares, bob);
+      // The refusal is the description's line, read out: one line, not two.
+      const notes = within(voice).getAllByText(said);
+      expect(notes).toHaveLength(1);
+      expect(notes[0]?.getAttribute('role')).toBe('status');
+      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
+
+      redraw(refused, nobodyShares);
+      expect(voice.textContent).not.toContain('One person shares at a time.');
+      expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('still says why a share of ours ended, beside who shares now', () => {
+      const { voice } = panel(joined({ share: { kind: 'idle', ended: 'self' } }), 'c', bobShares, bob);
+      expect(voice.textContent).toContain('You stopped sharing.');
+      expect(voice.textContent).toContain(said);
+    });
+  });
+
+  describe('a watched share that ends (F15)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const said = 'bob stopped sharing.';
+    const shown = (voice: HTMLElement) => within(voice).queryByText(said);
+
+    it(`says the holder stopped, read out, for ${String(stoppedFor / 1000)} s`, () => {
+      vi.useFakeTimers();
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      expect(shown(voice)).toBeNull();
+      // Bob's share ends: presence says nobody shares, then the client stops
+      // watching.
+      redraw(joined({ watching: true }), nobodyShares);
+      expect(shown(voice)).toBeNull();
+      redraw(joined({ watching: false }), nobodyShares);
+      expect(shown(voice)?.getAttribute('role')).toBe('status');
+      act(() => {
+        vi.advanceTimersByTime(stoppedFor - 1);
+      });
+      expect(shown(voice)).not.toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(shown(voice)).toBeNull();
+    });
+
+    it('says the holder stopped when the share and the watching end in one frame', () => {
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      redraw(joined({ watching: false }), nobodyShares);
+      expect(shown(voice)).not.toBeNull();
+    });
+
+    it('says nothing when the viewer stops watching, nor when that share ends later', () => {
+      vi.useFakeTimers();
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      redraw(joined({ watching: false }), bobShares);
+      expect(shown(voice)).toBeNull();
+      redraw(joined({ watching: false }), nobodyShares);
+      act(() => {
+        vi.advanceTimersByTime(stoppedFor);
+      });
+      expect(voice.textContent).not.toContain('stopped sharing');
+    });
+
+    it('says nothing while a share that went with a renewed room is waited for, nor when it is back', () => {
+      // The client keeps watching through the wait (connection.ts
+      // awaitShare): the room is renewed, and everyone left it.
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      redraw(joined({ phase: 'connecting', watching: true }), room());
+      redraw(joined({ watching: true }), room(one(7)));
+      expect(shown(voice)).toBeNull();
+      redraw(joined({ watching: true }), bobShares);
+      expect(voice.textContent).not.toContain('stopped sharing');
+    });
+
+    it('says the holder stopped when the wait for a renewed share runs out', () => {
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      redraw(joined({ watching: true }), room(one(7)));
+      redraw(joined({ watching: false }), room(one(7)));
+      expect(shown(voice)).not.toBeNull();
+    });
+
+    it('says nothing on leaving voice while watching', () => {
+      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      redraw(initialVoice, nobodyShares);
+      expect(voice.textContent).not.toContain('stopped sharing');
+    });
+  });
+
+  describe('the viewer in voice on another device (F24)', () => {
+    const elsewhere = 'You are in voice on another device. Joining here moves your voice to this device.';
+    const names = (voice: HTMLElement) => Array.from(voice.querySelectorAll('.voice-roster .who')).map((el) => el.textContent);
+
+    it('names the viewer "You (on another device)", and says a join here moves voice, while this page is not in voice', () => {
+      const { voice } = panel(initialVoice, 'c', room(one(3), one(7)), bob);
+      expect(names(voice)).toEqual(['bob', 'You (on another device)']);
+      expect(voice.textContent).toContain(elsewhere);
+      // Nothing stops the join.
+      expect(within(voice).getByRole('button', { name: 'Join voice in #c' }).hasAttribute('disabled')).toBe(false);
+    });
+
+    for (const phase of ['connecting', 'connected', 'reconnecting', 'unavailable'] as const) {
+      it(`names the viewer "You" while this page is in voice (${phase})`, () => {
+        const { voice } = panel(inVoice(phase, 'c'), 'c', room(one(3), one(7)), bob);
+        expect(names(voice)).toEqual(['bob', 'You']);
+        expect(voice.textContent).not.toContain('another device');
+      });
+    }
+
+    it('says so on a page another device took over', () => {
+      const why = 'Another device took over your place in this voice room';
+      const { voice } = panel({ ...initialVoice, phase: 'stopped', why }, 'c', room(one(7)));
+      expect(names(voice)).toEqual(['You (on another device)']);
+      expect(voice.textContent).toContain(elsewhere);
+    });
+
+    it("does not say so of this page's own place while presence catches up with a Leave voice", () => {
+      const { voice, redraw } = panel(inVoice('connected', 'c'), 'c', room(one(7)));
+      redraw(initialVoice);
+      expect(names(voice)).toEqual(['You']);
+      expect(voice.textContent).not.toContain('another device');
+      redraw(initialVoice, room());
+      expect(names(voice)).toEqual([]);
+      // In voice on another device later: said again.
+      redraw(initialVoice, room(one(7)));
+      expect(names(voice)).toEqual(['You (on another device)']);
+      expect(voice.textContent).toContain(elsewhere);
+    });
   });
 });
