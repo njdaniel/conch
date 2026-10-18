@@ -254,14 +254,17 @@ test.describe('screen share with LiveKit', () => {
       await expect.poll(async () => (await inbound(b.page)).audioBytes, { timeout: 15_000 }).toBeGreaterThan(sound + 2000);
       await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('alice (sharing)');
 
-      // C tries to share and is told A is.
-      await voiceRegion(c.page).getByRole('button', { name: 'Share screen' }).click();
-      await expect(voiceRegion(c.page)).toContainText('alice is sharing. One person shares at a time.');
+      // C cannot share, and is told A is (issue #591: Share screen is off
+      // while someone else shares, rather than refused when pressed).
+      const cShare = voiceRegion(c.page).getByRole('button', { name: 'Share screen' });
+      await expect(cShare).toBeDisabled();
+      await expect(cShare).toHaveAccessibleDescription('alice is sharing. One person shares at a time.');
 
-      // A stops; B's view closes.
+      // A stops; B's view closes, and B is told.
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
+      await expect(voiceRegion(b.page)).toContainText('alice stopped sharing.');
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
       await expect.poll(async () => (await shareRows()).slice(before).map((r) => r.action), { timeout: 15_000 }).toEqual(['voice_share_started', 'voice_share_stopped']);
       expect((await shareRows()).at(-1)?.detail).toContain('reason=self');
@@ -325,6 +328,50 @@ test.describe('screen share with LiveKit', () => {
         ]);
       await expectClean(a, 3);
       await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #591 (F14, F15). While bob shares, alice's Share screen is off and
+  // says who shares. Her own Stop watching says nothing; bob stopping a share
+  // she watches is said for a few seconds, and Share screen is on again.
+  test('while someone shares, Share screen is off and says who; a watched share that ends is said to have stopped', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Join voice');
+      await share(b);
+      const alice = voiceRegion(a.page);
+      const button = alice.getByRole('button', { name: 'Share screen' });
+      const said = 'bob is sharing. One person shares at a time.';
+      await expect(button).toBeDisabled();
+      await expect(button).toHaveAccessibleDescription(said);
+      await expect(alice.getByText(said)).toBeVisible();
+
+      // Alice stops watching herself: nothing is said of bob's share.
+      await watching(a, 'bob');
+      await shareView(a.page).getByRole('button', { name: 'Stop watching' }).click();
+      await expect(shareView(a.page)).toHaveCount(0);
+      await a.page.waitForTimeout(1000);
+      await expect(alice).not.toContainText('stopped sharing');
+      await expect(button).toBeDisabled();
+
+      await watching(a, 'bob');
+      const note = alice.getByRole('status').filter({ hasText: 'bob stopped sharing.' });
+      const stoppedAt = Date.now();
+      await voiceRegion(b.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(note).toBeVisible({ timeout: 3000 });
+      await expect(shareView(a.page)).toHaveCount(0);
+      await expect(button).toBeEnabled({ timeout: Math.max(1, stoppedAt + 3000 - Date.now()) });
+      await expect(button).toHaveAccessibleDescription('');
+      await expect(alice).not.toContainText(said);
+      await expect(note).toHaveCount(0, { timeout: Math.max(1, stoppedAt + 8000 - Date.now()) });
+      // Said for a while, not a flash: it went no sooner than it should.
+      expect(Date.now() - stoppedAt, 'how long the note was up').toBeGreaterThan(4000);
+      await expectClean(b, 1);
+      await expectClean(a);
     } finally {
       for (const p of [a, b]) await p.close();
     }
