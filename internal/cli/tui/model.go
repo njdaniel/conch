@@ -746,15 +746,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case len(names) == 0:
 			m.notice = "no channels on server"
-			names = []string{"general"}
+			names = []string{defaultChannel}
 		}
 		m.setStatus(modeChannels, m.notice)
 		m.channels = names
-		m.selected = 0
+		m.selected = defaultSelection(names)
 		// The channel on screen may have changed under the user.
 		m.target = nil
 		m.pendingNet = ""
-		m.subscribed[names[0]] = true
+		m.subscribed[m.current()] = true
 		return m, tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
 	case netsLoaded:
 		return m.netsLoaded(msg)
@@ -949,6 +949,19 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		commands = append(commands, m.loadAndFollow())
 	}
 	return m, tea.Batch(commands...)
+}
+
+// defaultChannel is the channel a person lands in when the server's list
+// holds it, wherever it sorts (issue #557).
+const defaultChannel = "general"
+
+// defaultSelection is the index of the channel to open first from a loaded
+// list: #general when the list holds it, otherwise the first channel.
+func defaultSelection(names []string) int {
+	if i := slices.Index(names, defaultChannel); i >= 0 {
+		return i
+	}
+	return 0
 }
 
 // current returns the selected channel, or "" while there are no channels.

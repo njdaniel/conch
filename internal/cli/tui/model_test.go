@@ -283,13 +283,22 @@ func TestModelChannelsLoaded(t *testing.T) {
 		return out
 	}
 	tests := []struct {
-		name       string
-		msg        channelsLoaded
-		wantList   []string
-		wantStatus string
+		name         string
+		msg          channelsLoaded
+		wantList     []string
+		wantSelected int
+		wantStatus   string
 	}{
 		{name: "populated", msg: channelsLoaded{channels: ch("ops", "dev")}, wantList: []string{"ops", "dev"}},
 		{name: "zero channels", msg: channelsLoaded{channels: []schema.ChannelV0{}}, wantList: []string{"general"}, wantStatus: "no channels on server"},
+		// #general is where a person lands, even when another channel sorts
+		// first (issue #557).
+		{name: "general present and not first", msg: channelsLoaded{channels: ch("dev", "general", "ops")}, wantList: []string{"dev", "general", "ops"}, wantSelected: 1},
+		{name: "general last", msg: channelsLoaded{channels: ch("alpha", "beta", "general")}, wantList: []string{"alpha", "beta", "general"}, wantSelected: 2},
+		{name: "general absent", msg: channelsLoaded{channels: ch("beta", "alpha")}, wantList: []string{"beta", "alpha"}},
+		{name: "general the only channel", msg: channelsLoaded{channels: ch("general")}, wantList: []string{"general"}},
+		{name: "general padded", msg: channelsLoaded{channels: ch("dev", " general ")}, wantList: []string{"dev", "general"}, wantSelected: 1},
+		{name: "near miss is not general", msg: channelsLoaded{channels: ch("dev", "General", "general-2")}, wantList: []string{"dev", "General", "general-2"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -297,26 +306,49 @@ func TestModelChannelsLoaded(t *testing.T) {
 			model := NewModel(context.Background(), api, 7, nil)
 			updated, cmd := model.Update(tt.msg)
 			got := updated.(Model)
-			if strings.Join(got.channels, ",") != strings.Join(tt.wantList, ",") || got.selected != 0 {
-				t.Fatalf("channels = %v selected %d, want %v", got.channels, got.selected, tt.wantList)
+			if strings.Join(got.channels, ",") != strings.Join(tt.wantList, ",") || got.selected != tt.wantSelected {
+				t.Fatalf("channels = %v selected %d, want %v selected %d", got.channels, got.selected, tt.wantList, tt.wantSelected)
+			}
+			want := tt.wantList[tt.wantSelected]
+			if !got.subscribed[want] || len(got.subscribed) != 1 {
+				t.Errorf("subscribed = %v, want only %q", got.subscribed, want)
+			}
+			// Voice presence and the events socket begin once, as before.
+			if got.voice.gen != 1 || got.ev.gen != 1 {
+				t.Errorf("voice gen %d events gen %d, want both begun once", got.voice.gen, got.ev.gen)
 			}
 			if got.status() != tt.wantStatus {
 				t.Errorf("status = %q, want %q", got.status(), tt.wantStatus)
 			}
 			msgs := runCmd(cmd)
+			// Everything the load begins follows the selected channel: its
+			// backfill, its nets and its members.
 			var loaded messagesLoaded
+			var nets netsLoaded
+			var members membersLoaded
 			for _, m := range msgs {
-				if l, ok := m.(messagesLoaded); ok {
+				switch l := m.(type) {
+				case messagesLoaded:
 					loaded = l
+				case netsLoaded:
+					nets = l
+				case membersLoaded:
+					members = l
 				}
 			}
-			if loaded.channel != tt.wantList[0] {
-				t.Errorf("backfill channel = %q, want %q", loaded.channel, tt.wantList[0])
+			if loaded.channel != want {
+				t.Errorf("backfill channel = %q, want %q", loaded.channel, want)
+			}
+			if nets.channel != want {
+				t.Errorf("nets channel = %q, want %q", nets.channel, want)
+			}
+			if members.channel != want {
+				t.Errorf("members channel = %q, want %q", members.channel, want)
 			}
 			select {
 			case sub := <-api.subscribe:
-				if sub != tt.wantList[0] {
-					t.Errorf("subscribed %q, want %q", sub, tt.wantList[0])
+				if sub != want {
+					t.Errorf("subscribed %q, want %q", sub, want)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("no subscription started")
@@ -332,7 +364,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 			}
 			// ...and the fallback channel's own errors, which would otherwise
 			// hide why the fallback happened.
-			failed, _ := got.Update(messagesLoaded{channel: tt.wantList[0], err: errors.New("channel not found")})
+			failed, _ := got.Update(messagesLoaded{channel: want, err: errors.New("channel not found")})
 			wantFailed := "channel not found"
 			if tt.wantStatus != "" {
 				wantFailed = tt.wantStatus
@@ -340,7 +372,7 @@ func TestModelChannelsLoaded(t *testing.T) {
 			if s := failed.(Model).status(); s != wantFailed {
 				t.Errorf("status after failed backfill = %q, want %q", s, wantFailed)
 			}
-			ended, _ := got.Update(subscriptionEnded{channel: tt.wantList[0], err: errors.New("gone")})
+			ended, _ := got.Update(subscriptionEnded{channel: want, err: errors.New("gone")})
 			wantEnded := "live updates: reconnecting…"
 			if tt.wantStatus != "" {
 				wantEnded = tt.wantStatus
