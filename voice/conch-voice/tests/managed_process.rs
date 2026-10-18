@@ -23,6 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use conch_voice_api::{
@@ -56,7 +57,10 @@ struct Helper {
     events: Arc<Mutex<Vec<String>>>,
     /// Set when the event pipe reached its end: every writer of it has gone.
     events_ended: Arc<Mutex<Option<Instant>>>,
+    /// Filled when standard error reached its end, by `stderr_reader`.
     stderr: Arc<Mutex<String>>,
+    /// The thread that reads standard error; taken when it is waited for.
+    stderr_reader: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// The private directories one run uses, and what is in them.
@@ -146,7 +150,7 @@ fn spawn(private: &Private, fd3: Fd3, args: &[&str], background: bool) -> Helper
     let stdin = child.stdin.take();
     let stderr = Arc::new(Mutex::new(String::new()));
     let (mut err, kept) = (child.stderr.take().unwrap(), Arc::clone(&stderr));
-    std::thread::spawn(move || {
+    let stderr_reader = std::thread::spawn(move || {
         let mut text = String::new();
         let _ = err.read_to_string(&mut text);
         kept.lock().unwrap().push_str(&text);
@@ -157,6 +161,7 @@ fn spawn(private: &Private, fd3: Fd3, args: &[&str], background: bool) -> Helper
         events,
         events_ended,
         stderr,
+        stderr_reader: Mutex::new(Some(stderr_reader)),
     }
 }
 
@@ -225,7 +230,21 @@ impl Helper {
         );
     }
 
+    /// Everything the helper wrote to standard error. The process having exited is not
+    /// enough: the text is there once the reader has reached the end of the pipe, which it
+    /// does a moment later, so it is waited for. The limit only keeps a test from hanging.
     fn stderr(&self) -> String {
+        if let Some(reader) = self.stderr_reader.lock().unwrap().take() {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !reader.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "standard error did not reach its end"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            reader.join().unwrap();
+        }
         self.stderr.lock().unwrap().clone()
     }
 }

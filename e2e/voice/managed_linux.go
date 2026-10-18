@@ -41,10 +41,16 @@ import (
 // the contract's bound, and the other TUI's helper carries on); a new TUI
 // joining again; leaving; quitting while the key is held; one account in two
 // TUIs (the second is warned, then displaces the first, which says so);
-// retry; and a removal from the channel, after which the TUI says why voice
-// stopped and text still works. No microphone, speaker or keyboard of the
-// machine is used, and none of this is the maintainer's acceptance with a
-// real headset and key, which stays a separate, manual check.
+// retry; a removal from the channel, after which the TUI says why voice
+// stopped and text still works; a member whose invite withheld voice, and a
+// TUI whose stored login has become another account's, each refused by the
+// helper with the reason in the TUI and nothing captured or joined; LiveKit
+// restarted under a TUI in voice, which reconnects by itself and is heard
+// again; and LiveKit down past every limit the helper puts on one outage,
+// which it waits out without giving up (issue #559). No microphone, speaker
+// or keyboard of the machine is used, and none of this is the maintainer's
+// acceptance with a real headset and key, which stays a separate, manual
+// check.
 
 const (
 	// keyTalk is KEY_F13, the talk key the check's voice.toml binds.
@@ -682,6 +688,18 @@ func (l *live) managedVoice(ctx context.Context) error {
 		return fmt.Errorf("ann's message from her TUI after voice stopped is not in lobby")
 	}
 	h.say("ok   managed: ann removed from squad: her TUI said voice stopped, not a member of this channel; its conch-voice exited and LiveKit dropped her; a message typed afterwards reached lobby")
+
+	// ---- refused voice, a restart of LiveKit, and an outage waited out
+	// (issue #559, managed_paths_linux.go)
+	if err := l.managedRefused(squadID, ben, ears); err != nil {
+		return err
+	}
+	if err := l.managedReconnect(ctx, squadID, cySeat, ears); err != nil {
+		return err
+	}
+	if err := l.managedOutage(ctx, squadID, cySeat, ears); err != nil {
+		return err
+	}
 
 	// ---- the end
 	for _, s := range []*seat{annSeat, cySeat} {
