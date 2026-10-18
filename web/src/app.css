@@ -1018,6 +1018,14 @@ label {
   overflow-wrap: anywhere;
 }
 
+/* Online and Offline, under People: quieter than the section headings. */
+.ag-panel h4 {
+  margin: var(--s2) 0 var(--s1);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .ag-person {
   display: flex;
   flex-wrap: wrap;
