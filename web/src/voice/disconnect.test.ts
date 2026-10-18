@@ -33,6 +33,16 @@ describe('after a refused session', () => {
   });
 });
 
+describe('a refused session in the 403 family', () => {
+  it.each<[string, Parameters<typeof afterRefusal>[0], string]>([
+    ['voice not allowed', { ok: false, failure: 'invalid', status: 403, code: 'voice_not_allowed' }, 'Your account does not include voice. Ask whoever invited you.'],
+    ['an agent', { ok: false, failure: 'invalid', status: 403, code: 'forbidden' }, 'Voice is for people, not for this account'],
+    ['no code', { ok: false, failure: 'invalid', status: 403 }, 'Voice is for people, not for this account'],
+  ])('%s stops with its own line', (_name, refusal, why) => {
+    expect(afterRefusal(refusal)).toEqual({ kind: 'stop', why });
+  });
+});
+
 describe('retry delay', () => {
   it('doubles from 1 s to 30 s with jitter between half and all of it', () => {
     const ceilings = [1000, 2000, 4000, 8000, 16000, 30000, 30000];

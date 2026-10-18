@@ -37,6 +37,34 @@ import { record } from '../diagnostics';
 // (DOMException names). Any other error of a connection is not a device's.
 const deviceErrors: ReadonlySet<string> = new Set(['NotAllowedError', 'NotFoundError', 'NotReadableError', 'OverconstrainedError', 'SecurityError', 'AbortError']);
 
+// deviceReason says what a device error means for the person, by its name
+// alone, or null for an error that is worth trying again (an AbortError, or
+// one that is not a device's). Retrying a microphone the browser refused, or
+// one that is not there, cannot succeed until the person does something, so
+// those stop instead (issue #586). The words name no device, room or token.
+function deviceReason(name: unknown, watchOnly = false): string | null {
+  // Someone already watching only is not told to watch only.
+  const or = watchOnly ? '.' : ', or use Watch only.';
+  switch (name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return `Your browser blocked the microphone. Allow it for this site in the address bar, then join again${or}`;
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return `No microphone was found. Connect one and join again${or}`;
+    case 'NotReadableError':
+      return `The microphone is in use by another program, or could not be opened. Close it and join again${or}`;
+    default:
+      return null;
+  }
+}
+
+// errorName is the name of a thrown error. A DOMException is not an Error
+// everywhere, so its name is read as a property.
+function errorName(err: unknown): unknown {
+  return typeof err === 'object' && err !== null && 'name' in err ? err.name : undefined;
+}
+
 export interface RoomEvents {
   readonly onReconnecting: () => void;
   readonly onReconnected: () => void;
@@ -250,9 +278,10 @@ export class VoiceClient {
     this.set({ watchOnly: false });
     try {
       await room.publishMicrophone();
-    } catch {
+    } catch (err: unknown) {
       if (mine !== this.attempt) return;
-      this.set({ watchOnly: true, why: 'The microphone could not be used' });
+      // The connection stays: the person keeps watching, told why.
+      this.set({ watchOnly: true, why: deviceReason(errorName(err), true) ?? 'The microphone could not be used' });
       return;
     }
     if (mine === this.attempt) this.applyBlock();
@@ -586,14 +615,19 @@ export class VoiceClient {
       await room.connect(session.value.livekit_url, grant.token, grant.room, grant.can_publish && !this.state.watchOnly, events);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
-      // A DOMException is not an Error everywhere, so its name is read as a
-      // property.
-      const name = typeof err === 'object' && err !== null && 'name' in err ? err.name : undefined;
+      const name = errorName(err);
       if (typeof name === 'string' && deviceErrors.has(name)) record({ kind: 'device_error', name });
       if (mine !== this.attempt) return;
+      // A new attempt number first: closing a room that had joined before the
+      // microphone failed fires its Disconnected, which must not act again
+      // (it would turn a stop into a retry).
+      const next = ++this.attempt;
       void room.close().catch(() => undefined);
       this.room = null;
-      this.act({ kind: 'retry' }, mine);
+      // A microphone that cannot be had stops: the next attempt is the
+      // person's own Join voice or Watch only. Anything else is retried.
+      const why = deviceReason(name);
+      this.act(why === null ? { kind: 'retry' } : { kind: 'stop', why }, next);
       return;
     }
     if (mine !== this.attempt) {
