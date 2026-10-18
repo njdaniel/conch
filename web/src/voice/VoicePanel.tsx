@@ -8,7 +8,7 @@
 // voice, and the controls. Less used choices are under Voice options. The
 // watch view is drawn into the lobby's stage with a portal, so it is still
 // this one component, wherever it shows.
-import { useContext, useEffect, useState } from 'react';
+import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import { StageHost } from '../stage';
@@ -19,6 +19,11 @@ import { occupants, sharer, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote } from './share';
 import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
+
+// The keys that hold Hold to talk down while it has focus.
+function holdKey(e: KeyEvent): boolean {
+  return e.key === ' ' || e.key === 'Enter';
+}
 
 const phaseLabel: Record<Phase, string> = {
   idle: 'Not in voice',
@@ -66,6 +71,11 @@ export function VoicePanel({
   const [options, setOptions] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
+  // Leave voice takes itself away once the client has drained (up to a
+  // second): if it had focus then, focus goes to Join voice rather than to
+  // the page's top (issue #590).
+  const left = useRef(false);
+  const joinButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!voice.capturing) return;
@@ -79,6 +89,12 @@ export function VoicePanel({
       window.removeEventListener('keydown', onKey);
     };
   }, [voice]);
+
+  useEffect(() => {
+    if (state.phase !== 'idle' || !left.current) return;
+    left.current = false;
+    if (document.activeElement === null || document.activeElement === document.body) joinButton.current?.focus();
+  }, [state.phase]);
 
   if (viewed === null && !inVoice) {
     // No channel to show (it was lost, or none is open). A stopped client
@@ -192,6 +208,18 @@ export function VoicePanel({
                     onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
                     onPointerUp={() => { client.release(); }}
                     onPointerCancel={() => { client.release(); }}
+                    // The keyboard holds it as a pointer does (issue #590): a
+                    // held key repeats, and only its first press counts. Focus
+                    // moving away lets go, as a lost pointer does.
+                    onKeyDown={(e) => {
+                      if (!holdKey(e) || e.repeat) return;
+                      e.preventDefault();
+                      client.press();
+                    }}
+                    onKeyUp={(e) => {
+                      if (holdKey(e)) client.release();
+                    }}
+                    onBlur={() => { client.release(); }}
                     onContextMenu={(e) => { e.preventDefault(); }}
                   >
                     <Glyph name="mic" />
@@ -227,14 +255,21 @@ export function VoicePanel({
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
-                <button type="button" className="danger" onClick={voice.leave}>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={(e) => {
+                    left.current = document.activeElement === e.currentTarget;
+                    voice.leave();
+                  }}
+                >
                   <Glyph name="leave" />
                   <span className="label">Leave voice</span>
                 </button>
               </>
             ) : (
               <>
-                <button type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
+                <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
                   <Glyph name="headphones" />
                   Join voice {dest}
                 </button>
@@ -254,7 +289,7 @@ export function VoicePanel({
         {inVoice ? (
           <>
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
-              <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus.</p>
+              <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
             <ShareNotes voice={voice} holderName={holder === null ? null : nameOf(people, holder.principal, viewer)} othersShare={theirs !== null} />
             {theirs === null || state.watching ? null : (
@@ -364,7 +399,7 @@ function Options({ voice, open }: { readonly voice: VoiceControl; readonly open:
         </label>
       )}
       <p className="hint">
-        The talk key works only while this tab has focus. On Linux, conch-voice has a global talk key. On a phone, audio continues
+        The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues
         only while the page is open on screen.
       </p>
     </div>

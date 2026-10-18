@@ -553,3 +553,53 @@ describe('lobby', () => {
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connected');
   });
 });
+
+// Issue #590 (F20): arriving in the lobby puts focus on the open channel's
+// heading, so the next Tab starts there and not at the top of the page. Only
+// arriving does: opening another channel leaves focus where it is.
+describe('focus on arriving', () => {
+  const heading = (name: string) => within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2, name });
+
+  it('goes to the heading after signing in from the keyboard, and stays put on a channel switch', async () => {
+    serve(asMember);
+    render(<App origin={origin} />);
+    const field = screen.getByLabelText('Credential');
+    field.focus();
+    fireEvent.change(field, { target: { value: secret } });
+    // Enter in the field submits its form.
+    fireEvent.submit(field);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(heading('general'));
+    });
+    expect(document.activeElement?.getAttribute('tabindex')).toBe('-1');
+
+    const ops = screen.getByRole('button', { name: 'ops' });
+    ops.focus();
+    fireEvent.click(ops);
+    await screen.findByRole('heading', { level: 2, name: 'ops' });
+    await act(async () => {});
+    expect(document.activeElement).toBe(ops);
+  });
+
+  it('goes to the heading when a stored sign-in is restored on reload', async () => {
+    serve(asMember);
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(heading('general'));
+    });
+  });
+
+  it('is left alone when it is already somewhere on arriving', async () => {
+    serve(asMember);
+    window.sessionStorage.setItem('conch.web.token', secret);
+    const elsewhere = document.createElement('button');
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    render(<App origin={origin} />);
+    await screen.findByRole('heading', { level: 2, name: 'general' });
+    await act(async () => {});
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+  });
+});

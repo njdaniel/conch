@@ -3,7 +3,7 @@
 // heard, and the channel voice is in is a way back to it while another is on
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -52,9 +52,10 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
 function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }) {
   const calls: string[] = [];
   const opened: string[] = [];
-  render(
+  const voice = control(state, calls, snapshot);
+  const { rerender } = render(
     <VoicePanel
-      voice={control(state, calls, snapshot)}
+      voice={voice}
       viewer={7}
       people={new Map()}
       viewed={viewed}
@@ -63,7 +64,11 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
       }}
     />,
   );
-  return { calls, opened, voice: screen.getByRole('region', { name: 'Voice' }) };
+  // Draws the same panel again with another state, as a phase change does.
+  const redraw = (next: VoiceState) => {
+    rerender(<VoicePanel voice={{ ...voice, state: next }} viewer={7} people={new Map()} viewed={viewed} onOpen={() => undefined} />);
+  };
+  return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
 
 const inVoice = (phase: Phase, channel: string): VoiceState => ({ ...initialVoice, phase, channel });
@@ -307,5 +312,104 @@ describe('the strip in voice', () => {
     const { voice } = panel(joined(true), 'c', { kind: 'presence', presence: someone });
     expect(voice.querySelector('.voice-state')?.textContent).toContain('Deafened (you hear no one, and you are muted).');
     expect(shape(voice)).toEqual(before);
+  });
+});
+
+// Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
+// focus, the hint says where the talk key does not work, and Leave voice
+// hands focus to Join voice instead of dropping it.
+describe('the keyboard', () => {
+  const talking = () => {
+    const { voice, client, redraw, calls } = panel(inVoice('connected', 'c'), 'c');
+    const press = vi.spyOn(client, 'press').mockImplementation(() => undefined);
+    const release = vi.spyOn(client, 'release').mockImplementation(() => undefined);
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    talk.focus();
+    return { voice, talk, press, release, redraw, calls };
+  };
+
+  for (const [key, code] of [
+    [' ', 'Space'],
+    ['Enter', 'Enter'],
+  ] as const) {
+    it(`holds Hold to talk down with ${code}, and lets go on its keyup`, () => {
+      const { talk, press, release } = talking();
+      const down = fireEvent.keyDown(talk, { key, code });
+      // The key is the button's: its default (a click, a scroll) is not done.
+      expect(down).toBe(false);
+      expect(press).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
+      fireEvent.keyUp(talk, { key, code });
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(press).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it('does nothing on a held key repeating', () => {
+    const { talk, press, release } = talking();
+    fireEvent.keyDown(talk, { key: ' ', code: 'Space' });
+    fireEvent.keyDown(talk, { key: ' ', code: 'Space', repeat: true });
+    fireEvent.keyDown(talk, { key: 'Enter', code: 'Enter', repeat: true });
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('ignores other keys', () => {
+    const { talk, press, release } = talking();
+    fireEvent.keyDown(talk, { key: 'a', code: 'KeyA' });
+    fireEvent.keyUp(talk, { key: 'a', code: 'KeyA' });
+    expect(press).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('lets go when focus leaves Hold to talk', () => {
+    const { voice, talk, press, release } = talking();
+    fireEvent.keyDown(talk, { key: ' ', code: 'Space' });
+    within(voice).getByRole('button', { name: 'Mute' }).focus();
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('says, in the strip and in Voice options, that the talk key does not work while typing', () => {
+    const { voice } = talking();
+    const said = 'It works only while this tab has focus, and not while you are typing.';
+    expect(voice.querySelector('.talk-key-note')?.textContent).toBe(`Talk key: \` (backtick). ${said}`);
+    const options = voice.querySelector('#voice-options');
+    expect(options?.textContent).toContain('Talk key: ` (backtick).');
+    expect(options?.textContent).toContain('The talk key works only while this tab has focus, and not while you are typing.');
+  });
+
+  it('gives focus to Join voice after Leave voice, pressed with focus on it, has left', () => {
+    const { voice, redraw, calls } = talking();
+    const leave = within(voice).getByRole('button', { name: 'Leave voice' });
+    leave.focus();
+    fireEvent.click(leave);
+    expect(calls).toEqual(['leave']);
+    // Still leaving: the strip is as it was.
+    redraw(inVoice('connected', 'c'));
+    expect(document.activeElement).toBe(leave);
+    redraw(initialVoice);
+    expect(document.activeElement).toBe(within(voice).getByRole('button', { name: 'Join voice in #c' }));
+  });
+
+  it('leaves focus alone after Leave voice pressed without focus on it', () => {
+    const { voice, talk, redraw } = talking();
+    talk.blur();
+    fireEvent.click(within(voice).getByRole('button', { name: 'Leave voice' }));
+    redraw(initialVoice);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('does not take focus to Join voice from where it went while leaving', () => {
+    const { voice, redraw } = talking();
+    const leave = within(voice).getByRole('button', { name: 'Leave voice' });
+    leave.focus();
+    fireEvent.click(leave);
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    outside.focus();
+    redraw(initialVoice);
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
   });
 });

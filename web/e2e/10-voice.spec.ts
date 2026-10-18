@@ -7,7 +7,7 @@
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { channelButton, conversation, expect, expectFits, phones, signIn, test } from './fixtures';
+import { channelButton, conversation, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -328,6 +328,91 @@ test.describe('with LiveKit', () => {
       await expectClean(a);
     } finally {
       await a.context.close();
+    }
+  });
+
+  // Issue #590 (F09, F20): voice from the keyboard alone. Signing in leaves
+  // focus on the channel's heading; Hold to talk is held with Space or Enter
+  // while it has focus, and Tab away lets go; Escape does not leave voice;
+  // and Leave voice hands focus to Join voice. Bob only listens.
+  test('voice is worked from the keyboard alone, and focus is never dropped', async ({ browser }) => {
+    const b = await person(browser, 'bob');
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const watch = watchPage(page, vw);
+    try {
+      const voice = voiceRegion(page);
+      const focused = (l: Locator) => l.evaluate((el) => el === document.activeElement);
+      // Presses Tab until the control has focus, as a person would.
+      const tabTo = async (l: Locator) => {
+        for (let i = 0; i < 40 && !(await focused(l)); i++) await page.keyboard.press('Tab');
+        await expect(l).toBeFocused();
+      };
+
+      await page.goto(vw.appUrl);
+      await page.getByLabel('Credential').focus();
+      await page.keyboard.type(vw.alice.token);
+      await page.keyboard.press('Enter');
+      await expect(statusLine(page)).toContainText(vw.alice.name);
+      await expect(conversation(page).getByRole('heading', { level: 2, name: vw.channel })).toBeFocused();
+
+      const join = voice.getByRole('button', { name: 'Join voice in #voice-room', exact: true });
+      await expect(join).toBeEnabled();
+      await tabTo(join);
+      await page.keyboard.press('Enter');
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      const actor = `principal:${String(vw.alice.id)}`;
+      await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
+      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      const before = (await transmits()).length;
+      const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
+      const heard = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
+
+      const talk = voice.getByRole('button', { name: 'Hold to talk' });
+      await tabTo(talk);
+      // Space, then Enter, each held: pressed again while down, as a held key
+      // repeats, and it is still one press.
+      for (const [i, key] of (['Space', 'Enter'] as const).entries()) {
+        await page.keyboard.down(key);
+        await page.keyboard.down(key);
+        await page.keyboard.down(key);
+        await expect(voice).toContainText('Transmitting', { timeout: 2000 });
+        await expect(heard).toContainText('alice (transmitting)', { timeout: 15_000 });
+        await new Promise((r) => setTimeout(r, 1200));
+        await page.keyboard.up(key);
+        await expect(voice).toContainText('Not transmitting');
+        await expect(heard).not.toContainText('alice (transmitting)', { timeout: 15_000 });
+        await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(i + 1).fill(pair).flat());
+        await expect(talk).toBeFocused();
+      }
+
+      // Tab while holding lets go. Enter is held, not Space: a Space let go
+      // on the next button would press it.
+      await page.keyboard.down('Enter');
+      await expect(voice).toContainText('Transmitting', { timeout: 2000 });
+      await new Promise((r) => setTimeout(r, 1200));
+      await page.keyboard.press('Tab');
+      await expect(talk).not.toBeFocused();
+      await expect(voice).toContainText('Not transmitting');
+      await page.keyboard.up('Enter');
+      await expect(heard).not.toContainText('alice (transmitting)', { timeout: 15_000 });
+      await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(3).fill(pair).flat());
+      expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
+
+      // Escape is not a way out of voice (UX-21).
+      await page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 500));
+      await expect(voice).toContainText('Connected in #voice-room');
+
+      const leave = voice.getByRole('button', { name: 'Leave voice' });
+      await tabTo(leave);
+      await page.keyboard.press('Enter');
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await expect(join).toBeFocused();
+      await expectClean({ page, watch, member: vw.alice });
+    } finally {
+      await context.close();
+      await b.context.close();
     }
   });
 
