@@ -312,16 +312,17 @@ func (m Model) roster(width int) string {
 // voice rooms of the channel on screen: whether they are in one (from another
 // client, unless this terminal's own helper is running), whether they are
 // transmitting there,
-// and whether presence says anything at all. It knows nothing of any other
-// channel's rooms, nor anything while presence is reconnecting or LiveKit
-// cannot be reached.
+// and whether presence says anything at all. The session this terminal has
+// just left, which presence may list for a while longer, is not counted
+// (voicectl.go, justLeft). It knows nothing of any other channel's rooms, nor
+// anything while presence is reconnecting or LiveKit cannot be reached.
 func (m Model) selfInVoice() (in, talking, known bool) {
 	if m.voice.state != voiceLive || !m.voice.doc.Available || m.authorID <= 0 {
 		return false, false, false
 	}
 	for _, room := range m.voice.doc.Rooms {
 		for _, p := range room.Participants {
-			if p.PrincipalID == m.authorID {
+			if p.PrincipalID == m.authorID && !m.justLeft(room, p) {
 				in = true
 				talking = talking || p.Transmitting
 			}

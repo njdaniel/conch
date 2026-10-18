@@ -132,6 +132,7 @@ func (s *Server) acceptSocket(w http.ResponseWriter, r *http.Request) (conn *web
 }
 
 func (s *Server) socketOpened(ctx context.Context, t *socketTrace) {
+	s.metrics.socketOpened(t.route)
 	full, summary := s.connLogs.open(t.credID, t.principalID, s.now())
 	t.full = full
 	summary.log(ctx)
@@ -149,6 +150,7 @@ func (s *Server) socketClosed(ctx context.Context, t *socketTrace) {
 		// here, and "error" is the honest word for it.
 		reason = schema.SocketCloseError
 	}
+	s.metrics.socketClosed(t.route, reason)
 	lasted := time.Since(t.opened)
 	frames := t.frames.Load()
 	id, _ := requestIDFrom(ctx)

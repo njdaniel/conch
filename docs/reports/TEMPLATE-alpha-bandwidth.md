@@ -20,7 +20,7 @@ these; paste it as it is.
 
 ### 1.1 What is measured, and why
 
-One sharer to about 29 viewers sizes the deployment (O6, O7). The four runs answer:
+One sharer to about 29 viewers sizes the deployment (O6, O7). The five runs answer:
 
 - how many Mbps leave and enter the droplet, and how close that is to what the droplet
   can carry;
@@ -39,7 +39,7 @@ One sharer to about 29 viewers sizes the deployment (O6, O7). The four runs answ
 | `conchd` version | `/healthz` |
 | LiveKit image | the digest `ops/deploy/livekit.service` pins (v1.13.7) |
 | Caddy version | `caddy version` |
-| Web client version, and its share settings | the build's version; the encodings A11b ships (O6: 1080p at up to 30 fps, simulcast 720p15 and 360p5, share sound; viewers on adaptive stream) |
+| Web client version, and its share settings | the build's version; the encodings it ships (issue #565, superseding O6: captured at the source's size up to 3840×2160 and up to 60 fps; the top layer as captured at 6, 10 or 18 Mb/s by its longer side, up to 1920, up to 2560 and above; simulcast 1080p30 at 4 Mb/s and 720p15 at 1.5 Mb/s where smaller than the capture; VP8; share sound; viewers on adaptive stream, sharer on dynacast) |
 | Load generator | a second short-lived droplet (size, region) **or** a machine on a fast line (its kind and line speed, not its name) |
 | Generator's own capacity | its download rate measured before the runs: it must be well above what the runs make it receive, or the runs measure the generator |
 | `lk` | 2.19.0, downloaded and checked by `scripts/alpha-loadtest.sh` |
@@ -79,7 +79,7 @@ Start each run's measurements (§1.5) first, then the share or the voices, then 
 script; the five measured minutes start when lk prints `Finished connecting to room`.
 Keep lk's two summary tables (`Track loading`, `Subscriber summaries`) for the report.
 
-### 1.4 The four runs
+### 1.4 The five runs
 
 Each lasts 5 minutes, steady, in one channel's voice room.
 
@@ -89,11 +89,18 @@ Each lasts 5 minutes, steady, in one channel's voice room.
 | 2. Document | the same tab sharing a mostly static text document | nobody | as run 1 / 0 | as run 1 |
 | 3. Voice only | nothing | 3 at once | 30 minus the real browsers / 3 | as many as are at hand, microphones on |
 | 4. Movie night | as run 1 | 3 at once | 29 minus the real viewers / 3 | as run 1 |
+| 5. 4K60 | one Chrome window on a 3840×2160 display sharing a 4K video at 60 fps with sound, through the web client | nobody | as run 1 / 0 | the sharer, plus at least two viewers: one watching full screen on a 3840×2160 display, and a phone |
 
 Run 2 against run 1 shows what the content hint and simulcast do for text. Every share
 is captured as motion (issue #554), so under congestion the encoder keeps frame rate
 and gives up resolution; say whether the text stayed readable. The bitrate should fall
 when nothing moves.
+
+Run 5 against run 1 shows what a 4K60 share costs (issue #565). The top layer is
+encoded and sent only while a viewer's view needs it, so the full-screen 4K viewer
+stays full screen for the whole run, and the report says which viewers took the top
+layer. Record the sharer's own upload and CPU too, and its `qualityLimitationReason`:
+a 4K60 VP8 encode may be limited by the sharer's machine before the network.
 
 ### 1.5 How each number is taken
 
@@ -158,7 +165,7 @@ run's plan, or the run is repeated.
 end of the run:
 - video `inbound-rtp`: `framesPerSecond`, `frameWidth`×`frameHeight`, `freezeCount`,
   `totalFreezesDuration`, `framesDropped`, `packetsLost`, `jitter`;
-- audio `inbound-rtp` (the share's sound in runs 1, 2 and 4; the voices in 3 and 4):
+- audio `inbound-rtp` (the share's sound in runs 1, 2, 4 and 5; the voices in 3 and 4):
   `concealedSamples` as a share of `totalSamplesReceived`, `concealmentEvents`,
   `packetsLost`.
 
@@ -189,6 +196,7 @@ rest of the month's use (vnstat's monthly total before the runs gives that basel
 | 2 | | | | |
 | 3 | | | | |
 | 4 | | | | |
+| 5 | | | | |
 
 ### 2.2 CPU and memory
 
@@ -198,6 +206,7 @@ rest of the month's use (vnstat's monthly total before the runs gives that basel
 | 2 | | | | |
 | 3 | | | | |
 | 4 | | | | |
+| 5 | | | | |
 
 ### 2.3 Layers and what viewers saw
 
@@ -216,6 +225,7 @@ rest of the month's use (vnstat's monthly total before the runs gives that basel
 | 2 | | | |
 | 3 | | | |
 | 4 | | | |
+| 5 | | | |
 
 ### 2.5 Transfer
 

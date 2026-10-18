@@ -148,6 +148,8 @@ func (t Track) IsMicrophone() bool {
 }
 
 type Participant struct {
+	// SID is the id LiveKit assigns the connection (PA_...).
+	SID      string  `json:"sid"`
 	Identity string  `json:"identity"`
 	State    any     `json:"state"`
 	Tracks   []Track `json:"tracks"`

@@ -77,6 +77,14 @@ type Config struct {
 	// who is not an operator may hold. Zero or less means
 	// store.DefaultPersonalInviteAllowance.
 	InviteAllowance int
+	// MetricsListen, when set, is the address of a second listener that
+	// serves Prometheus metrics at /metrics and nothing else (issue #562,
+	// metrics.go). Empty, the default, means no such listener. /metrics is
+	// never served on Listen.
+	MetricsListen string
+	// MetricsAllowRemote lets MetricsListen be an address that is not
+	// loopback. Without it such an address stops the server at start.
+	MetricsAllowRemote bool
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -113,6 +121,11 @@ type Server struct {
 	events *eventsHub
 	http   *http.Server
 	ln     net.Listener
+	// metrics is the server's own registry and counts (metrics.go). It is
+	// always kept, in memory; only metricsLn, bound when MetricsListen is
+	// set, ever serves it.
+	metrics   *serverMetrics
+	metricsLn net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -211,6 +224,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	s.metrics = newServerMetrics(s)
 	// Runs that end with their session change without SetRunState, so the
 	// store reports them here, after its commit (issue #405).
 	st.OnRunsEnded(func(runs []store.EndedRun) {
@@ -264,18 +278,44 @@ func (s *Server) Handler() http.Handler {
 	return s.http.Handler
 }
 
-// Listen binds the configured address. It is separated from Serve so tests can
-// bind ":0" and read the assigned port via Addr before serving.
+// Listen binds the configured address, and the metrics address when one is
+// set. It is separated from Serve so tests can bind ":0" and read the assigned
+// port via Addr before serving. A metrics address that is refused, or cannot
+// be bound, binds nothing.
 func (s *Server) Listen() error {
 	if s.ln != nil {
 		return nil
+	}
+	if s.cfg.MetricsListen != "" {
+		// Checked before the main bind, so a refused address leaves nothing
+		// bound.
+		if err := ValidateMetricsListen(s.cfg.MetricsListen, s.cfg.MetricsAllowRemote); err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
 	}
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.cfg.Listen, err)
 	}
+	if s.cfg.MetricsListen != "" {
+		mln, err := s.listenMetrics()
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		s.metricsLn = mln
+	}
 	s.ln = ln
 	return nil
+}
+
+// MetricsAddr reports the metrics listener's bound address, or "" when there
+// is none.
+func (s *Server) MetricsAddr() string {
+	if s.metricsLn == nil {
+		return ""
+	}
+	return s.metricsLn.Addr().String()
 }
 
 // Addr reports the bound address, or "" if the server has not been bound yet.
@@ -325,6 +365,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Sessions: the sweeper marks silent sessions stale and then offline. It
 	// stops with ctx and Serve waits for it, so no goroutine outlives Serve.
 	defer s.startSessionSweeper(ctx)()
+
+	// Metrics, when configured, on their own listener; stopped with the rest.
+	defer s.serveMetrics(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()
