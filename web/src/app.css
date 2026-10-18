@@ -1168,14 +1168,27 @@ label {
   margin: 0;
 }
 
+/* Two rows (issue #587): the roster on top, then the state on the left and
+   the controls on the right. The dock is on the window's bottom edge, so
+   what grows (more people, a longer status line) grows upwards, and the
+   controls stay under the pointer. */
 .voice-bar {
+  display: grid;
+  gap: var(--s2);
+}
+
+.voice-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   gap: var(--s2) var(--s4);
 }
 
+/* Its basis, not its text, decides whether the controls fit beside it, and
+   the text wraps within it: a longer status makes it taller, and never moves
+   the controls. */
 .voice-state {
+  flex: 1 1 12rem;
   min-width: 0;
 }
 
@@ -1250,20 +1263,45 @@ label {
   color: var(--warn);
 }
 
+/* Who is in voice: how many, then every chip, wrapping onto more lines
+   rather than scrolling sideways out of sight. */
+.voice-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.voice-count {
+  flex: none;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 600;
+}
+
 .voice-roster {
   display: flex;
-  flex: 1 1 12rem;
+  flex: 1 1 0;
+  flex-wrap: wrap;
   gap: var(--s2);
   min-width: 0;
   margin: 0;
   padding: 4px;
-  overflow-x: auto;
   list-style: none;
+}
+
+/* "+N more" is for a phone, where the roster is capped. */
+.voice-more {
+  display: none;
 }
 
 .voice-roster li {
   display: flex;
   flex: none;
+  max-width: 100%;
+  min-width: 0;
   align-items: center;
   gap: 0.35rem;
   padding: 0.15rem 0.5rem 0.15rem 0.15rem;
@@ -1295,9 +1333,11 @@ label {
 
 .voice-controls {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
+  max-width: 100%;
   margin-left: auto;
 }
 
@@ -1686,6 +1726,22 @@ label {
     width: 100%;
     margin-left: 0;
     gap: 0.35rem;
+  }
+
+  /* The count and "+N more" on one line, the chips the strip's width below
+     them: three, then "+N more" for the rest (issue #587). */
+  .voice-roster {
+    flex-basis: 100%;
+    order: 1;
+  }
+
+  .voice-roster.capped li:nth-child(n + 4) {
+    display: none;
+  }
+
+  .voice-more {
+    display: inline-flex;
+    margin-left: auto;
   }
 
   .voice .talk {
