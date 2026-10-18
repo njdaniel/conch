@@ -656,6 +656,72 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  // Issue #599 (F21): the other person sees a push-to-talk talker as
+  // "speaking", as they do one on the open microphone. "speaking" is
+  // LiveKit's own speaker detection, which needs the sound at -35 dBov or
+  // louder for 40% of each 400 ms; this suite's steady tone is, and so the
+  // talker shows within 3 s of the press (the track opens at most a second
+  // after it), and stays while the key is held. The audit saw no "speaking"
+  // because it ran on Chromium's default fake microphone, a short beep every
+  // half second, loud enough for about a sixth of the time: "speaking" then
+  // shows only now and then, in either mode. Two people of their own,
+  // so no other test's audit trail sees their presses.
+  //
+  // expectHeld checks that what shows is still there at every look, four a
+  // second, for ms.
+  async function expectHeld(what: Locator, text: string, ms: number): Promise<void> {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      expect(await what.innerText(), `"${text}" held for ${String(ms)} ms`).toContain(text);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  test('a push-to-talk talker shows as speaking to the other person, as on the open microphone', async ({ browser }) => {
+    const people = [await vw.addMember('ivy'), await vw.addMember('jon')];
+    const contexts = [await browser.newContext(), await browser.newContext()];
+    try {
+      const [talker, listener] = await Promise.all(
+        people.map(async (m, i) => {
+          const context = contexts[i];
+          if (context === undefined) throw new Error('no context');
+          const page = await context.newPage();
+          await signIn(page, vw, m.token, m.name);
+          await channelButton(page, vw.channel).click();
+          const voice = voiceRegion(page);
+          await voice.getByRole('button', { name: 'Join voice' }).click();
+          await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          return { page, voice };
+        }),
+      );
+      if (talker === undefined || listener === undefined) throw new Error('no people');
+      const heard = listener.voice.getByRole('list', { name: 'In voice' }).getByRole('listitem').filter({ hasText: 'ivy' });
+      await expect(heard).toBeVisible({ timeout: 15_000 });
+      await expect(heard).not.toContainText('speaking');
+
+      await talker.page.getByRole('heading', { name: 'Conch' }).click();
+      await talker.page.keyboard.down('Backquote');
+      await expect(heard).toContainText('speaking', { timeout: 3000 });
+      // And held while the key is: on the beep it comes and goes.
+      await expectHeld(heard, 'speaking', 2000);
+      await talker.page.keyboard.up('Backquote');
+      await expect(heard).not.toContainText('speaking', { timeout: 5000 });
+
+      await talker.voice.getByRole('button', { name: 'Voice options' }).click();
+      await talker.voice.getByLabel('Open microphone').check();
+      await expect(heard).toContainText('speaking', { timeout: 10_000 });
+      await expectHeld(heard, 'speaking', 2000);
+      await talker.voice.getByLabel('Push to talk').check();
+      await expect(heard).not.toContainText('speaking', { timeout: 5000 });
+      for (const p of [talker, listener]) {
+        await p.voice.getByRole('button', { name: 'Leave voice' }).click();
+        await expect(p.voice).toContainText('Not in voice', { timeout: 10_000 });
+      }
+    } finally {
+      for (const c of contexts) await c.close();
+    }
+  });
+
   // Issue #591 (F24): one person's credential open on two pages, one of them
   // in voice. The other names them "You (on another device)" and says that
   // joining there moves their voice; the one in voice names them "You", and
