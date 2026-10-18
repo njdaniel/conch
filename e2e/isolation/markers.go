@@ -165,23 +165,20 @@ func (m *markers) scan(body []byte, a asked, asJSON bool) []string {
 }
 
 // headerLeaks scans response headers as one text, all but the request id.
+// conchd sets that id on every response, from random hex, so now and then it
+// holds A's run tag by chance (six hex characters, a piece of every A name).
+// Only a value of exactly that form (schema.ValidRequestID) is passed over:
+// anything else in the header is scanned, so A's text put there is still found.
 func (m *markers) headerLeaks(h http.Header, a asked) []string {
 	var b strings.Builder
 	for k, vs := range h {
 		if http.CanonicalHeaderKey(k) == http.CanonicalHeaderKey(schema.RequestIDHeader) {
-			vs = slices.DeleteFunc(slices.Clone(vs), requestID.MatchString)
+			vs = slices.DeleteFunc(slices.Clone(vs), schema.ValidRequestID)
 		}
 		b.WriteString(k + ": " + strings.Join(vs, ", ") + "\n")
 	}
 	return m.scan([]byte(b.String()), a, false)
 }
-
-// requestID is the form of the request id conchd sets on every response:
-// random hex, so now and then it holds A's run tag by chance (six hex
-// characters, a piece of every A name). Only a value of exactly that form is
-// passed over: anything else in the header is scanned, so A's text put there
-// would still be found.
-var requestID = regexp.MustCompile(fmt.Sprintf(`^[0-9a-f]{%d}$`, schema.RequestIDLength))
 
 // jsonEscaped is how encoding/json writes s inside a string: a body may
 // escape < > & as < and so on.
