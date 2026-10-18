@@ -1258,6 +1258,31 @@ The log never holds a token, a socket ticket, an invite code, a voice room name,
 
 **`/healthz`.** `GET /healthz` needs no credential and answers `{"status","version","db","voice"}`. `status` and `db` are `ok`, or `degraded` with a `503` when the database cannot be reached. `voice` is `ok` (LiveKit answered the last time it was asked), `unavailable` (configured, but not answering, or not yet asked since the start) or `not_configured`. A voice outage never makes `status` degraded or the answer `503`: messaging, approvals and audit work without it.
 
+**Metrics.** `conchd` can serve Prometheus metrics (issue #562). They are off by default. To turn them on, give a second, loopback address:
+
+```sh
+bin/conchd serve --data ./data --metrics-listen 127.0.0.1:9464   # or CONCHD_METRICS_LISTEN=127.0.0.1:9464
+curl -s http://127.0.0.1:9464/metrics | grep '^conch_'
+```
+
+They are served on that listener only, at `/metrics` and nothing else. The main listener has no `/metrics` (it answers `404`), whatever the settings. The metrics listener has no authentication: loopback is the boundary, as with LiveKit's own `prometheus_port`. The counts say how many people are online, in voice and sharing, so an address that is not loopback (`:9464`, `0.0.0.0:9464`, a public IP or a host name other than `localhost`) stops `conchd` at start unless `--metrics-allow-remote` (or `CONCHD_METRICS_ALLOW_REMOTE=1`) is given as well, and then `conchd` logs a warning. To scrape from another machine, prefer an SSH tunnel or a Prometheus on the same host.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `conch_http_requests_total` | counter | `route` (the route's pattern, such as `POST /v1/channels/{channel}/messages`, or `unmatched` for any path no route matches), `code` (`1xx` for an upgraded socket, `2xx`, `3xx`, `4xx`, `5xx`) |
+| `conch_http_request_duration_seconds` | histogram | `route`. Sockets are counted above but not timed. |
+| `conch_ws_connections` | gauge | `kind`: `hub` (`/v0/ws`, `/v1/ws`, `/v2/ws`), `events`, `voice` |
+| `conch_ws_disconnects_total` | counter | `reason`: the connection log's reasons (`client`, `server_shutdown`, `keepalive_timeout`, `revoked`, `removed`, `slow_consumer`, `session_ended`, `error`) |
+| `conch_principals_online` | gauge | `kind` (`human`, `agent`): principals with a session that is online, not stale |
+| `conch_voice_rooms_active`, `conch_voice_participants`, `conch_voice_shares_active` | gauge | none; as voice presence shows them, so zero while LiveKit is not answering |
+| `conch_voice_tokens_issued_total` | counter | `result`: `ok`, or `refused` for any other answer |
+| `conch_messages_posted_total` | counter | `kind` of the author (`human`, `agent`), over REST and MCP |
+| `conch_auth_failures_total` | counter | `reason`: `missing_credential`, `invalid_credential`, `invalid_ticket` |
+| `conch_problem_reports_total` | counter | none |
+| `conch_build_info` | gauge, always 1 | `version` |
+
+The Go runtime's and the process's own metrics (`go_*`, `process_*`: heap, goroutines, garbage collection, CPU, open files) come with them. No label names a person, a channel, a room or a path: every value is from a fixed list or the route table, so no request can add a series.
+
 **Reporting a problem.** A tester uses "Report a problem" in the web page's header (also offered when the page cannot reach the server) or `conch report`. Both ask the bug template's questions, show exactly what will be sent, and send it only when asked to. The web page adds its version, the browser, the system, the window's size, its voice state and its last 100 diagnostic events, kept in memory only: sockets opened and closed with their codes, reconnect attempts, failed calls with their status, error code and request id, voice connection states and microphone errors by name. The page empties it whenever its sign-in ends (signing out, out everywhere, in another tab, or a `401`), so a shared browser never reports the last person's events. Nothing in them is a token, a ticket, an invite code, a room or channel name or message text; the server refuses an event of any other shape. `conchd` stores the report with its own version, the reporter, the time, the voice health and the reporter's last 20 request ids and socket closes, from memory. A report is at most 32 KiB, a person may send 10 an hour, and each is audited as `problem_reported` with its id alone.
 
 | Route | Who | Success | Refusals |

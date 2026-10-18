@@ -139,6 +139,7 @@ func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.InfoContext(ctx, "reports: received", "principal", caller.ID, "report", report.ID)
+	s.metrics.problemReported()
 	writeJSON(w, http.StatusCreated, schema.CreateProblemReportResponseV1{ID: report.ID, CreatedAt: report.CreatedAt})
 }
 
