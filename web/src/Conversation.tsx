@@ -195,6 +195,11 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
+// The open channel's heading, where focus goes on arriving in the lobby
+// (issue #590). It is not the composer: on a phone that would open the
+// keyboard over the page.
+export const headingId = 'conversation-heading';
+
 // How close to the bottom still counts as being at it, in pixels.
 const nearBottom = 24;
 
@@ -315,7 +320,9 @@ export function Conversation({
         <span className="hash" aria-hidden="true">
           #
         </span>
-        <h2>{channel}</h2>
+        <h2 id={headingId} tabIndex={-1}>
+          {channel}
+        </h2>
       </header>
       {live === 'reconnecting' ? <p className="stale banner">This conversation may be out of date</p> : null}
       {chat.history === 'error' ? (

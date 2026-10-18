@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion } from './ServerVersion';
 import { StageHost } from './stage';
@@ -149,6 +150,19 @@ export function Lobby({
   useEffect(() => {
     if (membersOver) membersBody.current?.focus();
   }, [membersOver]);
+  // Arriving (signing in, or a sign-in restored on reload) leaves focus on
+  // the page's body, where the next Tab starts from the top: the first time a
+  // conversation is shown, focus goes to its heading (issue #590). Only then:
+  // opening another channel later leaves focus where it is.
+  const arrived = useRef(false);
+  const showing = channels.loaded && conversation !== null && conversation !== undefined;
+  useEffect(() => {
+    if (!showing || arrived.current) return;
+    const heading = document.getElementById(headingId);
+    if (heading === null) return;
+    arrived.current = true;
+    if (document.activeElement === null || document.activeElement === document.body) heading.focus();
+  }, [showing]);
 
   function closeSettings() {
     setSettingsOpen(false);
