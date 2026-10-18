@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 
 use conch_voice::sdk::DisconnectReason;
 use conch_voice_api::{
-    VoiceControlCommand, VoiceControlErrorCode, VoiceControlEvent, VoiceControlHelloV1,
-    VoiceControlPhase, VoiceControlReason, VoiceControlStateV1, parse_command,
+    VOICE_CONTROL_EVENT_QUEUE_LINES, VoiceControlCommand, VoiceControlErrorCode, VoiceControlEvent,
+    VoiceControlHelloV1, VoiceControlPhase, VoiceControlReason, VoiceControlStateV1, parse_command,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
+use support::fake::Call;
 use support::managed::{Login, ManagedRig, ManagedSetup};
 use support::stub::{Reply, Stub, whoami};
 
@@ -984,6 +985,7 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
     rig.send_start();
     rig.ready().await;
     let base = rig.read().last().unwrap().seq();
+    let track_muted = rig.sdk.count(Call::Mute);
     // The owner stops reading; meanwhile the mute key is struck far more often than the
     // queue holds states. Each strike is one change, and so one state, and one seq.
     rig.reader.stop(true);
@@ -994,11 +996,29 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
         rig.reader.is_waited_for()
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The owner reads again only once the helper has taken the strikes, all but perhaps
+    // the last: each strike that mutes mutes the track as well. That is more states than
+    // the helper holds for an owner who does not read, so some were dropped.
+    rig.until("the strikes taken", |rig| {
+        rig.sdk.count(Call::Mute) >= track_muted + STRIKES as usize / 2
+    })
+    .await;
     rig.reader.stop(false);
 
-    // The owner reads again, sees a gap, and asks for the state until the answer comes
-    // after every strike: then it is the whole state, unmuted after an even number.
+    // The owner reads first what the helper held for it: the event in its writer's hands
+    // and a full queue. Only then does it ask, as `conch` asks only once it has read an
+    // event after the gap. Asked sooner, the helper may read the command before its
+    // writer has taken anything from the queue, and the state and the ack that answer it
+    // are dropped as any event is that meets a full queue (§3): the owner would wait for
+    // an ack that never comes (#555).
+    rig.until("the events held for the owner", |rig| {
+        rig.read().iter().filter(|event| event.seq() > base).count()
+            > VOICE_CONTROL_EVENT_QUEUE_LINES
+    })
+    .await;
+
+    // Then it asks for the state, whose seq shows the gap, until the answer comes after
+    // every strike: then it is the whole state, unmuted after an even number.
     let mut id = 2;
     let resynced = loop {
         rig.send(&ManagedRig::command("get_state", id, json!({})));
