@@ -11,13 +11,16 @@ export function VoiceStatus({
   viewer,
   people,
   onUnauthorized,
+  onOpen,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
   readonly onUnauthorized: () => void;
+  // Opens a channel: the strip's way back to the channel voice is in.
+  readonly onOpen: (name: string) => void;
 }) {
   const voice = useVoice({ signedIn, channel, onUnauthorized });
-  return <VoicePanel voice={voice} viewer={viewer} people={people} viewed={channel} />;
+  return <VoicePanel voice={voice} viewer={viewer} people={people} viewed={channel} onOpen={onOpen} />;
 }
