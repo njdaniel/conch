@@ -79,7 +79,9 @@ const (
 	// multi-architecture index for v1.13.7.
 	Image = "livekit/livekit-server:v1.13.7@sha256:6fd3b7088874c4d119160dd688798dfec852bc014786d392caad15f6f63912a3"
 
-	// LKVersion is the pinned livekit-cli release.
+	// LKVersion is the pinned livekit-cli release. When it changes, recheck
+	// the keys lk logs a participant's identity under: e2e/isolation's
+	// lkParticipantKeys relies on them.
 	LKVersion = "2.19.0"
 )
 
