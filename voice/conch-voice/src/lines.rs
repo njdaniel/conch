@@ -12,6 +12,9 @@
 //!   full the line is dropped and counted; a reader who stopped reading has lost lines, not
 //!   stopped the client.
 //! - When lines were dropped and there is room again, the first thing queued says how many.
+//! - A queue may keep a few places beyond its bound for lines that must not be dropped
+//!   ([`LineQueue::push_reserved`]). Such a line waits behind the lines already queued, and
+//!   is dropped only when those places are taken too, so the queue still has a bound.
 //! - A flush waits for what is queued to be written, but only up to a limit. A flush that
 //!   times out is not an error: the process goes on, or exits.
 //!
@@ -19,8 +22,9 @@
 //! a panic): a thread makes the write and the caller gives up on it after a limit.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How many lines may wait for the writer before lines are dropped: far more than a client
@@ -43,7 +47,16 @@ pub type Marker = Box<dyn Fn(u64) -> String + Send + Sync>;
 /// writer except [`LineQueue::flush`] and [`LineQueue::flush_blocking`], each up to its
 /// limit.
 pub struct LineQueue {
+    /// Room for `capacity` and `reserve` together. Which line may use which places is
+    /// decided by `waiting`, before anything is put on it.
     queue: SyncSender<Item>,
+    /// Items put on the queue and not yet taken by the writer: raised before an item is
+    /// put there and lowered once the writer has taken it, so never fewer than it holds.
+    waiting: Arc<AtomicUsize>,
+    /// How many items may wait before a line [`LineQueue::push`] queues is dropped.
+    capacity: usize,
+    /// How many more may wait for lines [`LineQueue::push_reserved`] queues.
+    reserve: usize,
     /// Lines dropped since the last marker was queued. Held only while a line is put on
     /// the queue, which does not wait, so it keeps lines from several threads in order
     /// without making any of them wait for output.
@@ -58,24 +71,35 @@ impl LineQueue {
     /// that stands in for dropped ones.
     #[must_use]
     pub fn spawn(out: Box<dyn Write + Send>, capacity: usize, marker: Marker) -> Self {
-        Self::start(out, capacity, Some(marker))
+        Self::start(out, capacity, 0, Some(marker))
     }
 
     /// As [`LineQueue::spawn`], for lines that say for themselves when some are missing: a
     /// line that meets a full queue is dropped and counted, and nothing is written in its
     /// place. The managed helper's events are such lines: each has a number one greater
     /// than the last, and a gap in the numbers is how its owner learns of a drop
-    /// (`docs/design/tui-voice.md` §3).
+    /// (`docs/design/tui-voice.md` §3). `reserve` more may wait, for lines queued with
+    /// [`LineQueue::push_reserved`].
     #[must_use]
-    pub fn spawn_unmarked(out: Box<dyn Write + Send>, capacity: usize) -> Self {
-        Self::start(out, capacity, None)
+    pub fn spawn_unmarked(out: Box<dyn Write + Send>, capacity: usize, reserve: usize) -> Self {
+        Self::start(out, capacity, reserve, None)
     }
 
-    fn start(out: Box<dyn Write + Send>, capacity: usize, marker: Option<Marker>) -> Self {
-        let (queue, items) = sync_channel(capacity);
-        std::thread::spawn(move || write_all(out, &items));
+    fn start(
+        out: Box<dyn Write + Send>,
+        capacity: usize,
+        reserve: usize,
+        marker: Option<Marker>,
+    ) -> Self {
+        let (queue, items) = sync_channel(capacity.saturating_add(reserve));
+        let waiting = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::clone(&waiting);
+        std::thread::spawn(move || write_all(out, &items, &taken));
         Self {
             queue,
+            waiting,
+            capacity,
+            reserve,
             dropped: Mutex::new(0),
             marker,
         }
@@ -84,15 +108,27 @@ impl LineQueue {
     /// Queues a line. It never waits: with the queue full the line is dropped and counted,
     /// and the count is written, as the marker, before the next line there is room for.
     pub fn push(&self, line: String) {
+        self.put(line, self.capacity);
+    }
+
+    /// Queues a line that may also take a reserved place: with the queue full it is queued
+    /// all the same, behind the lines waiting, and it is dropped only when the reserve is
+    /// taken too. It never waits. The caller is the one who knows why the reserve is enough.
+    pub fn push_reserved(&self, line: String) {
+        self.put(line, self.capacity.saturating_add(self.reserve));
+    }
+
+    /// Queues a line if fewer than `limit` items wait, and otherwise drops and counts it.
+    fn put(&self, line: String, limit: usize) {
         let mut dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
         if self.marker.is_none() {
-            if let Err(TrySendError::Full(_)) = self.queue.try_send(Item::Line(line)) {
+            if let Err(TrySendError::Full(_)) = self.offer(Item::Line(line), limit) {
                 *dropped = dropped.saturating_add(1);
             }
             return;
         }
-        if self.owe_nothing(&mut dropped)
-            && let Err(TrySendError::Full(_)) = self.queue.try_send(Item::Line(line))
+        if self.owe_nothing(&mut dropped, limit)
+            && let Err(TrySendError::Full(_)) = self.offer(Item::Line(line), limit)
         {
             *dropped = 1;
         } else if *dropped > 0 {
@@ -101,9 +137,29 @@ impl LineQueue {
         // A writer that is gone (its thread ended) takes nothing; there is nobody to tell.
     }
 
-    /// Queues the marker for lines dropped so far, if there are any. True if nothing is
-    /// owed any more; false if the queue is still full, and then the count stands.
-    fn owe_nothing(&self, dropped: &mut u64) -> bool {
+    /// Puts `item` on the queue if fewer than `limit` items wait for the writer, and hands
+    /// it back as `Full` if not. The place is taken before the item is put there, so two
+    /// threads never both take the last one.
+    fn offer(&self, item: Item, limit: usize) -> Result<(), TrySendError<Item>> {
+        let took = self
+            .waiting
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
+                (waiting < limit).then_some(waiting + 1)
+            });
+        if took.is_err() {
+            return Err(TrySendError::Full(item));
+        }
+        let sent = self.queue.try_send(item);
+        if sent.is_err() {
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    /// Queues the marker for lines dropped so far, if there are any, if fewer than `limit`
+    /// items wait. True if nothing is owed any more; false if the queue is still full, and
+    /// then the count stands.
+    fn owe_nothing(&self, dropped: &mut u64, limit: usize) -> bool {
         let Some(marker) = &self.marker else {
             // Nothing is ever owed: the lines say for themselves that some are missing.
             return true;
@@ -111,7 +167,7 @@ impl LineQueue {
         if *dropped == 0 {
             return true;
         }
-        match self.queue.try_send(Item::Line(marker(*dropped))) {
+        match self.offer(Item::Line(marker(*dropped)), limit) {
             Err(TrySendError::Full(_)) => false,
             Ok(()) | Err(TrySendError::Disconnected(_)) => {
                 *dropped = 0;
@@ -127,16 +183,16 @@ impl LineQueue {
         *self.dropped.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queues the end-of-flush mark, without waiting. The mark is handed back if the queue
-    /// is full.
+    /// Queues the end-of-flush mark, without waiting and without the reserve. The mark is
+    /// handed back if the queue is full.
     fn try_mark(&self, mark: Item) -> Result<(), Item> {
         {
             let mut dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
-            if !self.owe_nothing(&mut dropped) {
+            if !self.owe_nothing(&mut dropped, self.capacity) {
                 return Err(mark);
             }
         }
-        match self.queue.try_send(mark) {
+        match self.offer(mark, self.capacity) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(mark)) => Err(mark),
             // No writer: nothing is waiting to be written.
@@ -196,8 +252,10 @@ impl LineQueue {
 /// The writer thread: the one place that can wait for the reader. It ends when the queue's
 /// last sender is gone. A write that fails (the reader went away) loses that line and
 /// nothing else: the queue is still emptied, so nobody is ever refused for lack of room.
-fn write_all(mut out: Box<dyn Write + Send>, items: &Receiver<Item>) {
+fn write_all(mut out: Box<dyn Write + Send>, items: &Receiver<Item>, waiting: &AtomicUsize) {
     for item in items {
+        // Taken off the queue: its place is free while it is written, as with a channel.
+        waiting.fetch_sub(1, Ordering::SeqCst);
         match item {
             Item::Line(mut line) => {
                 // The line and its end in one write, so that a reader never sees half.
@@ -448,7 +506,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unmarked_queue_drops_what_does_not_fit_and_writes_nothing_in_its_place() {
         let writer = Stallable::stalled();
-        let lines = LineQueue::spawn_unmarked(Box::new(writer.clone()), 2);
+        let lines = LineQueue::spawn_unmarked(Box::new(writer.clone()), 2, 0);
         lines.push("a".into());
         writer.until_waiting();
         for line in ["b", "c", "lost", "lost", "lost"] {
@@ -465,6 +523,35 @@ pub(crate) mod tests {
             3,
             "the count stands; nothing was written for it"
         );
+    }
+
+    #[test]
+    fn a_reserved_line_is_queued_behind_a_full_queue_and_the_reserve_has_a_bound_too() {
+        let writer = Stallable::stalled();
+        let lines = LineQueue::spawn_unmarked(Box::new(writer.clone()), 2, 2);
+        lines.push("a".into());
+        writer.until_waiting();
+        for line in ["b", "c", "lost"] {
+            lines.push(line.into());
+        }
+        assert_eq!(lines.dropped(), 1);
+        // The queue is full for ordinary lines; a reserved one still has a place.
+        lines.push_reserved("kept 1".into());
+        lines.push("lost".into());
+        lines.push_reserved("kept 2".into());
+        // The reserve is taken too: a reserved line is dropped like any other, so the
+        // queue never holds more than its bound and its reserve.
+        lines.push_reserved("lost".into());
+        assert_eq!(lines.dropped(), 3);
+
+        writer.stall(false);
+        writer.until_text("a\nb\nc\nkept 1\nkept 2\n");
+        // Once the writer has taken them, every place is free again.
+        lines.push("d".into());
+        lines.push_reserved("kept 3".into());
+        assert!(lines.flush_blocking(Duration::from_secs(10)));
+        assert_eq!(writer.text(), "a\nb\nc\nkept 1\nkept 2\nd\nkept 3\n");
+        assert_eq!(lines.dropped(), 3);
     }
 
     #[test]
