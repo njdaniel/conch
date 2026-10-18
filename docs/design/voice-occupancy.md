@@ -1,6 +1,6 @@
 # Design: voice occupancy across the server
 
-- **Status:** Proposed, 2026-10-18, for the project owner's sign-off (issue #596, child a). It reverses two decisions recorded in [browser-ui-polish.md](browser-ui-polish.md) (§2), which is why it needs him. Nothing in it is implemented; the schema addition runs through the `schema-change` skill in child b.
+- **Status:** Accepted, 2026-10-18, by the project owner (issue #596, child a), with the three answers recorded in §7. It reverses two decisions recorded in [browser-ui-polish.md](browser-ui-polish.md) (§2). Nothing in it is implemented yet; the schema addition runs through the `schema-change` skill in child b.
 - **Touches:** [voice-control-plane.md](voice-control-plane.md) §6 (presence, its poller and its socket), [client-experience.md](client-experience.md) (UX-02, UX-04, UX-09, UX-23), [ADR-004](../adr/ADR-004-voice-via-livekit.md) (agents keep no voice), [ADR-005](../adr/ADR-005-nets-and-whispers.md) (voice belongs to a channel; nets are rooms of their own), the [browser UX audit](../reviews/browser-ux-audit.md) (F01, F02).
 - **Owner:** protocol-designer (this note, the one new wire shape); server-engineer (child b); web-engineer (child c).
 - **Issues:** #596 (this note and the split). Child c also builds on #584 (the strip names its destination) and #585 (a live roster when not joined).
@@ -136,8 +136,8 @@ Handler and socket tests in `internal/server`, table-driven on the pattern of `v
 
 **The socket.** `api.ts` opens `/v1/voice/occupancy/ws` through `connect` as it does presence; the hook holds it for the life of the signed-in page, not per channel. The trap #585 found applies: a refusal before the upgrade reaches the browser as close 1006 and `Feed` retries for ever, so the hook does not open the socket when `WhoAmIResponseV1.voice_allowed` is false. On `configured: false` the one frame says so and the marks stay empty.
 
-## 7. Open questions for the project owner
+## 7. Decisions of the project owner (2026-10-18)
 
-1. **The reversal (§2).** Do the counts in the channel list, under the narrowed rule "nothing outside the strip joins or offers a join", have your yes? This gates children b and c.
-2. **People without voice (§3.2).** Refuse them the counts, as every other voice route does (recommended), or show counts to any member? The second makes `voice_allowed` mean "may join" rather than "may see voice".
-3. **Nets (§3.1).** Confirm that v1 counts the channel-wide room only, for everyone, and that net rooms, when they arrive, would be a separate optional list for the net's own members rather than folded into the channel's number.
+1. **The reversal (§2): yes.** Counts in the channel list, under the narrowed rule "nothing outside the strip joins or offers a join". Children b and c may proceed.
+2. **People without voice (§3.2): refused**, as on every other voice route. `voice_allowed` keeps meaning "may see and use voice".
+3. **Nets (§3.1): the channel-wide room only, for everyone.** Net rooms, when they arrive, are a separate optional list for the net's own members, not folded into the channel's number.
