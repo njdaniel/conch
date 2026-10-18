@@ -26,6 +26,19 @@ export type ChannelsAction =
 
 export const initialChannels: ChannelsState = { channels: [], loaded: false, selected: null };
 
+// The channel a person lands in when nothing they chose names another (issue
+// #556): #general when they can see it, else the first channel, as before.
+export const defaultChannel = 'general';
+
+// fallbackChannel picks the landing channel from the names a person can see.
+export function fallbackChannel(names: readonly string[]): string | undefined {
+  return names.includes(defaultChannel) ? defaultChannel : names[0];
+}
+
+function fallback(channels: readonly ChannelV0[]): string | null {
+  return fallbackChannel(channels.map((c) => c.name)) ?? null;
+}
+
 function has(channels: readonly ChannelV0[], name: string | null): name is string {
   return name !== null && channels.some((c) => c.name === name);
 }
@@ -34,8 +47,10 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
   switch (action.type) {
     case 'loaded': {
       const { channels, preferred, remembered } = action;
+      // The link's channel, the open one and the remembered one are the
+      // person's own choices, so each wins over the default.
       const candidates = [preferred, state.selected, remembered];
-      const selected = candidates.find((name) => has(channels, name)) ?? channels[0]?.name ?? null;
+      const selected = candidates.find((name) => has(channels, name)) ?? fallback(channels);
       return { channels, loaded: true, selected };
     }
     case 'select':
@@ -44,7 +59,7 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
         : state;
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);
-      const selected = state.selected === action.name ? (channels[0]?.name ?? null) : state.selected;
+      const selected = state.selected === action.name ? fallback(channels) : state.selected;
       return { ...state, channels, selected, lost: action.name };
     }
     case 'reset':

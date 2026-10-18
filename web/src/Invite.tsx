@@ -8,6 +8,7 @@ import type { InvitePreviewV1 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
 import { noticeText } from './state/auth';
+import { fallbackChannel } from './state/channels';
 
 // The one answer for a code that is unknown, used, expired or closed. The
 // server does not say which, so neither does the page.
@@ -80,8 +81,9 @@ export function Invite({
   // was told (as signOut does).
   readonly onNewPerson: () => Promise<boolean>;
   readonly onBack: () => void;
-  // The joiner, and the first channel the invite grants. principal is null
-  // when the account was made but whoami did not answer: App asks again.
+  // The joiner, and the channel they land in: #general when the invite grants
+  // it, else the first channel it grants. principal is null when the account
+  // was made but whoami did not answer: App asks again.
   readonly onJoined: (principal: WhoAmIResponseV1 | null, channel: string | undefined) => void;
 }) {
   const [preview, setPreview] = useState<Preview>({ state: 'loading' });
@@ -137,7 +139,7 @@ export function Invite({
     void api.redeemInvite(inviteCode, name).then((result) => {
       setBusy(false);
       if (result.ok) {
-        onJoined(result.value, ready.channels[0]);
+        onJoined(result.value, fallbackChannel(ready.channels));
         return;
       }
       switch (result.failure) {
@@ -145,7 +147,7 @@ export function Invite({
           setHeld(true);
           return;
         case 'unchecked':
-          onJoined(null, ready.channels[0]);
+          onJoined(null, fallbackChannel(ready.channels));
           return;
         case 'unkept':
           setPreview({
