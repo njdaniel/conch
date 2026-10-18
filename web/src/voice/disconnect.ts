@@ -41,6 +41,9 @@ export function afterRefusal(r: Refusal): Next {
     case 400:
       return { kind: 'stop', why: 'Voice needs a server that signs people in' };
     case 403:
+      // A person whose access does not include voice (issue #437), and an
+      // agent, which never uses it, are both refused with a 403.
+      if (r.code === 'voice_not_allowed') return { kind: 'stop', why: 'Your account does not include voice. Ask whoever invited you.' };
       return { kind: 'stop', why: 'Voice is for people, not for this account' };
     case 404:
       return { kind: 'stop', why: 'You are not a member of this channel' };
