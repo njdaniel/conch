@@ -1386,6 +1386,32 @@ func (p *voicePoller) snapshotLocked(channelID, viewer int64) schema.VoicePresen
 	return snap
 }
 
+// metricCounts is what the metrics endpoint reports of voice (issue #562,
+// metrics.go): the rooms with somebody in them, the connections in those
+// rooms, and the screen shares that have started, all as presence shows them,
+// so nothing during an outage or in a stale room. It names no room and no
+// one. A rotated room is gone from rooms, so it stops counting at once.
+func (p *voicePoller) metricCounts() (rooms, participants, shares int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.s.lk == nil || !p.contacted || p.down {
+		return 0, 0, 0
+	}
+	for _, r := range p.rooms {
+		if r.stale {
+			continue
+		}
+		if n := len(r.participants); n > 0 {
+			rooms++
+			participants += n
+		}
+		if r.share != nil && !r.share.pending {
+			shares++
+		}
+	}
+	return rooms, participants, shares
+}
+
 // voiceSub is one presence socket's subscription. wake has room for one
 // queued notification: the poller only ever does a non-blocking send, so a
 // slow socket costs the poller nothing, and several changes collapse into one

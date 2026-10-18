@@ -528,6 +528,113 @@ func TestVoiceJoinWhereTheAccountAlreadyIs(t *testing.T) {
 	}
 }
 
+// Right after this TUI's own /voice leave, presence can go on listing the
+// session it left until the server's next sweep. That session, known by its
+// join time, is not another client, so a /voice join is not warned about;
+// any other entry of this account is, as before (§11).
+func TestVoiceJoinRightAfterLeave(t *testing.T) {
+	ours := time.Date(2026, time.October, 20, 8, 0, 0, 0, time.UTC)
+	theirs := ours.Add(90 * time.Second)
+	at := func(id int64, joined time.Time) schema.VoiceParticipant {
+		p := person(id, false)
+		p.JoinedAt = schema.NewTimestamp(joined)
+		return p
+	}
+	tests := []struct {
+		name string
+		// helper is what this TUI's helper last said before the leave; nil
+		// is no helper and no leave.
+		helper *voicehelper.Status
+		// before is presence while the helper ran; after, when set, is a
+		// presence document that arrives after the leave.
+		before, after schema.VoicePresenceV1
+		warned        bool
+	}{
+		{
+			name:   "leave then join within the presence lag",
+			helper: ptr(connected("general")), before: presence(true, true, at(7, ours), at(8, ours)),
+		},
+		{
+			name:   "leave, then a new document still listing the session left",
+			helper: ptr(connected("general")), before: presence(true, true, at(7, ours)),
+			after: presence(true, true, at(7, ours), at(8, theirs)),
+		},
+		{
+			name:   "another client present",
+			before: presence(true, true, at(7, ours)), warned: true,
+		},
+		{
+			name:   "leave, then a new document listing this account from another client",
+			helper: ptr(connected("general")), before: presence(true, true, at(7, ours)),
+			after: presence(true, true, at(7, theirs)), warned: true,
+		},
+		{
+			name:   "leave, then the session left gone and another client in",
+			helper: ptr(connected("general")), before: presence(true, true, at(7, ours)),
+			after: presence(true, true, at(7, theirs), at(8, ours)), warned: true,
+		},
+		{
+			// Displaced: the entry presence shows is the client that took over.
+			name:   "leave after another client displaced this one",
+			helper: ptr(failed("general", "duplicate_identity")), before: presence(true, true, at(7, theirs)),
+			warned: true,
+		},
+		{
+			// Nothing tells this TUI's session from another client then.
+			name:   "leave before presence showed the session",
+			helper: ptr(connected("general")), before: presence(true, true),
+			after: presence(true, true, at(7, ours)), warned: true,
+		},
+		{
+			// The helper was in #ops; #general's entry is someone else's.
+			name:   "leave another channel's voice",
+			helper: ptr(connected("ops")), before: presence(true, true, at(7, ours)),
+			warned: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, fake, _ := voiceTestModel(t)
+			m.voice.state, m.voice.doc = voiceLive, tt.before
+			if tt.helper != nil {
+				m = withHelper(t, m, *tt.helper)
+				var cmd tea.Cmd
+				m, cmd = submitText(t, m, "/voice leave")
+				for _, msg := range drain(cmd) {
+					m, _ = update(m, msg)
+				}
+				// The supervisor says voice is idle once the helper is reaped.
+				_, serial, _ := m.vc.owner.current()
+				m, _ = update(m, voiceStatusMsg{serial: serial, st: voicehelper.Status{Gen: 1, Phase: voicehelper.PhaseIdle}})
+				if got := fake.taken(); strings.Join(got, ",") != "leave" || m.vc.busy != "" {
+					t.Fatalf("leave: calls %v, busy %q", got, m.vc.busy)
+				}
+			}
+			if tt.after.Schema != "" {
+				m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: tt.after})
+			}
+			// The strip reads presence the same way.
+			if strip := m.voiceStrip(140); strings.Contains(strip, "from another client") != tt.warned {
+				t.Errorf("strip %q: says another client %v, want %v", strip, !tt.warned, tt.warned)
+			}
+			m, cmd := submitText(t, m, "/voice join")
+			drain(cmd)
+			calls := fake.taken()
+			warned := strings.Contains(m.status(), "voice: joining disconnects your other #general voice; repeat /voice join within 10 s")
+			if warned != tt.warned || (len(calls) == 0) != tt.warned {
+				t.Fatalf("warned %v, want %v; calls %v; status %q", warned, tt.warned, calls, m.status())
+			}
+			if !tt.warned && strings.Join(calls, ",") != "join general" {
+				t.Errorf("calls %v, want join general", calls)
+			}
+			// A join starts afresh: what the leave recorded is gone.
+			if !tt.warned && m.vc.left.channel != "" {
+				t.Errorf("after the join, the session left is still %+v", m.vc.left)
+			}
+		})
+	}
+}
+
 // A failed or missing helper leaves text as it was: the draft, the history,
 // the channel and the focus, and sending still works.
 func TestVoiceFailureLeavesTextUsable(t *testing.T) {

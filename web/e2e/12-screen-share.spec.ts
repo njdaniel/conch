@@ -1,9 +1,10 @@
 // Screen share in the browser (issue #444). Three people in three browser
 // contexts against the conchd and pinned LiveKit of voice-world.ts, each on
-// Chromium's fake devices: the screen picker is answered with a fake screen,
-// 1920x1080 at 30 fps with a sound track (playwright.config.ts). Without
-// Docker the tests fail when CI is set and are skipped otherwise, as in
-// 10-voice.
+// Chromium's fake devices: the screen picker is answered with a fake screen
+// with a sound track (playwright.config.ts). The fake screen captures at the
+// size and rate it is asked for, so at 3840x2160 and 60 fps, published with
+// 720p and 1080p layers below it (issue #565). Without Docker the tests fail
+// when CI is set and are skipped otherwise, as in 10-voice.
 //
 // A share carries on when the room is renewed under it (issue #516): another
 // member disabled renews the room, and the sharer's page claims the share
@@ -26,6 +27,10 @@ const shareView = (page: Page) => page.getByRole('region', { name: 'Shared scree
 // A narrow window, a phone's width, for the layer test: what decides the
 // layer is the size of the view, not the device.
 const narrow: BrowserContextOptions = { viewport: { width: 360, height: 740 } };
+// A full-HD desktop window for the same test. The smallest layer is 720p
+// (issue #565), so a 1280x720 window, Playwright's desktop default, needs no
+// larger one than a phone does.
+const fullHD: BrowserContextOptions = { viewport: { width: 1920, height: 1080 } };
 
 // Installed before the page's own scripts: keeps every peer connection the
 // SDK makes (for getStats), keeps the screen the picker gave (so a test can
@@ -497,7 +502,7 @@ test.describe('screen share with LiveKit', () => {
 
   test('a phone-wide viewer receives a smaller layer than a full-screen desktop viewer, and the panel fits it', async ({ browser }) => {
     const a = await person(browser, 'alice');
-    const b = await person(browser, 'bob');
+    const b = await person(browser, 'bob', fullHD);
     const c = await person(browser, 'carol', narrow);
     try {
       await join(a, 'Join voice');

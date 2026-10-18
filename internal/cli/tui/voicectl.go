@@ -260,10 +260,61 @@ type voiceCtl struct {
 	// confirmKnown is whether presence showed this account in that voice
 	// (the channel on screen) or could not tell (any other channel).
 	confirmKnown bool
+	// left is this TUI's own session as presence showed it when /voice leave
+	// ended it, so that presence still listing it afterwards is not taken for
+	// another client (§11). A join clears it.
+	left voiceLeft
 	// path and diag are the helper's path and log tail as /voice status
 	// last read them, for its page.
 	path string
 	diag []string
+}
+
+// voiceLeft is a session this TUI left: the channel, the account, and the
+// join times presence gave that account in the channel's room. Presence is
+// read on a sweep, so it can go on listing the session for a while after the
+// helper has gone. The server gives each connection its own joined_at, so an
+// entry with one of these join times is the session that was left, and any
+// other entry of the account is another client.
+type voiceLeft struct {
+	channel   string
+	principal int64
+	joined    []schema.Timestamp
+}
+
+// leaving is the session this TUI's helper has in the channel on screen, as
+// presence shows it now: what /voice leave records. It is empty when presence
+// says nothing of it, and when the helper is not in voice there: a failed
+// helper may have been displaced by another client, whose entry this would
+// otherwise record as its own.
+func (m Model) leaving() voiceLeft {
+	if !m.vc.voiceActive() || m.vc.status.Channel != m.current() || m.voice.state != voiceLive ||
+		!m.voice.doc.Available || m.authorID <= 0 {
+		return voiceLeft{}
+	}
+	l := voiceLeft{channel: m.current(), principal: m.authorID}
+	for _, room := range m.voice.doc.Rooms {
+		// The helper joins only the channel-wide room.
+		if room.Audience != nil {
+			continue
+		}
+		for _, p := range room.Participants {
+			if p.PrincipalID == m.authorID && !p.JoinedAt.IsZero() {
+				l.joined = append(l.joined, p.JoinedAt)
+			}
+		}
+	}
+	return l
+}
+
+// justLeft reports whether p, in room of the channel on screen, is the
+// session this TUI left, still listed by presence.
+func (m Model) justLeft(room schema.VoicePresenceRoom, p schema.VoiceParticipant) bool {
+	l := m.vc.left
+	if room.Audience != nil || l.channel != m.current() || l.principal != p.PrincipalID || p.JoinedAt.IsZero() {
+		return false
+	}
+	return slices.ContainsFunc(l.joined, func(at schema.Timestamp) bool { return at.Time().Equal(p.JoinedAt.Time()) })
 }
 
 // WithVoice gives the model voice controls with setup. Without it /voice says
@@ -542,8 +593,10 @@ func (m Model) voiceJoin(args []string) (tea.Model, tea.Cmd) {
 	// client: joining here would disconnect that one, so it is said first,
 	// and a repeat within voiceConfirmWindow goes ahead (§11). Presence covers
 	// only the channel on screen: there it is known; for any other channel it
-	// is not, and the same step is asked for. The status line is cut beside
-	// the key hints on a small terminal, so the strip says it too.
+	// is not, and the same step is asked for. The session this TUI has just
+	// left, which presence may still list, is not another client
+	// (selfInVoice). The status line is cut beside the key hints on a small
+	// terminal, so the strip says it too.
 	in, _, known := m.selfInVoice()
 	onScreen := channel == m.current()
 	if !onScreen || (known && in) {
@@ -567,6 +620,7 @@ func (m Model) voiceJoin(args []string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input = ""
+	m.vc.left = voiceLeft{}
 	m.vc.busy = opJoin.asked(channel)
 	m.setStatus(modeChannels, "voice: joining #"+sanitize(channel)+"…")
 	cmd := m.voiceCall(ctl, serial, opJoin, channel)
@@ -586,6 +640,7 @@ func (m Model) voiceLeave() (tea.Model, tea.Cmd) {
 	// Leave is never refused for a command in flight: it is how a join that
 	// hangs is given up on.
 	m.input = ""
+	m.vc.left = m.leaving()
 	m.vc.busy = opLeave.asked("")
 	m.setStatus(modeChannels, "voice: leaving…")
 	return m, m.voiceCall(ctl, serial, opLeave, "")
