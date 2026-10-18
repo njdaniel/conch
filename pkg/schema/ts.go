@@ -102,6 +102,10 @@ var TSTypes = []TSType{
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	// Voice occupancy (issue #596): how many are in each channel's voice,
+	// streamed on a socket of its own so the channel list can show it.
+	{Value: VoiceChannelOccupancy{}},
+	{Value: VoiceOccupancyV1{}, Family: "voice-occupancy-v1", Schema: VoiceOccupancySchemaV1},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},

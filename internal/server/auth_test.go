@@ -183,6 +183,12 @@ var routeExpectations = map[string]routeExpectation{
 	// caller who passes authentication gets 400 before anything else.
 	"GET /v1/channels/{channel}/voice": {classAuth, "/v1/channels/general/voice", "", 200},
 	"GET /v1/voice/ws":                 {classAuth, "/v1/voice/ws", "", 400},
+	// Voice occupancy (issue #596). Not configured is a valid document, so a
+	// person with voice gets 200; the socket takes no parameter, so a plain
+	// GET gets as far as the upgrade and is refused there with 426. AuthOff
+	// gets 400 and an agent 403 on both (special-cased below).
+	"GET /v1/voice/occupancy":    {classAuth, "/v1/voice/occupancy", "", 200},
+	"GET /v1/voice/occupancy/ws": {classAuth, "/v1/voice/occupancy/ws", "", 426},
 	// The events socket (issue #269) needs a channel parameter too, so every
 	// caller who passes authentication gets 400 (AuthOff: sessions_require_auth).
 	"GET /v1/events/ws": {classAuth, "/v1/events/ws", "", 400},
@@ -434,7 +440,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || isFileRoute(rt.pattern) {
+			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -500,7 +506,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 					rt.pattern == "GET /v1/credentials/mine" || rt.pattern == "DELETE /v1/credentials/mine/{id}" {
 					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to list or revoke
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				if isFileRoute(rt.pattern) {

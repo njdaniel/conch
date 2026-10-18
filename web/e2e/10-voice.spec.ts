@@ -588,6 +588,58 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  // Issue #588 (F05): in voice in one channel and reading another, the
+  // roster's names come from the channel voice is in. The channel alice reads
+  // has her and the operator only; bob, the screen he shares, and someone who
+  // joins while she reads it are still named.
+  test('the roster names the people of the channel voice is in, read from another channel', async ({ browser }) => {
+    const other = 'f05-alone';
+    const done = async (what: string, call: Promise<{ status: number }>) => {
+      const { status } = await call;
+      expect(status >= 200 && status < 300, `${what}: status ${String(status)}`).toBe(true);
+    };
+    await done(`create ${other}`, vw.api(vw.operator, 'POST', '/v0/channels', { name: other }));
+    await done(`add alice to ${other}`, vw.api(vw.operator, 'PUT', `/v1/channels/${other}/members/${String(vw.alice.id)}`));
+    const dana = await vw.addMember('dana');
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    const d = await browser.newContext();
+    try {
+      const alice = voiceRegion(a.page);
+      const bob = voiceRegion(b.page);
+      await alice.getByRole('button', { name: 'Join voice' }).click();
+      await bob.getByRole('button', { name: 'Join voice' }).click();
+      for (const v of [alice, bob]) await expect(v).toContainText('Connected in #voice-room', { timeout: 30_000 });
+
+      await channelButton(a.page, other).click();
+      await expect(conversation(a.page).getByRole('heading', { name: other })).toBeVisible();
+      const roster = alice.getByRole('list', { name: 'In voice' });
+      await expect(roster).toContainText('You');
+      await expect(roster).toContainText('bob');
+      await expect(roster).not.toContainText(/Member \d+/);
+
+      // bob's share is announced by his name.
+      await bob.getByRole('button', { name: 'Share screen' }).click();
+      await expect(alice).toContainText('bob is sharing a screen', { timeout: 15_000 });
+      await expect(alice).not.toContainText(/Member \d+/);
+      await bob.getByRole('button', { name: 'Stop sharing' }).click();
+
+      // Someone who joins while alice reads the other channel is named within
+      // 3 s of appearing.
+      const page = await d.newPage();
+      await signIn(page, vw, dana.token, dana.name);
+      await channelButton(page, vw.channel).click();
+      await voiceRegion(page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(roster.getByRole('listitem')).toHaveCount(3, { timeout: 30_000 });
+      await expect(roster).toContainText('dana', { timeout: 3000 });
+      await expect(roster).not.toContainText(/Member \d+/);
+    } finally {
+      await d.close();
+      await a.context.close();
+      await b.context.close();
+    }
+  });
+
   test('removing the member disconnects the browser and the page says why', async ({ browser }) => {
     const b = await person(browser, 'bob');
     try {

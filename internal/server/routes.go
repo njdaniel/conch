@@ -70,6 +70,12 @@ func (s *Server) routeTable() []route {
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a
 		// socket. The credential and membership re-checks are unchanged.
 		{pattern: "GET /v1/voice/ws", access: accessAuthenticated, handler: hf(s.handleVoiceWS), acceptsTicket: true},
+		// Voice occupancy (issue #596): how many are in each channel's voice,
+		// for the caller's own channels; people with voice only, checked in the
+		// handlers (voice_occupancy.go). The socket takes ?ticket= as the
+		// presence socket does, for the browser.
+		rt("GET /v1/voice/occupancy", accessAuthenticated, hf(s.handleVoiceOccupancy)),
+		{pattern: "GET /v1/voice/occupancy/ws", access: accessAuthenticated, handler: hf(s.handleVoiceOccupancyWS), acceptsTicket: true},
 		// Sessions (issue #265). Any caller with a credential; the session
 		// routes act on the caller's own sessions (by credential) and the
 		// list is a membership-gated read. Checked in the handlers.

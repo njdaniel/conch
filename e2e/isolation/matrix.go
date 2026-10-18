@@ -68,6 +68,9 @@ type probe struct {
 	contentType  string
 	socket       bool // a WebSocket upgrade (method GET)
 	ticket       bool // with a ticket rather than the bearer
+	// frame waits, once upgraded, for the socket's first frame, the
+	// document it sends on connect, and answers with it as the body.
+	frame bool
 }
 
 // row is one line of the matrix.
@@ -94,6 +97,8 @@ type row struct {
 	// after runs once the row has passed, as the prober, for a check of its
 	// own.
 	after func(w *world, a api) error
+	// inspect checks the body of an own row's success, as the prober.
+	inspect func(w *world, a api, body []byte) error
 	// mayNot is the refusal for a prober an operator did not let invite,
 	// when it differs from want.
 	mayNot answer
@@ -254,6 +259,14 @@ func matrixRows() []row {
 		own("GET /v1/sessions", "reads her own channel's roster", func(w *world, _ subject) probe { return get("/v1/sessions?channel=" + bChannel(w)) }),
 		own("GET /v1/runs", "lists her own channel's runs", func(w *world, _ subject) probe { return get("/v1/runs?channel=" + bChannel(w)) }),
 		own("GET /v1/channels/{channel}/voice", "reads her own channel's voice presence", func(w *world, _ subject) probe { return get("/v1/channels/" + bChannel(w) + "/voice") }),
+		// Voice occupancy (issue #596): a row for each of her channels and
+		// none for A's, not even a zero; the socket's first frame is the same.
+		{route: "GET /v1/voice/occupancy", what: "reads her voice occupancy", own: true, inspect: checkOwnOccupancy,
+			probe: func(*world, subject) probe { return get("/v1/voice/occupancy") }},
+		{route: "GET /v1/voice/occupancy/ws", what: "opens her voice occupancy socket", own: true, inspect: checkOwnOccupancy,
+			probe: func(*world, subject) probe { return occupancySock(false) }},
+		{route: "GET /v1/voice/occupancy/ws", what: "opens her voice occupancy socket with a ticket", own: true, inspect: checkOwnOccupancy,
+			probe: func(*world, subject) probe { return occupancySock(true) }},
 
 		// Files.
 		{route: "POST /v2/channels/{channel}/files", what: "uploads a file to A's channel", pick: aChannel, want: channelNotFound,
@@ -530,8 +543,16 @@ func (w *world) send(a api, p probe) (result, error) {
 			return result{}, err
 		}
 		if f != nil {
-			f.close()
-			return result{status: http.StatusSwitchingProtocols}, nil
+			defer f.close()
+			if !p.frame {
+				return result{status: http.StatusSwitchingProtocols}, nil
+			}
+			if err := waitFor(p.path+" to send its first frame", 10*time.Second, func() (bool, string) {
+				return len(f.received()) > 0, "no frame"
+			}); err != nil {
+				return result{}, err
+			}
+			return result{status: http.StatusSwitchingProtocols, body: f.received()[0]}, nil
 		}
 		return result(r), nil
 	}
@@ -601,7 +622,7 @@ func (w *world) runRow(r row) (int, error) {
 	if leaks := w.marks.headerLeaks(got.header, a); len(leaks) > 0 {
 		return 1, fmt.Errorf("status %d, and the response headers hold %s", got.status, strings.Join(leaks, "; "))
 	}
-	success := got.status >= 200 && got.status <= 299
+	success := got.status >= 200 && got.status <= 299 || (p.socket && got.status == http.StatusSwitchingProtocols)
 	switch {
 	case r.onBehalf:
 		if err := w.checkOnBehalf(got); err != nil {
@@ -611,6 +632,11 @@ func (w *world) runRow(r row) (int, error) {
 	case r.own:
 		if !success {
 			return 1, fmt.Errorf("status %d %s, want a success: the route answers about the caller alone", got.status, w.h.redact(lkit.Truncate(string(got.body), 200)))
+		}
+		if r.inspect != nil {
+			if err := r.inspect(w, as, got.body); err != nil {
+				return 1, err
+			}
 		}
 	default:
 		if err := checkRefusal(got, r.wantFor(w.prober), a); err != nil {

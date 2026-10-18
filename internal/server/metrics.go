@@ -67,7 +67,8 @@ var (
 	// An upgraded socket is 1xx; a status outside 100–599 is "other".
 	metricsCodeClasses = []string{"1xx", "2xx", "3xx", "4xx", "5xx", "other"}
 	// metricsSocketKinds are the kinds of socket: the message hub's
-	// (/v0/ws, /v1/ws, /v2/ws), the events socket's and voice presence's.
+	// (/v0/ws, /v1/ws, /v2/ws), the events socket's, and voice presence's and
+	// occupancy's.
 	metricsSocketKinds = []string{"hub", "events", "voice", "other"}
 	// metricsPrincipalKinds are the kinds of principal.
 	metricsPrincipalKinds = []string{string(store.PrincipalHuman), string(store.PrincipalAgent)}
@@ -86,7 +87,7 @@ func metricsSocketKind(pattern string) string {
 		return "hub"
 	case "GET /v1/events/ws":
 		return "events"
-	case "GET /v1/voice/ws":
+	case "GET /v1/voice/ws", "GET /v1/voice/occupancy/ws":
 		return "voice"
 	}
 	return "other"

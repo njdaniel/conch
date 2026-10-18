@@ -169,7 +169,9 @@ type bSockets struct {
 	checked map[*feed]int
 }
 
-// openBSockets opens, as m, every socket variant on each of channels.
+// openBSockets opens, as m, every socket variant on each of channels, and
+// the occupancy socket, which is m's across every channel, with the bearer
+// and with a ticket.
 func openBSockets(m *member, channels []string) (*bSockets, error) {
 	out := &bSockets{checked: map[*feed]int{}}
 	for _, ch := range channels {
@@ -179,16 +181,25 @@ func openBSockets(m *member, channels []string) (*bSockets, error) {
 		}
 		out.feeds = append(out.feeds, feeds...)
 	}
+	// After the per-channel ones, so that by the time checkQuiet reaches
+	// them the voice sockets have shown B's control in presence.
+	occ, err := openOccupancy(m)
+	if err != nil {
+		return nil, err
+	}
+	out.feeds = append(out.feeds, occ...)
 	return out, nil
 }
 
 // controls is what B does so that each of its sockets is known to deliver,
 // per channel: a message (message sockets), a session (events sockets) and a
-// string the voice sockets must carry ("" when none is to be waited for).
+// string the voice sockets must carry ("" when none is to be waited for);
+// and what the occupancy sockets wait for (checkOccupancyFeed's mode).
 type controls struct {
-	message string
-	session string
-	voice   map[string]string // by channel name
+	message   string
+	session   string
+	voice     map[string]string // by channel name
+	occupancy string
 }
 
 // checkQuiet waits until each socket of B has carried B's control since the
@@ -199,6 +210,11 @@ func (s *bSockets) checkQuiet(w *world, c controls) error {
 	for _, f := range s.feeds {
 		want := c.message
 		switch {
+		case isOccupancy(f):
+			if err := s.checkOccupancyFeed(w, f, c.occupancy, s.checked[f]); err != nil {
+				return err
+			}
+			want = ""
 		case strings.Contains(f.what, "/v1/voice/ws"):
 			want = ""
 			for ch, v := range c.voice {
