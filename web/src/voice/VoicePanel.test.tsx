@@ -153,7 +153,7 @@ describe('the strip while not in voice', () => {
     rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
   };
   const lines = (voice: HTMLElement) => [unreachable, notAllowed, unread].filter((l) => voice.textContent.includes(l));
-  const roster = (voice: HTMLElement) => within(voice).queryByRole('list', { name: 'In voice' });
+  const roster = (voice: HTMLElement) => within(voice).queryByRole('list', { name: / in voice$/ });
   // Enabled, disabled, or not there.
   const offered = (voice: HTMLElement) =>
     ['Join voice in #c', 'Watch only in #c'].map((name) => {
@@ -208,5 +208,104 @@ describe('the strip while not in voice', () => {
     const { voice } = panel(initialVoice, 'c', { kind: 'presence', presence: { ...presence, configured: false, available: false } });
     expect(voice.textContent).toContain('Voice is not set up on this server');
     expect(within(voice).queryAllByRole('button')).toEqual([]);
+  });
+});
+
+// Issue #587: the roster never hides people. How many are in voice is its
+// heading, which names the list; on a phone a CSS rule on the class set here
+// shows three chips, and "+N more" the rest.
+describe('the roster', () => {
+  const inRoom = (n: number): VoicePresenceV1 => ({
+    ...presence,
+    rooms: [
+      {
+        participants: Array.from({ length: n }, (_, i) => ({
+          principal_id: 10 + i,
+          can_publish: true,
+          transmitting: false,
+          joined_at: '2026-10-18T00:00:00Z',
+        })),
+      },
+    ],
+  });
+  const shown = (n: number) => panel(initialVoice, 'c', { kind: 'presence', presence: inRoom(n) }).voice;
+
+  it('is absent, with no count, while nobody is in voice', () => {
+    const voice = shown(0);
+    expect(within(voice).queryByRole('list')).toBeNull();
+    expect(within(voice).queryByRole('heading')).toBeNull();
+    expect(voice.textContent).not.toMatch(/\d in voice/);
+  });
+
+  for (const n of [1, 8]) {
+    it(`says ${String(n)} in voice, as its heading and as the list's name`, () => {
+      const voice = shown(n);
+      const heading = within(voice).getByRole('heading', { name: `${String(n)} in voice` });
+      const list = within(voice).getByRole('list', { name: `${String(n)} in voice` });
+      expect(list.getAttribute('aria-labelledby')).toBe(heading.id);
+      expect(within(list).getAllByRole('listitem')).toHaveLength(n);
+    });
+  }
+
+  for (const n of [1, 3]) {
+    it(`offers no "more" button with ${String(n)} in voice, and caps nothing`, () => {
+      const voice = shown(n);
+      expect(within(voice).queryByRole('button', { name: /more$/ })).toBeNull();
+      expect(within(voice).getByRole('list').classList.contains('capped')).toBe(false);
+    });
+  }
+
+  it('with more than three, offers "+N more", which shows the rest and says so', () => {
+    const voice = shown(8);
+    const list = within(voice).getByRole('list', { name: '8 in voice' });
+    const more = within(voice).getByRole('button', { name: '+5 more' });
+    expect(more.getAttribute('aria-expanded')).toBe('false');
+    expect(more.getAttribute('aria-controls')).toBe(list.id);
+    expect(list.classList.contains('capped')).toBe(true);
+    // Every name is still in the list: the cap only hides chips on a phone.
+    expect(within(list).getAllByRole('listitem')).toHaveLength(8);
+
+    fireEvent.click(more);
+    const fewer = within(voice).getByRole('button', { name: 'Show fewer' });
+    expect(fewer.getAttribute('aria-expanded')).toBe('true');
+    expect(list.classList.contains('capped')).toBe(false);
+
+    fireEvent.click(fewer);
+    expect(within(voice).getByRole('button', { name: '+5 more' }).getAttribute('aria-expanded')).toBe('false');
+    expect(list.classList.contains('capped')).toBe(true);
+  });
+});
+
+// Issue #587 (F12): the strip is two rows, the roster above the state and the
+// controls, and a longer status line changes only the text in the state
+// column: the elements, their order and their classes stay the same, so the
+// CSS that keeps the controls in place has nothing else to move.
+describe('the strip in voice', () => {
+  const joined = (deafened: boolean): VoiceState => ({ ...inVoice('connected', 'c'), muted: deafened, deafened });
+  const someone: VoicePresenceV1 = {
+    ...presence,
+    rooms: [{ participants: [{ principal_id: 7, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
+  };
+  // The strip's elements, in order, each with its classes.
+  const shape = (voice: HTMLElement) =>
+    Array.from(voice.querySelectorAll('.voice-bar, .voice-bar *')).map((el) => `${el.tagName}.${el.getAttribute('class') ?? ''}`);
+
+  it('is the roster, then a row of the state and the controls, with Leave voice last', () => {
+    const { voice } = panel(joined(false), 'c', { kind: 'presence', presence: someone });
+    const bar = voice.querySelector('.voice-bar');
+    expect(Array.from(bar?.children ?? []).map((el) => el.className)).toEqual(['voice-who', 'voice-row']);
+    const row = voice.querySelector('.voice-row');
+    expect(Array.from(row?.children ?? []).map((el) => el.className)).toEqual(['voice-state', 'voice-controls']);
+    const leave = within(voice).getByRole('button', { name: 'Leave voice' });
+    expect(leave.parentElement?.lastElementChild).toBe(leave);
+    expect(leave.parentElement?.className).toBe('voice-controls');
+  });
+
+  it('keeps the same elements, order and classes when deafened, the longest status line', () => {
+    const before = shape(panel(joined(false), 'c', { kind: 'presence', presence: someone }).voice);
+    cleanup();
+    const { voice } = panel(joined(true), 'c', { kind: 'presence', presence: someone });
+    expect(voice.querySelector('.voice-state')?.textContent).toContain('Deafened (you hear no one, and you are muted).');
+    expect(shape(voice)).toEqual(before);
   });
 });
