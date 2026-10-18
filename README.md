@@ -48,11 +48,11 @@ Conch is in a **private communications alpha**. The main flows are implemented a
 | Messaging | Channels, threads, files, search, typed messages, nets, whispers, unread state | Richer conversation features as real usage earns them |
 | Browser | Chat, invites, people and agent views, settings, diagnostics, responsive desktop/mobile UI | Wider manual browser and device validation |
 | Voice and sharing | Browser push-to-talk and open microphone, watch-only mode, screen sharing with browser-supported audio | Layered voice nets, captions, and broader platform validation |
-| Native voice | Standalone Rust `conch-voice` for Linux/PipeWire with native push-to-talk | Integrated TUI voice controls, packaging, and other native platforms |
+| Native voice | Standalone Rust `conch-voice` for Linux/PipeWire with native push-to-talk, plus integrated TUI controls | Broader real-device validation, packaging, and other native platforms |
 | Agents | MCP messaging and approvals, sessions, runs, activity, interventions, and reference adapters | More runtime coverage and richer orchestration |
 | Deployment | Single-server core, embedded web client, invites, audit, diagnostics, and deployment runbooks | More production and upgrade evidence from the alpha |
 
-The [roadmap](ROADMAP.md) separates shipped work, the current alpha, and later direction. Captions, translation, an Electron desktop shell, and integrated TUI voice are not claimed as current features.
+The [roadmap](ROADMAP.md) separates shipped work, the current alpha, and later direction. Captions, translation, and an Electron desktop shell are not claimed as current features.
 
 ## Quickstart
 

@@ -465,10 +465,10 @@ func TestMCPSessionToolsNeedAnIssuedCredential(t *testing.T) {
 	}
 }
 
-// What the docs/manual.md says of post_activity's data: the MCP library decodes and
+// What the README says of post_activity's data: the MCP library decodes and
 // re-encodes every call's arguments, so object keys come out sorted and
 // numbers pass through float64, where REST stores the JSON as sent. If the
-// library ever keeps the bytes, this fails and the docs/manual.md should say so.
+// library ever keeps the bytes, this fails and the README should say so.
 func TestMCPPostActivityDataIsReencoded(t *testing.T) {
 	f := newInterventionFixture(t)
 	const sent = `{"b":1,"a":9007199254740993}`
