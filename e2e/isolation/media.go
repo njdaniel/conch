@@ -152,6 +152,29 @@ func linesNaming(hl *lkit.Headless, id int64, also ...string) []string {
 	return out
 }
 
+// namesSID reports whether an lk log line names the participant LiveKit
+// gave sid (PA_...): as a whole JSON string value, under whatever key. lk
+// v2.19.0 writes a SID under "participantID" (participant connected; could
+// not find participant, deferring track update) and "localParticipant";
+// matching the quoted value rather than a list of keys also catches a key
+// not seen yet. A SID is random, so unlike p<id> it is no room name by
+// chance; but a longer value holding it (a SID that ends in it) is not it.
+func namesSID(line, sid string) bool {
+	return sid != "" && strings.Contains(line, `"`+sid+`"`)
+}
+
+// linesNamingSID returns the lines of hl's log that name the participant
+// LiveKit gave sid.
+func linesNamingSID(hl *lkit.Headless, sid string) []string {
+	var out []string
+	for _, line := range hl.LogLines() {
+		if namesSID(line, sid) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // voiceA puts A in voice: ann joins through lk, publishing a microphone,
 // claims the share and publishes a screen and its sound on the same
 // connection; amy joins with a bare signalling connection.
@@ -329,6 +352,19 @@ func (w *world) mediaB(v *voiceA) error {
 		if got := linesNaming(viewer, who.id); len(got) > 0 {
 			return fmt.Errorf("bob's lk in B's room was told of %s: %s", who.name, w.h.redact(got[0]))
 		}
+		// LiveKit also names a participant by the SID it gave them, and a
+		// line may carry that alone. The SID is read from A's room now: it
+		// is the connection bob could have been told of.
+		ok, p, saw := lk.has(v.room, who.id)
+		if !ok {
+			return fmt.Errorf("%s left A's room while B looked: %s", who.name, saw)
+		}
+		if !strings.HasPrefix(p.SID, "PA_") {
+			return fmt.Errorf("LiveKit lists %s in A's room without a participant SID (%q), so bob's lk log cannot be checked for it", who.name, p.SID)
+		}
+		if got := linesNamingSID(viewer, p.SID); len(got) > 0 {
+			return fmt.Errorf("bob's lk in B's room was told of %s by SID: %s", who.name, w.h.redact(got[0]))
+		}
 	}
 	for _, hl := range []*lkit.Headless{beaLK, viewer} {
 		for _, t := range hl.Relay.IssuedTokens() {
@@ -343,7 +379,7 @@ func (w *world) mediaB(v *voiceA) error {
 			return fmt.Errorf("a B member is in A's room: %s", saw)
 		}
 	}
-	w.h.say("ok   media: bea's grant names B's room alone; the same token bent to A's room is refused by LiveKit (401); bob, subscribed to everything in B's room, hears bea and is told nothing of ann's screen, sound or microphone, or of amy")
+	w.h.say("ok   media: bea's grant names B's room alone; the same token bent to A's room is refused by LiveKit (401); bob, subscribed to everything in B's room, hears bea and is told nothing of ann's screen, sound or microphone, or of amy (by identity or by LiveKit SID)")
 	return nil
 }
 
