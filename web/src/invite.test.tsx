@@ -206,6 +206,23 @@ describe('the landing page', () => {
     expect(window.location.hash).toBe('#/c/red');
   });
 
+  // Issue #556: a guest whose invite grants #general lands there, even when
+  // another granted channel comes first.
+  it('lands the joiner in #general when the invite grants it', async () => {
+    opened({
+      ...joining,
+      'POST /v1/invites/preview': () => json({ ...preview, channels: ['red', 'general'] }),
+      ...as(joinerToken, joiner, channelList('red', 'general')),
+    });
+    await chooseName('wren');
+    const general = await screen.findByRole('button', { name: 'general' });
+    await waitFor(() => {
+      expect(general.getAttribute('aria-current')).toBe('true');
+    });
+    expect(screen.getByRole('button', { name: 'red' }).getAttribute('aria-current')).not.toBe('true');
+    expect(window.location.hash).toBe('#/c/general');
+  });
+
   it('keeps the form and what was typed when the name is taken', async () => {
     const { calls } = opened({ ...joining, 'POST /v1/invites/redeem': () => refusal(409, 'principal_exists', 'that name is taken; choose another') });
     await chooseName('ada');

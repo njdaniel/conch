@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { authReducer, initialAuth, noticeText, type AuthAction, type AuthState } from './auth';
-import { channelsReducer, initialChannels, type ChannelsState } from './channels';
+import { channelsReducer, defaultChannel, fallbackChannel, initialChannels, type ChannelsState } from './channels';
 import { connectionLabel, connectionReducer, type ConnectionAction, type ConnectionState } from './connection';
 
 const member: WhoAmIResponseV1 = { id: 2, kind: 'human', name: 'ada', role: 'member' };
@@ -107,5 +107,56 @@ describe('channelsReducer', () => {
   });
   it('resets', () => {
     expect(channelsReducer(loaded('ops'), { type: 'reset' })).toEqual(initialChannels);
+  });
+
+  // Issue #556: #general takes the place of "the first channel", after the
+  // person's own choices. alpha sorts before general in these lists.
+  const alphaFirst = [ch(1, 'alpha'), ch(2, 'general'), ch(3, 'ops')];
+  const noGeneral = [ch(1, 'alpha'), ch(3, 'ops')];
+  it.each<{
+    name: string;
+    channels: ChannelV0[];
+    current: string | null;
+    preferred: string | null;
+    remembered: string | null;
+    want: string | null;
+  }>([
+    { name: 'opens #general when nothing else is known', channels: alphaFirst, current: null, preferred: null, remembered: null, want: 'general' },
+    { name: 'opens #general when every known name is gone', channels: alphaFirst, current: 'gone', preferred: 'gone', remembered: 'gone', want: 'general' },
+    { name: "lets a link's channel win over #general", channels: alphaFirst, current: null, preferred: 'alpha', remembered: null, want: 'alpha' },
+    { name: 'lets the open channel win over #general', channels: alphaFirst, current: 'ops', preferred: null, remembered: null, want: 'ops' },
+    { name: 'lets the remembered channel win over #general', channels: alphaFirst, current: null, preferred: null, remembered: 'alpha', want: 'alpha' },
+    { name: 'opens the first channel without #general', channels: noGeneral, current: null, preferred: null, remembered: null, want: 'alpha' },
+    { name: 'opens nothing without channels', channels: [], current: null, preferred: null, remembered: null, want: null },
+  ])('on load $name', ({ channels, current, preferred, remembered, want }) => {
+    const state: ChannelsState = { channels, loaded: true, selected: current };
+    expect(channelsReducer(state, { type: 'loaded', channels, preferred, remembered }).selected).toBe(want);
+  });
+
+  it.each<{ name: string; channels: ChannelV0[]; selected: string | null; lost: string; want: string | null; left: string[] }>([
+    { name: 'moves to #general when the open channel is lost', channels: alphaFirst, selected: 'ops', lost: 'ops', want: 'general', left: ['alpha', 'general'] },
+    { name: 'moves to the first channel when it is lost without #general', channels: noGeneral, selected: 'ops', lost: 'ops', want: 'alpha', left: ['alpha'] },
+    { name: 'moves to the first channel when #general itself is lost', channels: alphaFirst, selected: 'general', lost: 'general', want: 'alpha', left: ['alpha', 'ops'] },
+    { name: 'keeps the open channel when another is lost', channels: alphaFirst, selected: 'ops', lost: 'alpha', want: 'ops', left: ['general', 'ops'] },
+    { name: 'has no selection when the last channel is lost', channels: [ch(1, 'alpha')], selected: 'alpha', lost: 'alpha', want: null, left: [] },
+  ])('$name', ({ channels, selected, lost, want, left }) => {
+    const next = channelsReducer({ channels, loaded: true, selected }, { type: 'lost', name: lost });
+    expect(next.selected).toBe(want);
+    expect(next.channels.map((c) => c.name)).toEqual(left);
+    expect(next.lost).toBe(lost);
+  });
+});
+
+describe('fallbackChannel', () => {
+  it.each<{ names: string[]; want: string | undefined }>([
+    { names: ['alpha', 'general'], want: 'general' },
+    { names: ['general', 'alpha'], want: 'general' },
+    { names: ['red', 'blue'], want: 'red' },
+    { names: [], want: undefined },
+  ])('picks $want from $names', ({ names, want }) => {
+    expect(fallbackChannel(names)).toBe(want);
+  });
+  it('names #general', () => {
+    expect(defaultChannel).toBe('general');
   });
 });
