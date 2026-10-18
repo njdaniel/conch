@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Composer } from './Composer';
 import { Avatar } from './Icons';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
@@ -271,6 +271,25 @@ export function Conversation({
     if (atBottom.current) el.scrollTop = el.scrollHeight;
     else setUnseen(true);
   });
+
+  // Anything that changes the log's own height (the whisper picker, the voice
+  // strip, a share's stage) keeps a reader at the newest message there; one
+  // who has scrolled up is left where they are. Browsers without a
+  // ResizeObserver, and jsdom, keep the behaviour above alone.
+  useEffect(() => {
+    const el = log.current;
+    if (el === null || typeof ResizeObserver !== 'function') return;
+    let height = el.clientHeight;
+    const watch = new ResizeObserver(() => {
+      if (el.clientHeight === height) return;
+      height = el.clientHeight;
+      if (atBottom.current) el.scrollTop = el.scrollHeight;
+    });
+    watch.observe(el);
+    return () => {
+      watch.disconnect();
+    };
+  }, []);
 
   function showOlder() {
     const el = log.current;
