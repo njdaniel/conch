@@ -7,6 +7,7 @@
 // more personal invites they may make, both as whoami says (issue #468).
 import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { clock } from './Conversation';
 import { Glyph } from './Icons';
 import { serverLine, waitWords } from './Invite';
 import { inviteLink } from './route';
@@ -89,11 +90,15 @@ export function InvitePanel({
   const [mayInvite, setMayInvite] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  // The link of the invite just made: shown until Done, and never again.
-  const [link, setLink] = useState<string | null>(null);
+  // The link of the invite just made, and its kind, which says who it lets
+  // in: shown until Done, and never again.
+  const [link, setLink] = useState<{ readonly url: string; readonly kind: InviteKind } | null>(null);
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no');
   const [invites, setInvites] = useState<readonly InviteV1[] | null>(null);
   const [listProblem, setListProblem] = useState<string | null>(null);
+  // When the list was last read, so a list left open says how old it is.
+  const [readAt, setReadAt] = useState<number | null>(null);
+  const makeButton = useRef<HTMLButtonElement>(null);
   // whoami as last re-read here: what is left of the allowance changes with
   // every invite made, closed, used or expired, and only the server counts it.
   const [latest, setLatest] = useState<WhoAmIResponseV1 | null>(null);
@@ -105,6 +110,7 @@ export function InvitePanel({
         // An operator's list may hold everyone's invites (issue #438); this
         // panel is for the person's own.
         setInvites(result.value.filter((invite) => invite.created_by === meId));
+        setReadAt(Date.now());
         setListProblem(null);
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else setListProblem('Could not load your invites.');
@@ -118,6 +124,20 @@ export function InvitePanel({
 
   useEffect(() => {
     if (open) refresh();
+  }, [open, refresh]);
+
+  // An invite is used elsewhere, by someone else: while the panel is open, the
+  // list is read again when the person comes back to the page. No timer polls
+  // it (issue #593); Refresh reads it on demand.
+  useEffect(() => {
+    if (!open) return undefined;
+    function onChange() {
+      if (document.visibilityState !== 'hidden') refresh();
+    }
+    document.addEventListener('visibilitychange', onChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onChange);
+    };
   }, [open, refresh]);
 
   // Closing the panel forgets the link it showed.
@@ -155,7 +175,7 @@ export function InvitePanel({
     void api.createInvite(request).then((result) => {
       setBusy(false);
       if (result.ok) {
-        setLink(inviteLink(origin, result.value.code));
+        setLink({ url: inviteLink(origin, result.value.code), kind: result.value.invite.kind });
         setCopied('no');
         refresh();
       } else if (result.failure === 'unauthorized') onUnauthorized();
@@ -166,7 +186,7 @@ export function InvitePanel({
   function copy() {
     if (link === null) return;
     try {
-      void navigator.clipboard.writeText(link).then(
+      void navigator.clipboard.writeText(link.url).then(
         () => {
           setCopied('yes');
         },
@@ -220,13 +240,21 @@ export function InvitePanel({
         {link === null ? null : (
           <div className="invite-link" role="group" aria-label="New invite link">
             <p>
-              <strong>Anyone with this link can join</strong> until it expires or you close it. It is shown only now: copy it
-              and send it to the person you are inviting.
+              {link.kind === 'personal' ? (
+                <>
+                  <strong>The first person to open this link joins</strong>, and then it stops working.
+                </>
+              ) : (
+                <>
+                  <strong>Anyone with this link can join</strong> until it expires or you close it.
+                </>
+              )}{' '}
+              It is shown only now: copy it and send it to the person you are inviting.
             </p>
             <input
               type="text"
               readOnly
-              value={link}
+              value={link.url}
               aria-label="Invite link"
               onFocus={(event) => {
                 event.currentTarget.select();
@@ -239,7 +267,12 @@ export function InvitePanel({
               <button
                 type="button"
                 onClick={() => {
+                  // Done unmounts itself: focus goes to Make invite, inside the
+                  // panel, so Escape still closes it. The list is read again,
+                  // since the link may have been used while it was shown.
+                  makeButton.current?.focus();
                   setLink(null);
+                  refresh();
                 }}
               >
                 Done
@@ -359,7 +392,7 @@ export function InvitePanel({
           {remaining === undefined ? null : (
             <p className="hint">{remaining === 1 ? '1 invite left' : `${String(remaining)} invites left`}</p>
           )}
-          <button type="submit" disabled={!canCreate} aria-busy={busy}>
+          <button ref={makeButton} type="submit" disabled={!canCreate} aria-busy={busy}>
             {busy ? 'Making the invite…' : 'Make invite'}
           </button>
           <p role="alert" className="notice">
@@ -404,6 +437,14 @@ export function InvitePanel({
         <button type="button" onClick={refresh}>
           Refresh
         </button>
+        {readAt === null ? null : (
+          <>
+            {' '}
+            <span className="hint">
+              Read at <time dateTime={new Date(readAt).toISOString()}>{clock(readAt)}</time>
+            </span>
+          </>
+        )}
       </div>
     </section>
   );
