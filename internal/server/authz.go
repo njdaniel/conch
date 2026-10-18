@@ -334,6 +334,10 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// themselves (issue #240).
 		return store.Message{}, errAttachmentRefused
 	}
+	if err == nil {
+		// A grant is only ever an agent's.
+		g.scope.s.metrics.messagePosted(store.PrincipalAgent)
+	}
 	return msg, err
 }
 
