@@ -84,7 +84,9 @@ function install() {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
       if (new Headers(init?.headers).get('Authorization') !== `Bearer ${secret}`) return Promise.resolve(json({}, 401));
       const path = url.pathname;
-      if (path === '/v1/whoami') return Promise.resolve(json({ id: 2, kind: 'human', name: 'ada', role: 'member' }));
+      // Without voice, so the page opens no voice socket beside the
+      // conversation's (issue #585): every socket counted here is its.
+      if (path === '/v1/whoami') return Promise.resolve(json({ id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false }));
       if (path === '/v1/channels') return Promise.resolve(json({ channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/read-state') {

@@ -104,6 +104,32 @@ for (const [size, options] of sizes) {
   });
 }
 
+// Issue #585 (F07): a joiner whose invite left voice out is told so, not that
+// voice could not be read, and the page asks nothing of voice: a socket conchd
+// refuses before the upgrade would be retried for ever.
+test('A8 a joiner without voice is told so, and the page asks for no voice route', async ({ meet, secrets, world }) => {
+  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const { page } = await meet(desktop);
+  const asked: string[] = [];
+  const voiceRoute = /\/v1\/channels\/[^/]+\/voice(\/|$|\?)|\/v1\/voice\//;
+  page.on('request', (r) => {
+    if (voiceRoute.test(new URL(r.url()).pathname)) asked.push(r.url());
+  });
+  page.on('websocket', (ws) => {
+    if (voiceRoute.test(new URL(ws.url()).pathname)) asked.push(ws.url());
+  });
+  await page.goto(inviteUrl(world, made.code));
+  await join(page, unique('no-voice'));
+  await keepToken(page, secrets);
+  const voice = page.getByRole('region', { name: 'Voice' });
+  await expect(voice).toContainText('Your account does not include voice. Ask whoever invited you.');
+  await expect(voice).not.toContainText('Voice status could not be read.');
+  await expect(voice.getByRole('button')).toHaveCount(0);
+  // Long enough for a retried socket to show: the feed's first wait is 1 s.
+  await new Promise((r) => setTimeout(r, 3000));
+  expect(asked, 'requests to the voice routes').toEqual([]);
+});
+
 test('A8 a personal link opened again says it no longer works', async ({ meet, secrets, world }) => {
   const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
   const first = await meet(desktop);

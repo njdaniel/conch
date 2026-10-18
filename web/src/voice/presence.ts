@@ -1,6 +1,7 @@
 // Voice presence: the roster, who is transmitting and who is sharing a screen,
-// from the voice socket (and, before the caller has joined, one read of the
-// snapshot).
+// from the voice socket, which is open for the channel shown whether or not
+// the caller has joined (and, after the server closes it, one read of the
+// snapshot to learn why).
 import { voicePresenceV1, type VoicePresenceV1 } from '../schema/voice';
 
 // parsePresence reads one socket frame; null for anything that is not a

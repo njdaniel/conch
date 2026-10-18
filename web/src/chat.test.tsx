@@ -11,7 +11,9 @@ const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
 const at = '2026-10-14T10:42:00Z';
 
-const member = { id: 2, kind: 'human', name: 'ada', role: 'member' };
+// Without voice, so the page opens no voice socket beside the conversation's
+// (issue #585): every socket and ticket counted here is the conversation's.
+const member = { id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false };
 const channelList = {
   channels: [
     { id: 7, name: 'general', created_at: at },
