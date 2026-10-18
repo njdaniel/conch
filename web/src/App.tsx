@@ -136,6 +136,10 @@ export function App({ origin }: { readonly origin: string }) {
   const onLost = useCallback((name: string) => {
     dispatchChannels({ type: 'lost', name });
   }, []);
+  // The one way a channel is opened: from the list, or from the voice strip.
+  const onOpen = useCallback((name: string) => {
+    dispatchChannels({ type: 'select', name });
+  }, []);
   const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
   // One older page at a time, and none past maxHeld.
   const getOldest = useCallback((name: string) => {
@@ -460,7 +464,16 @@ export function App({ origin }: { readonly origin: string }) {
           }
           signIns={(endThis) => <YourSignIns onEndThis={endThis} onUnauthorized={onUnauthorized} />}
           report={<ReportProblem onUnauthorized={onUnauthorized} />}
-          voice={<VoiceStatus signedIn={signedIn} channel={selected} viewer={auth.principal.id} people={live.people} onUnauthorized={onUnauthorized} />}
+          voice={
+            <VoiceStatus
+              signedIn={signedIn}
+              channel={selected}
+              viewer={auth.principal.id}
+              people={live.people}
+              onUnauthorized={onUnauthorized}
+              onOpen={onOpen}
+            />
+          }
           invites={
             auth.principal.may_invite === true ? (
               <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} onUnauthorized={onUnauthorized} />
@@ -513,9 +526,7 @@ export function App({ origin }: { readonly origin: string }) {
               </>
             )
           }
-          onOpen={(name) => {
-            dispatchChannels({ type: 'select', name });
-          }}
+          onOpen={onOpen}
           onRetry={() => {
             setAttempt((n) => n + 1);
           }}

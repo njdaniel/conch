@@ -15,7 +15,8 @@ const sizes = [
   ['phone', phone],
 ] as const;
 
-const noLongerWorks = 'This invite no longer works. Ask the person who sent it for a new one.';
+const goneHeading = "This link can't be used";
+const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.';
 
 const unique = (label: string) => `a8-${label}-${String(Date.now())}`;
 const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button');
@@ -104,7 +105,7 @@ for (const [size, options] of sizes) {
   });
 }
 
-test('A8 a personal link opened again says it no longer works', async ({ meet, secrets, world }) => {
+test('A8 a personal link opened again says it can no longer be used', async ({ meet, secrets, world }) => {
   const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
   const first = await meet(desktop);
   await first.page.goto(inviteUrl(world, made.code));
@@ -113,9 +114,13 @@ test('A8 a personal link opened again says it no longer works', async ({ meet, s
 
   const again = await meet(phone);
   await again.page.goto(inviteUrl(world, made.code));
-  await expect(again.page.getByRole('heading', { name: 'This invite no longer works' })).toBeVisible();
+  await expect(again.page.getByRole('heading', { name: goneHeading })).toBeVisible();
   await expect(again.page.getByRole('alert')).toHaveText(noLongerWorks);
   await expect(again.page.getByLabel('Your name')).toHaveCount(0);
+  // Nobody is signed in here: no button, so none leads to the credential form
+  // (issue #593).
+  await expect(again.page.getByRole('button')).toHaveCount(0);
+  await expect(again.page.getByLabel('Credential')).toHaveCount(0);
   await expectCodeGone(again.page, made.code, world, false);
 });
 
@@ -138,7 +143,10 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   await panel.getByRole('button', { name: 'Make invite' }).click();
   const shown = panel.getByRole('textbox', { name: 'Invite link' });
   await expect(shown).toBeVisible();
-  await expect(panel.getByText(/Anyone with this link can join/)).toBeVisible();
+  // A personal link says it lets in one person (issue #593).
+  const box = panel.getByRole('group', { name: 'New invite link' });
+  await expect(box).toContainText('The first person to open this link joins, and then it stops working.');
+  await expect(box).not.toContainText('Anyone with this link');
   await panel.getByRole('button', { name: 'Copy link' }).click();
   await expect(panel.getByText('Copied.')).toBeVisible();
   const link = await page.evaluate(() => navigator.clipboard.readText());
@@ -147,6 +155,7 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   const list = panel.getByRole('list', { name: 'Your invites' });
   await expect(list.getByRole('listitem')).toHaveCount(1);
   await expect(list.getByRole('listitem')).toContainText('Open');
+  await expect(panel.getByText(/^Read at \d\d:\d\d$/)).toBeVisible();
 
   // Someone else, on a phone: the inviter's name is taken, another is not.
   const joiner = await meet(phone);
@@ -166,6 +175,20 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   // The inviter's list says it was used. A second one is made and closed.
   await panel.getByRole('button', { name: 'Refresh' }).click();
   await expect(list.getByRole('listitem')).toContainText('Used');
+  await expect(list.getByRole('button', { name: 'Close' })).toHaveCount(0);
+
+  // The used link, opened in a fresh browser where nobody is signed in: the
+  // dead-invite page, with no way to the credential form (issue #593). It
+  // previews and does not redeem, so it spends nothing of the per-address
+  // redeem limit the sign-in link spec counts on.
+  const late = await meet(desktop);
+  await late.page.goto(link);
+  await expect(late.page.getByRole('heading', { level: 1 })).toHaveText(goneHeading);
+  await expect(late.page.getByRole('alert')).toHaveText(noLongerWorks);
+  await expect(late.page.getByRole('button')).toHaveCount(0);
+  await expect(late.page.getByLabel('Credential')).toHaveCount(0);
+  await expectCodeGone(late.page, inviteCode, world, false);
+
   await panel.getByRole('button', { name: 'Done' }).click();
   await expect(shown).toHaveCount(0);
   await panel.getByRole('button', { name: 'Make invite' }).click();

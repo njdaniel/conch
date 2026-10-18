@@ -1018,6 +1018,14 @@ label {
   overflow-wrap: anywhere;
 }
 
+/* Online and Offline, under People: quieter than the section headings. */
+.ag-panel h4 {
+  margin: var(--s2) 0 var(--s1);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .ag-person {
   display: flex;
   flex-wrap: wrap;
@@ -1195,6 +1203,35 @@ label {
 .phase-connecting .voice-phase::before,
 .phase-reconnecting .voice-phase::before {
   border-color: var(--warn);
+}
+
+/* The channel voice is in, while another is on screen: a way back to it,
+   read as part of the line. */
+.voice-phase .voice-where {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.voice-phase .voice-where:hover:not(:disabled) {
+  background: none;
+  text-decoration-thickness: 2px;
+}
+
+/* Where Join voice and Watch only go. A long channel name ends in an
+   ellipsis rather than widening the strip. */
+.voice-controls .dest {
+  min-width: 0;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .voice-sub {
@@ -1588,6 +1625,7 @@ label {
   .channels h2,
   .send .label,
   .voice-controls button:not(.sharing, .danger) .label,
+  .voice-controls .dest,
   .share-controls .label {
     position: absolute;
     width: 1px;

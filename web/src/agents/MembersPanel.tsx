@@ -1,8 +1,9 @@
-// The right panel: who is here (People) and what is running (Agents), from
+// The right panel: who is here (People, online then offline) and what is
+// running (Agents and Runs, folded to one line when there are none), from
 // the members list joined with the latest roster frame. Every name, task,
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Avatar } from '../Icons';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
@@ -93,6 +94,27 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen }: {
   );
 }
 
+// A group of people under its heading, with how many it holds; the list is
+// named by the heading. An empty group is not shown.
+function PeopleGroup({ title, people }: { readonly title: string; readonly people: readonly Entry[] }) {
+  const id = useId();
+  if (people.length === 0) return null;
+  return (
+    <>
+      <h4 id={id}>{`${title} — ${String(people.length)}`}</h4>
+      <ul aria-labelledby={id}>
+        {people.map((p) => (
+          <li key={p.id} className={`ag-person state-${p.state}`}>
+            <Avatar id={p.id} name={p.name} />
+            <span className="ag-name">{p.name}</span>
+            {p.live > 1 ? <span> ({p.live} sessions)</span> : null} <span className="ag-status">{p.state}</span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
 const unavailable: Record<'ended' | 'unavailable', string> = {
   ended: 'Session ended; could not start a new one',
   unavailable: 'Could not start a session',
@@ -122,6 +144,16 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
     setExpanded(new Set());
   }, [channelId]);
 
+  // Stale people are still here, so they are listed as online, each with its
+  // word; the order within a group is the joined order.
+  const online = joined.people.filter((p) => p.state !== 'offline');
+  const offline = joined.people.filter((p) => p.state === 'offline');
+  // Most channels have neither agents nor runs: one line instead of two empty
+  // sections, once the runs are known to be none. While they load, or after a
+  // failed read (which offers Try again), the sections show.
+  const runs = state.runs;
+  const folded = joined.agents.length === 0 && runs.loaded && !runs.loading && runs.note === null && runs.list.length === 0;
+
   if (session.phase === 'failed') {
     return (
       <div>
@@ -143,41 +175,42 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
       {joined.people.length === 0 ? (
         <p className="empty">Nobody</p>
       ) : (
-        <ul aria-label="People">
-          {joined.people.map((p) => (
-            <li key={p.id} className={`ag-person state-${p.state}`}>
-              <Avatar id={p.id} name={p.name} />
-              <span className="ag-name">{p.name}</span>
-              {p.live > 1 ? <span> ({p.live})</span> : null} <span className="ag-status">{p.state}</span>
-            </li>
-          ))}
-        </ul>
+        <>
+          <PeopleGroup title="Online" people={online} />
+          <PeopleGroup title="Offline" people={offline} />
+        </>
       )}
-      <h3>Agents</h3>
-      {joined.agents.length === 0 ? (
-        <p className="empty">No agents in this channel</p>
+      {folded ? (
+        <p className="empty">No agents or runs in this channel.</p>
       ) : (
-        <ul aria-label="Agents">
-          {joined.agents.map((a) => (
-            <AgentRow
-              key={a.id}
-              entry={a}
-              expanded={expanded.has(a.id)}
-              onToggle={() => {
-                setExpanded((held) => {
-                  const next = new Set(held);
-                  if (!next.delete(a.id)) next.add(a.id);
-                  return next;
-                });
-              }}
-              sessionRuns={state.sessionRuns}
-              now={now}
-              onOpen={agents.openRun}
-            />
-          ))}
-        </ul>
+        <>
+          <h3>Agents</h3>
+          {joined.agents.length === 0 ? (
+            <p className="empty">No agents in this channel</p>
+          ) : (
+            <ul aria-label="Agents">
+              {joined.agents.map((a) => (
+                <AgentRow
+                  key={a.id}
+                  entry={a}
+                  expanded={expanded.has(a.id)}
+                  onToggle={() => {
+                    setExpanded((held) => {
+                      const next = new Set(held);
+                      if (!next.delete(a.id)) next.add(a.id);
+                      return next;
+                    });
+                  }}
+                  sessionRuns={state.sessionRuns}
+                  now={now}
+                  onOpen={agents.openRun}
+                />
+              ))}
+            </ul>
+          )}
+          <RunsList agents={agents} />
+        </>
       )}
-      <RunsList agents={agents} />
       {state.notice === null ? null : <p role="status">{state.notice}</p>}
     </div>
   );
