@@ -655,6 +655,28 @@ export function soundNote(f: ShareFeatures): string {
   }
 }
 
+// shortShareNote is soundNote and ownPageNote in one line, which is what the
+// strip shows before a share (issue #600): whether sound comes, and that a
+// whole screen shows this page. The full notes are in Voice options.
+export function shortShareNote(f: ShareFeatures): string {
+  if (!f.canShare) return soundNote(f);
+  const page = 'a whole screen also shows this page.';
+  if (!f.chromium || f.platform === 'android') return `Sharing: the picture only, no sound; ${page}`;
+  if (f.platform === 'windows') return `Sharing: a tab or the entire screen carries sound; ${page}`;
+  return `Sharing: only a tab carries sound; ${page}`;
+}
+
+// othersShareNote says who else shares a screen, and whether with sound.
+export function othersShareNote(who: string | null, audio: boolean): string {
+  return `${who ?? 'Someone else'} is sharing a screen${audio ? ', with sound' : ''}.`;
+}
+
+// busyNote is why Share screen is off while someone else shares, and what a
+// claim refused for that is told: who shares, and that one person does.
+export function busyNote(who: string | null, audio: boolean): string {
+  return `${othersShareNote(who, audio)} One person shares at a time.`;
+}
+
 // endedNote says why the last share ended, or why one did not start. who is
 // the person presence shows sharing, when it shows someone.
 export function endedNote(end: ShareEnd, who: string | null): string {
@@ -678,7 +700,7 @@ export function endedNote(end: ShareEnd, who: string | null): string {
     case 'idle':
       return 'Your share ended because nothing was shared for a while.';
     case 'busy':
-      return who === null ? 'Someone else is sharing. One person shares at a time.' : `${who} is sharing. One person shares at a time.`;
+      return busyNote(who, false);
     case 'cancelled':
       return 'Nothing was shared: the picker was closed.';
     case 'not_connected':

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { FakeClock, settle } from './fakes';
-import { browserFeatures, endedNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareRoom, type ShareState } from './share';
+import { browserFeatures, busyNote, endedNote, othersShareNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -952,6 +952,39 @@ describe('what the page says', () => {
     for (const [name, features, text] of browsers) expect(soundNote(features), name).toMatch(text);
   });
 
+  // Issue #600: the strip's one line names the same facts as soundNote and
+  // ownPageNote, for each of soundNote's cases: whether sound comes, and that
+  // a whole screen shows this page. A browser that cannot share says so in
+  // full, as it is one sentence and there is nothing about a picker to add.
+  it('says the same in one short line: whether sound comes, and that a whole screen shows this page', () => {
+    const sound: Record<string, RegExp> = {
+      'Chrome on Windows': /^Sharing: a tab or the entire screen carries sound; /,
+      'Edge on macOS': /^Sharing: only a tab carries sound; /,
+      'Chrome on Linux': /^Sharing: only a tab carries sound; /,
+      'Chrome on Android': /^Sharing: the picture only, no sound; /,
+      'Firefox on Windows': /^Sharing: the picture only, no sound; /,
+      'Safari on macOS': /^Sharing: the picture only, no sound; /,
+      'Safari on iPhone': /^This browser cannot share a screen/,
+    };
+    for (const [name, features] of browsers) {
+      const line = shortShareNote(features);
+      expect(line, name).toMatch(sound[name] ?? /no such case/);
+      if (features.canShare) {
+        expect(line, name).toMatch(/a whole screen also shows this page\.$/);
+        expect(line.length, `${name}: ${line}`).toBeLessThanOrEqual(90);
+      } else {
+        expect(line, name).toBe(soundNote(features));
+      }
+    }
+  });
+
+  it("says in one line who else shares and with what sound, which is why Share screen is off", () => {
+    expect(othersShareNote('bob', false)).toBe('bob is sharing a screen.');
+    expect(othersShareNote('bob', true)).toBe('bob is sharing a screen, with sound.');
+    expect(busyNote('bob', true)).toBe('bob is sharing a screen, with sound. One person shares at a time.');
+    expect(busyNote(null, false)).toBe('Someone else is sharing a screen. One person shares at a time.');
+  });
+
   it('warns before the picker opens that a whole screen or this window shows this page, chat included', () => {
     expect(ownPageNote).toBe('Sharing your entire screen or this browser window shows this page too, chat included. Share a tab or another window to keep it out.');
   });
@@ -965,8 +998,8 @@ describe('what the page says', () => {
   });
 
   it('names who is sharing when a claim is busy, and says why every other share ended', () => {
-    expect(endedNote('busy', 'alice')).toBe('alice is sharing. One person shares at a time.');
-    expect(endedNote('busy', null)).toMatch(/^Someone else is sharing/);
+    expect(endedNote('busy', 'alice')).toBe('alice is sharing a screen. One person shares at a time.');
+    expect(endedNote('busy', null)).toBe('Someone else is sharing a screen. One person shares at a time.');
     expect(endedNote('server', null)).toMatch(/server ended your share.*operator/);
     for (const end of ['self', 'browser', 'left', 'lost', 'cancelled', 'not_connected', 'unavailable', 'failed'] as const) {
       expect(endedNote(end, null).length, end).toBeGreaterThan(10);

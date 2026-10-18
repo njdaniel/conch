@@ -7,7 +7,8 @@
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { channelButton, conversation, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
+import type { PostMessageRequestV2 } from '../src/schema/generated';
+import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -432,34 +433,118 @@ test.describe('with LiveKit', () => {
     }
   });
 
-  // Issue #467: on a phone the voice panel, joined, fits the screen in both
-  // microphone modes, and is worked by tapping.
-  test('on a phone the joined voice panel fits the screen and is worked by tapping', async ({ browser }) => {
-    for (const [size, options] of phones) {
-      const a = await person(browser, 'alice', options);
-      try {
-        const voice = voiceRegion(a.page);
-        await expectFits(a.page, `${size}: the lobby before joining voice`);
-        await voice.getByRole('button', { name: 'Join voice' }).tap();
-        await expect(voice).toContainText('Connected in', { timeout: 30_000 });
-        await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
-        await expectFits(a.page, `${size}: the voice panel, push to talk`);
-        await voice.getByRole('button', { name: 'Mute' }).tap();
-        await expect(voice).toContainText('Muted.');
-        await voice.getByRole('button', { name: 'Unmute' }).tap();
-        await voice.getByRole('button', { name: 'Voice options' }).tap();
-        await expectFits(a.page, `${size}: the voice panel with its options open`);
-        await voice.getByLabel('Open microphone').tap();
-        await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
-        await expectFits(a.page, `${size}: the voice panel, open microphone`);
-        await voice.getByLabel('Push to talk').tap();
-        await voice.getByRole('button', { name: 'Leave voice' }).tap();
-        await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
-      } finally {
-        await a.context.close();
+  // Issue #600 (F08, F12): bob and carol join voice, so that with the page's
+  // own person three are in voice, by push to talk, and nobody shares.
+  async function twoInVoice(browser: import('@playwright/test').Browser) {
+    const others = [await person(browser, 'bob'), await person(browser, 'carol')];
+    for (const o of others) {
+      await voiceRegion(o.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(o.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+    }
+    return others;
+  }
+
+  // Issue #600: in a test of its own, the strip's notes before a share are
+  // one line on a desktop, the talk key and the line about sharing side by
+  // side; More about sharing opens Voice options at the full notes.
+  test('on a desktop the notes before a share are one line, and the full notes are one press away', async ({ browser }) => {
+    const others = await twoInVoice(browser);
+    try {
+      for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }]) {
+        const size = `${String(viewport.width)}×${String(viewport.height)}`;
+        const a = await person(browser, 'alice', { viewport });
+        try {
+          const voice = voiceRegion(a.page);
+          await voice.getByRole('button', { name: 'Join voice' }).click();
+          await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
+          const more = voice.getByRole('button', { name: 'More about sharing' });
+          await expect(more, `${size}: the line about sharing shows before Share screen is pressed`).toBeVisible();
+          await expect(voice.getByText(/^Talk key: .* It works only while this tab has focus/)).toBeVisible();
+          const { height, line } = await notesHeight(voice);
+          expect(height, `${size}: the notes are ${String(height)} px high, one line is ${String(line)} px`).toBeLessThanOrEqual(line + 1);
+
+          await more.click();
+          await expect(voice.getByRole('button', { name: 'Voice options', expanded: true })).toBeVisible();
+          const about = voice.getByRole('region', { name: 'Sharing your screen' });
+          await expect(about).toBeFocused();
+          await expect(about).toContainText(/Sound: .*tab shares its (own )?sound/);
+          await expect(about).toContainText('shows this page too, chat included');
+          await voice.getByRole('button', { name: 'Leave voice' }).click();
+          await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+        } finally {
+          await a.context.close();
+        }
       }
+    } finally {
+      for (const o of others) await o.context.close();
     }
   });
+
+  // Issue #467: on a phone the voice panel, joined, fits the screen in both
+  // microphone modes, and is worked by tapping. Issue #600 (F08): with three
+  // in voice by push to talk and nobody sharing, the strip is at most 200 px
+  // high and nothing in it needs scrolling to reach, and a conversation read
+  // to its newest message still shows it after Join voice.
+  test('on a phone the joined voice panel fits the screen and is worked by tapping', async ({ browser }) => {
+    const others = await twoInVoice(browser);
+    try {
+      for (const [size, options] of phones) {
+        const bodies = Array.from({ length: 30 }, (_, i) => `p600 ${size} line ${String(i + 1)}`);
+        for (const body of bodies) {
+          const request: PostMessageRequestV2 = { body };
+          const r = await vw.api(vw.bob.token, 'POST', `/v2/channels/${vw.channel}/messages`, request);
+          expect(r.status, `post ${body}`).toBe(201);
+        }
+        await phone(browser, size, options, bodies[bodies.length - 1] ?? '');
+      }
+    } finally {
+      for (const o of others) await o.context.close();
+    }
+  });
+
+  async function phone(browser: import('@playwright/test').Browser, size: string, options: BrowserContextOptions, last: string): Promise<void> {
+    const a = await person(browser, 'alice', options);
+    try {
+      const voice = voiceRegion(a.page);
+      const log = messages(a.page);
+      const newest = log.getByRole('listitem').filter({ hasText: last });
+      await expect(newest).toBeVisible();
+      expect(await log.evaluate((el) => el.scrollHeight > el.clientHeight), `${size}: the conversation is longer than the log`).toBe(true);
+      await expectInside(newest, log, `${size}: the newest message before joining voice`);
+      await expectFits(a.page, `${size}: the lobby before joining voice`);
+      await voice.getByRole('button', { name: 'Join voice' }).tap();
+      await expect(voice).toContainText('Connected in', { timeout: 30_000 });
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
+      await expect(voice.getByRole('button', { name: 'More about sharing' }), `${size}: the line about sharing shows`).toBeVisible();
+      await expectFits(a.page, `${size}: the voice panel, push to talk`);
+      const dock = await voice.evaluate((el) => {
+        const d = el.parentElement;
+        return d === null ? null : { height: d.getBoundingClientRect().height, scroll: d.scrollHeight, client: d.clientHeight };
+      });
+      if (dock === null) throw new Error('the voice panel is in no dock');
+      // 200 px is the 390×844 phone's bound. At 360 px the controls take two
+      // rows (Hold to talk keeps its words), and the strip still needs no
+      // scrolling.
+      if (size === '390×844') expect(dock.height, `${size}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(200);
+      expect(dock.scroll, `${size}: the strip holds ${String(dock.scroll)} px in ${String(dock.client)}`).toBeLessThanOrEqual(dock.client);
+      await expectInside(newest, log, `${size}: the newest message after joining voice`);
+      await voice.getByRole('button', { name: 'Mute' }).tap();
+      await expect(voice).toContainText('Muted.');
+      await voice.getByRole('button', { name: 'Unmute' }).tap();
+      await voice.getByRole('button', { name: 'Voice options' }).tap();
+      await expectFits(a.page, `${size}: the voice panel with its options open`);
+      await voice.getByLabel('Open microphone').tap();
+      await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
+      await expectFits(a.page, `${size}: the voice panel, open microphone`);
+      await voice.getByLabel('Push to talk').tap();
+      await voice.getByRole('button', { name: 'Leave voice' }).tap();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await a.context.close();
+    }
+  }
 
   // Issue #584: Join voice and Watch only name the room they join, in full on
   // a desktop and read out in full on a phone; while another channel is on
@@ -738,3 +823,42 @@ test.describe('with LiveKit', () => {
     }
   });
 });
+
+// Two frames, so that a change of size has been laid out and drawn.
+async function frames(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            done();
+          });
+        });
+      }),
+  );
+}
+
+// expectInside checks that element is wholly inside the log's box: in view.
+async function expectInside(element: Locator, log: Locator, what: string): Promise<void> {
+  await frames(element.page());
+  const box = await element.boundingBox();
+  const frame = await log.boundingBox();
+  if (box === null || frame === null) throw new Error(`${what} has no box on the screen`);
+  const where = `${what} is at y ${String(box.y)}, ${String(box.height)} high, in a log from y ${String(frame.y)}, ${String(frame.height)} high`;
+  expect(box.y, where).toBeGreaterThanOrEqual(frame.y - 1);
+  expect(box.y + box.height, where).toBeLessThanOrEqual(frame.y + frame.height + 1);
+}
+
+// notesHeight is how high the strip's notes are, and one line of their text
+// with the notes' own padding (issue #600).
+async function notesHeight(voice: Locator): Promise<{ readonly height: number; readonly line: number }> {
+  return voice.evaluate((el) => {
+    const notes = el.querySelector('.voice-notes');
+    const hint = notes?.querySelector('.hint');
+    if (!(notes instanceof HTMLElement) || !(hint instanceof HTMLElement)) throw new Error('no notes in the strip');
+    const own = getComputedStyle(notes);
+    const text = getComputedStyle(hint);
+    const line = text.lineHeight.endsWith('px') ? parseFloat(text.lineHeight) : parseFloat(text.fontSize) * parseFloat(text.lineHeight);
+    return { height: notes.getBoundingClientRect().height, line: line + parseFloat(own.paddingTop) + parseFloat(own.paddingBottom) };
+  });
+}
