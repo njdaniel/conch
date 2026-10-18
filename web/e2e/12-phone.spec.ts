@@ -7,7 +7,9 @@
 import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
 import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
-import { inviteUrl } from './world';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
+import type { InvitePermissionRequestV1 } from '../src/schema/generated';
+import { call, inviteUrl, ok, type World } from './world';
 
 // Things a phone's width finds first: a word with no place to break, an
 // address, and a line long enough to wrap many times. Each size posts its own.
@@ -151,6 +153,65 @@ for (const [size, options] of phones) {
     await panel.getByRole('button', { name: 'Done' }).tap();
     await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
   });
+
+  // Issue #601: the channel row shows there are more channels than fit, and
+  // the buttons that are only an icon, and the audience select, are big
+  // enough for a finger. A new person, made through the API rather than by an
+  // invite (redeeming counts against the network's tries, which 13-sign-in-
+  // link needs), in channels of their own, so the shared fixture people's
+  // lists are left as they are. They may invite, so Invite someone is shown.
+  test(`P601 at ${size} the channel row shows there is more, and the top bar's buttons and the audience select are finger-sized`, async ({ meet, secrets, world }) => {
+    const tag = `p601-${size.slice(0, 3)}-${String(Date.now())}`;
+    const op = world.tokens.operator;
+    const person: CreatePrincipalRequest = { kind: 'human', name: tag };
+    const id = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+    const label: CreateCredentialRequestV1 = { label: tag };
+    const { token } = await ok(world, op, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, label);
+    secrets.push(token);
+    const mayInvite: InvitePermissionRequestV1 = { may_invite: true };
+    await done(world, op, 'PUT', `/v1/principals/${String(id)}/invite-permission`, mayInvite);
+    const names = Array.from({ length: 8 }, (_, i) => `${tag}-${String(i + 1)}`);
+    for (const channel of names) {
+      await done(world, op, 'POST', '/v0/channels', { name: channel });
+      await done(world, op, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`);
+    }
+    const { page } = await meet(options);
+    await signIn(page, world, token, tag);
+    await expect(channelButton(page, names[names.length - 1] ?? '')).toBeAttached();
+    await expect(page.getByLabel('To:')).toBeVisible();
+
+    for (const [what, target] of [
+      ['Members', page.getByRole('button', { name: 'Members' })],
+      ['Settings', page.getByRole('button', { name: 'Settings' })],
+      ['Invite someone', page.getByRole('region', { name: 'Invites' }).getByRole('button', { name: 'Invite someone' })],
+      ['the audience select', page.getByLabel('To:')],
+    ] as const) {
+      const box = await target.boundingBox();
+      if (box === null) throw new Error(`${what} has no box on the screen`);
+      const where = `${what} is ${String(box.width)}×${String(box.height)}`;
+      expect(box.width, where).toBeGreaterThanOrEqual(44);
+      expect(box.height, where).toBeGreaterThanOrEqual(44);
+    }
+    await expectFits(page, 'the lobby with more channels than fit');
+
+    // At the start the fade is on the right edge only; at the end, the left.
+    const row = page.getByRole('navigation', { name: 'Channels' }).getByRole('list');
+    const fades = () =>
+      row.evaluate((el) => ({ before: getComputedStyle(el, '::before').opacity, after: getComputedStyle(el, '::after').opacity }));
+    await row.evaluate((el) => {
+      el.scrollLeft = 0;
+    });
+    await expect(row).toHaveClass(/\bmore-after\b/);
+    await expect(row).not.toHaveClass(/\bmore-before\b/);
+    expect(await fades()).toEqual({ before: '0', after: '1' });
+    await row.evaluate((el) => {
+      el.scrollLeft = el.scrollWidth;
+    });
+    await expect(row).toHaveClass(/\bmore-before\b/);
+    await expect(row).not.toHaveClass(/\bmore-after\b/);
+    expect(await fades()).toEqual({ before: '1', after: '0' });
+    await expectFits(page, 'the lobby with the channel row scrolled to its end');
+  });
 }
 
 // expectOnScreen checks that an element, scrolled into view, lies wholly
@@ -206,6 +267,13 @@ async function frames(page: Page): Promise<void> {
         });
       }),
   );
+}
+
+// done makes an operator's call that must succeed and whose reply is not
+// needed.
+async function done(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<void> {
+  const reply = await call(world, token, method, path, body);
+  if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);
 }
 
 // keepToken hands the credential the invite gave this page to the fixture's

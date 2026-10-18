@@ -1168,14 +1168,27 @@ label {
   margin: 0;
 }
 
+/* Two rows (issue #587): the roster on top, then the state on the left and
+   the controls on the right. The dock is on the window's bottom edge, so
+   what grows (more people, a longer status line) grows upwards, and the
+   controls stay under the pointer. */
 .voice-bar {
+  display: grid;
+  gap: var(--s2);
+}
+
+.voice-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   gap: var(--s2) var(--s4);
 }
 
+/* Its basis, not its text, decides whether the controls fit beside it, and
+   the text wraps within it: a longer status makes it taller, and never moves
+   the controls. */
 .voice-state {
+  flex: 1 1 12rem;
   min-width: 0;
 }
 
@@ -1250,20 +1263,45 @@ label {
   color: var(--warn);
 }
 
+/* Who is in voice: how many, then every chip, wrapping onto more lines
+   rather than scrolling sideways out of sight. */
+.voice-who {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.voice-count {
+  flex: none;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 600;
+}
+
 .voice-roster {
   display: flex;
-  flex: 1 1 12rem;
+  flex: 1 1 0;
+  flex-wrap: wrap;
   gap: var(--s2);
   min-width: 0;
   margin: 0;
   padding: 4px;
-  overflow-x: auto;
   list-style: none;
+}
+
+/* "+N more" is for a phone, where the roster is capped. */
+.voice-more {
+  display: none;
 }
 
 .voice-roster li {
   display: flex;
   flex: none;
+  max-width: 100%;
+  min-width: 0;
   align-items: center;
   gap: 0.35rem;
   padding: 0.15rem 0.5rem 0.15rem 0.15rem;
@@ -1295,9 +1333,11 @@ label {
 
 .voice-controls {
   display: flex;
+  flex: none;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
+  max-width: 100%;
   margin-left: auto;
 }
 
@@ -1643,12 +1683,57 @@ label {
   }
 
   .channel-list {
+    --fade: 2rem;
     display: flex;
+    gap: var(--s1);
     overflow-x: auto;
   }
 
+  /* The fade at an edge the row has more beyond (issue #601). Each sticks to
+     its edge as the row scrolls and takes no room in it: its negative margin
+     gives back its width and the gap before or after it. Taps go through. */
+  .channel-list::before,
+  .channel-list::after {
+    content: '';
+    position: sticky;
+    z-index: 1;
+    flex: none;
+    width: var(--fade);
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .channel-list::before {
+    left: 0;
+    margin-right: calc(-1 * (var(--fade) + var(--s1)));
+    background: linear-gradient(to right, var(--surface), transparent);
+  }
+
+  .channel-list::after {
+    right: 0;
+    margin-left: calc(-1 * (var(--fade) + var(--s1)));
+    background: linear-gradient(to left, var(--surface), transparent);
+  }
+
+  .channel-list.more-before::before,
+  .channel-list.more-after::after {
+    opacity: 1;
+  }
+
+  /* A channel and its unread count read as one pill. The count stays outside
+     the button in the page, so the button's name is still the channel's
+     alone; only the drawing joins them. */
   .channel-list li {
     flex: none;
+    gap: 0;
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .channel-list li:has(> button[aria-current='true']) {
+    background: var(--accent-bg);
+    border-color: var(--accent);
   }
 
   .channel-list button {
@@ -1656,12 +1741,17 @@ label {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: transparent;
     border-left: 0;
-    border-bottom: 3px solid transparent;
+    border-radius: 999px;
   }
 
   .channel-list button[aria-current='true'] {
-    border-bottom-color: var(--accent);
+    background: transparent;
+  }
+
+  .channel-list .unread {
+    margin-right: var(--s2);
   }
 
   .conv-head {
@@ -1686,6 +1776,22 @@ label {
     width: 100%;
     margin-left: 0;
     gap: 0.35rem;
+  }
+
+  /* The count and "+N more" on one line, the chips the strip's width below
+     them: three, then "+N more" for the rest (issue #587). */
+  .voice-roster {
+    flex-basis: 100%;
+    order: 1;
+  }
+
+  .voice-roster.capped li:nth-child(n + 4) {
+    display: none;
+  }
+
+  .voice-more {
+    display: inline-flex;
+    margin-left: auto;
   }
 
   .voice .talk {
@@ -1748,8 +1854,17 @@ label {
     border-radius: 0;
   }
 
-  /* Big enough for a finger. */
+  /* Big enough for a finger: 44px each way for the buttons that are only
+     an icon (issue #601), 44px high for the rest. */
   .lobby button {
+    min-height: 2.75rem;
+  }
+
+  .icon-button {
+    min-width: 2.75rem;
+  }
+
+  .audience-row select {
     min-height: 2.75rem;
   }
 }

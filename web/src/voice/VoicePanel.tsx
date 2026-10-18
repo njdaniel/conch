@@ -15,7 +15,7 @@ import { StageHost } from '../stage';
 import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
 import { keyLabel } from './keys';
-import { occupants, sharer } from './presence';
+import { occupants, sharer, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote } from './share';
 import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
@@ -152,105 +152,98 @@ export function VoicePanel({
 
   return (
     <section aria-label="Voice" className={`voice phase-${state.phase}${state.transmitting ? ' sending' : ''}`}>
+      {/* Two rows (issue #587): who is in voice on top, and below it where
+          you are and the controls. The dock sits on the window's bottom edge,
+          so a roster that grows, or a longer status, moves the strip's top and
+          leaves the controls where they were. */}
       <div className="voice-bar">
-        <div className="voice-state">
-          <p className="voice-phase">
-            {phaseLabel[state.phase]}
-            {where}
-          </p>
-          {inVoice ? (
-            <p className="voice-sub">
-              {captured ? <span className="chip">Microphone in use</span> : null}{' '}
-              <span className="voice-tx">
-                {state.muted ? 'Muted. ' : ''}
-                {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
-                {state.listenOnly ? 'Listen only. ' : ''}
-                {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
-                {state.transmitting ? 'Transmitting' : 'Not transmitting'}
-              </span>
+        {roster.length === 0 ? null : <Roster roster={roster} people={people} viewer={viewer} speaking={speaking} />}
+        <div className="voice-row">
+          <div className="voice-state">
+            <p className="voice-phase">
+              {phaseLabel[state.phase]}
+              {where}
             </p>
-          ) : (
-            <p className="voice-sub">Microphone off</p>
-          )}
-        </div>
-
-        {roster.length === 0 ? null : (
-          <ul aria-label="In voice" className="voice-roster">
-            {roster.map((o) => (
-              <li key={o.principal} className={speaking.has(o.principal) ? 'speaking' : undefined}>
-                <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
-                <span className="who">{nameOf(people, o.principal, viewer)}</span>
-                {o.transmitting ? <Tag text="transmitting" /> : null}
-                {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
-                {o.sharing ? <Tag text="sharing" /> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-
-        <div className="voice-controls">
-          {inVoice ? (
-            <>
-              {state.mode === 'ptt' ? (
-                <button
-                  type="button"
-                  className="talk"
-                  aria-pressed={state.transmitting}
-                  disabled={state.listenOnly || state.watchOnly}
-                  onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
-                  onPointerUp={() => { client.release(); }}
-                  onPointerCancel={() => { client.release(); }}
-                  onContextMenu={(e) => { e.preventDefault(); }}
-                >
-                  <Glyph name="mic" />
-                  Hold to talk
-                </button>
-              ) : (
-                <span className="open-mic">
-                  <Glyph name="mic" />
-                  Open microphone <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
+            {inVoice ? (
+              <p className="voice-sub">
+                {captured ? <span className="chip">Microphone in use</span> : null}{' '}
+                <span className="voice-tx">
+                  {state.muted ? 'Muted. ' : ''}
+                  {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
+                  {state.listenOnly ? 'Listen only. ' : ''}
+                  {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
+                  {state.transmitting ? 'Transmitting' : 'Not transmitting'}
                 </span>
-              )}
-              {state.watchOnly && !state.listenOnly ? (
-                <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
-                  Use microphone
+              </p>
+            ) : (
+              <p className="voice-sub">Microphone off</p>
+            )}
+          </div>
+
+          <div className="voice-controls">
+            {inVoice ? (
+              <>
+                {state.mode === 'ptt' ? (
+                  <button
+                    type="button"
+                    className="talk"
+                    aria-pressed={state.transmitting}
+                    disabled={state.listenOnly || state.watchOnly}
+                    onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
+                    onPointerUp={() => { client.release(); }}
+                    onPointerCancel={() => { client.release(); }}
+                    onContextMenu={(e) => { e.preventDefault(); }}
+                  >
+                    <Glyph name="mic" />
+                    Hold to talk
+                  </button>
+                ) : (
+                  <span className="open-mic">
+                    <Glyph name="mic" />
+                    Open microphone <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
+                  </span>
+                )}
+                {state.watchOnly && !state.listenOnly ? (
+                  <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
+                    Use microphone
+                  </button>
+                ) : null}
+                <button type="button" aria-pressed={state.muted} onClick={() => { client.setMuted(!state.muted); }}>
+                  <Glyph name="micOff" />
+                  <span className="label">{state.muted ? 'Unmute' : 'Mute'}</span>
                 </button>
-              ) : null}
-              <button type="button" aria-pressed={state.muted} onClick={() => { client.setMuted(!state.muted); }}>
-                <Glyph name="micOff" />
-                <span className="label">{state.muted ? 'Unmute' : 'Mute'}</span>
-              </button>
-              <button type="button" aria-pressed={state.deafened} onClick={() => { client.setDeafened(!state.deafened); }}>
-                <Glyph name="headphones" />
-                <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
-              </button>
-              <ShareButton voice={voice} />
-              {theirs !== null && !state.watching ? (
-                <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
-                  <Glyph name="screen" />
-                  <span className="label">Watch</span>
+                <button type="button" aria-pressed={state.deafened} onClick={() => { client.setDeafened(!state.deafened); }}>
+                  <Glyph name="headphones" />
+                  <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
-              ) : null}
-              <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
-                <Glyph name="options" />
-                <span className="label">Voice options</span>
-              </button>
-              <button type="button" className="danger" onClick={voice.leave}>
-                <Glyph name="leave" />
-                <span className="label">Leave voice</span>
-              </button>
-            </>
-          ) : (
-            <>
-              <button type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
-                <Glyph name="headphones" />
-                Join voice {dest}
-              </button>
-              <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
-                Watch only {dest}
-              </button>
-            </>
-          )}
+                <ShareButton voice={voice} />
+                {theirs !== null && !state.watching ? (
+                  <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
+                    <Glyph name="screen" />
+                    <span className="label">Watch</span>
+                  </button>
+                ) : null}
+                <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
+                  <Glyph name="options" />
+                  <span className="label">Voice options</span>
+                </button>
+                <button type="button" className="danger" onClick={voice.leave}>
+                  <Glyph name="leave" />
+                  <span className="label">Leave voice</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
+                  <Glyph name="headphones" />
+                  Join voice {dest}
+                </button>
+                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
+                  Watch only {dest}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -290,6 +283,47 @@ export function VoicePanel({
       {inVoice ? <Options voice={voice} open={options} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
+  );
+}
+
+// How many chips a phone shows before "+N more" (issue #587). The cap itself
+// is a CSS rule, so the strip measures nothing.
+const phoneChips = 3;
+
+// Roster is who is in voice, with how many as its heading, which also names
+// the list. At 700 px and wider every chip shows, wrapping onto more lines;
+// on a phone the first three show, and "+N more" shows the rest.
+function Roster({ roster, people, viewer, speaking }: {
+  readonly roster: readonly Occupant[];
+  readonly people: ReadonlyMap<number, Person>;
+  readonly viewer: number;
+  readonly speaking: ReadonlySet<number>;
+}) {
+  const [all, setAll] = useState(false);
+  const more = roster.length - phoneChips;
+  const capped = more > 0 && !all;
+  return (
+    <div className="voice-who">
+      <h2 id="voice-count" className="voice-count">
+        {roster.length} in voice
+      </h2>
+      <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
+        {roster.map((o) => (
+          <li key={o.principal} className={speaking.has(o.principal) ? 'speaking' : undefined}>
+            <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
+            <span className="who">{nameOf(people, o.principal, viewer)}</span>
+            {o.transmitting ? <Tag text="transmitting" /> : null}
+            {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
+            {o.sharing ? <Tag text="sharing" /> : null}
+          </li>
+        ))}
+      </ul>
+      {more > 0 ? (
+        <button type="button" className="voice-more quiet" aria-expanded={all} aria-controls="voice-roster" onClick={() => { setAll(!all); }}>
+          {all ? 'Show fewer' : `+${String(more)} more`}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
