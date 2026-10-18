@@ -140,8 +140,8 @@ interface Server {
   channelRunUrls: string[];
   // The channel's messages, newest first, as the history read returns them.
   messages: Json[];
-  // While holdBefore matches the `before` of a channel runs read, its answer
-  // waits in `held` until a test calls it.
+  // While holdBefore matches the `before` of a channel runs read ('' for the
+  // first page), its answer waits in `held` until a test calls it.
   holdBefore: string | null;
   held: (() => void)[];
   runs: Record<number, Json>;
@@ -216,7 +216,8 @@ function install() {
         if (!url.searchParams.has('session')) {
           server.channelRunUrls.push(url.search);
           const answer = () => json({ runs: server.channelRuns.filter(beforeOf(url)).slice(0, Number(url.searchParams.get('limit'))) });
-          if (server.holdBefore !== null && url.searchParams.get('before') === server.holdBefore) {
+          // The first page has no `before`: holdBefore '' holds it.
+          if (server.holdBefore !== null && (url.searchParams.get('before') ?? '') === server.holdBefore) {
             return new Promise<Response>((done) => {
               server.held.push(() => {
                 done(answer());
@@ -354,14 +355,15 @@ describe('the panel', () => {
     const socket = await openApp();
     await panel().findByText('Connecting…');
     await showRoster(socket, [session(100, 2), session(101, 2), agentSession()]);
-    const people = panel().getByRole('list', { name: 'People' });
-    const ada = within(people).getByText('ada').closest('li');
-    expect(ada?.textContent).toContain('(2)');
+    const online = panel().getByRole('list', { name: 'Online — 1' });
+    const ada = within(online).getByText('ada').closest('li');
+    expect(ada?.textContent).toContain('(2 sessions)');
     expect(ada?.textContent).toContain('online');
     // A member with no session reads offline, and its name is text, not markup.
-    const mallory = within(people).getByText('<b>mallory</b>').closest('li');
+    const offline = panel().getByRole('list', { name: 'Offline — 1' });
+    const mallory = within(offline).getByText('<b>mallory</b>').closest('li');
     expect(mallory?.textContent).toContain('offline');
-    expect(people.querySelector('b')).toBeNull();
+    expect(offline.querySelector('b')).toBeNull();
     const agents = panel().getByRole('list', { name: 'Agents' });
     const bot = within(agents).getByText('bot').closest('li');
     expect(bot?.textContent).toContain('Agent');
@@ -464,8 +466,9 @@ describe('the member list the socket sends', () => {
     await waitFor(() => {
       expect(panel().queryByText('<b>mallory</b>')).toBeNull();
     });
-    const people = panel().getByRole('list', { name: 'People' });
-    expect(within(people).getByText('ada')).toBeDefined();
+    const online = panel().getByRole('list', { name: 'Online — 1' });
+    expect(within(online).getByText('ada')).toBeDefined();
+    expect(panel().queryByRole('list', { name: /^Offline/ })).toBeNull();
     expect(within(panel().getByRole('list', { name: 'Agents' })).getByText('ghost')).toBeDefined();
     await act(async () => {});
     expect(server.membersReads).toBe(reads);
@@ -1309,5 +1312,95 @@ describe('Go to message', () => {
     const button = await detail.findByRole('button', { name: 'Go to message: this run answers no message' });
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(button.textContent).toBe('No message');
+  });
+});
+
+// The people groups and the folded agent sections (issue #594).
+
+const humans = { members: members.members.filter((m) => m.kind === 'human') };
+const listed = (list: HTMLElement) => within(list).getAllByRole('listitem').map((li) => li.querySelector('.ag-name')?.textContent);
+
+describe('the members column', () => {
+  it('names the count of a person with more than one online session, and shows none for one', async () => {
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2), session(101, 2)]);
+    const ada = within(panel().getByRole('list', { name: 'Online — 1' })).getByText('ada').closest('li') as HTMLElement;
+    expect(within(ada).getByText('(2 sessions)')).toBeDefined();
+    socket.send(roster([session(100, 2)]));
+    await waitFor(() => {
+      expect(panel().queryByText('(2 sessions)')).toBeNull();
+    });
+    expect(within(panel().getByRole('list', { name: 'Online — 1' })).getByText('ada').closest('li')?.textContent).not.toMatch(/\(\d/);
+  });
+
+  it('groups people by Online (with stale) and Offline, with counts, and moves one who goes offline at the next roster', async () => {
+    server.members = {
+      members: [
+        ...humans.members,
+        { principal_id: 6, created_at: at, name: 'cy', kind: 'human' },
+        { principal_id: 8, created_at: at, name: 'dee', kind: 'human' },
+      ],
+    };
+    const cy = (state: string): Json => session(102, 6, { name: 'cy', state, status: state });
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2), cy('stale'), session(103, 8, { name: 'dee', state: 'offline', status: 'offline' })]);
+    await panel().findByText('dee');
+    const onlineHeading = panel().getByRole('heading', { name: 'Online — 2' });
+    const offlineHeading = panel().getByRole('heading', { name: 'Offline — 2' });
+    expect(onlineHeading.compareDocumentPosition(offlineHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const online = panel().getByRole('list', { name: 'Online — 2' });
+    expect(listed(online)).toEqual(['ada', 'cy']);
+    // Stale is still here, and still says so.
+    expect(within(online).getByText('cy').closest('li')?.textContent).toContain('stale');
+    expect(listed(panel().getByRole('list', { name: 'Offline — 2' }))).toEqual(['<b>mallory</b>', 'dee']);
+
+    socket.send(roster([session(100, 2), cy('offline'), session(103, 8, { name: 'dee', state: 'offline', status: 'offline' })]));
+    const offline = await panel().findByRole('list', { name: 'Offline — 3' });
+    expect(listed(offline)).toEqual(['<b>mallory</b>', 'cy', 'dee']);
+    expect(listed(panel().getByRole('list', { name: 'Online — 1' }))).toEqual(['ada']);
+  });
+
+  it('folds Agents and Runs to one line in a channel with neither, once the runs are read', async () => {
+    server.members = humans;
+    server.holdBefore = '';
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2)]);
+    // While the runs load, the sections show as before.
+    await panel().findByText('Loading runs…');
+    expect(panel().getByRole('heading', { name: 'Agents' })).toBeDefined();
+    await waitFor(() => {
+      expect(server.held).toHaveLength(1);
+    });
+    server.held[0]?.();
+    await panel().findByText('No agents or runs in this channel.');
+    expect(panel().queryByRole('heading', { name: 'Agents' })).toBeNull();
+    expect(panel().queryByRole('heading', { name: 'Runs' })).toBeNull();
+    expect(panel().queryByRole('combobox', { name: 'Filter runs' })).toBeNull();
+    // A run that starts brings the sections back.
+    socket.send(run({ id: 41 }));
+    await panel().findByRole('list', { name: 'Channel runs' });
+    expect(panel().queryByText('No agents or runs in this channel.')).toBeNull();
+  });
+
+  it('shows both sections for an agent with no runs', async () => {
+    await openRuns([]);
+    await panel().findByText('No runs in this channel');
+    expect(panel().getByRole('heading', { name: 'Agents' })).toBeDefined();
+    expect(within(panel().getByRole('list', { name: 'Agents' })).getByText('bot')).toBeDefined();
+    expect(panel().getByRole('heading', { name: 'Runs' })).toBeDefined();
+    expect(panel().getByRole('combobox', { name: 'Filter runs' })).toBeDefined();
+    expect(panel().queryByText('No agents or runs in this channel.')).toBeNull();
+  });
+
+  it('shows both sections for runs with no agents', async () => {
+    server.members = humans;
+    server.channelRuns = [run({ id: 41 })];
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2)]);
+    await runsList();
+    expect(panel().getByRole('heading', { name: 'Agents' })).toBeDefined();
+    expect(panel().getByText('No agents in this channel')).toBeDefined();
+    expect(panel().getByRole('heading', { name: 'Runs' })).toBeDefined();
+    expect(panel().queryByText('No agents or runs in this channel.')).toBeNull();
   });
 });

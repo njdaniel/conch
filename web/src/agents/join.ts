@@ -12,7 +12,7 @@ export interface Entry {
   readonly name: string;
   readonly kind: PrincipalKind;
   readonly sessions: readonly SessionV1[];
-  // How many sessions are online right now: the "(2)" after a name.
+  // How many sessions are online right now: the "(2 sessions)" after a name.
   readonly live: number;
   // The best liveness among the sessions; offline with none.
   readonly state: SessionState;
