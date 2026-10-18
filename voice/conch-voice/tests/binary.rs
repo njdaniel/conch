@@ -843,6 +843,34 @@ fn exit_within(child: &mut Child, within: Duration) -> Option<(Option<i32>, Dura
     None
 }
 
+/// Linux makes a pipe of pages, and no page is smaller than this.
+const LEAST_PAGE: usize = 4096;
+
+/// How many more bytes the pipe that `writer` writes into takes without blocking, written
+/// one line feed at a time and counted up to [`LEAST_PAGE`]. A pipe with a page free takes
+/// at least a page. A full one takes only what is left of its last page, which is less
+/// than the line its blocked writer is waiting to write: whatever size the pipe is, this
+/// tells the two apart. It makes the pipe's open file nonblocking for every handle on it,
+/// so it is called only once nobody else writes through it, within a tokio runtime.
+fn room_left(writer: std::io::PipeWriter) -> usize {
+    let nonblocking = tokio::net::unix::pipe::Sender::from_owned_fd(writer.into())
+        .and_then(tokio::net::unix::pipe::Sender::into_nonblocking_fd)
+        .unwrap();
+    let mut pipe = std::fs::File::from(nonblocking);
+    let mut room = 0;
+    while room < LEAST_PAGE {
+        match pipe.write(b"\n") {
+            Ok(written) => {
+                assert_eq!(written, 1);
+                room += written;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("measuring the pipe: {error}"),
+        }
+    }
+    room
+}
+
 /// The real process, with a standard output that is a pipe nobody reads. The client fills
 /// it (each line that is not a command is answered with one, and thirty thousand of them
 /// are far more than a pipe and the queue behind it hold). It must still leave on a
@@ -855,15 +883,22 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         let not_livekit = NotLiveKit::start().await;
         conchd.livekit_url(&not_livekit.url);
 
+        // The test keeps a second handle on the client's end of its standard output, to
+        // measure, once the client is gone, whether the pipe was full.
+        let (mut stdout, client_end) = std::io::pipe().unwrap();
+        let test_end = client_end.try_clone().unwrap();
         let mut command = conch_voice(private.path());
         command
             .args(["join", "ops", "--server", &conchd.url(), "--json"])
             .args(NO_DEVICES)
             .env("CONCH_TOKEN", FAKE_LOGIN)
+            .stdout(client_end)
             // What it logs about the joins that fail is not what this is about.
             .stderr(Stdio::null());
-        let (exited, unread) = tokio::task::spawn_blocking(move || {
+        let (exited, room, unread) = tokio::task::spawn_blocking(move || {
             let mut child = command.spawn().unwrap();
+            // The command holds the client's end too: the pipe ends when the client's does.
+            drop(command);
             let mut stdin = child.stdin.take().unwrap();
             stdin.write_all(&b"junk\n".repeat(30_000)).unwrap();
             stdin.flush().unwrap();
@@ -886,15 +921,13 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
                 child.kill().unwrap();
                 child.wait().unwrap();
             }
-            // What was in the pipe all along, read only now that the client is gone.
+            let room = room_left(test_end);
+            // What was in the pipe all along, read only now that the client is gone, and
+            // without the line feeds that measured it.
             let mut unread = Vec::new();
-            child
-                .stdout
-                .take()
-                .unwrap()
-                .read_to_end(&mut unread)
-                .unwrap();
-            (exited, unread)
+            stdout.read_to_end(&mut unread).unwrap();
+            unread.truncate(unread.len() - room);
+            (exited, room, unread)
         })
         .await
         .unwrap();
@@ -904,11 +937,11 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         });
         assert_eq!(code, Some(0), "{way}: a clean exit");
         assert!(took < Duration::from_secs(8), "{way}: {took:?}");
-        // The pipe really was full: it holds what a pipe holds, and the client had more to
-        // say than that.
+        // The pipe really was full: when the client left it had no room for a line, whatever
+        // size the pipe was.
         assert!(
-            unread.len() >= 60_000,
-            "{way}: only {} bytes were waiting in the pipe",
+            room < LEAST_PAGE,
+            "{way}: the pipe was not full: it took {room} bytes more, with {} in it",
             unread.len()
         );
         let unread = String::from_utf8_lossy(&unread);
