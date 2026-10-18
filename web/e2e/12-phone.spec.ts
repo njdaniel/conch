@@ -66,6 +66,48 @@ for (const [size, options] of phones) {
     await expectFits(page, 'the lobby with the members panel open');
   });
 
+  // Issue #589: the whisper picker takes height from the log. A reader at the
+  // newest message stays there; one who has scrolled up is not moved.
+  test(`P589 at ${size} the newest message stays in view when the whisper picker opens and closes`, async ({ meet, world }) => {
+    const bodies = Array.from({ length: 40 }, (_, i) => `p589 ${size} line ${String(i + 1)}`);
+    for (const body of bodies) await post(world, world.tokens.nick, 'general', body);
+    const last = bodies[bodies.length - 1] ?? '';
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const log = messages(page);
+    const newest = log.getByRole('listitem').filter({ hasText: last });
+    await expect(newest).toBeVisible();
+    const scrolls = await log.evaluate((el) => el.scrollHeight > el.clientHeight);
+    expect(scrolls, 'the conversation is longer than the log').toBe(true);
+    await expectInside(page, newest, log, 'the newest message on opening the channel');
+
+    const to = page.getByLabel('To:');
+    const picker = conversation(page).getByRole('group', { name: 'Whisper to' });
+    await to.selectOption({ label: 'Whisper to…' });
+    await expect(picker).toBeVisible();
+    await expectInside(page, newest, log, 'the newest message with the whisper picker open');
+    await to.selectOption({ label: '#general' });
+    await expect(picker).toBeHidden();
+    await expectInside(page, newest, log, 'the newest message with the whisper picker closed');
+
+    // Scrolled up by more than the 24px that still counts as the end.
+    await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 200;
+    });
+    await frames(page);
+    const before = await firstVisible(log);
+    await to.selectOption({ label: 'Whisper to…' });
+    await expect(picker).toBeVisible();
+    await frames(page);
+    expect(Math.abs((await firstVisible(log)).top - before.top), `${before.text} moved with the picker open`).toBeLessThanOrEqual(1);
+    await to.selectOption({ label: '#general' });
+    await expect(picker).toBeHidden();
+    await frames(page);
+    const after = await firstVisible(log);
+    expect(after.text, 'the first message in view').toBe(before.text);
+    expect(Math.abs(after.top - before.top), `${before.text} moved with the picker closed`).toBeLessThanOrEqual(1);
+  });
+
   test(`P467 at ${size} a member opens a channel, posts and makes an invite, all by tapping`, async ({ meet, secrets, world }) => {
     const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general', 'nets-demo'], voice: false, may_invite: true });
     const name = unique(size.slice(0, 3));
@@ -124,6 +166,46 @@ async function expectOnScreen(page: Page, element: Locator, what: string): Promi
   expect(box.y, where).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width, where).toBeLessThanOrEqual(screen.width);
   expect(box.y + box.height, where).toBeLessThanOrEqual(screen.height);
+}
+
+// expectInside checks that an element lies wholly inside the visible box of
+// the log that scrolls it, once the page has settled.
+async function expectInside(page: Page, element: Locator, log: Locator, what: string): Promise<void> {
+  await frames(page);
+  const box = await element.boundingBox();
+  const frame = await log.boundingBox();
+  if (box === null || frame === null) throw new Error(`${what} has no box on the screen`);
+  const where = `${what} is at y ${String(box.y)}, ${String(box.height)} high, in a log from y ${String(frame.y)}, ${String(frame.height)} high`;
+  expect(box.y, where).toBeGreaterThanOrEqual(frame.y - 1);
+  expect(box.y + box.height, where).toBeLessThanOrEqual(frame.y + frame.height + 1);
+}
+
+// firstVisible is the first message whose bottom is below the log's top: its
+// text and where its top is on the screen.
+async function firstVisible(log: Locator): Promise<{ readonly text: string; readonly top: number }> {
+  return log.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    for (const li of el.querySelectorAll('li')) {
+      const box = li.getBoundingClientRect();
+      if (box.bottom > top) return { text: li.textContent, top: box.top };
+    }
+    throw new Error('no message is in view');
+  });
+}
+
+// frames waits for two animation frames: a resize and the scroll it causes
+// are both drawn by then.
+async function frames(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            done();
+          });
+        });
+      }),
+  );
 }
 
 // keepToken hands the credential the invite gave this page to the fixture's
