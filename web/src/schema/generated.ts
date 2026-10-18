@@ -838,6 +838,34 @@ export const voiceShareV1 = object<VoiceShareV1>({
   audio: bool,
 });
 
+// schema.VoiceChannelOccupancy
+export interface VoiceChannelOccupancy {
+  channel_id: number;
+  in_voice: number;
+}
+
+export const voiceChannelOccupancy = object<VoiceChannelOccupancy>({
+  channel_id: int,
+  in_voice: int,
+});
+
+// schema.VoiceOccupancyV1
+export const voiceOccupancyV1Schema = 'conch.voice_occupancy.v1';
+
+export interface VoiceOccupancyV1 {
+  schema: typeof voiceOccupancyV1Schema;
+  configured: boolean;
+  available: boolean;
+  channels: VoiceChannelOccupancy[];
+}
+
+export const voiceOccupancyV1 = object<VoiceOccupancyV1>({
+  schema: vocab<typeof voiceOccupancyV1Schema>({ [voiceOccupancyV1Schema]: true }),
+  configured: bool,
+  available: bool,
+  channels: array(voiceChannelOccupancy),
+});
+
 // schema.PrincipalV0
 export interface PrincipalV0 {
   id: number;

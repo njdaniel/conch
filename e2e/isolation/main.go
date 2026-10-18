@@ -29,6 +29,10 @@
 //   - The media half (media.go): B cannot get a session for A's room, a B
 //     token bent to name A's room is refused by LiveKit, and a B viewer
 //     subscribed to everything in B's room is told nothing of A's.
+//   - Occupancy (occupancy.go): B's occupancy sockets, open from before A
+//     is active, carry rows for B's channels alone, every count zero while
+//     only A is in voice, and what B's own presence says once B is; B reads
+//     it as a row of the matrix, and B's agent is refused it.
 //   - Revocation (revoke.go): a second credential of a tester's, holding
 //     every socket variant, is revoked alone, and the sockets of her first
 //     stay open; then the tester, holding every socket variant, a LiveKit
@@ -213,6 +217,9 @@ func run(h *harness) (summary, error) {
 		if v, err = w.startVoiceA(); err != nil {
 			return sum, fmt.Errorf("group A in voice: %w", err)
 		}
+		if err := bsock.checkOccupancyWhileAIsInVoice(w); err != nil {
+			return sum, fmt.Errorf("group B's occupancy sockets: %w", err)
+		}
 	}
 	text, secrets, ids := w.marks.count()
 	h.say("ok   A is active: messages (v0, v1, v2, a thread, a whisper, a net), a file, read state, an agent's session and run, an intervention, an approval, a report%s; markers: %d pieces of A's text, %d secrets, %d ids",
@@ -225,7 +232,7 @@ func run(h *harness) (summary, error) {
 	if err := bsock.checkQuiet(w, c); err != nil {
 		return sum, fmt.Errorf("group B's sockets: %w", err)
 	}
-	h.say("ok   sockets: B's %d open sockets (every socket variant on both B channels) carried B's control, none with anything of A", len(bsock.feeds))
+	h.say("ok   sockets: B's %d open sockets (every socket variant on both B channels, and the occupancy socket with the bearer and a ticket) carried B's control, none with anything of A", len(bsock.feeds))
 
 	total := 0
 	for _, m := range []*member{w.b.people[0], w.b.people[2]} {
@@ -259,6 +266,11 @@ func run(h *harness) (summary, error) {
 	if sum.timings, err = w.revoke(v, sum.bounds); err != nil {
 		return sum, fmt.Errorf("revocation: %w", err)
 	}
+	took, err := w.removalDropsTheRow()
+	if err != nil {
+		return sum, fmt.Errorf("removal from a channel: %w", err)
+	}
+	h.say("ok   removal: bea, removed from one of B's channels, keeps her occupancy sockets, which lost that channel's row within %s (bound %s); she is put back", took.Round(100*time.Microsecond), socketBound)
 
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.

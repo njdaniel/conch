@@ -131,6 +131,12 @@ func TestRevokeOneCredentialClosesItsSockets(t *testing.T) {
 				f.lk.setRoom(f.room, fakeParticipant{identity: f.identity("ann2"), joinedMs: 1_000, published: true})
 				f.pass(t)
 			}},
+		// Voice occupancy (issue #596): a count change reaches B.
+		{name: "voice occupancy", path: "/v1/voice/occupancy/ws", connect: 1,
+			later: func(t *testing.T, f fixture) {
+				f.lk.setRoom(f.room, fakeParticipant{identity: f.identity("ann2"), joinedMs: 1_000, published: true})
+				f.pass(t)
+			}},
 	}
 	revokes := []struct {
 		name string

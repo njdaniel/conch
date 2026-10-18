@@ -28,6 +28,12 @@ func agentRows() []row {
 		return row{route: route, what: what, pick: pick, probe: p, want: want}
 	}
 	sessionNotFound := answer{http.StatusNotFound, "session_not_found"}
+	// Agents keep no voice (ADR-004): occupancy is refused them, as presence
+	// is, and the refusal is audited.
+	noVoice := func(route, what string, p probe) row {
+		return row{route: route, what: what, want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentVoiceDenied(route),
+			probe: func(*world, subject) probe { return p }}
+	}
 	runNotFound := answer{http.StatusNotFound, "run_not_found"}
 	interNotFound := answer{http.StatusNotFound, "intervention_not_found"}
 	return []row{
@@ -72,6 +78,9 @@ func agentRows() []row {
 		byID("POST /v1/interventions/{id}/ack", "answers A's intervention", aIntervention, interNotFound, func(_ *world, s subject) probe {
 			return post("/v1/interventions/"+id(s.id)+"/ack", schema.AckInterventionRequestV1{State: schema.InterventionStateAcknowledged})
 		}),
+		noVoice("GET /v1/voice/occupancy", "reads voice occupancy", get("/v1/voice/occupancy")),
+		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket", occupancySock(false)),
+		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket with a ticket", occupancySock(true)),
 	}
 }
 

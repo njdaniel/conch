@@ -137,6 +137,11 @@ func (w *world) hold(m *member, channel, room string) (holder, error) {
 	if h.sockets, err = openAll(m, channel); err != nil {
 		return h, err
 	}
+	occ, err := openOccupancy(m)
+	if err != nil {
+		return h, err
+	}
+	h.sockets = append(h.sockets, occ...)
 	if h.ticket, err = m.api.ticket(); err != nil {
 		return h, err
 	}
@@ -360,10 +365,18 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, err
 	}
+	occ, err := openOccupancy(second)
+	if err != nil {
+		return nil, err
+	}
+	feeds = append(feeds, occ...)
 	t, err := w.measure("revoke one of the tester's credentials (ann's second)", []holder{{m: second, sockets: feeds}}, bounds, func() error {
 		return w.op.call(http.MethodDelete, fmt.Sprintf("/v1/credentials/%d", second.credID), nil, nil)
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := closedRevoked(feeds); err != nil {
 		return nil, err
 	}
 	out = append(out, t)
@@ -398,6 +411,9 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 		return w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/disable", ann.id), nil, nil)
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := closedRevoked(tester.sockets); err != nil {
 		return nil, err
 	}
 	out = append(out, t)
@@ -459,6 +475,11 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	for _, hd := range joiners {
+		if err := closedRevoked(hd.sockets); err != nil {
+			return nil, err
+		}
 	}
 	out = append(out, t)
 	if err := w.staysOut(joiners, bounds); err != nil {

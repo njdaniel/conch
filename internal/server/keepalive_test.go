@@ -74,6 +74,7 @@ func TestHeartbeatFrames(t *testing.T) {
 		{"v1", "/v1/ws?channel=alpha&heartbeat=1", false},
 		{"v0", "/v0/ws?channel=alpha&heartbeat=1", false},
 		{"voice", "/v1/voice/ws?channel=alpha&heartbeat=1", false},
+		{"voice occupancy", "/v1/voice/occupancy/ws?heartbeat=1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

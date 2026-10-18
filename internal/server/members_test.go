@@ -186,6 +186,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"GET /v1/voice/occupancy/ws":                                      "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
 	}
 	covered := make(map[string]bool, len(rows))
 	for _, row := range rows {
