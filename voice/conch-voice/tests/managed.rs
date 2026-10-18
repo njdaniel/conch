@@ -1007,10 +1007,8 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
 
     // The owner reads first what the helper held for it: the event in its writer's hands
     // and a full queue. Only then does it ask, as `conch` asks only once it has read an
-    // event after the gap. Asked sooner, the helper may read the command before its
-    // writer has taken anything from the queue, and the state and the ack that answer it
-    // are dropped as any event is that meets a full queue (§3): the owner would wait for
-    // an ack that never comes (#555).
+    // event after the gap. (Asked sooner, the answer waits behind the full queue and still
+    // comes: the test after this one.)
     rig.until("the events held for the owner", |rig| {
         rig.read().iter().filter(|event| event.seq() > base).count()
             > VOICE_CONTROL_EVENT_QUEUE_LINES
@@ -1049,6 +1047,87 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
         seqs.windows(2).any(|pair| pair[1] > pair[0] + 1),
         "no gap: nothing was dropped"
     );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// Commands read while the owner is not reading and the queue is full are still answered,
+/// each exactly once and in order, once the owner reads again: an ack, and the state that
+/// answers `get_state`, are never dropped (§5, rules 8 and 10; #571).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_reads() {
+    // Odd, so that the last strike mutes and the track says when it has been taken.
+    const STRIKES: i64 = 401;
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    let track_muted = rig.sdk.count(Call::Mute);
+    // The owner stops reading, and the mute key is struck far more often than the queue
+    // holds states: when every strike has been taken, the queue is full.
+    rig.reader.stop(true);
+    for _ in 0..STRIKES {
+        rig.strike_mute();
+    }
+    rig.until("the writer waiting on the owner", |rig| {
+        rig.reader.is_waited_for()
+    })
+    .await;
+    rig.until("every strike taken", |rig| {
+        rig.sdk.count(Call::Mute) >= track_muted + (STRIKES as usize).div_ceil(2)
+    })
+    .await;
+
+    // Still not reading, the owner asks for the state, unmutes, and mutes again. The last
+    // mutes the track: by then the session loop has answered the two before it, with the
+    // queue as full as the strikes left it.
+    rig.send(&ManagedRig::command("get_state", 2, json!({})));
+    rig.send(&ManagedRig::command("set_mute", 3, json!({"muted": false})));
+    rig.send(&ManagedRig::command("set_mute", 4, json!({"muted": true})));
+    rig.until("the last command taken", |rig| {
+        rig.sdk.count(Call::Mute) > track_muted + (STRIKES as usize).div_ceil(2)
+    })
+    .await;
+    rig.reader.stop(false);
+
+    rig.ack(4).await;
+    let events = rig.read();
+    let acks: Vec<(i64, bool)> = events
+        .iter()
+        .filter_map(|event| match event {
+            VoiceControlEvent::Ack(ack) if ack.id > 1 => Some((ack.id, ack.ok)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        acks,
+        [(2, true), (3, true), (4, true)],
+        "each answered once"
+    );
+    // get_state is answered by a state and then its ack, whatever the queue held: the
+    // state as every strike left it, muted after an odd number.
+    let at = events
+        .iter()
+        .position(|event| matches!(event, VoiceControlEvent::Ack(a) if a.id == 2))
+        .unwrap();
+    let VoiceControlEvent::State(answer) = &events[at - 1] else {
+        panic!("get_state answered without a state just before: {events:?}");
+    };
+    assert_eq!(answer.seq + 1, events[at].seq(), "the state, then the ack");
+    assert!(answer.muted, "{answer:?}");
+    // Seq only rises, and what was dropped still shows as a gap, before the answers.
+    let seqs: Vec<i64> = events.iter().map(VoiceControlEvent::seq).collect();
+    assert!(
+        seqs.windows(2).all(|pair| pair[1] > pair[0]),
+        "seq repeats or goes back: {seqs:?}"
+    );
+    assert!(
+        seqs[..at].windows(2).any(|pair| pair[1] > pair[0] + 1),
+        "no gap before the answers: nothing was dropped"
+    );
+    // And the session goes on: the state after the last command is muted.
+    rig.send(&ManagedRig::command("get_state", 5, json!({})));
+    assert!(rig.ack(5).await.ok);
+    assert!(rig.state().unwrap().muted);
     rig.close();
     assert_eq!(rig.exit_code().await, 0);
 }

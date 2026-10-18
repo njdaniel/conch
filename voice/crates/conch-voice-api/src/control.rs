@@ -60,8 +60,9 @@ pub const VOICE_CONTROL_MAX_LINE_BYTES: usize = 4096;
 pub const VOICE_CONTROL_MAX_ID: i64 = (1 << 53) - 1;
 /// The most commands the owner may have written and not yet seen acknowledged.
 pub const VOICE_CONTROL_MAX_IN_FLIGHT: usize = 8;
-/// The most events the helper holds for a reader that is slow; past it an event is
-/// dropped, and the gap shows in seq.
+/// The most events the helper holds for a reader that is slow; past it a state or
+/// protocol_error is dropped, and the gap shows in seq. Acks, and the state that answers
+/// `get_state`, wait in places of their own (`docs/design/tui-voice.md` §3).
 pub const VOICE_CONTROL_EVENT_QUEUE_LINES: usize = 256;
 /// The most versions a hello may offer.
 pub const VOICE_CONTROL_MAX_VERSIONS: usize = 8;

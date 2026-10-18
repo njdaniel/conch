@@ -78,8 +78,9 @@ const (
 	// and not yet seen acknowledged.
 	VoiceControlMaxInFlight = 8
 	// VoiceControlEventQueueLines is the most events the helper holds for a
-	// reader that is slow. Past it an event is dropped, never waited for; the
-	// gap shows in seq.
+	// reader that is slow. Past it a state or protocol_error is dropped, never
+	// waited for; the gap shows in seq. Acks, and the state that answers
+	// get_state, wait in places of their own (docs/design/tui-voice.md §3).
 	VoiceControlEventQueueLines = 256
 	// VoiceControlMaxVersions is the most versions a hello may offer.
 	VoiceControlMaxVersions = 8

@@ -33,9 +33,12 @@
 //! - **Every command with a usable id read before the final state gets exactly one ack,
 //!   after the state its effect changed.** All of them are answered by one place in turn
 //!   (the start-up, the session loop, or its leaving), so that their order is the order
-//!   they were read in.
-//! - **A slow owner loses events, not the helper.** At most 256 events wait; past that
-//!   one is dropped and the gap shows in seq, and the owner asks for a snapshot (§3).
+//!   they were read in. An ack is written however slow the owner is (below).
+//! - **A slow owner loses events, not the helper.** At most 256 events wait; past that a
+//!   state or a protocol_error is dropped and the gap shows in seq, and the owner asks for
+//!   a snapshot (§3). An ack, and the state that answers `get_state`, are not dropped:
+//!   they wait behind the others in places of their own, enough for every command the
+//!   owner may have unanswered ([`Events`]).
 //! - **Nothing an event says came from a command or from `conchd`.** Every string in one
 //!   is a schema name, a word of a closed vocabulary, or this binary's version.
 //!
@@ -56,13 +59,13 @@ use std::time::Duration;
 pub use conch_voice_api::VoiceControlCapture as Capture;
 use conch_voice_api::{
     Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_EVENT_QUEUE_LINES,
-    VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_MAX_LINE_BYTES,
-    VOICE_CONTROL_MAX_RETRY_IN_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS,
-    VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlBlock, VoiceControlCommand,
-    VoiceControlCredential, VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPhase,
-    VoiceControlProtocolErrorV1, VoiceControlPtt, VoiceControlPttProblem, VoiceControlReason,
-    VoiceControlStartV1, VoiceControlStateV1, default_config_dir, parse_command, resolve_token,
-    to_line,
+    VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_MAX_IN_FLIGHT,
+    VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
+    VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1,
+    VoiceControlBlock, VoiceControlCommand, VoiceControlCredential, VoiceControlErrorCode,
+    VoiceControlHelloV1, VoiceControlPhase, VoiceControlProtocolErrorV1, VoiceControlPtt,
+    VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1, VoiceControlStateV1,
+    default_config_dir, parse_command, resolve_token, to_line,
 };
 use conch_voice_control::{
     Config, Key, KeyAction, KeyBindings, KeyEvent, LineCommand, Ptt, PttInput, PttStatus,
@@ -329,9 +332,36 @@ impl Snapshot {
     }
 }
 
+/// How many answers may wait beyond [`VOICE_CONTROL_EVENT_QUEUE_LINES`]: an ack for each
+/// command the owner may have unanswered, and the state before it if it is a `get_state`.
+///
+/// Enough by the owner's contract (§5, rule 10): it has at most
+/// [`VOICE_CONTROL_MAX_IN_FLIGHT`] commands written and not seen answered, and one whose
+/// answer still waits here is one it has not seen answered. An owner that sends more than
+/// that is past the contract, and the bound still holds: its answers past the reserve are
+/// dropped as other events are, the gap shows, and it waits for an ack that does not come.
+const ANSWER_LINES: usize = 2 * VOICE_CONTROL_MAX_IN_FLIGHT;
+
+/// Whether an event may be dropped for a slow owner.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// A state that changed, or a protocol_error: dropped if the queue is full, and the gap
+    /// in seq says so.
+    IfThereIsRoom,
+    /// An ack, or the state that answers `get_state`: never dropped within
+    /// [`ANSWER_LINES`], since the owner waits for each and fails the session without
+    /// it (§7), and since after a gap the answer to `get_state` is how it resynchronises.
+    Answer,
+}
+
 /// The writer of the events: the only thing that writes to file descriptor 3. Each event
 /// gets the next seq whether or not it is written, so a drop shows as a gap. Nothing here
 /// waits for the owner but [`Events::flush`], up to its limit.
+///
+/// Every event joins the back of one queue, an answer too: an ack is written after every
+/// event written before it, the state its command changed among them, and seq only rises.
+/// When the queue is full an answer waits behind the events already in it, in a place
+/// reserved for answers ([`ANSWER_LINES`]).
 pub struct Events {
     queue: LineQueue,
     next: i64,
@@ -339,20 +369,23 @@ pub struct Events {
 
 impl Events {
     /// A writer of events to `out`, on a thread of its own, with at most
-    /// [`VOICE_CONTROL_EVENT_QUEUE_LINES`] waiting.
+    /// [`VOICE_CONTROL_EVENT_QUEUE_LINES`] waiting, and [`ANSWER_LINES`] more for answers.
     #[must_use]
     pub fn spawn(out: Box<dyn Write + Send>) -> Self {
         Self {
-            queue: LineQueue::spawn_unmarked(out, VOICE_CONTROL_EVENT_QUEUE_LINES),
+            queue: LineQueue::spawn_unmarked(out, VOICE_CONTROL_EVENT_QUEUE_LINES, ANSWER_LINES),
             next: 1,
         }
     }
 
-    fn write(&mut self, line: impl FnOnce(i64) -> Result<String, ApiError>) {
+    fn write(&mut self, keep: Keep, line: impl FnOnce(i64) -> Result<String, ApiError>) {
         let seq = self.next;
         self.next = self.next.saturating_add(1);
         match line(seq) {
-            Ok(line) => self.queue.push(line),
+            Ok(line) => match keep {
+                Keep::IfThereIsRoom => self.queue.push(line),
+                Keep::Answer => self.queue.push_reserved(line),
+            },
             // A state that does not hold together is a fault here, not something to send:
             // the owner sees the gap in seq and asks again.
             Err(error) => log::error!("managed: an event was not written: {error}"),
@@ -361,23 +394,28 @@ impl Events {
 
     /// The hello: the first event, written before anything is read.
     pub fn hello(&mut self) {
-        self.write(|seq| {
+        // The first event, into an empty queue.
+        self.write(Keep::IfThereIsRoom, |seq| {
             let mut hello = VoiceControlHelloV1::v1(cli::version());
             hello.seq = seq;
             to_line(&hello)
         });
     }
 
-    fn state(&mut self, snapshot: &Snapshot) {
-        self.write(|seq| to_line(&snapshot.event(seq)));
+    fn state(&mut self, snapshot: &Snapshot, keep: Keep) {
+        self.write(keep, |seq| to_line(&snapshot.event(seq)));
     }
 
     fn ack(&mut self, id: i64, refusal: Option<VoiceControlErrorCode>) {
-        self.write(|seq| to_line(&VoiceControlAckV1::new(seq, id, refusal)));
+        self.write(Keep::Answer, |seq| {
+            to_line(&VoiceControlAckV1::new(seq, id, refusal))
+        });
     }
 
     fn protocol_error(&mut self, code: VoiceControlErrorCode) {
-        self.write(|seq| to_line(&VoiceControlProtocolErrorV1::new(seq, code)));
+        self.write(Keep::IfThereIsRoom, |seq| {
+            to_line(&VoiceControlProtocolErrorV1::new(seq, code))
+        });
     }
 
     /// Waits until what was written so far has reached the pipe, or `limit` has passed.
@@ -406,13 +444,18 @@ impl Owner {
     }
 
     /// Tells the owner the state if it differs from the last one it was told, or whatever
-    /// it is if `force`.
+    /// it is if `force`. `force` is how `get_state` is answered, and only that: the state
+    /// it writes is kept as an ack is, so that the answer is a state and then the ack
+    /// whatever the queue holds (§5, rule 8).
     pub fn state(&mut self, snapshot: &Snapshot, force: bool) {
         if snapshot.is_failing() {
             self.watchdog.failed();
         }
-        if force || self.shown.as_ref() != Some(snapshot) {
-            self.events.state(snapshot);
+        if force {
+            self.events.state(snapshot, Keep::Answer);
+            self.shown = Some(snapshot.clone());
+        } else if self.shown.as_ref() != Some(snapshot) {
+            self.events.state(snapshot, Keep::IfThereIsRoom);
             self.shown = Some(snapshot.clone());
         }
     }
@@ -431,7 +474,7 @@ impl Owner {
     /// Tells the owner the final state, and gives it [`FINAL_STATE_LIMIT`] to be written.
     /// Nothing is written after it: this is the end of the owner.
     pub async fn finish(mut self, last: &Snapshot) {
-        self.events.state(last);
+        self.events.state(last, Keep::IfThereIsRoom);
         if !self.events.flush(FINAL_STATE_LIMIT).await {
             log::warn!("managed: the final state was not read before leaving");
         }
@@ -1692,6 +1735,23 @@ mod tests {
         assert_eq!(snapshot.retry_in_ms, Some(VOICE_CONTROL_MAX_RETRY_IN_MS));
     }
 
+    fn starting() -> Snapshot {
+        Snapshot::new(
+            VoiceControlPhase::Starting,
+            None,
+            None,
+            Capture::Off,
+            fresh_status(false, false),
+            KeyView::Unknown,
+        )
+    }
+
+    fn seqs_of(text: &str) -> Vec<i64> {
+        text.lines()
+            .map(|line| conch_voice_api::parse_event(line.as_bytes()).unwrap().seq())
+            .collect()
+    }
+
     /// The events are numbered from 1 and a dropped one leaves a gap, never a repeat.
     #[test]
     fn events_are_numbered_and_a_dropped_one_leaves_a_gap() {
@@ -1701,8 +1761,9 @@ mod tests {
         events.hello();
         writer.until_waiting();
         // The hello is in the writer's hands; this many more fit; the rest are dropped.
-        for id in 1..=(VOICE_CONTROL_EVENT_QUEUE_LINES as i64 + 10) {
-            events.ack(id, None);
+        // States, which may be dropped: an ack would be kept (the test below).
+        for _ in 0..VOICE_CONTROL_EVENT_QUEUE_LINES + 10 {
+            events.state(&starting(), Keep::IfThereIsRoom);
         }
         writer.stall(false);
         writer.until_lines(1 + VOICE_CONTROL_EVENT_QUEUE_LINES);
@@ -1714,10 +1775,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        let seqs: Vec<i64> = lines
-            .lines()
-            .map(|line| conch_voice_api::parse_event(line.as_bytes()).unwrap().seq())
-            .collect();
+        let seqs = seqs_of(&lines);
         assert_eq!(seqs[0], 1);
         assert!(seqs.windows(2).all(|pair| pair[1] > pair[0]), "{seqs:?}");
         let last = seqs[seqs.len() - 1];
@@ -1725,6 +1783,82 @@ mod tests {
             last,
             VOICE_CONTROL_EVENT_QUEUE_LINES as i64 + 12,
             "a gap of ten"
+        );
+    }
+
+    /// With the queue full, an ack and the state that answers `get_state` are still
+    /// written, after what waited before them, as many as the owner may have unanswered;
+    /// past that they are dropped too, so the queue keeps a bound (#571).
+    #[test]
+    fn answers_are_kept_behind_a_full_queue_and_their_places_have_a_bound() {
+        use crate::lines::tests::Stallable;
+        use conch_voice_api::VoiceControlEvent;
+        let writer = Stallable::stalled();
+        let watchdog = Watchdog::off();
+        let mut owner = Owner::new(Events::spawn(Box::new(writer.clone())), watchdog);
+        owner.events.hello();
+        writer.until_waiting();
+        let full = VOICE_CONTROL_EVENT_QUEUE_LINES + 10;
+        for _ in 0..full {
+            owner.events.state(&starting(), Keep::IfThereIsRoom);
+        }
+        // As many commands as the owner may have unanswered, each a get_state: a state,
+        // then the ack.
+        for id in 1..=VOICE_CONTROL_MAX_IN_FLIGHT as i64 {
+            owner.state(&starting(), true);
+            owner.ack(id, None);
+        }
+        // Past the contract: dropped, as any event is that meets a full queue.
+        owner.ack(100, None);
+        owner.state(&starting(), true);
+        writer.stall(false);
+        let answered = 1 + VOICE_CONTROL_EVENT_QUEUE_LINES + ANSWER_LINES;
+        writer.until_lines(answered);
+        // Something written now shows the second gap, of the answers past the contract.
+        owner.ack(101, None);
+        writer.until_lines(answered + 1);
+
+        let text = writer.text();
+        let events: Vec<_> = text
+            .lines()
+            .map(|line| conch_voice_api::parse_event(line.as_bytes()).unwrap())
+            .collect();
+        let seqs = seqs_of(&text);
+        assert!(seqs.windows(2).all(|pair| pair[1] > pair[0]), "{seqs:?}");
+        // The hello and the states that fitted, then a gap, then every answer in order.
+        let first_answer = 1 + VOICE_CONTROL_EVENT_QUEUE_LINES;
+        assert_eq!(
+            seqs[first_answer],
+            2 + full as i64,
+            "a gap of ten before them"
+        );
+        let acks: Vec<i64> = events
+            .iter()
+            .filter_map(|event| match event {
+                VoiceControlEvent::Ack(ack) => Some(ack.id),
+                _ => None,
+            })
+            .collect();
+        let mut wanted: Vec<i64> = (1..=VOICE_CONTROL_MAX_IN_FLIGHT as i64).collect();
+        wanted.push(101);
+        assert_eq!(acks, wanted);
+        // Each get_state's ack just after its state.
+        for (at, event) in events.iter().enumerate().skip(first_answer) {
+            let VoiceControlEvent::Ack(ack) = event else {
+                continue;
+            };
+            if ack.id == 101 {
+                continue;
+            }
+            let VoiceControlEvent::State(state) = &events[at - 1] else {
+                panic!("the ack of {} is not just after a state", ack.id);
+            };
+            assert_eq!(state.seq + 1, ack.seq, "the ack of {}", ack.id);
+        }
+        assert_eq!(
+            seqs[seqs.len() - 1] - seqs[seqs.len() - 2],
+            3,
+            "the two past the contract were dropped, and the gap shows"
         );
     }
 
