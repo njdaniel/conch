@@ -5,9 +5,10 @@
 import { join } from 'node:path';
 import { closeSync, openSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { history, post } from './api';
-import { expect, messages, say, signIn, statusLine, test } from './fixtures';
-import { repoRoot, safePath, type World } from './world';
+import { channelButton, expect, messages, say, signIn, statusLine, test } from './fixtures';
+import { call, ok, repoRoot, safePath, type World } from './world';
 
 async function healthy(world: World): Promise<boolean> {
   try {
@@ -37,6 +38,43 @@ function restart(world: World): void {
   server.unref();
 }
 
+// done makes an operator's call that must succeed and whose reply is not
+// needed.
+async function done(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<void> {
+  const reply = await call(world, token, method, path, body);
+  if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);
+}
+
+const paused = 'Sending is paused until the server is back. Your draft is kept.';
+
+// Issue #592: a channel with nothing in it says so, until the first message.
+// Before P3-09, on a channel and a person of its own made through the API, so
+// the fixture people's lists are left as they are.
+test('P592 an empty channel says so until its first message is sent', async ({ meet, secrets, world }) => {
+  const channel = `p592-empty-${String(Date.now())}`;
+  const op = world.tokens.operator;
+  const person: CreatePrincipalRequest = { kind: 'human', name: channel };
+  const id = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+  const label: CreateCredentialRequestV1 = { label: channel };
+  const { token } = await ok(world, op, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, label);
+  secrets.push(token);
+  await done(world, op, 'POST', '/v0/channels', { name: channel });
+  await done(world, op, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`);
+
+  const { page } = await meet();
+  await signIn(page, world, token, channel);
+  await channelButton(page, channel).click();
+  const empty = messages(page).getByText(`No messages in #${channel} yet. Say hello.`);
+  await expect(empty).toBeVisible();
+  // Connected is not a pause.
+  await expect(page.getByText(paused)).toHaveCount(0);
+
+  const first = 'p592 the first message';
+  await say(page, channel, first);
+  await expect(messages(page).getByText(first)).toHaveCount(1);
+  await expect(empty).toHaveCount(0);
+});
+
 test('P3-09 after conchd restarts the page shows Reconnecting and out of date, then recovers with the history once', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
@@ -52,6 +90,8 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   const notSetUp = 'Voice is not set up on this server';
   const unreachable = 'Voice status unavailable: the server cannot be reached.';
   await expect(voice).toContainText(notSetUp);
+  await expect(page.getByText(paused)).toHaveCount(0);
+  const connectedColor = await page.getByLabel('Message #general').evaluate((el) => getComputedStyle(el).color);
 
   // The server stops.
   const pid = world.serverPid();
@@ -65,6 +105,10 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
   await expect(page.getByLabel('Message #general')).toBeDisabled();
   await expect(page.getByLabel('Message #general')).toHaveValue(typed);
+  // Issue #592: the composer says why, and looks closed.
+  await expect(page.getByText(paused)).toBeVisible();
+  await expect(page.getByLabel('Message #general')).toHaveAccessibleDescription(paused);
+  expect(await page.getByLabel('Message #general').evaluate((el) => getComputedStyle(el).color)).not.toBe(connectedColor);
   // The strip says voice cannot be read, not what it last read, and offers no
   // join.
   await expect(voice).toContainText(unreachable);
@@ -83,6 +127,8 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   await expect(voice).not.toContainText(unreachable);
   await expect(page.getByText('This conversation may be out of date')).toHaveCount(0);
   await expect(page.getByLabel('Message #general')).toBeEnabled();
+  await expect(page.getByText(paused)).toHaveCount(0);
+  await expect(page.getByLabel('Message #general')).toHaveAccessibleDescription('');
   for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
 
   // Live again: a message after the restart arrives once, and the line that was

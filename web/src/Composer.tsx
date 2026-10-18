@@ -7,6 +7,10 @@ import type { Person } from './useLiveChannel';
 // The text the TUI shows after the first whisper.
 export const whisperNotice = 'note: whispers are recorded in the audit log';
 
+// What the composer says while the connection is being made again.
+export const pausedText = 'Sending is paused until the server is back. Your draft is kept.';
+const pausedId = 'composer-paused';
+
 const channelValue = 'channel';
 const whisperValue = 'whisper';
 const netValue = (id: number) => `net:${String(id)}`;
@@ -22,6 +26,7 @@ export function Composer({
   viewer,
   draft,
   enabled,
+  paused,
   onDraft,
   onTarget,
   onSend,
@@ -36,6 +41,9 @@ export function Composer({
   readonly draft: string;
   // Whether the connection is open; the composer is read-only otherwise.
   readonly enabled: boolean;
+  // Whether the connection was open and is being made again: the composer
+  // says why it is read-only (UX-05, UX-07). Not at the first load.
+  readonly paused: boolean;
   readonly onDraft: (text: string) => void;
   readonly onTarget: (action: TargetAction) => void;
   readonly onSend: (body: string, audience: Audience | undefined) => void;
@@ -110,6 +118,7 @@ export function Composer({
           ref={select}
           value={value}
           disabled={!enabled}
+          aria-describedby={paused ? pausedId : undefined}
           onChange={(event) => {
             choose(event.target.value);
           }}
@@ -154,12 +163,13 @@ export function Composer({
           ))}
         </fieldset>
       ) : null}
-      <div className="composer-box">
+      <div className={paused ? 'composer-box paused' : 'composer-box'}>
       <textarea
         id="composer-text"
         rows={2}
         value={draft}
         disabled={!enabled}
+        aria-describedby={paused ? pausedId : undefined}
         onChange={(event) => {
           onDraft(event.target.value);
         }}
@@ -178,6 +188,11 @@ export function Composer({
         <span className="label">Send</span>
       </button>
       </div>
+      {paused ? (
+        <p id={pausedId} className="hint">
+          {pausedText}
+        </p>
+      ) : null}
       {target.refusal === null ? null : <p role="alert" className="notice">{target.refusal}</p>}
       {target.note === null ? null : <p role="status" className="hint">{target.note}</p>}
     </form>

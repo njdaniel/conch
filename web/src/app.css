@@ -990,6 +990,18 @@ label {
   outline: none;
 }
 
+/* Read-only while the connection is made again (issue #592): dimmed, and the
+   line under the box says why. */
+.composer-box.paused {
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.composer-box.paused textarea {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .composer-box:has(textarea:focus-visible) {
   outline: 2px solid var(--focus);
   outline-offset: 2px;

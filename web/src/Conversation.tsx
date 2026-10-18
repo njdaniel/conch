@@ -363,6 +363,9 @@ export function Conversation({
             Load older messages
           </button>
         ) : null}
+        {chat.history === 'ready' && shown.length === 0 && chat.pending.length === 0 ? (
+          <p className="hint">No messages in #{channel} yet. Say hello.</p>
+        ) : null}
         <ol className="messages">
           {shown.map((message, i) => (
             <Message
@@ -400,6 +403,7 @@ export function Conversation({
         viewer={viewer}
         draft={draft}
         enabled={live === 'open'}
+        paused={live === 'reconnecting'}
         onDraft={onDraft}
         onTarget={onTarget}
         onSend={onSend}
