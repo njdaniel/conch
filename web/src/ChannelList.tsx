@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent } from 'react';
+import { useEffect, useRef, type KeyboardEvent } from 'react';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
 
@@ -35,6 +35,14 @@ export function ChannelList({
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   // The one button in the tab order: the open channel, or the first.
   const stop = selected ?? channels[0]?.name ?? null;
+
+  // The open channel is kept in sight, however it was opened: on a phone the
+  // list is one row that scrolls sideways, and it may be off screen. jsdom
+  // has no scrollIntoView.
+  useEffect(() => {
+    const el = selected === null ? undefined : buttons.current.get(selected);
+    if (el !== undefined && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [selected]);
 
   function move(event: KeyboardEvent, from: number) {
     const last = channels.length - 1;

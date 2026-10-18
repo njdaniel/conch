@@ -1267,8 +1267,10 @@ describe('Go to message', () => {
   let scrolled: Element[];
   beforeEach(() => {
     scrolled = [];
+    // The channel list keeps the open channel in sight (issue #584); every
+    // other scroll is counted.
     Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled.push(this);
+      if (this.closest('.channel-list') === null) scrolled.push(this);
     };
   });
   afterEach(() => {
