@@ -79,6 +79,7 @@ Usage:
                      [--livekit-url <ws-url>] [--livekit-api-url <http-url>]
                      [--web-dir <dir> | --no-web] [--allowed-origins <origin,...>]
                      [--trusted-proxies <cidr,...>] [--invite-allowance <n>]
+                     [--metrics-listen <addr> [--metrics-allow-remote]]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -137,6 +138,14 @@ Flags for serve:
   --invite-allowance     how many open personal invites one person who may invite can hold
                          at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
                          default 5)
+  --metrics-listen       address of a second listener serving Prometheus metrics at /metrics,
+                         such as 127.0.0.1:9464 (env CONCHD_METRICS_LISTEN, default none: no
+                         metrics listener). /metrics is never served on --listen. It has no
+                         authentication and counts people, rooms and shares, so the address
+                         must be loopback; serve refuses to start otherwise.
+  --metrics-allow-remote let --metrics-listen be an address that is not loopback
+                         (env CONCHD_METRICS_ALLOW_REMOTE=1). Anyone who can reach it can
+                         read the metrics; conchd logs a warning when it is used.
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -166,6 +175,8 @@ type serveOptions struct {
 	sessionOffline    time.Duration
 	trustedProxies    []netip.Prefix
 	inviteAllowance   int
+	metricsListen     string
+	metricsRemote     bool
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -214,6 +225,14 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		}
 		*inviteAllowance = v
 	}
+	metricsListen := fs.String("metrics-listen", os.Getenv("CONCHD_METRICS_LISTEN"), "address of a second listener serving Prometheus metrics at /metrics (loopback only unless --metrics-allow-remote)")
+	// As with --no-web: a switch set to something unreadable is an error, not
+	// unset.
+	metricsRemoteDefault, err := envBool("CONCHD_METRICS_ALLOW_REMOTE")
+	if err != nil {
+		return serveOptions{}, err
+	}
+	metricsRemote := fs.Bool("metrics-allow-remote", metricsRemoteDefault, "let --metrics-listen be an address that is not loopback")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -269,11 +288,20 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, err
 	}
+	if *metricsRemote && *metricsListen == "" {
+		return serveOptions{}, errors.New("serve: --metrics-allow-remote needs --metrics-listen")
+	}
+	if *metricsListen != "" {
+		if err := server.ValidateMetricsListen(*metricsListen, *metricsRemote); err != nil {
+			return serveOptions{}, fmt.Errorf("serve: --metrics-listen: %w", err)
+		}
+	}
 	return serveOptions{
 		webDir: *webDir, webFS: webFS, webSource: webSource, allowedOrigins: origins,
 		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
+		metricsListen: *metricsListen, metricsRemote: *metricsRemote,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -357,20 +385,22 @@ func runServe(args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		DataDir:         opts.dataDir,
-		Listen:          opts.listen,
-		Version:         buildVersion(),
-		MCPBearerTokens: opts.mcpTokens,
-		AuthMode:        opts.authMode,
-		LiveKit:         opts.livekit,
-		MaxUploadBytes:  opts.maxUploadBytes,
-		WebDir:          opts.webDir,
-		WebFS:           opts.webFS,
-		AllowedOrigins:  opts.allowedOrigins,
-		SessionStale:    opts.sessionStale,
-		SessionOffline:  opts.sessionOffline,
-		TrustedProxies:  opts.trustedProxies,
-		InviteAllowance: opts.inviteAllowance,
+		DataDir:            opts.dataDir,
+		Listen:             opts.listen,
+		Version:            buildVersion(),
+		MCPBearerTokens:    opts.mcpTokens,
+		AuthMode:           opts.authMode,
+		LiveKit:            opts.livekit,
+		MaxUploadBytes:     opts.maxUploadBytes,
+		WebDir:             opts.webDir,
+		WebFS:              opts.webFS,
+		AllowedOrigins:     opts.allowedOrigins,
+		SessionStale:       opts.sessionStale,
+		SessionOffline:     opts.sessionOffline,
+		TrustedProxies:     opts.trustedProxies,
+		InviteAllowance:    opts.inviteAllowance,
+		MetricsListen:      opts.metricsListen,
+		MetricsAllowRemote: opts.metricsRemote,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
@@ -384,6 +414,11 @@ func runServe(args []string) error {
 
 	fmt.Printf("conchd %s listening on %s (data %s)\n", buildVersion(), srv.Addr(), opts.dataDir)
 	fmt.Printf("conchd web: %s\n", opts.webSource)
+	if addr := srv.MetricsAddr(); addr != "" {
+		fmt.Printf("conchd metrics: http://%s/metrics\n", addr)
+	} else {
+		fmt.Println("conchd metrics: off")
+	}
 	return srv.Serve(ctx)
 }
 

@@ -104,7 +104,8 @@ func (s *Server) postMessage(
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
-	if _, err := s.store.PrincipalByID(ctx, authorID); errors.Is(err, store.ErrNotFound) {
+	author, err := s.store.PrincipalByID(ctx, authorID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "author_not_found", "author not found")
 		return
 	} else if err != nil {
@@ -125,6 +126,7 @@ func (s *Server) postMessage(
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	s.metrics.messagePosted(author.Kind)
 	messageV1 := messageV1FromStore(stored)
 	// Persist-then-broadcast: the message is durable before anyone hears
 	// about it, so a crash here loses delivery, never data.
@@ -552,7 +554,19 @@ func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, age
 	if serr := s.scopedPostRefusal(ctx, err, post.ChannelID, post.AuthorID, agentSubject); serr != nil {
 		return schema.MessageV2{}, nil, serr
 	}
+	s.countScopedPost(agentSubject)
 	return messageV2FromStore(stored), recipients, nil
+}
+
+// countScopedPost counts a stored scoped message for the metrics by its
+// author's kind (metrics.go). A scoped post always has an authenticated
+// author, and agentSubject is set exactly when that author is an agent.
+func (s *Server) countScopedPost(agentSubject string) {
+	if agentSubject != "" {
+		s.metrics.messagePosted(store.PrincipalAgent)
+		return
+	}
+	s.metrics.messagePosted(store.PrincipalHuman)
 }
 
 // scopedPostRefusal turns an error of a scoped insert (a post or a reply) into
@@ -676,7 +690,8 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
-	if _, err := s.store.PrincipalByID(ctx, req.AuthorID); errors.Is(err, store.ErrNotFound) {
+	author, err := s.store.PrincipalByID(ctx, req.AuthorID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "author_not_found", "author not found")
 		return
 	} else if err != nil {
@@ -692,6 +707,7 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
 		return
 	}
+	s.metrics.messagePosted(author.Kind)
 	message := messageV2FromStore(stored)
 	// Persist-then-broadcast. A scoped reply goes to its recipients' v2 sockets
 	// only. A reply to a channel-wide root is an ordinary message to a v0 or v1

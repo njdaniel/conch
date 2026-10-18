@@ -134,6 +134,8 @@ Nets in voice (V5) follow the alpha. The alpha's groups are single rooms. Whispe
 - simulcast layers so phones and slow links get a smaller one;
 - measure one sharer to 29 viewers on the chosen droplet before the alpha opens.
 
+*Superseded by #565 (2026-10-17):* up to 4K at 60 fps, the top layer as captured, with 1080p30 and 720p15 layers below it, pending #448's measurement.
+
 If the droplet's bandwidth is the limit, the plan is a larger droplet or LiveKit's own egress limits. A second media server would only come after that.
 
 **O7. The deployment.**

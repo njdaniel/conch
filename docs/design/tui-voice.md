@@ -51,7 +51,7 @@ The numbers both sides are held to. The names are the Go constants; the Rust sid
 | `VoiceControlMaxLineBytes` | 4096 | Longest line, in bytes, without its line feed. |
 | `VoiceControlMaxID` | 9007199254740991 | Largest command id or event seq (2^53-1). |
 | `VoiceControlMaxInFlight` | 8 | Most commands the owner has written and not seen answered. |
-| `VoiceControlEventQueueLines` | 256 | Most events the helper holds for a slow reader; past it an event is dropped and the gap shows in seq. |
+| `VoiceControlEventQueueLines` | 256 | Most events the helper holds for a slow reader; past it a state or protocol_error is dropped and the gap shows in seq. Acks, and the state that answers `get_state`, are not dropped: they wait behind the others in places of their own, `2 × VoiceControlMaxInFlight` of them (§5, rules 8 and 10). |
 | `VoiceControlMaxVersions` | 8 | Most versions a hello offers. |
 | `VoiceControlMaxHelperVersionBytes` | 64 | Longest `helper_version`. |
 | `VoiceControlMaxServerBytes` | 1024 | Longest `server` in a start. |
@@ -109,10 +109,10 @@ Every message has `schema` and `kind`. Commands also have `id`; events have `seq
 4. Otherwise the owner writes `start` in v1. The helper writes no state before it has accepted a start.
 5. The first line the helper reads must be a valid start. If it is not, the helper writes `protocol_error` with the line's own code when that code is one that ends a session (`too_long`, `malformed`, `unknown_schema`, `invalid`), and `not_started` for anything else; then a failed state with reason `protocol_error`, and exits 1, having opened no device (`transcript-bad-first-command.json`). End of input before a start: exit 0, nothing written. No start within `VoiceControlStartTimeoutMS`: failed with `start_timeout`, exit 1.
 6. On a valid start the helper writes `state` (phase `starting`) and then `ack ok`. Only then does it read its configuration, check the login, open audio and join (§8.1).
-7. **A state a command changed is written before the command's ack.** When the owner reads an `ack ok` for `set_mute true`, the latest state it has read already says `muted: true`, unless something else (the mute key on the keyboard) changed it again since. An ack that changes nothing (a second `set_mute true`) has no state before it.
-8. `get_state` is answered by a state and then the ack, always, so the owner can resynchronise after a gap in seq (`transcript-gap-resync.json`).
+7. **A state a command changed is written before the command's ack.** When the owner reads an `ack ok` for `set_mute true`, the latest state it has read already says `muted: true`, unless something else (the mute key on the keyboard) changed it again since. An ack that changes nothing (a second `set_mute true`) has no state before it. If that state was dropped for a slow reader (§3), the ack still comes, after a gap in seq that says so.
+8. `get_state` is answered by a state and then the ack, always, whatever the helper's queue holds, so the owner can resynchronise after a gap in seq (`transcript-gap-resync.json`).
 9. `leave` is answered by a state in phase `stopping` with reason `left`, then the ack; then, when it is done, the final state, and the helper exits 0. A second `leave` while stopping is acknowledged ok. `set_mute` and `set_deafen` once stopping has begun are refused with `stopping`.
-10. Acks come in the order commands were read; every command with a usable id gets exactly one. The owner keeps at most `VoiceControlMaxInFlight` unanswered and gives each `VoiceControlAckTimeoutMS`.
+10. Acks come in the order commands were read; every command with a usable id gets exactly one, however slowly the owner reads. The owner keeps at most `VoiceControlMaxInFlight` unanswered and gives each `VoiceControlAckTimeoutMS`.
 11. The last event is a state in phase `stopped` (exit 0) or `failed` (exit 1). Nothing is written after it. The helper gives it up to 250 ms to be written, never more.
 12. Seq never repeats or goes back. A reader treats a seq that is not greater than the last as a broken helper.
 

@@ -14,3 +14,5 @@ github.com/modelcontextprotocol/go-sdk
 golang.org/x/term
 # Unicode normalization and case folding for the name key (issue #441): approved by Nick on #420/#441, 2026-10-16.
 golang.org/x/text
+# Prometheus client for conchd's /metrics on a separate loopback listener (issue #562): approved by Nick on #562, 2026-10-17, at v1.24.1.
+github.com/prometheus/client_golang

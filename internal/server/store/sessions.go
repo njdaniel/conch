@@ -503,3 +503,35 @@ func (s *Store) ListChannelSessions(ctx context.Context, channelID int64, now ti
 	}
 	return out, nil
 }
+
+// OnlinePrincipals counts, by kind, the principals with at least one session
+// that has not ended and is online (issue #562). It is the metrics endpoint's
+// read at scrape time; it names nobody. A kind with nobody online is absent.
+func (s *Store) OnlinePrincipals(ctx context.Context) (map[PrincipalKind]int, error) {
+	// state <> 'offline' is implied by state = 'online', but SQLite uses the
+	// partial index sessions_live_by_last_seen only when the query says it.
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT p.kind, COUNT(DISTINCT s.principal_id)
+		 FROM sessions s JOIN principals p ON p.id = s.principal_id
+		 WHERE s.ended_at IS NULL AND s.state <> 'offline' AND s.state = 'online'
+		 GROUP BY p.kind`)
+	if err != nil {
+		return nil, fmt.Errorf("store: count online principals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[PrincipalKind]int)
+	for rows.Next() {
+		var (
+			kind string
+			n    int
+		)
+		if err := rows.Scan(&kind, &n); err != nil {
+			return nil, fmt.Errorf("store: count online principals: scan: %w", err)
+		}
+		out[PrincipalKind(kind)] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: count online principals: %w", err)
+	}
+	return out, nil
+}
