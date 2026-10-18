@@ -34,8 +34,9 @@ export default defineConfig({
   // on 127.0.0.1 from hiding host candidates behind mDNS names.
   //
   // Screen share (issue #444) runs on the same fake devices: the screen picker
-  // is answered with a fake screen, 1920x1080 at 30 fps with a fake sound
-  // track (checked on the pinned Chromium), so no test needs a real display.
+  // is answered with a fake screen with a fake sound track, so no test needs a
+  // real display. The fake screen captures at the size and rate it is asked
+  // for: 3840x2160 at 60 fps since issue #565 (checked on the pinned Chromium).
   // The auto-select flag answers the picker the same way should a run use
   // Chromium's real picker (a headed run).
   projects: [
