@@ -44,7 +44,7 @@ illustrative, and none of them is reproduced.
 | "Hold Mouse 4 to talk" | **Hold to talk**, and under it "Talk key: ` (backtick). It works only while this tab has focus." | UX-10: the browser cannot promise global PTT. On a touch screen the key line is hidden; Voice options still says it. |
 | Deafen, Share screen, Captions, Leave | Mute, Deafen, Share screen / Stop sharing, Watch, **Voice options**, **Leave voice** (the one red control) | Only what exists. |
 | — | "Microphone in use" (amber) while connected or reconnecting with the microphone, apart from "Transmitting" / "Not transmitting" | Capture is not transmission (UX-11). |
-| — | **Voice options**: push to talk or open microphone, the talk key, the open-microphone level, what a share is for, and the talk-key and phone notes | The less used choices, one click away. |
+| — | **Voice options**: push to talk or open microphone, the talk key, the open-microphone level, and the talk-key and phone notes | The less used choices, one click away. |
 
 ### Movie night (`movie-night.png`)
 

@@ -71,7 +71,7 @@ import type { DisconnectCause } from './disconnect';
 import type { Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import type { Captured, KeptScreen, ShareContent } from './share';
+import type { Captured, KeptScreen } from './share';
 
 export { principalOf };
 
@@ -122,13 +122,16 @@ export function wanted(source: Track.Source, watching: boolean): boolean {
 // the voice processing a microphone gets, the Conch tab itself left out of
 // the choices, and the shared tab still heard by the sharer. The system's
 // sound leaves out what this page plays (restrictOwnAudio), so the room's
-// voices are not sent back into the room.
-export function captureOptions(content: ShareContent): ScreenShareCaptureOptions {
+// voices are not sent back into the room. Every share is captured as motion
+// (issue #554): shares are mostly films and games watched together, and motion
+// keeps the frame rate when bandwidth runs short, giving up text sharpness
+// only then.
+export function captureOptions(): ScreenShareCaptureOptions {
   return {
     video: true,
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
     resolution: ScreenSharePresets.h1080fps30.resolution,
-    contentHint: content,
+    contentHint: 'motion',
     systemAudio: 'include',
     selfBrowserSurface: 'exclude',
     surfaceSwitching: 'include',
@@ -430,10 +433,10 @@ class LiveKitAdapter implements Room {
 
   // ---- sharing
 
-  async pickScreen(content: ShareContent): Promise<Captured> {
+  async pickScreen(): Promise<Captured> {
     this.ensureOpen();
     await this.stopScreen();
-    const tracks = await this.room.localParticipant.createScreenTracks(captureOptions(content));
+    const tracks = await this.room.localParticipant.createScreenTracks(captureOptions());
     if (this.closed) {
       for (const t of tracks) t.stop();
       throw new ClosedError();

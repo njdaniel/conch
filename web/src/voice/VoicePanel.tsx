@@ -16,7 +16,7 @@ import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer } from './presence';
-import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote, type ShareContent } from './share';
+import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote } from './share';
 import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
 
@@ -60,8 +60,6 @@ export function VoicePanel({
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
   const [options, setOptions] = useState(false);
-  // What the next share is for, chosen under Voice options.
-  const [content, setContent] = useState<ShareContent>('detail');
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
 
@@ -189,7 +187,7 @@ export function VoicePanel({
                 <Glyph name="headphones" />
                 <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
               </button>
-              <ShareButton voice={voice} content={content} />
+              <ShareButton voice={voice} />
               {theirs !== null && !state.watching ? (
                 <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
                   <Glyph name="screen" />
@@ -249,19 +247,14 @@ export function VoicePanel({
         )}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options} content={content} onContent={setContent} /> : null}
+      {inVoice ? <Options voice={voice} open={options} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
   );
 }
 
 // Voice options: the less used choices, out of the strip.
-function Options({ voice, open, content, onContent }: {
-  readonly voice: VoiceControl;
-  readonly open: boolean;
-  readonly content: ShareContent;
-  readonly onContent: (content: ShareContent) => void;
-}) {
+function Options({ voice, open }: { readonly voice: VoiceControl; readonly open: boolean }) {
   const { state, client } = voice;
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
@@ -300,43 +293,19 @@ function Options({ voice, open, content, onContent }: {
         The talk key works only while this tab has focus. On Linux, conch-voice has a global talk key. On a phone, audio continues
         only while the page is open on screen.
       </p>
-      <ShareChoice voice={voice} content={content} onContent={onContent} />
     </div>
-  );
-}
-
-// What a share is for, which sets how it is encoded. Chosen before sharing.
-function ShareChoice({ voice, content, onContent }: {
-  readonly voice: VoiceControl;
-  readonly content: ShareContent;
-  readonly onContent: (content: ShareContent) => void;
-}) {
-  const { state, features } = voice;
-  if (state.listenOnly || !features.canShare || state.share.kind !== 'idle') return null;
-  return (
-    <fieldset className="voice-mode">
-      <legend>Share your screen</legend>
-      <label>
-        <input type="radio" name="share-content" checked={content === 'detail'} onChange={() => { onContent('detail'); }} />
-        Text and pictures
-      </label>
-      <label>
-        <input type="radio" name="share-content" checked={content === 'motion'} onChange={() => { onContent('motion'); }} />
-        Video or a game
-      </label>
-    </fieldset>
   );
 }
 
 // ShareButton is the sharer's one control in the strip: Share screen, or
 // Stop sharing while a share is starting, live or resuming.
-function ShareButton({ voice, content }: { readonly voice: VoiceControl; readonly content: ShareContent }) {
+function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   const { state, client, features } = voice;
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
   if (share.kind === 'idle') {
     return (
-      <button type="button" onClick={() => { client.startShare(content); }} disabled={state.phase !== 'connected'}>
+      <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
         <Glyph name="screen" />
         <span className="label">Share screen</span>
       </button>
