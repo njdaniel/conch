@@ -1076,6 +1076,41 @@ describe('scrolling', () => {
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
+  // What Chrome does (issue #585 against #589): the voice strip gets shorter,
+  // the log taller, and the browser clamps the scroll; when the log gets
+  // shorter again (the whisper picker), scroll anchoring puts the clamped
+  // position back, 43px above the bottom, and says so with a scroll event
+  // before the observer runs. That scroll is not the reader leaving the end.
+  it('keeps a reader at the newest message there when the browser scrolls as the log changes height', async () => {
+    stubObserver();
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1014, top: 586, client: 428 };
+    geometry(log, geo);
+    resized(log);
+    fireEvent.scroll(log);
+    // Taller: clamped to the new end, before the observer has run.
+    geo.client = 503;
+    geo.top = 511;
+    fireEvent.scroll(log);
+    resized(log);
+    geo.top = 511;
+    // Shorter: the browser's anchoring moves the scroll back to 586.
+    geo.client = 385;
+    geo.top = 586;
+    fireEvent.scroll(log);
+    resized(log);
+    expect(geo.top).toBe(1014);
+    expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+    // The reader's own scrolls still count once the observer has the height.
+    geo.top = 300;
+    fireEvent.scroll(log);
+    geo.client = 503;
+    resized(log);
+    expect(geo.top).toBe(300);
+  });
+
   it('leaves a reader who has scrolled up where they are when the log changes height', async () => {
     stubObserver();
     server.history.general = [message(1, 'one')];
