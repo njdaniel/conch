@@ -264,4 +264,4 @@ your browser goes by:
 **If you also use the terminal app** (`conch`): it keeps its sign-in in a settings
 folder. For a second server, or a second person, give each its own folder, by setting
 `CONCH_CONFIG_DIR` to that folder before you sign in and whenever you run `conch`.
-The project's README explains it, under "Human side".
+The project's [manual](manual.md#4-human-side-conch) explains it, under "Human side".

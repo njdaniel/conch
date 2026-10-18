@@ -7,7 +7,7 @@
 # LiveKit is limited to 2 CPUs and 4 GB by default, the alpha droplet's size
 # (docs/design/private-alpha.md, O7), so what is seen here compares with it.
 # Everything listens on 127.0.0.1 except LiveKit's media ports, which listen
-# on every interface (README, "Run LiveKit beside conchd"). State lives
+# on every interface (docs/manual.md, "Run LiveKit beside conchd"). State lives
 # outside the checkout, in ${XDG_CACHE_HOME:-~/.cache}/conch-dev. The script
 # stops only what it started: conchd by the PID it recorded, and the
 # container by its own name.
