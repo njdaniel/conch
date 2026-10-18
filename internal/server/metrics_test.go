@@ -423,6 +423,7 @@ func TestMetricsSockets(t *testing.T) {
 		{"hub", "/v2/ws?channel=general"},
 		{"events", "/v1/events/ws?channel=general"},
 		{"voice", "/v1/voice/ws?channel=general"},
+		{"voice", "/v1/voice/occupancy/ws"},
 	}
 	// The client closes: root's sockets.
 	var conns []*websocket.Conn
@@ -431,7 +432,7 @@ func TestMetricsSockets(t *testing.T) {
 	}
 	waitFor("hub", 3)
 	waitFor("events", 1)
-	waitFor("voice", 1)
+	waitFor("voice", 2)
 	for _, c := range conns {
 		_ = c.CloseNow()
 	}
@@ -458,7 +459,7 @@ func TestMetricsSockets(t *testing.T) {
 	}
 	waitFor("hub", 3)
 	waitFor("events", 1)
-	waitFor("voice", 1)
+	waitFor("voice", 2)
 	_, credID, err := f.srv.store.ResolveCredentialDetail(ctx, f.aliceTok)
 	if err != nil {
 		t.Fatal(err)

@@ -309,8 +309,12 @@ type voicePoller struct {
 	retryAt   time.Time
 	nextSweep time.Time
 
-	subs   map[*voiceSub]struct{}
-	closed bool
+	subs map[*voiceSub]struct{}
+	// occSubs are the occupancy sockets' subscriptions (voice_occupancy.go):
+	// one per viewer, woken when a count may have changed, never by a
+	// transmit flip or a share.
+	occSubs map[*voiceOccupancySub]struct{}
+	closed  bool
 }
 
 func newVoicePoller(s *Server) *voicePoller {
@@ -332,6 +336,7 @@ func newVoicePoller(s *Server) *voicePoller {
 		shareEnded:      make(map[voiceShareEndKey]schema.VoiceShareEnded),
 		removed:         make(map[string]time.Time),
 		subs:            make(map[*voiceSub]struct{}),
+		occSubs:         make(map[*voiceOccupancySub]struct{}),
 	}
 }
 
@@ -757,6 +762,10 @@ func (p *voicePoller) runPass(ctx context.Context) bool {
 			for _, id := range channels {
 				p.notify(id)
 			}
+			// A room hidden with people in it changes its channel's count.
+			if len(channels) > 0 {
+				p.notifyOccupancy()
+			}
 		}
 	}
 	return true
@@ -1028,6 +1037,14 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 	}
 	events = append(events, unclaimed...)
+	// What the room's count shows (occupancyLocked): nobody while it was
+	// stale. Only a change to that wakes the occupancy sockets; a transmit
+	// flip, a share or a reconnection changes no count.
+	shown := len(old)
+	if r.stale {
+		shown = 0
+	}
+	counted := shown != len(next)
 	r.participants = next
 	r.stale = false
 	r.marked = again
@@ -1036,6 +1053,9 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 	p.writeEvents(ctx, events...)
 	if changed {
 		p.notify(r.channelID)
+	}
+	if counted {
+		p.notifyOccupancy()
 	}
 	return withdraw
 }
@@ -1196,6 +1216,7 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", room.ChannelID)
 		events = append(events, voiceEvent{actor: actor, action: store.AuditVoiceLeft, channelID: room.ChannelID, detail: detail})
 		p.notify(room.ChannelID)
+		p.notifyOccupancy()
 	}
 	p.writeEvents(ctx, events...)
 }
@@ -1249,6 +1270,7 @@ func (p *voicePoller) forgetEverywhere(ctx context.Context, principalID int64) {
 		p.writeEvents(ctx, events...)
 		r.order.Unlock()
 		p.notify(r.channelID)
+		p.notifyOccupancy()
 	}
 }
 
@@ -1482,7 +1504,8 @@ func (p *voicePoller) dropPrincipal(channelID, principalID int64) {
 	}
 }
 
-// dropPrincipalAll closes principalID's presence subscriptions on every channel.
+// dropPrincipalAll closes principalID's presence subscriptions on every
+// channel, and their occupancy subscriptions.
 func (p *voicePoller) dropPrincipalAll(principalID int64) {
 	if principalID == 0 {
 		return
@@ -1494,11 +1517,16 @@ func (p *voicePoller) dropPrincipalAll(principalID int64) {
 			p.dropLocked(sub)
 		}
 	}
+	for sub := range p.occSubs {
+		if sub.principalID == principalID {
+			p.dropOccupancyLocked(sub)
+		}
+	}
 }
 
-// dropCredential closes the presence subscriptions opened with credentialID,
-// on every channel: that one credential was revoked (issue #519). A zero
-// credential (no caller) matches nothing.
+// dropCredential closes the presence and occupancy subscriptions opened with
+// credentialID, on every channel: that one credential was revoked (issue
+// #519). A zero credential (no caller) matches nothing.
 func (p *voicePoller) dropCredential(credentialID int64) {
 	if credentialID == 0 {
 		return
@@ -1510,6 +1538,11 @@ func (p *voicePoller) dropCredential(credentialID int64) {
 			p.dropLocked(sub)
 		}
 	}
+	for sub := range p.occSubs {
+		if sub.credentialID == credentialID {
+			p.dropOccupancyLocked(sub)
+		}
+	}
 }
 
 // closeAll drops every subscription and refuses new ones: shutdown.
@@ -1519,6 +1552,9 @@ func (p *voicePoller) closeAll() {
 	p.closed = true
 	for sub := range p.subs {
 		p.dropLocked(sub)
+	}
+	for sub := range p.occSubs {
+		p.dropOccupancyLocked(sub)
 	}
 }
 
@@ -1539,12 +1575,16 @@ func (p *voicePoller) notify(channelID int64) {
 	}
 }
 
-// notifyAll wakes every subscriber: availability changed for all channels.
+// notifyAll wakes every subscriber, presence and occupancy: availability
+// changed for all channels.
 func (p *voicePoller) notifyAll() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for sub := range p.subs {
 		wake(sub)
+	}
+	for sub := range p.occSubs {
+		wakeOccupancy(sub)
 	}
 }
 
@@ -1679,6 +1719,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	p.mu.Unlock()
 	p.writeEvents(ctx, events...)
 	p.notify(channelID)
+	p.notifyOccupancy()
 }
 
 // deleteRooms deletes retired rooms in LiveKit, which disconnects everyone in
@@ -1756,12 +1797,15 @@ func withoutRotated(rooms []store.VoiceRoom, rotated []voiceRotation) []store.Vo
 // purpose, and have only SQLite's busy timeout.
 
 // voiceMemberRemoved runs after a principal's membership of channelID was
-// removed: their presence sockets on the channel close, the invariant is
-// checked (a removed holder rotates the room), and they are removed from any
-// of the channel's rooms that were not rotated, in case they are in one
-// without having been issued a session.
+// removed: their presence sockets on the channel close (their occupancy
+// sockets lose its row), the invariant is checked (a removed holder rotates
+// the room), and they are removed from any of the channel's rooms that were
+// not rotated, in case they are in one without having been issued a session.
 func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID int64) {
 	s.voice.dropPrincipal(channelID, principalID)
+	// Their occupancy sockets stay open and lose the channel's row, before
+	// the removal is answered.
+	s.voice.occupancyChannelLost(channelID, principalID)
 	if s.lk == nil {
 		return
 	}
@@ -1780,10 +1824,10 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 }
 
 // voicePrincipalLostAccess runs after a principal was disabled or had every
-// credential revoked: their presence sockets close and the invariant is
-// checked. A disabled principal is also removed, by name, from the rooms of
-// its channels that were not rotated. reason is voiceReasonPrincipalOff or
-// voiceReasonCredsRevoked.
+// credential revoked: their presence and occupancy sockets close and the
+// invariant is checked. A disabled principal is also removed, by name, from
+// the rooms of its channels that were not rotated. reason is
+// voiceReasonPrincipalOff or voiceReasonCredsRevoked.
 func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64, reason string) {
 	s.voice.dropPrincipalAll(principalID)
 	if s.lk == nil {
@@ -1815,8 +1859,8 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 }
 
 // voiceCredentialRevoked runs after credentialID was revoked or replaced: its
-// presence sockets close and, if a session was issued under it, its room is
-// rotated.
+// presence and occupancy sockets close and, if a session was issued under it,
+// its room is rotated.
 func (s *Server) voiceCredentialRevoked(ctx context.Context, credentialID int64) {
 	s.voice.dropCredential(credentialID)
 	if s.lk == nil {

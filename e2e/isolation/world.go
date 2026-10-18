@@ -535,6 +535,12 @@ func (w *world) controlB(round int) (controls, error) {
 	if round > 1 {
 		joiner = bob
 	}
+	switch {
+	case w.lk != nil:
+		c.occupancy = "counts"
+	case round == 1:
+		c.occupancy = schema.VoiceOccupancySchemaV1
+	}
 	for _, ch := range w.b.channels {
 		switch {
 		case w.lk != nil:

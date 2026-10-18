@@ -1107,6 +1107,22 @@ mod tests {
         }
     }
 
+    /// Voice fixtures of documents `conch-voice` never reads, each with the reason, so
+    /// that a new one is still a decision: claim it with a type, or say here why not.
+    const NOT_READ: &[(&str, &str)] = &[
+        // Voice occupancy (issue #596): how many are in each channel's voice, for a
+        // channel list. The voice client joins one channel it is told and shows no list.
+        ("voice-occupancy-v1.json", "occupancy is for a channel list"),
+        (
+            "voice-occupancy-v1-unavailable.json",
+            "occupancy is for a channel list",
+        ),
+        (
+            "voice-occupancy-v1-not-configured.json",
+            "occupancy is for a channel list",
+        ),
+    ];
+
     #[test]
     fn every_voice_fixture_in_pkg_schema_is_claimed_by_a_type() {
         let claimed: BTreeSet<String> = claimed().iter().map(|(n, _)| (*n).to_owned()).collect();
@@ -1122,7 +1138,10 @@ mod tests {
             "expected the voice fixtures in {}, found {on_disk:?}",
             fixtures().display()
         );
-        let unclaimed: Vec<_> = on_disk.difference(&claimed).collect();
+        let unclaimed: Vec<_> = on_disk
+            .difference(&claimed)
+            .filter(|name| !NOT_READ.iter().any(|(n, _)| n == name))
+            .collect();
         assert!(
             unclaimed.is_empty(),
             "pkg/schema/testdata has voice fixtures no Rust type claims: {unclaimed:?}. \

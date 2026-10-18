@@ -402,7 +402,7 @@ func TestWSTicketOnlyOnOptedInRoutes(t *testing.T) {
 			optedIn = append(optedIn, rt.pattern)
 		}
 	}
-	want := []string{"GET /v2/ws", "GET /v1/events/ws", "GET /v1/voice/ws"}
+	want := []string{"GET /v2/ws", "GET /v1/events/ws", "GET /v1/voice/ws", "GET /v1/voice/occupancy/ws"}
 	if strings.Join(optedIn, "|") != strings.Join(want, "|") {
 		t.Errorf("routes that accept a ticket = %v, want only %v", optedIn, want)
 	}
@@ -636,6 +636,21 @@ func TestWSTicketOpensSocket(t *testing.T) {
 		expired := f.ticketFor(t, f.aliceTok)
 		f.clock.Advance(30 * time.Second)
 		refusedWith(t, "/v1/voice/ws?channel=alpha&ticket="+expired, http.StatusUnauthorized)
+	})
+
+	// The occupancy socket (issue #596) takes a ticket for the browser too.
+	t.Run("the occupancy socket opens with a ticket, once", func(t *testing.T) {
+		tk := f.ticketFor(t, f.aliceTok)
+		path := "/v1/voice/occupancy/ws?ticket=" + tk
+		conn, _, err := openTicketSocket(ctx, base, path) //nolint:bodyclose // upgraded
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.CloseNow() })
+		refusedWith(t, path, http.StatusUnauthorized) // spent
+		expired := f.ticketFor(t, f.aliceTok)
+		f.clock.Advance(30 * time.Second)
+		refusedWith(t, "/v1/voice/occupancy/ws?ticket="+expired, http.StatusUnauthorized)
 	})
 
 	t.Run("the older sockets do not take a ticket", func(t *testing.T) {

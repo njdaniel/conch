@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +20,9 @@ import (
 // client ends it, so a test that wants the count back polls it against a
 // deadline (waitSockets) instead of sleeping a guessed time.
 
-// socketRoutes are the five routes the cap spans, as paths on channel alpha.
+// socketRoutes are the six routes the cap spans, as paths on channel alpha.
+// The occupancy socket (issue #596) names no channel: it is the caller's
+// across every channel they are in.
 var socketRoutes = []struct {
 	name string
 	path string
@@ -29,7 +32,12 @@ var socketRoutes = []struct {
 	{"v2", "/v2/ws?channel=alpha"},
 	{"events", "/v1/events/ws?channel=alpha"},
 	{"voice", "/v1/voice/ws?channel=alpha"},
+	{"voice occupancy", "/v1/voice/occupancy/ws"},
 }
+
+// perChannel reports whether a socket route of socketRoutes is opened on one
+// channel, and so is refused to a non-member and closed by a removal.
+func perChannel(path string) bool { return strings.HasSuffix(path, "?channel=alpha") }
 
 func capDial(base, path, token string) (*websocket.Conn, *http.Response, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -189,8 +197,8 @@ func TestSocketCounter(t *testing.T) {
 	}
 }
 
-// The cap holds across the five routes together, whichever route the 33rd
-// arrives on: the other 32 are a mix of all five.
+// The cap holds across the six routes together, whichever route the 33rd
+// arrives on: the other 32 are a mix of all six.
 func TestSocketCapAcrossRoutes(t *testing.T) {
 	for _, tt := range socketRoutes {
 		t.Run(tt.name, func(t *testing.T) {
@@ -330,6 +338,9 @@ func TestSocketCountDoesNotLeak(t *testing.T) {
 	}
 	for _, route := range socketRoutes {
 		for _, end := range ends {
+			if end.name == "removed from the channel" && !perChannel(route.path) {
+				continue // a removal takes a row out of the occupancy socket and keeps it open
+			}
 			t.Run(route.name+"/"+end.name, func(t *testing.T) {
 				f := newMemberFixture(t)
 				f.srv.credRecheckInterval = 10 * time.Millisecond
@@ -371,6 +382,9 @@ func TestSocketRefusalsDoNotLeakOrCount(t *testing.T) {
 				t.Fatalf("a plain GET got %d, want an accept failure", resp.StatusCode)
 			}
 			waitSockets(t, f.srv, credID, 0)
+			if !perChannel(route.path) {
+				return // no channel to refuse; voice_occupancy_test.go has its refusals
+			}
 
 			// A non-member is 404 whatever else; the same with a channel
 			// that does not exist, and neither is counted.
