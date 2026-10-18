@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, reconnectLimit, reportWait, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, reconnectLimit, reportWait, type Phase, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -14,6 +14,10 @@ class StubRoom implements Room {
   deafened: boolean[] = [];
   closed = false;
   connectError = false;
+  // When set, connect or publishMicrophone rejects with this, as a browser
+  // refusing the microphone does (issue #586).
+  connectFailure: Error | null = null;
+  microphoneFailure: Error | null = null;
   connectArgs: { url: string; token: string; roomName: string; publish: boolean } | null = null;
   levelNow = 0;
   // What happened, in order, across the room and the reports (issue #495).
@@ -24,6 +28,7 @@ class StubRoom implements Room {
   connect = (url: string, tok: string, name: string, publish: boolean, events: RoomEvents): Promise<void> => {
     this.connectArgs = { url, token: tok, roomName: name, publish };
     this.events = events;
+    if (this.connectFailure !== null) return Promise.reject(this.connectFailure);
     return this.connectError ? Promise.reject(new Error('unreachable')) : Promise.resolve();
   };
   setSending = (on: boolean): Promise<void> => {
@@ -43,8 +48,12 @@ class StubRoom implements Room {
     this.deafened.push(on);
   };
   level = (): number => this.levelNow;
+  // When set, closing the room reports it disconnected, as the SDK does for
+  // a room that had joined.
+  disconnectOnClose = false;
   close = (): Promise<void> => {
     this.closed = true;
+    if (this.disconnectOnClose) this.events?.onDisconnected('lost');
     return Promise.resolve();
   };
   // The share and watch half of a room (issue #444), recorded.
@@ -55,7 +64,7 @@ class StubRoom implements Room {
   pickFails = false;
   publishMicrophone = (): Promise<void> => {
     this.calls.push('microphone');
-    return Promise.resolve();
+    return this.microphoneFailure === null ? Promise.resolve() : Promise.reject(this.microphoneFailure);
   };
   setWatching = (on: boolean): void => {
     this.watching.push(on);
@@ -107,7 +116,8 @@ const claim: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at
 
 // held: each report waits for the test to answer it (answer below), as a
 // slow conchd would.
-function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0, held = false) {
+// prepare sets up each room as it is made, before it is connected.
+function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0, held = false, prepare?: (room: StubRoom, index: number) => void) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
@@ -146,6 +156,7 @@ function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: Tr
         const room = new StubRoom();
         room.log = log;
         room.connectError = rooms.length < failFirst;
+        prepare?.(room, rooms.length);
         rooms.push(room);
         return room;
       },
@@ -488,6 +499,113 @@ describe('disconnects', () => {
     await settle();
     expect(t.asked).toHaveLength(2);
     expect(t.rooms[0]?.closed).toBe(true);
+  });
+});
+
+// Issue #586: a microphone the browser refuses, or that is not there, stops
+// with the reason by name; nothing tries again until the person does.
+const deviceError = (name: string): Error => new DOMException('device detail that is not shown', name);
+
+describe('a refused or missing microphone', () => {
+  it.each<[string, Phase, RegExp]>([
+    ['NotAllowedError', 'stopped', /Your browser blocked the microphone/],
+    ['SecurityError', 'stopped', /Your browser blocked the microphone/],
+    ['NotFoundError', 'stopped', /No microphone was found/],
+    ['OverconstrainedError', 'stopped', /No microphone was found/],
+    ['NotReadableError', 'stopped', /in use by another program/],
+    ['AbortError', 'unavailable', /trying again/],
+    ['Error', 'unavailable', /trying again/],
+  ])('%s on Join voice -> %s', async (name, phase, why) => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room, i) => {
+      if (i === 0) room.connectFailure = deviceError(name);
+    });
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot().phase).toBe(phase);
+    expect(t.client.snapshot().why).toMatch(why);
+    expect(t.rooms[0]?.closed).toBe(true);
+    if (phase === 'stopped') {
+      // No retry timer is set: nothing asks conchd again by itself.
+      expect(t.clock.pending).toBe(0);
+      t.clock.advance(60_000);
+      await settle();
+      expect(t.asked).toHaveLength(1);
+    } else {
+      expect(t.clock.pending).toBe(1);
+      t.clock.advance(1000);
+      await settle();
+      expect(t.asked).toHaveLength(2);
+      expect(t.client.snapshot().phase).toBe('connected');
+    }
+  });
+
+  // The SDK joins the room before it asks for the microphone, so the room
+  // closed after the refusal says it disconnected: that is not a loss to
+  // retry.
+  it('a room that joined before the microphone was refused stays stopped when it is closed', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room) => {
+      room.connectFailure = deviceError('NotAllowedError');
+      room.disconnectOnClose = true;
+    });
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(t.clock.pending).toBe(0);
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.asked).toHaveLength(1);
+  });
+
+  it('the reason names nothing of the device, the room or the token', async () => {
+    for (const name of ['NotAllowedError', 'NotFoundError', 'NotReadableError']) {
+      const t = setup([okSession()], [], 0, false, (room) => {
+        room.connectFailure = deviceError(name);
+      });
+      t.client.join('general');
+      await settle();
+      expect(t.client.snapshot().why).not.toMatch(/device detail|secret|general/);
+    }
+  });
+
+  it('after a blocked microphone, Watch only connects without it', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room, i) => {
+      if (i === 0) room.connectFailure = deviceError('NotAllowedError');
+    });
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot().phase).toBe('stopped');
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    expect(t.rooms[1]?.connectArgs?.publish).toBe(false);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true, why: null });
+  });
+
+  it('a refused Use microphone keeps the connection and watch only, and says why by name', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.microphoneFailure = deviceError('NotAllowedError');
+    });
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    await t.client.useMicrophone();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true });
+    expect(t.client.snapshot().why).toMatch(/Your browser blocked the microphone/);
+    // Already watching only: not told to watch only.
+    expect(t.client.snapshot().why).not.toMatch(/Watch only/);
+    expect(t.rooms[0]?.closed).toBe(false);
+    t.client.press();
+    await settle();
+    expect(t.reports).toEqual([]);
+  });
+
+  it('a Use microphone that fails for another reason says so plainly', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.microphoneFailure = new Error('something else');
+    });
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    await t.client.useMicrophone();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true, why: 'The microphone could not be used' });
   });
 });
 

@@ -245,6 +245,9 @@ export function Conversation({
   // renders in between (the request starting).
   const anchor = useRef<{ readonly height: number; readonly top: number; readonly oldest: number } | null>(null);
   const seen = useRef('');
+  // The log's height as the observer below last handled it; null before it
+  // has, or without one.
+  const sized = useRef<number | null>(null);
   const [unseen, setUnseen] = useState(false);
 
   const shown = ordered(chat);
@@ -279,15 +282,16 @@ export function Conversation({
   useEffect(() => {
     const el = log.current;
     if (el === null || typeof ResizeObserver !== 'function') return;
-    let height = el.clientHeight;
+    sized.current = null;
     const watch = new ResizeObserver(() => {
-      if (el.clientHeight === height) return;
-      height = el.clientHeight;
+      if (el.clientHeight === sized.current) return;
+      sized.current = el.clientHeight;
       if (atBottom.current) el.scrollTop = el.scrollHeight;
     });
     watch.observe(el);
     return () => {
       watch.disconnect();
+      sized.current = null;
     };
   }, []);
 
@@ -331,9 +335,17 @@ export function Conversation({
         tabIndex={0}
         onScroll={(event) => {
           const el = event.currentTarget;
-          atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
-          onBottom(atBottom.current);
-          if (atBottom.current) setUnseen(false);
+          // A scroll at a height the observer has not handled yet is the
+          // browser's, not the reader's: Chrome's scroll anchoring puts back
+          // a position it once clamped when the log grew (the voice strip
+          // getting shorter, say) as soon as the log gets shorter again, which
+          // leaves a reader at the newest message more than nearBottom above
+          // it. Whether they were at the bottom is kept for the observer.
+          if (sized.current === null || el.clientHeight === sized.current) {
+            atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
+            onBottom(atBottom.current);
+            if (atBottom.current) setUnseen(false);
+          }
           if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
       >

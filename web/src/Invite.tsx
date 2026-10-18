@@ -11,8 +11,11 @@ import { noticeText } from './state/auth';
 import { fallbackChannel } from './state/channels';
 
 // The one answer for a code that is unknown, used, expired or closed. The
-// server does not say which, so neither does the page.
-export const noLongerWorks = 'This invite no longer works. Ask the person who sent it for a new one.';
+// server does not say which, so neither does the page. Someone who joined from
+// a personal link and comes back to it needs a sign-in link, not an invite
+// (issue #593); the heading says the rest, in other words.
+export const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.';
+export const goneHeading = "This link can't be used";
 
 // waitWords says how long Retry-After asks the page to wait, in words.
 export function waitWords(seconds: number | undefined): string {
@@ -57,7 +60,8 @@ export const heldLine =
 type Preview =
   | { readonly state: 'loading' }
   | { readonly state: 'ready'; readonly preview: InvitePreviewV1 }
-  // gone is the invite that no longer works: nothing on the page can help.
+  // gone is the invite that no longer works: nothing on the page can help,
+  // and only someone signed in here has somewhere to go back to.
   | { readonly state: 'refused'; readonly line: string; readonly gone: boolean };
 
 export function Invite({
@@ -176,7 +180,7 @@ export function Invite({
   return (
     <main className="signin invite" aria-labelledby="invite-heading">
       <h1 id="invite-heading" ref={heading} tabIndex={-1}>
-        {preview.state === 'refused' && preview.gone ? 'This invite no longer works' : 'You are invited to Conch'}
+        {preview.state === 'refused' && preview.gone ? goneHeading : 'You are invited to Conch'}
       </h1>
       <p>
         Server: <code>{origin}</code>
@@ -187,8 +191,18 @@ export function Invite({
           <p role="alert" className="notice">
             {preview.line}
           </p>
-          <div className="actions">
-            {preview.gone ? null : (
+          {/* A person who came by an invite never had a credential to type:
+              with nobody signed in, going back would lead only to that form. */}
+          {preview.gone ? (
+            signedInAs === null ? null : (
+              <div className="actions">
+                <button type="button" onClick={onBack}>
+                  Back to Conch
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="actions">
               <button
                 type="button"
                 onClick={() => {
@@ -198,11 +212,11 @@ export function Invite({
               >
                 Try again
               </button>
-            )}
-            <button type="button" onClick={onBack}>
-              Go back
-            </button>
-          </div>
+              <button type="button" onClick={onBack}>
+                Go back
+              </button>
+            </div>
+          )}
         </>
       ) : null}
       {ready === null ? null : (
