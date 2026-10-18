@@ -272,8 +272,6 @@ describe('sharing', () => {
     expect(await within(voice()).findByText(/only a tab shares its sound/)).toBeTruthy();
     // And that a whole screen or this window would show this page and its chat.
     expect(within(voice()).getByText(/entire screen or this browser window shows this page too, chat included/)).toBeTruthy();
-    fireEvent.click(within(voice()).getByRole('button', { name: 'Voice options' }));
-    fireEvent.click(within(voice()).getByLabelText('Video or a game'));
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
@@ -281,6 +279,21 @@ describe('sharing', () => {
     fireEvent.click(within(voice()).getByRole('button', { name: 'Stop sharing' }));
     await act(settle);
     expect(await within(voice()).findByText('You stopped sharing.')).toBeTruthy();
+  });
+
+  // Issue #554: there is no choice of what a share is for. Voice options asks
+  // nothing about sharing, and Share screen opens the picker at once.
+  it('asks nothing before a share: Voice options has no share choice, and Share screen opens the picker', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    fireEvent.click(await within(voice()).findByRole('button', { name: 'Voice options' }));
+    expect(within(voice()).getByRole('group', { name: 'Microphone' })).toBeTruthy();
+    expect(within(voice()).queryByRole('group', { name: 'Share your screen' })).toBeNull();
+    expect(within(voice()).queryAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual(['Push to talk', 'Open microphone']);
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
   });
 
   it('a second person trying to share is told who is sharing', async () => {

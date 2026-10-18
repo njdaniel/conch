@@ -311,7 +311,7 @@ vi.mock('livekit-client', () => {
   };
 });
 
-import { grantWait, newLiveKitRoom, principalOf, sdkLog } from './sdk';
+import { captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog } from './sdk';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
@@ -622,7 +622,7 @@ describe('sharing a screen', () => {
 
   it("asks the picker for 1080p at 30 fps with unprocessed sound, tab and system sound offered, this page's own sound and this tab left out", async () => {
     const room = await connected();
-    expect(await room.pickScreen('motion')).toEqual({ audio: true });
+    expect(await room.pickScreen()).toEqual({ audio: true });
     expect(state.screenOptions).toEqual({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
@@ -637,9 +637,24 @@ describe('sharing a screen', () => {
     expect(state.calls).toEqual(['pick']);
   });
 
+  // Issue #554: there is no choice of what a share is for; every share keeps
+  // motion, and the rest of the picker's options are as they were.
+  it('captures every share as motion', () => {
+    expect(captureOptions()).toEqual({
+      video: true,
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
+      contentHint: 'motion',
+      systemAudio: 'include',
+      selfBrowserSurface: 'exclude',
+      surfaceSwitching: 'include',
+      suppressLocalAudioPlayback: false,
+    });
+  });
+
   it('publishes the picture with simulcast layers of 720p at 15 fps and 360p at 5 fps, and the sound as stereo music', async () => {
     const room = await connected();
-    await room.pickScreen('detail');
+    await room.pickScreen();
     await room.publishScreen();
     expect(state.published).toEqual([
       {
@@ -666,7 +681,7 @@ describe('sharing a screen', () => {
     try {
       const ends: string[] = [];
       const room = await connected((cause) => ends.push(cause));
-      await room.pickScreen('detail');
+      await room.pickScreen();
       await room.publishScreen();
       // Its own stop: unpublished and stopped, and not reported.
       await room.stopScreen();
@@ -676,7 +691,7 @@ describe('sharing a screen', () => {
 
       // The browser ends the capture; the SDK unpublishes it from inside the
       // same event, possibly first.
-      await room.pickScreen('detail');
+      await room.pickScreen();
       await room.publishScreen();
       const video = state.screenTracks[2];
       state.handlers.get('ltu')?.({ source: 'screen_share', track: video });
@@ -687,7 +702,7 @@ describe('sharing a screen', () => {
       // The server withdraws the share: the SDK unpublishes it, the capture
       // still live.
       await room.stopScreen();
-      await room.pickScreen('detail');
+      await room.pickScreen();
       await room.publishScreen();
       state.handlers.get('ltu')?.({ source: 'screen_share', track: state.screenTracks[4] });
       vi.runAllTimers();
@@ -699,7 +714,7 @@ describe('sharing a screen', () => {
 
   it('stops the capture before unpublishing, so a hung connection leaves no screen captured', async () => {
     const room = await connected();
-    await room.pickScreen('detail');
+    await room.pickScreen();
     await room.publishScreen();
     state.unpublishHangs = true;
     let done = false;
@@ -715,7 +730,7 @@ describe('sharing a screen', () => {
 
   it('a Leave stops a share picked but not published', async () => {
     const room = await connected();
-    await room.pickScreen('detail');
+    await room.pickScreen();
     await room.close();
     expect(state.screenTracks.map((t) => t.stopped > 0)).toEqual([true, true]);
   });
@@ -727,7 +742,7 @@ describe('sharing a screen', () => {
     try {
       const ends: string[] = [];
       const old = await connected((cause) => ends.push(cause));
-      await old.pickScreen('motion');
+      await old.pickScreen();
       await old.publishScreen();
       const kept = old.keepScreen();
       expect(kept?.audio).toBe(true);
@@ -769,7 +784,7 @@ describe('sharing a screen', () => {
 
   it('a kept capture says when the browser ended it, and stops when asked', async () => {
     const room = await connected();
-    await room.pickScreen('detail');
+    await room.pickScreen();
     await room.publishScreen();
     const kept = room.keepScreen();
     await room.close();
@@ -801,7 +816,7 @@ describe('sharing a screen', () => {
   async function grantedLate() {
     state.shareGranted = true;
     const old = await connected();
-    await old.pickScreen('motion');
+    await old.pickScreen();
     await old.publishScreen();
     const kept = old.keepScreen();
     await old.close();
@@ -916,7 +931,7 @@ describe('sharing a screen', () => {
   async function keptMidPublish(hold: 'pending' | 'not yet pending') {
     const ends: string[] = [];
     const room = await connected((cause) => ends.push(cause));
-    await room.pickScreen('motion');
+    await room.pickScreen();
     const held = deferred<undefined>();
     if (hold === 'pending') state.sharePublish = held;
     else state.shareGate = held;
@@ -976,7 +991,7 @@ describe('sharing a screen', () => {
 
   it('a first share is sent as captured, and a stop is not a blanking', async () => {
     const room = await connected();
-    await room.pickScreen('detail');
+    await room.pickScreen();
     await room.publishScreen();
     expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled)).toEqual([true, true]);
     await room.stopScreen();

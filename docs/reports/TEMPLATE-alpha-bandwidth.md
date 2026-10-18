@@ -90,9 +90,10 @@ Each lasts 5 minutes, steady, in one channel's voice room.
 | 3. Voice only | nothing | 3 at once | 30 minus the real browsers / 3 | as many as are at hand, microphones on |
 | 4. Movie night | as run 1 | 3 at once | 29 minus the real viewers / 3 | as run 1 |
 
-Run 2 against run 1 shows what the content hint and simulcast do for text: the encoder
-should drop frame rate rather than resolution, and the bitrate should fall when nothing
-moves.
+Run 2 against run 1 shows what the content hint and simulcast do for text. Every share
+is captured as motion (issue #554), so under congestion the encoder keeps frame rate
+and gives up resolution; say whether the text stayed readable. The bitrate should fall
+when nothing moves.
 
 ### 1.5 How each number is taken
 

@@ -49,8 +49,8 @@ function setup(claims: ShareClaimResult[] = []) {
   };
   const clock = new FakeClock();
   const stub: ShareRoom = {
-    pickScreen: (content) => {
-      calls.push(`pick ${content}`);
+    pickScreen: () => {
+      calls.push('pick');
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
@@ -105,7 +105,7 @@ function setup(claims: ShareClaimResult[] = []) {
 }
 
 async function sharing(t = setup()) {
-  await t.share.start('general', t.stub, 'detail');
+  await t.share.start('general', t.stub);
   expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
   t.calls.length = 0;
   return t;
@@ -114,8 +114,8 @@ async function sharing(t = setup()) {
 describe('starting a share', () => {
   it('claims, opens the picker, claims again, then publishes', async () => {
     const t = setup();
-    await t.share.start('general', t.stub, 'motion');
-    expect(t.calls).toEqual(['claim general', 'pick motion', 'claim general', 'publish']);
+    await t.share.start('general', t.stub);
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'publish']);
     expect(t.states.map((s) => s.kind)).toEqual(['claiming', 'picking', 'publishing', 'sharing']);
     expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
   });
@@ -123,13 +123,13 @@ describe('starting a share', () => {
   it('says when no sound was obtained', async () => {
     const t = setup();
     t.room.audio = false;
-    await t.share.start('general', t.stub, 'detail');
+    await t.share.start('general', t.stub);
     expect(t.share.current).toEqual({ kind: 'sharing', audio: false });
   });
 
   it('someone else sharing is told before the picker opens, and nothing is released', async () => {
     const t = setup([busy]);
-    await t.share.start('general', t.stub, 'detail');
+    await t.share.start('general', t.stub);
     expect(t.calls).toEqual(['claim general']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'busy' });
   });
@@ -142,7 +142,7 @@ describe('starting a share', () => {
       [{ ok: false, failure: 'invalid', status: 403, code: 'voice_not_allowed' }, 'failed'],
     ] as const) {
       const t = setup([answer]);
-      await t.share.start('general', t.stub, 'detail');
+      await t.share.start('general', t.stub);
       expect(t.share.current, JSON.stringify(answer)).toEqual({ kind: 'idle', ended: end });
       expect(t.calls).toEqual(['claim general']);
     }
@@ -151,50 +151,50 @@ describe('starting a share', () => {
   it('a picker closed without choosing releases the claim', async () => {
     const t = setup();
     t.room.pickFails = true;
-    await t.share.start('general', t.stub, 'detail');
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'release general']);
+    await t.share.start('general', t.stub);
+    expect(t.calls).toEqual(['claim general', 'pick', 'release general']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'cancelled' });
   });
 
   it('a share taken by someone else while the picker was open stops the capture and releases nothing', async () => {
     const t = setup([granted, busy]);
-    await t.share.start('general', t.stub, 'detail');
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'claim general', 'stop screen']);
+    await t.share.start('general', t.stub);
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'stop screen']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'busy' });
   });
 
   it('a second claim that fails otherwise stops the capture and releases the first', async () => {
     const t = setup([granted, unavailable]);
-    await t.share.start('general', t.stub, 'detail');
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'claim general', 'stop screen', 'release general']);
+    await t.share.start('general', t.stub);
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'stop screen', 'release general']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'unavailable' });
   });
 
   it('a refused publish stops the capture and releases the claim', async () => {
     const t = setup();
     t.room.publishFails = true;
-    await t.share.start('general', t.stub, 'detail');
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'claim general', 'publish', 'stop screen', 'release general']);
+    await t.share.start('general', t.stub);
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'publish', 'stop screen', 'release general']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'failed' });
   });
 
   it('does not start twice', async () => {
     const t = await sharing();
-    await t.share.start('general', t.stub, 'detail');
+    await t.share.start('general', t.stub);
     expect(t.calls).toEqual([]);
   });
 
   it('a stop while the picker is open releases at once, and stops what is picked when it comes', async () => {
     const t = setup();
     t.room.pick = deferred();
-    const started = t.share.start('general', t.stub, 'detail');
+    const started = t.share.start('general', t.stub);
     await settle();
     expect(t.share.current.kind).toBe('picking');
     await t.share.stop('left');
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'left' });
     t.room.pick.resolve({ audio: true });
     await started;
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'stop screen', 'release general', 'stop screen']);
+    expect(t.calls).toEqual(['claim general', 'pick', 'stop screen', 'release general', 'stop screen']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'left' });
   });
 });
@@ -240,7 +240,7 @@ describe('stopping a share', () => {
   it('presence is not looked at while the picker is open: the claim is made again after it', async () => {
     const t = setup();
     t.room.pick = deferred();
-    const started = t.share.start('general', t.stub, 'detail');
+    const started = t.share.start('general', t.stub);
     await settle();
     t.share.presence('me');
     // The first claim lapsed while the person chose.
@@ -273,7 +273,7 @@ describe('stopping a share', () => {
     async function lapsedWhilePicking(then: (t: ReturnType<typeof setup>) => Promise<void>) {
       const t = setup();
       t.room.pick = deferred();
-      const started = t.share.start('general', t.stub, 'detail');
+      const started = t.share.start('general', t.stub);
       await settle();
       expect(t.share.current.kind).toBe('picking');
       // The picker stays open past conchd's wait: the claim lapses, and bea
@@ -290,7 +290,7 @@ describe('stopping a share', () => {
         t.room.pick?.reject(new Error('NotAllowedError'));
         await settle();
       });
-      expect(t.calls).toEqual(['claim general', 'pick detail']);
+      expect(t.calls).toEqual(['claim general', 'pick']);
       expect(t.share.current).toEqual({ kind: 'idle', ended: 'cancelled' });
     });
 
@@ -346,7 +346,7 @@ describe('stopping a share', () => {
         () => undefined,
         new FakeClock(),
       );
-      const started = share.start('general', t.stub, 'detail');
+      const started = share.start('general', t.stub);
       await share.stop('self');
       // Nothing was held when the stop was asked for.
       expect(t.calls.filter((c) => c.startsWith('release'))).toEqual([]);
@@ -376,7 +376,7 @@ describe('stopping a share', () => {
     it('a picker closed without choosing names the first claim', async () => {
       const t = setup();
       t.room.pickFails = true;
-      await t.share.start('general', t.stub, 'detail');
+      await t.share.start('general', t.stub);
       expect(t.released).toEqual(['2026-10-16T00:00:00.000Z']);
     });
   });
@@ -462,7 +462,7 @@ describe('why the server ended it', () => {
     t.share.presence('none', ended('operator'));
     await settle();
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'operator' });
-    await t.share.start('general', t.stub, 'detail');
+    await t.share.start('general', t.stub);
     // The document still carries the old reason while the new share runs.
     t.share.presence('me', ended('operator'));
     t.share.presence('none', ended('operator'));
@@ -737,10 +737,10 @@ describe('a room renewed while the share is being published', () => {
     const t = setup(claims);
     const publish = deferred<undefined>();
     t.room.publish = publish;
-    void t.share.start('general', t.stub, 'detail');
+    void t.share.start('general', t.stub);
     await settle();
     expect(t.share.current).toEqual({ kind: 'publishing' });
-    expect(t.calls).toEqual(['claim general', 'pick detail', 'claim general', 'publish']);
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'publish']);
     t.share.presence('me');
     t.calls.length = 0;
     return { ...t, publish, claimed: first, next: '2026-10-16T00:01:00.000Z' };
