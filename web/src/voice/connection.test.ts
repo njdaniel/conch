@@ -554,7 +554,7 @@ describe('watch only', () => {
 describe('sharing through the client', () => {
   it('claims, picks, claims again and publishes on the connected room; leaving stops it and tells conchd', async () => {
     const t = await joined();
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     expect(t.shares).toEqual(['claim general', 'claim general']);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
@@ -568,7 +568,7 @@ describe('sharing through the client', () => {
   it('a share does not outlive its connection: a reconnect through conchd ends it and tells conchd', async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.startShare('motion');
+    t.client.startShare();
     await settle();
     // Removed from the room, which goes on: not a renewal (issue #516).
     t.rooms[0]?.events?.onDisconnected('participant_removed');
@@ -579,7 +579,7 @@ describe('sharing through the client', () => {
 
   it('an SDK reconnect claims the share again', async () => {
     const t = await joined();
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.rooms[0]?.events?.onReconnecting();
     t.rooms[0]?.events?.onReconnected();
@@ -590,7 +590,7 @@ describe('sharing through the client', () => {
 
   it('presence that no longer shows this person sharing is the server ending it', async () => {
     const t = await joined();
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.client.presence(presenceWith(7));
     t.client.presence(presenceWith(null));
@@ -602,7 +602,7 @@ describe('sharing through the client', () => {
 
   it('the room ending the published share is the browser or the server, by cause', async () => {
     const t = await joined();
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.rooms[0]?.events?.onScreenEnded('browser');
     await settle();
@@ -612,7 +612,7 @@ describe('sharing through the client', () => {
 
   it("does not ask conchd to stop a share presence shows as someone else's", async () => {
     const t = await joined();
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.client.presence(presenceWith(7));
     // The server ended this share and principal 8 claimed the room's.
@@ -625,7 +625,7 @@ describe('sharing through the client', () => {
   it('is not offered before the connection is up', () => {
     const t = setup();
     t.client.join('general');
-    t.client.startShare('detail');
+    t.client.startShare();
     expect(t.shares).toEqual([]);
   });
 });
@@ -642,7 +642,7 @@ describe('a share across a renewed room', () => {
   it('is resumed on the new connection: claimed again and the same capture published, with no picker', async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.client.presence(presenceWith(7));
     t.client.presence(renewedPresence(true));
@@ -659,7 +659,7 @@ describe('a share across a renewed room', () => {
   it('a sharer who was the one removed gets no session: nothing is claimed again and the capture stops', async () => {
     const t = setup([okSession(), { ok: false, failure: 'unauthorized' }]);
     await joined(t);
-    t.client.startShare('detail');
+    t.client.startShare();
     await settle();
     t.client.presence(presenceWith(7));
     t.client.presence(renewedPresence(true));

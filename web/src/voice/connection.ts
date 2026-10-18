@@ -30,7 +30,7 @@ import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type N
 import { TransmitGate, type GateMode, type GateOptions } from './gate';
 import { occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareContent, type ShareRoom, type ShareState } from './share';
+import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareRoom, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -259,11 +259,11 @@ export class VoiceClient {
   }
 
   // startShare shares a screen into the room this page is connected to.
-  startShare(content: ShareContent): void {
+  startShare(): void {
     const channel = this.channel;
     const room = this.room;
     if (this.state.phase !== 'connected' || channel === null || room === null) return;
-    void this.share.start(channel, room, content);
+    void this.share.start(channel, room);
   }
 
   stopShare(): void {
