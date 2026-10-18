@@ -3,6 +3,7 @@
 // microphone are reached only from src/voice/.
 import { VoicePanel } from './voice/VoicePanel';
 import { useVoice } from './voice/useVoice';
+import { useVoiceNames } from './voice/useVoiceNames';
 import type { Person } from './useLiveChannel';
 
 export function VoiceStatus({
@@ -18,6 +19,8 @@ export function VoiceStatus({
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
+  // The people of the channel on screen. While voice is in another channel,
+  // the roster's names come from that channel's members (useVoiceNames).
   readonly people: ReadonlyMap<number, Person>;
   // Whether the viewer may use voice: a human whose access includes it.
   // Without it the page asks for no voice presence at all.
@@ -29,5 +32,13 @@ export function VoiceStatus({
   readonly onOpen: (name: string) => void;
 }) {
   const voice = useVoice({ signedIn, channel, voiceAllowed, reachable, onUnauthorized });
-  return <VoicePanel voice={voice} viewer={viewer} people={people} viewed={channel} onOpen={onOpen} />;
+  const { state, snapshot } = voice;
+  const joined = state.phase !== 'idle' && state.phase !== 'stopped' ? state.channel : null;
+  const named = useVoiceNames({
+    joined,
+    viewed: channel,
+    presence: snapshot.kind === 'presence' ? snapshot.presence : null,
+    people,
+  });
+  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} onOpen={onOpen} />;
 }
