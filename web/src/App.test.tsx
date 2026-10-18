@@ -31,6 +31,38 @@ function serve(routes: Record<string, Handler>) {
   return fetchMock;
 }
 
+const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
+
+// A WebSocket that connects nowhere: the test opens it and sends its frames.
+class FakeSocket {
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  constructor(
+    readonly url: string,
+    private readonly all: FakeSocket[],
+  ) {
+    all.push(this);
+  }
+  close() {
+    this.all.splice(this.all.indexOf(this), 1);
+  }
+}
+
+// socketsOf stands in for WebSocket and lists the sockets the page holds open.
+function socketsOf(): FakeSocket[] {
+  const all: FakeSocket[] = [];
+  vi.stubGlobal(
+    'WebSocket',
+    class extends FakeSocket {
+      constructor(url: string) {
+        super(url, all);
+      }
+    },
+  );
+  return all;
+}
+
 const healthz = (version: string): Handler => () => json({ status: 'ok', version, db: 'ok', voice: 'not_configured' });
 
 const asMember: Record<string, Handler> = {
@@ -263,14 +295,52 @@ describe('lobby', () => {
 
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
     const presence = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: false, available: false, rooms: [] };
-    serve({ ...asMember, '/v1/channels/general/voice': () => json(presence) });
+    const sockets = socketsOf();
+    serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
     render(<App origin={origin} />);
     signIn();
     const voice = await screen.findByRole('region', { name: 'Voice' });
+    // The presence socket says so, as conchd without LiveKit does on connect.
+    const socket = await waitFor(() => {
+      const found = sockets.find((s) => new URL(s.url).pathname === '/v1/voice/ws');
+      expect(found).toBeDefined();
+      return found as FakeSocket;
+    });
+    expect(new URL(socket.url).searchParams.get('channel')).toBe('general');
+    act(() => {
+      socket.onopen?.();
+      socket.onmessage?.({ data: JSON.stringify(presence) });
+    });
     await waitFor(() => {
       expect(voice.textContent).toContain('Voice is not set up on this server');
     });
     expect(within(voice).queryByRole('button')).toBeNull();
+  });
+
+  it.each([
+    ['a person whose access has no voice', { ...member, voice_allowed: false }],
+    ['an agent', { id: 9, kind: 'agent', name: 'bot', role: 'member' }],
+  ])('asks nothing of voice for %s', async (_who, principal) => {
+    const sockets = socketsOf();
+    const fetchMock = serve({
+      '/v1/whoami': () => json(principal),
+      '/v1/channels': () => json(channels),
+      '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201),
+    });
+    render(<App origin={origin} />);
+    signIn();
+    const voice = await screen.findByRole('region', { name: 'Voice' });
+    await waitFor(() => {
+      expect(voice.textContent).toContain('Your account does not include voice. Ask whoever invited you.');
+    });
+    expect(within(voice).queryByRole('button')).toBeNull();
+    // No voice route is asked for, by fetch or by socket, then or later.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    const asked = fetchMock.mock.calls.map(([input]) => (typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url));
+    expect(asked.filter((p) => p.includes('/voice'))).toEqual([]);
+    expect(sockets.filter((s) => new URL(s.url).pathname.includes('voice'))).toEqual([]);
   });
 
   it('shows Connecting while the channels load', async () => {

@@ -102,10 +102,25 @@ export function VoicePanel({
       </section>
     );
   }
+  if (!inVoice && snapshot.kind === 'not_allowed') {
+    // Nothing to join: the person's access has no voice. A stopped client
+    // still says why it stopped.
+    return (
+      <section aria-label="Voice" className="voice">
+        <div className="voice-state">
+          <p className="voice-phase">Not in voice</p>
+          <p className="hint">Your account does not include voice. Ask whoever invited you.</p>
+          {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
+        </div>
+      </section>
+    );
+  }
 
   const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
-  const canJoin = voice.secure && presence?.available !== false && presence !== null;
+  // Only on a live snapshot that says voice is up: not while loading, while
+  // the server cannot be reached, or after the socket was closed for good.
+  const canJoin = voice.secure && presence !== null && presence.available;
   const holder = sharer(presence);
   // Someone else's share, which this page may watch.
   const theirs = holder !== null && holder.principal !== viewer ? holder : null;
@@ -263,7 +278,9 @@ export function VoicePanel({
               <p className="hint">Voice needs a secure page: use https, or localhost.</p>
             ) : presence?.available === false ? (
               <p className="hint">Voice is unavailable right now; chat still works.</p>
-            ) : snapshot.kind === 'unknown' ? (
+            ) : snapshot.kind === 'unreachable' ? (
+              <p className="hint">Voice status unavailable: the server cannot be reached.</p>
+            ) : snapshot.kind === 'gone' ? (
               <p className="hint">Voice status could not be read.</p>
             ) : null}
           </>

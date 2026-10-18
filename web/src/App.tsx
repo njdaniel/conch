@@ -470,6 +470,10 @@ export function App({ origin }: { readonly origin: string }) {
               channel={selected}
               viewer={auth.principal.id}
               people={live.people}
+              // A server that predates voice_allowed says nothing: voice, as
+              // the invite panel reads it. Agents have no voice (ADR-004).
+              voiceAllowed={auth.principal.voice_allowed !== false && auth.principal.kind === 'human'}
+              reachable={connection === 'connected'}
               onUnauthorized={onUnauthorized}
               onOpen={onOpen}
             />

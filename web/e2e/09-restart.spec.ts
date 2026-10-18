@@ -46,6 +46,12 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
   const typed = 'p3-09 typed while the server is down';
   await page.getByLabel('Message #general').fill(typed);
+  // Issue #585: the voice strip reads its presence from the server's socket,
+  // and this server has no LiveKit.
+  const voice = page.getByRole('region', { name: 'Voice' });
+  const notSetUp = 'Voice is not set up on this server';
+  const unreachable = 'Voice status unavailable: the server cannot be reached.';
+  await expect(voice).toContainText(notSetUp);
 
   // The server stops.
   const pid = world.serverPid();
@@ -59,12 +65,22 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
   await expect(page.getByLabel('Message #general')).toBeDisabled();
   await expect(page.getByLabel('Message #general')).toHaveValue(typed);
+  // The strip says voice cannot be read, not what it last read, and offers no
+  // join.
+  await expect(voice).toContainText(unreachable);
+  await expect(voice).not.toContainText(notSetUp);
+  await expect(voice.getByRole('button', { name: /Join voice/ })).toBeDisabled();
+  await expect(voice.getByRole('button', { disabled: false })).toHaveCount(0);
 
   // It comes back on the same data directory and address.
   restart(world);
   await expect.poll(() => healthy(world), { message: 'conchd is serving again', timeout: 30_000 }).toBe(true);
 
   await expect(statusLine(page)).toContainText('Connected', { timeout: 60_000 });
+  // Within 5 s of Connected, without opening another channel, the strip has
+  // read the server again rather than waiting out its own backoff.
+  await expect(voice).toContainText(notSetUp, { timeout: 5000 });
+  await expect(voice).not.toContainText(unreachable);
   await expect(page.getByText('This conversation may be out of date')).toHaveCount(0);
   await expect(page.getByLabel('Message #general')).toBeEnabled();
   for (const body of before) await expect(messages(page).getByText(body)).toHaveCount(1);
