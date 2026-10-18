@@ -1643,12 +1643,57 @@ label {
   }
 
   .channel-list {
+    --fade: 2rem;
     display: flex;
+    gap: var(--s1);
     overflow-x: auto;
   }
 
+  /* The fade at an edge the row has more beyond (issue #601). Each sticks to
+     its edge as the row scrolls and takes no room in it: its negative margin
+     gives back its width and the gap before or after it. Taps go through. */
+  .channel-list::before,
+  .channel-list::after {
+    content: '';
+    position: sticky;
+    z-index: 1;
+    flex: none;
+    width: var(--fade);
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .channel-list::before {
+    left: 0;
+    margin-right: calc(-1 * (var(--fade) + var(--s1)));
+    background: linear-gradient(to right, var(--surface), transparent);
+  }
+
+  .channel-list::after {
+    right: 0;
+    margin-left: calc(-1 * (var(--fade) + var(--s1)));
+    background: linear-gradient(to left, var(--surface), transparent);
+  }
+
+  .channel-list.more-before::before,
+  .channel-list.more-after::after {
+    opacity: 1;
+  }
+
+  /* A channel and its unread count read as one pill. The count stays outside
+     the button in the page, so the button's name is still the channel's
+     alone; only the drawing joins them. */
   .channel-list li {
     flex: none;
+    gap: 0;
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .channel-list li:has(> button[aria-current='true']) {
+    background: var(--accent-bg);
+    border-color: var(--accent);
   }
 
   .channel-list button {
@@ -1656,12 +1701,17 @@ label {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    background: transparent;
     border-left: 0;
-    border-bottom: 3px solid transparent;
+    border-radius: 999px;
   }
 
   .channel-list button[aria-current='true'] {
-    border-bottom-color: var(--accent);
+    background: transparent;
+  }
+
+  .channel-list .unread {
+    margin-right: var(--s2);
   }
 
   .conv-head {
@@ -1748,8 +1798,17 @@ label {
     border-radius: 0;
   }
 
-  /* Big enough for a finger. */
+  /* Big enough for a finger: 44px each way for the buttons that are only
+     an icon (issue #601), 44px high for the rest. */
   .lobby button {
+    min-height: 2.75rem;
+  }
+
+  .icon-button {
+    min-width: 2.75rem;
+  }
+
+  .audience-row select {
     min-height: 2.75rem;
   }
 }

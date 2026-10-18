@@ -87,9 +87,11 @@ test.describe('with LiveKit', () => {
     stopWorld?.();
   });
 
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions) {
+  // before runs on the new page before it signs in, to watch it from the start.
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol', options?: BrowserContextOptions, before?: (page: Page) => void) {
     const context = await browser.newContext(options);
     const page = await context.newPage();
+    before?.(page);
     const watch = watchPage(page, vw);
     await page.addInitScript(countBytes);
     const m = vw[who];
@@ -443,6 +445,61 @@ test.describe('with LiveKit', () => {
       } finally {
         await a.context.close();
       }
+    }
+  });
+
+  // Issue #585 (F02): the roster of a channel not joined is live. Bob watches
+  // the strip without joining; alice joining and leaving shows within 3 s,
+  // with no channel opened again. Bob's page holds one presence socket all
+  // along, and asks for no session, no device and no LiveKit connection.
+  test('the roster of a channel not joined shows people arriving and leaving', async ({ browser }) => {
+    // Each presence socket bob's page opens: its channel, and whether it is
+    // still open.
+    const sockets: { channel: string | null; open: boolean }[] = [];
+    let sessions = 0;
+    const b = await person(browser, 'bob', undefined, (page) => {
+      page.on('websocket', (ws) => {
+        const url = new URL(ws.url());
+        if (url.pathname !== '/v1/voice/ws') return;
+        const s = { channel: url.searchParams.get('channel'), open: true };
+        sockets.push(s);
+        ws.on('close', () => {
+          s.open = false;
+        });
+      });
+      page.on('request', (r) => {
+        if (r.url().endsWith('/voice/session')) sessions++;
+      });
+    });
+    const a = await person(browser, 'alice');
+    try {
+      const bob = voiceRegion(b.page);
+      const alice = voiceRegion(a.page);
+      const listed = bob.getByRole('list', { name: 'In voice' }).getByText('alice', { exact: true });
+      // Live before anyone joins, and alice from another test is gone.
+      await expect(bob.getByRole('button', { name: 'Join voice in #voice-room', exact: true })).toBeEnabled();
+      await expect(listed).toHaveCount(0, { timeout: 60_000 });
+      const opened = sockets.length;
+
+      await alice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(alice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(listed).toHaveCount(1, { timeout: 3000 });
+      await expect(bob).toContainText('Not in voice');
+
+      await alice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(alice).toContainText('Not in voice', { timeout: 10_000 });
+      await expect(listed).toHaveCount(0, { timeout: 3000 });
+
+      // One presence socket, for the channel on screen, all along: none
+      // opened again for alice's coming and going.
+      expect(sockets.length, 'presence sockets opened while alice came and went').toBe(opened);
+      expect(sockets.filter((s) => s.open).map((s) => s.channel), 'presence sockets open').toEqual([vw.channel]);
+      expect(sessions, 'voice sessions bob asked for').toBe(0);
+      expect(await b.page.evaluate(() => (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs.length), 'peer connections on bob\'s page').toBe(0);
+      await expectClean(b);
+    } finally {
+      await a.context.close();
+      await b.context.close();
     }
   });
 

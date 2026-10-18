@@ -7,7 +7,9 @@
 import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
 import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
-import { inviteUrl } from './world';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
+import type { InvitePermissionRequestV1 } from '../src/schema/generated';
+import { call, inviteUrl, ok, type World } from './world';
 
 // Things a phone's width finds first: a word with no place to break, an
 // address, and a line long enough to wrap many times. Each size posts its own.
@@ -66,6 +68,48 @@ for (const [size, options] of phones) {
     await expectFits(page, 'the lobby with the members panel open');
   });
 
+  // Issue #589: the whisper picker takes height from the log. A reader at the
+  // newest message stays there; one who has scrolled up is not moved.
+  test(`P589 at ${size} the newest message stays in view when the whisper picker opens and closes`, async ({ meet, world }) => {
+    const bodies = Array.from({ length: 40 }, (_, i) => `p589 ${size} line ${String(i + 1)}`);
+    for (const body of bodies) await post(world, world.tokens.nick, 'general', body);
+    const last = bodies[bodies.length - 1] ?? '';
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const log = messages(page);
+    const newest = log.getByRole('listitem').filter({ hasText: last });
+    await expect(newest).toBeVisible();
+    const scrolls = await log.evaluate((el) => el.scrollHeight > el.clientHeight);
+    expect(scrolls, 'the conversation is longer than the log').toBe(true);
+    await expectInside(page, newest, log, 'the newest message on opening the channel');
+
+    const to = page.getByLabel('To:');
+    const picker = conversation(page).getByRole('group', { name: 'Whisper to' });
+    await to.selectOption({ label: 'Whisper to…' });
+    await expect(picker).toBeVisible();
+    await expectInside(page, newest, log, 'the newest message with the whisper picker open');
+    await to.selectOption({ label: '#general' });
+    await expect(picker).toBeHidden();
+    await expectInside(page, newest, log, 'the newest message with the whisper picker closed');
+
+    // Scrolled up by more than the 24px that still counts as the end.
+    await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 200;
+    });
+    await frames(page);
+    const before = await firstVisible(log);
+    await to.selectOption({ label: 'Whisper to…' });
+    await expect(picker).toBeVisible();
+    await frames(page);
+    expect(Math.abs((await firstVisible(log)).top - before.top), `${before.text} moved with the picker open`).toBeLessThanOrEqual(1);
+    await to.selectOption({ label: '#general' });
+    await expect(picker).toBeHidden();
+    await frames(page);
+    const after = await firstVisible(log);
+    expect(after.text, 'the first message in view').toBe(before.text);
+    expect(Math.abs(after.top - before.top), `${before.text} moved with the picker closed`).toBeLessThanOrEqual(1);
+  });
+
   test(`P467 at ${size} a member opens a channel, posts and makes an invite, all by tapping`, async ({ meet, secrets, world }) => {
     const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general', 'nets-demo'], voice: false, may_invite: true });
     const name = unique(size.slice(0, 3));
@@ -109,6 +153,65 @@ for (const [size, options] of phones) {
     await panel.getByRole('button', { name: 'Done' }).tap();
     await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
   });
+
+  // Issue #601: the channel row shows there are more channels than fit, and
+  // the buttons that are only an icon, and the audience select, are big
+  // enough for a finger. A new person, made through the API rather than by an
+  // invite (redeeming counts against the network's tries, which 13-sign-in-
+  // link needs), in channels of their own, so the shared fixture people's
+  // lists are left as they are. They may invite, so Invite someone is shown.
+  test(`P601 at ${size} the channel row shows there is more, and the top bar's buttons and the audience select are finger-sized`, async ({ meet, secrets, world }) => {
+    const tag = `p601-${size.slice(0, 3)}-${String(Date.now())}`;
+    const op = world.tokens.operator;
+    const person: CreatePrincipalRequest = { kind: 'human', name: tag };
+    const id = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+    const label: CreateCredentialRequestV1 = { label: tag };
+    const { token } = await ok(world, op, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, label);
+    secrets.push(token);
+    const mayInvite: InvitePermissionRequestV1 = { may_invite: true };
+    await done(world, op, 'PUT', `/v1/principals/${String(id)}/invite-permission`, mayInvite);
+    const names = Array.from({ length: 8 }, (_, i) => `${tag}-${String(i + 1)}`);
+    for (const channel of names) {
+      await done(world, op, 'POST', '/v0/channels', { name: channel });
+      await done(world, op, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`);
+    }
+    const { page } = await meet(options);
+    await signIn(page, world, token, tag);
+    await expect(channelButton(page, names[names.length - 1] ?? '')).toBeAttached();
+    await expect(page.getByLabel('To:')).toBeVisible();
+
+    for (const [what, target] of [
+      ['Members', page.getByRole('button', { name: 'Members' })],
+      ['Settings', page.getByRole('button', { name: 'Settings' })],
+      ['Invite someone', page.getByRole('region', { name: 'Invites' }).getByRole('button', { name: 'Invite someone' })],
+      ['the audience select', page.getByLabel('To:')],
+    ] as const) {
+      const box = await target.boundingBox();
+      if (box === null) throw new Error(`${what} has no box on the screen`);
+      const where = `${what} is ${String(box.width)}×${String(box.height)}`;
+      expect(box.width, where).toBeGreaterThanOrEqual(44);
+      expect(box.height, where).toBeGreaterThanOrEqual(44);
+    }
+    await expectFits(page, 'the lobby with more channels than fit');
+
+    // At the start the fade is on the right edge only; at the end, the left.
+    const row = page.getByRole('navigation', { name: 'Channels' }).getByRole('list');
+    const fades = () =>
+      row.evaluate((el) => ({ before: getComputedStyle(el, '::before').opacity, after: getComputedStyle(el, '::after').opacity }));
+    await row.evaluate((el) => {
+      el.scrollLeft = 0;
+    });
+    await expect(row).toHaveClass(/\bmore-after\b/);
+    await expect(row).not.toHaveClass(/\bmore-before\b/);
+    expect(await fades()).toEqual({ before: '0', after: '1' });
+    await row.evaluate((el) => {
+      el.scrollLeft = el.scrollWidth;
+    });
+    await expect(row).toHaveClass(/\bmore-before\b/);
+    await expect(row).not.toHaveClass(/\bmore-after\b/);
+    expect(await fades()).toEqual({ before: '1', after: '0' });
+    await expectFits(page, 'the lobby with the channel row scrolled to its end');
+  });
 }
 
 // expectOnScreen checks that an element, scrolled into view, lies wholly
@@ -124,6 +227,53 @@ async function expectOnScreen(page: Page, element: Locator, what: string): Promi
   expect(box.y, where).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width, where).toBeLessThanOrEqual(screen.width);
   expect(box.y + box.height, where).toBeLessThanOrEqual(screen.height);
+}
+
+// expectInside checks that an element lies wholly inside the visible box of
+// the log that scrolls it, once the page has settled.
+async function expectInside(page: Page, element: Locator, log: Locator, what: string): Promise<void> {
+  await frames(page);
+  const box = await element.boundingBox();
+  const frame = await log.boundingBox();
+  if (box === null || frame === null) throw new Error(`${what} has no box on the screen`);
+  const where = `${what} is at y ${String(box.y)}, ${String(box.height)} high, in a log from y ${String(frame.y)}, ${String(frame.height)} high`;
+  expect(box.y, where).toBeGreaterThanOrEqual(frame.y - 1);
+  expect(box.y + box.height, where).toBeLessThanOrEqual(frame.y + frame.height + 1);
+}
+
+// firstVisible is the first message whose bottom is below the log's top: its
+// text and where its top is on the screen.
+async function firstVisible(log: Locator): Promise<{ readonly text: string; readonly top: number }> {
+  return log.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    for (const li of el.querySelectorAll('li')) {
+      const box = li.getBoundingClientRect();
+      if (box.bottom > top) return { text: li.textContent, top: box.top };
+    }
+    throw new Error('no message is in view');
+  });
+}
+
+// frames waits for two animation frames: a resize and the scroll it causes
+// are both drawn by then.
+async function frames(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            done();
+          });
+        });
+      }),
+  );
+}
+
+// done makes an operator's call that must succeed and whose reply is not
+// needed.
+async function done(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<void> {
+  const reply = await call(world, token, method, path, body);
+  if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);
 }
 
 // keepToken hands the credential the invite gave this page to the fixture's

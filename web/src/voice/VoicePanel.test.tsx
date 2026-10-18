@@ -7,14 +7,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
-import type { VoiceControl } from './useVoice';
+import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
 const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
 
 // A client that is never asked to connect: the panel reads the state it is
 // given, and join and leave are recorded instead.
-function control(state: VoiceState, calls: string[]): VoiceControl {
+function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceControl {
   const client = new VoiceClient({
     clock: new FakeClock(),
     random: () => 0.5,
@@ -28,7 +28,7 @@ function control(state: VoiceState, calls: string[]): VoiceControl {
   });
   return {
     state,
-    snapshot: { kind: 'presence', presence },
+    snapshot,
     shown: state.channel,
     talkKey: 'Backquote',
     capturing: false,
@@ -49,12 +49,12 @@ function control(state: VoiceState, calls: string[]): VoiceControl {
   };
 }
 
-function panel(state: VoiceState, viewed: string | null) {
+function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }) {
   const calls: string[] = [];
   const opened: string[] = [];
   render(
     <VoicePanel
-      voice={control(state, calls)}
+      voice={control(state, calls, snapshot)}
       viewer={7}
       people={new Map()}
       viewed={viewed}
@@ -137,5 +137,76 @@ describe('the channel voice is in', () => {
     const { voice, opened } = panel(inVoice('connected', 'a'), null);
     fireEvent.click(within(voice).getByRole('button', { name: '#a' }));
     expect(opened).toEqual(['a']);
+  });
+});
+
+// Issue #585: what the strip says about a channel's voice while not in it, row
+// by row: nothing before the first frame, the live roster, the server out of
+// reach (no roster, which may be stale), a person without voice, and a socket
+// the server closed for another reason.
+describe('the strip while not in voice', () => {
+  const unreachable = 'Voice status unavailable: the server cannot be reached.';
+  const notAllowed = 'Your account does not include voice. Ask whoever invited you.';
+  const unread = 'Voice status could not be read.';
+  const someone: VoicePresenceV1 = {
+    ...presence,
+    rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
+  };
+  const lines = (voice: HTMLElement) => [unreachable, notAllowed, unread].filter((l) => voice.textContent.includes(l));
+  const roster = (voice: HTMLElement) => within(voice).queryByRole('list', { name: 'In voice' });
+  // Enabled, disabled, or not there.
+  const offered = (voice: HTMLElement) =>
+    ['Join voice in #c', 'Watch only in #c'].map((name) => {
+      const b = within(voice).queryByRole('button', { name });
+      return b === null ? 'absent' : b.hasAttribute('disabled') ? 'disabled' : 'enabled';
+    });
+
+  it('says nothing yet before the first frame, and cannot be joined', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'loading' });
+    expect(lines(voice)).toEqual([]);
+    expect(roster(voice)).toBeNull();
+    expect(offered(voice)).toEqual(['disabled', 'disabled']);
+  });
+
+  it('shows the roster of a live snapshot, and can be joined', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'presence', presence: someone });
+    expect(lines(voice)).toEqual([]);
+    expect(roster(voice)?.textContent).toContain('Member 3');
+    expect(offered(voice)).toEqual(['enabled', 'enabled']);
+  });
+
+  it('cannot be joined on a snapshot that says voice is down', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'presence', presence: { ...presence, available: false } });
+    expect(voice.textContent).toContain('Voice is unavailable right now; chat still works.');
+    expect(offered(voice)).toEqual(['disabled', 'disabled']);
+  });
+
+  it('says the server cannot be reached, shows no roster, and cannot be joined', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'unreachable' });
+    expect(lines(voice)).toEqual([unreachable]);
+    expect(roster(voice)).toBeNull();
+    expect(offered(voice)).toEqual(['disabled', 'disabled']);
+  });
+
+  it('tells a person without voice who to ask, and offers no join', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'not_allowed' });
+    expect(lines(voice)).toEqual([notAllowed]);
+    expect(voice.textContent).toMatch(/^Not in voice/);
+    expect(roster(voice)).toBeNull();
+    expect(offered(voice)).toEqual(['absent', 'absent']);
+    expect(within(voice).queryAllByRole('button')).toEqual([]);
+  });
+
+  it('says the status could not be read after the server closed the socket, and cannot be joined', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'gone' });
+    expect(lines(voice)).toEqual([unread]);
+    expect(roster(voice)).toBeNull();
+    expect(offered(voice)).toEqual(['disabled', 'disabled']);
+  });
+
+  it('says voice is not set up on a server without LiveKit, and offers no join', () => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'presence', presence: { ...presence, configured: false, available: false } });
+    expect(voice.textContent).toContain('Voice is not set up on this server');
+    expect(within(voice).queryAllByRole('button')).toEqual([]);
   });
 });

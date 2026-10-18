@@ -272,14 +272,15 @@ describe('what the voice client records', () => {
     );
     client.join(channelName);
     await settle();
+    // A refused microphone stops (issue #586); the person joins again.
     refuse = false;
-    clock.advance(60_000);
+    client.join(channelName);
     await settle();
     expect(client.snapshot().phase).toBe('connected');
     expect(timeless()).toEqual([
       { kind: 'voice_state', state: 'connecting' },
       { kind: 'device_error', name: 'NotAllowedError' },
-      { kind: 'voice_state', state: 'unavailable' },
+      { kind: 'voice_state', state: 'stopped' },
       { kind: 'voice_state', state: 'connecting' },
       { kind: 'voice_state', state: 'connected' },
     ]);

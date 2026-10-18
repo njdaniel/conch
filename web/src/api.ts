@@ -1072,8 +1072,9 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
   return { ok: false, failure: 'invalid' };
 }
 
-// getVoicePresence reads who is in a channel's voice, once. The presence
-// socket takes over while the caller is in voice.
+// getVoicePresence reads who is in a channel's voice, once. The page keeps
+// presence on its socket, joined or not, and reads this only to learn why
+// the server closed that socket (1008).
 export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
   return authed(`${channelPath(channel)}/voice`, voicePresenceV1);
 }
