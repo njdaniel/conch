@@ -43,6 +43,10 @@ func voiceIdentity(principalID int64) string { return "p" + strconv.FormatInt(pr
 // it records the denial, not a session).
 func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Counted for the metrics whatever the answer: tokens issued, or refused
+	// for any reason (metrics.go).
+	issued := false
+	defer func() { s.metrics.voiceSession(issued) }()
 	channel, caller, ok := s.voiceSessionCaller(w, r)
 	if !ok {
 		return
@@ -86,6 +90,7 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.InfoContext(ctx, "voice: session issued", "principal", caller.ID, "channel", channel.ID)
+	issued = true
 	// The body carries bearer tokens: never cached.
 	writeSecretJSON(w, http.StatusOK, resp)
 }

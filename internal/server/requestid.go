@@ -87,10 +87,12 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // requestIDMiddleware is the outermost handler: outside authentication, so a
 // refused request has an id too. It sets the header before anything is
-// written, and after the request records it in the caller's ring when the
-// route wrapper found a caller.
+// written, and after the request counts it for the metrics (metrics.go), by
+// the route the route wrapper found, and records it in the caller's ring when
+// the route wrapper found a caller.
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		id := newRequestID()
 		// Ignored, not trusted: dropped so nothing further in can read it.
 		r.Header.Del(schema.RequestIDHeader)
@@ -99,12 +101,13 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(withRequestID(r.Context(), id), requestTraceKey{}, trace)
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r.WithContext(ctx))
-		if trace.principalID == 0 {
-			return
-		}
 		status := sw.status
 		if status == 0 {
 			status = http.StatusOK
+		}
+		s.metrics.observeRequest(s.metricsRoute(r, trace.route), status, time.Since(start))
+		if trace.principalID == 0 {
+			return
 		}
 		s.diag.recordRequest(trace.principalID, schema.ServerRequestTraceV1{
 			At: schema.NewTimestamp(s.now()), RequestID: id, Route: trace.route, Status: status,
@@ -113,7 +116,8 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 }
 
 // traceRoute wraps each route's handler: inside the mux, past authentication,
-// it is where the caller and the matched pattern are known.
+// it is where the caller and the matched pattern are known. The pattern is
+// also the route label of the request's metrics.
 func traceRoute(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if t := requestTraceFrom(r.Context()); t != nil {

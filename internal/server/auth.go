@@ -164,17 +164,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if matched && rt.acceptsTicket && len(r.Header.Values("Authorization")) == 0 && r.URL.Query().Has("ticket") {
 				principal, credentialID, redeemed := s.redeemWSTicket(w, r)
 				if !redeemed {
+					s.metrics.authFailed("invalid_ticket")
 					return
 				}
 				next.ServeHTTP(w, r.WithContext(withCredentialID(withCaller(r.Context(), principal), credentialID)))
 				return
 			}
+			s.metrics.authFailed("missing_credential")
 			writeUnauthenticated(w)
 			return
 		}
 		principal, credentialID, err := s.store.ResolveCredentialDetail(r.Context(), token)
 		switch {
 		case errors.Is(err, store.ErrCredentialInvalid):
+			s.metrics.authFailed("invalid_credential")
 			writeUnauthenticated(w)
 			return
 		case err != nil:
