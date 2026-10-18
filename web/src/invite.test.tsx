@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { heldLine } from './Invite';
+import { goneHeading, heldLine, noLongerWorks } from './Invite';
 import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
 
 const origin = 'http://127.0.0.1:8080';
@@ -250,17 +250,52 @@ describe('the landing page', () => {
   it.each<{ readonly when: string; readonly routes: Record<string, Route> }>([
     { when: 'previewed', routes: { 'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
     { when: 'redeemed', routes: { 'POST /v1/invites/redeem': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
-  ])('says the one "no longer works" when the invite is invalid, $when', async ({ routes }) => {
+  ])('says the one "can\'t be used" when the invite is invalid, $when', async ({ routes }) => {
     const { view } = opened({ ...joining, ...routes });
     if (routes['POST /v1/invites/redeem'] !== undefined) await chooseName('wren');
-    expect(await screen.findByText('This invite no longer works. Ask the person who sent it for a new one.')).toBeDefined();
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('This invite no longer works');
+    expect(await screen.findByText(noLongerWorks)).toBeDefined();
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe("This link can't be used");
     expect(screen.queryByLabelText('Your name')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    // Nobody is signed in here: no button, so none leads to the credential form.
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
     expectNoCode(view.container);
-    // Going back drops the code: the sign-in page, and nothing to come back to.
-    fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
-    await screen.findByLabelText('Credential');
+  });
+
+  // Issue #593 (F19): the server gives one answer for every cause, so the
+  // page does too. Each is a code the server does not take.
+  it.each([
+    { cause: 'used', hash: `#/invite/${inviteCode}` },
+    { cause: 'closed', hash: `#/invite/${inviteCode}` },
+    { cause: 'expired', hash: `#/invite/${inviteCode}` },
+    { cause: 'malformed', hash: '#/invite/%E0%A4%A' },
+  ])('shows the same heading and alert for a $cause invite, sharing no sentence', async ({ hash }) => {
+    serve({ ...joining, 'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') });
+    window.location.hash = hash;
+    const view = render(<App origin={origin} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.');
+    const heading = screen.getByRole('heading', { level: 1 });
+    expect(heading.textContent).toBe(goneHeading);
+    expect(alert.textContent).not.toContain(heading.textContent);
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryByLabelText('Credential')).toBeNull();
+    expectNoCode(view.container);
+  });
+
+  it('offers someone signed in here "Back to Conch", to the lobby, for an invite that cannot be used', async () => {
+    window.localStorage.setItem(key, memberToken);
+    const { calls, view } = opened({
+      ...as(memberToken, member, channelList('general')),
+      'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid'),
+    });
+    expect(await screen.findByText(noLongerWorks)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Go back' })).toBeNull();
+    expectNoCode(view.container);
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Conch' }));
+    await screen.findByRole('navigation', { name: 'Channels' });
+    expect(window.localStorage.getItem(key)).toBe(memberToken);
+    expect(calls.some((c) => c.path === '/v1/credentials/current')).toBe(false);
   });
 
   it.each([
@@ -459,7 +494,8 @@ describe('invite someone', () => {
     fireEvent.click(make);
     const link = await within(panel).findByRole<HTMLInputElement>('textbox', { name: 'Invite link' });
     expect(link.value).toBe(`${origin}/app/#/invite/${newCode}`);
-    expect(within(panel).getByText(/Anyone with this link can join/)).toBeDefined();
+    expect(within(panel).getByText(/The first person to open this link joins/)).toBeDefined();
+    expect(within(panel).queryByText(/Anyone with this link/)).toBeNull();
     // The default expiry is the server's: none is sent.
     expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: false });
 
@@ -613,6 +649,117 @@ describe('invite someone', () => {
     const list = await within(panel).findByRole('list', { name: 'Your invites' });
     fireEvent.click(await within(list).findByRole('button', { name: 'Close' }));
     await within(panel).findByText('2 invites left');
+  });
+
+  // Issue #593 (F18): the new link's words follow its kind.
+  it.each([
+    { kind: 'personal', says: /The first person to open this link joins/, not: /Anyone with this link/ },
+    { kind: 'open', says: /Anyone with this link can join/, not: /The first person to open this link/ },
+  ])('says who a new $kind link lets in', async ({ kind, says, not }) => {
+    serve({
+      ...as(operatorToken, operator, channelList('general')),
+      'POST /v1/invites': () => json({ invite: inviteOf(8, 1, { kind }), code: newCode }, 201),
+      'GET /v1/invites': () => json({ invites: [] }),
+    });
+    window.sessionStorage.setItem(key, operatorToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    if (kind === 'open') fireEvent.click(within(panel).getByRole('radio', { name: 'Open link: anyone with it' }));
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    const box = await within(panel).findByRole('group', { name: 'New invite link' });
+    expect(within(box).getByText(says)).toBeDefined();
+    expect(box.textContent).not.toMatch(not);
+    expect(box.textContent).toContain('It is shown only now: copy it and send it to the person you are inviting.');
+  });
+
+  it('puts focus on Make invite after Done, reads the list again, and Escape still closes the panel', async () => {
+    const calls = serve({
+      ...as(memberToken, inviter, channelList('general')),
+      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+      'GET /v1/invites': () => json({ invites: [inviteOf(7, 2)] }),
+    });
+    const reads = () => calls.filter((c) => c.path === '/v1/invites' && c.method === 'GET').length;
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    const done = await within(panel).findByRole('button', { name: 'Done' });
+    await within(panel).findByRole('list', { name: 'Your invites' });
+    await act(async () => {});
+    const before = reads();
+    done.focus();
+    fireEvent.click(done);
+    const make = within(panel).getByRole('button', { name: 'Make invite' });
+    expect(document.activeElement).toBe(make);
+    await waitFor(() => {
+      expect(reads()).toBe(before + 1);
+    });
+    fireEvent.keyDown(make, { key: 'Escape' });
+    const toggle = within(panel).getByRole('button', { name: 'Invite someone' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+    await act(async () => {});
+  });
+
+  it('says when the list was read, and reads it again when the page is shown again while open', async () => {
+    let listed = [inviteOf(7, 2)];
+    const calls = serve({
+      ...as(memberToken, inviter, channelList('general')),
+      'GET /v1/invites': () => json({ invites: listed }),
+    });
+    const reads = () => calls.filter((c) => c.path === '/v1/invites' && c.method === 'GET').length;
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your invites' });
+    expect(await within(list).findByRole('button', { name: 'Close' })).toBeDefined();
+    const readAt = await within(panel).findByText((_, el) => el?.tagName === 'SPAN' && /^Read at \d\d:\d\d$/.test(el.textContent));
+    expect(readAt.querySelector('time')?.getAttribute('datetime')).toMatch(/^\d{4}-\d\d-\d\dT/);
+    await act(async () => {});
+
+    // Someone redeems it elsewhere; the tab is hidden, then shown again.
+    listed = [inviteOf(7, 2, { uses: 1 })];
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const before = reads();
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(reads()).toBe(before);
+    visibility.mockReturnValue('visible');
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await within(list).findByText('Used');
+    expect(within(list).getByText('· joined')).toBeDefined();
+    expect(within(list).queryByRole('button', { name: 'Close' })).toBeNull();
+    expect(reads()).toBe(before + 1);
+
+    // Once closed, the panel does not read on being shown again.
+    fireEvent.click(within(panel).getByRole('button', { name: 'Invite someone' }));
+    await act(async () => {});
+    const closed = reads();
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(reads()).toBe(closed);
+  });
+
+  it('shows a use elsewhere on Refresh', async () => {
+    let listed = [inviteOf(7, 2)];
+    serve({
+      ...as(memberToken, inviter, channelList('general')),
+      'GET /v1/invites': () => json({ invites: listed }),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your invites' });
+    await within(list).findByText('Open');
+    listed = [inviteOf(7, 2, { uses: 1 })];
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await within(list).findByText('Used');
   });
 
   it('shows an operator no count, since operators have no allowance', async () => {

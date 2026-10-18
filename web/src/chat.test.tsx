@@ -1026,6 +1026,106 @@ describe('scrolling', () => {
     expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
   });
 
+  // A stand-in ResizeObserver (jsdom has none) that keeps what it watches and
+  // its callback, so a test can say when the log's height has changed.
+  class FakeObserver {
+    static all: FakeObserver[] = [];
+    watched: Element[] = [];
+    disconnected = false;
+    constructor(readonly callback: ResizeObserverCallback) {
+      FakeObserver.all.push(this);
+    }
+    observe(el: Element) {
+      this.watched.push(el);
+    }
+    unobserve() {}
+    disconnect() {
+      this.disconnected = true;
+    }
+  }
+  const watching = (log: HTMLElement) => FakeObserver.all.filter((o) => !o.disconnected && o.watched.includes(log));
+  function resized(log: HTMLElement) {
+    const observers = watching(log);
+    expect(observers).toHaveLength(1);
+    act(() => {
+      for (const o of observers) o.callback([], o);
+    });
+  }
+  function stubObserver() {
+    FakeObserver.all = [];
+    vi.stubGlobal('ResizeObserver', FakeObserver);
+  }
+
+  it('keeps a reader at the newest message there when the log gets shorter or taller', async () => {
+    stubObserver();
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1000, top: 700, client: 300 };
+    geometry(log, geo);
+    fireEvent.scroll(log);
+    // Something below the log (the whisper picker) takes 100px of it.
+    geo.client = 200;
+    resized(log);
+    expect(geo.top).toBe(1000);
+    // And gives it back.
+    fireEvent.scroll(log);
+    geo.client = 300;
+    resized(log);
+    expect(geo.top).toBe(1000);
+    expect(screen.queryByRole('button', { name: 'Jump to latest' })).toBeNull();
+  });
+
+  it('leaves a reader who has scrolled up where they are when the log changes height', async () => {
+    stubObserver();
+    server.history.general = [message(1, 'one')];
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1000, top: 100, client: 300 };
+    geometry(log, geo);
+    fireEvent.scroll(log);
+    geo.client = 200;
+    resized(log);
+    expect(geo.top).toBe(100);
+    geo.client = 300;
+    resized(log);
+    expect(geo.top).toBe(100);
+    // Jump to latest still comes and works as before.
+    socket.send(message(2, 'two'));
+    const jump = await screen.findByRole('button', { name: 'Jump to latest' });
+    expect(geo.top).toBe(100);
+    fireEvent.click(jump);
+    expect(geo.top).toBe(1000);
+  });
+
+  it('stops watching the log when the conversation goes', async () => {
+    stubObserver();
+    await openChat();
+    const log = screen.getByRole('log');
+    expect(watching(log)).toHaveLength(1);
+    cleanup();
+    expect(FakeObserver.all.every((o) => o.disconnected)).toBe(true);
+  });
+
+  it('works without a ResizeObserver, as in jsdom', async () => {
+    expect(typeof globalThis.ResizeObserver).toBe('undefined');
+    const errors = vi.spyOn(console, 'error');
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1000, top: 700, client: 300 };
+    geometry(log, geo);
+    fireEvent.scroll(log);
+    geo.client = 200;
+    geo.height = 1020;
+    socket.send(message(1, 'one'));
+    await screen.findByText('one');
+    expect(geo.top).toBe(1020);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
   it('has a Load older messages button for keyboard readers', async () => {
     server.history.general = Array.from({ length: 101 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
     await openChat();
