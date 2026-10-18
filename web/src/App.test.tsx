@@ -258,7 +258,7 @@ describe('lobby', () => {
     const voice = screen.getByRole('region', { name: 'Voice' });
     expect(document.body.textContent.replace(voice.textContent, '')).not.toMatch(/voice|join/i);
     expect(voice.textContent).toMatch(/^Not in voice/);
-    expect(within(voice).getByRole('button', { name: 'Join voice' }).hasAttribute('disabled')).toBe(true);
+    expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).hasAttribute('disabled')).toBe(true);
   });
 
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
