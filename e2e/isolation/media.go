@@ -119,6 +119,39 @@ func (lk *liveKit) anywhere(id int64) (int, error) {
 
 func identity(id int64) string { return fmt.Sprintf("p%d", id) }
 
+// lkParticipantKeys are the keys under which lk names a participant by
+// identity in its log, as lk v2.19.0 and the server-sdk-go it is built with
+// write them: "participant" (participant connected, track subscribed, and
+// every line of a remote participant's own logger). "participantID" and
+// "localParticipant" hold the SID LiveKit assigns (PA_...), never the
+// identity conchd chose, so they cannot name p<id>.
+var lkParticipantKeys = []string{"participant"}
+
+// namesParticipant reports whether an lk log line names participant p<id>:
+// as the whole value of one of lkParticipantKeys. A bare p<id> is not enough,
+// since a room name, a track id or a longer identity (p<id>0) can hold it.
+func namesParticipant(line string, id int64) bool {
+	for _, k := range lkParticipantKeys {
+		if strings.Contains(line, `"`+k+`": "`+identity(id)+`"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// linesNaming returns the lines of hl's log that name participant p<id> and
+// contain every one of also. Every check of whom lk was told of goes through
+// it, so no two members are matched in different ways.
+func linesNaming(hl *lkit.Headless, id int64, also ...string) []string {
+	var out []string
+	for _, line := range hl.LogLines(also...) {
+		if namesParticipant(line, id) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // voiceA puts A in voice: ann joins through lk, publishing a microphone,
 // claims the share and publishes a screen and its sound on the same
 // connection; amy joins with a bare signalling connection.
@@ -274,9 +307,8 @@ func (w *world) mediaB(v *voiceA) error {
 		return err
 	}
 	defer viewer.Stop()
-	beaIdentity := `"participant": "` + identity(bea.id) + `"`
 	if err := waitFor("bob to be subscribed to bea's microphone in B's room", 30*time.Second, func() (bool, string) {
-		got := viewer.LogLines("track subscribed", beaIdentity)
+		got := linesNaming(viewer, bea.id, "track subscribed")
 		if viewer.Exited() {
 			return false, "lk exited: " + viewer.Tail()
 		}
@@ -290,12 +322,13 @@ func (w *world) mediaB(v *voiceA) error {
 	} else if screen, audio := lkit.ShareTracks(p); !screen || !audio {
 		return fmt.Errorf("ann's share ended while B looked: sources %v", p.Sources())
 	}
-	annIdentity := `"participant": "` + identity(ann.id) + `"`
-	if got := viewer.LogLines(annIdentity); len(got) > 0 {
-		return fmt.Errorf("bob's lk in B's room was told of ann: %s", w.h.redact(got[0]))
-	}
-	if got := viewer.LogLines(identity(w.a.people[2].id) + `"`); len(got) > 0 {
-		return fmt.Errorf("bob's lk in B's room was told of amy: %s", w.h.redact(got[0]))
+	for _, who := range []struct {
+		name string
+		id   int64
+	}{{"ann", ann.id}, {"amy", w.a.people[2].id}} {
+		if got := linesNaming(viewer, who.id); len(got) > 0 {
+			return fmt.Errorf("bob's lk in B's room was told of %s: %s", who.name, w.h.redact(got[0]))
+		}
 	}
 	for _, hl := range []*lkit.Headless{beaLK, viewer} {
 		for _, t := range hl.Relay.IssuedTokens() {
