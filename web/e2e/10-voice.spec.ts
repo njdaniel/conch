@@ -461,8 +461,12 @@ test.describe('with LiveKit', () => {
           const more = voice.getByRole('button', { name: 'More about sharing' });
           await expect(more, `${size}: the line about sharing shows before Share screen is pressed`).toBeVisible();
           await expect(voice.getByText(/^Talk key: .* It works only while this tab has focus/)).toBeVisible();
-          const { height, line } = await notesHeight(voice);
-          expect(height, `${size}: the notes are ${String(height)} px high, one line is ${String(line)} px`).toBeLessThanOrEqual(line + 1);
+          // The line about sharing is one line (the issue's criterion). The
+          // talk-key note beside it may wrap to a line of its own where fonts
+          // are wider (CI), so the whole block is held to two lines.
+          const { height, share, line } = await notesHeight(voice);
+          expect(share, `${size}: the line about sharing is ${String(share)} px high, one line is ${String(line)} px`).toBeLessThanOrEqual(line + 1);
+          expect(height, `${size}: the notes are ${String(height)} px high, two lines are ${String(2 * line)} px`).toBeLessThanOrEqual(2 * line + 8);
 
           await more.click();
           await expect(voice.getByRole('button', { name: 'Voice options', expanded: true })).toBeVisible();
@@ -917,14 +921,20 @@ async function expectInside(element: Locator, log: Locator, what: string): Promi
 
 // notesHeight is how high the strip's notes are, and one line of their text
 // with the notes' own padding (issue #600).
-async function notesHeight(voice: Locator): Promise<{ readonly height: number; readonly line: number }> {
+async function notesHeight(voice: Locator): Promise<{ readonly height: number; readonly share: number; readonly line: number }> {
   return voice.evaluate((el) => {
     const notes = el.querySelector('.voice-notes');
     const hint = notes?.querySelector('.hint');
-    if (!(notes instanceof HTMLElement) || !(hint instanceof HTMLElement)) throw new Error('no notes in the strip');
+    // The line about sharing: the hint that holds More about sharing.
+    const share = notes?.querySelector('button.more')?.closest('.hint');
+    if (!(notes instanceof HTMLElement) || !(hint instanceof HTMLElement) || !(share instanceof HTMLElement)) throw new Error('no notes in the strip');
     const own = getComputedStyle(notes);
     const text = getComputedStyle(hint);
     const line = text.lineHeight.endsWith('px') ? parseFloat(text.lineHeight) : parseFloat(text.fontSize) * parseFloat(text.lineHeight);
-    return { height: notes.getBoundingClientRect().height, line: line + parseFloat(own.paddingTop) + parseFloat(own.paddingBottom) };
+    return {
+      height: notes.getBoundingClientRect().height - parseFloat(own.paddingTop) - parseFloat(own.paddingBottom),
+      share: share.getBoundingClientRect().height,
+      line,
+    };
   });
 }
