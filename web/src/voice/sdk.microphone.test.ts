@@ -6,10 +6,11 @@
 // a device change that switches to the first device listed, a capture that
 // ends while unmuted, and the next unmute after a capture ended. The browser's
 // devices are a stub that counts every capture asked for. jsdom, no network,
-// no microphone.
+// no microphone. The voice processing asked for (issue #659) is checked the
+// same way.
 import { createLocalAudioTrack, LocalTrackPublication, Room, RoomEvent, Track, type LocalAudioTrack } from 'livekit-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { captureMicrophone } from './sdk';
+import { captureMicrophone, microphoneOptions } from './sdk';
 
 // A browser's capture of one device.
 class FakeCapture extends EventTarget {
@@ -133,6 +134,46 @@ describe('a chosen microphone', () => {
     expect(track.source).toBe(Track.Source.Microphone);
     expect(capture(track).deviceId).toBe('mic-1');
     expect(browser.asked).toHaveLength(1);
+    track.stop();
+  });
+});
+
+// Issue #659: what the browser is asked for, with voice processing on and
+// off, at a first capture and at a restart. The SDK's restart drops every
+// filter when its constraints name no device; given options, it names the
+// default as a preference, so the filters reach the system default too.
+describe('voice processing', () => {
+  const filters = (on: boolean) => ({ echoCancellation: on, noiseSuppression: on, autoGainControl: on });
+  const named = (audio: MediaStreamConstraints['audio']): unknown => (typeof audio === 'object' ? audio.deviceId : undefined);
+
+  it.each([true, false])('a first capture asks for each filter as given (on: %s), and a chosen device exactly', async (on) => {
+    const chosen = await captureMicrophone('mic-1', on);
+    expect(browser.asked).toHaveLength(1);
+    expect(browser.asked[0]?.audio).toMatchObject({ deviceId: { exact: 'mic-1' }, ...filters(on) });
+    chosen.stop();
+    const following = await captureMicrophone(null, on);
+    expect(browser.asked).toHaveLength(2);
+    expect(browser.asked[1]?.audio).toMatchObject(filters(on));
+    expect(named(browser.asked[1]?.audio)).not.toHaveProperty('exact');
+    following.stop();
+  });
+
+  it('with processing off, voice isolation is asked off too', async () => {
+    const track = await captureMicrophone(null, false);
+    expect(browser.asked[0]?.audio).toMatchObject({ voiceIsolation: false });
+    track.stop();
+  });
+
+  it.each([true, false])('a restart asks for the device and each filter (on: %s), the system default included', async (on) => {
+    const track = await captureMicrophone('mic-1', !on);
+    browser.asked.length = 0;
+    await track.restartTrack(microphoneOptions('mic-1', on));
+    expect(browser.asked).toHaveLength(1);
+    expect(browser.asked[0]?.audio).toMatchObject({ deviceId: { exact: 'mic-1' }, ...filters(on) });
+    await track.restartTrack(microphoneOptions(null, on));
+    expect(browser.asked).toHaveLength(2);
+    expect(browser.asked[1]?.audio).toMatchObject(filters(on));
+    expect(named(browser.asked[1]?.audio)).not.toHaveProperty('exact');
     track.stop();
   });
 });

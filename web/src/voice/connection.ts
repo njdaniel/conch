@@ -34,6 +34,12 @@
 // ended, or the device chosen is no longer listed) is missing: the gate stays
 // blocked, and nothing is captured, on this connection or the next, until
 // the person chooses one.
+//
+// The browser's voice processing (echo cancellation, noise suppression and
+// automatic gain) is one switch per microphone (issue #659), on unless the
+// person turned it off for that device, System default being a device of its
+// own. A change in voice captures the same device again, through the same
+// switch: the browser ignores a change of the filters on a live capture.
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
@@ -90,6 +96,33 @@ export interface Microphone {
   readonly label: string;
 }
 
+// What a capture says of the browser's voice processing (issue #659): each
+// filter on, off, or null where the browser does not say.
+export interface Processing {
+  readonly echoCancellation: boolean | null;
+  readonly noiseSuppression: boolean | null;
+  readonly autoGainControl: boolean | null;
+}
+
+// Where the voice processing chosen for each microphone is kept: by device
+// id, and System default (null) as a device of its own. A device never set
+// has it on.
+export interface ProcessingStore {
+  readonly get: (device: string | null) => boolean;
+  readonly set: (device: string | null, on: boolean) => void;
+}
+
+// memoryStore keeps the choices for as long as the client lasts.
+function memoryStore(): ProcessingStore {
+  const kept = new Map<string | null, boolean>();
+  return {
+    get: (device) => kept.get(device) ?? true,
+    set: (device, on) => {
+      kept.set(device, on);
+    },
+  };
+}
+
 export interface RoomEvents {
   readonly onReconnecting: () => void;
   readonly onReconnected: () => void;
@@ -131,15 +164,22 @@ export interface Room extends ShareRoom {
   // The microphone to capture: a device by id, captured exactly or not at
   // all, or null for the system default. Set before connecting.
   setMicrophone: (choice: string | null) => void;
-  // Moves the microphone to another device, keeping its publication and its
-  // mute; or captures and publishes it if nothing is. It rejects, with
-  // nothing captured, if the device cannot be had.
+  // Whether the browser's voice processing is asked for, at every capture
+  // from here on: the next connection's, and a switch's.
+  setProcessing: (on: boolean) => void;
+  // Moves the microphone to another device, or captures the same one again,
+  // keeping its publication and its mute; or captures and publishes it if
+  // nothing is. It rejects, with nothing captured, if the device cannot be
+  // had.
   switchMicrophone: (choice: string | null) => Promise<void>;
   // The microphones the browser lists, read without asking for any device;
   // null when it does not name them.
   microphones: () => Promise<readonly Microphone[] | null>;
   // The device the microphone is captured from, or null while none is.
   microphoneInUse: () => string | null;
+  // What the capture says of its voice processing, or null while nothing is
+  // captured.
+  microphoneProcessing: () => Processing | null;
   // Subscribes to a share's picture and sound, or lets them go. Microphones
   // are always subscribed.
   setWatching: (on: boolean) => void;
@@ -183,6 +223,10 @@ export interface VoiceState {
   readonly microphone: Microphone | null;
   // The device the capture is on, by id, or null while nothing is captured.
   readonly inUse: string | null;
+  // Whether voice processing is on for the microphone chosen, and what the
+  // capture says of it, or null while nothing is captured.
+  readonly processing: boolean;
+  readonly reported: Processing | null;
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
@@ -200,6 +244,9 @@ export interface VoiceEnv {
   readonly gate?: GateOptions;
   // The microphone chosen earlier in this tab, if any (issue #658).
   readonly microphone?: Microphone | null;
+  // The voice processing chosen for each microphone (issue #659); without
+  // it, the choices last as long as the client.
+  readonly processing?: ProcessingStore;
 }
 
 // How long the SDK's own reconnect is allowed before the client goes back to
@@ -236,10 +283,20 @@ export const initialVoice: VoiceState = {
   microphones: null,
   microphone: null,
   inUse: null,
+  processing: true,
+  reported: null,
   missing: false,
 };
 
 const noTracks: ShareTracks = { video: false, audio: false };
+
+// Nothing captured: no device in use, and nothing said of its processing.
+const nothingInUse = { inUse: null, reported: null } as const;
+
+// inUseOn is what a room's capture says: its device and its processing.
+function inUseOn(room: Room): Pick<VoiceState, 'inUse' | 'reported'> {
+  return { inUse: room.microphoneInUse(), reported: room.microphoneProcessing() };
+}
 
 export class VoiceClient {
   private readonly env: VoiceEnv;
@@ -278,11 +335,13 @@ export class VoiceClient {
   // blocked meanwhile, and only the last one's outcome counts.
   private switching = false;
   private switches = 0;
+  private readonly processing: ProcessingStore;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
     this.now = now;
-    this.state = { ...initialVoice, microphone: env.microphone ?? null };
+    this.processing = env.processing ?? memoryStore();
+    this.state = { ...initialVoice, ...this.chosen(env.microphone ?? null) };
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
@@ -345,6 +404,7 @@ export class VoiceClient {
       await this.findChosen(room);
       if (mine !== this.attempt) return;
       room.setMicrophone(this.state.microphone?.id ?? null);
+      room.setProcessing(this.state.processing);
       await room.publishMicrophone();
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
@@ -353,14 +413,14 @@ export class VoiceClient {
       const name = errorName(err);
       if (this.state.microphone !== null && typeof name === 'string' && goneErrors.has(name)) {
         room.setMicrophone(null);
-        this.set({ watchOnly: true, microphone: null, why: chosenGone });
+        this.set({ watchOnly: true, ...this.chosen(null), why: chosenGone });
         return;
       }
       this.set({ watchOnly: true, why: deviceReason(name, true) ?? 'The microphone could not be used' });
       return;
     }
     if (mine !== this.attempt) return;
-    this.set({ inUse: room.microphoneInUse() });
+    this.set(inUseOn(room));
     this.applyBlock();
     void this.readMicrophones(mine, room);
   }
@@ -370,29 +430,60 @@ export class VoiceClient {
   // with the microphone, the capture moves to it at once, with the gate shut
   // and blocked until it has: a press held across the switch ends, and
   // nothing is sent until a new one. A switch that fails leaves the
-  // microphone missing, with the reason.
+  // microphone missing, with the reason. The device is captured with the
+  // voice processing chosen for it.
   async chooseMicrophone(choice: Microphone | null): Promise<void> {
-    this.set({ microphone: choice });
+    this.set(this.chosen(choice));
     const room = this.room;
     const s = this.state;
     if (room === null || s.watchOnly || s.listenOnly || (s.phase !== 'connected' && s.phase !== 'reconnecting')) return;
+    await this.switchTo(room, choice?.id ?? null);
+  }
+
+  // setProcessing turns the browser's voice processing on or off for the
+  // microphone chosen, and keeps that for the device. In voice with the
+  // microphone captured, the same device is captured again at once, as by a
+  // switch: the gate is shut and blocked until it has been. A microphone
+  // missing is not captured: the choice is used once one is chosen.
+  async setProcessing(on: boolean): Promise<void> {
+    const chosen = this.state.microphone;
+    this.processing.set(chosen?.id ?? null, on);
+    this.set({ processing: on });
+    const room = this.room;
+    const s = this.state;
+    if (room === null || s.watchOnly || s.listenOnly || s.missing || (s.phase !== 'connected' && s.phase !== 'reconnecting')) return;
+    await this.switchTo(room, chosen?.id ?? null);
+  }
+
+  // switchTo captures the microphone again, on the device given and with the
+  // voice processing chosen, with the gate shut and blocked until it has.
+  // Only the last switch's outcome counts.
+  private async switchTo(room: Room, choice: string | null): Promise<void> {
     const mine = this.attempt;
     const turn = ++this.switches;
     this.switching = true;
     this.applyBlock();
+    // What the old capture said of its processing is not the new one's.
+    this.set({ reported: null });
+    room.setProcessing(this.state.processing);
     let failure: unknown = null;
     try {
-      await room.switchMicrophone(choice?.id ?? null);
+      await room.switchMicrophone(choice);
     } catch (err: unknown) {
       failure = err;
     }
     if (turn !== this.switches) return;
     this.switching = false;
     if (mine !== this.attempt) return;
-    if (failure === null) this.set({ missing: false, why: null, inUse: room.microphoneInUse() });
-    else this.set({ missing: true, inUse: null, why: deviceReason(errorName(failure)) ?? 'The microphone could not be used' });
+    if (failure === null) this.set({ missing: false, why: null, ...inUseOn(room) });
+    else this.set({ missing: true, ...nothingInUse, why: deviceReason(errorName(failure)) ?? 'The microphone could not be used' });
     this.applyBlock();
     void this.readMicrophones(mine, room);
+  }
+
+  // chosen is a microphone chosen, with the voice processing chosen for it.
+  private chosen(microphone: Microphone | null): Pick<VoiceState, 'microphone' | 'processing'> {
+    return { microphone, processing: this.processing.get(microphone?.id ?? null) };
   }
 
   // findChosen finds the microphone chosen among those listed, before it is
@@ -407,7 +498,10 @@ export class VoiceClient {
     if (list === null || list.some((m) => m.id === chosen.id) || this.state.microphone !== chosen) return;
     const named = list.filter((m) => m.label === chosen.label);
     const found = named.length === 1 ? named[0] : undefined;
-    if (found !== undefined) this.set({ microphone: found });
+    if (found === undefined) return;
+    // Its voice processing goes with it to the new id.
+    this.processing.set(found.id, this.processing.get(chosen.id));
+    this.set(this.chosen(found));
   }
 
   // readMicrophones reads the list of microphones and the device in use,
@@ -416,7 +510,7 @@ export class VoiceClient {
     if (this.state.watchOnly || this.state.listenOnly) return;
     const microphones = await room.microphones().catch(() => null);
     if (mine !== this.attempt) return;
-    this.set({ microphones, inUse: this.state.missing ? null : room.microphoneInUse() });
+    this.set({ microphones, ...(this.state.missing ? nothingInUse : inUseOn(room)) });
   }
 
   // startShare shares a screen into the room this page is connected to.
@@ -524,7 +618,7 @@ export class VoiceClient {
       watching: false,
       shareTracks: noTracks,
       microphones: null,
-      inUse: null,
+      ...nothingInUse,
       missing: false,
     });
     if (room !== null) await room.close().catch(() => undefined);
@@ -671,7 +765,7 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks, inUse: null });
+    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks, ...nothingInUse });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -756,7 +850,7 @@ export class VoiceClient {
       },
       onMicrophoneLost: () => {
         if (mine !== this.attempt) return;
-        this.set({ missing: true, inUse: null });
+        this.set({ missing: true, ...nothingInUse });
         this.applyBlock();
         void this.readMicrophones(mine, room);
       },
@@ -779,6 +873,8 @@ export class VoiceClient {
       if (mine !== this.attempt) return;
     }
     room.setMicrophone(this.state.microphone?.id ?? null);
+    const processing = this.state.processing;
+    room.setProcessing(processing);
     try {
       await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events);
     } catch (err: unknown) {
@@ -797,7 +893,7 @@ export class VoiceClient {
       // device chosen not being there is said as such, and the choice is let
       // go, so the next Join voice uses the system default.
       if (publish && this.state.microphone !== null && typeof name === 'string' && goneErrors.has(name)) {
-        this.set({ microphone: null });
+        this.set(this.chosen(null));
         this.act({ kind: 'stop', why: chosenGone }, next);
         return;
       }
@@ -811,8 +907,11 @@ export class VoiceClient {
     }
     room.setDeafened(this.state.deafened);
     this.connectedAt = this.now();
-    this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish, inUse: room.microphoneInUse() });
+    this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish, ...inUseOn(room) });
     this.applyBlock();
+    // Voice processing changed while connecting: the capture may have been
+    // made as it was, so it is made again as it is now.
+    if (publish && !this.state.missing && this.state.processing !== processing) void this.switchTo(room, this.state.microphone?.id ?? null);
     void this.readMicrophones(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);

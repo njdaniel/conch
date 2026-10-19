@@ -8,8 +8,10 @@
 // encodings follow what was captured (issue #565). The microphone chosen
 // (issue #658): captured exactly, published as a track the page provides,
 // moved to another device by a restart of that track, and lost when its
-// capture ends or its device is no longer listed. No network, no
-// microphone, no screen.
+// capture ends or its device is no longer listed. Voice processing (issue
+// #659): all three filters on or off at every capture, a change made by a
+// restart and never on the live capture, and reported as the capture says.
+// No network, no microphone, no screen.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
 import { VoiceClient } from './connection';
@@ -30,7 +32,14 @@ interface StubMedia {
   clones: { enabled: boolean; stopped: number; stop: () => void }[];
   clone: () => { enabled: boolean; stopped: number; stop: () => void };
   stop: () => void;
-  getSettings: () => { deviceId: string };
+  // Issue #659: the voice processing the capture says it has.
+  filters: StubFilters;
+  getSettings: () => { deviceId: string } & StubFilters;
+}
+interface StubFilters {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
 }
 // The track the adapter publishes: the page's own (user-provided) wrapper of
 // a capture, as LocalAudioTrack is.
@@ -115,6 +124,8 @@ interface Stub {
   devices: StubDevice[];
   listed: unknown[][];
   contexts: { closed: number }[];
+  // Issue #659: the filters the browser keeps on whatever it is asked.
+  keptOn: string[];
 }
 interface StubSettings {
   channelCount?: number;
@@ -179,6 +190,7 @@ const state = vi.hoisted((): Stub => {
     devices: [],
     listed: [],
     contexts: [],
+    keptOn: [],
   };
 });
 
@@ -222,10 +234,20 @@ vi.mock('livekit-client', () => {
     return track;
   };
   // A capture of the device a constraint names exactly, or of the default.
-  const media = (deviceId: unknown): StubMedia => {
+  // It has the voice processing asked for, but for any filter the browser
+  // keeps on (state.keptOn).
+  const media = (options: unknown): StubMedia => {
+    const asked: Record<string, unknown> = typeof options === 'object' && options !== null ? { ...options } : {};
+    const deviceId = asked['deviceId'];
     const exact = typeof deviceId === 'object' && deviceId !== null && 'exact' in deviceId ? String(deviceId.exact) : 'default';
+    const filters: StubFilters = {};
+    for (const name of ['echoCancellation', 'noiseSuppression', 'autoGainControl'] as const) {
+      const value = asked[name];
+      if (typeof value === 'boolean') filters[name] = value || state.keptOn.includes(name);
+    }
     const m: StubMedia = {
       deviceId: exact,
+      filters,
       readyState: 'live',
       stopped: 0,
       clones: [],
@@ -244,7 +266,7 @@ vi.mock('livekit-client', () => {
         m.stopped++;
         m.readyState = 'ended';
       },
-      getSettings: () => ({ deviceId: m.deviceId }),
+      getSettings: () => ({ deviceId: m.deviceId, ...m.filters }),
     };
     state.medias.push(m);
     return m;
@@ -281,8 +303,13 @@ vi.mock('livekit-client', () => {
       state.restart = null;
       if (held !== null) await held.promise;
       if (state.restartFails !== null) throw state.restartFails;
-      const deviceId = typeof options === 'object' && options !== null && 'deviceId' in options ? options.deviceId : undefined;
-      this.mediaStreamTrack = media(deviceId);
+      this.mediaStreamTrack = media(options);
+    };
+    // The browser's own change of a live capture's filters, which Chromium
+    // ignores (issue #659): never to be called.
+    applyConstraints = () => {
+      state.calls.push('applyConstraints');
+      return Promise.resolve();
     };
     on = (event: string, fn: () => void) => {
       if (event === 'ended') this.ends.push(fn);
@@ -429,8 +456,7 @@ vi.mock('livekit-client', () => {
     createLocalAudioTrack: (options: unknown) => {
       state.captureOptions = options;
       state.calls.push('capture');
-      const deviceId = typeof options === 'object' && options !== null && 'deviceId' in options ? options.deviceId : undefined;
-      const captured = () => ({ mediaStreamTrack: media(deviceId), constraints: options });
+      const captured = () => ({ mediaStreamTrack: media(options), constraints: options });
       if (state.capture === null) return Promise.resolve(captured());
       const pending = state.capture;
       return pending.promise.then(captured);
@@ -489,6 +515,7 @@ beforeEach(() => {
   state.devices = [];
   state.listed.length = 0;
   state.contexts.length = 0;
+  state.keptOn = [];
   vi.stubGlobal(
     'AudioContext',
     class {
@@ -688,9 +715,10 @@ describe('the microphone chosen', () => {
   const processing = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   const inputs = (...ids: string[]): StubDevice[] => ids.map((id) => ({ kind: 'audioinput', deviceId: id, label: `Microphone ${id}` }));
 
-  async function connected(choice: string | null, told: { lost: number; changed: number } = { lost: 0, changed: 0 }) {
+  async function connected(choice: string | null, told: { lost: number; changed: number } = { lost: 0, changed: 0 }, filters = true) {
     const room = newLiveKitRoom();
     room.setMicrophone(choice);
+    room.setProcessing(filters);
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, {
       ...events,
       onMicrophoneLost: () => {
@@ -857,6 +885,69 @@ describe('the microphone chosen', () => {
     await room.switchMicrophone('mic-1');
     expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-1' }, ...processing }]);
     expect(room.microphoneInUse()).toBe('mic-1');
+  });
+
+  // Issue #659: the browser's voice processing, all on or all off. Voice
+  // isolation, which the SDK asks on at a first capture unless told, is
+  // asked off with the rest.
+  const unprocessed = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, voiceIsolation: false };
+
+  it('captures with the voice processing given: all three on, or all three off', async () => {
+    await connected('mic-1', undefined, false);
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-1' }, ...unprocessed });
+    state.tracks.length = 0;
+    await connected(null, undefined, false);
+    expect(state.captureOptions).toEqual(unprocessed);
+    state.tracks.length = 0;
+    await connected('mic-1', undefined, true);
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-1' }, ...processing });
+  });
+
+  it('a change restarts the track with the device and all three filters, and never changes the live capture', async () => {
+    const { room, track } = await connected('mic-1');
+    state.calls.length = 0;
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-1' }, ...unprocessed }]);
+    room.setProcessing(true);
+    await room.switchMicrophone('mic-1');
+    expect(state.restarts.at(-1)).toEqual({ deviceId: { exact: 'mic-1' }, ...processing });
+    // System default: the filters are given with no device named.
+    room.setProcessing(false);
+    await room.switchMicrophone(null);
+    expect(state.restarts.at(-1)).toEqual(unprocessed);
+    expect(state.calls).toEqual(['restart', 'restart', 'restart']);
+    expect(state.calls).not.toContain('applyConstraints');
+    // The same track, published once: no republish.
+    expect(state.tracks).toEqual([track]);
+  });
+
+  it('reports the filters as the capture says them, not as they were asked', async () => {
+    const { room, track } = await connected('mic-1');
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    state.keptOn = ['noiseSuppression'];
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: false, noiseSuppression: true, autoGainControl: false });
+    // A browser that does not say is not taken to have done either.
+    track.mediaStreamTrack.filters = {};
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: null, noiseSuppression: null, autoGainControl: null });
+    // Nothing captured, nothing said.
+    track.stop();
+    expect(room.microphoneProcessing()).toBeNull();
+  });
+
+  it('after a change the tap hears the new capture: the old clone is stopped and a new one tapped', async () => {
+    const { room } = await connected('mic-1');
+    const old = state.medias[0];
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(old?.clones[0]?.stopped).toBe(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(state.contexts).toHaveLength(2);
+    expect(state.medias[1]?.filters).toEqual({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+    expect(state.medias[1]?.clones).toHaveLength(1);
+    expect(state.medias[1]?.clones[0]?.enabled).toBe(true);
   });
 });
 

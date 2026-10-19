@@ -14,13 +14,15 @@
 // Voice options has the choice of microphone (issue #658): System default or
 // a device the browser lists, with the device the capture is on. A microphone
 // that goes is said in the notes, and nothing is sent until one is chosen.
+// It also has the switch for the browser's voice processing (issue #659),
+// with what the capture says of it.
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
 import { StageHost } from '../stage';
 import type { Person } from '../useLiveChannel';
-import type { Phase } from './connection';
+import type { Phase, Processing } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
@@ -589,6 +591,58 @@ function MicrophoneChoice({ voice }: { readonly voice: VoiceControl }) {
   );
 }
 
+// The voice processing switch (issue #659): its words, the note said while it
+// is off, and the hint by the open microphone's level.
+export const processingLabel = 'Voice processing (echo cancellation, noise suppression, automatic gain)';
+export const processingOffNote = 'Off: your microphone is sent as it is.';
+export const processingUseNote =
+  'Use this for a virtual microphone (such as one a text-to-speech program provides) or a studio microphone. With speakers rather than headphones, others may hear themselves.';
+export const thresholdHint = 'Without automatic gain your level may differ: check the meter and set the level.';
+
+// The filters, by the names the switch gives them.
+const filterNames: readonly (readonly [keyof Processing, string])[] = [
+  ['echoCancellation', 'echo cancellation'],
+  ['noiseSuppression', 'noise suppression'],
+  ['autoGainControl', 'automatic gain'],
+];
+
+// reportedNote says what a capture made with processing off reports: off, or
+// the filters the browser kept on. A browser that does not say, of a filter
+// it did not keep, is not said to have turned it off.
+export function reportedNote(reported: Processing | null): string | null {
+  if (reported === null) return null;
+  const kept = filterNames.filter(([key]) => reported[key] === true).map(([, name]) => name);
+  if (kept.length > 0) {
+    const last = kept.pop() ?? '';
+    const names = kept.length === 0 ? last : `${kept.join(', ')} and ${last}`;
+    return `Your browser kept ${names} on.`;
+  }
+  return filterNames.every(([key]) => reported[key] === false) ? processingOffNote : null;
+}
+
+// ProcessingChoice is the voice processing switch, for the microphone chosen,
+// and while it is off what the capture says and when to use it.
+function ProcessingChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const said = state.processing ? null : reportedNote(state.reported);
+  return (
+    <div className="voice-processing">
+      <label>
+        <input
+          type="checkbox"
+          checked={state.processing}
+          onChange={(e) => {
+            void client.setProcessing(e.target.checked);
+          }}
+        />
+        {processingLabel}
+      </label>
+      {said === null ? null : <p className="hint">{said}</p>}
+      {state.processing ? null : <p className="hint">{processingUseNote}</p>}
+    </div>
+  );
+}
+
 // Voice options: the less used choices, out of the strip.
 function Options({ voice, open, sharable, about }: {
   readonly voice: VoiceControl;
@@ -612,6 +666,7 @@ function Options({ voice, open, sharable, about }: {
           <input type="radio" name="voice-mode" checked={state.mode === 'open'} onChange={() => { client.setMode('open'); }} />
           Open microphone
         </label>
+        <ProcessingChoice voice={voice} />
       </fieldset>
       {state.mode === 'ptt' ? (
         <p className="hint">
@@ -621,17 +676,27 @@ function Options({ voice, open, sharable, about }: {
           </button>
         </p>
       ) : (
-        <label className="threshold">
-          Level that opens the microphone
-          <input
-            type="range"
-            min={0.02}
-            max={0.6}
-            step={0.01}
-            value={state.threshold}
-            onChange={(e) => { client.setThreshold(Number(e.target.value)); }}
-          />
-        </label>
+        <>
+          <label className="threshold">
+            Level that opens the microphone
+            <input
+              type="range"
+              min={0.02}
+              max={0.6}
+              step={0.01}
+              value={state.threshold}
+              aria-describedby={state.processing ? undefined : 'voice-threshold-hint'}
+              onChange={(e) => { client.setThreshold(Number(e.target.value)); }}
+            />
+          </label>
+          {/* Without automatic gain a quiet microphone may not reach the
+              level, and a noisy room may (issue #659). */}
+          {state.processing ? null : (
+            <p id="voice-threshold-hint" className="hint">
+              {thresholdHint}
+            </p>
+          )}
+        </>
       )}
       <p className="hint">
         The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues

@@ -9,10 +9,15 @@
 // says the microphone was disconnected, captures nothing more, and sends
 // nothing while the talk key is held.
 //
+// Voice processing (issue #659): a member turns it off, the browser is asked
+// for a capture with echo cancellation, noise suppression and auto gain off,
+// the page says the capture reports them off, and another page still hears a
+// press.
+//
 // An init script, installed before the page's own scripts as
-// 17-voice-microphone.spec.ts installs its own, counts every capture the page
-// asks the browser for, hides devices from the list on request, and keeps the
-// captures so a test can end one. Against a conchd with LiveKit of its own
+// 17-voice-microphone.spec.ts installs its own, counts and keeps every
+// capture the page asks the browser for, and what it asked, hides devices
+// from the list on request, and keeps the captures so a test can end one. Against a conchd with LiveKit of its own
 // (voice-world.ts): without Docker it fails when CI is set and is skipped
 // otherwise.
 import type { Locator, Page } from '@playwright/test';
@@ -26,8 +31,9 @@ const missingNote = 'Your microphone was disconnected. Choose a microphone in Vo
 // devices wraps the page's device calls: every capture is counted and kept,
 // and a device whose id is in __hidden is left out of the list.
 const devices = () => {
-  const w = window as unknown as { __captures: number; __hidden: string[]; __tracks: MediaStreamTrack[] };
+  const w = window as unknown as { __captures: number; __asked: unknown[]; __hidden: string[]; __tracks: MediaStreamTrack[] };
   w.__captures = 0;
+  w.__asked = [];
   w.__hidden = [];
   w.__tracks = [];
   const media = navigator.mediaDevices as MediaDevices | undefined;
@@ -36,6 +42,7 @@ const devices = () => {
   const list = media.enumerateDevices.bind(media);
   media.getUserMedia = async (constraints?: MediaStreamConstraints) => {
     w.__captures++;
+    w.__asked.push(JSON.parse(JSON.stringify(constraints ?? null)) as unknown);
     const stream = await capture(constraints);
     w.__tracks.push(...stream.getAudioTracks());
     return stream;
@@ -44,6 +51,9 @@ const devices = () => {
 };
 
 const captures = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __captures: number }).__captures);
+
+// What every capture asked the browser for, in order.
+const asked = (page: Page): Promise<unknown[]> => page.evaluate(() => (window as unknown as { __asked: unknown[] }).__asked);
 
 // unplug drops a device from the list and tells the page its devices changed.
 const unplug = (page: Page, id: string): Promise<void> =>
@@ -239,6 +249,54 @@ test.describe('choosing the microphone', () => {
       // Nothing was audited as unreported; the reported pairs are all there are.
       await new Promise((r) => setTimeout(r, 3000));
       expect(await transmits()).toEqual([...pair, ...pair]);
+      expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
+      expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
+
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await a.context.close();
+      await b.context.close();
+    }
+  });
+
+  test('voice processing turned off captures the microphone without it, says so, and is still heard', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      const voice = voiceRegion(a.page);
+      const actor = `principal:${String(vw.alice.id)}`;
+      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      const before = await transmits();
+      await join(a.page);
+      await join(b.page);
+      const box = voice.getByRole('checkbox', { name: 'Voice processing (echo cancellation, noise suppression, automatic gain)' });
+      await expect(box).toBeChecked();
+      const first = (await asked(a.page)).length;
+
+      // Off: one new capture, all three filters off, in voice with the
+      // microphone still in use, and the capture says them off.
+      await box.uncheck();
+      await expect(voice).toContainText('Off: your microphone is sent as it is.', { timeout: 5_000 });
+      await expect(voice).toContainText(/Connected in #voice-room/);
+      await expect(voice.getByText('Microphone in use')).toBeVisible();
+      const requests = await asked(a.page);
+      expect(requests).toHaveLength(first + 1);
+      expect(requests.at(-1)).toMatchObject({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+
+      // Another page hears a press.
+      await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
+      const quiet = await delta(b.page, 2000);
+      await holdTalk(a.page);
+      await expect(voice).toContainText('Transmitting');
+      const loud = await delta(b.page, 2000);
+      await a.page.keyboard.up('Backquote');
+      await expect(voice).toContainText('Not transmitting');
+      expect(loud, `bytes while A talks with processing off (${String(loud)}) versus quiet (${String(quiet)})`).toBeGreaterThan(quiet * 4 + 2000);
+
+      // One reported pair, and nothing audited as unreported.
+      await expect.poll(transmits, { timeout: 15_000 }).toEqual([...before, 'voice_transmit_started', 'voice_transmit_stopped']);
       expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
       expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
 
