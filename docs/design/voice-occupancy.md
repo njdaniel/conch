@@ -1,6 +1,6 @@
 # Design: voice occupancy across the server
 
-- **Status:** Accepted, 2026-10-18, by the project owner (issue #596, child a), with the three answers recorded in §7. It reverses two decisions recorded in [browser-ui-polish.md](browser-ui-polish.md) (§2). Nothing in it is implemented yet; the schema addition runs through the `schema-change` skill in child b.
+- **Status:** Accepted, 2026-10-18, by the project owner (issue #596, child a), with the three answers recorded in §7. It reverses two decisions recorded in [browser-ui-polish.md](browser-ui-polish.md) (§2). Implemented: the server half (child b, PR #613) and the web client (child c, issue #596).
 - **Touches:** [voice-control-plane.md](voice-control-plane.md) §6 (presence, its poller and its socket), [client-experience.md](client-experience.md) (UX-02, UX-04, UX-09, UX-23), [ADR-004](../adr/ADR-004-voice-via-livekit.md) (agents keep no voice), [ADR-005](../adr/ADR-005-nets-and-whispers.md) (voice belongs to a channel; nets are rooms of their own), the [browser UX audit](../reviews/browser-ux-audit.md) (F01, F02).
 - **Owner:** protocol-designer (this note, the one new wire shape); server-engineer (child b); web-engineer (child c).
 - **Issues:** #596 (this note and the split). Child c also builds on #584 (the strip names its destination) and #585 (a live roster when not joined).

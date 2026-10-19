@@ -42,9 +42,11 @@ import {
 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import {
+  voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
   voiceShareV1,
+  type VoiceOccupancyV1,
   type VoicePresenceV1,
   type VoiceSessionResponseV1,
   type VoiceShareV1,
@@ -891,21 +893,29 @@ function socketUrl(path: string, query: Record<string, string>): string {
   return `${scheme}//${window.location.host}${path}?${new URLSearchParams(query).toString()}`;
 }
 
-// How many times each kind of socket has been tried since it was last open,
-// for the diagnostic ring: 0 while it is open or was never lost.
-const retries: Record<DiagnosticSocket, number> = { messages: 0, events: 0, voice: 0 };
-const lost: Record<DiagnosticSocket, boolean> = { messages: false, events: false, voice: false };
+// The page's sockets. The occupancy socket (issue #596) is a voice socket to
+// the diagnostic ring, whose vocabulary has no word of its own for it, but it
+// keeps its own count of tries, so a presence socket's losses are not added
+// to it.
+type SocketName = DiagnosticSocket | 'occupancy';
+const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages', events: 'events', voice: 'voice', occupancy: 'voice' };
+
+// How many times each socket has been tried since it was last open, for the
+// diagnostic ring: 0 while it is open or was never lost.
+const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0 };
+const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false };
 
 // connect asks for a ticket with the credential and opens the socket that
 // `address` names, given the ticket. The ticket is single use, so a reconnect
 // calls this again. The diagnostic ring is told of each open, each close with
-// its code and each try after a loss, by `kind`, never by address: the
+// its code and each try after a loss, by kind, never by address: the
 // address holds the channel and the ticket.
-async function connect(kind: DiagnosticSocket, address: (ticket: string) => string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  if (lost[kind]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[kind] });
+async function connect(name: SocketName, address: (ticket: string) => string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  const kind = diagnosticOf[name];
+  if (lost[name]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[name] });
   // Lost until it opens: a ticket refused or a socket that never opens is
   // followed by another try.
-  lost[kind] = true;
+  lost[name] = true;
   const ticket = await requestTicket();
   if (!ticket.ok) return ticket;
   let socket: WebSocket;
@@ -915,8 +925,8 @@ async function connect(kind: DiagnosticSocket, address: (ticket: string) => stri
     return { ok: false, failure: 'network' };
   }
   socket.onopen = () => {
-    lost[kind] = false;
-    retries[kind] = 0;
+    lost[name] = false;
+    retries[name] = 0;
     record({ kind: 'socket_open', socket: kind });
     events.onOpen();
   };
@@ -925,7 +935,7 @@ async function connect(kind: DiagnosticSocket, address: (ticket: string) => stri
   };
   // An error is always followed by a close, which is what the feed acts on.
   socket.onclose = (event: CloseEvent) => {
-    lost[kind] = true;
+    lost[name] = true;
     record({ kind: 'socket_close', socket: kind, code: event.code });
     events.onClose(event.code, event.reason);
   };
@@ -1122,6 +1132,22 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   return connect('voice', (ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
+}
+
+// Voice occupancy (issue #596): how many are in each channel's voice, for
+// every channel the caller may see voice in. Counts only, never names; the
+// page holds one socket of it, not one per channel.
+
+// getVoiceOccupancy reads it once. The page keeps it on its socket, and reads
+// this only to learn why the server closed that socket (1008).
+export function getVoiceOccupancy(): Promise<ApiResult<VoiceOccupancyV1>> {
+  return authed('/v1/voice/occupancy', voiceOccupancyV1);
+}
+
+// openOccupancySocket opens its stream with a ticket: the whole document on
+// connect, and again whenever a count changes.
+export function openOccupancySocket(events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  return connect('occupancy', (ticket) => socketUrl('/v1/voice/occupancy/ws', { ticket }), events);
 }
 
 // sendReport sends a problem report (issue #446) to the server's operator.

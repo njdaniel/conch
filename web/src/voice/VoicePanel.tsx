@@ -7,10 +7,13 @@
 // whether the microphone is captured and whether you transmit, who is in
 // voice, and the controls. Less used choices are under Voice options. The
 // watch view is drawn into the lobby's stage with a portal, so it is still
-// this one component, wherever it shows.
+// this one component, wherever it shows. While not in voice it also says where
+// else people are talking (issue #596), with a way to open that channel: only
+// to open it, since joining is always Join voice, here.
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
+import type { ChannelV0 } from '../schema/channel';
 import { StageHost } from '../stage';
 import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
@@ -18,6 +21,7 @@ import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
 import { ShareView } from './ShareView';
+import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
 
 // The keys that hold Hold to talk down while it has focus.
@@ -42,6 +46,27 @@ function nameOf(people: ReadonlyMap<number, Person>, id: number, viewer: number,
   return people.get(id)?.name ?? `Member ${String(id)}`;
 }
 
+// Where else people are in voice (issue #596): the channel with the most,
+// ties to the lower id, and how many other channels have someone. The channel
+// on screen is not one of them: its people are the roster.
+export interface Busiest {
+  readonly name: string;
+  readonly count: number;
+  readonly more: number;
+}
+
+export function busiest(channels: readonly ChannelV0[], occupancy: InVoice, viewed: string | null): Busiest | null {
+  let best: { readonly channel: ChannelV0; readonly count: number } | null = null;
+  let found = 0;
+  for (const channel of channels) {
+    const count = occupancy.get(channel.id) ?? 0;
+    if (channel.name === viewed || count <= 0) continue;
+    found++;
+    if (best === null || count > best.count || (count === best.count && channel.id < best.channel.id)) best = { channel, count };
+  }
+  return best === null ? null : { name: best.channel.name, count: best.count, more: found - 1 };
+}
+
 // How long "<name> stopped sharing." stays (issue #591, F15).
 export const stoppedFor = 5000;
 
@@ -62,12 +87,18 @@ export function VoicePanel({
   viewer,
   people,
   viewed,
+  channels = [],
+  occupancy = nobody,
   onOpen,
 }: {
   readonly voice: VoiceControl;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
   readonly viewed: string | null;
+  // The viewer's channels, and how many are in each one's voice: for the line
+  // that says where else people are talking.
+  readonly channels?: readonly ChannelV0[];
+  readonly occupancy?: InVoice;
   // Opens a channel, as the channel list does: the way back to the one voice
   // is in, from any other.
   readonly onOpen: (name: string) => void;
@@ -162,6 +193,11 @@ export function VoicePanel({
     };
   }, [stopped]);
 
+  // Where else people are talking, while this page is not in voice: in voice,
+  // the strip describes the viewer's own connection.
+  const away = inVoice ? null : busiest(channels, occupancy, viewed);
+  const awayLine = away === null ? null : <Elsewhere where={away} onOpen={onOpen} />;
+
   if (viewed === null && !inVoice) {
     // No channel to show (it was lost, or none is open). A stopped client
     // still says why it stopped.
@@ -169,6 +205,7 @@ export function VoicePanel({
       <section aria-label="Voice" className="voice">
         <div className="voice-state">
           <p className="voice-phase">{phaseLabel[state.phase]}</p>
+          {awayLine}
           {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         </div>
       </section>
@@ -247,6 +284,7 @@ export function VoicePanel({
           leaves the controls where they were. */}
       <div className="voice-bar">
         {roster.length === 0 ? null : <Roster roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} />}
+        {awayLine}
         <div className="voice-row">
           <div className="voice-state">
             <p className="voice-phase">
@@ -406,6 +444,31 @@ export function VoicePanel({
       {inVoice ? <Options voice={voice} open={options} sharable={sharable} about={about} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
+  );
+}
+
+// Elsewhere is the line "3 in voice in #game-night", and a button that opens
+// that channel (issue #596). It opens the channel and does nothing else: Join
+// voice there is the viewer's next choice, not this button's.
+function Elsewhere({ where, onOpen }: { readonly where: Busiest; readonly onOpen: (name: string) => void }) {
+  const more = where.more === 0 ? '' : ` and ${String(where.more)} more ${where.more === 1 ? 'channel' : 'channels'}`;
+  return (
+    <p className="voice-elsewhere">
+      <Glyph name="speaker" />
+      <span>
+        {where.count} in voice in #{where.name}
+        {more}
+      </span>{' '}
+      <button
+        type="button"
+        className="quiet"
+        onClick={() => {
+          onOpen(where.name);
+        }}
+      >
+        Open #{where.name}
+      </button>
+    </p>
   );
 }
 

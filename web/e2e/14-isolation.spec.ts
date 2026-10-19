@@ -1,9 +1,10 @@
 // A14 (issue #447): two groups on one server, and the page of a member of one
 // shows nothing of the other, and is sent nothing of it on any socket or in
-// any answer: not its channels, its people, its messages or who is in its
-// voice room. Checked after a full load and after the page's sockets drop and
-// it reconnects by itself. The server-side matrix is e2e/isolation; this is
-// what a person sees.
+// any answer: not its channels, its people, its messages, who is in its
+// voice room or how many are (issue #596: the occupancy socket counts the
+// reader's own channels only). Checked after a full load and after the
+// page's sockets drop and it reconnects by itself. The server-side matrix is
+// e2e/isolation; this is what a person sees.
 //
 // Each test makes its own two groups through the operator's API, with names
 // no other spec uses, so the people it adds touch no other spec. The voice
@@ -145,6 +146,46 @@ async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly s
   }
 }
 
+// The voice counts in the channel list (issue #596).
+const voiceMarks = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('img', { name: / in voice$/ });
+
+// Occupancy is every document the page's occupancy socket was sent, and how
+// many such sockets it opened.
+interface Occupancy {
+  readonly frames: { channels: { channel_id: number; in_voice: number }[] }[];
+  readonly opened: () => number;
+}
+
+// watchOccupancy records the occupancy socket's frames (issue #596). Call it
+// before the page loads.
+function watchOccupancy(page: Page): Occupancy {
+  const frames: Occupancy['frames'] = [];
+  let opened = 0;
+  page.on('websocket', (ws) => {
+    if (new URL(ws.url()).pathname !== '/v1/voice/occupancy/ws') return;
+    opened++;
+    ws.on('framereceived', (frame) => {
+      if (typeof frame.payload !== 'string') return;
+      const doc = JSON.parse(frame.payload) as { schema?: unknown; channels?: unknown };
+      if (doc.schema === 'conch.voice_occupancy.v1' && Array.isArray(doc.channels)) frames.push(doc as Occupancy['frames'][number]);
+    });
+  });
+  return { frames, opened: () => opened };
+}
+
+// expectOnlyOwn checks that the occupancy socket sent something, and that
+// every channel it counted is one of the reader's own, never one of the
+// other group's: absent, not zero.
+function expectOnlyOwn(occupancy: Occupancy, own: readonly number[], other: readonly number[], view: string): void {
+  expect(occupancy.frames.length, `${view}: the occupancy socket sent a document`).toBeGreaterThan(0);
+  for (const f of occupancy.frames) {
+    for (const c of f.channels) {
+      expect(own, `${view}: the occupancy socket counted channel ${String(c.channel_id)}`).toContain(c.channel_id);
+      expect(other, `${view}: the occupancy socket counted a channel of the other group`).not.toContain(c.channel_id);
+    }
+  }
+}
+
 // openMembers opens the members panel when it is closed (it starts closed on
 // a narrow screen) and returns the list.
 async function openMembers(page: Page) {
@@ -279,9 +320,18 @@ test.describe('with LiveKit', () => {
     vw.addSecret(bea.token);
     const markersOfA = [vw.channel, vw.alice.name, vw.bob.name, vw.carol.name];
 
+    // The channel ids of each group, for the occupancy socket (issue #596),
+    // whose frames name channels by id alone.
+    const idsOf = async (token: string) =>
+      ((await must(api, 'channels', token, 'GET', '/v1/channels')) as { channels: { id: number }[] }).channels.map((c) => c.id);
+    const aIds = await idsOf(vw.alice.token);
+    const bIds = await idsOf(bea.token);
+    expect(bIds).toHaveLength(1);
+
     const b = await meet(phones[0][1]);
     await b.page.addInitScript(trackSockets);
     const traffic = watchTraffic(b.page);
+    const occupancy = watchOccupancy(b.page);
     await signIn(b.page, vw, bea.token, bea.name);
     await expect(channelButtons(b.page)).toHaveCount(1);
     await channelButton(b.page, bChannel).click();
@@ -289,6 +339,10 @@ test.describe('with LiveKit', () => {
     await expect(voiceRegion(b.page)).toContainText(`Connected in #${bChannel}`, { timeout: 30_000 });
     const inVoice = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
     await expect(inVoice).toContainText('You', { timeout: 15_000 });
+    // B's own count rises when B's person joins, so the silence about A
+    // below means something.
+    await expect(voiceMarks(b.page)).toHaveText(['1'], { timeout: 15_000 });
+    await expect(voiceMarks(b.page).first()).toHaveAccessibleName('1 in voice');
 
     // The roster calls its reader "You". alice is in A's room all the while,
     // as the operator reads it: what B does not see is there to be seen.
@@ -299,13 +353,19 @@ test.describe('with LiveKit', () => {
     await expect.poll(aliceInVoice, { message: 'alice is in A\'s voice room', timeout: 15_000 }).toBe(true);
     await expectFits(b.page, "B's lobby in voice at phone size");
     await expectNothingOf(b.page, traffic, markersOfA, 'in voice');
+    expectOnlyOwn(occupancy, bIds, aIds, 'in voice');
 
     await b.page.reload();
     await expect(statusLine(b.page)).toContainText('Connected');
     await expect(channelButtons(b.page)).toHaveCount(1);
     await channelButton(b.page, bChannel).click();
     await expect(voiceRegion(b.page).getByRole('button', { name: 'Join voice' })).toBeVisible();
+    // Not in voice, with alice in A's room: no line says anyone is in voice
+    // anywhere else, and the only mark there could be is B's own channel's.
+    await expect(voiceRegion(b.page).locator('.voice-elsewhere')).toHaveCount(0);
+    expect(await voiceMarks(b.page).count()).toBeLessThanOrEqual(1);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a full load');
+    expectOnlyOwn(occupancy, bIds, aIds, 'after a full load');
 
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
     await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
@@ -313,5 +373,8 @@ test.describe('with LiveKit', () => {
     await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
     expect(await aliceInVoice(), 'alice is still in A\'s voice room').toBe(true);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a reconnect');
+    expectOnlyOwn(occupancy, bIds, aIds, 'after a reconnect');
+    // One occupancy socket a load, opened again after the drop: three in all.
+    expect(occupancy.opened(), 'occupancy sockets B\'s page opened').toBe(3);
   });
 });

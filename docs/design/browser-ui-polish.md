@@ -26,7 +26,7 @@ illustrative, and none of them is reproduced.
 | "Invite friends" in the top bar | "Invite someone" in the right column | "Invite someone" in the top bar; its form opens below it, and Escape closes it with focus back on the button | Same panel and behaviour (#440, #457, #468), only moved. Shown only to someone who may invite. |
 | Settings gear | Five account buttons and a paragraph in the header | One **Settings** button; a panel holds who you are, Change your name, Your sign-ins, Sign out and Sign out everywhere (with their note and question), Report a problem and the server version | The secondary options leave the header. Nothing is new, nothing removed. |
 | Left: server card, channels with `#`, active row | Plain buttons, bold when open | Channels with `#`, the open one marked by a bar, a fill and `aria-current`; unread counts as pills | No server card: the API has no server name or picture. |
-| Left: "Voice" rooms with avatars | None | Not drawn as rooms. Voice in Conch is per channel (ADR-005); who is in voice is in the voice strip | No fake rooms. |
+| Left: "Voice" rooms with avatars | None | Not drawn as rooms. Voice in Conch is per channel (ADR-005); who is in voice is in the voice strip, and each channel in the list shows how many are in its voice, as a count beside it like the unread pill ([voice-occupancy.md](voice-occupancy.md), #596) | No fake rooms, and no names outside the strip. |
 | Centre: channel header with topic | `<h2>` | `# name` header | Channels have no topic in the API. |
 | Banner "Anna, Lukas and Sofia are in … Join voice" | "Join voice" in the right column | The voice strip lists who is in voice beside Join voice and Watch only | Kept inside the voice section: browsing must never look like joining (UX-02). |
 | Messages: avatar, name, time, body | `15:24 bob: text` | Initial, name, an Agent pill, time on a header line; body below; a run of messages by one author within five minutes shows the header once | The text `HH:MM name [agent]: body` is still there for screen readers and the tests; repeated headers are hidden on screen only. |
@@ -149,8 +149,11 @@ or ring has a word beside it.
 - Drafts, the scroll position, Jump to latest (now a pill over the log),
   Sending / Failed / Not confirmed with Retry and Dismiss, audience badges,
   sign-out questions, revocation and every error line are the same components.
-- Nothing outside the voice section mentions voice or offers to join it (the
-  lobby test that checks this is unchanged).
+- Nothing outside the voice section joins voice or offers to join it. The
+  channel list may say how many are in a channel's voice; opening the
+  channel is all it does (narrowed by [voice-occupancy.md](voice-occupancy.md)
+  §2, #596; the lobby test checks that no control outside the voice section
+  is named for joining or for voice).
 - No inline style, no external font or script; icons are inline SVG with
   `aria-hidden`, and each icon button keeps its words as hidden text. The
   initials are CSS (`attr(data-initial)`), so they are in no text read out.

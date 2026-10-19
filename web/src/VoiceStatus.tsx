@@ -1,6 +1,8 @@
 // Where voice appears: join and leave, mute and deafen, push-to-talk or an open
 // microphone, and who is in the room and who is talking. The SDK and the
 // microphone are reached only from src/voice/.
+import type { ChannelV0 } from './schema/channel';
+import type { InVoice } from './voice/useOccupancy';
 import { VoicePanel } from './voice/VoicePanel';
 import { useVoice } from './voice/useVoice';
 import { useVoiceNames } from './voice/useVoiceNames';
@@ -13,6 +15,8 @@ export function VoiceStatus({
   people,
   voiceAllowed,
   reachable,
+  channels,
+  occupancy,
   onUnauthorized,
   onOpen,
 }: {
@@ -27,6 +31,10 @@ export function VoiceStatus({
   readonly voiceAllowed: boolean;
   // Whether conchd is reached: the status line's Connected.
   readonly reachable: boolean;
+  // The viewer's channels and how many are in each one's voice (issue #596),
+  // for the line that says where else people are talking.
+  readonly channels: readonly ChannelV0[];
+  readonly occupancy: InVoice;
   readonly onUnauthorized: () => void;
   // Opens a channel: the strip's way back to the channel voice is in.
   readonly onOpen: (name: string) => void;
@@ -40,5 +48,5 @@ export function VoiceStatus({
     presence: snapshot.kind === 'presence' ? snapshot.presence : null,
     people,
   });
-  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} onOpen={onOpen} />;
+  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} channels={channels} occupancy={occupancy} onOpen={onOpen} />;
 }

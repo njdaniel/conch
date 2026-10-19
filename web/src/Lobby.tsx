@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion } from './ServerVersion';
@@ -54,6 +55,7 @@ export function Lobby({
   me = 0,
   channels,
   unread,
+  occupancy,
   connection,
   conversation,
   panel,
@@ -74,6 +76,8 @@ export function Lobby({
   readonly me?: number;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
+  // How many are in each channel's voice (issue #596), shown in the list.
+  readonly occupancy?: InVoice;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
@@ -227,7 +231,7 @@ export function Lobby({
         <nav aria-label="Channels" className="channels">
           <h2>Channels</h2>
           {channels.loaded ? (
-            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} onOpen={onOpen} />
+            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} occupancy={occupancy} onOpen={onOpen} />
           ) : connection === 'reconnecting' ? (
             <div className="problem">
               <p className="empty">Cannot reach the server</p>
