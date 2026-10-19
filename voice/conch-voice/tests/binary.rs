@@ -1156,3 +1156,90 @@ fn on_a_terminal_keys_refuses_a_file_and_a_pipe_itself_and_reads_nothing_from_th
         assert_eq!(stdout, "", "{option}");
     }
 }
+
+/// `devices --json` as the process: with no PipeWire server to reach (a socket that is not
+/// there), one line of JSON, the exit code 0 whatever became of `voice.toml`, and no
+/// keyboard text.
+#[test]
+fn devices_json_is_one_line_and_exits_0_for_a_valid_a_refused_and_a_missing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let private = tempfile::tempdir().unwrap();
+    let config = private.path().join("conch");
+    std::fs::create_dir(&config).unwrap();
+    let toml = config.join("voice.toml");
+    let json = |private: &Path, config: &Path| {
+        let mut command = conch_voice(private);
+        command
+            .env("CONCH_CONFIG_DIR", config)
+            .env("XDG_RUNTIME_DIR", private)
+            .env("PIPEWIRE_REMOTE", "conch-voice-test-no-such-socket");
+        let (code, stdout, stderr) = run(command.args(["devices", "--json"]));
+        // libpipewire logs to standard error itself when it cannot load its own
+        // configuration (as on a machine without PipeWire installed, like CI): those
+        // lines are its, not conch-voice's, and are left out of what is checked.
+        let ours: String = stderr
+            .lines()
+            .filter(|line| !line.starts_with('[') || line.get(2..4) != Some("]["))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        (code, stdout, ours)
+    };
+    let document = |stdout: &str| -> serde_json::Value {
+        assert_eq!(stdout.matches('\n').count(), 1, "{stdout:?}");
+        assert!(stdout.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(stdout).unwrap();
+        assert_eq!(value["schema"], "conch.voice_devices.v1");
+        assert_eq!(value["pipewire"], "unavailable", "{stdout}");
+        assert_eq!(value["microphones"], serde_json::json!([]));
+        assert_eq!(value["speakers"], serde_json::json!([]));
+        assert!(!stdout.contains("What granting access means"));
+        assert!(
+            !stdout.contains(private.path().to_str().unwrap()),
+            "{stdout}"
+        );
+        value
+    };
+
+    // No file.
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    assert_eq!(document(&stdout)["config"], "missing");
+
+    // A valid one.
+    write_voice_toml(
+        &toml,
+        "[audio]\ninput = \"speech_out\"\noutput = \"default\"\n",
+    );
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    let value = document(&stdout);
+    assert_eq!(value["config"], "ok");
+    assert_eq!(value["configured_input"], "speech_out");
+    assert!(value.get("configured_output").is_none(), "{stdout}");
+
+    // A refused one: the document says so and one line says why.
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(document(&stdout)["config"], "refused");
+    assert!(stderr.starts_with("conch-voice: "), "{stderr}");
+    assert_eq!(stderr.matches('\n').count(), 1, "{stderr}");
+
+    // No directory at all.
+    let mut command = conch_voice(private.path());
+    command
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("XDG_RUNTIME_DIR", private.path())
+        .env("PIPEWIRE_REMOTE", "conch-voice-test-no-such-socket");
+    let (code, stdout, _) = run(command.args(["devices", "--json"]));
+    assert_eq!(code, Some(0));
+    assert_eq!(document(&stdout)["config"], "none");
+
+    // A mistake on the command line is still 2, and writes no document.
+    let (code, stdout, _) = run(conch_voice(private.path()).args(["devices", "--json", "x"]));
+    assert_eq!(code, Some(2));
+    assert_eq!(stdout, "");
+}
