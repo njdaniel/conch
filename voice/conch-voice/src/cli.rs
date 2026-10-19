@@ -171,7 +171,11 @@ pub enum Invocation {
     /// `conch-voice managed`.
     Managed(ManagedArgs),
     /// `conch-voice devices`.
-    Devices,
+    Devices {
+        /// `--json`: write the device list as one `conch.voice_devices.v1` line instead of
+        /// the text, and probe no keyboard.
+        json: bool,
+    },
     /// `conch-voice keys <device>`.
     Keys {
         /// The keyboard's event device.
@@ -307,6 +311,12 @@ pub fn command() -> Command {
              read it, and prints a udev rule that would grant you read access to that one \
              device. It opens each keyboard to see whether it can, and reads nothing from any \
              of them; it opens no audio device.",
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .help("Write the microphones and speakers as one line of JSON (conch.voice_devices.v1) instead; no keyboard is looked at"),
         );
     let keys = Command::new("keys")
         .about("Show the code of EVERY key pressed on a keyboard until Ctrl-C, to find the key to talk with")
@@ -438,7 +448,11 @@ where
                 test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
             }));
         }
-        Some(("devices", _)) => return Ok(Invocation::Devices),
+        Some(("devices", devices)) => {
+            return Ok(Invocation::Devices {
+                json: devices.get_flag("json"),
+            });
+        }
         Some(("config", config)) => return config_set(config),
         Some(("keys", keys)) => {
             if let Some(device) = keys.get_one::<PathBuf>("device") {
@@ -989,7 +1003,11 @@ mod tests {
     fn devices_and_keys_are_commands_and_keys_needs_its_device() {
         assert_eq!(
             parse(["conch-voice", "devices"]).unwrap(),
-            Invocation::Devices
+            Invocation::Devices { json: false }
+        );
+        assert_eq!(
+            parse(["conch-voice", "devices", "--json"]).unwrap(),
+            Invocation::Devices { json: true }
         );
         assert_eq!(
             parse([
@@ -1006,6 +1024,8 @@ mod tests {
             &["keys"][..],
             &["keys", "one", "two"],
             &["devices", "extra"],
+            &["devices", "--json", "extra"],
+            &["devices", "--jsn"],
             // How a device is checked is not an option of any command.
             &["keys", "--any-file", "x"],
             &["join", "--key-device", "x"],

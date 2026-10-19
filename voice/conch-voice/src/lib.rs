@@ -90,6 +90,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use conch_voice_audio::{CountingSink, ToneSource, WavSource};
+use dmn_audio::NodeTable;
 use tokio::sync::mpsc;
 
 use crate::audio::PipeWire;
@@ -333,25 +334,73 @@ pub fn managed(
 /// nothing is read from any keyboard. A machine PipeWire does not run on gets a line that
 /// says so, and the keyboards all the same.
 ///
+/// With `json`, only the first half, as one `conch.voice_devices.v1` line
+/// ([`devices::device_list`]): no keyboard is listed, opened or looked up, and nothing is
+/// asked of the login. It reads `voice.toml` only to say what `[audio]` names.
+///
 /// # Errors
 ///
 /// [`Error::Output`] if standard output cannot be written to.
-pub fn devices() -> Result<(), Error> {
-    let audio = match PipeWire::connect() {
-        Ok(pipewire) => devices::audio_report(
-            &pipewire.nodes(audio::LISTING_WAIT),
-            &mut std::io::stdout().lock(),
-        ),
-        Err(error) => devices::audio_unavailable(&error.to_string(), &mut std::io::stdout().lock()),
-    };
-    audio.map_err(Error::Output)?;
-    devices::report(
-        Path::new(devices::BY_ID),
-        DeviceRule::EventDevice,
-        devices::current_uid(),
+pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Result<(), Error> {
+    devices_with(
+        json,
+        environment,
+        scrubber,
+        || {
+            PipeWire::connect()
+                .map(|pipewire| pipewire.nodes(audio::LISTING_WAIT))
+                .map_err(|error| error.to_string())
+        },
+        |out| {
+            devices::report(
+                Path::new(devices::BY_ID),
+                DeviceRule::EventDevice,
+                devices::current_uid(),
+                out,
+            )
+        },
         &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
     )
-    .map_err(Error::Output)
+}
+
+/// [`devices`] with its three contacts with the machine passed in: PipeWire's node table,
+/// the keyboards' half, and the two streams. `keyboards` is called for the text form and
+/// never for `json`, which is how a test shows that `--json` touches none.
+///
+/// A configuration that is refused is not a failure: the document says `refused`, one
+/// scrubbed line goes to `err`, and the exit code is 0.
+///
+/// # Errors
+///
+/// [`Error::Output`] if `out` cannot be written to.
+pub fn devices_with(
+    json: bool,
+    environment: &Environment,
+    scrubber: &Scrubber,
+    connect: impl FnOnce() -> Result<NodeTable, String>,
+    keyboards: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+    out: &mut dyn std::io::Write,
+    err: &mut dyn std::io::Write,
+) -> Result<(), Error> {
+    if json {
+        let (config, refused) = devices::config_view(environment);
+        if let Some(refused) = refused {
+            // Best effort: the document on standard output is the answer.
+            let _ = writeln!(err, "{}", error_line(scrubber, &refused));
+        }
+        let list = match connect() {
+            Ok(table) => devices::device_list(&table, &config),
+            Err(_) => devices::device_list_unavailable(&config),
+        };
+        return devices::write_device_list(&list, out).map_err(Error::Output);
+    }
+    match connect() {
+        Ok(table) => devices::audio_report(&table, out),
+        Err(why) => devices::audio_unavailable(&why, out),
+    }
+    .map_err(Error::Output)?;
+    keyboards(out).map_err(Error::Output)
 }
 
 /// `conch-voice config set <key> <value>`: saves the microphone or the speakers in
