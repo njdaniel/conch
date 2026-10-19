@@ -175,7 +175,7 @@ test.describe('screen share with LiveKit', () => {
   async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal): Promise<Someone> {
     const context = await browser.newContext(options);
     const page = await context.newPage();
-    const watch = watchPage(page, vw);
+    const watch = await watchPage(page, vw);
     await page.addInitScript(instrument);
     if (late !== undefined) await routeSignal(page, late);
     const member = typeof who === 'string' ? vw[who] : who;
@@ -227,6 +227,15 @@ test.describe('screen share with LiveKit', () => {
     const reports = p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l));
     expect(reports.filter((l) => l !== cameraReport)).toEqual([]);
     expect(reports.length, 'camera policy reports, one per share').toBe(shares);
+    // The same, as the page's ReportingObserver is told (issue #595). The
+    // camera's report comes from the picker call itself (a bare
+    // getDisplayMedia() makes it, and none is made with the camera allowed),
+    // so it is counted here, not taken away.
+    expect(p.watch.policy.filter((l) => !l.startsWith('camera ')), 'Permissions-Policy reports other than the camera').toEqual([]);
+    expect(p.watch.policy.length, 'camera Permissions-Policy reports, one per share').toBe(shares);
+    // And no request to conchd the browser counts as failed: a stopped
+    // share's 204 is read to its end, as a transmit report's is.
+    expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
   }
 
   async function shareRows(): Promise<{ action: string; detail: string }[]> {

@@ -47,7 +47,7 @@ test.describe('with a refused microphone', () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     try {
-      const watch = watchPage(page, vw);
+      const watch = await watchPage(page, vw);
       await page.addInitScript(refuseMicrophone);
       // Every voice session asked for, and every socket opened to LiveKit.
       const sessions: number[] = [];
