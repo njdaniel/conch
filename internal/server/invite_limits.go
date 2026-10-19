@@ -97,6 +97,21 @@ func defaultInviteLimits() inviteLimits {
 	}
 }
 
+// testRelaxedPerAddressBurst is the per-address burst of a server started
+// with Config.TestRelaxInviteLimits: more attempts than any suite makes within
+// one window, which is all that "relaxed" has to mean.
+const testRelaxedPerAddressBurst = 1_000_000
+
+// testRelaxedInviteLimits are the defaults with the two per-address limits
+// raised. The server-wide and per-principal limits stay as they are: the
+// browser suite redeems from one address, not in bulk.
+func testRelaxedInviteLimits() inviteLimits {
+	l := defaultInviteLimits()
+	l.previewPerAddress.burst = testRelaxedPerAddressBurst
+	l.redeemPerAddress.burst = testRelaxedPerAddressBurst
+	return l
+}
+
 // tokenBucket is one bucket. The zero value is full: a key seen for the first
 // time has its whole burst.
 type tokenBucket struct {
