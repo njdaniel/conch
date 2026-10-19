@@ -81,11 +81,12 @@ func main() {
 	realList := flag.String("real-adapters", "", "with --keep, add an agent real-<runtime> for each of claude, codex, ollama (comma-separated); each model comes from CONCH_P3_MODEL_<RUNTIME>")
 	advertiseURL := flag.String("advertise", "", "with --keep, bind conchd to this address of this machine (http://<ip>:<port>) and write it into every file, for a guest on the LAN")
 	nonLoopback := flag.Bool("non-loopback", false, "without --keep, run the suite with conchd bound to this machine's own non-loopback IPv4 and every client pointed at it (CI uses it)")
+	relaxInvites := flag.Bool("relax-invite-limits", false, "with --keep (not with --advertise), start conchd with --test-relax-invite-limits; the browser suite uses it so its specs do not share one invite budget")
 	flag.Parse()
 	runtimeSet := false
 	flag.Visit(func(f *flag.Flag) { runtimeSet = runtimeSet || f.Name == "runtime" })
-	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) || (*nonLoopback && (*keep || *reset || *advertiseURL != "")) {
-		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep] [--real-adapter [--runtime claude|codex]] | --reset")
+	if flag.NArg() != 0 || (*reset && (*keep || *realAdapter)) || (*runtimeName != "claude" && *runtimeName != "codex") || (runtimeSet && !*realAdapter) || (*realList != "" && (!*keep || *reset)) || (*nonLoopback && (*keep || *reset || *advertiseURL != "")) || (*relaxInvites && (!*keep || *advertiseURL != "")) {
+		fmt.Fprintln(os.Stderr, "usage: go run ./e2e/p3-local [--keep [--relax-invite-limits]] [--real-adapter [--runtime claude|codex]] | --reset")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --real-adapters claude,codex,ollama")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --keep --advertise http://<host-ip>:<port>")
 		fmt.Fprintln(os.Stderr, "       go run ./e2e/p3-local --non-loopback")
@@ -124,6 +125,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, name+": FAIL:", err)
 		os.Exit(1)
 	}
+	r.relaxInviteLimits = *relaxInvites
 	if *reset {
 		err = r.reset()
 		stop()
@@ -184,6 +186,10 @@ type runner struct {
 	// advertise is set by --advertise: conchd binds to its address and every
 	// file and printed command names its URL.
 	advertise *advertise
+	// relaxInviteLimits starts conchd with --test-relax-invite-limits (issue
+	// #609). Only the browser suite's --keep run sets it, and conchd refuses
+	// it on anything but loopback.
+	relaxInviteLimits bool
 	// webDir is the built web client conchd serves; CONCH_P3_WEB_DIR names one
 	// that is not repo/web/dist, and then nothing is built for it.
 	webDir    string
@@ -839,6 +845,9 @@ func (r *runner) serveArgs(listen string) []string {
 	args := []string{"serve", "--listen", listen, "--web-dir", r.webDir, "--data", filepath.Join(r.root, "data")}
 	if r.suite {
 		args = append(args, "--session-stale", suiteSessionStale, "--session-offline", suiteSessionOffline)
+	}
+	if r.relaxInviteLimits {
+		args = append(args, "--test-relax-invite-limits")
 	}
 	return args
 }

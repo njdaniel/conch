@@ -101,9 +101,8 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   await expectCodeGone(again.page, link.code);
 });
 
-// The person is made by the operator here, not by an invite: redeeming an
-// invite and using a sign-in link spend one per-address bucket, and the
-// suite's other specs, all from 127.0.0.1, spend most of it.
+// The person is made by the operator here: the spec is about the link, and
+// an invite would only add a redemption that has nothing to do with it.
 test('B493 an expired sign-in link says it no longer works', async ({ meet, world }) => {
   const request: CreatePrincipalRequest = { kind: 'human', name: unique('late') };
   const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, request)).principal.id;
