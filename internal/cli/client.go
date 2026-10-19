@@ -647,6 +647,21 @@ func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.Voic
 	return result, nil
 }
 
+// VoiceOccupancy returns one snapshot of how many people are in the voice of
+// each channel the caller may see voice in. As with presence, a document that
+// fails its own Validate is an error and is never shown.
+func (c *Client) VoiceOccupancy(ctx context.Context) (schema.VoiceOccupancyV1, error) {
+	endpoint := c.resolve("v1", "voice", "occupancy")
+	var result schema.VoiceOccupancyV1
+	if err := c.roundTrip(ctx, "voice occupancy", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.VoiceOccupancyV1{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return schema.VoiceOccupancyV1{}, fmt.Errorf("cli: invalid voice occupancy: %w", err)
+	}
+	return result, nil
+}
+
 // SubscribeVoicePresence follows channel's voice presence socket and calls
 // receive with the whole-state document the server sends on connect and on
 // every change. A document that fails Validate ends the subscription with an

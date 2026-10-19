@@ -41,6 +41,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
 /// The test options: no PipeWire.
 const NO_DEVICES: [&str; 4] = ["--mic", "none", "--sink", "count"];
 
+/// What the helper logs when the final state was not written in time (`Owner::finish`).
+const FINAL_STATE_UNREAD: &str = "the final state was not read before leaving";
+
 /// What file descriptor 3 is when the helper starts.
 enum Fd3 {
     Closed,
@@ -458,14 +461,33 @@ async fn a_parent_that_dies_while_the_control_pipe_stays_open_is_noticed_and_it_
         Duration::from_millis(VOICE_CONTROL_OWNER_POLL_MS + VOICE_CONTROL_OWNER_LOSS_EXIT_MS);
     assert!(took < bound, "ended {took:?} after its parent died");
     eprintln!("parent died: the helper ended {took:?} after");
+    // The final state is best effort (`docs/design/tui-voice.md` §5, rule 11): the helper
+    // gives it 250 ms to be written, and on a machine so loaded that its writer thread
+    // is not scheduled in that time it leaves without it, and says so. The owner side
+    // takes the end of the pipe as the helper ending. So a missing final state passes
+    // only with that line in standard error: a helper that left it out when it could
+    // have written it still fails here.
     let states = helper.states();
-    assert_eq!(
-        states.last(),
-        Some(&(
-            VoiceControlPhase::Stopped,
-            Some(VoiceControlReason::OwnerLost)
-        ))
+    let stopped = (
+        VoiceControlPhase::Stopped,
+        Some(VoiceControlReason::OwnerLost),
     );
+    if states.last() != Some(&stopped) {
+        let stderr = helper.stderr();
+        assert!(
+            stderr.contains(FINAL_STATE_UNREAD),
+            "no final state, and the helper did not say it could not write it\nstates: {states:?}\nstderr: {stderr}"
+        );
+        assert_eq!(
+            states.last(),
+            Some(&(
+                VoiceControlPhase::Stopping,
+                Some(VoiceControlReason::OwnerLost)
+            )),
+            "stderr: {stderr}"
+        );
+        eprintln!("the final state was not read in time, as the helper said");
+    }
     assert!(
         helper.stdin.is_some(),
         "the control pipe was open throughout"

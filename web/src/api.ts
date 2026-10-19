@@ -217,7 +217,8 @@ async function noteRefusal(res: Response): Promise<void> {
 // answer is its status alone. Chromium hands even a 204 a body, and logs a
 // request whose body is left unread, or is cancelled, as failed
 // (net::ERR_ABORTED) once the response is let go; read to the end, it is a
-// request finished (issue #595). A body that cannot be read changes nothing:
+// request finished (issues #595, #622). sendAs does this for every 204, so a
+// call added later cannot forget. A body that cannot be read changes nothing:
 // the status was the answer.
 async function discard(res: Response): Promise<void> {
   try {
@@ -313,6 +314,9 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
     forget(held);
     return { kind: 'unauthorized' };
   }
+  // A 204 is a status alone by definition (sign-outs, closes, a transmit
+  // report): read it out here so no caller has to remember to (issue #622).
+  if (res.status === 204) await discard(res);
   return { kind: 'reply', res };
 }
 
@@ -1119,10 +1123,7 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   if (reply.kind === 'none') return 'failed';
   if (reply.kind === 'unauthorized') return 'unauthorized';
   const status = reply.res.status;
-  if (status >= 200 && status < 300) {
-    await discard(reply.res);
-    return 'ok';
-  }
+  if (status >= 200 && status < 300) return 'ok';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'failed';
   return 'no_session';
@@ -1207,6 +1208,5 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
-  await discard(reply.res);
   return { ok: true, value: null };
 }
