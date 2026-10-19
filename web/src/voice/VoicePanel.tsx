@@ -8,7 +8,7 @@
 // voice, and the controls. Less used choices are under Voice options. The
 // watch view is drawn into the lobby's stage with a portal, so it is still
 // this one component, wherever it shows.
-import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent } from 'react';
+import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import { StageHost } from '../stage';
@@ -16,7 +16,7 @@ import type { Person } from '../useLiveChannel';
 import type { Phase } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
-import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, soundNote } from './share';
+import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
 import { ShareView } from './ShareView';
 import type { VoiceControl } from './useVoice';
 
@@ -75,6 +75,10 @@ export function VoicePanel({
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
   const [options, setOptions] = useState(false);
+  // More about sharing opens Voice options at the full share notes, and
+  // takes focus there once they are shown (issue #600).
+  const about = useRef<HTMLElement>(null);
+  const [toAbout, setToAbout] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
   // Leave voice takes itself away once the client has drained (up to a
@@ -118,6 +122,12 @@ export function VoicePanel({
       window.removeEventListener('keydown', onKey);
     };
   }, [voice]);
+
+  useEffect(() => {
+    if (!toAbout || !options) return;
+    setToAbout(false);
+    about.current?.focus();
+  }, [toAbout, options]);
 
   useEffect(() => {
     if (state.phase !== 'idle' || !left.current) return;
@@ -217,6 +227,17 @@ export function VoicePanel({
   // name is only read out, and the buttons show their verbs. With no channel
   // on screen there is nowhere to name.
   const dest = viewed === null ? null : <span className="dest">in #{viewed}</span>;
+  // Whether this page could start a share now, but for someone else's. Then
+  // who else shares is said in the line that says why Share screen is off
+  // (issue #600: one line, not two), and while nobody else does, the strip's
+  // one line about sharing shows, with the full notes in Voice options.
+  const { features } = voice;
+  const busyLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
+  const sharable = busyLine && theirs === null;
+  const more = () => {
+    setOptions(true);
+    setToAbout(true);
+  };
 
   return (
     <section aria-label="Voice" className={`voice phase-${state.phase}${state.transmitting ? ' sending' : ''}`}>
@@ -351,17 +372,18 @@ export function VoicePanel({
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
               <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
-            <ShareNotes voice={voice} holderName={holder === null ? null : nameOf(people, holder.principal, viewer)} othersName={theirs === null ? null : theirName} />
+            <ShareNotes
+              voice={voice}
+              holderName={holder === null ? null : nameOf(people, holder.principal, viewer)}
+              others={theirs === null ? null : { name: theirName, audio: theirs.sharingAudio }}
+              onMore={more}
+            />
             {stopped === null ? null : (
               <p role="status" className="hint">
                 {stopped.name} stopped sharing.
               </p>
             )}
-            {theirs === null || state.watching ? null : (
-              <p className="hint">
-                {theirName} is sharing a screen{theirs.sharingAudio ? ', with sound' : ''}.
-              </p>
-            )}
+            {theirs === null || state.watching || busyLine ? null : <p className="hint">{othersShareNote(theirName, theirs.sharingAudio)}</p>}
           </>
         ) : (
           <>
@@ -381,7 +403,7 @@ export function VoicePanel({
         )}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options} /> : null}
+      {inVoice ? <Options voice={voice} open={options} sharable={sharable} about={about} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
   );
@@ -431,8 +453,15 @@ function Roster({ roster, people, viewer, elsewhere, speaking }: {
 }
 
 // Voice options: the less used choices, out of the strip.
-function Options({ voice, open }: { readonly voice: VoiceControl; readonly open: boolean }) {
-  const { state, client } = voice;
+function Options({ voice, open, sharable, about }: {
+  readonly voice: VoiceControl;
+  readonly open: boolean;
+  // Whether the full share notes are said: while the strip's line about
+  // sharing shows.
+  readonly sharable: boolean;
+  readonly about: RefObject<HTMLElement | null>;
+}) {
+  const { state, client, features } = voice;
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
       <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
@@ -470,6 +499,13 @@ function Options({ voice, open }: { readonly voice: VoiceControl; readonly open:
         The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues
         only while the page is open on screen.
       </p>
+      {sharable ? (
+        <section id="voice-share-about" ref={about} tabIndex={-1} className="voice-about" aria-labelledby="voice-share-about-title">
+          <h3 id="voice-share-about-title">Sharing your screen</h3>
+          <p className="hint">{soundNote(features)}</p>
+          <p className="hint">{ownPageNote}</p>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -505,22 +541,35 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
 
 // ShareNotes is what the sharer's side says: what sound a share will carry
 // and what it shows, before the picker opens; what is happening; and why the
-// last share ended. While someone else shares no picker can open, so the
-// notes about it wait until their share ends, and a line says who shares
-// instead: Share screen's description.
+// last share ended. Before a share that is one line (issue #600), and More
+// about sharing opens Voice options at the full notes. While someone else
+// shares no picker can open, so that line waits until their share ends, and
+// one line says who shares instead, and with what sound: Share screen's
+// description.
 //
 // A claim refused because someone else shares (busy) says the same words, so
 // it is that line, read out when it comes, and it goes with the other share
 // (issue #591, F14): once nobody else shares it is no longer true.
-function ShareNotes({ voice, holderName, othersName }: {
+function ShareNotes({ voice, holderName, others, onMore }: {
   readonly voice: VoiceControl;
   readonly holderName: string | null;
-  // Who else shares, or null while nobody else does.
-  readonly othersName: string | null;
+  // Who else shares, and whether with sound, or null while nobody else does.
+  readonly others: { readonly name: string; readonly audio: boolean } | null;
+  readonly onMore: () => void;
 }) {
   const { state, features } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
+  const line = (
+    <p className="hint share-line">
+      {shortShareNote(features)}{' '}
+      <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>
+        More about sharing
+      </button>
+    </p>
+  );
+  // A browser that cannot share is told so in one sentence, and there is no
+  // more to say about sharing.
   if (!features.canShare) return <p className="hint">{soundNote(features)}</p>;
   switch (share.kind) {
     case 'sharing':
@@ -541,17 +590,15 @@ function ShareNotes({ voice, holderName, othersName }: {
     case 'idle':
       return (
         <>
-          {othersName === null ? (
-            <p className="hint">
-              <span>{soundNote(features)}</span> <span>{ownPageNote}</span>
-            </p>
+          {others === null ? (
+            line
           ) : share.ended === 'busy' ? (
             <p key="refused" id="voice-share-busy" role="status" className="hint">
-              {endedNote('busy', othersName)}
+              {busyNote(others.name, others.audio)}
             </p>
           ) : (
             <p key="busy" id="voice-share-busy" className="hint">
-              {endedNote('busy', othersName)}
+              {busyNote(others.name, others.audio)}
             </p>
           )}
           {share.ended === null || share.ended === 'busy' ? null : (
