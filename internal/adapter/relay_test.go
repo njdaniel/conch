@@ -749,9 +749,15 @@ func TestRelayRunsItsClocks(t *testing.T) {
 	waitFor(t, "the heartbeat and the look for interventions", func() bool {
 		return len(fake.seen("/v1/sessions/7/heartbeat")) == 1 && len(fake.seen("/v1/sessions/7/interventions")) == 1
 	})
-	clk.advance(cfg.InterventionTimeout + time.Second)
-	clk.fire(interventionSweep)
+	// The fake having seen the request does not mean the relay has read the
+	// response and started the clock on intervention 40: that clock starts at
+	// the relay's now, so a sweep (or an advance) that comes first leaves
+	// nothing overdue and nothing fires the sweep again. So move the time on
+	// and sweep on every poll until the answer comes; once the relay holds
+	// the intervention, the next advance makes it overdue.
 	waitFor(t, "the answer after the timeout", func() bool {
+		clk.advance(cfg.InterventionTimeout + time.Second)
+		clk.fire(interventionSweep)
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
 		return fake.ivs[40] == schema.InterventionStateFailed
