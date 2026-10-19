@@ -19,7 +19,8 @@
 //! that carries audio only while the transmit gate is open. To the output PipeWire has, or
 //! the one `audio.output` names, the mix of what the channel's speakers say ([`audio`]). No join token, room name or
 //! login token is in anything this program writes, and nothing it does waits for what it
-//! writes to be read.
+//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device changed and
+//! nothing else ([`config_cmd`]): the one file this program writes.
 //!
 //! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
 //! input is also its owner's commands on standard input, and the end of that input; its
@@ -33,7 +34,7 @@
 //! ([`presence`]); the connection to PipeWire and the microphone and speaker streams
 //! opened through it ([`audio`]), the microphone's from the moment a session first allows
 //! publishing until the session ends, the speakers' for the whole session. It keeps no
-//! file. It keeps no token to use again: a join token goes to
+//! file, and writes one only for `config set`: `voice.toml`. It keeps no token to use again: a join token goes to
 //! the SDK for the one join it was issued for, and the only copies held here are the
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
@@ -50,7 +51,8 @@
 //! - [`secrets`] and [`logger`]: what keeps tokens and room names out of the output.
 //! - [`lines`]: the queue every line passes on its way to standard output or standard
 //!   error, so that a reader who stops reading stops nothing.
-//! - [`cli`]: the command line and the layers of configuration.
+//! - [`cli`]: the command line and the layers of configuration. [`config_cmd`]: `config
+//!   set`, which saves a device in `voice.toml`.
 //! - [`keydev`]: the key device's watcher. [`keys`] and [`devices`]: the two commands that
 //!   help set it up. [`status`]: the status redrawn in place on a terminal.
 //!
@@ -61,6 +63,7 @@
 
 pub mod audio;
 pub mod cli;
+pub mod config_cmd;
 pub mod devices;
 pub mod error;
 pub mod input;
@@ -349,6 +352,20 @@ pub fn devices() -> Result<(), Error> {
         &mut std::io::stdout().lock(),
     )
     .map_err(Error::Output)
+}
+
+/// `conch-voice config set <key> <value>`: saves the microphone or the speakers in
+/// `voice.toml`, and changes nothing else in it ([`config_cmd`]). Prints nothing.
+///
+/// # Errors
+///
+/// What [`config_cmd::set`] says; `voice.toml` is then as it was.
+pub fn config_set(
+    environment: &Environment,
+    key: conch_voice_control::AudioKey,
+    value: &str,
+) -> Result<(), Error> {
+    config_cmd::set(environment, key, value)
 }
 
 /// `conch-voice keys <device>`: says that it will show every key pressed on the device,
