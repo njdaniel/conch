@@ -149,7 +149,7 @@ func TestVoiceDevicesV1Validate(t *testing.T) {
 			d.Microphones[0].Name = "Mikrofon für Sprache (USB)"
 		}},
 		{name: "valid, a description with a line separator (not a control character)", mutate: func(d *VoiceDevicesV1) {
-			d.Microphones[0].Description = "a b"
+			d.Microphones[0].Description = "a\u2028b"
 		}},
 		{name: "valid, a configured input the list does not have", mutate: func(d *VoiceDevicesV1) {
 			d.ConfiguredInput = "alsa_input.usb-Generic_USB_Headset-00.mono-fallback"
@@ -351,7 +351,7 @@ func TestVoiceDevicesCasesCoverEveryRefusal(t *testing.T) {
 // character chosen so that the encoder writes it as a six-byte escape: a line
 // separator, which is not a control character and so passes Validate.
 func largestVoiceDevicesV1() VoiceDevicesV1 {
-	const sep = " "
+	const sep = "\u2028"
 	name := strings.Repeat(sep, VoiceDevicesMaxNameBytes/len(sep))
 	description := strings.Repeat(sep, VoiceDevicesMaxDescriptionChars)
 	list := func() []VoiceDevice {
