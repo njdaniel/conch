@@ -911,6 +911,122 @@ func TestVoicePresenceSocketStreams(t *testing.T) {
 	}
 }
 
+// TestVoicePresenceSocketRoomShownAgain: a room that could not be read is
+// hidden from the presence socket, and when a later pass reads it again the
+// socket is told, even if the people are the same as before the failure
+// (issue #610). A room with nobody in it shows nothing either way, so that
+// return sends no frame.
+func TestVoicePresenceSocketRoomShownAgain(t *testing.T) {
+	tests := []struct {
+		name string
+		// occupant is who is in the room before it cannot be read.
+		occupant []fakeParticipant
+		// back is the frame wanted when the room is read again; "" means
+		// none is sent.
+		back string
+		// next changes the room, and after is the frame that gives: a frame
+		// sent where none was due would be read ahead of it.
+		next  func(f *presenceFixture, room string)
+		after string
+	}{
+		{
+			name:     "the same people",
+			occupant: []fakeParticipant{{joinedMs: 1_000, published: true, muted: true}},
+			back:     "ann2",
+			next: func(f *presenceFixture, room string) {
+				f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) { p.muted = false })
+			},
+			after: "ann2*",
+		},
+		{
+			name: "nobody",
+			back: "",
+			next: func(f *presenceFixture, room string) {
+				f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000, published: true, muted: true})
+			},
+			after: "ann2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			room, other := f.inUse(t, f.ops), f.inUse(t, f.ops2)
+			// A second room that stays readable keeps this from being an outage.
+			f.lk.setRoom(other, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+			for _, p := range tc.occupant {
+				p.identity = f.identity("ann2")
+				f.lk.setRoom(room, p)
+			}
+			base := wsTestServer(t, f.srv)
+			conn, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			byID := map[int64]string{}
+			for n, id := range f.ids {
+				byID[id] = n
+			}
+			frame := func(step string) string {
+				t.Helper()
+				s := readPresence(t, conn)
+				if !s.Available || len(s.Rooms) != 1 {
+					t.Fatalf("%s: %+v", step, s)
+				}
+				var names []string
+				for _, p := range s.Rooms[0].Participants {
+					n := byID[p.PrincipalID]
+					if p.Transmitting {
+						n += "*"
+					}
+					names = append(names, n)
+				}
+				return strings.Join(names, ",")
+			}
+			if s := readPresence(t, conn); s.Available {
+				t.Fatalf("on connect: %+v", s)
+			}
+			f.pass(t)
+			want := ""
+			if len(tc.occupant) > 0 {
+				want = "ann2"
+			}
+			if got := frame("first read"); got != want {
+				t.Fatalf("first read: frame = %q, want %q", got, want)
+			}
+
+			// The room cannot be read: its people are hidden. Nobody to hide
+			// in the empty room, so that case sends nothing here.
+			f.lk.config(func(l *scriptedLiveKit) { l.listFail = map[string]bool{room: true} })
+			f.clock.Advance(testPassGap)
+			f.pass(t)
+			if len(tc.occupant) > 0 {
+				if got := frame("unreadable"); got != "" {
+					t.Fatalf("unreadable: frame = %q, want nobody", got)
+				}
+			}
+
+			// Read again, with the people the failure left behind.
+			f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil })
+			f.clock.Advance(testPassGap)
+			f.pass(t)
+			if tc.back != "" {
+				if got := frame("read again"); got != tc.back {
+					t.Fatalf("read again: frame = %q, want %q", got, tc.back)
+				}
+			}
+
+			// A frame sent where none was due would be read here, ahead of
+			// the one for this change.
+			tc.next(f, room)
+			f.clock.Advance(testPassGap)
+			f.pass(t)
+			if got := frame("next change"); got != tc.after {
+				t.Errorf("next change: frame = %q, want %q", got, tc.after)
+			}
+		})
+	}
+}
+
 // TestVoicePresenceSocketClosedOnLoss: the socket is closed when the
 // subscriber is removed from the channel, disabled, or has every credential
 // revoked, and it is closed before the response is written.
