@@ -1045,6 +1045,12 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 		shown = 0
 	}
 	counted := shown != len(next)
+	// A stale room shown again shows people it hid, even when they are the
+	// same as before the failure and none of the cases above saw a change
+	// (issue #610). An empty room shows nothing either way.
+	if r.stale && len(next) > 0 {
+		changed = true
+	}
 	r.participants = next
 	r.stale = false
 	r.marked = again

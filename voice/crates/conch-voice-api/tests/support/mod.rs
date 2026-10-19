@@ -1,7 +1,8 @@
 //! A stand-in for `conchd`, written by hand on tokio's listener: enough HTTP/1.1 to make
 //! every answer the client has to cope with reproducible, and a WebSocket side that plays
-//! a script. It binds `127.0.0.1:0`, so tests never share a port, and it records what it
-//! was sent so that tests can check the request and count the attempts.
+//! a script. It binds `127.0.0.1:0` and keeps the listener for its whole life, so tests
+//! never share a port, and it records what it was sent so that tests can check the request
+//! and count the attempts.
 
 // Each test binary uses its own part of this module.
 #![allow(dead_code)]
@@ -13,7 +14,7 @@ use std::time::Duration;
 use conch_voice_api::{Client, Secret, ServerAddress};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -224,12 +225,31 @@ pub fn client_for(server: &str, timeout: Duration) -> Client {
     Client::new(&server, &Secret::new(FAKE_TOKEN), timeout).unwrap()
 }
 
-/// An address on this machine that nothing listens on.
-pub async fn closed_port() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
+/// An address on this machine that nothing listens on, and that no other test can be
+/// given while this value lives. The socket is bound but never told to listen: the kernel
+/// keeps the port reserved, so a parallel test's `bind("127.0.0.1:0")` cannot get it,
+/// and a connection to it is still refused. (Binding and then dropping would free the
+/// port for another test's stub to take, and this test would dial that stub.)
+pub struct ClosedPort {
+    _socket: TcpSocket,
+    addr: SocketAddr,
+}
+
+impl ClosedPort {
+    /// The address as a server address.
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
+pub async fn closed_port() -> ClosedPort {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    ClosedPort {
+        _socket: socket,
+        addr,
+    }
 }
 
 /// Reads one HTTP/1.1 request: the head up to the blank line, then `Content-Length` bytes.

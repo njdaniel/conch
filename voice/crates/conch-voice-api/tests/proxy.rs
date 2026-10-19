@@ -136,7 +136,8 @@ async fn the_calls_a_child_process_makes_with_proxy_variables_set() {
     assert_eq!(stub.requests().len(), 4, "{:#?}", stub.requests());
 
     // Over HTTPS, to a port nothing listens on: refused there, not tunnelled.
-    let secure = closed_port().await.replace("http://", "https://");
+    let closed = closed_port().await;
+    let secure = closed.url().replace("http://", "https://");
     let client = client_for(&secure, Duration::from_secs(2));
     let rest = client.presence("general").await.map(|_| ());
     assert!(matches!(rest, Err(Error::Connect { .. })), "{rest:?}");
