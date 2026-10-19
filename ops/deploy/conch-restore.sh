@@ -14,7 +14,8 @@
 # /var/lib/conch/<instance>.
 #
 # CONCHD is the binary to run (default /opt/conch/current/conchd);
-# CONCH_RESTORE_PORT is the first port to try (default 18080).
+# CONCH_RESTORE_PORT is the loopback port to use (default: any free port,
+# chosen by conchd).
 set -euo pipefail
 # Character classes such as [0-9] mean ASCII only in the C locale.
 export LC_ALL=C
@@ -76,15 +77,12 @@ while IFS= read -r sum; do
 done < <(sqlite3 "$data/conch.db" 'SELECT DISTINCT sha256 FROM files')
 echo "files:         $files, each with its stored SHA-256"
 
-# 5. conchd opens it. A spare loopback port, an empty environment (no LiveKit,
-# no ntfy), and no web client.
-port=${CONCH_RESTORE_PORT:-18080}
-while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
-    port=$((port + 1))
-    [ "$port" -lt 65000 ] || fail "no spare port"
-done
+# 5. conchd opens it. Loopback, an empty environment (no LiveKit, no ntfy),
+# and no web client. It binds port 0 unless CONCH_RESTORE_PORT names one, and
+# the port is read from the line conchd prints once it holds it, so the check
+# below can only reach this conchd, never another one on the same machine.
 log=$scratch/conchd.log
-env -i PATH="$PATH" "$conchd" serve --data "$data" --listen "127.0.0.1:$port" --no-web >"$log" 2>&1 &
+env -i PATH="$PATH" "$conchd" serve --data "$data" --listen "127.0.0.1:${CONCH_RESTORE_PORT:-0}" --no-web >"$log" 2>&1 &
 pid=$!
 stop() {
     if kill -0 "$pid" 2>/dev/null; then
@@ -93,6 +91,15 @@ stop() {
     fi
 }
 trap stop EXIT
+
+port=""
+for _ in $(seq 1 100); do
+    port=$(sed -n 's/.* listening on 127\.0\.0\.1:\([0-9]*\) (data .*/\1/p' "$log" 2>/dev/null | head -n 1)
+    [ -z "$port" ] || break
+    kill -0 "$pid" 2>/dev/null || { tail -n 5 "$log" >&2; fail "conchd exited on the restored data"; }
+    sleep 0.1
+done
+[ -n "$port" ] || { tail -n 5 "$log" >&2; fail "conchd did not say which port it holds"; }
 
 health=""
 for _ in $(seq 1 100); do
