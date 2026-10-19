@@ -267,7 +267,7 @@ test.describe('screen share with LiveKit', () => {
       // while someone else shares, rather than refused when pressed).
       const cShare = voiceRegion(c.page).getByRole('button', { name: 'Share screen' });
       await expect(cShare).toBeDisabled();
-      await expect(cShare).toHaveAccessibleDescription('alice is sharing. One person shares at a time.');
+      await expect(cShare).toHaveAccessibleDescription('alice is sharing a screen, with sound. One person shares at a time.');
 
       // A stops; B's view closes, and B is told.
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
@@ -354,7 +354,7 @@ test.describe('screen share with LiveKit', () => {
       await share(b);
       const alice = voiceRegion(a.page);
       const button = alice.getByRole('button', { name: 'Share screen' });
-      const said = 'bob is sharing. One person shares at a time.';
+      const said = 'bob is sharing a screen, with sound. One person shares at a time.';
       await expect(button).toBeDisabled();
       await expect(button).toHaveAccessibleDescription(said);
       await expect(alice.getByText(said)).toBeVisible();

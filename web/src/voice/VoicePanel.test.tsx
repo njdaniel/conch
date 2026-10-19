@@ -8,9 +8,11 @@ import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
+import { ownPageNote, soundNote, type ShareFeatures } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { stoppedFor, VoicePanel } from './VoicePanel';
 
+const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
 
 // A client that is never asked to connect: the panel reads the state it is
@@ -34,7 +36,7 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
     talkKey: 'Backquote',
     capturing: false,
     secure: true,
-    features: { canShare: true, chromium: true, platform: 'linux' },
+    features: chrome,
     client,
     setTalkKey: () => undefined,
     capture: () => undefined,
@@ -446,7 +448,7 @@ describe('what the strip says is true', () => {
   });
 
   describe('Share screen while someone else shares (F14)', () => {
-    const said = 'bob is sharing. One person shares at a time.';
+    const said = 'bob is sharing a screen. One person shares at a time.';
 
     it('is off, and described as who shares; on again with no description once nobody else does', () => {
       const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
@@ -593,5 +595,79 @@ describe('what the strip says is true', () => {
       expect(names(voice)).toEqual(['You (on another device)']);
       expect(voice.textContent).toContain(elsewhere);
     });
+  });
+});
+
+// Issue #600 (F08, F12): before a share the notes are one line, and More
+// about sharing opens Voice options at the full notes. While someone else
+// shares, one line says who, with what sound, and why Share screen is off.
+describe('the notes about sharing', () => {
+  const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+  const one = (principal: number, sharing = false) => ({
+    principal_id: principal,
+    can_publish: true,
+    transmitting: false,
+    joined_at: '2026-10-18T00:00:00Z',
+    ...(sharing ? { sharing: true, sharing_audio: true } : {}),
+  });
+  const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
+  const nobodyShares = room(one(7), one(3), one(4));
+  const bobShares = room(one(7), one(3, true), one(4));
+  const joined = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+  // The full notes for Chrome on Linux, the fake control's browser.
+  const full = [soundNote(chrome), ownPageNote];
+  const line = 'Sharing: only a tab carries sound; a whole screen also shows this page.';
+
+  it('are one line before a share, with More about sharing; the full notes wait in Voice options', () => {
+    const { voice } = panel(joined(), 'c', nobodyShares, bob);
+    const short = within(voice).getByText(line);
+    expect(short.classList.contains('hint')).toBe(true);
+    expect(within(short).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
+    // Nothing else of sharing is in the strip's notes: the full text is only
+    // under Voice options, still closed.
+    const notes = voice.querySelector('.voice-notes');
+    for (const text of full) expect(notes?.textContent).not.toContain(text);
+    const options = voice.querySelector('#voice-options');
+    expect(options?.hasAttribute('hidden')).toBe(true);
+    for (const text of full) expect(options?.textContent).toContain(text);
+  });
+
+  it('More about sharing opens Voice options at the full notes, in one press', () => {
+    const { voice } = panel(joined(), 'c', nobodyShares, bob);
+    fireEvent.click(within(voice).getByRole('button', { name: 'More about sharing' }));
+    expect(within(voice).getByRole('button', { name: 'Voice options', expanded: true })).toBeTruthy();
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(false);
+    const about = within(voice).getByRole('region', { name: 'Sharing your screen' });
+    expect(document.activeElement).toBe(about);
+    for (const text of full) expect(within(about).getByText(text)).toBeTruthy();
+  });
+
+  it("are absent while someone else shares, and one line says who, with sound, as Share screen's description", () => {
+    const said = 'bob is sharing a screen, with sound. One person shares at a time.';
+    const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
+    expect(within(voice).queryByText(line)).toBeNull();
+    expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
+    expect(voice.querySelector('#voice-share-about')).toBeNull();
+    for (const text of full) expect(voice.textContent).not.toContain(text);
+    // One line about bob's share, not two.
+    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([said]);
+    expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
+
+    // Watching it, the same line, and still one in the notes (the watch
+    // view has its own title).
+    redraw(joined({ watching: true }), bobShares);
+    const notes = voice.querySelector<HTMLElement>('.voice-notes');
+    if (notes === null) throw new Error('no notes');
+    expect(within(notes).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([said]);
+
+    // Once bob stops, the one line about sharing is back.
+    redraw(joined(), nobodyShares);
+    expect(within(voice).getByText(line)).toBeTruthy();
+  });
+
+  it('name who shares in a line of its own for someone listening only, who cannot share', () => {
+    const { voice } = panel(joined({ listenOnly: true }), 'c', bobShares, bob);
+    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual(['bob is sharing a screen, with sound.']);
+    expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
   });
 });

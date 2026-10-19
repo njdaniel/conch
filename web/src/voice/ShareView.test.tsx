@@ -305,7 +305,7 @@ describe('sharing', () => {
     expect(within(voice()).queryByText(/only a tab shares its sound/)).toBeNull();
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
     await act(settle);
-    expect(await within(voice()).findByText('bea is sharing. One person shares at a time.')).toBeTruthy();
+    expect(await within(voice()).findByText('bea is sharing a screen. One person shares at a time.')).toBeTruthy();
     expect(t.rooms[0]?.calls).toEqual([]);
   });
 
@@ -339,7 +339,7 @@ describe('sharing', () => {
     const renewed = { ...presence(null), rooms: [{ participants: [] }], share_ended: { reason: 'rotated' as const, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } };
     for (const [answer, text] of [
       [granted, 'The voice room was renewed, and your share carried on in the new one.'],
-      [busy, 'bea is sharing. One person shares at a time.'],
+      [busy, 'bea is sharing a screen. One person shares at a time.'],
     ] as const) {
       const t = setup([granted, granted, answer]);
       t.client.join('general');

@@ -192,4 +192,5 @@ prints, and `scripts/dev-stack.sh invite` for a second person.
 - A server name and picture (needs an API field).
 - Multiple nets in the strip (the index says the mockup is still missing).
 - Making the share notes shorter on a narrow window: on a phone browser that can
-  share, while nobody shares, they take four lines of the strip.
+  share, while nobody shares, they take four lines of the strip. Done in #600:
+  one line under the strip at every width, its full text under Voice options.

@@ -990,6 +990,18 @@ label {
   outline: none;
 }
 
+/* Read-only while the connection is made again (issue #592): dimmed, and the
+   line under the box says why. */
+.composer-box.paused {
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.composer-box.paused textarea {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .composer-box:has(textarea:focus-visible) {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -1362,10 +1374,42 @@ label {
   color: var(--accent);
 }
 
+/* The notes run on in one line where they fit (issue #600): the talk key and
+   the line about sharing sit side by side on a desktop, and wrap rather than
+   scroll where they do not. */
 .voice-notes {
-  display: grid;
-  gap: 0.15rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem var(--s4);
   margin-top: var(--s1);
+}
+
+/* More about sharing reads as part of its line, as a link does. */
+.voice-notes .more {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.voice-notes .more:hover:not(:disabled) {
+  background: none;
+  text-decoration-thickness: 2px;
+}
+
+/* The full share notes, under Voice options. */
+.voice-about {
+  flex-basis: 100%;
+}
+
+.voice-about h3 {
+  margin: 0 0 var(--s1);
+  font-size: var(--small);
 }
 
 .voice-notes:empty {
@@ -1664,7 +1708,7 @@ label {
   .topbar .label,
   .channels h2,
   .send .label,
-  .voice-controls button:not(.sharing, .danger) .label,
+  .voice-controls button:not(.sharing) .label,
   .voice-controls .dest,
   .share-controls .label {
     position: absolute;
@@ -1772,17 +1816,29 @@ label {
     padding: var(--s2) var(--s3);
   }
 
+  /* The strip in voice fits in 200 px of a 390×844 phone (issue #600): the
+     count beside the chips, the controls in one row, and less space between
+     the rows. */
+  .voice-bar,
+  .voice-row {
+    row-gap: var(--s1);
+  }
+
   .voice-controls {
     width: 100%;
     margin-left: 0;
     gap: 0.35rem;
   }
 
-  /* The count and "+N more" on one line, the chips the strip's width below
-     them: three, then "+N more" for the rest (issue #587). */
+  .voice-controls button:not(.talk) {
+    min-width: 2.75rem;
+    padding-inline: 0.5rem;
+  }
+
+  /* The count, then the chips: three, then "+N more" for the rest (issue
+     #587). */
   .voice-roster {
-    flex-basis: 100%;
-    order: 1;
+    flex-basis: 0;
   }
 
   .voice-roster.capped li:nth-child(n + 4) {
@@ -1797,6 +1853,8 @@ label {
   .voice .talk {
     flex: 1 1 6rem;
     min-width: 6rem;
+    padding-inline: 0.5rem;
+    white-space: nowrap;
   }
 
   .volume {

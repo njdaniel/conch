@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
@@ -245,6 +246,65 @@ describe('loading', () => {
     await waitFor(() => {
       expect(FakeSocket.all).toHaveLength(1);
     });
+  });
+});
+
+describe('an empty channel', () => {
+  const emptyLine = 'No messages in #general yet. Say hello.';
+
+  it('says so once its history has loaded with nothing in it', async () => {
+    await openChat();
+    await screen.findByText(emptyLine);
+    expect(within(screen.getByRole('log', { name: 'Messages' })).getByText(emptyLine).tagName).toBe('P');
+  });
+
+  it('says nothing of the kind for a channel with messages', async () => {
+    server.history.general = [message(1, 'one')];
+    await openChat();
+    await screen.findByText('one');
+    expect(screen.queryByText(emptyLine)).toBeNull();
+  });
+
+  it('says nothing of the kind while the history is loading', async () => {
+    const real = globalThis.fetch;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (path.includes('/v2/channels/general/messages')) await held;
+      return real(input, init);
+    });
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await screen.findByRole('log', { name: 'Messages' });
+    await act(async () => {});
+    expect(screen.queryByText(emptyLine)).toBeNull();
+    release();
+    await screen.findByText(emptyLine);
+  });
+
+  it('says nothing of the kind after the history could not be read', async () => {
+    const real = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (path.includes('/v2/channels/general/messages')) return Promise.resolve(json({}, 500));
+      return real(input, init);
+    });
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await screen.findByText('Cannot load the messages');
+    expect(screen.queryByText(emptyLine)).toBeNull();
+  });
+
+  it('goes as soon as the first message is sending', async () => {
+    const socket = await openChat();
+    await connect(socket);
+    await screen.findByText(emptyLine);
+    server.post = () => new Promise<Response>(() => undefined);
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'hello' } });
+    fireEvent.keyDown(screen.getByLabelText('Message #general'), { key: 'Enter' });
+    await screen.findByText('Sending');
+    expect(screen.queryByText(emptyLine)).toBeNull();
   });
 });
 
@@ -656,6 +716,48 @@ describe('drafts', () => {
 });
 
 describe('reconnecting', () => {
+  // described is the text of what an element's aria-describedby names.
+  const described = (el: HTMLElement) =>
+    (el.getAttribute('aria-describedby') ?? '')
+      .split(' ')
+      .filter((id) => id !== '')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+
+  it('says sending is paused, and describes the box and the audience with it, only while reconnecting', async () => {
+    const first = await openChat();
+    // The first load is not a pause.
+    const box = screen.getByLabelText<HTMLTextAreaElement>('Message #general');
+    const to = screen.getByLabelText<HTMLSelectElement>('To:');
+    expect(screen.queryByText(pausedText)).toBeNull();
+    expect(box.hasAttribute('aria-describedby')).toBe(false);
+    await connect(first);
+    expect(screen.queryByText(pausedText)).toBeNull();
+    expect(box.hasAttribute('aria-describedby')).toBe(false);
+    expect(box.parentElement?.classList.contains('paused')).toBe(false);
+    fireEvent.change(box, { target: { value: 'kept through the gap' } });
+
+    first.drop(1006);
+    await screen.findByText(pausedText);
+    expect(described(box)).toContain(pausedText);
+    expect(described(to)).toContain(pausedText);
+    expect(box.parentElement?.classList.contains('paused')).toBe(true);
+    // The box stays closed as before, with the draft in it.
+    expect(box.disabled).toBe(true);
+    expect(to.disabled).toBe(true);
+    expect(box.value).toBe('kept through the gap');
+
+    await waitFor(() => {
+      expect(FakeSocket.all).toHaveLength(2);
+    }, { timeout: 3000 });
+    (FakeSocket.all[1] as FakeSocket).open();
+    await waitFor(() => {
+      expect(screen.queryByText(pausedText)).toBeNull();
+    });
+    expect(box.hasAttribute('aria-describedby')).toBe(false);
+    expect(box.parentElement?.classList.contains('paused')).toBe(false);
+    expect(box.value).toBe('kept through the gap');
+  });
   it('says Reconnecting, marks the conversation out of date and disables the composer, then recovers with a fresh ticket and after', async () => {
     server.history.general = [message(1, 'one')];
     const first = await openChat();
