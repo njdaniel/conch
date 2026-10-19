@@ -216,6 +216,7 @@ func walkCases(t *testing.T) []walkCase {
 			return []string{"admin", "sign-in-link", "close", "--server", u, "9"}
 		}},
 		{key: "voice status", args: func(u, _ string) []string { return []string{"voice", "status", "--server", u, "general"} }},
+		{key: "voice where", quietWhenOK: true, args: func(u, _ string) []string { return []string{"voice", "where", "--server", u} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
 		{key: "reject", whoamiOK: true, args: func(u, _ string) []string { return []string{"reject", "--server", u, "--reason", "no", "1"} }},
@@ -384,6 +385,9 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
 				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}},
 			}}})
+		case "GET /v1/voice/occupancy":
+			write(w, http.StatusOK, schema.VoiceOccupancyV1{Schema: schema.VoiceOccupancySchemaV1, Configured: true, Available: true,
+				Channels: []schema.VoiceChannelOccupancy{{ChannelID: 1, InVoice: 2}}})
 		case "GET /v1/approvals":
 			write(w, http.StatusOK, schema.ListApprovalsResponseV1{Approvals: []schema.ApprovalV1{
 				{ID: 1, State: schema.ApprovalState(hostile), Title: hostile, Body: hostile, RequesterID: 42, Deadline: ts},
