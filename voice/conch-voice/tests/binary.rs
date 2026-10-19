@@ -120,6 +120,101 @@ fn a_configuration_file_with_a_typo_is_refused_by_name() {
     assert!(stderr.contains("unknown key `chanel`"), "{stderr}");
 }
 
+/// `config set` as a process: 0 and nothing printed when it saves; 2 for a key it does not
+/// write or a name it cannot; 1 and one line when the file cannot be saved, which is then
+/// as it was. The login stored beside it is never touched.
+#[test]
+fn config_set_saves_quietly_refuses_in_one_line_and_exits_by_the_rule() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let private = tempfile::tempdir().unwrap();
+    let directory = private.path().join("config").join("conch");
+
+    // No configuration directory: refused, and none is made.
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "default"]));
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "conch-voice: no configuration directory: run `conch login` first\n"
+    );
+    assert!(!directory.exists());
+
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("voice.toml");
+    let credentials = directory.join("credentials.json");
+    let stored = format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}");
+    std::fs::write(&credentials, &stored).unwrap();
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let kept = "# mine\nchannel = \"ops\"\n\n[audio]\ninput = \"old\" # by hand\n";
+    write_voice_toml(&path, kept);
+
+    let (code, stdout, stderr) = run(conch_voice(private.path()).args([
+        "config",
+        "set",
+        "audio.input",
+        "alsa_input.usb-Example_Mic-00.mono-fallback",
+    ]));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.output", "default"]));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    let saved = "# mine\nchannel = \"ops\"\n\n[audio]\noutput = \"default\"\ninput = \"alsa_input.usb-Example_Mic-00.mono-fallback\" # by hand\n";
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+    // A mistake on the command line: exit 2, and the file as it was.
+    for args in [
+        &["config", "set", "server", "http://evil.example"][..],
+        &["config", "set", "channel", "ops"],
+        &["config", "set", "keys.talk", "KEY_F13"],
+        &["config", "set", "keys.device", "/dev/input/event3"],
+        &["config", "set", "audio.input", "with \"quotes\""],
+        &["config", "set", "audio.input", "escape\u{1b}[2J"],
+        &["config", "set", "audio.input", ""],
+        &["config", "set", "audio.input"],
+        &["config"],
+    ] {
+        let (code, stdout, stderr) = run(conch_voice(private.path()).args(args));
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert_eq!(stdout, "", "{args:?}");
+        assert!(!stderr.contains('\u{1b}'), "{args:?}: {stderr}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "{args:?}");
+    }
+
+    // A file that cannot be saved: exit 1 with one line, and the file as it was.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "other"]));
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.starts_with("conch-voice: ") && stderr.ends_with('\n'),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("chmod go-w"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+    write_voice_toml(&path, "audio.input = \"a\"\n");
+    let (code, _, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "other"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.ends_with(
+            "`[audio]` is written in a form this command does not edit: change it by hand\n"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "audio.input = \"a\"\n"
+    );
+
+    assert_eq!(std::fs::read_to_string(&credentials).unwrap(), stored);
+}
+
 #[test]
 fn conch_config_dir_moves_voice_toml_and_a_relative_one_is_refused_by_name() {
     let private = tempfile::tempdir().unwrap();

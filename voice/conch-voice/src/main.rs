@@ -66,6 +66,9 @@ fn main() {
         }
         Invocation::Devices => conch_voice::devices(),
         Invocation::Keys { device } => conch_voice::keys(device),
+        Invocation::ConfigSet { key, value } => {
+            conch_voice::config_set(&Environment::from_process(), *key, value)
+        }
     };
     // What was logged is given a moment to be written, and then the reason the client
     // stopped for, if it has one. Neither is waited for beyond its limit.

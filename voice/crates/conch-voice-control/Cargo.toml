@@ -12,7 +12,10 @@ publish.workspace = true
 # Only Deserialize is derived, for the configuration file.
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
-# Parsing only: the crate never writes TOML, so the "display" feature (and toml_writer) is left out.
+# Parsing only, so the "display" feature (and toml_writer) is left out. The one thing written
+# is a device name under [audio] (set_audio_value), as a quoted string that needs no escape:
+# the edit is a byte range of the text, found by the parser's spans and checked by parsing
+# the result, which a writer would not do better and which would not keep the comments.
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 
 [lints]

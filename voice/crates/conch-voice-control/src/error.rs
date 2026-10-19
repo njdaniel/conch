@@ -39,6 +39,24 @@ pub enum Error {
         message: String,
     },
 
+    /// `[audio]` is written as an inline table, with dotted keys, or with a value that is not
+    /// a string where a device belongs, and [`crate::set_audio_value`] edits none of those.
+    #[error("{file}: `[audio]` is written in a form this command does not edit: change it by hand")]
+    AudioFormNotEditable {
+        /// The file the caller said the text came from.
+        file: String,
+    },
+
+    /// An edit [`crate::set_audio_value`] made did not pass its own check: the result read
+    /// differently, or the text changed outside the one value. Nothing is to be written.
+    #[error("{file}: setting `{key}` would change more than its value: change it by hand")]
+    AudioEditUnchecked {
+        /// The file the caller said the text came from.
+        file: String,
+        /// The key, dotted from the top of the file (`audio.input`).
+        key: String,
+    },
+
     /// A key was named that this crate's table of key names does not have, or numbered outside
     /// the range of key codes.
     #[error(
