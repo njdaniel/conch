@@ -378,7 +378,8 @@ async fn whoami_refusals_and_failures_each_have_their_error() {
     assert!(matches!(error, Error::Undecodable { .. }), "{error:?}");
     assert_no_secret(&error, "an id that is not a number");
     // Nothing listening.
-    let client = client_for(&closed_port().await, Duration::from_secs(5));
+    let closed = closed_port().await;
+    let client = client_for(&closed.url(), Duration::from_secs(5));
     let error = client.whoami().await.unwrap_err();
     assert!(matches!(error, Error::Connect { .. }), "{error:?}");
 }
@@ -776,7 +777,8 @@ async fn a_slow_server_is_a_timeout_and_the_request_is_not_sent_again() {
 
 #[tokio::test]
 async fn nothing_listening_is_a_connection_failure() {
-    let client = client_for(&closed_port().await, Duration::from_secs(5));
+    let closed = closed_port().await;
+    let client = client_for(&closed.url(), Duration::from_secs(5));
     let session = client.session("general").await;
     let report = client
         .transmit("general", VoiceTransmitState::Stopped, None)
