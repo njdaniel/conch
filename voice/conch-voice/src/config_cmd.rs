@@ -47,6 +47,11 @@ pub const FILE_NAME: &str = "voice.toml";
 /// makes `credentials.json`.
 pub const NEW_FILE_MODE: u32 = 0o600;
 
+/// `O_NONBLOCK` on Linux (x86-64 and AArch64, the targets conch-voice is built for). std
+/// has no name for it and `libc` is not a dependency here; on a regular file it changes
+/// nothing.
+const O_NONBLOCK: i32 = 0o4000;
+
 /// How many names are tried for the temporary file before giving up.
 const TEMPORARY_NAMES: u32 = 16;
 
@@ -134,10 +139,9 @@ pub(crate) fn save(
     }
     fs::rename(&temporary.path, &path).map_err(write)?;
     temporary.renamed = true;
-    // The rename is in the directory: synced, it is on the disk.
-    File::open(dir)
-        .and_then(|dir| dir.sync_all())
-        .map_err(write)?;
+    // The rename is in the directory: synced, it is on the disk. The file is saved either
+    // way, so a directory that cannot be synced is not reported as a failed save.
+    let _ = File::open(dir).and_then(|dir| dir.sync_all());
     Ok(())
 }
 
@@ -181,7 +185,14 @@ impl Snapshot {
                 mode,
             });
         }
-        let mut file = File::open(path).map_err(read)?;
+        // Opened without waiting: a FIFO put in the file's place since it was looked at
+        // would otherwise block the open until something writes to it. The check below
+        // then refuses it as a change.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NONBLOCK)
+            .open(path)
+            .map_err(read)?;
         // What was opened must be what was looked at: a link or another file put in its
         // place between the two is a change.
         let opened = file.metadata().map_err(read)?;
