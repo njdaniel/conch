@@ -111,12 +111,26 @@ test.describe('with LiveKit', () => {
   // operator's in sessionStorage. Each must be exactly the signed-in member's,
   // and the rest of storage is checked without it.
   //
-  // timing is false after LiveKit was down: on a failed connection the SDK
-  // puts the join token in its /rtc/validate request, which the page's
-  // resource timing records (README, "Voice in the browser").
-  async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }, timing = true): Promise<void> {
+  // The one exception is named: on a failed LiveKit connection, even one the
+  // SDK retries by itself under load, livekit-client sends the join token in
+  // the access_token query of its /rtc/v1/validate request, and the page's
+  // resource timing records that URL (README, "Voice in the browser"). That
+  // parameter, in a URL on LiveKit's origin with exactly that path, is left
+  // out of the timing entries checked. A token in any other URL, or in any other place, still
+  // fails.
+  async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }): Promise<void> {
     await p.watch.settled();
-    const { kept, credentials } = await p.page.evaluate((withTiming) => {
+    const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
+    const { kept, credentials } = await p.page.evaluate((livekitHttp) => {
+      const timingName = (name: string) => {
+        try {
+          const url = new URL(name);
+          if (url.origin === livekitHttp && url.pathname === '/rtc/v1/validate') url.searchParams.delete('access_token');
+          return url.href;
+        } catch {
+          return name;
+        }
+      };
       const without = (storage: Storage) => {
         const rest: Record<string, string | null> = {};
         for (let i = 0; i < storage.length; i++) {
@@ -133,10 +147,10 @@ test.describe('with LiveKit', () => {
           without(sessionStorage),
           without(localStorage),
           document.cookie,
-          withTiming ? JSON.stringify(performance.getEntries().map((e) => e.name)) : '',
+          JSON.stringify(performance.getEntries().map((e) => timingName(e.name))),
         ].join('\n'),
       };
-    }, timing);
+    }, livekit);
     for (const credential of credentials) {
       expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
     }
@@ -1035,6 +1049,117 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  // A first LiveKit connection that fails and is retried (as one does on a
+  // loaded machine) leaves the join token in the resource timing of its
+  // /rtc/v1/validate request; that is the one place expectClean lets it be.
+  //
+  // Playwright's page.route does not see a WebSocket, and routeWebSocket
+  // cannot make one fail to open; and a socket made to fail by the test (a
+  // path LiveKit answers with a 404) is logged by Chromium, with its address
+  // and so the token, in the console, which expectClean rightly refuses. So the
+  // page connects, and then makes the request the SDK makes after a failed
+  // connect, with the join token it was given.
+  test('a first LiveKit connection that fails and is retried still leaves the page clean', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+      await a.watch.settled();
+      const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+      if (join === undefined) throw new Error('no join token was captured from the session answers');
+      const origin = vw.livekitOrigin.replace(/^ws/, 'http');
+      await a.page.evaluate(async ([o, t]) => {
+        const r = await fetch(`${o ?? ''}/rtc/v1/validate?access_token=${t ?? ''}`).catch(() => undefined);
+        await r?.text();
+      }, [origin, join]);
+      const seen = await a.page.evaluate(() => performance.getEntries().map((e) => e.name).filter((n) => n.includes('/rtc/v1/validate')));
+      expect(seen.some((n) => n.includes(`access_token=${join}`)), 'the join token is in a validate URL in the page\'s timing').toBe(true);
+      await expectClean(a);
+    } finally {
+      await a.context.close();
+    }
+  });
+
+  // The exception is narrow: a secret (the member's own token stands in for a join token) anywhere else, or in a validate URL but not its access_token, fails expectClean.
+  const leaks: [string, (page: Page, token: string) => Promise<void>][] = [
+    [
+      'the DOM',
+      (page, t) =>
+        page.evaluate((x) => {
+          document.body.appendChild(document.createTextNode(x));
+        }, t),
+    ],
+    [
+      'session storage',
+      (page, t) =>
+        page.evaluate((x) => {
+          sessionStorage.setItem('other', x);
+        }, t),
+    ],
+    [
+      'local storage',
+      (page, t) =>
+        page.evaluate((x) => {
+          localStorage.setItem('other', x);
+        }, t),
+    ],
+    [
+      'a cookie',
+      (page, t) =>
+        page.evaluate((x) => {
+          document.cookie = `other=${x}`;
+        }, t),
+    ],
+    [
+      'the console',
+      (page, t) =>
+        page.evaluate((x) => {
+          console.log(x);
+        }, t),
+    ],
+    [
+      'another URL in the timing',
+      (page, t) =>
+        page.evaluate(async (x) => {
+          await (await fetch(`/app/leak?access_token=${x}`)).text();
+        }, t),
+    ],
+    [
+      'a validate URL of another path',
+      (page, t) =>
+        page.evaluate(async (x) => {
+          await (await fetch(`/app/rtc/v1/validate/x?access_token=${x}`)).text();
+        }, t),
+    ],
+    [
+      'a validate URL on conchd\'s origin',
+      (page, t) =>
+        page.evaluate(async (x) => {
+          await (await fetch(`/rtc/v1/validate?access_token=${x}`)).text();
+        }, t),
+    ],
+    [
+      'a validate URL, in another parameter',
+      (page, t) =>
+        page.evaluate(async (x) => {
+          await (await fetch(`/rtc/v1/validate?other=${x}`)).text();
+        }, t),
+    ],
+  ];
+  for (const [where, leak] of leaks) {
+    test(`a secret in ${where} still fails expectClean`, async ({ browser }) => {
+      const a = await person(browser, 'alice');
+      try {
+        await expectClean(a);
+        await leak(a.page, a.member.token);
+        await expect(expectClean(a), `a secret in ${where}`).rejects.toThrow();
+      } finally {
+        await a.context.close();
+      }
+    });
+  }
+
   test('restarting LiveKit brings the page back by itself', async ({ browser }) => {
     const a = await person(browser, 'alice');
     try {
@@ -1045,7 +1170,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).not.toContainText('Connected in', { timeout: 60_000 });
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
-      await expectClean(a, false);
+      await expectClean(a);
     } finally {
       await a.context.close();
     }

@@ -1203,7 +1203,7 @@ The web page at `/app/` joins a channel's voice with the LiveKit JavaScript SDK,
 - **When it stops.** If the room is deleted or you are removed, the page asks `conchd` again, which either issues a new session or says why not (for example that you are no longer a member). If LiveKit is down the page says voice is unavailable and tries again, 1 s doubling to 30 s; chat is unaffected. The SDK's own reconnect is allowed for 20 s, then the page goes back to `conchd`.
 - **Reports.** Every time the microphone opens or closes the page tells `conchd`, one report at a time and in order, so the audit log has a `voice_transmit_started` and `voice_transmit_stopped` pair for each talk. Audio never waits for a report. A browser that does not report would get a `voice_transmit_unreported` row for every transmission.
 - **No token or room name** is stored, logged, shown or put in the page; the SDK's own log is set to warnings, redacted, and kept in memory (the page makes no console call).
-- **Where the join token can still be seen.** When a connection fails, the SDK puts the short-lived (15 s) join token in the `access_token` query of its `/rtc/validate` request and of the signalling URL, so it appears in LiveKit's access log and in the page's resource timing entries.
+- **Where the join token can still be seen.** When a connection fails, the SDK puts the short-lived (15 s) join token in the `access_token` query of its `/rtc/v1/validate` request and of the signalling URL, so it appears in LiveKit's access log and in the page's resource timing entries.
 
 | Browser | Voice | Talk key |
 | --- | --- | --- |
