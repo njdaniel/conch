@@ -49,6 +49,10 @@ import (
 // no duplicate keys, exact case-sensitive field names) the Rust side applies
 // too, so the two languages accept and refuse the same lines. The golden and
 // conformance fixtures are in testdata/voice-control/.
+//
+// This file is v1, which is published and does not change. v2 (live device
+// switching and the open microphone, issue #653) is voice_control_v2.go; it
+// shares the hello, the vocabularies and the readers' framing with v1.
 
 // VoiceControlSchemaV1 is the versioned name every v1 message carries in its
 // schema field. A hello is always written in this version, whatever else the
@@ -136,7 +140,8 @@ const (
 // VoiceControlCommandKind is what a command asks for.
 type VoiceControlCommandKind string
 
-// Voice control command kinds.
+// Voice control command kinds. The first five are v1's; the last two were
+// added in v2 (voice_control_v2.go) and are unknown_kind to a v1 reader.
 const (
 	// VoiceControlCommandStart is the first command and the only one before
 	// it: join this channel on this server as this principal.
@@ -149,17 +154,49 @@ const (
 	VoiceControlCommandGetState VoiceControlCommandKind = "get_state"
 	// VoiceControlCommandLeave leaves voice; the helper then exits.
 	VoiceControlCommandLeave VoiceControlCommandKind = "leave"
+	// VoiceControlCommandSetDevices (v2) names the microphone and speakers
+	// to use from now on, without leaving.
+	VoiceControlCommandSetDevices VoiceControlCommandKind = "set_devices"
+	// VoiceControlCommandSetTalkMode (v2) chooses what may open the gate: a
+	// press, or the microphone's own sound.
+	VoiceControlCommandSetTalkMode VoiceControlCommandKind = "set_talk_mode"
 )
 
-// Valid reports whether k is a recognized command kind.
+// Valid reports whether k is a command kind of any version. A reader checks
+// KnownIn for its own version: a kind of another version is unknown_kind to
+// it, as any other unknown kind is.
 func (k VoiceControlCommandKind) Valid() bool {
 	switch k {
 	case VoiceControlCommandStart, VoiceControlCommandSetMute, VoiceControlCommandSetDeafen,
-		VoiceControlCommandGetState, VoiceControlCommandLeave:
+		VoiceControlCommandGetState, VoiceControlCommandLeave,
+		VoiceControlCommandSetDevices, VoiceControlCommandSetTalkMode:
 		return true
 	default:
 		return false
 	}
+}
+
+// KnownIn reports whether version (a schema name such as
+// VoiceControlSchemaV1) has a command of kind k. Each version's kinds are
+// listed in full, so that a kind a later version adds to the vocabulary is
+// not known here by accident.
+func (k VoiceControlCommandKind) KnownIn(version string) bool {
+	switch version {
+	case VoiceControlSchemaV1:
+		switch k {
+		case VoiceControlCommandStart, VoiceControlCommandSetMute, VoiceControlCommandSetDeafen,
+			VoiceControlCommandGetState, VoiceControlCommandLeave:
+			return true
+		}
+	case VoiceControlSchemaV2:
+		switch k {
+		case VoiceControlCommandStart, VoiceControlCommandSetMute, VoiceControlCommandSetDeafen,
+			VoiceControlCommandGetState, VoiceControlCommandLeave,
+			VoiceControlCommandSetDevices, VoiceControlCommandSetTalkMode:
+			return true
+		}
+	}
+	return false
 }
 
 // VoiceControlEventKind is what an event reports.
@@ -496,7 +533,8 @@ const (
 	// VoiceControlErrorAlreadyStarted: a second start. It is refused and the
 	// helper goes on.
 	VoiceControlErrorAlreadyStarted VoiceControlErrorCode = "already_started"
-	// VoiceControlErrorStopping: set_mute or set_deafen after leaving began.
+	// VoiceControlErrorStopping: set_mute or set_deafen (and in v2
+	// set_devices or set_talk_mode) after leaving began.
 	VoiceControlErrorStopping VoiceControlErrorCode = "stopping"
 )
 
@@ -888,36 +926,42 @@ func (s VoiceControlStateV1) Validate() error {
 
 // validateReason checks the reason and retry_in_ms against the phase.
 func (s VoiceControlStateV1) validateReason() error {
-	if s.Reason != "" && !s.Reason.Valid() {
-		return fmt.Errorf("schema: voice control state reason %q is not recognized", s.Reason)
+	return validateVoiceControlReason(s.Phase, s.Reason, s.RetryInMS)
+}
+
+// validateVoiceControlReason is the reason rule of every version's state: the
+// phases and reasons did not change in v2.
+func validateVoiceControlReason(phase VoiceControlPhase, reason VoiceControlReason, retryInMS *int64) error {
+	if reason != "" && !reason.Valid() {
+		return fmt.Errorf("schema: voice control state reason %q is not recognized", reason)
 	}
-	switch s.Phase {
+	switch phase {
 	case VoiceControlPhaseStarting, VoiceControlPhaseConnecting, VoiceControlPhaseConnected:
-		if s.Reason != "" {
-			return fmt.Errorf("schema: voice control state in phase %q must have no reason", s.Phase)
+		if reason != "" {
+			return fmt.Errorf("schema: voice control state in phase %q must have no reason", phase)
 		}
 	case VoiceControlPhaseReconnecting:
-		if s.Reason != "" && !slices.Contains(voiceControlRetryReasons, s.Reason) {
-			return fmt.Errorf("schema: voice control state reason %q is not a reason to reconnect", s.Reason)
+		if reason != "" && !slices.Contains(voiceControlRetryReasons, reason) {
+			return fmt.Errorf("schema: voice control state reason %q is not a reason to reconnect", reason)
 		}
 	case VoiceControlPhaseStopping:
-		if !slices.Contains(voiceControlStopReasons, s.Reason) && !slices.Contains(voiceControlFailReasons, s.Reason) {
-			return fmt.Errorf("schema: voice control state reason %q is not a reason to stop", s.Reason)
+		if !slices.Contains(voiceControlStopReasons, reason) && !slices.Contains(voiceControlFailReasons, reason) {
+			return fmt.Errorf("schema: voice control state reason %q is not a reason to stop", reason)
 		}
 	case VoiceControlPhaseStopped:
-		if !slices.Contains(voiceControlStopReasons, s.Reason) {
-			return fmt.Errorf("schema: voice control state stopped needs one of left, owner_lost, signal, got %q", s.Reason)
+		if !slices.Contains(voiceControlStopReasons, reason) {
+			return fmt.Errorf("schema: voice control state stopped needs one of left, owner_lost, signal, got %q", reason)
 		}
 	case VoiceControlPhaseFailed:
-		if !slices.Contains(voiceControlFailReasons, s.Reason) {
-			return fmt.Errorf("schema: voice control state reason %q is not a reason to fail", s.Reason)
+		if !slices.Contains(voiceControlFailReasons, reason) {
+			return fmt.Errorf("schema: voice control state reason %q is not a reason to fail", reason)
 		}
 	}
-	if s.RetryInMS != nil {
-		if s.Phase != VoiceControlPhaseReconnecting || s.Reason == "" {
+	if retryInMS != nil {
+		if phase != VoiceControlPhaseReconnecting || reason == "" {
 			return errors.New("schema: voice control state retry_in_ms is only for reconnecting with a reason")
 		}
-		if *s.RetryInMS < 0 || *s.RetryInMS > VoiceControlMaxRetryInMS {
+		if *retryInMS < 0 || *retryInMS > VoiceControlMaxRetryInMS {
 			return fmt.Errorf("schema: voice control state retry_in_ms must be 0 to %d", VoiceControlMaxRetryInMS)
 		}
 	}
@@ -976,8 +1020,14 @@ func validateVoiceControlID(id int64) error {
 }
 
 func validateVoiceControlCommandHead(schema string, kind, want VoiceControlCommandKind, id int64) error {
-	if schema != VoiceControlSchemaV1 {
-		return fmt.Errorf("schema: voice control command schema must be %q, got %q", VoiceControlSchemaV1, schema)
+	return validateVoiceControlCommandHeadIn(VoiceControlSchemaV1, schema, kind, want, id)
+}
+
+// validateVoiceControlCommandHeadIn checks a command's head against the
+// version it must be written in.
+func validateVoiceControlCommandHeadIn(version, schema string, kind, want VoiceControlCommandKind, id int64) error {
+	if schema != version {
+		return fmt.Errorf("schema: voice control command schema must be %q, got %q", version, schema)
 	}
 	if kind != want {
 		return fmt.Errorf("schema: voice control command kind must be %q, got %q", want, kind)
@@ -986,8 +1036,14 @@ func validateVoiceControlCommandHead(schema string, kind, want VoiceControlComma
 }
 
 func validateVoiceControlEventHead(schema string, kind, want VoiceControlEventKind, seq int64) error {
-	if schema != VoiceControlSchemaV1 {
-		return fmt.Errorf("schema: voice control event schema must be %q, got %q", VoiceControlSchemaV1, schema)
+	return validateVoiceControlEventHeadIn(VoiceControlSchemaV1, schema, kind, want, seq)
+}
+
+// validateVoiceControlEventHeadIn checks an event's head against the version
+// it must be written in.
+func validateVoiceControlEventHeadIn(version, schema string, kind, want VoiceControlEventKind, seq int64) error {
+	if schema != version {
+		return fmt.Errorf("schema: voice control event schema must be %q, got %q", version, schema)
 	}
 	if kind != want {
 		return fmt.Errorf("schema: voice control event kind must be %q, got %q", want, kind)
@@ -1110,7 +1166,7 @@ func ParseVoiceControlCommand(line []byte) (VoiceControlCommand, error) {
 	}
 	kindText, _ := fieldString(fields, "kind")
 	kind := VoiceControlCommandKind(kindText)
-	if !kind.Valid() {
+	if !kind.KnownIn(VoiceControlSchemaV1) {
 		return VoiceControlCommand{}, voiceControlErr(VoiceControlErrorUnknownKind, id, "not a command kind of %s", VoiceControlSchemaV1)
 	}
 	r := fieldReader{fields: fields}
@@ -1335,8 +1391,15 @@ func decodeVoiceControlObject(line []byte) (map[string]json.RawMessage, error) {
 }
 
 func checkVoiceControlSchema(fields map[string]json.RawMessage) error {
-	if s, ok := fieldString(fields, "schema"); !ok || s != VoiceControlSchemaV1 {
-		return voiceControlErr(VoiceControlErrorUnknownSchema, 0, "schema is not %s", VoiceControlSchemaV1)
+	return checkVoiceControlSchemaIs(fields, VoiceControlSchemaV1)
+}
+
+// checkVoiceControlSchemaIs refuses a line of any version but the one the
+// reader is of, a later or earlier one alike: the version is fixed when the
+// owner writes its start, and nothing else is read as it.
+func checkVoiceControlSchemaIs(fields map[string]json.RawMessage, version string) error {
+	if s, ok := fieldString(fields, "schema"); !ok || s != version {
+		return voiceControlErr(VoiceControlErrorUnknownSchema, 0, "schema is not %s", version)
 	}
 	return nil
 }

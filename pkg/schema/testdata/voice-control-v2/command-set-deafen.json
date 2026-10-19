@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "set_deafen",
+  "id": 3,
+  "deafened": true
+}
