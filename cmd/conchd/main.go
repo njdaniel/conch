@@ -80,6 +80,7 @@ Usage:
                      [--web-dir <dir> | --no-web] [--allowed-origins <origin,...>]
                      [--trusted-proxies <cidr,...>] [--invite-allowance <n>]
                      [--metrics-listen <addr> [--metrics-allow-remote]]
+                     [--test-relax-invite-limits]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
   conchd version
 
@@ -146,6 +147,14 @@ Flags for serve:
   --metrics-allow-remote let --metrics-listen be an address that is not loopback
                          (env CONCHD_METRICS_ALLOW_REMOTE=1). Anyone who can reach it can
                          read the metrics; conchd logs a warning when it is used.
+  --test-relax-invite-limits
+                         TEST SERVERS ONLY. Raises the per-address limits of the invite and
+                         sign-in-link routes so a browser suite that redeems everything from
+                         one address does not share a budget between specs. Flag only, no
+                         environment variable. serve refuses to start with it unless every
+                         address it binds is loopback and no trusted proxy is set, and logs
+                         a warning when it is on. Any reverse proxy or tunnel in front of it,
+                         trusted or not, makes it reachable: never use it on such a server.
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -177,6 +186,7 @@ type serveOptions struct {
 	inviteAllowance   int
 	metricsListen     string
 	metricsRemote     bool
+	relaxInviteLimits bool
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -233,6 +243,9 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		return serveOptions{}, err
 	}
 	metricsRemote := fs.Bool("metrics-allow-remote", metricsRemoteDefault, "let --metrics-listen be an address that is not loopback")
+	// A flag and nothing else: an environment variable could be left set in
+	// a service file by accident, a flag has to be typed.
+	relaxInviteLimits := fs.Bool("test-relax-invite-limits", false, "TEST SERVERS ONLY: raise the per-address invite and sign-in-link limits (loopback listeners only)")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -301,7 +314,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
-		metricsListen: *metricsListen, metricsRemote: *metricsRemote,
+		metricsListen: *metricsListen, metricsRemote: *metricsRemote, relaxInviteLimits: *relaxInviteLimits,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
@@ -385,22 +398,23 @@ func runServe(args []string) error {
 	}
 
 	srv := server.New(server.Config{
-		DataDir:            opts.dataDir,
-		Listen:             opts.listen,
-		Version:            buildVersion(),
-		MCPBearerTokens:    opts.mcpTokens,
-		AuthMode:           opts.authMode,
-		LiveKit:            opts.livekit,
-		MaxUploadBytes:     opts.maxUploadBytes,
-		WebDir:             opts.webDir,
-		WebFS:              opts.webFS,
-		AllowedOrigins:     opts.allowedOrigins,
-		SessionStale:       opts.sessionStale,
-		SessionOffline:     opts.sessionOffline,
-		TrustedProxies:     opts.trustedProxies,
-		InviteAllowance:    opts.inviteAllowance,
-		MetricsListen:      opts.metricsListen,
-		MetricsAllowRemote: opts.metricsRemote,
+		DataDir:               opts.dataDir,
+		Listen:                opts.listen,
+		Version:               buildVersion(),
+		MCPBearerTokens:       opts.mcpTokens,
+		AuthMode:              opts.authMode,
+		LiveKit:               opts.livekit,
+		MaxUploadBytes:        opts.maxUploadBytes,
+		WebDir:                opts.webDir,
+		WebFS:                 opts.webFS,
+		AllowedOrigins:        opts.allowedOrigins,
+		SessionStale:          opts.sessionStale,
+		SessionOffline:        opts.sessionOffline,
+		TrustedProxies:        opts.trustedProxies,
+		InviteAllowance:       opts.inviteAllowance,
+		MetricsListen:         opts.metricsListen,
+		MetricsAllowRemote:    opts.metricsRemote,
+		TestRelaxInviteLimits: opts.relaxInviteLimits,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,

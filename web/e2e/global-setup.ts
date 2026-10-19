@@ -1,7 +1,9 @@
 // Starts the community the suite runs against: e2e/p3-local --keep, with a
 // temporary root of its own. The runner builds conchd, conch and conch-adapter,
 // starts conchd on a free loopback port, provisions the fixture community and
-// writes the credentials; world.ts reads them from there. The web client is
+// writes the credentials; --relax-invite-limits keeps the specs, which all come
+// from 127.0.0.1, from sharing one invite budget (issue #609);
+// world.ts reads them from there. The web client is
 // built here first and handed to the runner, so that the runner never runs
 // `npm ci` under the Playwright that is running.
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -41,7 +43,7 @@ export default function globalSetup(): void {
   process.env['CONCH_E2E_ROOT'] = root;
   try {
     must('npm run build', spawnSync('npm', ['run', 'build'], { cwd: webDir, env: { ...process.env, PATH: safePath() }, encoding: 'utf8', timeout: 300_000 }));
-    must('go run ./e2e/p3-local --keep', spawnSync('go', ['run', './e2e/p3-local', '--keep'], { cwd: repoRoot, env: runnerEnv(root), encoding: 'utf8', timeout: 600_000 }));
+    must('go run ./e2e/p3-local --keep --relax-invite-limits', spawnSync('go', ['run', './e2e/p3-local', '--keep', '--relax-invite-limits'], { cwd: repoRoot, env: runnerEnv(root), encoding: 'utf8', timeout: 600_000 }));
     loadWorld();
   } catch (err) {
     // Playwright does not run the teardown of a setup that threw, so this

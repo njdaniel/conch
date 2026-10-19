@@ -3,6 +3,7 @@ import {
   claimVoiceShare,
   closeInvite,
   continueAsOperator,
+  endSession,
   endSignIn,
   createInvite,
   forgetStored,
@@ -636,6 +637,60 @@ describe('answers that are a status alone', () => {
     serve(() => answer.res);
     expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: true, value: null });
     expect(answer.reads()).toBe(1);
+  });
+
+  // Issue #622: the read is in the shared request helper, so every call that
+  // answers 204 is covered, not only the two #595 named.
+  const unreadable = () => Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+  const paths: readonly { readonly name: string; readonly run: () => Promise<unknown>; readonly want: unknown; readonly token: string }[] = [
+    { name: 'sign-out', run: () => signOut(), want: true, token: memberToken },
+    { name: 'ending another sign-in', run: () => endSignIn(8), want: { ok: true, value: null }, token: memberToken },
+    { name: 'closing an invite', run: () => closeInvite(4), want: { ok: true, value: null }, token: memberToken },
+  ];
+
+  it.each(paths)('reads the 204 body of $name to its end', async ({ run, want, token }) => {
+    await signedInFrom(window.localStorage, token);
+    const answer = noContent();
+    serve(() => answer.res);
+    expect(await run()).toEqual(want);
+    expect(answer.reads()).toBe(1);
+  });
+
+  it.each(paths)('still takes $name as done when the 204 body cannot be read', async ({ run, want, token }) => {
+    await signedInFrom(window.localStorage, token);
+    const answer = noContent(unreadable);
+    serve(() => answer.res);
+    expect(await run()).toEqual(want);
+  });
+
+  it('reads the 204 body of forgetting a sign-in that could not be checked', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => Promise.reject(new TypeError('Failed to fetch')));
+    expect((await restore()).ok).toBe(false);
+    const answer = noContent();
+    serve(() => answer.res);
+    expect(await forgetStored()).toBe(true);
+    expect(answer.reads()).toBe(1);
+  });
+
+  it('reads the keepalive session end to its end', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = noContent();
+    const calls = serve(() => answer.res);
+    endSession(5);
+    await vi.waitFor(() => {
+      expect(answer.reads()).toBe(1);
+    });
+    expect(calls).toEqual([{ path: '/v1/sessions/5', method: 'DELETE', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('does not read a refusal, which the caller reads for its code', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const refusal = json({ code: 'invite_not_found', message: 'no such invite' }, 404);
+    const spy = vi.spyOn(refusal, 'arrayBuffer');
+    serve(() => refusal);
+    expect(await closeInvite(4)).toMatchObject({ ok: false, code: 'invite_not_found' });
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

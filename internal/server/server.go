@@ -85,6 +85,13 @@ type Config struct {
 	// MetricsAllowRemote lets MetricsListen be an address that is not
 	// loopback. Without it such an address stops the server at start.
 	MetricsAllowRemote bool
+	// TestRelaxInviteLimits raises the per-address rate limits of the invite and
+	// sign-in-link routes (invite_limits.go) so that a browser suite, which
+	// redeems everything from one address, does not share one budget across
+	// its specs (issue #609). It is for test servers only: Listen refuses it
+	// unless every address the server binds is loopback and no trusted proxy
+	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
+	TestRelaxInviteLimits bool
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -220,7 +227,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(defaultInviteLimits()), reportLimits: newReportLimiter(defaultReportLimit())}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit())}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
@@ -283,6 +290,12 @@ func (s *Server) Handler() http.Handler {
 // port via Addr before serving. A metrics address that is refused, or cannot
 // be bound, binds nothing.
 func (s *Server) Listen() error {
+	// A server behind a reverse proxy binds loopback too (Caddy forwards to
+	// 127.0.0.1 in the deployment) yet is reachable from anywhere, so trusted
+	// proxies rule the relaxed limits out as well (issue #609).
+	if s.cfg.TestRelaxInviteLimits && len(s.cfg.TrustedProxies) > 0 {
+		return errors.New("server: the test-only relaxed invite limits are on, but trusted proxies are set, so this server is reachable through a proxy; they are for a local test server only")
+	}
 	if s.ln != nil {
 		return nil
 	}
@@ -297,16 +310,52 @@ func (s *Server) Listen() error {
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.cfg.Listen, err)
 	}
+	if s.cfg.TestRelaxInviteLimits {
+		if err := checkRelaxedLimitsLoopback("HTTP", ln); err != nil {
+			_ = ln.Close()
+			return err
+		}
+	}
 	if s.cfg.MetricsListen != "" {
 		mln, err := s.listenMetrics()
 		if err != nil {
 			_ = ln.Close()
 			return err
 		}
+		if s.cfg.TestRelaxInviteLimits {
+			if err := checkRelaxedLimitsLoopback("metrics", mln); err != nil {
+				_ = mln.Close()
+				_ = ln.Close()
+				return err
+			}
+		}
 		s.metricsLn = mln
 	}
 	s.ln = ln
+	if s.cfg.TestRelaxInviteLimits {
+		slog.Warn("invites: TEST-ONLY relaxed per-address invite and sign-in-link rate limits are ON; the brake on guessing invite codes from one address is off. Never run a real server this way", "addr", ln.Addr().String())
+	}
 	return nil
+}
+
+// inviteLimitsFor is the invite routes' limits cfg asks for.
+func inviteLimitsFor(cfg Config) inviteLimits {
+	if cfg.TestRelaxInviteLimits {
+		return testRelaxedInviteLimits()
+	}
+	return defaultInviteLimits()
+}
+
+// checkRelaxedLimitsLoopback refuses relaxed invite limits on a listener that
+// is not loopback, judged by the address it actually bound, so that ":8080",
+// "0.0.0.0:0" and a name that resolves elsewhere are all refused. A relaxed
+// limit on a reachable server would turn off the only brake on guessing
+// invite codes from one address.
+func checkRelaxedLimitsLoopback(what string, ln net.Listener) error {
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("server: the test-only relaxed invite limits are on, but the %s listener is bound to %s, which is not loopback; they are for a local test server only", what, ln.Addr())
 }
 
 // MetricsAddr reports the metrics listener's bound address, or "" when there

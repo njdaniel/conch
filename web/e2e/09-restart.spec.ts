@@ -20,12 +20,15 @@ async function healthy(world: World): Promise<boolean> {
 
 // restart starts conchd again as the walkthrough's last command does: the same
 // binary, address, web client and data directory, in the run's isolated home.
+// It keeps --test-relax-invite-limits, which global-setup.ts gave the first
+// server: without it the specs after this one would get the production
+// per-address limits back (issue #609).
 function restart(world: World): void {
   const log = openSync(join(world.root, 'logs', 'conchd-restart.log'), 'a');
   const home = join(world.root, 'home');
   const server = spawn(
     join(world.root, 'bin', 'conchd'),
-    ['serve', '--listen', new URL(world.origin).host, '--web-dir', join(repoRoot, 'web', 'dist'), '--data', join(world.root, 'data')],
+    ['serve', '--listen', new URL(world.origin).host, '--web-dir', join(repoRoot, 'web', 'dist'), '--data', join(world.root, 'data'), '--test-relax-invite-limits'],
     {
       cwd: world.root,
       env: { PATH: safePath(), HOME: home, TMPDIR: join(world.root, 'tmp'), XDG_CONFIG_HOME: join(home, 'config'), XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: join(home, 'state'), XDG_CACHE_HOME: join(home, 'cache') },

@@ -360,7 +360,8 @@ async fn errors_made_around_secrets() -> Vec<(&'static str, Error)> {
     let stub = Stub::always(Reply::Stall(Duration::from_secs(5))).await;
     let hurried = stub.client_with(Duration::from_millis(100));
     errors.push(("a timeout", hurried.presence("general").await.unwrap_err()));
-    let nowhere = client_for(&closed_port().await, Duration::from_secs(5));
+    let closed = closed_port().await;
+    let nowhere = client_for(&closed.url(), Duration::from_secs(5));
     errors.push((
         "a refused connection",
         nowhere.session("general").await.unwrap_err(),
