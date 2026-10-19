@@ -1,0 +1,10 @@
+{
+  "schema": "conch.voice_devices.v1",
+  "pipewire": "unavailable",
+  "synced": false,
+  "microphones": [],
+  "speakers": [],
+  "unshown_microphones": 0,
+  "unshown_speakers": 0,
+  "config": "ok"
+}
