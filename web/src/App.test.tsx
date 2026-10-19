@@ -70,6 +70,20 @@ const asMember: Record<string, Handler> = {
   '/v1/channels': (a) => (a === `Bearer ${secret}` ? json(channels) : json({}, 401)),
 };
 
+// The roles a person can act on.
+const controlRoles = ['button', 'link', 'checkbox', 'radio', 'switch', 'textbox', 'combobox', 'menuitem', 'tab', 'option', 'slider'] as const;
+
+// controlsOutside lists the accessible names, matching name, of every control
+// on the page that is not inside region.
+function controlsOutside(region: HTMLElement, name: RegExp): string[] {
+  return controlRoles.flatMap((role) =>
+    screen
+      .queryAllByRole(role, { name })
+      .filter((el) => !region.contains(el))
+      .map((el) => `${role}: ${el.getAttribute('aria-label') ?? el.textContent}`),
+  );
+}
+
 function signIn(token = secret) {
   const field = screen.getByLabelText('Credential');
   fireEvent.change(field, { target: { value: token } });
@@ -284,13 +298,71 @@ describe('lobby', () => {
     expect(status.textContent).toContain('ada');
     expect(status.textContent).toContain(origin);
     expect(status.textContent).toContain('Connected');
-    // Voice is only in its own section; nothing anywhere else mentions voice
-    // or offers to join it. Here conchd has no voice route, so it is not
-    // joinable, and it joins nothing by itself.
+    // Nothing outside the voice section joins voice or offers to (issue
+    // #596, narrowing #536's "nothing outside it mentions voice"): no control
+    // anywhere else is named for joining or for voice. Here conchd has no
+    // voice route, so it is not joinable, and it joins nothing by itself.
     const voice = screen.getByRole('region', { name: 'Voice' });
-    expect(document.body.textContent.replace(voice.textContent, '')).not.toMatch(/voice|join/i);
+    expect(controlsOutside(voice, /join|voice/i)).toEqual([]);
+    // The check sees the strip's own (Join voice, Watch only) when the strip
+    // is not left out, so the empty list above means something.
+    expect(controlsOutside(document.createElement('div'), /join|voice/i).length).toBeGreaterThan(0);
     expect(voice.textContent).toMatch(/^Not in voice/);
     expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('shows in the list how many are in each channel\'s voice, from one socket, and only the strip offers to join (issue #596)', async () => {
+    const sockets = socketsOf();
+    const fetchMock = serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
+    render(<App origin={origin} />);
+    signIn();
+    const voice = await screen.findByRole('region', { name: 'Voice' });
+    const occupancy = await waitFor(() => {
+      const found = sockets.filter((s) => new URL(s.url).pathname === '/v1/voice/occupancy/ws');
+      expect(found).toHaveLength(1);
+      return found[0] as FakeSocket;
+    });
+    // The viewer's, not a channel's: it names none.
+    expect(new URL(occupancy.url).searchParams.get('channel')).toBeNull();
+    act(() => {
+      occupancy.onopen?.();
+      occupancy.onmessage?.({
+        data: JSON.stringify({
+          schema: 'conch.voice_occupancy.v1',
+          configured: true,
+          available: true,
+          channels: [
+            { channel_id: 1, in_voice: 1 },
+            { channel_id: 2, in_voice: 3 },
+            { channel_id: 3, in_voice: 0 },
+          ],
+        }),
+      });
+    });
+    const list = screen.getByRole('navigation', { name: 'Channels' });
+    // The marks are text in the list, beside the buttons, which keep their names.
+    expect(await within(list).findByRole('img', { name: '3 in voice' })).toBeDefined();
+    expect(within(list).getByRole('img', { name: '1 in voice' })).toBeDefined();
+    expect(within(list).queryAllByRole('img', { name: /in voice/ })).toHaveLength(2);
+    expect(list.textContent).toContain('3');
+    expect(screen.getByRole('button', { name: 'ops' }).textContent).toBe('ops');
+    // Still nothing outside the strip offers to join, or names voice.
+    expect(controlsOutside(voice, /join|voice/i)).toEqual([]);
+
+    // The strip, not in voice, says where the others are, and opens it.
+    expect(voice.querySelector('.voice-elsewhere')?.textContent).toBe('3 in voice in #ops Open #ops');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Open #ops' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'ops' }).getAttribute('aria-current')).toBe('true');
+    });
+    // Opening is all it did: no voice session was asked for, and the strip
+    // still offers Join voice, now for the channel on screen.
+    expect(within(voice).getByRole('button', { name: 'Join voice in #ops' })).toBeDefined();
+    expect(voice.querySelector('.voice-elsewhere')?.textContent).toBe('1 in voice in #general Open #general');
+    const asked = fetchMock.mock.calls.map(([input]) => (typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url));
+    expect(asked.filter((p) => p.includes('/voice/session'))).toEqual([]);
+    // The one occupancy socket is the page's, whatever channel is open.
+    expect(sockets.filter((s) => new URL(s.url).pathname === '/v1/voice/occupancy/ws')).toEqual([occupancy]);
   });
 
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {

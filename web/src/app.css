@@ -529,6 +529,28 @@ label {
   color: var(--on-accent);
 }
 
+/* How many are in a channel's voice (issue #596): a pill of its own, quieter
+   than the unread count, a speaker and the number. */
+.channel-list .in-voice {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0 0.45rem 0 0.35rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.channel-list .in-voice .icon {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
 .centre {
   display: flex;
   flex-direction: column;
@@ -1275,6 +1297,34 @@ label {
   color: var(--warn);
 }
 
+/* Where else people are in voice, while not in voice (issue #596): one line,
+   and its button opens that channel. */
+.voice-elsewhere {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.voice-elsewhere > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.voice-elsewhere .icon {
+  width: 1rem;
+  height: 1rem;
+  color: var(--accent);
+}
+
+.voice-elsewhere button {
+  padding-block: 0.2rem;
+  font-size: var(--small);
+}
+
 /* Who is in voice: how many, then every chip, wrapping onto more lines
    rather than scrolling sideways out of sight. */
 .voice-who {
@@ -1794,8 +1844,13 @@ label {
     background: transparent;
   }
 
-  .channel-list .unread {
+  .channel-list .unread,
+  .channel-list .in-voice:last-child {
     margin-right: var(--s2);
+  }
+
+  .channel-list .in-voice:not(:last-child) {
+    margin-right: var(--s1);
   }
 
   .conv-head {

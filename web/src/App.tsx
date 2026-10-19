@@ -29,6 +29,7 @@ import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
+import { useOccupancy } from './voice/useOccupancy';
 
 export function App({ origin }: { readonly origin: string }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
@@ -198,6 +199,13 @@ export function App({ origin }: { readonly origin: string }) {
   });
 
   const now = useNow(signedIn);
+
+  // A server that predates voice_allowed says nothing: voice, as the invite
+  // panel reads it. Agents have no voice (ADR-004).
+  const voiceAllowed = principal !== null && principal.voice_allowed !== false && principal.kind === 'human';
+  // How many are in each channel's voice (issue #596): one socket for the
+  // page, for the list and the strip. Never opened for someone without voice.
+  const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
 
   // Go to message: run detail closes, and once the conversation is on screen
   // again it scrolls to the message the run answers and puts focus on it. A
@@ -447,6 +455,7 @@ export function App({ origin }: { readonly origin: string }) {
           me={auth.principal.id}
           channels={channels}
           unread={unread}
+          occupancy={occupancy}
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
           account={
@@ -470,10 +479,10 @@ export function App({ origin }: { readonly origin: string }) {
               channel={selected}
               viewer={auth.principal.id}
               people={live.people}
-              // A server that predates voice_allowed says nothing: voice, as
-              // the invite panel reads it. Agents have no voice (ADR-004).
-              voiceAllowed={auth.principal.voice_allowed !== false && auth.principal.kind === 'human'}
+              voiceAllowed={voiceAllowed}
               reachable={connection === 'connected'}
+              channels={channels.channels}
+              occupancy={occupancy}
               onUnauthorized={onUnauthorized}
               onOpen={onOpen}
             />

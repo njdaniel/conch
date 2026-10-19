@@ -4,6 +4,7 @@
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connection';
@@ -669,5 +670,79 @@ describe('the notes about sharing', () => {
     const { voice } = panel(joined({ listenOnly: true }), 'c', bobShares, bob);
     expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual(['bob is sharing a screen, with sound.']);
     expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
+  });
+});
+
+// Issue #596: while not in voice, the strip says where else people are in
+// voice, and its button opens that channel and nothing more. The channel on
+// screen is the roster's, not this line's.
+describe('where else people are in voice', () => {
+  const at = '2026-10-18T00:00:00Z';
+  const channels: ChannelV0[] = [
+    { id: 1, name: 'general', created_at: at },
+    { id: 2, name: 'game-night', created_at: at },
+    { id: 3, name: 'book-club', created_at: at },
+    { id: 4, name: 'quiet', created_at: at },
+  ];
+
+  function strip(state: VoiceState, viewed: string | null, occupancy: [number, number][]) {
+    const calls: string[] = [];
+    const opened: string[] = [];
+    render(
+      <VoicePanel
+        voice={control(state, calls, { kind: 'presence', presence })}
+        viewer={7}
+        people={new Map()}
+        viewed={viewed}
+        channels={channels}
+        occupancy={new Map(occupancy)}
+        onOpen={(name) => {
+          opened.push(name);
+        }}
+      />,
+    );
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    return { voice, calls, opened, line: () => voice.querySelector('.voice-elsewhere') };
+  }
+
+  it('names the channel and how many, and its button opens that channel without joining', () => {
+    const { voice, calls, opened, line } = strip(initialVoice, 'general', [[2, 3]]);
+    expect(line()?.textContent).toBe('3 in voice in #game-night Open #game-night');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Open #game-night' }));
+    expect(opened).toEqual(['game-night']);
+    expect(calls).toEqual([]);
+    // Join voice still goes where it went: the channel on screen.
+    expect(within(voice).getByRole('button', { name: 'Join voice in #general' })).toBeTruthy();
+  });
+
+  it('names the busiest, ties to the lower id, and says how many more channels', () => {
+    expect(strip(initialVoice, 'general', [[3, 2], [2, 2], [4, 1]]).line()?.textContent).toBe('2 in voice in #game-night and 2 more channels Open #game-night');
+    cleanup();
+    expect(strip(initialVoice, 'general', [[3, 1], [4, 5]]).line()?.textContent).toBe('5 in voice in #quiet and 1 more channel Open #quiet');
+  });
+
+  it('leaves out the channel on screen: its people are the roster', () => {
+    expect(strip(initialVoice, 'game-night', [[2, 3]]).line()).toBeNull();
+    cleanup();
+    expect(strip(initialVoice, 'game-night', [[2, 3], [3, 1]]).line()?.textContent).toBe('1 in voice in #book-club Open #book-club');
+  });
+
+  it('says nothing while nobody is in voice anywhere', () => {
+    const { voice, line } = strip(initialVoice, 'general', []);
+    expect(line()).toBeNull();
+    expect(within(voice).queryByRole('button', { name: /^Open/ })).toBeNull();
+  });
+
+  it("is not shown while in voice: the strip then describes the viewer's own connection", () => {
+    expect(strip(inVoice('connected', 'general'), 'general', [[2, 3]]).line()).toBeNull();
+    cleanup();
+    expect(strip(inVoice('connected', 'general'), 'book-club', [[2, 3]]).line()).toBeNull();
+  });
+
+  it('is shown while no channel is on screen', () => {
+    const { voice, opened, line } = strip(initialVoice, null, [[3, 2]]);
+    expect(line()?.textContent).toBe('2 in voice in #book-club Open #book-club');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Open #book-club' }));
+    expect(opened).toEqual(['book-club']);
   });
 });

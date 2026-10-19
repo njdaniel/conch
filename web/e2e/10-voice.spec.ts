@@ -745,6 +745,116 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  // Issue #596 (F01): where people are talking is seen from any channel.
+  // kim is in voice in #f01-game-night; lee reads #f01-books and max
+  // #f01-chess. Each list counts the people in #f01-game-night's voice, and
+  // each strip says where they are, within 3 s of kim joining and of her
+  // leaving. max's Open button opens the channel and joins nothing. Three
+  // people and three channels of this test's own, made through the API, so
+  // no other test's voice moves these counts.
+  test('people in voice in one channel are seen from the others, and opening that channel joins nothing', async ({ browser }) => {
+    const must = async (what: string, call: Promise<{ status: number; text: string }>): Promise<unknown> => {
+      const r = await call;
+      expect(r.status >= 200 && r.status < 300, `${what}: status ${String(r.status)}`).toBe(true);
+      return r.text === '' ? null : (JSON.parse(r.text) as unknown);
+    };
+    const room = 'f01-game-night';
+    const reading = { lee: 'f01-books', max: 'f01-chess' } as const;
+    for (const name of [room, reading.lee, reading.max]) await must(`create ${name}`, vw.api(vw.operator, 'POST', '/v0/channels', { name }));
+    const human = async (name: string, channels: readonly string[]) => {
+      const made = (await must(`create ${name}`, vw.api(vw.operator, 'POST', '/v0/principals', { kind: 'human', name }))) as { principal: { id: number } };
+      const cred = (await must(`credential for ${name}`, vw.api(vw.operator, 'POST', `/v1/principals/${String(made.principal.id)}/credentials`, { label: name }))) as { token: string };
+      for (const c of channels) await must(`add ${name} to ${c}`, vw.api(vw.operator, 'PUT', `/v1/channels/${c}/members/${String(made.principal.id)}`));
+      vw.addSecret(cred.token);
+      return { id: made.principal.id, name, token: cred.token };
+    };
+    const kim = await human('f01-kim', [room]);
+    const leeMember = await human('f01-lee', [room, reading.lee]);
+    const maxMember = await human('f01-max', [room, reading.max]);
+
+    // What a reader's page asked for: each occupancy socket, each voice
+    // session, and each device.
+    const open = async (m: { name: string; token: string }, channel: string) => {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      const seen = { occupancy: 0, sessions: 0 };
+      page.on('websocket', (ws) => {
+        if (new URL(ws.url()).pathname === '/v1/voice/occupancy/ws') seen.occupancy++;
+      });
+      page.on('request', (r) => {
+        if (r.url().endsWith('/voice/session')) seen.sessions++;
+      });
+      const watch = watchPage(page, vw);
+      await page.addInitScript(countBytes);
+      await page.addInitScript(() => {
+        const w = window as unknown as { __devices: number };
+        w.__devices = 0;
+        const devices = navigator.mediaDevices as MediaDevices | undefined;
+        if (devices === undefined) return;
+        const original = devices.getUserMedia.bind(devices);
+        devices.getUserMedia = (c?: MediaStreamConstraints) => {
+          w.__devices++;
+          return original(c);
+        };
+      });
+      await signIn(page, vw, m.token, m.name);
+      await channelButton(page, channel).click();
+      await expect(conversation(page).getByRole('heading', { name: channel })).toBeVisible();
+      return { context, page, watch, member: m, seen };
+    };
+    const k = await open(kim, room);
+    const lee = await open(leeMember, reading.lee);
+    const max = await open(maxMember, reading.max);
+    const mark = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('img', { name: / in voice$/ });
+    // The strip's line "N in voice in #x", with its Open button.
+    const elsewhere = (page: Page) => voiceRegion(page).locator('.voice-elsewhere');
+    try {
+      for (const r of [lee, max]) {
+        await expect(mark(r.page)).toHaveCount(0);
+        await expect(elsewhere(r.page)).toHaveCount(0);
+      }
+
+      await voiceRegion(k.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(k.page)).toContainText(`Connected in #${room}`, { timeout: 30_000 });
+      for (const r of [lee, max]) {
+        // The count is beside the channel's button, which keeps its name.
+        await expect(mark(r.page)).toHaveAccessibleName('1 in voice', { timeout: 3000 });
+        await expect(r.page.getByRole('navigation', { name: 'Channels' }).getByRole('listitem').filter({ has: r.page.getByRole('img', { name: / in voice$/ }) })).toContainText(room);
+        await expect(channelButton(r.page, room)).toHaveAccessibleName(room);
+        await expect(elsewhere(r.page)).toHaveText(`1 in voice in #${room} Open #${room}`, { timeout: 3000 });
+      }
+
+      // max opens it from the strip: the channel opens, and voice does not.
+      await voiceRegion(max.page).getByRole('button', { name: `Open #${room}`, exact: true }).click();
+      await expect(conversation(max.page).getByRole('heading', { name: room })).toBeVisible();
+      await expect(voiceRegion(max.page)).toContainText('Not in voice');
+      await expect(voiceRegion(max.page).getByRole('list', { name: 'In voice' })).toContainText(kim.name);
+      await expect(voiceRegion(max.page).getByRole('button', { name: `Join voice in #${room}`, exact: true })).toBeEnabled();
+      // Its people are the roster now, not the line.
+      await expect(elsewhere(max.page)).toHaveCount(0);
+
+      // kim leaves; lee's list and strip say so within 3 s.
+      await voiceRegion(k.page).getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voiceRegion(k.page)).toContainText('Not in voice', { timeout: 10_000 });
+      await expect(mark(lee.page)).toHaveCount(0, { timeout: 3000 });
+      await expect(elsewhere(lee.page)).toHaveCount(0, { timeout: 3000 });
+
+      // Seeing it asked for nothing of voice: no session, no device, no
+      // LiveKit connection; and one occupancy socket a page all along.
+      for (const r of [lee, max]) {
+        expect(r.seen.sessions, `voice sessions ${r.member.name} asked for`).toBe(0);
+        expect(r.seen.occupancy, `occupancy sockets ${r.member.name}'s page opened`).toBe(1);
+        expect(await r.page.evaluate(() => (window as unknown as { __devices: number }).__devices), `devices ${r.member.name}'s page asked for`).toBe(0);
+        expect(await r.page.evaluate(() => (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs.length), `peer connections on ${r.member.name}'s page`).toBe(0);
+        await expectClean(r);
+      }
+    } finally {
+      await k.context.close();
+      await lee.context.close();
+      await max.context.close();
+    }
+  });
+
   // Issue #599 (F21): the other person sees a push-to-talk talker as
   // "speaking", as they do one on the open microphone. "speaking" is
   // LiveKit's own speaker detection, which needs the sound at -35 dBov or

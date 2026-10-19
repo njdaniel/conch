@@ -140,3 +140,55 @@ describe('an unread count', () => {
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-describedby')).toBeNull();
   });
 });
+
+// Issue #596: how many are in a channel's voice, as text beside its button,
+// describing it as the unread count does, never in its name.
+describe('a voice count', () => {
+  const occupied = (occupancy: [number, number][], unread = new Map<string, number>()) => (
+    <ChannelList channels={channels} selected="general" unread={unread} occupancy={new Map(occupancy)} onOpen={() => undefined} />
+  );
+
+  it('says how many are in voice, describes its channel button and leaves the name alone', async () => {
+    render(occupied([[3, 3]]));
+    const button = await screen.findByRole('button', { name: 'game-night' });
+    expect(button.textContent).toBe('game-night');
+    const mark = screen.getByRole('img', { name: '3 in voice' });
+    expect(mark.textContent).toBe('3');
+    // A speaker, hidden from a screen reader: the mark's name says it.
+    expect(mark.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(button.getAttribute('aria-describedby')).toBe(mark.id);
+    expect(mark.closest('button')).toBeNull();
+    expect(mark.parentElement).toBe(button.parentElement);
+  });
+
+  it('shows nothing for a channel with nobody in voice', () => {
+    render(occupied([[1, 0]]));
+    expect(screen.queryByRole('img', { name: /in voice/ })).toBeNull();
+    for (const b of screen.getAllByRole('button')) expect(b.getAttribute('aria-describedby')).toBeNull();
+  });
+
+  it('sits beside an unread count, and the button is described by both', () => {
+    render(occupied([[2, 1]], new Map([['book-club', 4]])));
+    const button = screen.getByRole('button', { name: 'book-club' });
+    const mark = screen.getByRole('img', { name: '1 in voice' });
+    const unread = screen.getByRole('img', { name: '4 unread' });
+    expect(button.getAttribute('aria-describedby')).toBe(`${mark.id} ${unread.id}`);
+  });
+
+  it('opens the channel when its button is pressed, as any channel does', () => {
+    const opened: string[] = [];
+    render(<ChannelList channels={channels} selected="general" unread={new Map()} occupancy={new Map([[3, 2]])} onOpen={(n) => { opened.push(n); }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'game-night' }));
+    expect(opened).toEqual(['game-night']);
+  });
+
+  it('follows the counts as they change', () => {
+    const view = render(occupied([[3, 2]]));
+    expect(screen.getByRole('img', { name: '2 in voice' })).toBeTruthy();
+    view.rerender(occupied([[3, 1], [1, 4]]));
+    expect(screen.getByRole('img', { name: '1 in voice' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: '4 in voice' })).toBeTruthy();
+    view.rerender(occupied([]));
+    expect(screen.queryByRole('img', { name: /in voice/ })).toBeNull();
+  });
+});
