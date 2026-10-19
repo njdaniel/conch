@@ -1173,7 +1173,16 @@ fn devices_json_is_one_line_and_exits_0_for_a_valid_a_refused_and_a_missing_file
             .env("CONCH_CONFIG_DIR", config)
             .env("XDG_RUNTIME_DIR", private)
             .env("PIPEWIRE_REMOTE", "conch-voice-test-no-such-socket");
-        run(command.args(["devices", "--json"]))
+        let (code, stdout, stderr) = run(command.args(["devices", "--json"]));
+        // libpipewire logs to standard error itself when it cannot load its own
+        // configuration (as on a machine without PipeWire installed, like CI): those
+        // lines are its, not conch-voice's, and are left out of what is checked.
+        let ours: String = stderr
+            .lines()
+            .filter(|line| !line.starts_with('[') || line.get(2..4) != Some("]["))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        (code, stdout, ours)
     };
     let document = |stdout: &str| -> serde_json::Value {
         assert_eq!(stdout.matches('\n').count(), 1, "{stdout:?}");
