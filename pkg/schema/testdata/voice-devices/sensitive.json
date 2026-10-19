@@ -1,0 +1,18 @@
+{
+  "description": "What the device list must never carry. forbidden_field_fragments may not occur in the name of any field of the document or of a device: it carries device names and descriptions and what voice.toml names, and nothing of the login, the server, the room or the file's place on disk.",
+  "forbidden_field_fragments": [
+    "token",
+    "secret",
+    "password",
+    "room",
+    "livekit",
+    "authorization",
+    "bearer",
+    "cookie",
+    "url",
+    "identity",
+    "server",
+    "path",
+    "dir"
+  ]
+}
