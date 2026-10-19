@@ -131,6 +131,7 @@ Usage:
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
+  conch voice where [--server <url>] [--json]
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
   conch approve [flags] <id>
@@ -180,6 +181,16 @@ Scope:
   exits 0; voice not configured or unavailable prints one line and exits
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
+  voice where shows which of your channels have people in voice, so you can
+  find where to join; it only reads and never joins. One line per channel with
+  anyone in its channel-wide voice room, in channel id order:
+    <channel> <count>
+  Nets' rooms are not counted. Nobody in voice anywhere prints
+  "nobody is in voice in any of your channels" and exits 0; voice not
+  configured or unavailable, or a credential without voice, prints one line
+  and exits nonzero. --json prints the server's document (conch.voice_occupancy.v1)
+  as it is, channel ids and zero counts included, and exits 0 for any valid
+  document.
 
   admin is the operator's setup path: create channels and principals, issue
   and revoke credentials, set channel membership, store an agent's manifest.
@@ -1018,11 +1029,13 @@ var voiceNow = time.Now
 
 func runVoice(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: voice requires a subcommand (status)")
+		return errors.New("cli: voice requires a subcommand (status, where)")
 	}
 	switch args[0] {
 	case "status":
 		return runVoiceStatus(ctx, args[1:], stdout, stderr)
+	case "where":
+		return runVoiceWhere(ctx, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("cli: unknown voice subcommand %q", args[0])
 	}
@@ -1235,4 +1248,65 @@ func watchVoice(ctx context.Context, client *Client, channel string, stdout, std
 		return nil
 	}
 	return voiceFailure(err)
+}
+
+// runVoiceWhere prints which channels have people in voice (issue #611): one
+// read of GET /v1/voice/occupancy, with channel names from the channel list
+// because the document carries ids alone. It never joins anything.
+func runVoiceWhere(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("voice where", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	asJSON := fs.Bool("json", false, "print the server's document")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("cli: voice where: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return errors.New("cli: voice where: takes no arguments")
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	doc, err := client.VoiceOccupancy(ctx)
+	if err != nil {
+		return voiceFailure(err)
+	}
+	if *asJSON {
+		return json.NewEncoder(stdout).Encode(doc)
+	}
+	switch {
+	case !doc.Configured:
+		return errVoiceNotConfigured
+	case !doc.Available:
+		return errVoiceUnavailable
+	}
+	var busy []schema.VoiceChannelOccupancy
+	for _, c := range doc.Channels {
+		if c.InVoice > 0 {
+			busy = append(busy, c)
+		}
+	}
+	if len(busy) == 0 {
+		_, err := fmt.Fprintln(stdout, "nobody is in voice in any of your channels")
+		return err
+	}
+	// A name that cannot be looked up leaves the channel shown by its id.
+	names := map[int64]string{}
+	if list, err := client.ListChannels(ctx); err == nil {
+		for _, ch := range list.Channels {
+			names[ch.ID] = ch.Name
+		}
+	}
+	for _, c := range busy {
+		name, ok := names[c.ChannelID]
+		if ok {
+			name = voiceName(name)
+		} else {
+			name = "#" + strconv.FormatInt(c.ChannelID, 10)
+		}
+		if _, err := fmt.Fprintf(stdout, "%s %d\n", name, c.InVoice); err != nil {
+			return err
+		}
+	}
+	return nil
 }
