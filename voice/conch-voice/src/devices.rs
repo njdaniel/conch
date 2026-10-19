@@ -47,7 +47,7 @@ struct Listed<'a> {
 }
 
 /// Whether a `node.name` can be written between quotes in the configuration file as it is.
-fn fit_for_the_config(name: &str) -> bool {
+pub(crate) fn fit_for_the_config(name: &str) -> bool {
     !name.is_empty() && one_line(name) == name && !name.contains(['"', '\\'])
 }
 

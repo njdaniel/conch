@@ -223,6 +223,9 @@ Who is connected and who is talking comes from `conchd`'s presence socket (voice
 | `conch-voice join [channel]` | Joins the channel's voice and runs until `quit`, the end of standard input, or Ctrl-C. |
 | `conch-voice devices` | Lists PipeWire inputs and outputs, and keyboards with whether they can be read, and prints the udev rule that would grant one. |
 | `conch-voice keys <device>` | Prints the code of each key pressed on that device until Ctrl-C, to find the talk key. Says first that it will show every key pressed. Writes only to a terminal: with standard output redirected it refuses (exit code 2). |
+| `conch-voice config set audio.input\|audio.output <name>` | Saves the microphone or the speakers in `voice.toml` (issue #651): a device name as `devices` lists it, or `default`. Only that value's text changes; comments, key order and every other key stay as written. Prints nothing; exit code 2 for any other key or a name that cannot be written as it is, 1 with one line when the file cannot be saved. |
+
+`conch-voice` writes `voice.toml` only through `config set`, and only the `[audio]` devices: never `server`, `channel` or `[keys]`, never `credentials.json`, and never the directory, which it does not create. A file that is a symbolic link, is not a regular file, is writable by group or others, is refused as it stands, or writes `[audio]` inline or with dotted keys is left alone to be changed by hand. The new text is checked by parsing it before anything is written, goes to a new file beside the old one with the old file's mode (0600 for a new one), and replaces it by a rename; a change another writer made in the meantime is detected, kept, and the save refused.
 
 `join` takes test options that replace hardware: a WAV file as the microphone, a sink that counts instead of playing, and standard input instead of a key device (§4).
 
