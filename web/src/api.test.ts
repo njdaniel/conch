@@ -16,6 +16,7 @@ import {
   postMessage,
   previewInvite,
   redeemInvite,
+  reportVoiceTransmit,
   restore,
   signIn,
   signOut,
@@ -592,6 +593,49 @@ describe('invites', () => {
       code: 'invite_allowance_exceeded',
       message: 'you already have as many open personal invites as you may',
     });
+  });
+});
+
+// Issue #595: Chromium logs an answer whose body is never read, or is
+// cancelled, as a failed request (net::ERR_ABORTED), a 204's included. A call
+// whose answer is its status alone reads the body to its end. jsdom gives a
+// 204 no body, so the read is watched on the response itself.
+describe('answers that are a status alone', () => {
+  function noContent(read?: () => Promise<ArrayBuffer>): { res: Response; reads: () => number } {
+    const res = new Response(null, { status: 204 });
+    const spy = vi.spyOn(res, 'arrayBuffer');
+    if (read !== undefined) spy.mockImplementation(read);
+    return { res, reads: () => spy.mock.calls.length };
+  }
+
+  it("reads a 204 transmit report's body to its end, and the report is answered", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answers = [noContent(), noContent()];
+    let next = 0;
+    const calls = serve(() => answers[next++]?.res ?? json({}, 500));
+    expect(await reportVoiceTransmit('red team', 'started', new AbortController().signal)).toBe('ok');
+    expect(await reportVoiceTransmit('red team', 'stopped', new AbortController().signal)).toBe('ok');
+    expect(answers.map((a) => a.reads())).toEqual([1, 1]);
+    expect(calls).toEqual([
+      { path: '/v1/channels/red%20team/voice/transmit', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/channels/red%20team/voice/transmit', method: 'POST', auth: `Bearer ${memberToken}` },
+    ]);
+  });
+
+  it('still takes a 204 transmit report as answered when its body cannot be read', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = noContent(() => Promise.reject(new DOMException('The operation was aborted.', 'AbortError')));
+    serve(() => answer.res);
+    expect(await reportVoiceTransmit('red', 'started', new AbortController().signal)).toBe('ok');
+    expect(answer.reads()).toBe(1);
+  });
+
+  it("reads a stopped share's 204 body to its end", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = noContent();
+    serve(() => answer.res);
+    expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: true, value: null });
+    expect(answer.reads()).toBe(1);
   });
 });
 

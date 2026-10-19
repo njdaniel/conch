@@ -245,20 +245,49 @@ room:
   }
 }
 
-// What a page said and was given, for the checks that no secret shows.
+// What a page said and was given, for the checks that no secret shows, and
+// what went wrong on it that the person would not see (issue #595).
 export interface Watch {
   // Every console message and uncaught error of the page, in order.
   readonly console: readonly string[];
+  // Every request to conchd the browser counted as failed, as its method,
+  // path and error: one aborted or never answered, or one answered and its
+  // body let go unread (Chromium's net::ERR_ABORTED after a 204).
+  readonly failed: readonly string[];
+  // Every Permissions-Policy violation the page was told of by a
+  // ReportingObserver, as the feature and where in a script it was asked for.
+  readonly policy: readonly string[];
   // Resolves once every voice session answer seen so far has been read and
   // its join tokens and room names added to the world's secrets.
   settled: () => Promise<void>;
 }
 
-// watchPage records everything page writes to its console, and adds the join
+// Installed before the page's own scripts: hands each Permissions-Policy
+// violation report to the test through the binding watchPage exposes, so a
+// report made before a reload is kept.
+const reportPolicy = () => {
+  const tell = (window as unknown as { __conchPolicyReport?: (line: string) => Promise<void> }).__conchPolicyReport;
+  new ReportingObserver(
+    (reports) => {
+      for (const r of reports) {
+        // A PermissionsPolicyViolationReportBody, which TypeScript's DOM types
+        // do not name.
+        const b = (r.body ?? {}) as { featureId?: string; sourceFile?: string | null; lineNumber?: number | null; columnNumber?: number | null };
+        void tell?.(`${b.featureId ?? '?'} at ${b.sourceFile ?? '(no file)'}:${String(b.lineNumber ?? '?')}:${String(b.columnNumber ?? '?')}`);
+      }
+    },
+    { types: ['permissions-policy-violation'], buffered: true },
+  ).observe();
+};
+
+// watchPage records everything page writes to its console, every request to
+// conchd that fails and every Permissions-Policy report, and adds the join
 // token and room name of every voice session conchd answers it with to vw's
 // secrets. Call it before the page loads.
-export function watchPage(page: Page, vw: VoiceWorld): Watch {
+export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   const lines: string[] = [];
+  const failed: string[] = [];
+  const policy: string[] = [];
   const reads: Promise<void>[] = [];
   page.on('console', (m) => {
     lines.push(`${m.type()}: ${m.text()}`);
@@ -266,6 +295,15 @@ export function watchPage(page: Page, vw: VoiceWorld): Watch {
   page.on('pageerror', (err) => {
     lines.push(`pageerror: ${err.message}`);
   });
+  page.on('requestfailed', (req) => {
+    const url = new URL(req.url());
+    if (url.origin !== vw.origin) return;
+    failed.push(`${req.method()} ${url.pathname} ${req.failure()?.errorText ?? ''}`);
+  });
+  await page.exposeFunction('__conchPolicyReport', (line: string) => {
+    policy.push(line);
+  });
+  await page.addInitScript(reportPolicy);
   page.on('response', (res) => {
     if (!new URL(res.url()).pathname.endsWith('/voice/session')) return;
     reads.push(
@@ -284,6 +322,8 @@ export function watchPage(page: Page, vw: VoiceWorld): Watch {
   });
   return {
     console: lines,
+    failed,
+    policy,
     settled: async () => {
       await Promise.all(reads);
     },
