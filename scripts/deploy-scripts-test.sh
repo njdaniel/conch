@@ -95,11 +95,31 @@ ok "no secret in ops/deploy"
 
 # --- helpers ---------------------------------------------------------------
 
-# free_port <from>: the first loopback port from <from> nothing listens on.
-free_port() {
-    local p=$1
-    while (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; do p=$((p + 1)); done
-    echo "$p"
+# Two copies of this test can run at once (two worktrees, two workers), so no
+# port is picked by looking for a free one and binding it later: another run can
+# take it in between, and the curl then reaches that run's conchd, which does not
+# know our token. conchd binds port 0 and prints the address it holds
+# ("listening on 127.0.0.1:PORT"). That line is written by the process we
+# started, after it bound, so the port read from it is ours.
+
+# wait_listening <pid> <log>: print the port the conchd <pid> bound, read from
+# its log. Return 1 if it exits first (a bind failure, a bad flag) or says
+# nothing in 10 seconds.
+wait_listening() {
+    local pid=$1 log=$2 addr
+    for _ in $(seq 1 100); do
+        addr=$(sed -n 's/.* listening on \([^ ]*\) (data .*/\1/p' "$log" 2>/dev/null | head -n 1)
+        if [ -n "$addr" ]; then echo "${addr##*:}"; return 0; fi
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+# listen_or_fail <pid> <log>: wait_listening, or fail saying the bind failed and
+# where the log is.
+listen_or_fail() {
+    wait_listening "$1" "$2" || { cat "$2" >&2; fail "conchd did not bind a port; see $2"; }
 }
 
 wait_health() { # <port>
@@ -135,9 +155,9 @@ mkdir -p "$data_root/alpha" "$backups"
 umask 077
 token=$("$work/bin/conchd-v0.0.1" bootstrap-operator --data "$data_root/alpha" --name tester)
 [ -n "$token" ] || fail "no operator token"
-port=$(free_port 18300)
-"$work/bin/conchd-v0.0.1" serve --data "$data_root/alpha" --listen "127.0.0.1:$port" --no-web >"$work/serve.log" 2>&1 &
+"$work/bin/conchd-v0.0.1" serve --data "$data_root/alpha" --listen 127.0.0.1:0 --no-web >"$work/serve.log" 2>&1 &
 pids+=($!)
+port=$(listen_or_fail "${pids[0]}" "$work/serve.log")
 wait_health "$port" || { cat "$work/serve.log" >&2; fail "conchd did not start"; }
 
 api "$port" "$token" POST /v0/channels -H 'Content-Type: application/json' -d '{"name":"ops"}' >/dev/null
@@ -203,16 +223,16 @@ ok "retention"
 # --- restore drill -----------------------------------------------------------
 
 latest=$(ls -1t "$backups"/alpha/conch-alpha-2*.tar.gz | head -n 1)
-CONCHD=$work/bin/conchd-v0.0.1 CONCH_RESTORE_PORT=$((port + 1)) "$deploy/conch-restore.sh" "$latest" "$work/scratch" >"$work/restore.out" 2>&1 ||
+CONCHD=$work/bin/conchd-v0.0.1 "$deploy/conch-restore.sh" "$latest" "$work/scratch" >"$work/restore.out" 2>&1 ||
     { cat "$work/restore.out" >&2; fail "the restore drill failed"; }
 grep -q 'conch-restore: OK' "$work/restore.out" || fail "the drill did not report OK"
 grep -q '"db":"ok"' "$work/restore.out" || fail "the drill did not report /healthz db ok"
 ok "restore drill"
 
 # The restored data holds the message and the file, served by a conchd.
-rport=$(free_port $((port + 2)))
-"$work/bin/conchd-v0.0.1" serve --data "$work/scratch/data" --listen "127.0.0.1:$rport" --no-web >"$work/restored.log" 2>&1 &
+"$work/bin/conchd-v0.0.1" serve --data "$work/scratch/data" --listen 127.0.0.1:0 --no-web >"$work/restored.log" 2>&1 &
 pids+=($!)
+rport=$(listen_or_fail "${pids[1]}" "$work/restored.log")
 wait_health "$rport" || fail "the restored data did not start"
 api "$rport" "$token" GET /v2/channels/ops/messages | grep -q 'hello before the backup' || fail "the message is not in the restored server"
 api "$rport" "$token" GET "/v2/files/$file_id" -o "$work/restored.bin"
@@ -242,8 +262,6 @@ opt=$work/opt etc=$work/etc rel=$work/release up_data=$work/updata
 mkdir -p "$opt/releases/v0.0.1" "$etc" "$rel/v0.0.2" "$work/pids" "$up_data/beta"
 install -m 0755 "$work/bin/conchd-v0.0.1" "$opt/releases/v0.0.1/conchd"
 ln -s "$opt/releases/v0.0.1" "$opt/current"
-bport=$(free_port 18400)
-printf 'CONCHD_DATA=%s\nCONCHD_LISTEN=127.0.0.1:%s\n' "$up_data/beta" "$bport" >"$etc/beta.env"
 cp "$work/bin/conchd-v0.0.2" "$rel/v0.0.2/conchd_v0.0.2_linux_$arch"
 (cd "$rel/v0.0.2" && sha256sum "./conchd_v0.0.2_linux_$arch" >checksums.txt)
 
@@ -273,8 +291,21 @@ EOF
 chmod +x "$work/systemctl"
 
 btoken=$("$opt/current/conchd" bootstrap-operator --data "$up_data/beta" --name tester)
-"$work/systemctl" start conchd@beta
-wait_health "$bport" || fail "beta did not start"
+# The instance's port is in its env file, because the upgrade restarts it on the
+# same address, so it cannot be port 0. Try a port from a range each run picks
+# at random. A conchd that fails to bind exits without printing its address and
+# the next port is tried; the port is ours once our own conchd printed it.
+bport=""
+for _ in 1 2 3 4 5 6 7 8; do
+    cand=$((20000 + RANDOM % 20000))
+    printf 'CONCHD_DATA=%s\nCONCHD_LISTEN=127.0.0.1:%s\n' "$up_data/beta" "$cand" >"$etc/beta.env"
+    : >"$work/beta.log"
+    "$work/systemctl" start conchd@beta
+    if wait_listening "$(cat "$work/pids/beta")" "$work/beta.log" >/dev/null; then bport=$cand; break; fi
+    "$work/systemctl" stop conchd@beta
+done
+[ -n "$bport" ] || { cat "$work/beta.log" >&2; fail "beta did not bind a port in 8 tries; see $work/beta.log"; }
+wait_health "$bport" || fail "beta did not start; see $work/beta.log"
 api "$bport" "$btoken" POST /v0/channels -H 'Content-Type: application/json' -d '{"name":"ops"}' >/dev/null
 post() { api "$bport" "$btoken" POST /v2/channels/ops/messages -H 'Content-Type: application/json' -d "{\"body\":\"$1\"}" >/dev/null; }
 has() { api "$bport" "$btoken" GET /v2/channels/ops/messages | grep -q "$1"; }
