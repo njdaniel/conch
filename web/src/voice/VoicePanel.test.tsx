@@ -11,7 +11,7 @@ import { initialVoice, VoiceClient, type Phase, type VoiceState } from './connec
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { stoppedFor, VoicePanel } from './VoicePanel';
+import { followsNote, missingNote, stoppedFor, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -744,5 +744,89 @@ describe('where else people are in voice', () => {
     expect(line()?.textContent).toBe('2 in voice in #book-club Open #book-club');
     fireEvent.click(within(voice).getByRole('button', { name: 'Open #book-club' }));
     expect(opened).toEqual(['book-club']);
+  });
+});
+
+// Issue #658: the choice of microphone in Voice options, the device in use,
+// and the note while the microphone is missing.
+describe('the microphone chosen', () => {
+  const list = [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'mic-1', label: 'Headset' },
+    { id: 'mic-2', label: 'Webcam' },
+  ];
+  const headset = { id: 'mic-1', label: 'Headset' };
+  const using = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), microphones: list, inUse: 'default', ...patch });
+  const options = (voice: HTMLElement) => {
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    return voice.querySelector<HTMLElement>('#voice-options') ?? voice;
+  };
+  const choice = (opts: HTMLElement) => within(opts).getByRole<HTMLSelectElement>('combobox', { name: 'Microphone' });
+  const names = (select: HTMLSelectElement) => Array.from(select.options).map((o) => o.textContent);
+
+  it('lists System default first, then every microphone by name, and says which device is in use', () => {
+    const { voice } = panel(using(), 'c');
+    const opts = options(voice);
+    const select = choice(opts);
+    expect(names(select)).toEqual(['System default', 'Default - Headset', 'Headset', 'Webcam']);
+    expect(select.selectedOptions[0]?.textContent).toBe('System default');
+    expect(opts.textContent).toContain('In use: Default - Headset');
+    expect(opts.textContent).toContain(followsNote);
+  });
+
+  it('shows a device chosen as chosen, and the device the capture is on', () => {
+    const { voice } = panel(using({ microphone: headset, inUse: 'mic-1' }), 'c');
+    const opts = options(voice);
+    expect(choice(opts).selectedOptions[0]?.textContent).toBe('Headset');
+    expect(opts.textContent).toContain('In use: Headset');
+    expect(opts.textContent).not.toContain(followsNote);
+  });
+
+  it('choosing calls the client: a device listed, and System default as none', () => {
+    const { voice, client } = panel(using({ microphone: headset, inUse: 'mic-1' }), 'c');
+    const chosen = vi.spyOn(client, 'chooseMicrophone').mockResolvedValue();
+    const select = choice(options(voice));
+    fireEvent.change(select, { target: { value: select.options[3]?.value } });
+    fireEvent.change(select, { target: { value: select.options[0]?.value } });
+    expect(chosen.mock.calls).toEqual([[{ id: 'mic-2', label: 'Webcam' }], [null]]);
+  });
+
+  it.each<[string, Partial<VoiceState>]>([
+    ['in watch only', { watchOnly: true, microphones: null, inUse: null }],
+    ['when the browser does not name its microphones', { microphones: null }],
+  ])('lists nothing %s, and says when it will', (_what, patch) => {
+    const { voice } = panel(using(patch), 'c');
+    const opts = options(voice);
+    expect(within(opts).queryByRole('combobox', { name: 'Microphone' })).toBeNull();
+    expect(opts.textContent).toContain('Microphones are listed once you use your microphone.');
+  });
+
+  it('says nothing of microphones in listen only', () => {
+    const { voice } = panel(using({ listenOnly: true, microphones: null, inUse: null }), 'c');
+    const opts = options(voice);
+    expect(within(opts).queryByRole('combobox', { name: 'Microphone' })).toBeNull();
+    expect(opts.textContent).not.toContain('Microphones are listed');
+  });
+
+  it('while missing: the note, no Microphone in use, nothing in use, and the list asks for a choice', () => {
+    const { voice, redraw } = panel(using({ microphone: headset, inUse: 'mic-1' }), 'c');
+    expect(within(voice).getByText('Microphone in use')).toBeTruthy();
+    expect(within(voice).queryByText(missingNote)).toBeNull();
+    redraw(using({ microphone: headset, inUse: null, missing: true }));
+    expect(within(voice).getByText(missingNote).getAttribute('role')).toBe('status');
+    expect(within(voice).queryByText('Microphone in use')).toBeNull();
+    const opts = options(voice);
+    const select = choice(opts);
+    expect(select.selectedOptions[0]?.textContent).toBe('Choose a microphone');
+    // The same device, or System default, is a change from there.
+    expect(names(select)).toEqual(['Choose a microphone', 'System default', 'Default - Headset', 'Headset', 'Webcam']);
+    expect(opts.textContent).not.toContain('In use:');
+  });
+
+  it('a switch that failed says why instead of the note', () => {
+    const why = 'The microphone is in use by another program, or could not be opened. Close it and join again, or use Watch only.';
+    const { voice } = panel(using({ inUse: null, missing: true, why }), 'c');
+    expect(within(voice).getByText(why)).toBeTruthy();
+    expect(within(voice).queryByText(missingNote)).toBeNull();
   });
 });
