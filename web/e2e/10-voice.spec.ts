@@ -832,7 +832,7 @@ test.describe('with LiveKit', () => {
       page.on('request', (r) => {
         if (r.url().endsWith('/voice/session')) seen.sessions++;
       });
-      const watch = watchPage(page, vw);
+      const watch = await watchPage(page, vw);
       await page.addInitScript(countBytes);
       await page.addInitScript(() => {
         const w = window as unknown as { __devices: number };
