@@ -11,6 +11,10 @@
 // capture ends or its device is no longer listed. Voice processing (issue
 // #659): all three filters on or off at every capture, a change made by a
 // restart and never on the live capture, and reported as the capture says.
+// The speakers chosen (issue #660): listed without asking for any device,
+// switched by the SDK's own switch for outputs, '' being the system default,
+// handed to a new room before it connects, and followed when the SDK moves
+// sound by itself; not asked at all where the browser cannot choose.
 // No network, no microphone, no screen.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
@@ -126,6 +130,11 @@ interface Stub {
   contexts: { closed: number }[];
   // Issue #659: the filters the browser keeps on whatever it is asked.
   keptOn: string[];
+  // Issue #660: whether the browser can choose an output, each output the
+  // SDK was asked to switch to, and when set, a refusal of the next switch.
+  outputSelection: boolean;
+  outputs: string[];
+  outputFails: Error | null;
 }
 interface StubSettings {
   channelCount?: number;
@@ -191,6 +200,9 @@ const state = vi.hoisted((): Stub => {
     listed: [],
     contexts: [],
     keptOn: [],
+    outputSelection: true,
+    outputs: [],
+    outputFails: null,
   };
 });
 
@@ -409,8 +421,17 @@ vi.mock('livekit-client', () => {
     }
     // The SDK's own switch, which leaves a muted track on its old device
     // until the next unmute: never to be called for the microphone.
-    switchActiveDevice(kind: string) {
+    // For the speakers (issue #660) it is the one switch: it moves every
+    // voice, and tells the room which output is now in use, as the SDK does.
+    switchActiveDevice(kind: string, id: string) {
       state.calls.push(`switchActiveDevice ${kind}`);
+      if (kind === 'audiooutput') {
+        state.outputs.push(id);
+        const refusal = state.outputFails;
+        state.outputFails = null;
+        if (refusal !== null) return Promise.reject(refusal);
+        state.handlers.get('adc')?.(kind, id);
+      }
       return Promise.resolve(true);
     }
   }
@@ -429,6 +450,7 @@ vi.mock('livekit-client', () => {
       TrackUnmuted: 'tum',
       ParticipantPermissionsChanged: 'ppc',
       MediaDevicesChanged: 'mdc',
+      ActiveDeviceChanged: 'adc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -462,6 +484,7 @@ vi.mock('livekit-client', () => {
       return pending.promise.then(captured);
     },
     getLogger: () => state.logger,
+    supportsAudioOutputSelection: () => state.outputSelection,
     // The SDK's own setLogLevel persists the level; the adapter must not call it.
     setLogLevel: () => {
       state.calls.push('setLogLevel');
@@ -516,6 +539,9 @@ beforeEach(() => {
   state.listed.length = 0;
   state.contexts.length = 0;
   state.keptOn = [];
+  state.outputSelection = true;
+  state.outputs.length = 0;
+  state.outputFails = null;
   vi.stubGlobal(
     'AudioContext',
     class {
@@ -553,6 +579,7 @@ const events = {
   onShareTracks: () => undefined,
   onMicrophoneLost: () => undefined,
   onDevicesChanged: () => undefined,
+  onOutputMoved: () => undefined,
 };
 
 describe('the SDK adapter', () => {
@@ -1515,6 +1542,117 @@ describe("a share's encodings", () => {
 // The whole client over the adapter: the join token and the room name of a
 // grant are handed to the SDK and kept nowhere a page or another script can
 // read them back. The stub SDK logs both while connecting, as a real one may.
+describe('the speakers chosen', () => {
+  const outputs = [
+    { kind: 'audiooutput', deviceId: 'default', label: 'Default - Headset' },
+    { kind: 'audiooutput', deviceId: 'out-1', label: 'Desk speakers' },
+    { kind: 'audiooutput', deviceId: 'out-2', label: '' },
+    { kind: 'audioinput', deviceId: 'mic-1', label: 'Headset microphone' },
+  ];
+  // A remote microphone, as the SDK hands it over.
+  const voice = (sid: string) => ({ source: 'microphone', kind: 'audio', sid, attach: () => document.createElement('audio'), detach: () => [] });
+
+  it('lists the named outputs with permission requests off', async () => {
+    state.devices = outputs;
+    expect(await newLiveKitRoom().outputs()).toEqual([
+      { id: 'default', label: 'Default - Headset' },
+      { id: 'out-1', label: 'Desk speakers' },
+    ]);
+    expect(state.listed).toEqual([['audiooutput', false]]);
+  });
+
+  it("switches with the SDK's switch for outputs, and System default is the empty id", async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.switchOutput('out-1');
+    await room.switchOutput('');
+    expect(state.outputs).toEqual(['out-1', '']);
+    expect(state.calls).not.toContain('switchActiveDevice audioinput');
+  });
+
+  it('a refusal puts every voice back on the output in use, and rejects', async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.switchOutput('out-1');
+    state.outputFails = new DOMException('no such output', 'NotFoundError');
+    await expect(room.switchOutput('out-2')).rejects.toMatchObject({ name: 'NotFoundError' });
+    expect(state.outputs).toEqual(['out-1', 'out-2', 'out-1']);
+  });
+
+  it('the output kept in the tab is handed to a new room before it connects, so it is where the first voice plays', async () => {
+    state.devices = outputs;
+    const session: VoiceSessionResult = {
+      ok: true,
+      value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] },
+    };
+    const client = new VoiceClient({
+      clock: new FakeClock(),
+      random: () => 0.5,
+      createSession: () => Promise.resolve(session),
+      report: () => Promise.resolve('ok'),
+      newRoom: newLiveKitRoom,
+      claimShare: () => Promise.resolve({ ok: false, failure: 'network' }),
+      stopShare: () => Promise.resolve(),
+      outputSelection: true,
+      output: { id: 'out-1', label: 'Desk speakers' },
+    });
+    client.join('general');
+    await settle();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ phase: 'connected', output: { id: 'out-1', label: 'Desk speakers' }, outputNote: null });
+    expect(state.outputs).toEqual(['out-1']);
+    expect(state.calls.indexOf('switchActiveDevice audiooutput')).toBeLessThan(state.calls.indexOf('connect'));
+    await client.leave();
+  });
+
+  it("tells the client where the SDK moved sound when the output in use went, and not of the page's own switch", async () => {
+    const moved: string[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onOutputMoved: (id) => moved.push(id) });
+    await room.switchOutput('out-1');
+    expect(moved).toEqual([]);
+    // The SDK's own move, after Desk speakers went; and a change of another kind.
+    state.handlers.get('adc')?.('audiooutput', 'default');
+    state.handlers.get('adc')?.('audioinput', 'mic-1');
+    expect(moved).toEqual(['default']);
+  });
+
+  it('on the system default, a move by the SDK is undone: sound stays on the system default', async () => {
+    const moved: string[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onOutputMoved: (id) => moved.push(id) });
+    state.handlers.get('adc')?.('audiooutput', 'out-1');
+    await settle();
+    expect(moved).toEqual([]);
+    expect(state.outputs).toEqual(['']);
+  });
+
+  it('deafen still silences every voice, whatever the output', async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.switchOutput('out-1');
+    state.handlers.get('ts')?.(voice('a'));
+    room.setDeafened(true);
+    state.handlers.get('ts')?.(voice('b'));
+    const played = [...document.body.querySelectorAll('audio')];
+    expect(played).toHaveLength(2);
+    expect(played.every((el) => el.muted)).toBe(true);
+    await room.close();
+  });
+
+  it('where the browser cannot choose an output, nothing is asked of the SDK', async () => {
+    state.outputSelection = false;
+    state.devices = outputs;
+    const room = newLiveKitRoom();
+    await room.switchOutput('out-1');
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect(await room.outputs()).toEqual([]);
+    await room.switchOutput('');
+    expect(state.outputs).toEqual([]);
+    expect(state.listed).toEqual([]);
+  });
+});
+
 describe('the join token and room name', () => {
   const token = 'eyJhbGciOiJIUzI1NiJ9.join-token-body.signature-part';
   const roomName = 'conch-0123456789abcdef0123456789abcdef';

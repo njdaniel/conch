@@ -16,6 +16,11 @@
 // that goes is said in the notes, and nothing is sent until one is chosen.
 // It also has the switch for the browser's voice processing (issue #659),
 // with what the capture says of it.
+//
+// It has the choice of speakers too (issue #660), where the browser lets a
+// page choose: System default or an output the browser lists, the one in
+// use selected. A choice the browser refuses, and speakers that went, are
+// said in the notes.
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
@@ -413,6 +418,11 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {state.outputNote === null ? null : (
+              <p role="status" className="hint">
+                {state.outputNote}
+              </p>
+            )}
             {/* A switch that failed says why instead (state.why). */}
             {state.missing && state.why === null ? (
               <p role="status" className="hint">
@@ -591,6 +601,49 @@ function MicrophoneChoice({ voice }: { readonly voice: VoiceControl }) {
   );
 }
 
+// What Voice options says where the speakers cannot be chosen, and where the
+// browser lists none but the default (issue #660).
+export const noOutputChoice = 'This browser plays sound on its default output.';
+export const noOtherOutputs = 'This browser lists no other speakers yet.';
+
+// SpeakersChoice is the choice of speakers in Voice options: System default
+// first, then each output the browser lists, the one in use selected. One in
+// use that is not listed (the browser names none yet) is shown as well, so
+// that the list says what is in use.
+function SpeakersChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  if (!state.outputSelection) return <p className="hint">{noOutputChoice}</p>;
+  const list = state.outputs ?? [];
+  const inUse = state.output;
+  const shown = inUse === null || list.some((o) => o.id === inUse.id) ? list : [...list, inUse];
+  return (
+    <div className="voice-device">
+      <label htmlFor="voice-speakers">Speakers</label>
+      <select
+        id="voice-speakers"
+        value={inUse === null ? systemDefault : devicePrefix + inUse.id}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === systemDefault) {
+            void client.chooseOutput(null);
+            return;
+          }
+          const picked = shown.find((o) => devicePrefix + o.id === v);
+          if (picked !== undefined) void client.chooseOutput(picked);
+        }}
+      >
+        <option value={systemDefault}>System default</option>
+        {shown.map((o) => (
+          <option key={o.id} value={devicePrefix + o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {list.length === 0 ? <p className="hint">{noOtherOutputs}</p> : null}
+    </div>
+  );
+}
+
 // The voice processing switch (issue #659): its words, the note said while it
 // is off, and the hint by the open microphone's level.
 export const processingLabel = 'Voice processing (echo cancellation, noise suppression, automatic gain)';
@@ -656,6 +709,7 @@ function Options({ voice, open, sharable, about }: {
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
       <MicrophoneChoice voice={voice} />
+      <SpeakersChoice voice={voice} />
       <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
         <legend>Microphone</legend>
         <label>

@@ -14,6 +14,12 @@
 // the page says the capture reports them off, and another page still hears a
 // press.
 //
+// Choosing the speakers (issue #660): Chromium's fake devices list three
+// outputs ("Fake Default Audio Output", whose id is "default", then "Fake
+// Audio Output 1" and "Fake Audio Output 2"). A member chooses one, and every
+// element on the page that plays a voice plays on it, before and after a
+// reload.
+//
 // An init script, installed before the page's own scripts as
 // 17-voice-microphone.spec.ts installs its own, counts and keeps every
 // capture the page asks the browser for, and what it asked, hides devices
@@ -49,6 +55,15 @@ const devices = () => {
   };
   media.enumerateDevices = async () => (await list()).filter((d) => !w.__hidden.includes(d.deviceId));
 };
+
+// The output each element playing a voice plays on: every audio element with
+// a stream, read from the element itself.
+const sinks = (page: Page): Promise<string[]> =>
+  page.evaluate(() =>
+    Array.from(document.querySelectorAll('audio'))
+      .filter((el) => el.srcObject !== null)
+      .map((el) => (el as HTMLAudioElement & { readonly sinkId: string }).sinkId),
+  );
 
 const captures = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __captures: number }).__captures);
 
@@ -298,6 +313,44 @@ test.describe('choosing the microphone', () => {
       // One reported pair, and nothing audited as unreported.
       await expect.poll(transmits, { timeout: 15_000 }).toEqual([...before, 'voice_transmit_started', 'voice_transmit_stopped']);
       expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
+      expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
+
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await a.context.close();
+      await b.context.close();
+    }
+  });
+
+  test('the speakers chosen play every voice, and are kept across a reload', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      const voice = voiceRegion(a.page);
+      await join(a.page);
+      await join(b.page);
+      const speakers = voice.getByRole('combobox', { name: 'Speakers' });
+      await expect(speakers.locator('option')).toHaveText(['System default', 'Fake Default Audio Output', 'Fake Audio Output 1', 'Fake Audio Output 2']);
+      await expect(speakers).toHaveValue('system');
+      // Bob's voice plays on the page, on the system default.
+      await expect.poll(() => sinks(a.page), { timeout: 15_000 }).toEqual(['']);
+
+      await speakers.selectOption({ label: 'Fake Audio Output 1' });
+      const one = await idOf(speakers, 'Fake Audio Output 1');
+      await expect.poll(() => sinks(a.page), { timeout: 5_000 }).toEqual([one]);
+      await expect(speakers.locator('option:checked')).toHaveText('Fake Audio Output 1');
+
+      // A reload keeps the choice for the tab: the voice plays there again,
+      // under the id the output has now.
+      await a.page.reload();
+      await channelButton(a.page, vw.channel).click();
+      await join(a.page);
+      const again = voice.getByRole('combobox', { name: 'Speakers' });
+      await expect(again.locator('option:checked')).toHaveText('Fake Audio Output 1');
+      const reloaded = await idOf(again, 'Fake Audio Output 1');
+      await expect.poll(() => sinks(a.page), { timeout: 15_000 }).toEqual([reloaded]);
       expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
 
       await voice.getByRole('button', { name: 'Leave voice' }).click();

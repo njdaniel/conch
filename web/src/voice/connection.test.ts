@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, reconnectLimit, reportWait, type Microphone, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -150,6 +150,25 @@ class StubRoom implements Room {
   };
   microphoneProcessing = (): Processing | null =>
     this.inUseNow === null ? null : { echoCancellation: this.asked, noiseSuppression: this.asked, autoGainControl: this.asked, ...this.kept };
+  // Issue #660: each output handed to the room, and whether the room was
+  // connected by then; the outputs the browser lists; and, when set, a
+  // refusal of every output but the system default.
+  outputCalls: { readonly id: string; readonly connected: boolean }[] = [];
+  outputList: readonly Output[] = [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'out-1', label: 'Desk speakers' },
+    { id: 'out-2', label: 'Headset' },
+  ];
+  outputsRead = 0;
+  outputFailure: Error | null = null;
+  switchOutput = (id: string): Promise<void> => {
+    this.outputCalls.push({ id, connected: this.connectArgs !== null });
+    return this.outputFailure !== null && id !== '' ? Promise.reject(this.outputFailure) : Promise.resolve();
+  };
+  outputs = (): Promise<readonly Output[]> => {
+    this.outputsRead++;
+    return Promise.resolve(this.outputList);
+  };
 }
 
 const okSession = (canPublish = true): VoiceSessionResult => ({
@@ -176,6 +195,9 @@ function setup(
   prepare?: (room: StubRoom, index: number) => void,
   microphone?: Microphone | null,
   processing?: ProcessingStore,
+  // Issue #660: whether the speakers may be chosen (they may not unless a
+  // test says), and the output remembered from earlier in the tab.
+  speakers?: { readonly selection: boolean; readonly output?: Output | null },
 ) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
@@ -229,6 +251,7 @@ function setup(
       },
       ...(microphone === undefined ? {} : { microphone }),
       ...(processing === undefined ? {} : { processing }),
+      ...(speakers === undefined ? {} : { outputSelection: speakers.selection, output: speakers.output ?? null }),
     },
     () => clock.now,
   );
@@ -1472,5 +1495,132 @@ describe('a microphone chosen while connecting', () => {
     await settle();
     expect(t.rooms[0]?.switches).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: null, inUse: 'default' });
+  });
+});
+
+// Issue #660: the speakers chosen, handed to every new room before it
+// connects, found again by name, let go when refused or no longer listed,
+// and followed when the SDK moves sound away from an output that went.
+describe('the speakers chosen', () => {
+  const desk: Output = { id: 'out-1', label: 'Desk speakers' };
+  const headset: Output = { id: 'out-2', label: 'Headset' };
+  const room = (t: { rooms: StubRoom[] }, i: number): StubRoom => {
+    const r = t.rooms[i];
+    if (r === undefined) throw new Error(`no room ${String(i)}`);
+    return r;
+  };
+  const speakers = (output: Output | null = null) => ({ selection: true, output });
+  const sessions = () => [okSession(), okSession(), okSession(), okSession()];
+
+  it('is handed to every new room before it connects: a new session, a renewed room, and Leave then Join', async () => {
+    const t = setup(sessions(), [], 0, false, undefined, undefined, undefined, speakers(desk));
+    expect(t.client.snapshot()).toMatchObject({ outputSelection: true, output: desk });
+    await joined(t);
+    expect(room(t, 0).outputCalls).toEqual([{ id: 'out-1', connected: false }]);
+    // Chosen in voice: every voice moves now, and every later room has it.
+    await t.client.chooseOutput(headset);
+    expect(room(t, 0).outputCalls.at(-1)).toEqual({ id: 'out-2', connected: true });
+    room(t, 0).events?.onDisconnected('participant_removed');
+    await settle();
+    expect(room(t, 1).outputCalls).toEqual([{ id: 'out-2', connected: false }]);
+    room(t, 1).events?.onDisconnected('room_deleted');
+    await settle();
+    expect(room(t, 2).outputCalls).toEqual([{ id: 'out-2', connected: false }]);
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(room(t, 3).outputCalls).toEqual([{ id: 'out-2', connected: false }]);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', output: headset, outputNote: null });
+  });
+
+  it('System default is the empty id, and a new room starts on it without being told', async () => {
+    const t = await joined(setup(sessions(), [], 0, false, undefined, undefined, undefined, speakers(desk)));
+    await t.client.chooseOutput(null);
+    expect(room(t, 0).outputCalls.at(-1)).toEqual({ id: '', connected: true });
+    room(t, 0).events?.onDisconnected('room_deleted');
+    await settle();
+    expect(room(t, 1).outputCalls).toEqual([]);
+    expect(t.client.snapshot().output).toBeNull();
+  });
+
+  it('a choice the browser refuses keeps the output in use, and says so', async () => {
+    const t = await joined(setup(sessions(), [], 0, false, undefined, undefined, undefined, speakers(desk)));
+    room(t, 0).outputFailure = new DOMException('not allowed', 'NotAllowedError');
+    await t.client.chooseOutput(headset);
+    expect(t.client.snapshot()).toMatchObject({ output: desk, outputNote: outputRefused(headset, desk) });
+    expect(t.client.snapshot().outputNote).toBe('Could not play sound on Headset; it stays on Desk speakers.');
+    // A later choice the browser takes clears the note.
+    room(t, 0).outputFailure = null;
+    await t.client.chooseOutput(null);
+    expect(t.client.snapshot()).toMatchObject({ output: null, outputNote: null });
+  });
+
+  it('a choice the browser refuses at a new room is let go for the system default, and said', async () => {
+    const t = setup(sessions(), [], 0, false, (r) => {
+      r.outputFailure = new DOMException('not allowed', 'NotAllowedError');
+    }, undefined, undefined, speakers(desk));
+    await joined(t);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', output: null, outputNote: 'Could not play sound on Desk speakers; it stays on System default.' });
+  });
+
+  it('is found by its name under a new id, and let go when it is no longer listed', async () => {
+    const renamed = { id: 'out-9', label: 'Desk speakers' };
+    const t = setup(sessions(), [], 0, false, (r, i) => {
+      r.outputList = i === 0 ? [renamed, headset] : [headset];
+    }, undefined, undefined, speakers(desk));
+    await joined(t);
+    expect(room(t, 0).outputCalls[0]).toEqual({ id: 'out-9', connected: false });
+    expect(t.client.snapshot()).toMatchObject({ output: renamed, outputNote: null });
+    room(t, 0).events?.onDisconnected('room_deleted');
+    await settle();
+    expect(room(t, 1).outputCalls).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ output: null, outputNote: outputRefused(renamed, null) });
+  });
+
+  it('is found again once the browser names its outputs: under a new id, or let go', async () => {
+    const t = setup(sessions(), [], 0, false, (r) => {
+      // Nothing named before the microphone is allowed.
+      r.outputList = [];
+    }, undefined, undefined, speakers(desk));
+    await joined(t);
+    const r = room(t, 0);
+    // Not to be told: handed to the room as it is.
+    expect(r.outputCalls).toEqual([{ id: 'out-1', connected: false }]);
+    expect(t.client.snapshot()).toMatchObject({ outputs: [], output: desk });
+    r.outputList = [{ id: 'out-7', label: 'Desk speakers' }, headset];
+    r.events?.onDevicesChanged();
+    await settle();
+    expect(r.outputCalls.at(-1)).toEqual({ id: 'out-7', connected: true });
+    expect(t.client.snapshot()).toMatchObject({ outputs: r.outputList, output: { id: 'out-7', label: 'Desk speakers' }, outputNote: null });
+    r.outputList = [headset];
+    r.events?.onDevicesChanged();
+    await settle();
+    expect(r.outputCalls.at(-1)).toEqual({ id: '', connected: true });
+    expect(t.client.snapshot()).toMatchObject({ output: null, outputNote: 'Could not play sound on Desk speakers; it stays on System default.' });
+  });
+
+  it('lists the outputs in voice, in watch only too, and forgets them on leaving', async () => {
+    const t = setup(sessions(), [], 0, false, undefined, undefined, undefined, speakers());
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    expect(t.client.snapshot().outputs).toEqual(room(t, 0).outputList);
+    await t.client.leave();
+    expect(t.client.snapshot()).toMatchObject({ outputs: null, outputNote: null });
+  });
+
+  it('follows the SDK when the output in use went: the one now in use, and the note', async () => {
+    const t = await joined(setup(sessions(), [], 0, false, undefined, undefined, undefined, speakers(headset)));
+    room(t, 0).events?.onOutputMoved('out-1');
+    expect(t.client.snapshot()).toMatchObject({ output: desk, outputNote: outputMoved(desk) });
+    expect(t.client.snapshot().outputNote).toBe('Your speakers were disconnected; sound now plays on Desk speakers.');
+  });
+
+  it('where the speakers cannot be chosen, nothing is asked of the room', async () => {
+    const t = setup(sessions(), [], 0, false, undefined, undefined, undefined, { selection: false, output: desk });
+    await joined(t);
+    await t.client.chooseOutput(headset);
+    expect(room(t, 0).outputCalls).toEqual([]);
+    expect(room(t, 0).outputsRead).toBe(0);
+    expect(t.client.snapshot()).toMatchObject({ outputSelection: false, outputs: null });
   });
 });

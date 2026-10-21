@@ -11,7 +11,7 @@ import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, missingNote, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -922,5 +922,82 @@ describe('voice processing', () => {
     // Push to talk has no level, and so no hint.
     redraw(using({ mode: 'ptt', processing: false, reported: off }));
     expect(opts.textContent).not.toContain(thresholdHint);
+  });
+});
+
+// Issue #660: the speakers in Voice options, where the browser lets a page
+// choose them: System default first, then each output listed, the one in use
+// selected; a line where it cannot choose, and where it lists none; and
+// what the notes say of a refusal and of speakers that went.
+describe('the speakers chosen', () => {
+  const outputs = [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'out-1', label: 'Desk speakers' },
+  ];
+  const desk = { id: 'out-1', label: 'Desk speakers' };
+  const playing = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), outputSelection: true, outputs, ...patch });
+  const options = (voice: HTMLElement) => {
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    return voice.querySelector<HTMLElement>('#voice-options') ?? voice;
+  };
+  const choice = (opts: HTMLElement) => within(opts).getByRole<HTMLSelectElement>('combobox', { name: 'Speakers' });
+  const names = (select: HTMLSelectElement) => Array.from(select.options).map((o) => o.textContent);
+  const said = (voice: HTMLElement, text: string) => within(voice).queryAllByRole('status').some((el) => el.textContent === text);
+
+  it('lists System default first, then every output by name, with the one in use selected', () => {
+    const { voice, redraw } = panel(playing(), 'c');
+    const select = choice(options(voice));
+    expect(names(select)).toEqual(['System default', 'Default - Headset', 'Desk speakers']);
+    expect(select.selectedOptions[0]?.textContent).toBe('System default');
+    redraw(playing({ output: desk }));
+    expect(choice(voice).selectedOptions[0]?.textContent).toBe('Desk speakers');
+    expect(voice.textContent).not.toContain(noOtherOutputs);
+  });
+
+  it('choosing calls the client: an output listed, and System default as none', () => {
+    const { voice, client } = panel(playing({ output: desk }), 'c');
+    const chosen = vi.spyOn(client, 'chooseOutput').mockResolvedValue();
+    const select = choice(options(voice));
+    fireEvent.change(select, { target: { value: select.options[1]?.value } });
+    fireEvent.change(select, { target: { value: select.options[0]?.value } });
+    expect(chosen.mock.calls).toEqual([[{ id: 'default', label: 'Default - Headset' }], [null]]);
+  });
+
+  it.each<[string, Partial<VoiceState>]>([
+    ['in voice', {}],
+    ['in watch only', { watchOnly: true }],
+    ['in listen only', { listenOnly: true }],
+  ])('where the browser cannot choose, says so %s and shows no control', (_what, patch) => {
+    const { voice } = panel(playing({ outputSelection: false, outputs: null, ...patch }), 'c');
+    const opts = options(voice);
+    expect(within(opts).queryByRole('combobox', { name: 'Speakers' })).toBeNull();
+    expect(opts.textContent).toContain('This browser plays sound on its default output.');
+    expect(noOutputChoice).toBe('This browser plays sound on its default output.');
+  });
+
+  it.each<[string, Partial<VoiceState>]>([
+    ['lists no output', { outputs: [] }],
+    ['has not been read yet', { outputs: null }],
+  ])('offers only System default where the browser %s, and says so', (_what, patch) => {
+    const { voice } = panel(playing(patch), 'c');
+    const opts = options(voice);
+    expect(names(choice(opts))).toEqual(['System default']);
+    expect(opts.textContent).toContain('This browser lists no other speakers yet.');
+  });
+
+  it('says a refusal in the notes, with the output in use selected', () => {
+    const refused = 'Could not play sound on Headset; it stays on Desk speakers.';
+    const { voice } = panel(playing({ output: desk, outputNote: refused }), 'c');
+    expect(said(voice, refused)).toBe(true);
+    expect(choice(options(voice)).selectedOptions[0]?.textContent).toBe('Desk speakers');
+  });
+
+  it('says that the speakers were disconnected, with the output now in use selected', () => {
+    const moved = 'Your speakers were disconnected; sound now plays on Desk speakers.';
+    const { voice, redraw } = panel(playing({ output: { id: 'out-2', label: 'Headset' }, outputs: [...outputs, { id: 'out-2', label: 'Headset' }] }), 'c');
+    expect(said(voice, moved)).toBe(false);
+    redraw(playing({ output: desk, outputNote: moved }));
+    expect(said(voice, moved)).toBe(true);
+    expect(choice(options(voice)).selectedOptions[0]?.textContent).toBe('Desk speakers');
   });
 });
