@@ -214,7 +214,7 @@ The plan, its open decisions and the work in order are in
 [docs/design/private-alpha.md](docs/design/private-alpha.md).
 
 Ships:
-- **Invites.** Personal invites, which testers may make, and time-limited open links, which operators make. There is no public signup. Every account records the invite it came through, and access is revoked at once.
+- **Invites.** Personal invites, which testers may make, and time-limited open links, which operators make. There is no public signup (*amended by [ADR-009](docs/adr/ADR-009-guests-and-open-joining.md)*: an operator may turn on open joining from the server's address, off by default, and guests may join). Every account records the invite it came through, and access is revoked at once.
 - **Browser voice and screen share** through LiveKit's JavaScript SDK:
   - push-to-talk while the tab has focus, mute and deafen;
   - one share per room, with sound where the browser can.

@@ -76,7 +76,7 @@ A talk key that works while a game has focus needs a desktop app. That is Electr
 - **Platforms:** Linux, Windows, macOS, and phones or tablets. The browser is the alpha client everywhere (ADR-008 §1).
 - **No global talk key for the alpha.**
 - **Screen sharing carries sound** where the browser can.
-- **Invites are the way in.** There is no public signup. Testers may invite testers. Operators may put out an **open link**: anyone with it may join until it expires, and a use cap is optional and off by default.
+- **Invites are the way in.** There is no public signup (*superseded by [ADR-009](../adr/ADR-009-guests-and-open-joining.md)*: an operator may turn on open joining, off by default, and guests may join). Testers may invite testers. Operators may put out an **open link**: anyone with it may join until it expires, and a use cap is optional and off by default.
 - **About 30 at once**, many more accounts in total, including Nick's throwaway test accounts and AI agents.
 - **One server; each group in its own private channels;** one-on-ones are two-member private channels.
 
@@ -109,7 +109,7 @@ The alternative is an HttpOnly session cookie. It needs CSRF protection on every
 
 **O2. What a joiner is.**
 
-*Recommend:* a joiner is an ordinary human principal with the channels and grants its invite named. There is no separate guest kind. "Guest" is just a person whose invite was narrow.
+*Recommend:* a joiner is an ordinary human principal with the channels and grants its invite named. There is no separate guest kind. "Guest" is just a person whose invite was narrow. *Superseded by [ADR-009](../adr/ADR-009-guests-and-open-joining.md) (2026-10-21): a guest is now a principal of its own kind, marked guest.*
 
 **O3. Names.**
 

@@ -69,7 +69,7 @@ Nick's decisions, recorded on #420 (2026-10-15):
 
 ## Unchanged
 
-- No public signup.
+- No public signup. *Amended by [ADR-009](ADR-009-guests-and-open-joining.md):* an operator may turn on open joining from the server's address; it is off by default.
 - No end-to-end encryption.
 - No federation.
 - No multi-tenancy.
