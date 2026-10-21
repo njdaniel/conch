@@ -109,6 +109,42 @@ Mandatory, dispatcher-owned. No worker output reaches a commit without all of:
    the worker, its version, what was unverified at handoff, and what the
    reviewer amended.
 
+## Escalation
+
+A worker that struggles is escalated by rule, not by whether the dispatcher
+happens to notice. Until #678 this was habit: the principal resumed workers
+with corrections, finished the hard part itself (#609's trusted-proxy refusal,
+#619's narrowed exception, #665's follow-up), or redispatched — and a fresh
+session after a restart had no way to know the habit existed.
+
+**The worker ladder**, cheapest first: Sonnet → Opus → Opus at max effort.
+Wire-shape, protocol and design work goes to Fable (protocol-designer)
+instead. The principal session sits above the ladder.
+
+| Trigger | What happens |
+|---|---|
+| A worker fails the review gate twice on the same issue, or reports it is stuck | Resume it once with the failure notes. If it fails again, redispatch one step up the ladder with the original brief plus what failed (the gate's findings, not a summary of them). |
+| A worker runs past 2× the estimated time in the issue's Dispatch block | The principal reads its transcript, then either guides it (resume with a correction) or redispatches one step up. |
+| The same test fails for two different workers | Stop dispatching on that area. The principal investigates: two workers failing one test is a real bug, a flake or the environment, not the worker. Receipt: wave 2's Rust tests timed out for several workers under load, and the base failed them too (#654's acceptance record). |
+| A security review's must-fix, or a design question the issue didn't settle | The principal handles it. It is never sent back down to a lower tier, because a worker without the context is how it arose. Receipt: #656's security review caught a fail-open that the principal's own brief had asked for; the principal fixed the brief's rule, not the worker. |
+
+**Hard stops don't move.** Escalation goes up the ladder, never around the
+dispatch hard stops: approval-path code, kill-criterion verdicts and release
+calls stay with the principal and are never delegated; Tier-H decisions
+(ADR-000) stay with Nick; security-sensitive work never goes to codex
+full-auto. A struggling worker on any of these is a reason for the principal
+to take the work back, not to find another worker for it.
+
+**Recording.** Each escalation goes in the PR's Attribution section: who did
+what, at which model and effort, and why it was escalated (which trigger,
+with the failure in one line). A reader of the PR can then see how much of it
+the first worker wrote.
+
+**Cost.** An escalated rerun is charged to the issue it was for, not
+absorbed elsewhere. If escalation at least doubles the issue's cost, update
+the estimate in its Dispatch block and say why, so later estimates for
+similar issues start from the real number.
+
 ## Unattended runner
 
 `ops/conch-agent.sh` (systemd timer, 3×/day) is a separate, headless path that
