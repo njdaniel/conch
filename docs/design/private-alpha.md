@@ -76,7 +76,7 @@ A talk key that works while a game has focus needs a desktop app. That is Electr
 - **Platforms:** Linux, Windows, macOS, and phones or tablets. The browser is the alpha client everywhere (ADR-008 §1).
 - **No global talk key for the alpha.**
 - **Screen sharing carries sound** where the browser can.
-- **Invites are the way in.** There is no public signup. Testers may invite testers. Operators may put out an **open link**: anyone with it may join until it expires, and a use cap is optional and off by default.
+- **Invite-only by default.** [ADR-009](../adr/ADR-009-guests-and-open-joining.md) proposes optional address joining, a separate guest switch enforced on invites too, and password-based account creation. Existing invites remain account-only unless changed. Testers may invite when granted permission; operators may make time-limited open links.
 - **About 30 at once**, many more accounts in total, including Nick's throwaway test accounts and AI agents.
 - **One server; each group in its own private channels;** one-on-ones are two-member private channels.
 
@@ -109,7 +109,7 @@ The alternative is an HttpOnly session cookie. It needs CSRF protection on every
 
 **O2. What a joiner is.**
 
-*Recommend:* a joiner is an ordinary human principal with the channels and grants its invite named. There is no separate guest kind. "Guest" is just a person whose invite was narrow.
+The original plan created ordinary members for every invite. [ADR-009](../adr/ADR-009-guests-and-open-joining.md) proposes a separate temporary guest state: generated reserved `guest-` names, current-visit access and no recovery after logout/expiry. Posts retain guest attribution. A live guest can create a password-backed account atomically; permanent membership and extra permissions remain governed by explicit access rules. See [the revised design](guests-and-accounts.md).
 
 **O3. Names.**
 
@@ -198,6 +198,16 @@ Each item below becomes one issue in a **Private alpha** milestone. They are fil
 **After the alpha:** a desktop app with a global talk key (Electron); nets in voice (V5); live transcription and captions; web files, search and threads. Translation, richer agent participation, and assemblies and deliberation (P4/P5) are deferred.
 
 The existing voice-track issues stay where they are: #185, #189, #393, #394 and #396 in P8, and #381 and #353 in "P3 extensions". The alpha does not wait for them.
+
+## Onboarding acceptance amendment (proposed ADR-009)
+
+The first usable alpha also requires guest joining where enabled, refresh/reconnect,
+explicit End visit and expiry, password-backed account creation/conversion, member return
+login, and normal operator login. Guest access cannot recover a previous visit's private
+history; posted messages retain original attribution. Test both invitation and bare-address
+guest policy, unchanged permissions on conversion, and reset/revocation. The infrastructure
+may be deployed before these gates pass, but it is not accepted as the usable alpha until
+they do. See [guests-and-accounts.md](guests-and-accounts.md) for the proposed contracts.
 
 ## 6. How it is built, tested and fed back
 

@@ -91,8 +91,9 @@ Two things this paragraph used to list did not ship here:
 
 - **Auth (OIDC + local).** P2 exits on bearer credentials issued by an operator (track
   phase V1), which is real auth and enough for a small trusted group. Interactive
-  password login and optional OIDC (#24) move to P7, or earlier if a real user needs
-  them. *(Nick, 2026-10-13.)*
+  password login and optional OIDC (#24) moved to P7. Proposed ADR-009 now brings
+  password login into the usable alpha; OIDC remains deferred. *(Original decision:
+  Nick, 2026-10-13; onboarding proposal: #701, 2026-10-21.)*
 - **The first runtime adapter** is P3's, where this paragraph already pointed.
 
 > **Why P2 gated everything below:** capability manifests and real auth are
@@ -214,7 +215,7 @@ The plan, its open decisions and the work in order are in
 [docs/design/private-alpha.md](docs/design/private-alpha.md).
 
 Ships:
-- **Invites.** Personal invites, which testers may make, and time-limited open links, which operators make. There is no public signup. Every account records the invite it came through, and access is revoked at once.
+- **Joining and accounts.** Invites remain the default. Proposed [ADR-009](docs/adr/ADR-009-guests-and-open-joining.md) adds password sign-in, atomic account creation/conversion and optional temporary guests with reserved `guest-` names. A server-wide guest gate covers invitations and direct joining. Every identity records its origin, and revocation ends access.
 - **Browser voice and screen share** through LiveKit's JavaScript SDK:
   - push-to-talk while the tab has focus, mute and deafen;
   - one share per room, with sound where the browser can.
@@ -224,7 +225,9 @@ Ships:
 > **Exit:** Nick deploys a versioned build, and testers join through invites from at least
 > Windows, macOS, Linux and a phone. They chat, talk and share a screen with sound. They
 > recover from a dropped connection. One is revoked and the open link is closed. A
-> problem report reaches the backlog with its build and diagnostics.
+> problem report reaches the backlog with its build and diagnostics. Proposed ADR-009
+> adds guest policy/lifecycle, password-backed conversion and returning member/operator
+> login to the usable-alpha exit; deployment alone does not establish those flows.
 
 **After the alpha:**
 - a desktop app with a talk key that works while another app has focus (Electron, ADR-007);
@@ -330,7 +333,8 @@ happens here — terminal-first (dashboard GUI optional per the P3 track).*
 
 > **Amended by ADR-008:** invite onboarding and a browser client for invited testers
 > (chat, voice, screen share) move into the private alpha. The full small-team GUI,
-> presence preferences, human DMs and password or OIDC login stay here.
+> presence preferences, human DMs and OIDC login stay here. Proposed ADR-009 brings
+> password login and temporary-guest/account onboarding into the usable alpha.
 
 ADR-007 brings the shared React foundation and a limited browser lobby/chat/agent
 view into P3, and with it a basic online / stale / offline roster for people as well
@@ -343,8 +347,9 @@ Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 
 is left: presence, human DMs, per-principal permissions polish — plus the full graphical
 client (web SPA over the existing API, TUI still first-class beside it). This is the GUI
 that's genuinely justified by having humans to use it, as distinct from the P3 dashboard.
-Interactive password login and optional OIDC (#24) land here too, moved from P2 on
-2026-10-13; until then people sign in with a credential an operator issues.
+Optional OIDC remains here (#24). Password login moved here from P2 on 2026-10-13,
+but proposed ADR-009 now places it in the usable alpha alongside account onboarding.
+Operator-issued credentials remain available for automation and bootstrap.
 
 > Reverses the "web UI possibly never" leaning. The GUI requires its own ADR; ADR-003
 > does not cover it.

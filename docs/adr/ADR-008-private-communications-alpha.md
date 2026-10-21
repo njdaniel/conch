@@ -53,7 +53,7 @@ Nick's decisions, recorded on #420 (2026-10-15):
    Rules for both:
    - An invite grants only what its maker holds: named channels, voice, and whether the joiner may invite in turn. It never grants operator rights.
    - Every account records the invite it came through.
-   - An invite always creates a human principal; agents are still made by an operator.
+   - An invite always creates a human principal; agents are still made by an operator. ADR-009 proposes account/guest invite modes subject to the server-wide guest policy; existing invites remain account-only by default.
    - Redemption is rate-limited, and an operator can pause all invites.
 
    Invites are new security surface: their implementation gets a `security-reviewer` pass, and their wire shapes go through the schema-change skill.
@@ -69,7 +69,7 @@ Nick's decisions, recorded on #420 (2026-10-15):
 
 ## Unchanged
 
-- No public signup.
+- Invite-only by default. [ADR-009](ADR-009-guests-and-open-joining.md) proposes optional open joining, an independent guest gate for all entry points, temporary guest identities and password-based real accounts. Its acceptance supersedes the original no-public-signup rule.
 - No end-to-end encryption.
 - No federation.
 - No multi-tenancy.
