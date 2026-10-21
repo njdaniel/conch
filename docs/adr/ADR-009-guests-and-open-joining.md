@@ -28,7 +28,9 @@ namespace. Those decisions replace the original D2/D3. This is a design, not imp
    separately confirmed end-all-guests action ends them immediately.
 2. **Temporary guests (D2).** The server generates a unique, never-reused
    `guest-<random suffix>` name. The normalized `guest` prefix is reserved against
-   permanent usernames, including case and confusable variants. Guest identity is not
+   permanent usernames, including case and confusable variants. A guest may add a
+   non-unique display label, always rendered as `Guest: <label> · <tag>` and never used to
+   sign in or to name a principal. Guest identity is not
    recoverable by retyping a name, using the same browser, or reopening an invitation.
    One tab-scoped credential survives refresh and brief reconnects. Proposed defaults
    are two hours idle and 24 hours absolute, bounded by any shorter invitation lifetime.
@@ -88,6 +90,9 @@ namespace. Those decisions replace the original D2/D3. This is a design, not imp
   creation/decision authorization carry `approval-path`, exercise request → notify →
   resolve → audit, and are merged by Nick personally.
 - Signup, password login/reset, TOTP, guest lifecycle, history filtering and device links
-  require security review. The earlier passkey-design review is not approval of this revision.
+  require security review. The earlier passkey-design review is not approval of this revision;
+  this revision's own review (#703) and its adopted fixes are recorded in the design's §11.
+- Guests never hold approval rights: the store forces `can_decide = 0` on a guest's
+  memberships and the deciding transaction re-checks the guest flag.
 - Changes are scoped to onboarding and this design. The broader roadmap restructuring is
   still a separate discussion; no deployment or release is authorized by this ADR.

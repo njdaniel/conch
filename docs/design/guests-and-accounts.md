@@ -15,8 +15,9 @@ behavior. No code, dependency or database migration is introduced by this docume
 
 - A visitor opens an allowed entry point, chooses **Join as guest**, and can participate
   without a password or an operator issuing a token.
-- The server assigns a name such as `guest-a7k4m2q9`. A guest visit grants temporary,
-  scoped access; it does not create a recoverable personal account.
+- The server assigns a handle such as `guest-a7k4m2q9`. The visitor may also type a
+  display label, shown as **Guest: Nick · a7k4**, never as a bare name (§4.1). A guest
+  visit grants temporary, scoped access; it does not create a recoverable personal account.
 - **Create an account** asks for a permanent username and password. Real accounts can
   return to their authorized conversations and can be granted additional permissions.
   Account creation alone does not grant access to other conversations or elevated roles.
@@ -55,6 +56,8 @@ preview and redemption must reflect that guest joining is unavailable.
 
 Turning guest creation off does not silently evict existing callers. The operator has
 **End all guest visits**, with dry run and confirmation, to revoke existing guests.
+The response to turning guests off, and its audit entry, carry the number of live guest
+visits and name End all guest visits, since visits otherwise last up to 24 hours (F12).
 Normal password login for existing members is independent of joining/invite switches.
 
 A channel may be designated for bare-address admission. At least one must exist to enable
@@ -72,8 +75,9 @@ Server-side checks apply to REST, CLI/TUI and the browser. Hiding a button is no
 
 1. Fetch front-door/invite information. Show only effective allowed actions and **Sign in**.
    An invite preview keeps the existing expiry, scope and rate-limit checks.
-2. **Guest:** no permanent username or password. Create an unpredictable server-generated
-   guest name, one credential and the allowed memberships in one transaction. Show:
+2. **Guest:** no permanent username or password; an optional display label (§4.1). Create an
+   unpredictable server-generated guest handle, one credential and the allowed memberships
+   in one transaction. Show:
    "Temporary guest. End visit signs you out permanently. Your messages remain.
    Create an account to keep access." Show the visit's absolute expiry.
 3. **Account:** collect permanent username and password together. Validate/hash before the
@@ -160,6 +164,22 @@ creation/import; no operator bypass for this namespace. Existing reserved admini
 names and `hidden-` rules remain. Guests cannot rename themselves into the member namespace.
 A guest label is not an authentication identifier that can be reclaimed.
 
+**Display labels (#694's owner clarification, reconciled in #703).** At entry the visitor
+may type an optional display label (for example `Nick`); without one the handle is shown.
+The label is 1–32 code points after NFC, held to the #441 key and visible-character rules
+(no control, format or bidi characters), refused when it contains `·` or a run of
+whitespace (which could fake a second tag), when its folded key starts with `guest` (which
+could fake another visit's handle), or when its folded key is a reserved administrative
+name or `server_name`, and fixed for the visit. On the wire it is its own schema field
+beside the handle, never `name`, and part of the attribution record of §4.4. It is **not unique**: a
+later visitor may use the same label. It is never an identifier: sign-in, mentions,
+membership changes, audit and every API that names a principal use the principal ID or the
+handle, never the label. Every surface renders a guest as `Guest: <label> · <first four
+characters of the handle suffix>` (or the handle alone), from the stored guest flag, never
+from text, so two visits labelled `Nick` stay distinguishable and no permanent account can
+look like a guest. Historical posts keep the label and tag they were posted under (§4.4).
+On conversion the label is dropped; the member chooses a permanent username (§3.3).
+
 Preflight existing principals before enabling this migration. Existing real names in the
 reserved namespace need an explicit, audited rename plan; do not silently rename, hide or
 reclassify accounts. Until conflicts are resolved, refuse enabling the new guest feature.
@@ -175,9 +195,15 @@ reset and operator sign-in links must refuse a guest target.
 Effective expiry is the earliest of idle expiry, hard deadline and any shorter invitation
 credential lifetime. Do not reuse the member once-a-day renewal logic: it cannot enforce
 these shorter bounds. Read expiry from the server clock on every authenticated request,
-socket delivery/subscription check and media entitlement check. Authenticated foreground
-activity/heartbeats and active media liveness can refresh idle time, never the hard deadline.
-Background keepalives may keep the visit live only until its hard deadline.
+socket delivery/subscription check and media entitlement check. Idle time is refreshed
+only by a REST request carrying the guest's bearer, recorded in `last_used_at` at most once
+a minute; never by an open socket, WebSocket ping, ticket redemption or the voice poller,
+and never past the hard deadline. `CredentialLive` (today `store/resolve.go`, which checks
+only expiry, revocation and disable) applies `max(last_used_at, created_at) + idle` to guest
+and operator-session credentials, so every socket recheck (`ws.go`), ticket redemption
+(`tickets.go`) and media entitlement check (`voice.go`) inherits the idle rule without
+code of its own. A page that is open and in use makes requests; a stolen token kept alive
+by a ping loop does not stay live. *(Security review F5.)*
 
 The lifecycle is `active → ended` or `active → converted`, never back to active.
 Serialize conversion, logout, renewal, disable and expiry so exactly one terminal outcome
@@ -207,6 +233,22 @@ An operator may admit a guest to another current conversation, but only as tempo
 membership with a fresh history boundary. They cannot attach privileged or durable roles
 while the principal remains a guest. Member-only rights require successful account creation
 and a separate authorized grant.
+
+**Approval rights are enforced in the store, not by intent** *(security review F1, must-fix;
+approval-path)*. Today `store.PutChannelMember` turns `can_decide` on when the field is
+omitted (`store/members.go`, `decide := canDecide == nil || *canDecide`; `AddChannelMember`
+passes nil), and quorum counts every `can_decide = 1` member (`store/approvals.go`). So:
+the store forces `can_decide = 0` on every membership write whose principal is in guest
+state (`PutChannelMember`, `setCanDecideTx`, the admission transaction and the operator
+add), and refuses an explicit `can_decide: true` on a guest with `guest_not_allowed`.
+`DecideAsMember` re-reads the guest flag inside the deciding transaction and refuses with
+`decision_not_permitted`. Conversion does not touch `can_decide`: a converted member gains
+it only through a later, audited operator grant, which is approval-path work.
+
+**Files** *(F11)*. `humansOnlyFiles` admits any `kind = human`, so guests need an explicit
+refusal on `POST /v2/channels/{channel}/files`; `GET /v2/files/{id}` and `/meta` apply the
+history bound through `FileVisibleTo` (`store/audience.go`). MCP is already closed to
+guests (agents only, `mcp_auth.go`); G2 records that rather than re-gating it.
 
 Each guest membership records a server-chosen history lower bound at admission, preferably
 an immutable message sequence/watermark rather than a client timestamp. Every read surface
@@ -243,8 +285,15 @@ Retain it through conversion too: earlier guest posts remain identifiable as gue
 new member posts use the permanent identity.
 
 Return attribution only with messages the viewer is authorized to read; do not expose
-expired principal directories across groups. Ending or hiding a guest must not rename
-historical messages to `hidden-<id>` or attach them to a later user.
+expired principal directories across groups. Ending a guest must not rename historical
+messages to `hidden-<id>` or attach them to a later user.
+
+**Guests are not hideable** *(security review F10)*. `HidePrincipal` is a rename
+(`store/hide.go`) and clients render the new name on old messages, which would break the
+immutable attribution above. Hide refuses a principal in guest state with
+`guest_not_hideable`; End visit, the entry invite's revocation and End all guest visits are
+the levers. Hiding a converted member renames the member identity as today, while posts
+made during the guest visit keep their stored guest attribution.
 
 Remove live credentials, memberships, presence and transient state at termination.
 Retain minimal attribution/audit records under the server's existing retention policy.
@@ -272,8 +321,12 @@ password. Bound stored parameters before verification; compare derived hashes in
 time. Benchmark the target host and permit an explicit reviewed tuning change, never
 silently below OWASP's documented minimum (19 MiB, 2 iterations, parallelism 1).
 
-All hash-producing and hash-verifying routes share a bounded work pool: initially at most
-two running hashes and eight queued requests, bounded wait, then 429/503 with Retry-After.
+Hash-producing and hash-verifying routes use **two bounded work pools** *(security review
+F3)*, so an anonymous login flood cannot stop an operator from re-authenticating to pause
+joining or end guest visits. The anonymous pool serves login, signup, invite redemption and
+reset completion; the authenticated pool serves conversion, password change, re-authentication
+and device links. Each initially allows at most two running hashes and eight queued requests,
+bounded wait, then 429/503 with Retry-After.
 Acquire capacity before allocating hash memory; do not hold a SQLite write transaction
 while hashing. Rate-limit before expensive work. Unknown users perform equivalent dummy
 hash work within the same limits. Test queue cancellation and memory bounds under load.
@@ -294,8 +347,13 @@ certification. Hashing guidance:
 
 Login failures for unknown, wrong-password, disabled, hidden, guest or legacy-unset-password
 accounts return the same status/body and comparable work. Rate-limit by trusted client address
-and normalized account key, with bounded key storage, progressive temporary throttling and
-server-wide work limits. Do not permanently lock an account through anonymous failures.
+and by a **per-name window** *(security review F4)*: keyed by the folded key of the typed
+name whether or not a principal exists, bounded like `bucketSet` (`invite_limits.go`), it
+holds a not-before time. Inside the window the server answers 429 with Retry-After at once,
+before any hashing; it never sleeps or delays a response, so the throttle itself cannot
+reveal which names exist. Do not permanently lock an account through anonymous failures.
+Successes are capped too *(F9)*: 30 per name key per hour, then 429 with Retry-After, so a
+holder of a valid password cannot mint lasting credentials without bound.
 Log safe reason codes only; no password, request body, token or full client address.
 
 Verify outside the write transaction, then re-read enabled state and password/authentication
@@ -306,6 +364,9 @@ session after a normal password change; reset issues no general session automati
 Reuse current socket/media revocation hooks.
 
 Password changes require the current password; operators additionally require TOTP.
+An operator's first password and TOTP enrolment are reachable **only** through the
+host-made setup token (§5.3): `POST /v1/password/mine` and TOTP enrolment on an operator
+bearer credential answer 403 `setup_on_host` *(security review F7)*.
 First-password enrollment for legacy members uses their existing session only with a
 fresh one-use enrollment proof from an operator, not possession of a long-lived bearer
 alone. Show setup incomplete until done. Bootstrap-created accounts use the same rule.
@@ -314,8 +375,16 @@ alone. Show setup incomplete until done. Bootstrap-created accounts use the same
 
 Normal operator login requires password and a TOTP proof. Password verification yields
 only a short-lived, one-use pending-auth challenge, never an operator bearer. TOTP completion
-is bound to that challenge/principal and limited attempts; challenge lifetime five minutes.
+is bound to that challenge, its principal and the client address it was issued to
+*(F14)*, with limited attempts; challenge lifetime five minutes.
 Recheck account state/auth generation at completion. Uniform failure responses apply.
+
+**One failure count for every factor** *(security review F2, must-fix)*. A wrong TOTP code,
+a wrong re-authentication pair and a wrong password are the same account failure: each
+counts in the typed name's window (§5.2) with the same not-before time. The window resets
+only when a credential is issued at TOTP completion, never at the password step, so knowing
+the password does not buy fresh guesses at the code. Challenge issuance is bounded per name
+(it shares the window) and per address.
 Operator sessions are tab-scoped with 12-hour absolute and one-hour idle expiry, checked
 server-side even if browser storage remains.
 
@@ -329,14 +398,21 @@ it after enrollment. Show setup material only in the enrollment view, not during
 A QR encoder is optional follow-up; manual authenticator setup needs no new QR dependency.
 
 Sensitive operator actions require password+TOTP reauthentication within ten minutes,
-bound to the current session and invalidated by credential/auth changes. Initial catalog:
-operator creation/promotion, credential/recovery issuance, password/TOTP changes, guest
-and joining policy, privileged membership changes, bulk revoke/hide and conversion permits.
-G4 must enumerate actual routes and test that each requires this server-side proof.
+bound to the current session and invalidated by credential/auth changes. **The class is
+defined by a rule, not a list** *(security review F8)*: every operator route that creates a
+principal, credential, link, permit or hook; grants a right or access (including
+`PUT /v1/channels/{channel}/members/{id}`, which grants `can_decide` and is approval-path,
+invite permission, open joining and manifests); or removes or ends a person (disable, hide,
+bulk revoke, End all guest visits). Password and TOTP changes are in it. The route-table
+test enumerates the class and fails on any operator route not classified either way.
 
 Offline host commands bootstrap the first operator or reset operator authentication, with
 a short-lived one-use setup token (ten minutes, stored hashed) bound to a restricted setup
-flow. No general API access before password+TOTP enrollment succeeds. Offline recovery
+flow. No general API access before password+TOTP enrollment succeeds. Redeeming the token
+spends it at once and answers a 15-minute credential with `scope = setup`, usable only for
+setting the password, TOTP enrol/confirm and `GET /v1/whoami`. The scope is checked once,
+in `authMiddleware` beside expiry, never per handler, so no route can forget it
+*(security review F6)*. Offline recovery
 revokes existing sessions/links and is audited; never offer a public operator reset endpoint.
 
 Existing operator bearer credentials remain explicit automation/CLI credentials under the
@@ -406,7 +482,7 @@ an old passwordless member-redeem route bypass account setup.
 | --- | --- |
 | Join information | Effective guest/account modes, pause/cap state, server label, password login availability; no hidden channel/person discovery. |
 | Invites | Effective join modes, credential lifetime and recorded origin; password required for member redemption. |
-| Guests | Guest state, original attribution, hard expiry, remaining allowed actions; no exposed password/auth secrets. |
+| Guests | Guest state, handle, display label and tag as separate fields (never `name`), original attribution, hard expiry, remaining allowed actions; no exposed password/auth secrets. |
 | Conversion | New permanent name/password; atomic success or unchanged guest; explicit enrollment permit when used. |
 | Passwords | Login, change, first enrollment and restricted reset; generic authentication failures. |
 | Operator auth | Pending login, TOTP enrollment/finish, recent-auth proof, session expiries and offline recovery. |
@@ -443,13 +519,25 @@ TOTP secrets or names from unauthorized groups.
 ## 8. Abuse limits and security cases
 
 - Guest cap checked in the creation transaction across address and invite paths.
-  Count only live visits; recheck concurrent expiry/conversion and creation.
+  Count only live visits; recheck concurrent expiry/conversion and creation. A per-address
+  cap keeps a few addresses from filling `max_guests` *(F13)*: the setting
+  `max_guests_per_address`, default five, keyed like `limitKey` (`clientaddr.go`, IPv6 by
+  /64). Behind an unset trusted proxy or one shared NAT every guest shares an address, so
+  the response to enabling guests and `/health` warn when a trusted proxy is unset or every
+  live guest arrives from one address.
+- Guest churn: End visit and rejoin yields a fresh identity, so hiding or disabling one
+  visit never reaches the person. The levers are pausing or revoking the entry invite,
+  `guests_enabled`, `max_guests` and the per-address cap. `guest_started` audits the entry
+  point, never the address, following the invite audit rule (`invite_limits.go`) (F13).
 - Join defaults retain existing invite limiter behavior: per-address 10 per ten minutes,
   shared server-wide creation limit 20/minute. Name-conflict probes get a separate five/hour
   allowance. Guest names are generated, so guests cannot probe/reserve permanent names.
-- Login defaults: ten attempts per address per ten minutes, five failed attempts per account
-  key per ten minutes, bounded escalating delays; same admission policy for nonexistent names.
-  Success does not clear an unrelated attacker's throttling state. TOTP completion permits
+- Login defaults: ten **failures** per address per ten minutes (successes spend nothing),
+  and the per-name window of §5.2: five failures per name key per ten minutes, then an
+  immediate 429 with a not-before time, never a server-side delay; the same policy for
+  nonexistent names. Wrong TOTP codes and re-authentication pairs count in the same window
+  (§5.3). Only issuing a credential resets it, and success does not clear an unrelated
+  attacker's throttling state. 30 successes per name key per hour. TOTP completion permits
   at most five attempts per challenge. Reset/enrollment/reauth/device links have bounded
   per-address and per-principal buckets. All password work also uses §5.1's global pool.
 - Bound limiter key maps, guest metadata, pending challenges, request sizes and audit volume.
@@ -478,7 +566,9 @@ Required real-server isolation and browser tests:
 2. Guest modes and account modes honored on every entry point. Guest-only cannot convert
    without the explicit enrollment permit. Paused/revoked/expired entries fail closed.
 3. Generated names unique under concurrency, never reused; case/confusable guest-prefix
-   permanent signup/rename/import refused, including operator writes. Existing-name
+   permanent signup/rename/import refused, including operator writes. Two visits with the
+   same display label render with different tags, neither label signs in or is accepted as
+   a principal reference, and a refused label (control/bidi/confusable/reserved) is refused. Existing-name
    conflicts produce an explicit migration report without destructive renames.
 4. Refresh and short disconnect retain a live visit. Logout, idle expiry, hard expiry,
    operator revoke and browser-loss cleanup terminate it. Test sockets/media against the
@@ -501,11 +591,18 @@ Required real-server isolation and browser tests:
    mint MFA sessions. Test official RFC vectors and clock-window boundaries.
 10. Guests cannot invite, upload, create channels/private conversations, intervene in agents,
     create credentials or request/decide approvals, even if an operator tries to grant them
-    a role. After conversion no privilege appears without an authorized grant.
+    a role. An operator adding a guest with `can_decide` omitted leaves it 0, an explicit
+    `true` is refused, and a guest's decision is refused in the deciding transaction. After
+    conversion `can_decide` is still 0 and no privilege appears without an authorized grant.
 11. Approval-sensitive changes also run the complete authorized request → notify → resolve
     → audit scenario, alongside guest refusal tests; refusal-only tests are insufficient.
 12. Argon2 concurrency/queue bounds, throttling, dummy verification, input limits, hash
     upgrades, transaction races, secret redaction and HTTPS/proxy enforcement tested.
+    The sixth failure on an existing and on an unknown name gets the same immediate 429.
+    Wrong TOTP codes across many challenges and addresses hit the name's window. During an
+    anonymous login flood an operator re-authentication and a guest conversion complete.
+    A guest token kept alive only by a socket or ping loop expires at the idle bound.
+    A setup-scoped credential is refused everywhere but its three routes.
 13. CLI/TUI login, guest entry/end, conversion, operator reauth and recovery administration
     have equivalent REST semantics and no secrets in process arguments.
 14. Every new route has an isolation matrix row or a narrowly justified exemption and
@@ -551,6 +648,17 @@ Review corrections in this revision:
 - Generated guest names cannot reserve permanent names; historical attribution is separate
   from active access and survives terminal cleanup.
 - Approval-path implementation work is classified explicitly.
+
+**Security review of af0c3bc (#703, 2026-10-21).** An independent security-reviewer pass on
+this revision returned BLOCK with two must-fixes and seven should-fixes, all adopted above:
+F1 guest `can_decide` enforced in the store (§4.3), F2 one failure count for every factor
+(§5.3), F3 two hashing pools (§5.1), F4 immediate per-name 429 with no sleep (§5.2), F5 idle
+refreshed only by REST requests and applied in `CredentialLive` (§4.2), F6 setup scope in
+`authMiddleware` (§5.3), F7 operator enrolment only through the host (§5.2), F8 re-auth class
+defined by rule (§5.3), F9 cap on successful sign-ins (§5.2). Nits F10–F14 adopted: guests
+not hideable (§4.4), file routes (§4.3), the guests-off response (§2), churn levers and a
+per-address cap (§8), challenges bound to address (§5.3). The same pass also added #694's
+display labels (§4.1). A re-check of the amended text passed after four small corrections. Full record: [docs/reviews/adr-009-security-review.md](../reviews/adr-009-security-review.md).
 
 Before implementation/release:
 - Approve this ADR; choose/adjust proposed session and password-work defaults.
