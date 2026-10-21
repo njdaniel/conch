@@ -3,7 +3,10 @@
 //! `pkg/schema/testdata/voice-control/`, with what the helper writes checked against the
 //! rules of §5 as the Go reader checks the transcripts themselves; and the bounds of §3 as
 //! numbers: owner loss with the key device being read, while transmitting, shuts the gate
-//! within 100 ms, closes capture within 500 ms and ends within 3 s.
+//! within 100 ms, closes capture within 500 ms and ends within 3 s. The same for
+//! `conch.voice_control.v2` (§20): each transcript in `testdata/voice-control-v2/` against
+//! the real helper with test devices, the device switch and the open microphone, and the
+//! bounds in open mode while the microphone hears sound.
 //!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit: the microphone is a
 //! tone, the speakers count, the keyboard is a named pipe, and LiveKit is the fake.
@@ -17,16 +20,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use conch_voice::managed::Version;
 use conch_voice::sdk::DisconnectReason;
 use conch_voice_api::{
-    VOICE_CONTROL_EVENT_QUEUE_LINES, VoiceControlCommand, VoiceControlErrorCode, VoiceControlEvent,
+    VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
+    VoiceControlCommand, VoiceControlCommandKind, VoiceControlErrorCode, VoiceControlEvent,
     VoiceControlHelloV1, VoiceControlPhase, VoiceControlReason, VoiceControlStateV1, parse_command,
+    parse_command_v2, parse_event, parse_event_v2,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use support::fake::Call;
-use support::managed::{Login, ManagedRig, ManagedSetup};
+use support::managed::{KEYS_TOML, Login, ManagedRig, ManagedSetup, World, level_of};
 use support::stub::{Reply, Stub, whoami};
 
 /// `pkg/schema/testdata/voice-control`, read in place.
@@ -1388,4 +1394,1388 @@ async fn a_v1_helper_with_open_mode_configured_runs_push_to_talk_and_logs_one_li
         1,
         "one line, once:\n{written}"
     );
+}
+
+// ------------------------------------------------------------- conch.voice_control.v2
+
+/// `pkg/schema/testdata/voice-control-v2`, read in place.
+fn fixtures_v2() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pkg/schema/testdata/voice-control-v2")
+}
+
+fn fixture_v2(name: &str) -> Value {
+    let path = fixtures_v2().join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// `open_hang_ms` in the v2 tests' `voice.toml`, the least there is, in frames: a hang of
+/// quiet is waited for as frames read, so a test does not wait longer than it must.
+const HANG_FRAMES: u64 = 10;
+
+/// What the v2 tests' `voice.toml` adds to the keys of [`KEYS_TOML`]: the shortest hang.
+const QUICK_HANG: &str = "open_hang_ms = 100\n";
+
+/// A rig with microphones and speakers opened by name ([`World`]), loud from the start,
+/// with `extra` added to the `[audio]` of the usual `voice.toml`.
+async fn world_rig(extra: &str, arrange: impl FnOnce(&World)) -> (ManagedRig, World) {
+    let world = World::default();
+    arrange(&world);
+    let setup = ManagedSetup {
+        voice_toml: Some(format!("{KEYS_TOML}{QUICK_HANG}{extra}")),
+        world: Some(world.clone()),
+        ..ManagedSetup::default()
+    };
+    let rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+    (rig, world)
+}
+
+/// Every line the helper wrote, read by the reader of the owner's version (the hello by
+/// v1's), as the JSON it is. A line that reader refuses fails the test: Go's readers, and
+/// their `Validate`, are the specification of the owner's reading.
+fn helper_values(rig: &ManagedRig, version: Option<Version>) -> Vec<Value> {
+    rig.lines()
+        .iter()
+        .enumerate()
+        .map(|(at, line)| {
+            let read = match (at, version) {
+                (0, _) | (_, None | Some(Version::V1)) => parse_event(line.as_bytes()).map(|_| ()),
+                (_, Some(Version::V2)) => parse_event_v2(line.as_bytes()).map(|_| ()),
+            };
+            read.unwrap_or_else(|refusal| panic!("the owner refuses {line}: {refusal}"));
+            serde_json::from_str(line).unwrap()
+        })
+        .collect()
+}
+
+/// One step of what happened in a v2 session, in the order the owner saw it.
+#[derive(Debug, Clone)]
+enum Step {
+    Owner(String),
+    Close,
+    Signal,
+    Helper(Value),
+}
+
+/// What a transcript's helper step needs done to the world first: what its state shows
+/// happened there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Act {
+    /// The talk key released, if held, and pressed: a fresh press.
+    Press,
+    Release,
+    /// Quiet for longer than the hang, then sound: an onset.
+    Onset,
+    Quiet,
+    /// This device is there now.
+    Plug(&'static str),
+    /// The keyboard is unplugged, and plugged in again.
+    KeyboardGone,
+    KeyboardBack,
+}
+
+async fn act(rig: &mut ManagedRig, world: Option<&World>, act: Act) {
+    let world = || world.expect("the transcript needs a world");
+    match act {
+        Act::Press => {
+            rig.ready_v2().await;
+            rig.release_talk();
+            rig.press_talk();
+        }
+        Act::Release => rig.release_talk(),
+        Act::Onset => {
+            world().loud(false);
+            world().frames_pass(HANG_FRAMES + 10).await;
+            world().loud(true);
+        }
+        Act::Quiet => world().loud(false),
+        Act::Plug(name) => world().plug(name),
+        Act::KeyboardGone => rig.unplug_keyboard(),
+        Act::KeyboardBack => rig.plug_keyboard(),
+    }
+}
+
+/// The block reasons of a state, but `no_microphone`, which a microphone switch may pass
+/// through (below).
+fn blocks_but_the_microphone(state: &Value) -> Vec<Value> {
+    state["blocked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| *block != "no_microphone")
+        .cloned()
+        .collect()
+}
+
+/// Whether the helper's event is the one a transcript's step shows: by kind, phase and
+/// reason, and for a state by every field the step has, with one allowance: the design
+/// leaves it to the helper whether capture passes through `unavailable` (with
+/// `no_microphone`) while a switch moves it to another microphone (§20.5), and this helper
+/// does until the new one has given a frame. While a switch the owner asked for is moving
+/// it (`moving`), a step that shows `capture: on` therefore also matches `unavailable`; one
+/// that shows `unavailable` matches only that, and outside a switch capture is exact.
+fn matches_v2(event: &Value, want: &Value, moving: bool) -> bool {
+    if event["kind"] != want["kind"] {
+        return false;
+    }
+    let same = |field: &str| event.get(field) == want.get(field);
+    match want["kind"].as_str().unwrap() {
+        "hello" => true,
+        "ack" => same("id") && same("ok") && same("error"),
+        "protocol_error" => same("code"),
+        "state" => {
+            let shown = ["playback", "talk_mode"]
+                .into_iter()
+                .all(|field| want.get(field).is_none() || same(field));
+            let capture = same("capture")
+                || (moving && want["capture"] == "on" && event["capture"] == "unavailable");
+            shown
+                && capture
+                && [
+                    "phase",
+                    "reason",
+                    "transmitting",
+                    "muted",
+                    "deafened",
+                    "ptt",
+                    "ptt_problem",
+                ]
+                .into_iter()
+                .all(same)
+                && blocks_but_the_microphone(event) == blocks_but_the_microphone(want)
+        }
+        other => panic!("a step of kind {other}"),
+    }
+}
+
+/// What tells two states apart for the driver: a state the helper writes between two steps
+/// must repeat these of the last one matched (it may differ in capture, while a switch moves
+/// it, in `retry_in_ms` and the like), so that a transmission a transcript does not show,
+/// or a change of phase or mode, fails the run.
+fn state_key(event: &Value) -> Option<[Value; 4]> {
+    (event["kind"] == "state").then(|| {
+        [
+            event["phase"].clone(),
+            event.get("reason").cloned().unwrap_or(Value::Null),
+            event["transmitting"].clone(),
+            event.get("talk_mode").cloned().unwrap_or(Value::Null),
+        ]
+    })
+}
+
+/// Plays a v2 transcript's owner side against `rig`, doing to the world before each helper
+/// step what `acts` says for that step's seq, and waits for each helper step in what the
+/// helper writes, read by the owner's reader. Returns the log and the exit code.
+async fn drive_v2(
+    rig: &mut ManagedRig,
+    world: Option<&World>,
+    name: &str,
+    acts: &[(i64, Act)],
+) -> (Vec<Step>, i32) {
+    let doc = fixture_v2(name);
+    let steps = doc["steps"].as_array().unwrap().clone();
+    let mut log = Vec::new();
+    let mut version = None;
+    let mut cursor = 0;
+    let mut last_state = None;
+    // From a switch of microphone until a state shows it capturing.
+    let mut moving = false;
+    for step in &steps {
+        if step["from"] == "owner" {
+            if step["close"] == "stdin" {
+                rig.close();
+                log.push(Step::Close);
+            } else if step["signal"].is_string() {
+                rig.signal();
+                log.push(Step::Signal);
+            } else {
+                let mut message = step["message"].clone();
+                if message["kind"] == "start" {
+                    message["server"] = json!(rig.conchd.url());
+                    if version.is_none() {
+                        version = Some(match message["schema"].as_str() {
+                            Some("conch.voice_control.v2") => Version::V2,
+                            _ => Version::V1,
+                        });
+                    }
+                }
+                if message["kind"] == "set_devices" && message.get("input").is_some() {
+                    moving = true;
+                }
+                let line = message.to_string();
+                rig.line(line.as_bytes());
+                log.push(Step::Owner(line));
+            }
+            continue;
+        }
+        if let Some(code) = step["exit"].as_i64() {
+            let exit = rig.exit_code().await;
+            let events = helper_values(rig, version);
+            for event in &events[cursor..] {
+                assert!(
+                    state_key(event).is_some() && state_key(event) == last_state,
+                    "{name}: written after the last step: {event}"
+                );
+                log.push(Step::Helper(event.clone()));
+            }
+            assert_eq!(i64::from(exit), code, "{name}: exit\n{}", rig.events.text());
+            return (log, exit);
+        }
+        let want = &step["message"];
+        if let Some(seq) = want["seq"].as_i64() {
+            for (at, what) in acts {
+                if *at == seq {
+                    act(rig, world, *what).await;
+                }
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let found = loop {
+            let events = helper_values(rig, version);
+            let mut found = None;
+            for (k, event) in events.iter().enumerate().skip(cursor) {
+                if matches_v2(event, want, moving) {
+                    found = Some((k, events.clone()));
+                    break;
+                }
+                assert!(
+                    state_key(event).is_some() && state_key(event) == last_state,
+                    "{name}: wanted {want}, the helper wrote {event}\n{}",
+                    rig.events.text()
+                );
+            }
+            if let Some(found) = found {
+                break found;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{name}: timed out waiting for {want}\n{}",
+                rig.events.text()
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        };
+        let (at, events) = found;
+        for event in &events[cursor..=at] {
+            log.push(Step::Helper(event.clone()));
+        }
+        if let Some(key) = state_key(&events[at]) {
+            last_state = Some(key);
+        }
+        if events[at]["capture"] == "on" {
+            moving = false;
+        }
+        cursor = at + 1;
+    }
+    panic!("{name} has no exit step");
+}
+
+/// One of the owner's lines, as the helper reads it: with the reader of the version the
+/// session speaks, or for the first line, the one the line names.
+struct Read {
+    kind: Option<VoiceControlCommandKind>,
+    id: Option<i64>,
+    refusal: Option<VoiceControlErrorCode>,
+}
+
+fn read_owner_line(line: &str, version: Option<Version>) -> Read {
+    let v1 = |line: &str| match parse_command(line.as_bytes()) {
+        Ok(command) => Read {
+            kind: Some(command.kind()),
+            id: Some(command.id()),
+            refusal: None,
+        },
+        Err(refusal) => Read {
+            kind: None,
+            id: refusal.id,
+            refusal: Some(refusal.code),
+        },
+    };
+    let v2 = |line: &str| match parse_command_v2(line.as_bytes()) {
+        Ok(command) => Read {
+            kind: Some(command.kind()),
+            id: Some(command.id()),
+            refusal: None,
+        },
+        Err(refusal) => Read {
+            kind: None,
+            id: refusal.id,
+            refusal: Some(refusal.code),
+        },
+    };
+    match version {
+        Some(Version::V1) => v1(line),
+        Some(Version::V2) => v2(line),
+        None => match v2(line) {
+            Read {
+                refusal: Some(VoiceControlErrorCode::UnknownSchema),
+                ..
+            } => v1(line),
+            read => read,
+        },
+    }
+}
+
+/// A command with a usable id that has not been answered, the answer it must get when that
+/// is already known, its line, and whether the latest state transmitted when it was read.
+struct PendingV2 {
+    id: i64,
+    kind: Option<VoiceControlCommandKind>,
+    refusal: Option<VoiceControlErrorCode>,
+    line: Value,
+    was_transmitting: bool,
+}
+
+/// The rules of §5 and v2's own, checked against what really happened: the port of the Go
+/// reader's `checkVoiceControlV2Transcript`. The hello offers both versions; the start fixes
+/// the version; seq may skip (events dropped for a slow owner) but never repeats or goes
+/// back; a state a command changed comes before its ack, a microphone switch or a mode
+/// switch during a transmission ends it before the ack, and the mode set is the one the
+/// state says.
+fn check_rules_v2(log: &[Step], exit: i32) {
+    use VoiceControlCommandKind as Kind;
+    let mut seq = 0;
+    let mut last_id = 0;
+    let mut version: Option<Version> = None;
+    let mut hello = false;
+    let (mut started, mut ended) = (false, false);
+    let mut final_phase: Option<String> = None;
+    let mut state: Option<Value> = None;
+    let mut previous_was_state = false;
+    let mut pending: VecDeque<PendingV2> = VecDeque::new();
+    let mut want_protocol_error = None;
+    let mut want_failed_after = false;
+    let shown = || format!("{log:#?}");
+    for (i, step) in log.iter().enumerate() {
+        match step {
+            Step::Close | Step::Signal => {}
+            Step::Owner(line) => {
+                assert!(hello, "step {i}: the owner wrote before the hello");
+                let read = read_owner_line(line, version);
+                let value: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+                let is_start = read.kind == Some(Kind::Start);
+                if !started && !is_start {
+                    want_protocol_error = Some(match read.refusal {
+                        Some(code) if code.is_fatal() => code,
+                        _ => VoiceControlErrorCode::NotStarted,
+                    });
+                    continue;
+                }
+                let Some(id) = read.id else {
+                    want_protocol_error = read.refusal;
+                    continue;
+                };
+                if id <= last_id {
+                    want_protocol_error = Some(VoiceControlErrorCode::IdNotIncreasing);
+                    continue;
+                }
+                last_id = id;
+                let stopping = state.as_ref().is_some_and(|s| s["phase"] == "stopping");
+                let refusal = match (read.refusal, read.kind) {
+                    (Some(code), _) => Some(code),
+                    (None, Some(Kind::Start)) if started => {
+                        Some(VoiceControlErrorCode::AlreadyStarted)
+                    }
+                    (None, Some(Kind::Start)) => {
+                        started = true;
+                        version = Some(if value["schema"] == "conch.voice_control.v2" {
+                            Version::V2
+                        } else {
+                            Version::V1
+                        });
+                        None
+                    }
+                    (
+                        None,
+                        Some(
+                            Kind::SetMute | Kind::SetDeafen | Kind::SetDevices | Kind::SetTalkMode,
+                        ),
+                    ) if stopping => Some(VoiceControlErrorCode::Stopping),
+                    _ => None,
+                };
+                pending.push_back(PendingV2 {
+                    id,
+                    kind: read.kind,
+                    refusal,
+                    line: value,
+                    was_transmitting: state.as_ref().is_some_and(|s| s["transmitting"] == true),
+                });
+            }
+            Step::Helper(event) => {
+                assert!(
+                    !ended,
+                    "step {i}: written after the final state\n{}",
+                    shown()
+                );
+                let this = event["seq"].as_i64().unwrap();
+                assert!(this > seq, "step {i}: seq {this} after {seq}");
+                seq = this;
+                if !hello {
+                    assert_eq!(event["kind"], "hello", "step {i}: the first event");
+                    let offers: Vec<&str> = event["versions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        offers,
+                        ["conch.voice_control.v1", "conch.voice_control.v2"],
+                        "step {i}: the hello offers both versions"
+                    );
+                    hello = true;
+                    previous_was_state = false;
+                    continue;
+                }
+                if want_failed_after {
+                    assert!(
+                        event["kind"] == "state"
+                            && event["phase"] == "failed"
+                            && event["reason"] == "protocol_error",
+                        "step {i}: a protocol_error not followed by failed with reason \
+                         protocol_error\n{}",
+                        shown()
+                    );
+                }
+                let was_state = previous_was_state;
+                previous_was_state = event["kind"] == "state";
+                match event["kind"].as_str().unwrap() {
+                    "hello" => panic!("step {i}: a second hello"),
+                    "protocol_error" => {
+                        assert_eq!(
+                            want_protocol_error.map(VoiceControlErrorCode::as_str),
+                            event["code"].as_str(),
+                            "step {i}: protocol_error\n{}",
+                            shown()
+                        );
+                        want_protocol_error = None;
+                        want_failed_after = true;
+                    }
+                    "state" => {
+                        assert_eq!(
+                            want_protocol_error, None,
+                            "step {i}: a state where a protocol_error was due"
+                        );
+                        assert!(
+                            started || want_failed_after,
+                            "step {i}: a state before a start was accepted"
+                        );
+                        want_failed_after = false;
+                        if event["phase"] == "stopped" || event["phase"] == "failed" {
+                            ended = true;
+                            final_phase = event["phase"].as_str().map(str::to_owned);
+                        }
+                        state = Some(event.clone());
+                    }
+                    "ack" => {
+                        let next = pending.pop_front().unwrap_or_else(|| {
+                            panic!(
+                                "step {i}: an ack for {} that nothing asked for",
+                                event["id"]
+                            )
+                        });
+                        assert_eq!(
+                            event["id"],
+                            next.id,
+                            "step {i}: acks out of order\n{}",
+                            shown()
+                        );
+                        if let Some(refusal) = next.refusal {
+                            assert!(
+                                event["ok"] == false && event["error"] == refusal.as_str(),
+                                "step {i}: {event}"
+                            );
+                            continue;
+                        }
+                        assert!(
+                            event["ok"] == true,
+                            "step {i}: {event} refused for no reason\n{}",
+                            shown()
+                        );
+                        let latest = state
+                            .as_ref()
+                            .unwrap_or_else(|| panic!("step {i}: acknowledged before any state"));
+                        let line = &next.line;
+                        match next.kind {
+                            Some(Kind::SetMute) => {
+                                assert_eq!(latest["muted"], line["muted"], "step {i}: set_mute");
+                            }
+                            Some(Kind::SetDeafen) => {
+                                assert_eq!(
+                                    latest["deafened"], line["deafened"],
+                                    "step {i}: set_deafen"
+                                );
+                            }
+                            Some(Kind::Leave) => assert!(
+                                ["stopping", "stopped", "failed"]
+                                    .contains(&latest["phase"].as_str().unwrap()),
+                                "step {i}: leave acknowledged in {}",
+                                latest["phase"]
+                            ),
+                            Some(Kind::GetState) => assert!(
+                                was_state,
+                                "step {i}: get_state acknowledged without a state before it"
+                            ),
+                            Some(Kind::SetDevices) => assert!(
+                                line.get("input").is_none()
+                                    || !next.was_transmitting
+                                    || latest["transmitting"] == false,
+                                "step {i}: the microphone was switched during a transmission \
+                                 and the latest state still transmits"
+                            ),
+                            Some(Kind::SetTalkMode) => {
+                                assert_eq!(
+                                    latest["talk_mode"], line["talk_mode"],
+                                    "step {i}: set_talk_mode"
+                                );
+                                assert!(
+                                    !next.was_transmitting || latest["transmitting"] == false,
+                                    "step {i}: the talk mode was switched during a \
+                                     transmission and the latest state still transmits"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let want = i32::from(final_phase.as_deref() == Some("failed"));
+    assert_eq!(exit, want, "exit after a final phase of {final_phase:?}");
+    if started {
+        assert!(ended, "a started helper exited without a final state");
+    }
+    assert!(
+        pending.is_empty(),
+        "commands never answered: {}",
+        pending.len()
+    );
+}
+
+/// The v2 transcripts, with the `voice.toml` each runs with beyond the keys of
+/// [`KEYS_TOML`] (`None` for no key device, and the line given instead), the devices that
+/// are not there when it starts, and what is done to the world before each of the helper's
+/// steps, by the step's seq.
+struct Transcript {
+    name: &'static str,
+    toml: Option<&'static str>,
+    no_keys: Option<&'static str>,
+    unplugged: &'static [&'static str],
+    acts: &'static [(i64, Act)],
+}
+
+const USB_MIC: &str = "alsa_input.usb-Generic_USB_Audio-00.mono-fallback";
+const USB_SPEAKERS: &str = "alsa_output.usb-Generic_USB_Audio-00.analog-stereo";
+
+const TRANSCRIPTS_V2: [Transcript; 9] = [
+    Transcript {
+        name: "transcript-negotiation-v2-owner.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[],
+    },
+    // A v1 owner. (With open mode in voice.toml a v1 session is push-to-talk all the same,
+    // and says so in its log: the test of that counts the line in this process's log, and
+    // so is the only one here that makes it.)
+    Transcript {
+        name: "transcript-negotiation-v1-owner.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[],
+    },
+    Transcript {
+        name: "transcript-version-fixed.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[],
+    },
+    Transcript {
+        name: "transcript-refused-commands.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[],
+    },
+    Transcript {
+        name: "transcript-microphone-switch-while-transmitting.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[(6, Act::Press), (10, Act::Press), (11, Act::Release)],
+    },
+    Transcript {
+        name: "transcript-device-missing-after-switch.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[USB_MIC, USB_SPEAKERS],
+        acts: &[(8, Act::Plug(USB_MIC)), (11, Act::Plug(USB_SPEAKERS))],
+    },
+    // No key device, and open mode from voice.toml; one opening may last a second.
+    Transcript {
+        name: "transcript-open-mode.json",
+        toml: None,
+        no_keys: Some(
+            "[audio]\nrelease_tail_ms = 20\ntalk_mode = \"open\"\nopen_hang_ms = 100\nmax_transmit_secs = 1\n",
+        ),
+        unplugged: &[],
+        acts: &[
+            (6, Act::Onset),
+            (7, Act::Quiet),
+            (8, Act::Onset),
+            (13, Act::Onset),
+            (15, Act::Quiet),
+            (16, Act::Onset),
+        ],
+    },
+    Transcript {
+        name: "transcript-mode-switch-while-transmitting.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[
+            (6, Act::Press),
+            (9, Act::Onset),
+            (10, Act::KeyboardGone),
+            (11, Act::Quiet),
+            (14, Act::KeyboardBack),
+            (15, Act::Press),
+        ],
+    },
+    Transcript {
+        name: "transcript-open-mode-entered-loud.json",
+        toml: Some(""),
+        no_keys: None,
+        unplugged: &[],
+        acts: &[(10, Act::Onset), (15, Act::Onset), (16, Act::Quiet)],
+    },
+];
+
+/// Every v2 transcript, its owner side played against the real helper with test devices,
+/// gets the helper side it shows, and what the helper wrote keeps §5's rules and v2's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_v2_transcript_played_by_its_owner_gets_the_helper_side_it_shows() {
+    for transcript in &TRANSCRIPTS_V2 {
+        let name = transcript.name;
+        let world = World::default();
+        for device in transcript.unplugged {
+            world.unplug(device);
+        }
+        let setup = ManagedSetup {
+            voice_toml: Some(match (transcript.toml, transcript.no_keys) {
+                (Some(extra), _) => format!("{KEYS_TOML}{QUICK_HANG}{extra}"),
+                (None, Some(alone)) => alone.to_owned(),
+                (None, None) => unreachable!("{name}"),
+            }),
+            keyboard: transcript.no_keys.is_none(),
+            world: Some(world.clone()),
+            ..ManagedSetup::default()
+        };
+        let mut rig = ManagedRig::start_with(Stub::start().await, setup, |sdk| {
+            if name == "transcript-refused-commands.json" {
+                // So that the commands sent after leave meet a helper still leaving.
+                sdk.close_takes(Duration::from_millis(300));
+            }
+        })
+        .await;
+        let (log, exit) = drive_v2(&mut rig, Some(&world), name, transcript.acts).await;
+        check_rules_v2(&log, exit);
+        assert_eq!(rig.sdk.frames_while_muted(), 0, "{name}");
+        // Nothing but what was named was opened.
+        for opened in world.mic_names().into_iter().chain(world.sink_names()) {
+            assert!(
+                opened.is_none()
+                    || [USB_MIC, USB_SPEAKERS, "speech_out"].contains(&opened.as_deref().unwrap()),
+                "{name}: {opened:?} was opened"
+            );
+        }
+        eprintln!("{name}: {} steps", log.len());
+    }
+}
+
+#[test]
+fn every_v2_transcript_is_driven_here() {
+    let driven: Vec<&str> = TRANSCRIPTS_V2.iter().map(|t| t.name).collect();
+    for entry in std::fs::read_dir(fixtures_v2()).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if name.starts_with("transcript-") {
+            assert!(driven.contains(&name.as_str()), "{name} is not run");
+        }
+    }
+}
+
+/// The hello is v1's frozen shape, offering exactly v1 and v2, whichever the owner then
+/// chooses; the start fixes the version, and every event after it is in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hello_offers_both_and_the_start_chooses_the_version_of_every_event_after_it() {
+    for v2 in [false, true] {
+        let mut rig = ManagedRig::start().await;
+        rig.until("the hello", |rig| !rig.lines().is_empty()).await;
+        let hello: Value = serde_json::from_str(&rig.lines()[0]).unwrap();
+        let mut golden = fixture_v2("event-hello-v1-and-v2.json");
+        golden["helper_version"] = hello["helper_version"].clone();
+        assert_eq!(hello, golden, "the frozen shape, offering both");
+        if v2 {
+            rig.send_start_v2();
+        } else {
+            rig.send_start();
+        }
+        rig.until("connected", |rig| {
+            rig.lines()
+                .iter()
+                .any(|line| line.contains("\"connected\""))
+        })
+        .await;
+        rig.send(&if v2 {
+            ManagedRig::command_v2("leave", 2, json!({}))
+        } else {
+            ManagedRig::command("leave", 2, json!({}))
+        });
+        assert_eq!(rig.exit_code().await, 0);
+        let schema = if v2 {
+            "conch.voice_control.v2"
+        } else {
+            "conch.voice_control.v1"
+        };
+        let lines = rig.lines();
+        for line in &lines[1..] {
+            let event: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(event["schema"], schema, "{line}");
+            assert_eq!(
+                event.get("talk_mode").is_some(),
+                v2 && event["kind"] == "state",
+                "{line}"
+            );
+        }
+        if v2 {
+            // Read by v2's reader, whose Validate is Go's.
+            rig.read_v2();
+        } else {
+            rig.read();
+        }
+    }
+}
+
+/// A v1 session is today's: a line of v2 in it is unknown_schema, which ends it, and a v2
+/// command written in v1 is a kind v1 does not know, refused and nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_a_v1_session_a_v2_command_is_unknown_and_a_v2_line_ends_it() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    for (id, kind, fields) in [
+        (2, "set_devices", json!({"input": "speech_out"})),
+        (3, "set_talk_mode", json!({"talk_mode": "open"})),
+    ] {
+        rig.send(&ManagedRig::command(kind, id, fields));
+        assert_eq!(
+            rig.ack(id).await.error,
+            Some(VoiceControlErrorCode::UnknownKind),
+            "{kind}"
+        );
+    }
+    assert_eq!(rig.mic_opened(), 1, "no microphone was switched to");
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        4,
+        json!({"input": "speech_out"}),
+    ));
+    assert_eq!(rig.exit_code().await, 1);
+    let events = rig.read();
+    let at = events
+        .iter()
+        .position(|event| matches!(event, VoiceControlEvent::ProtocolError(_)))
+        .unwrap();
+    assert!(
+        matches!(&events[at], VoiceControlEvent::ProtocolError(e) if e.code == VoiceControlErrorCode::UnknownSchema)
+    );
+    assert_eq!(at + 2, events.len(), "{events:?}");
+    let last = rig.state().unwrap();
+    assert_eq!(
+        (last.phase, last.reason),
+        (
+            VoiceControlPhase::Failed,
+            Some(VoiceControlReason::ProtocolError)
+        )
+    );
+}
+
+/// The first samples of the frames that reached the track, from `from` on: which
+/// microphone each came from ([`level_of`]).
+fn sent_levels(rig: &ManagedRig, from: u64) -> Vec<f32> {
+    rig.sdk
+        .first_samples()
+        .split_off(usize::try_from(from).unwrap())
+}
+
+/// `set_devices` during a transmission: it ends with one `stopped`; no frame of either
+/// microphone reaches the track after the switch began; the state before the ack has
+/// stopped transmitting; the next states show the new microphone's capture; and only a
+/// fresh press sends again, from the new microphone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_microphone_switch_during_a_transmission_ends_it_and_a_fresh_press_is_needed() {
+    let (mut rig, world) = world_rig("", |_| {}).await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+    rig.press_talk();
+    rig.transmitting_v2(true).await;
+    let before = rig.sdk.frames();
+    rig.until("audio reaching the track", |rig| {
+        rig.sdk.frames() > before + 3
+    })
+    .await;
+
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"input": "speech_out"}),
+    ));
+    let ack = rig.ack_v2(2).await;
+    assert!(ack.ok);
+    // The state before the ack says the transmission is over.
+    let states = rig.states_v2();
+    let before_ack = states.iter().rfind(|state| state.seq < ack.seq).unwrap();
+    assert!(!before_ack.transmitting, "{before_ack:?}");
+    let at_ack = rig.sdk.frames();
+    // The new microphone is opened and captures; the key is still held.
+    rig.until_v2("the new microphone capturing", |state| {
+        state.capture.as_str() == "on" && state.blocked.is_empty()
+    })
+    .await;
+    world.frames_pass(20).await;
+    assert_eq!(rig.sdk.frames(), at_ack, "nothing after the switch");
+    assert!(
+        sent_levels(&rig, 0)
+            .iter()
+            .all(|level| *level == level_of(None)),
+        "nothing of the new microphone was sent"
+    );
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"], "one stopped");
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_eq!(world.mic_names(), [None, Some("speech_out".to_owned())]);
+    assert_eq!(rig.mic_closed(), 1, "the old stream is closed");
+
+    // A fresh press sends again, from the new microphone only.
+    rig.release_talk();
+    rig.press_talk();
+    rig.transmitting_v2(true).await;
+    rig.until("audio from the new microphone", |rig| {
+        rig.sdk.frames() > at_ack + 3
+    })
+    .await;
+    assert!(
+        sent_levels(&rig, at_ack)
+            .iter()
+            .all(|level| *level == level_of(Some("speech_out")))
+    );
+    rig.release_talk();
+    rig.transmitting_v2(false).await;
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
+/// A device that is not there after `set_devices` is acknowledged `ok`: the state before
+/// the ack says `capture: unavailable` with `no_microphone`, or `playback: unavailable`,
+/// nothing is captured or played from another device meanwhile, and a press sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_absent_device_after_set_devices_is_unavailable_and_none_other_is_used() {
+    let (mut rig, world) = world_rig("", |world| {
+        world.unplug(USB_MIC);
+        world.unplug(USB_SPEAKERS);
+    })
+    .await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"input": USB_MIC, "output": USB_SPEAKERS}),
+    ));
+    let ack = rig.ack_v2(2).await;
+    assert!(ack.ok);
+    let states = rig.states_v2();
+    let before_ack = states.iter().rfind(|state| state.seq < ack.seq).unwrap();
+    assert_eq!(before_ack.capture.as_str(), "unavailable");
+    assert!(before_ack.blocks(conch_voice_api::VoiceControlBlock::NoMicrophone));
+    assert_eq!(before_ack.playback.as_str(), "unavailable");
+
+    // A press does nothing: there is no microphone, and no other is used. (No microphone
+    // gives frames now, so the wait is a time.)
+    rig.press_talk();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    rig.release_talk();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let state = rig.state_v2().unwrap();
+    assert_eq!(
+        (state.capture.as_str(), state.playback.as_str()),
+        ("unavailable", "unavailable")
+    );
+    assert_eq!(rig.sdk.frames(), 0);
+    assert!(rig.conchd.reported().is_empty());
+    assert_eq!(world.mic_names(), [None, Some(USB_MIC.to_owned())]);
+    assert_eq!(world.sink_names(), [None, Some(USB_SPEAKERS.to_owned())]);
+
+    // They appear: capture and playback resume, on them.
+    world.plug(USB_MIC);
+    world.plug(USB_SPEAKERS);
+    rig.until_v2("capture and playback back", |state| {
+        state.capture.as_str() == "on" && state.playback.as_str() == "on"
+    })
+    .await;
+    assert_eq!(world.mic_names().len(), 2, "nothing else was opened");
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// Waits for `quiet` frames of silence, longer than the hang, and then makes the
+/// microphones loud: an onset.
+async fn onset(world: &World) {
+    world.loud(false);
+    world.frames_pass(HANG_FRAMES + 10).await;
+    world.loud(true);
+}
+
+/// `set_talk_mode open`, then sound: a `transmitting` state with `talk_mode: open`. Mute
+/// sends nothing, and after the unmute nothing is sent until a fresh onset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_talk_mode_open_then_sound_transmits_and_muting_sends_nothing() {
+    let (mut rig, world) = world_rig("", |_| {}).await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+    assert_eq!(rig.state_v2().unwrap().talk_mode.as_str(), "push_to_talk");
+
+    rig.send(&ManagedRig::command_v2(
+        "set_talk_mode",
+        2,
+        json!({"talk_mode": "open"}),
+    ));
+    assert!(rig.ack_v2(2).await.ok);
+    assert_eq!(rig.state_v2().unwrap().talk_mode.as_str(), "open");
+    // Loud since before the command: no onset, nothing sent.
+    world.frames_pass(HANG_FRAMES * 3).await;
+    assert_eq!(rig.sdk.frames(), 0, "the command opened nothing");
+
+    onset(&world).await;
+    rig.until_v2("transmitting in open mode", |state| {
+        state.transmitting && state.talk_mode.as_str() == "open"
+    })
+    .await;
+    rig.until("audio reaching the track", |rig| rig.sdk.frames() > 3)
+        .await;
+
+    rig.send(&ManagedRig::command_v2(
+        "set_mute",
+        3,
+        json!({"muted": true}),
+    ));
+    assert!(rig.ack_v2(3).await.ok);
+    assert!(!rig.state_v2().unwrap().transmitting);
+    let at_mute = rig.sdk.frames();
+    world.frames_pass(20).await;
+    assert_eq!(rig.sdk.frames(), at_mute, "muting sends nothing");
+    rig.send(&ManagedRig::command_v2(
+        "set_mute",
+        4,
+        json!({"muted": false}),
+    ));
+    assert!(rig.ack_v2(4).await.ok);
+    // Still loud: the rest of the utterance is not sent.
+    world.frames_pass(HANG_FRAMES * 3).await;
+    assert_eq!(
+        rig.sdk.frames(),
+        at_mute,
+        "unmuting during sound sends nothing"
+    );
+    onset(&world).await;
+    rig.transmitting_v2(true).await;
+    rig.until("audio again", |rig| rig.sdk.frames() > at_mute + 3)
+        .await;
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_eq!(
+        rig.conchd.reported(),
+        ["started", "stopped", "started"],
+        "an opening each"
+    );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// Issue #654 left the session's mute on a mode change without a session-level test: a
+/// change of talk mode in the middle of a transmission, either way, sends no frame after
+/// it, and the state before the ack already says `transmitting: false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mode_change_mid_transmission_sends_nothing_after_it_and_says_so_at_once() {
+    let (mut rig, world) = world_rig("", |_| {}).await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+    let mut id = 1;
+    for (from_press, to) in [(true, "open"), (false, "push_to_talk")] {
+        if from_press {
+            rig.press_talk();
+        } else {
+            onset(&world).await;
+        }
+        rig.transmitting_v2(true).await;
+        let before = rig.sdk.frames();
+        rig.until("audio reaching the track", |rig| {
+            rig.sdk.frames() > before + 3
+        })
+        .await;
+        id += 1;
+        rig.send(&ManagedRig::command_v2(
+            "set_talk_mode",
+            id,
+            json!({"talk_mode": to}),
+        ));
+        let ack = rig.ack_v2(id).await;
+        assert!(ack.ok);
+        let states = rig.states_v2();
+        let before_ack = states.iter().rfind(|state| state.seq < ack.seq).unwrap();
+        assert!(!before_ack.transmitting, "{to}: {before_ack:?}");
+        assert_eq!(before_ack.talk_mode.as_str(), to);
+        let at_ack = rig.sdk.frames();
+        // Loud, and in push-to-talk the key still held: nothing.
+        world.frames_pass(HANG_FRAMES * 3).await;
+        assert_eq!(
+            rig.sdk.frames(),
+            at_ack,
+            "{to}: a frame after the mode change"
+        );
+        assert!(rig.sdk.is_muted(), "{to}");
+        rig.release_talk();
+    }
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    rig.until("both stopped reported", |rig| {
+        rig.conchd.reported().len() == 4
+    })
+    .await;
+    assert_eq!(
+        rig.conchd.reported(),
+        ["started", "stopped", "started", "stopped"]
+    );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// In open mode, while the microphone hears sound and the gate is open: the owner going,
+/// leave, and a signal each shut the gate within `VoiceControlGateShutMS`, close capture
+/// and playback within `VoiceControlCaptureStopMS`, and end the helper within its bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_open_mode_while_sound_plays_the_owner_going_leave_and_a_signal_stop_within_the_bounds()
+{
+    for how in ["owner lost", "leave", "signal"] {
+        let (mut rig, world) = world_rig("talk_mode = \"open\"\n", |_| {}).await;
+        rig.send_start_v2();
+        rig.ready_v2().await;
+        assert_eq!(rig.state_v2().unwrap().talk_mode.as_str(), "open");
+        onset(&world).await;
+        rig.transmitting_v2(true).await;
+        rig.until("audio reaching the track", |rig| rig.sdk.frames() > 3)
+            .await;
+
+        let since = Instant::now();
+        let (reason, bound) = match how {
+            "owner lost" => {
+                rig.close();
+                (
+                    VoiceControlReason::OwnerLost,
+                    VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
+                )
+            }
+            "leave" => {
+                rig.send(&ManagedRig::command_v2("leave", 2, json!({})));
+                (VoiceControlReason::Left, VOICE_CONTROL_LEAVE_EXIT_MS)
+            }
+            _ => {
+                rig.signal();
+                (VoiceControlReason::Signal, VOICE_CONTROL_LEAVE_EXIT_MS)
+            }
+        };
+        let capture = Duration::from_millis(conch_voice_api::VOICE_CONTROL_CAPTURE_STOP_MS);
+        within(capture, since, || rig.mic_closed() >= 1).await;
+        within(capture, since, || rig.sink_closed() >= 1).await;
+        gate_shut_within_its_bound(&rig, since).await;
+        assert_eq!(rig.exit_code().await, 0, "{how}");
+        let took = since.elapsed();
+        assert!(
+            took < Duration::from_millis(bound),
+            "{how}: ended {took:?} after"
+        );
+        eprintln!("open mode, {how}: ended {took:?} after");
+        let last = rig.state_v2().unwrap();
+        assert_eq!(
+            (last.phase, last.reason, last.playback.as_str()),
+            (VoiceControlPhase::Stopped, Some(reason), "off"),
+            "{how}"
+        );
+        assert_eq!(rig.conchd.reported(), ["started", "stopped"], "{how}");
+    }
+}
+
+/// `set_devices` and `set_talk_mode` sent while the helper is still starting are kept and
+/// used once the session runs: the ack has no state before it, the starting state still says
+/// push-to-talk, the microphone opened is the one named, and the speakers opened are only
+/// the ones named, never those `voice.toml` names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn devices_and_the_mode_set_while_starting_are_used_once_the_session_runs() {
+    let world = World::default();
+    let setup = ManagedSetup {
+        voice_toml: Some(format!(
+            "{KEYS_TOML}{QUICK_HANG}input = \"configured_mic\"\noutput = \"configured_speakers\"\n"
+        )),
+        world: Some(world.clone()),
+        ..ManagedSetup::default()
+    };
+    let conchd = Stub::start().await;
+    let held = Arc::new(Notify::new());
+    conchd.next_whoami(Reply::Held(Arc::clone(&held), Box::new(whoami(7))));
+    let mut rig = ManagedRig::start_with(conchd, setup, |_| {}).await;
+    rig.send_start_v2();
+    assert!(rig.ack_v2(1).await.ok);
+    rig.until("whoami asked", |rig| rig.conchd.whoami_requests() == 1)
+        .await;
+    let states_before = rig.states_v2().len();
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"input": "speech_out", "output": "headset"}),
+    ));
+    rig.send(&ManagedRig::command_v2(
+        "set_talk_mode",
+        3,
+        json!({"talk_mode": "open"}),
+    ));
+    assert!(rig.ack_v2(2).await.ok);
+    assert!(rig.ack_v2(3).await.ok);
+    assert_eq!(
+        rig.states_v2().len(),
+        states_before,
+        "no state before the acks"
+    );
+    assert_eq!(rig.state_v2().unwrap().talk_mode.as_str(), "push_to_talk");
+    assert!(world.sink_names().is_empty() && world.mic_names().is_empty());
+
+    held.notify_one();
+    rig.until_v2("connected in open mode", |state| {
+        state.phase.as_str() == "connected" && state.talk_mode.as_str() == "open"
+    })
+    .await;
+    rig.ready_v2().await;
+    assert_eq!(world.mic_names(), [Some("speech_out".to_owned())]);
+    assert_eq!(world.sink_names(), [Some("headset".to_owned())]);
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// Speakers named after the start-up has opened the ones `voice.toml` names, but before the
+/// session runs, are switched to as the session starts: the configured ones are closed, and
+/// the speakers playing are the ones named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn speakers_named_after_the_start_up_opened_others_are_switched_to_when_the_session_runs() {
+    let world = World::default();
+    let setup = ManagedSetup {
+        voice_toml: Some(format!("{KEYS_TOML}output = \"configured_speakers\"\n")),
+        world: Some(world.clone()),
+        // The start-up waits for the key device, after it has opened the speakers.
+        keyboard_unplugged: true,
+        ..ManagedSetup::default()
+    };
+    let mut rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.send_start_v2();
+    rig.until("the configured speakers opened", |_| {
+        world.sink_names() == [Some("configured_speakers".to_owned())]
+    })
+    .await;
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"output": "headset"}),
+    ));
+    assert!(rig.ack_v2(2).await.ok);
+    rig.plug_keyboard();
+    rig.ready_v2().await;
+    assert_eq!(
+        world.sink_names(),
+        [
+            Some("configured_speakers".to_owned()),
+            Some("headset".to_owned())
+        ]
+    );
+    assert_eq!(rig.sink_closed(), 1, "the configured speakers were closed");
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// No secret of v2's `sensitive.json` reaches the event pipe of a v2 session: not a token
+/// in a field the start does not declare, not one used as a device name, and not one in a
+/// refused command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_secret_reaches_the_event_pipe_in_v2() {
+    let secrets: Vec<String> = fixture_v2("sensitive.json")["fake_secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|secret| secret.as_str().unwrap().to_owned())
+        .collect();
+    assert!(secrets.iter().any(|s| s == support::stub::FAKE_LOGIN));
+    assert!(secrets.iter().any(|s| s == support::stub::FAKE_JOIN));
+    assert!(secrets.iter().any(|s| s == support::stub::FAKE_ROOM));
+
+    let (mut rig, _world) = world_rig("", |_| {}).await;
+    let mut start = rig.start_command_v2();
+    start["token"] = json!(secrets[0]);
+    rig.send(&start);
+    rig.ready_v2().await;
+    // A device name is the owner's own text and never repeated: here, one that is a secret.
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"input": secrets[1], "output": secrets[2]}),
+    ));
+    assert!(rig.ack_v2(2).await.ok);
+    rig.send(&ManagedRig::command_v2(
+        "set_talk_mode",
+        3,
+        json!({"talk_mode": secrets[3]}),
+    ));
+    assert_eq!(
+        rig.ack_v2(3).await.error,
+        Some(VoiceControlErrorCode::Invalid)
+    );
+    rig.send(&ManagedRig::command_v2("leave", 4, json!({})));
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    let written = rig.events.text();
+    for secret in &secrets {
+        assert!(!written.contains(secret.as_str()), "{secret}:\n{written}");
+    }
+    for fragment in ["FAKE", "do-not-print", "eyJ"] {
+        assert!(!written.contains(fragment), "{fragment}:\n{written}");
+    }
+}
+
+/// Issue #656's security review: a device name the v2 reader accepts that PipeWire's library
+/// would read as another (white space around it, or nothing but white space, which it takes
+/// for the default) opens nothing. The side is unavailable, no other device is used in its
+/// place, and the opener is never called with it. Only the exact `default` is the default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_padded_device_name_opens_nothing_and_only_default_is_the_default() {
+    let (mut rig, world) = world_rig("", |_| {}).await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+    assert_eq!(
+        (world.mic_names(), world.sink_names()),
+        (vec![None], vec![None])
+    );
+    let mut id = 1;
+    for (input, output) in [
+        (" ", "  default "),
+        ("  default ", " "),
+        ("   ", "default "),
+    ] {
+        id += 1;
+        rig.send(&ManagedRig::command_v2(
+            "set_devices",
+            id,
+            json!({"input": input, "output": output}),
+        ));
+        let ack = rig.ack_v2(id).await;
+        assert!(ack.ok, "{input:?} {output:?}");
+        let states = rig.states_v2();
+        let before_ack = states.iter().rfind(|state| state.seq < ack.seq).unwrap();
+        assert_eq!(
+            (
+                before_ack.capture.as_str(),
+                before_ack.playback.as_str(),
+                before_ack.blocked.clone()
+            ),
+            (
+                "unavailable",
+                "unavailable",
+                vec![conch_voice_api::VoiceControlBlock::NoMicrophone]
+            ),
+            "{input:?} {output:?}"
+        );
+        // The same names again change nothing.
+        let states = rig.states_v2().len();
+        id += 1;
+        rig.send(&ManagedRig::command_v2(
+            "set_devices",
+            id,
+            json!({"input": input, "output": output}),
+        ));
+        assert!(rig.ack_v2(id).await.ok);
+        assert_eq!(rig.states_v2().len(), states, "{input:?} {output:?}");
+        // A press sends nothing: there is no microphone.
+        rig.press_talk();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        rig.release_talk();
+        assert_eq!(rig.sdk.frames(), 0, "{input:?} {output:?}");
+        assert_eq!(
+            rig.state_v2().unwrap().capture.as_str(),
+            "unavailable",
+            "{input:?}"
+        );
+
+        // Exactly `default` is the default: opened, and capturing and playing again.
+        id += 1;
+        rig.send(&ManagedRig::command_v2(
+            "set_devices",
+            id,
+            json!({"input": "default", "output": "default"}),
+        ));
+        assert!(rig.ack_v2(id).await.ok);
+        rig.until_v2("the default devices back", |state| {
+            state.capture.as_str() == "on" && state.playback.as_str() == "on"
+        })
+        .await;
+    }
+    // Nothing but the default was ever opened, once at the start and once after each case.
+    assert_eq!(world.mic_names(), vec![None; 4]);
+    assert_eq!(world.sink_names(), vec![None; 4]);
+    assert!(rig.conchd.reported().is_empty());
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    assert_eq!(rig.sdk.frames(), 0);
+}
+
+/// Issue #656's security review: a device that cannot be opened is said in this program's
+/// own words; the opener's error, which may name the device, is not logged (§20.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_that_cannot_be_opened_is_logged_without_its_name() {
+    let log = helper_log();
+    let (mut rig, _world) = world_rig("", |world| {
+        world.break_device("broken_mic_FAKE_name");
+        world.break_device("broken_speakers_FAKE_name");
+    })
+    .await;
+    rig.send_start_v2();
+    rig.ready_v2().await;
+    rig.send(&ManagedRig::command_v2(
+        "set_devices",
+        2,
+        json!({"input": "broken_mic_FAKE_name", "output": "broken_speakers_FAKE_name"}),
+    ));
+    let ack = rig.ack_v2(2).await;
+    assert!(ack.ok);
+    let state = rig.state_v2().unwrap();
+    assert_eq!(
+        (state.capture.as_str(), state.playback.as_str()),
+        ("unavailable", "unavailable")
+    );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    let written = log.text();
+    assert!(
+        written.contains(conch_voice::session::SPEAKERS_NOT_OPENED),
+        "{written}"
+    );
+    assert!(!written.contains("_FAKE_name"), "{written}");
+    assert!(!rig.events.text().contains("_FAKE_name"));
 }

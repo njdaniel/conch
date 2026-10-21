@@ -15,11 +15,13 @@ use std::time::Duration;
 
 use conch_voice_api::{
     Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
-    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlCommand,
-    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlProtocolErrorV1, VoiceControlRefusal,
-    VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant,
-    VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
-    VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_event,
+    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2, VoiceControlCommand,
+    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPlayback, VoiceControlProtocolErrorV1,
+    VoiceControlProtocolErrorV2, VoiceControlRefusal, VoiceControlTalkMode, VoiceDevice,
+    VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant, VoicePresenceRoom,
+    VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1,
+    VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2, parse_event,
+    parse_event_v2,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
@@ -237,6 +239,26 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
             "VoiceControlProtocolErrorV1",
             &VoiceControlProtocolErrorV1::new(2, VoiceControlErrorCode::Malformed),
         ),
+        // Version 2: the same, and a device name, which is not a secret, is not shown
+        // either; here it is one of the fake secrets, to show that.
+        debug("VoiceControlCommandV2", &control_v2_start_with_a_token()),
+        debug("VoiceControlCommandV2 (set_devices)", &control_v2_devices()),
+        debug_and_display("VoiceControlRefusal (v2)", &control_v2_refusal()),
+        debug(
+            "VoiceControlEventV2",
+            &parse_event_v2(control_v2_ack().as_bytes()).unwrap(),
+        ),
+        debug(
+            "VoiceControlHelloV1 (v1 and v2)",
+            &VoiceControlHelloV1::v1_and_v2("0.2.0"),
+        ),
+        debug("VoiceControlAckV2", &VoiceControlAckV2::new(3, 1, None)),
+        debug(
+            "VoiceControlProtocolErrorV2",
+            &VoiceControlProtocolErrorV2::new(2, VoiceControlErrorCode::TooLong),
+        ),
+        debug("VoiceControlTalkMode", &VoiceControlTalkMode::Open),
+        debug("VoiceControlPlayback", &VoiceControlPlayback::Unavailable),
     ];
     for shown in &all {
         assert!(!shown.text.is_empty(), "{}", shown.name);
@@ -286,6 +308,34 @@ fn control_start_with_a_token() -> VoiceControlCommand {
         "credential": "stored", "muted": false, "deafened": false, "token": FAKE_TOKEN,
     });
     parse_command(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_v2_start_with_a_token() -> conch_voice_api::VoiceControlCommandV2 {
+    let line = json!({
+        "schema": "conch.voice_control.v2", "kind": "start", "id": 1,
+        "server": "https://conch.example.org", "channel": "general", "principal_id": 7,
+        "credential": "stored", "muted": false, "deafened": false, "token": FAKE_TOKEN,
+    });
+    parse_command_v2(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_v2_devices() -> conch_voice_api::VoiceControlCommandV2 {
+    let line = json!({
+        "schema": "conch.voice_control.v2", "kind": "set_devices", "id": 2,
+        "input": FAKE_ROOM, "output": FAKE_JOIN,
+    });
+    parse_command_v2(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_v2_refusal() -> VoiceControlRefusal {
+    let line = json!({"schema": "conch.voice_control.v2", "kind": "set_talk_mode", "id": 4, "talk_mode": FAKE_TOKEN});
+    parse_command_v2(line.to_string().as_bytes()).unwrap_err()
+}
+
+fn control_v2_ack() -> String {
+    json!({"schema": "conch.voice_control.v2", "kind": "ack", "seq": 3, "id": 1,
+           "ok": true, "note": FAKE_ROOM})
+    .to_string()
 }
 
 fn control_refusal() -> VoiceControlRefusal {

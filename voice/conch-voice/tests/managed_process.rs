@@ -3,6 +3,9 @@
 //! goes, by the end of its standard input or by its parent dying, with the key device
 //! being read.
 //!
+//! The same for a v2 owner (`conch.voice_control.v2`, §20): the hello offers both
+//! versions, and the start chooses the one every event after it is in.
+//!
 //! No test here needs LiveKit, PipeWire or a keyboard: `conchd` is the stub, every session
 //! it is asked for is refused for now (503 `voice_unavailable`), so the helper is
 //! reconnecting by its policy; the microphone and speakers are the test options; the
@@ -26,9 +29,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use conch_voice::managed::V1_PUSH_TO_TALK;
 use conch_voice_api::{
     VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS, VoiceControlEvent,
-    VoiceControlPhase, VoiceControlReason, parse_event,
+    VoiceControlEventV2, VoiceControlPhase, VoiceControlReason, VoiceControlStateV2, parse_event,
+    parse_event_v2,
 };
 use serde_json::json;
 
@@ -305,7 +310,11 @@ fn the_hello_comes_first_and_an_owner_that_never_starts_it_ends_it() {
     match &helper.events()[0] {
         VoiceControlEvent::Hello(hello) => {
             assert_eq!(hello.seq, 1);
-            assert_eq!(hello.versions, ["conch.voice_control.v1"]);
+            // Both versions, in v1's frozen shape (docs/design/tui-voice.md §20.2).
+            assert_eq!(
+                hello.versions,
+                ["conch.voice_control.v1", "conch.voice_control.v2"]
+            );
             assert_eq!(
                 hello.helper_version,
                 format!("{} (48000 Hz, 10 ms frames)", env!("CARGO_PKG_VERSION"))
@@ -532,4 +541,178 @@ async fn sigterm_leaves_as_leave_does_with_reason_signal() {
             (VoiceControlPhase::Stopped, Some(VoiceControlReason::Signal)),
         ]
     );
+}
+
+// ------------------------------------------------------------- conch.voice_control.v2
+
+/// The v2 events a helper wrote, read as a v2 owner reads them: the hello by v1's reader,
+/// the rest by v2's (Go's `ParseVoiceControlEventV2` and its `Validate`). A line either
+/// refuses fails the test.
+fn events_v2(helper: &Helper) -> Vec<VoiceControlEventV2> {
+    let lines = helper.events.lock().unwrap().clone();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| {
+            if at == 0 {
+                assert!(
+                    matches!(
+                        parse_event(line.as_bytes()),
+                        Ok(VoiceControlEvent::Hello(_))
+                    ),
+                    "the first event is not a hello: {line}"
+                );
+                return None;
+            }
+            Some(
+                parse_event_v2(line.as_bytes())
+                    .unwrap_or_else(|refusal| panic!("the owner refuses {line}: {refusal}")),
+            )
+        })
+        .collect()
+}
+
+fn states_v2(helper: &Helper) -> Vec<VoiceControlStateV2> {
+    events_v2(helper)
+        .into_iter()
+        .filter_map(|event| match event {
+            VoiceControlEventV2::State(state) => Some(state),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The test options with the key device a named pipe the test holds open, and the pipe.
+fn with_keys() -> (Vec<String>, Pipe, File) {
+    let keyboard = Pipe::new();
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&keyboard.path)
+        .unwrap();
+    let mut args: Vec<String> = NO_DEVICES.iter().map(|arg| (*arg).to_owned()).collect();
+    args.push("--test-key-device".to_owned());
+    args.push(keyboard.path.display().to_string());
+    (args, keyboard, held)
+}
+
+/// A v2 owner, as a process: the start in v2 makes every event after the hello v2, open
+/// mode from `voice.toml` is in force and said, the speakers are said, and the end of
+/// standard input ends the helper within its bound with the key device being read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v2_owner_gets_v2_events_and_the_end_of_standard_input_ends_it_in_open_mode() {
+    let conchd = refusing_stub().await;
+    let toml = format!("{KEYS_TOML}talk_mode = \"open\"\n");
+    let private = Private::new(Some(&toml));
+    let events = private.events();
+    let (args, _keyboard, _held) = with_keys();
+    let mut line: serde_json::Value = serde_json::from_str(&start(&conchd)).unwrap();
+    line["schema"] = json!("conch.voice_control.v2");
+    let line = line.to_string();
+    let (code, took, helper) = tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut helper = spawn(&private, Fd3::Pipe(events), &args, false);
+        helper.send(&line);
+        helper.until(
+            "reconnecting in open mode with the key device read",
+            |helper| {
+                states_v2(helper).iter().any(|s| {
+                    s.phase == VoiceControlPhase::Reconnecting
+                        && s.ptt.as_str() == "ready"
+                        && s.talk_mode.as_str() == "open"
+                })
+            },
+        );
+        let gone = Instant::now();
+        helper.close();
+        let code = helper.exit_within(Duration::from_secs(10));
+        (code, gone.elapsed(), helper)
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, Some(0));
+    assert!(
+        took < Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "exited {took:?} after its standard input ended"
+    );
+    eprintln!("v2, open mode, standard input ended: the helper exited {took:?} after");
+    let states = states_v2(&helper);
+    // Push-to-talk while starting, before the configuration is read; open after.
+    assert_eq!(states[0].phase, VoiceControlPhase::Starting);
+    assert_eq!(states[0].talk_mode.as_str(), "push_to_talk");
+    assert_eq!(states[0].playback.as_str(), "off");
+    let reconnecting = states
+        .iter()
+        .find(|s| s.phase == VoiceControlPhase::Reconnecting)
+        .unwrap();
+    assert_eq!(
+        reconnecting.playback.as_str(),
+        "on",
+        "the counting sink plays"
+    );
+    let last = &states[states.len() - 2..];
+    assert_eq!(
+        (last[0].phase, last[0].reason),
+        (
+            VoiceControlPhase::Stopping,
+            Some(VoiceControlReason::OwnerLost)
+        )
+    );
+    assert_eq!(
+        (last[1].phase, last[1].reason, last[1].playback.as_str()),
+        (
+            VoiceControlPhase::Stopped,
+            Some(VoiceControlReason::OwnerLost),
+            "off"
+        )
+    );
+    let stderr = helper.stderr();
+    secrets_absent(&stderr);
+    assert!(!stderr.contains(V1_PUSH_TO_TALK), "{stderr}");
+}
+
+/// A v1 owner of the same helper, with the same `voice.toml`, as a process: the session is
+/// v1 as it has always been, push-to-talk, and the helper's log says so in one line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v1_owner_with_open_mode_configured_gets_v1_and_one_line_in_the_log() {
+    let conchd = refusing_stub().await;
+    let toml = format!("{KEYS_TOML}talk_mode = \"open\"\n");
+    let private = Private::new(Some(&toml));
+    let events = private.events();
+    let (args, _keyboard, _held) = with_keys();
+    let line = start(&conchd);
+    let (code, helper) = tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut helper = spawn(&private, Fd3::Pipe(events), &args, false);
+        helper.send(&line);
+        helper.until("reconnecting with the key device read", |helper| {
+            helper.events().iter().any(|event| {
+                matches!(event, VoiceControlEvent::State(s)
+                    if s.phase == VoiceControlPhase::Reconnecting && s.ptt.as_str() == "ready")
+            })
+        });
+        helper.close();
+        let code = helper.exit_within(Duration::from_secs(10));
+        (code, helper)
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, Some(0));
+    // Every event after the hello is v1's, with nothing of v2's in it.
+    for line in helper.events.lock().unwrap().iter().skip(1) {
+        assert!(line.contains("\"conch.voice_control.v1\""), "{line}");
+        assert!(
+            !line.contains("talk_mode") && !line.contains("playback"),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        helper.states().last(),
+        Some(&(
+            VoiceControlPhase::Stopped,
+            Some(VoiceControlReason::OwnerLost)
+        ))
+    );
+    let stderr = helper.stderr();
+    assert_eq!(stderr.matches(V1_PUSH_TO_TALK).count(), 1, "{stderr}");
 }

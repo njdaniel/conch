@@ -5,8 +5,9 @@
 //! Output: who the login is, voice sessions, presence snapshots and the presence stream,
 //! and the answers to transmit reports, as Rust copies of the wire types in `pkg/schema`;
 //! or one [`Error`] that says which refusal or failure it was. The managed helper's
-//! commands, read, and its events, written (`conch.voice_control.v1`). `pkg/schema` is the
-//! single source of truth; the types here are checked against its golden fixtures.
+//! commands, read, and its events, written (`conch.voice_control.v1` and `v2`).
+//! `pkg/schema` is the single source of truth; the types here are checked against its
+//! golden fixtures.
 //! Owns: nothing that outlives a call, other than the connections a [`Client`] keeps open
 //! and the socket a [`PresenceStream`] reads. It never writes the credentials file, never
 //! reads the environment, never retries and never logs.
@@ -29,7 +30,8 @@
 //! - [`Client`]: [`Client::whoami`], [`Client::session`], [`Client::transmit`],
 //!   [`Client::presence`], [`Client::presence_stream`].
 //! - [`parse_command`], [`parse_event`], [`to_line`]: the managed helper's control
-//!   protocol (`docs/design/tui-voice.md`).
+//!   protocol (`docs/design/tui-voice.md`); [`parse_command_v2`], [`parse_event_v2`]: its
+//!   version 2 (§20), which the hello offers beside v1.
 //! - [`VoiceDevicesV1`]: the device list `conch-voice devices --json` writes.
 //! - [`PresenceStream`]: snapshots in order, then a [`StreamEnd`].
 //!
@@ -41,6 +43,7 @@
 
 mod client;
 mod control;
+mod control_v2;
 mod error;
 mod login;
 mod presence;
@@ -64,6 +67,14 @@ pub use control::{
     VoiceControlPhase, VoiceControlProtocolErrorV1, VoiceControlPtt, VoiceControlPttProblem,
     VoiceControlReason, VoiceControlRefusal, VoiceControlSetDeafenV1, VoiceControlSetMuteV1,
     VoiceControlStartV1, VoiceControlStateV1, parse_command, parse_event, to_line,
+};
+pub use control_v2::{
+    VOICE_CONTROL_DEVICE_DEFAULT, VOICE_CONTROL_SCHEMA_V2, VoiceControlAckV2,
+    VoiceControlCommandV2, VoiceControlEventV2, VoiceControlGetStateV2, VoiceControlLeaveV2,
+    VoiceControlPlayback, VoiceControlProtocolErrorV2, VoiceControlSetDeafenV2,
+    VoiceControlSetDevicesV2, VoiceControlSetMuteV2, VoiceControlSetTalkModeV2,
+    VoiceControlStartV2, VoiceControlStateV2, VoiceControlTalkMode, parse_command_v2,
+    parse_event_v2,
 };
 pub use error::{Error, Refusal, code};
 pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token, stored_servers};

@@ -33,10 +33,13 @@
 //!   onset on their way when a reason ends cannot open the gate on that ending.
 //! - The microphone can be replaced while the task runs (a switch of device inside a
 //!   session, `docs/design/tui-voice.md` §20.5): [`TxCommand::CloseMicrophone`] drops the
-//!   old one, which closes its stream, and [`TxCommand::Microphone`] hands over the new one.
-//!   What the task says of a microphone ([`TxEvent::Microphone`]) carries how many times the
-//!   microphone had been changed, so that a word about one that is gone, still on its way,
-//!   is not taken for a word about the one in use ([`Transmitter::is_current_microphone`]).
+//!   old one, which closes its stream, and [`TxCommand::SwitchedMicrophone`] hands over the
+//!   new one. What the task says of a microphone ([`TxEvent::Microphone`]) carries how many
+//!   times the microphone had been changed, so that a word about one that is gone, still on
+//!   its way, is not taken for a word about the one in use
+//!   ([`Transmitter::is_current_microphone`]). The first read of a microphone a switch
+//!   handed over is always said, whether it gave a frame or not, so that the session learns
+//!   whether the new one is there before it counts it as a microphone.
 //!
 //! The task is told what to do with [`TxCommand`]s and says what happened with
 //! [`TxEvent`]s. Commands are taken before the next frame, so a forced shut is never behind
@@ -82,6 +85,11 @@ pub enum TxCommand<F> {
     /// was closed. It is read from now until it is closed or the task ends, and taken to have
     /// audio until it says otherwise.
     Microphone(BoxedMic),
+    /// A microphone opened in place of one that was closed, by a switch of device. As
+    /// `Microphone`, but what its first read gives, a frame or none, is said either way
+    /// ([`TxEvent::Microphone`]): the session counts it as a microphone only once it has
+    /// given a frame.
+    SwitchedMicrophone(BoxedMic),
     /// The microphone is dropped, which closes its stream: the session is over, or another
     /// microphone is to be used. Nothing is captured after this until the next `Microphone`.
     CloseMicrophone,
@@ -101,8 +109,9 @@ pub enum TxEvent {
         /// may hold: its own cap, which needs no timer.
         limit_reached: bool,
     },
-    /// The microphone source stopped having audio to give, or has it again, if it is the
-    /// one in use ([`Transmitter::is_current_microphone`]).
+    /// The microphone source stopped having audio to give, or has it again, or, for one a
+    /// switch handed over, was read for the first time, if it is the one in use
+    /// ([`Transmitter::is_current_microphone`]).
     Microphone {
         /// Whether it has audio to give.
         present: bool,
@@ -308,6 +317,7 @@ pub fn spawn_with_level<F: MicFeed>(
         gate,
         mic: None,
         mic_present: false,
+        mic_heard: true,
         pace: Pace::new(Pacing::Timer),
         feed: None,
         commands: command_rx,
@@ -333,6 +343,9 @@ struct Task<F> {
     mic: Option<BoxedMic>,
     /// What was last reported about the microphone.
     mic_present: bool,
+    /// False from a switch's microphone being handed over until its first read, which is
+    /// said whatever it gives.
+    mic_heard: bool,
     /// What wakes the task to read the microphone: the microphone's ring, or a timer for
     /// one that has no clock.
     pace: Pace,
@@ -455,7 +468,9 @@ impl Listen {
 fn restarts_detector<F>(command: &TxCommand<F>) -> bool {
     match command {
         TxCommand::Gate(GateCommand::Clear(reason)) => *reason != ShutReason::MaxTransmit,
-        TxCommand::Gate(GateCommand::TalkMode(_)) | TxCommand::Microphone(_) => true,
+        TxCommand::Gate(GateCommand::TalkMode(_))
+        | TxCommand::Microphone(_)
+        | TxCommand::SwitchedMicrophone(_) => true,
         TxCommand::Gate(_)
         | TxCommand::CloseMicrophone
         | TxCommand::Attach(_)
@@ -468,7 +483,7 @@ fn restarts_detector<F>(command: &TxCommand<F>) -> bool {
 fn changes_microphone<F>(command: &TxCommand<F>) -> bool {
     matches!(
         command,
-        TxCommand::Microphone(_) | TxCommand::CloseMicrophone
+        TxCommand::Microphone(_) | TxCommand::SwitchedMicrophone(_) | TxCommand::CloseMicrophone
     )
 }
 
@@ -560,6 +575,12 @@ impl<F: MicFeed> Task<F> {
                 self.mic = Some(mic);
                 self.mic_present = true;
             }
+            TxCommand::SwitchedMicrophone(mic) => {
+                self.pace = Pace::new(mic.pacing());
+                self.mic = Some(mic);
+                self.mic_present = true;
+                self.mic_heard = false;
+            }
             TxCommand::CloseMicrophone => {
                 self.pace = Pace::new(Pacing::Timer);
                 self.mic = None;
@@ -588,8 +609,9 @@ impl<F: MicFeed> Task<F> {
             }
             MicRead::NoMicrophone => false,
         };
-        if present != self.mic_present {
+        if present != self.mic_present || !self.mic_heard {
             self.mic_present = present;
+            self.mic_heard = true;
             self.report(TxEvent::Microphone {
                 present,
                 changes: self.mic_changes,
@@ -830,6 +852,7 @@ mod tests {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
+            mic_heard: true,
             pace: Pace::new(Pacing::Ring),
             feed: Some(record.clone()),
             commands,
@@ -871,6 +894,7 @@ mod tests {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
+            mic_heard: true,
             pace: Pace::new(Pacing::Ring),
             feed: Some(record.clone()),
             commands,
@@ -916,6 +940,7 @@ mod tests {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
+            mic_heard: true,
             pace: Pace::new(Pacing::Ring),
             feed: Some(record.clone()),
             commands,
@@ -999,6 +1024,7 @@ mod tests {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
+            mic_heard: true,
             pace: Pace::new(Pacing::Ring),
             feed: Some(record.clone()),
             commands,
@@ -1045,6 +1071,7 @@ mod tests {
                 gate: TransmitGate::new(gate_config(tail_ms, Duration::from_secs(60))).unwrap(),
                 mic: Some(Box::new(RingMic(ring.clone()))),
                 mic_present: true,
+                mic_heard: true,
                 pace: Pace::new(Pacing::Ring),
                 feed: Some(record.clone()),
                 commands,
@@ -1558,5 +1585,39 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(transmitter.events.try_recv().is_err());
+    }
+
+    /// Issue #656. A microphone a switch hands over is not taken to be there: its first read
+    /// is said either way, a frame or none, once, about that microphone, so that a session
+    /// that switched knows whether the new one is there before it counts it as one.
+    #[tokio::test]
+    async fn the_first_read_of_a_switched_microphone_is_said_whatever_it_gives() {
+        let mut transmitter = spawn::<Record>(gate_config(0, Duration::from_secs(60))).unwrap();
+        let next = async |transmitter: &mut Transmitter<Record>| loop {
+            let said = tokio::time::timeout(Duration::from_secs(10), transmitter.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let TxEvent::Microphone { present, changes } = said {
+                return (present, changes);
+            }
+        };
+        let reads = Arc::new(AtomicU64::new(0));
+        transmitter.send(TxCommand::SwitchedMicrophone(Box::new(CountedTone(
+            Arc::clone(&reads),
+        ))));
+        let (present, changes) = next(&mut transmitter).await;
+        assert!(present, "a microphone that gives frames is there");
+        assert!(transmitter.is_current_microphone(changes));
+        while reads.load(Ordering::Relaxed) < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(transmitter.events.try_recv().is_err(), "said once");
+
+        transmitter.send(TxCommand::CloseMicrophone);
+        transmitter.send(TxCommand::SwitchedMicrophone(Box::new(Absent)));
+        let (present, changes) = next(&mut transmitter).await;
+        assert!(!present, "one that gives none is not");
+        assert!(transmitter.is_current_microphone(changes));
     }
 }

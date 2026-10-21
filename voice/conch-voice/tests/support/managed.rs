@@ -2,14 +2,17 @@
 //! managed helper (`conch_voice::managed::run`) between a fake SDK and a stub `conchd`, with
 //! a named pipe for a keyboard, a tone for a microphone that never stops, and the owner's
 //! two pipes in the test's hands: it writes commands, reads events and closes standard
-//! input as `conch` would.
+//! input as `conch` would. With a [`World`], the microphones and speakers are opened by the
+//! name the helper asks for, and the test says which of them are there and whether the
+//! microphones hear anything: for `conch.voice_control.v2`'s device switch and open
+//! microphone.
 //!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit.
 
 use std::fs::{File, OpenOptions};
 use std::io::{PipeWriter, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,8 +23,11 @@ use conch_voice::receive::BoxedSink;
 use conch_voice::secrets::Scrubber;
 use conch_voice::session::Input;
 use conch_voice::transmit::BoxedMic;
-use conch_voice_api::{Secret, VoiceControlEvent, parse_event};
-use conch_voice_audio::{CountingSink, MicSource, ToneSource};
+use conch_voice_api::{
+    Secret, VoiceControlAckV2, VoiceControlEvent, VoiceControlEventV2, VoiceControlHelloV1,
+    VoiceControlStateV2, parse_event, parse_event_v2,
+};
+use conch_voice_audio::{CountingSink, FRAME_LEN, Frame, MicRead, MicSource, ToneSource};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -60,7 +66,14 @@ pub struct ManagedSetup {
     pub voice_toml: Option<String>,
     /// Read keys from the named pipe (`--test-key-device`), with the bindings of `voice_toml`.
     pub keyboard: bool,
+    /// Open the keyboard's end of the key device's pipe only when the test plugs it in
+    /// ([`ManagedRig::plug_keyboard`]): until then the key device's watcher waits to open
+    /// it, and the start-up waits for the watcher.
+    pub keyboard_unplugged: bool,
     pub start_timeout: Duration,
+    /// Microphones and speakers opened by name, as the test arranges them; `None` for the
+    /// tone and the counting sink, whatever is asked for.
+    pub world: Option<World>,
 }
 
 impl Default for ManagedSetup {
@@ -69,7 +82,167 @@ impl Default for ManagedSetup {
             login: Login::Stored,
             voice_toml: Some(KEYS_TOML.to_owned()),
             keyboard: true,
+            keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
+            world: None,
+        }
+    }
+}
+
+/// The level of every sample of a loud frame from the microphone of this name: the
+/// default's, and every named one's. A frame's first sample says which it came from
+/// (`FakeSdk::first_samples`). Both are far above the default open-mode level.
+pub fn level_of(name: Option<&str>) -> f32 {
+    match name {
+        None => 0.25,
+        Some(_) => 0.5,
+    }
+}
+
+/// The test's hold on a rig's microphones and speakers: which of them are not there, by
+/// name, and whether the microphones hear sound. Every name is there unless the test says
+/// it is not; PipeWire's default (`None`) always is.
+#[derive(Clone, Default)]
+pub struct World(Arc<WorldState>);
+
+#[derive(Default)]
+struct WorldState {
+    absent: Mutex<Vec<String>>,
+    broken: Mutex<Vec<String>>,
+    quiet: AtomicBool,
+    frames: AtomicU64,
+    mic_names: Mutex<Vec<Option<String>>>,
+    sink_names: Mutex<Vec<Option<String>>>,
+}
+
+impl World {
+    /// The device of this name is not there (unplugged, or never was).
+    pub fn unplug(&self, name: &str) {
+        self.0.absent.lock().unwrap().push(name.to_owned());
+    }
+
+    /// The device of this name cannot be opened: its opener fails, with an error that
+    /// names it, as a PipeWire error may.
+    pub fn break_device(&self, name: &str) {
+        self.0.broken.lock().unwrap().push(name.to_owned());
+    }
+
+    /// The opener's error for a device that cannot be opened, if this is one.
+    fn refuse(&self, doing: &'static str, name: Option<&str>) -> Result<(), Error> {
+        match name {
+            Some(name) if self.0.broken.lock().unwrap().iter().any(|b| b == name) => {
+                Err(Error::PipeWire {
+                    doing,
+                    detail: format!("FAKE: no node is named {name}"),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The device of this name is there.
+    pub fn plug(&self, name: &str) {
+        self.0
+            .absent
+            .lock()
+            .unwrap()
+            .retain(|absent| absent != name);
+    }
+
+    fn is_there(&self, name: Option<&str>) -> bool {
+        name.is_none_or(|name| !self.0.absent.lock().unwrap().iter().any(|a| a == name))
+    }
+
+    /// Whether every microphone hears sound from its next frame, or silence.
+    pub fn loud(&self, loud: bool) {
+        self.0.quiet.store(!loud, Ordering::SeqCst);
+    }
+
+    /// Frames read from any microphone so far.
+    pub fn frames(&self) -> u64 {
+        self.0.frames.load(Ordering::SeqCst)
+    }
+
+    /// Waits until `count` more frames have been read: time as the level detector counts
+    /// it, however late the task that reads them is.
+    pub async fn frames_pass(&self, count: u64) {
+        let until = self.frames() + count;
+        super::until("frames read", String::new, || self.frames() >= until).await;
+    }
+
+    /// The names the microphone was opened with, in order: `None` for the default.
+    pub fn mic_names(&self) -> Vec<Option<String>> {
+        self.0.mic_names.lock().unwrap().clone()
+    }
+
+    /// The names the speakers were opened with, in order.
+    pub fn sink_names(&self) -> Vec<Option<String>> {
+        self.0.sink_names.lock().unwrap().clone()
+    }
+}
+
+/// A microphone of a [`World`]: read every 10 ms, a frame at its own level while the world
+/// is loud and silence while it is quiet; no microphone at all while it is not there.
+struct WorldMic {
+    name: Option<String>,
+    world: World,
+}
+
+impl MicSource for WorldMic {
+    fn read(&mut self, frame: &mut Frame) -> MicRead {
+        if !self.world.is_there(self.name.as_deref()) {
+            return MicRead::NoMicrophone;
+        }
+        let quiet = self.world.0.quiet.load(Ordering::SeqCst);
+        let level = if quiet {
+            0.0
+        } else {
+            level_of(self.name.as_deref())
+        };
+        *frame = [level; FRAME_LEN];
+        self.world.0.frames.fetch_add(1, Ordering::SeqCst);
+        MicRead::Ready
+    }
+}
+
+/// Speakers of a [`World`]: playing while they are there.
+struct WorldSink {
+    name: Option<String>,
+    world: World,
+    sink: CountingSink,
+    closed: Arc<AtomicU32>,
+}
+
+impl conch_voice_audio::SpeakerSink for WorldSink {
+    fn play(&mut self, frame: &conch_voice_audio::Frame) {
+        self.sink.play(frame);
+    }
+}
+
+impl conch_voice::receive::Speakers for WorldSink {
+    fn playing(&self) -> bool {
+        self.world.is_there(self.name.as_deref())
+    }
+}
+
+impl Drop for WorldSink {
+    fn drop(&mut self) {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// One event of a v2 session: the hello, which is v1, and then v2's.
+#[derive(Debug, Clone)]
+pub enum EventV2 {
+    Hello(VoiceControlHelloV1),
+    V2(VoiceControlEventV2),
+}
+
+impl EventV2 {
+    pub fn seq(&self) -> i64 {
+        match self {
+            EventV2::Hello(hello) => hello.seq,
+            EventV2::V2(event) => event.seq(),
         }
     }
 }
@@ -128,7 +301,7 @@ pub struct ManagedRig {
     task: Option<JoinHandle<Result<(), Error>>>,
     /// Holds the configuration directory and the pipe for as long as the rig lives.
     _dir: tempfile::TempDir,
-    _pipe: Pipe,
+    pipe: Pipe,
 }
 
 impl ManagedRig {
@@ -175,7 +348,7 @@ impl ManagedRig {
         // The keyboard's end is opened to read and write, so that it does not wait for the
         // watcher, and the watcher's open does not wait for it.
         let pipe = Pipe::new();
-        let keyboard = setup.keyboard.then(|| {
+        let keyboard = (setup.keyboard && !setup.keyboard_unplugged).then(|| {
             OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -191,23 +364,53 @@ impl ManagedRig {
             Arc::clone(&mic_closed),
             Arc::clone(&sink_closed),
         );
-        let devices = Devices::Given {
-            // A tone that never stops: whatever does not reach the fake's audio source was
-            // stopped by the gate.
-            open_mic: Box::new(move |_| {
-                opened.fetch_add(1, Ordering::SeqCst);
-                let tone = ToneSource::new(440.0, 0.25)?;
-                Ok(Some(
-                    Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
-                ))
-            }),
-            open_sink: Box::new(move |_| {
-                Ok(Box::new(Silenced(
-                    CountingSink::new(&[440.0])?,
-                    Arc::clone(&silenced),
-                )) as BoxedSink)
-            }),
-            sink_tones: vec![440.0],
+        let devices = match setup.world.clone() {
+            None => Devices::Given {
+                // A tone that never stops: whatever does not reach the fake's audio source
+                // was stopped by the gate.
+                open_mic: Box::new(move |_| {
+                    opened.fetch_add(1, Ordering::SeqCst);
+                    let tone = ToneSource::new(440.0, 0.25)?;
+                    Ok(Some(
+                        Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
+                    ))
+                }),
+                open_sink: Box::new(move |_| {
+                    Ok(Box::new(Silenced(
+                        CountingSink::new(&[440.0])?,
+                        Arc::clone(&silenced),
+                    )) as BoxedSink)
+                }),
+                sink_tones: vec![440.0],
+            },
+            Some(world) => {
+                let sinks = world.clone();
+                Devices::Given {
+                    open_mic: Box::new(move |name| {
+                        opened.fetch_add(1, Ordering::SeqCst);
+                        world.refuse("open the microphone", name)?;
+                        let name = name.map(str::to_owned);
+                        world.0.mic_names.lock().unwrap().push(name.clone());
+                        let mic = WorldMic {
+                            name,
+                            world: world.clone(),
+                        };
+                        Ok(Some(Box::new(Closing(mic, Arc::clone(&closed))) as BoxedMic))
+                    }),
+                    open_sink: Box::new(move |name| {
+                        sinks.refuse("open the speakers", name)?;
+                        let name = name.map(str::to_owned);
+                        sinks.0.sink_names.lock().unwrap().push(name.clone());
+                        Ok(Box::new(WorldSink {
+                            name,
+                            world: sinks.clone(),
+                            sink: CountingSink::new(&[440.0])?,
+                            closed: Arc::clone(&silenced),
+                        }) as BoxedSink)
+                    }),
+                    sink_tones: vec![440.0],
+                }
+            }
         };
         let mut timings = quick();
         // A wait the policy asks for is a few milliseconds, as in the other tests.
@@ -255,8 +458,127 @@ impl ManagedRig {
             sink_closed,
             task: Some(task),
             _dir: dir,
-            _pipe: pipe,
+            pipe,
         }
+    }
+
+    /// The keyboard goes away: its end of the key device's pipe is closed, and the
+    /// watcher reads the end of it.
+    pub fn unplug_keyboard(&mut self) {
+        self.keyboard = None;
+    }
+
+    /// The keyboard is there (again): its end of the pipe is opened.
+    pub fn plug_keyboard(&mut self) {
+        self.keyboard = Some(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.pipe.path)
+                .unwrap(),
+        );
+    }
+
+    /// The start of a v2 session: the usual one, written in `conch.voice_control.v2`.
+    pub fn start_command_v2(&self) -> Value {
+        let mut start = self.start_command();
+        start["schema"] = json!("conch.voice_control.v2");
+        start
+    }
+
+    /// Writes the v2 start.
+    pub fn send_start_v2(&mut self) {
+        let start = self.start_command_v2();
+        self.send(&start);
+    }
+
+    /// A v2 command of `kind` with `id`, and these fields besides.
+    pub fn command_v2(kind: &str, id: i64, fields: Value) -> Value {
+        let mut command = Self::command(kind, id, fields);
+        command["schema"] = json!("conch.voice_control.v2");
+        command
+    }
+
+    /// Every event so far of a v2 session, read by the owner's rules: the hello by v1's
+    /// reader, everything after it by v2's, which is Go's `ParseVoiceControlEventV2` and
+    /// its `Validate`. A line either would refuse fails the test.
+    pub fn read_v2(&self) -> Vec<EventV2> {
+        self.lines()
+            .iter()
+            .enumerate()
+            .map(|(at, line)| {
+                let refused = |refusal: conch_voice_api::VoiceControlRefusal| -> ! {
+                    panic!("the owner refuses {line}: {refusal}")
+                };
+                if at == 0 {
+                    match parse_event(line.as_bytes()).unwrap_or_else(|r| refused(r)) {
+                        VoiceControlEvent::Hello(hello) => EventV2::Hello(hello),
+                        other => panic!("the first event is not a hello: {other:?}"),
+                    }
+                } else {
+                    EventV2::V2(parse_event_v2(line.as_bytes()).unwrap_or_else(|r| refused(r)))
+                }
+            })
+            .collect()
+    }
+
+    /// Every v2 state so far.
+    pub fn states_v2(&self) -> Vec<VoiceControlStateV2> {
+        self.read_v2()
+            .into_iter()
+            .filter_map(|event| match event {
+                EventV2::V2(VoiceControlEventV2::State(state)) => Some(state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The latest v2 state, if there is one.
+    pub fn state_v2(&self) -> Option<VoiceControlStateV2> {
+        self.states_v2().pop()
+    }
+
+    /// Waits until v2 command `id` is answered, and gives the answer.
+    pub async fn ack_v2(&self, id: i64) -> VoiceControlAckV2 {
+        let found = Arc::new(Mutex::new(None));
+        let kept = Arc::clone(&found);
+        self.until(&format!("the ack of {id}"), move |rig| {
+            let ack = rig.read_v2().into_iter().find_map(|event| match event {
+                EventV2::V2(VoiceControlEventV2::Ack(ack)) if ack.id == id => Some(ack),
+                _ => None,
+            });
+            let met = ack.is_some();
+            *kept.lock().unwrap() = ack;
+            met
+        })
+        .await;
+        found.lock().unwrap().take().unwrap()
+    }
+
+    /// Waits until the latest v2 state has `met` true of it.
+    pub async fn until_v2(&self, what: &str, met: impl Fn(&VoiceControlStateV2) -> bool) {
+        self.until(what, |rig| rig.state_v2().is_some_and(|state| met(&state)))
+            .await;
+    }
+
+    /// Waits until, in a v2 session, a press or an onset would transmit: connected,
+    /// capturing, nothing in the way.
+    pub async fn ready_v2(&self) {
+        self.until_v2("ready to transmit", |state| {
+            state.phase.as_str() == "connected"
+                && state.blocked.is_empty()
+                && state.capture.as_str() == "on"
+                && !state.transmitting
+        })
+        .await;
+    }
+
+    /// Waits until the latest v2 state says audio is leaving, or that it is not.
+    pub async fn transmitting_v2(&self, transmitting: bool) {
+        self.until_v2(&format!("transmitting {transmitting}"), |state| {
+            state.transmitting == transmitting
+        })
+        .await;
     }
 
     /// Writes one line to the helper's standard input, as given, with a line feed.

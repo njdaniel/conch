@@ -1,6 +1,7 @@
 //! The control protocol of a managed `conch-voice` (`conch.voice_control.v1`): Rust copies
 //! of the shapes in `pkg/schema/voice_control.go`, read and written by the rules of
-//! `docs/design/tui-voice.md` §3 and §4.
+//! `docs/design/tui-voice.md` §3 and §4. Version 2 (§20) is `control_v2.rs`, which shares
+//! the framing, the vocabularies and the hello with this one.
 //!
 //! A native client, the owner, starts `conch-voice managed` and drives it over two pipes:
 //! commands on the helper's standard input, events on its file descriptor 3. Every message
@@ -42,8 +43,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::control_v2::VOICE_CONTROL_SCHEMA_V2;
 use crate::error::Error;
 use crate::types::wire_object;
 
@@ -130,30 +132,32 @@ macro_rules! vocabulary {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())
             }
         }
 
-        impl Serialize for $name {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 serializer.serialize_str(self.as_str())
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let word = String::deserialize(deserializer)?;
-                Self::from_word(&word).ok_or_else(|| de::Error::custom($what))
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let word = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Self::from_word(&word).ok_or_else(|| serde::de::Error::custom($what))
             }
         }
     };
 }
+pub(crate) use vocabulary;
 
 vocabulary!(
-    /// What a command asks for.
-    VoiceControlCommandKind, "not a command kind of this version", {
+    /// What a command asks for: one vocabulary across the versions, as in Go, with
+    /// [`VoiceControlCommandKind::known_in`] saying which kinds a version has.
+    VoiceControlCommandKind, "not a command kind", {
     /// The first command, and the only one before it: join this channel as this principal.
     Start = "start",
     /// Set whether the user is muted.
@@ -164,7 +168,32 @@ vocabulary!(
     GetState = "get_state",
     /// Leave voice; the helper then exits.
     Leave = "leave",
+    /// Use this microphone and these speakers from now on. v2 only.
+    SetDevices = "set_devices",
+    /// Choose what may open the gate: a press, or the microphone's own sound. v2 only.
+    SetTalkMode = "set_talk_mode",
 });
+
+impl VoiceControlCommandKind {
+    /// Whether `version` (a schema name such as [`VOICE_CONTROL_SCHEMA_V1`]) has a command
+    /// of this kind. Each version's kinds are listed in full, as Go's `KnownIn` lists them,
+    /// so that a kind a later version adds is not known to an earlier one by accident:
+    /// `set_devices` is `unknown_kind` to a v1 reader, as it was before v2 existed.
+    #[must_use]
+    pub fn known_in(self, version: &str) -> bool {
+        use VoiceControlCommandKind::*;
+        match version {
+            VOICE_CONTROL_SCHEMA_V1 => {
+                matches!(self, Start | SetMute | SetDeafen | GetState | Leave)
+            }
+            VOICE_CONTROL_SCHEMA_V2 => matches!(
+                self,
+                Start | SetMute | SetDeafen | GetState | Leave | SetDevices | SetTalkMode
+            ),
+            _ => false,
+        }
+    }
+}
 
 vocabulary!(
     /// What an event reports.
@@ -443,7 +472,7 @@ impl fmt::Display for VoiceControlRefusal {
     }
 }
 
-fn refused(code: VoiceControlErrorCode, id: Option<i64>) -> VoiceControlRefusal {
+pub(crate) fn refused(code: VoiceControlErrorCode, id: Option<i64>) -> VoiceControlRefusal {
     VoiceControlRefusal { code, id }
 }
 
@@ -585,11 +614,27 @@ wire_object!(VoiceControlHelloV1, "a voice control hello", unknown = ignored, {
 impl VoiceControlHelloV1 {
     /// The hello of a helper that speaks v1 and nothing else.
     pub fn v1(helper_version: impl Into<String>) -> Self {
+        Self::offering(&[VOICE_CONTROL_SCHEMA_V1], helper_version)
+    }
+
+    /// The hello of a helper that speaks v1 and v2: written in v1, in the frozen shape, so
+    /// that an owner of either version reads it (`docs/design/tui-voice.md` §20.2).
+    pub fn v1_and_v2(helper_version: impl Into<String>) -> Self {
+        Self::offering(
+            &[VOICE_CONTROL_SCHEMA_V1, VOICE_CONTROL_SCHEMA_V2],
+            helper_version,
+        )
+    }
+
+    fn offering(versions: &[&str], helper_version: impl Into<String>) -> Self {
         Self {
             schema: VOICE_CONTROL_SCHEMA_V1.to_owned(),
             kind: VoiceControlEventKind::Hello,
             seq: 1,
-            versions: vec![VOICE_CONTROL_SCHEMA_V1.to_owned()],
+            versions: versions
+                .iter()
+                .map(|version| (*version).to_owned())
+                .collect(),
             helper_version: helper_version.into(),
         }
     }
@@ -837,10 +882,10 @@ pub trait VoiceControlMessage: Serialize {
 }
 
 macro_rules! message {
-    ($($type:ident),+) => {
-        $(impl VoiceControlMessage for $type {
-            fn validate(&self) -> Result<(), Error> {
-                self.check().map_err(|problem| Error::Invalid {
+    ($($type:ident),+ $(,)?) => {
+        $(impl $crate::control::VoiceControlMessage for $type {
+            fn validate(&self) -> Result<(), $crate::error::Error> {
+                self.check().map_err(|problem| $crate::error::Error::Invalid {
                     what: "voice control message",
                     problem,
                 })
@@ -848,6 +893,7 @@ macro_rules! message {
         })+
     };
 }
+pub(crate) use message;
 
 message!(
     VoiceControlStartV1,
@@ -900,11 +946,11 @@ pub fn parse_command(line: &[u8]) -> Result<VoiceControlCommand, VoiceControlRef
         Some(Loose::Whole(id)) if id_in_range(id) => id,
         _ => return Err(refused(VoiceControlErrorCode::Invalid, None)),
     };
-    let kind = match &head.kind {
-        Some(Loose::Text(word)) => VoiceControlCommandKind::from_word(word),
-        _ => None,
-    }
-    .ok_or(refused(VoiceControlErrorCode::UnknownKind, Some(id)))?;
+    let unknown = refused(VoiceControlErrorCode::UnknownKind, Some(id));
+    let kind = head
+        .command_kind()
+        .filter(|kind| kind.known_in(VOICE_CONTROL_SCHEMA_V1))
+        .ok_or(unknown)?;
     let command = match kind {
         VoiceControlCommandKind::Start => VoiceControlCommand::Start(typed(text, Some(id))?),
         VoiceControlCommandKind::SetMute => VoiceControlCommand::SetMute(typed(text, Some(id))?),
@@ -913,6 +959,11 @@ pub fn parse_command(line: &[u8]) -> Result<VoiceControlCommand, VoiceControlRef
         }
         VoiceControlCommandKind::GetState => VoiceControlCommand::GetState(typed(text, Some(id))?),
         VoiceControlCommandKind::Leave => VoiceControlCommand::Leave(typed(text, Some(id))?),
+        // `known_in` lists v1's kinds in full, so this is not reached unless the two fall
+        // out of step; refused, as Go refuses it, rather than read as something else.
+        VoiceControlCommandKind::SetDevices | VoiceControlCommandKind::SetTalkMode => {
+            return Err(unknown);
+        }
     };
     command
         .check()
@@ -936,9 +987,8 @@ pub fn parse_event(line: &[u8]) -> Result<VoiceControlEvent, VoiceControlRefusal
         Some(Loose::Whole(seq)) if id_in_range(seq) => seq,
         _ => return Err(invalid),
     };
-    let word = match head.kind {
-        Some(Loose::Text(word)) if !word.is_empty() => word,
-        _ => return Err(invalid),
+    let Some(word) = head.event_kind() else {
+        return Err(invalid);
     };
     let Some(kind) = VoiceControlEventKind::from_word(&word) else {
         return Ok(VoiceControlEvent::Unknown { seq, kind: word });
@@ -971,7 +1021,7 @@ pub fn parse_event(line: &[u8]) -> Result<VoiceControlEvent, VoiceControlRefusal
 
 /// The framing rules both directions share: the length, UTF-8, one line, one JSON object
 /// with no key twice. Gives the text and what the object says of its head.
-fn frame(line: &[u8]) -> Result<(&str, Head), VoiceControlRefusal> {
+pub(crate) fn frame(line: &[u8]) -> Result<(&str, Head), VoiceControlRefusal> {
     let malformed = refused(VoiceControlErrorCode::Malformed, None);
     if line.len() > VOICE_CONTROL_MAX_LINE_BYTES {
         return Err(refused(VoiceControlErrorCode::TooLong, None));
@@ -986,16 +1036,19 @@ fn frame(line: &[u8]) -> Result<(&str, Head), VoiceControlRefusal> {
 
 /// The second, typed reading of a line whose framing and head were accepted: every field
 /// the kind declares, of its type and not `null`. Any failure is `invalid`.
-fn typed<T: DeserializeOwned>(text: &str, id: Option<i64>) -> Result<T, VoiceControlRefusal> {
+pub(crate) fn typed<T: DeserializeOwned>(
+    text: &str,
+    id: Option<i64>,
+) -> Result<T, VoiceControlRefusal> {
     serde_json::from_str(text).map_err(|_| refused(VoiceControlErrorCode::Invalid, id))
 }
 
-fn id_in_range(id: i64) -> bool {
+pub(crate) fn id_in_range(id: i64) -> bool {
     (1..=VOICE_CONTROL_MAX_ID).contains(&id)
 }
 
 /// A JSON value seen only to learn whether it is a string or a whole number.
-enum Loose {
+pub(crate) enum Loose {
     Text(String),
     Whole(i64),
     Other,
@@ -1061,18 +1114,41 @@ impl<'de> Deserialize<'de> for Loose {
 /// that the right code can be given for what is wrong. Every key is looked at for being
 /// given twice; the values of the others are only skipped over.
 #[derive(Default)]
-struct Head {
+pub(crate) struct Head {
     schema: Option<Loose>,
     kind: Option<Loose>,
-    id: Option<Loose>,
-    seq: Option<Loose>,
+    pub(crate) id: Option<Loose>,
+    pub(crate) seq: Option<Loose>,
 }
 
 impl Head {
     fn check_schema(&self) -> Result<(), VoiceControlRefusal> {
+        self.check_schema_is(VOICE_CONTROL_SCHEMA_V1)
+    }
+
+    /// Refuses a line of any version but `version`, a later or an earlier one alike: the
+    /// version is fixed when the owner writes its start, and nothing else is read as it.
+    pub(crate) fn check_schema_is(&self, version: &str) -> Result<(), VoiceControlRefusal> {
         match &self.schema {
-            Some(Loose::Text(schema)) if schema == VOICE_CONTROL_SCHEMA_V1 => Ok(()),
+            Some(Loose::Text(schema)) if schema == version => Ok(()),
             _ => Err(refused(VoiceControlErrorCode::UnknownSchema, None)),
+        }
+    }
+
+    /// The command kind the line names, if it names one of the vocabulary's.
+    pub(crate) fn command_kind(&self) -> Option<VoiceControlCommandKind> {
+        match &self.kind {
+            Some(Loose::Text(word)) => VoiceControlCommandKind::from_word(word),
+            _ => None,
+        }
+    }
+
+    /// The event kind the line names, as written: `None` when it is missing, empty or not
+    /// a string.
+    pub(crate) fn event_kind(self) -> Option<String> {
+        match self.kind {
+            Some(Loose::Text(word)) if !word.is_empty() => Some(word),
+            _ => None,
         }
     }
 }
@@ -1119,10 +1195,19 @@ fn check_command_head(
     want: VoiceControlCommandKind,
     id: i64,
 ) -> Result<(), String> {
-    if schema != VOICE_CONTROL_SCHEMA_V1 {
-        return Err(format!(
-            "voice control command schema must be {VOICE_CONTROL_SCHEMA_V1:?}"
-        ));
+    check_command_head_in(VOICE_CONTROL_SCHEMA_V1, schema, kind, want, id)
+}
+
+/// The head of a command of `version`: its schema, its kind and its id.
+pub(crate) fn check_command_head_in(
+    version: &str,
+    schema: &str,
+    kind: VoiceControlCommandKind,
+    want: VoiceControlCommandKind,
+    id: i64,
+) -> Result<(), String> {
+    if schema != version {
+        return Err(format!("voice control command schema must be {version:?}"));
     }
     if kind != want {
         return Err(format!("voice control command kind must be {want:?}"));
@@ -1136,10 +1221,19 @@ fn check_event_head(
     want: VoiceControlEventKind,
     seq: i64,
 ) -> Result<(), String> {
-    if schema != VOICE_CONTROL_SCHEMA_V1 {
-        return Err(format!(
-            "voice control event schema must be {VOICE_CONTROL_SCHEMA_V1:?}"
-        ));
+    check_event_head_in(VOICE_CONTROL_SCHEMA_V1, schema, kind, want, seq)
+}
+
+/// The head of an event of `version`: its schema, its kind and its seq.
+pub(crate) fn check_event_head_in(
+    version: &str,
+    schema: &str,
+    kind: VoiceControlEventKind,
+    want: VoiceControlEventKind,
+    seq: i64,
+) -> Result<(), String> {
+    if schema != version {
+        return Err(format!("voice control event schema must be {version:?}"));
     }
     if kind != want {
         return Err(format!("voice control event kind must be {want:?}"));
@@ -1152,7 +1246,7 @@ fn check_event_head(
     Ok(())
 }
 
-fn check_id(id: i64) -> Result<(), String> {
+pub(crate) fn check_id(id: i64) -> Result<(), String> {
     if id_in_range(id) {
         Ok(())
     } else {
@@ -1170,16 +1264,25 @@ impl VoiceControlStartV1 {
             VoiceControlCommandKind::Start,
             self.id,
         )?;
-        check_server(&self.server)?;
-        check_channel(&self.channel)?;
-        if self.principal_id <= 0 {
-            return Err(format!(
-                "voice control start principal_id must be positive, got {}",
-                self.principal_id
-            ));
-        }
-        Ok(())
+        check_start_fields(&self.server, &self.channel, self.principal_id)
     }
+}
+
+/// What a start says beyond its head, in either version: the server, the channel and the
+/// principal. (The credential and the booleans are checked by their types.)
+pub(crate) fn check_start_fields(
+    server: &str,
+    channel: &str,
+    principal_id: i64,
+) -> Result<(), String> {
+    check_server(server)?;
+    check_channel(channel)?;
+    if principal_id <= 0 {
+        return Err(format!(
+            "voice control start principal_id must be positive, got {principal_id}"
+        ));
+    }
+    Ok(())
 }
 
 impl VoiceControlSetMuteV1 {
@@ -1292,14 +1395,22 @@ impl VoiceControlAckV1 {
             self.seq,
         )?;
         check_id(self.id)?;
-        match (self.ok, self.error) {
-            (true, Some(_)) => Err("voice control ack with ok must have no error".into()),
-            (false, error) if !error.is_some_and(VoiceControlErrorCode::is_ack_refusal) => Err(
-                "voice control ack error is not one of unknown_kind, invalid, already_started, stopping"
-                    .into(),
-            ),
-            _ => Ok(()),
-        }
+        check_ack_answer(self.ok, self.error)
+    }
+}
+
+/// An ack says why exactly when it refuses, with a code an ack may carry.
+pub(crate) fn check_ack_answer(
+    ok: bool,
+    error: Option<VoiceControlErrorCode>,
+) -> Result<(), String> {
+    match (ok, error) {
+        (true, Some(_)) => Err("voice control ack with ok must have no error".into()),
+        (false, error) if !error.is_some_and(VoiceControlErrorCode::is_ack_refusal) => Err(
+            "voice control ack error is not one of unknown_kind, invalid, already_started, stopping"
+                .into(),
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -1323,33 +1434,9 @@ impl VoiceControlStateV1 {
                 self.phase.as_str()
             ));
         }
-        let mut last = None;
-        for block in &self.blocked {
-            if last.is_some_and(|last| last >= *block) {
-                return Err(
-                    "voice control state block reasons must be listed once each, most important first"
-                        .into(),
-                );
-            }
-            last = Some(*block);
-        }
-        self.check_reason()?;
-        let problem = matches!(
-            self.ptt,
-            VoiceControlPtt::Unavailable | VoiceControlPtt::Lost
-        );
-        if problem && self.ptt_problem.is_none() {
-            return Err(format!(
-                "voice control state with ptt {:?} needs a ptt_problem",
-                self.ptt.as_str()
-            ));
-        }
-        if !problem && self.ptt_problem.is_some() {
-            return Err(format!(
-                "voice control state with ptt {:?} must have no ptt_problem",
-                self.ptt.as_str()
-            ));
-        }
+        check_blocked(&self.blocked)?;
+        check_reason(self.phase, self.reason, self.retry_in_ms)?;
+        check_ptt_problem(self.ptt, self.ptt_problem)?;
         if self.muted != self.blocks(Block::Muted) {
             return Err("voice control state muted must agree with the muted block reason".into());
         }
@@ -1403,38 +1490,78 @@ impl VoiceControlStateV1 {
         }
         Ok(())
     }
+}
 
-    fn check_reason(&self) -> Result<(), String> {
-        use VoiceControlPhase as Phase;
-        let reason = self.reason;
-        let fits = match self.phase {
-            Phase::Starting | Phase::Connecting | Phase::Connected => reason.is_none(),
-            Phase::Reconnecting => reason.is_none_or(VoiceControlReason::is_retry),
-            Phase::Stopping => reason.is_some_and(|r| r.is_stop() || r.is_failure()),
-            Phase::Stopped => reason.is_some_and(VoiceControlReason::is_stop),
-            Phase::Failed => reason.is_some_and(VoiceControlReason::is_failure),
-        };
-        if !fits {
+/// The block reasons are listed once each, most important first.
+pub(crate) fn check_blocked(blocked: &[VoiceControlBlock]) -> Result<(), String> {
+    let mut last = None;
+    for block in blocked {
+        if last.is_some_and(|last| last >= *block) {
+            return Err(
+                "voice control state block reasons must be listed once each, most important first"
+                    .into(),
+            );
+        }
+        last = Some(*block);
+    }
+    Ok(())
+}
+
+/// `ptt_problem` is there exactly when `ptt` is unavailable or lost.
+pub(crate) fn check_ptt_problem(
+    ptt: VoiceControlPtt,
+    ptt_problem: Option<VoiceControlPttProblem>,
+) -> Result<(), String> {
+    let problem = matches!(ptt, VoiceControlPtt::Unavailable | VoiceControlPtt::Lost);
+    if problem && ptt_problem.is_none() {
+        return Err(format!(
+            "voice control state with ptt {:?} needs a ptt_problem",
+            ptt.as_str()
+        ));
+    }
+    if !problem && ptt_problem.is_some() {
+        return Err(format!(
+            "voice control state with ptt {:?} must have no ptt_problem",
+            ptt.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// The reason, and `retry_in_ms`, fit the phase: §6's table, the same in both versions.
+pub(crate) fn check_reason(
+    phase: VoiceControlPhase,
+    reason: Option<VoiceControlReason>,
+    retry_in_ms: Option<i64>,
+) -> Result<(), String> {
+    use VoiceControlPhase as Phase;
+    let fits = match phase {
+        Phase::Starting | Phase::Connecting | Phase::Connected => reason.is_none(),
+        Phase::Reconnecting => reason.is_none_or(VoiceControlReason::is_retry),
+        Phase::Stopping => reason.is_some_and(|r| r.is_stop() || r.is_failure()),
+        Phase::Stopped => reason.is_some_and(VoiceControlReason::is_stop),
+        Phase::Failed => reason.is_some_and(VoiceControlReason::is_failure),
+    };
+    if !fits {
+        return Err(format!(
+            "voice control state reason {:?} does not fit phase {:?}",
+            reason.map_or("", VoiceControlReason::as_str),
+            phase.as_str()
+        ));
+    }
+    if let Some(retry_in_ms) = retry_in_ms {
+        if phase != Phase::Reconnecting || reason.is_none() {
+            return Err(
+                "voice control state retry_in_ms is only for reconnecting with a reason".into(),
+            );
+        }
+        if !(0..=VOICE_CONTROL_MAX_RETRY_IN_MS).contains(&retry_in_ms) {
             return Err(format!(
-                "voice control state reason {:?} does not fit phase {:?}",
-                reason.map_or("", VoiceControlReason::as_str),
-                self.phase.as_str()
+                "voice control state retry_in_ms must be 0 to {VOICE_CONTROL_MAX_RETRY_IN_MS}"
             ));
         }
-        if let Some(retry_in_ms) = self.retry_in_ms {
-            if self.phase != Phase::Reconnecting || reason.is_none() {
-                return Err(
-                    "voice control state retry_in_ms is only for reconnecting with a reason".into(),
-                );
-            }
-            if !(0..=VOICE_CONTROL_MAX_RETRY_IN_MS).contains(&retry_in_ms) {
-                return Err(format!(
-                    "voice control state retry_in_ms must be 0 to {VOICE_CONTROL_MAX_RETRY_IN_MS}"
-                ));
-            }
-        }
-        Ok(())
     }
+    Ok(())
 }
 
 impl VoiceControlProtocolErrorV1 {
@@ -2148,16 +2275,42 @@ mod tests {
                 ours(VoiceControlErrorCode::ALL, VoiceControlErrorCode::as_str),
             ),
         ];
-        // The command kinds that only conch.voice_control.v2 has (#653) are in the one
-        // Go vocabulary of command kinds, which serves both versions. This helper speaks
-        // v1 until #656 teaches it v2, which takes them off this list.
-        const V2_ONLY_KINDS: [&str; 2] = ["set_devices", "set_talk_mode"];
+        // The one Go vocabulary of command kinds serves both versions, and so does ours:
+        // which kinds a version has is `known_in`'s, below.
         for (go_type, ours) in table {
-            let mut theirs = words_of(go_type);
-            if go_type == "VoiceControlCommandKind" {
-                theirs.retain(|word| !V2_ONLY_KINDS.contains(&word.as_str()));
-            }
-            assert_eq!(theirs, ours, "{go_type}");
+            assert_eq!(words_of(go_type), ours, "{go_type}");
+        }
+    }
+
+    /// Which command kinds each version has, as Go's `KnownIn` lists them: v1's five, and
+    /// v2's seven. A kind is known to no other version.
+    #[test]
+    fn each_version_knows_its_own_command_kinds() {
+        use VoiceControlCommandKind::*;
+        let known = |version: &str| -> Vec<VoiceControlCommandKind> {
+            VoiceControlCommandKind::ALL
+                .iter()
+                .copied()
+                .filter(|kind| kind.known_in(version))
+                .collect()
+        };
+        assert_eq!(
+            known(VOICE_CONTROL_SCHEMA_V1),
+            [Start, SetMute, SetDeafen, GetState, Leave]
+        );
+        assert_eq!(known(VOICE_CONTROL_SCHEMA_V2), VoiceControlCommandKind::ALL);
+        assert!(known("conch.voice_control.v3").is_empty());
+        // A v2 kind in a v1 line is unknown_kind, with the line's id: refused, not fatal.
+        for kind in ["set_devices", "set_talk_mode"] {
+            let line = format!(r#"{{"schema":"conch.voice_control.v1","kind":"{kind}","id":4}}"#);
+            assert_eq!(
+                parse_command(line.as_bytes()),
+                Err(VoiceControlRefusal {
+                    code: VoiceControlErrorCode::UnknownKind,
+                    id: Some(4)
+                }),
+                "{kind}"
+            );
         }
     }
 
@@ -2341,6 +2494,14 @@ mod tests {
             compact(&fixture_text("event-hello.json"))
         );
         assert!(hello.offers(VOICE_CONTROL_SCHEMA_V1));
+        // A helper that speaks v2 too writes the same shape, in v1, offering both.
+        let both = VoiceControlHelloV1::v1_and_v2("0.2.0 (48000 Hz, 10 ms frames)");
+        let golden = std::fs::read_to_string(
+            fixtures().join("../voice-control-v2/event-hello-v1-and-v2.json"),
+        )
+        .unwrap();
+        assert_eq!(to_line(&both).unwrap(), compact(&golden));
+        assert!(both.offers(VOICE_CONTROL_SCHEMA_V1) && both.offers(VOICE_CONTROL_SCHEMA_V2));
         for bad in ["", "\u{1b}[2J", &"x".repeat(65), "é"] {
             assert!(to_line(&VoiceControlHelloV1::v1(bad)).is_err(), "{bad:?}");
         }
