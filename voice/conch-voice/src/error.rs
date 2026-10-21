@@ -56,6 +56,42 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] conch_voice_control::Error),
 
+    /// `config set` found no configuration directory to save `voice.toml` in. It never
+    /// creates one: `conch login` does, private.
+    #[error("no configuration directory: run `conch login` first")]
+    NoConfigDir,
+
+    /// `config set` found a symbolic link where `voice.toml` is. Saving through it would
+    /// write wherever it points, and saving over it would replace the link.
+    #[error("{path:?} is a link: change it by hand")]
+    ConfigLink {
+        /// The link.
+        path: PathBuf,
+    },
+
+    /// `config set` was asked to change a file that is not a configuration this program
+    /// reads. The file is left as it is.
+    #[error("{0}; fix voice.toml first")]
+    ConfigToFix(#[source] conch_voice_control::Error),
+
+    /// `config set` could not write the new `voice.toml`. The old one is as it was.
+    #[error("{path:?}: cannot save the configuration: {source}")]
+    ConfigWrite {
+        /// The file.
+        path: PathBuf,
+        /// What the operating system said.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Something else changed `voice.toml` while `config set` was saving it. What the other
+    /// writer wrote is kept.
+    #[error("{path:?} changed while saving: try again")]
+    ConfigChanged {
+        /// The file.
+        path: PathBuf,
+    },
+
     /// The login, the server address, or an answer of `conchd` that no retry can change.
     #[error(transparent)]
     Api(#[from] conch_voice_api::Error),

@@ -123,6 +123,7 @@ macro_rules! wire_words {
         }
     };
 }
+pub(crate) use wire_words;
 
 /// The value of `schema` in a v1 voice presence document.
 pub const VOICE_PRESENCE_SCHEMA_V1: &str = "conch.voice_presence.v1";
@@ -518,7 +519,7 @@ fn audience_key(audience: Option<&Audience>) -> AudienceKey {
     }
 }
 
-fn invalid(what: &'static str) -> impl Fn(String) -> Error {
+pub(crate) fn invalid(what: &'static str) -> impl Fn(String) -> Error {
     move |problem| Error::Invalid { what, problem }
 }
 

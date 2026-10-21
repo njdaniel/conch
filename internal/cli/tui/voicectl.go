@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -36,6 +37,14 @@ type voiceController interface {
 	Diagnostics() []string
 	HelperPath() string
 	Close(ctx context.Context) error
+}
+
+// voiceDevices is the part of voicehelper.OneShot the TUI uses: the one-shot
+// runs of conch-voice that list the microphones and speakers and save a
+// choice. Tests stand in for it.
+type voiceDevices interface {
+	Devices(ctx context.Context) (voicehelper.DeviceList, error)
+	SetDevice(ctx context.Context, key voicehelper.DeviceKey, name string) error
 }
 
 // voiceCloseTimeout bounds closing the supervisor: its own stop ends in
@@ -112,6 +121,19 @@ func (s VoiceSetup) factory() func(principal int64) (voiceController, error) {
 	}
 }
 
+// oneShot makes the runner of /voice devices, mic and speakers, or says why
+// there can be none. Listing and saving need no login, so unlike factory it
+// does not ask for one; the TUI's token is given only to be kept out of what
+// the runs report, and is never passed on.
+func (s VoiceSetup) oneShot() (voiceDevices, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return voicehelper.NewOneShot(voicehelper.Profile{
+		Server: s.server, ConfigDir: s.configDir, Credential: s.credential, Token: s.token,
+	}, voicehelper.Options{HelperPath: s.helperPath}), nil
+}
+
 // voiceOwner holds the TUI's one supervisor. Like ownSession it is shared by
 // every copy of the model, so that Run can close it after the program has
 // returned.
@@ -133,6 +155,10 @@ type voiceOwner struct {
 	// exit waits for them (closeVoice).
 	closing int
 	closed  sync.WaitGroup
+	// devices runs conch-voice once to list or save devices; nil, with
+	// devicesErr, when this terminal's setup cannot offer voice at all.
+	devices    voiceDevices
+	devicesErr error
 }
 
 var (
@@ -268,6 +294,16 @@ type voiceCtl struct {
 	// last read them, for its page.
 	path string
 	diag []string
+	// devices is the device list /voice devices last read, nil before the
+	// first: /voice mic and /voice speakers number from it, and /voice status
+	// names the choices from it. devDiag is what conch-voice wrote on its
+	// standard error while listing, sanitized.
+	devices *schema.VoiceDevicesV1
+	devDiag []string
+	// rejoinCancel ends the rejoin in flight after a save, if any: a
+	// /voice leave typed meanwhile calls it, so that the rejoin never joins
+	// after the person asked to leave.
+	rejoinCancel context.CancelFunc
 }
 
 // voiceLeft is a session this TUI left: the channel, the account, and the
@@ -320,7 +356,8 @@ func (m Model) justLeft(room schema.VoicePresenceRoom, p schema.VoiceParticipant
 // WithVoice gives the model voice controls with setup. Without it /voice says
 // this terminal does not offer voice.
 func (m Model) WithVoice(setup VoiceSetup) Model {
-	m.vc.owner = &voiceOwner{make: setup.factory()}
+	devices, err := setup.oneShot()
+	m.vc.owner = &voiceOwner{make: setup.factory(), devices: devices, devicesErr: err}
 	return m
 }
 
@@ -330,12 +367,17 @@ type voiceStatusMsg struct {
 	st     voicehelper.Status
 }
 
-// voiceDone is the end of one call to the supervisor numbered serial.
+// voiceDone is the end of one call to the supervisor numbered serial, or of
+// one one-shot run of conch-voice (opDevices, opSaveMic, opSaveSpeakers), which
+// belongs to no supervisor.
 type voiceDone struct {
 	serial  int
 	op      voiceOp
 	channel string
 	err     error
+	// list is what opDevices read; name is what a save saved.
+	list voicehelper.DeviceList
+	name string
 }
 
 // voicePage is what /voice status read from the supervisor.
@@ -356,6 +398,10 @@ const (
 	opDeafenOn
 	opDeafenOff
 	opClose
+	opDevices
+	opSaveMic
+	opSaveSpeakers
+	opRejoin
 )
 
 // asked is how a command in flight is shown: what was asked, with an
@@ -364,7 +410,8 @@ func (op voiceOp) asked(channel string) string {
 	return map[voiceOp]string{
 		opJoin: "joining #" + sanitize(channel), opLeave: "leaving", opRetry: "retrying",
 		opMuteOn: "muting", opMuteOff: "unmuting", opDeafenOn: "deafening", opDeafenOff: "undeafening",
-		opClose: "stopping voice",
+		opClose: "stopping voice", opDevices: "listing devices", opSaveMic: "saving the microphone",
+		opSaveSpeakers: "saving the speakers", opRejoin: "rejoining #" + sanitize(channel),
 	}[op]
 }
 
@@ -431,18 +478,37 @@ func voiceClosing(ctl voiceController, closed func()) tea.Cmd {
 }
 
 func (m Model) voiceDone(msg voiceDone) (tea.Model, tea.Cmd) {
-	if msg.op == opClose {
+	switch msg.op {
+	case opClose:
 		return m, nil
+	case opDevices, opSaveMic, opSaveSpeakers:
+		return m.deviceDone(msg)
 	}
 	// The answer of a supervisor dropped since (sign-out, another account)
 	// is about nothing on screen any more.
 	if _, serial, _ := m.vc.owner.current(); serial != msg.serial {
 		return m, nil
 	}
+	if msg.op == opRejoin {
+		m.vc.rejoinCancel = nil
+		if errors.Is(msg.err, context.Canceled) {
+			// A /voice leave ended it; the leave says how that went.
+			return m, nil
+		}
+	}
 	m.vc.busy = ""
 	switch {
+	case msg.err != nil && msg.op == opRejoin:
+		text := voiceErrText(msg.err)
+		var e *voicehelper.Error
+		if errors.As(msg.err, &e) && voicehelper.Retryable(e.Reason) {
+			text += " · /voice retry"
+		}
+		m.setStatus(modeChannels, text)
 	case msg.err != nil:
 		m.setStatus(modeChannels, voiceErrText(msg.err))
+	case msg.op == opRejoin:
+		m.setStatus(modeChannels, "voice: rejoined #"+sanitize(msg.channel)+" with the new choice; the strip shows its state")
 	case msg.op == opJoin, msg.op == opRetry:
 		m.setStatus(modeChannels, "voice: started for #"+sanitize(msg.channel)+"; the strip shows its state")
 	case msg.op == opLeave:
@@ -490,7 +556,7 @@ func (m Model) voiceIdentity(principal int64) (Model, tea.Cmd) {
 	return m, voiceClosing(c, closed)
 }
 
-const voiceUsage = "usage: /voice join [channel] | leave | mute on|off | deafen on|off | retry | status | help"
+const voiceUsage = "usage: /voice join [channel] | leave | mute on|off | deafen on|off | retry | devices | mic <n>|<name>|default | speakers <n>|<name>|default | status | help"
 
 // voiceCommand handles "/voice ...". Every refusal leaves the input as typed;
 // a command that goes ahead clears it.
@@ -541,6 +607,16 @@ func (m Model) voiceCommand(rest string) (tea.Model, tea.Cmd) {
 		return m.voiceSet(map[bool]voiceOp{true: opDeafenOn, false: opDeafenOff}[on])
 	case "retry":
 		return m.voiceTryAgain()
+	case "devices":
+		if len(args) != 0 {
+			m.setStatus(modeChannels, "usage: /voice devices")
+			return m, nil
+		}
+		return m.voiceListDevices()
+	case "mic":
+		return m.voiceSaveDevice(opSaveMic, afterWord(rest))
+	case "speakers":
+		return m.voiceSaveDevice(opSaveSpeakers, afterWord(rest))
 	case "status":
 		ctl, _, _ := m.vc.owner.current()
 		m.input = ""
@@ -638,7 +714,12 @@ func (m Model) voiceLeave() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Leave is never refused for a command in flight: it is how a join that
-	// hangs is given up on.
+	// hangs is given up on. A rejoin after a save is ended too, so that it
+	// cannot join after this.
+	if m.vc.rejoinCancel != nil {
+		m.vc.rejoinCancel()
+		m.vc.rejoinCancel = nil
+	}
 	m.input = ""
 	m.vc.left = m.leaving()
 	m.vc.busy = opLeave.asked("")
@@ -679,6 +760,277 @@ func (m Model) voiceTryAgain() (tea.Model, tea.Cmd) {
 	m.vc.busy = opRetry.asked("")
 	m.setStatus(modeChannels, "voice: retrying #"+sanitize(st.Channel)+"…")
 	return m, m.voiceCall(ctl, serial, opRetry, st.Channel)
+}
+
+// afterWord is rest without its first word: the argument of /voice mic and
+// /voice speakers, kept whole, since a device name may hold spaces.
+func afterWord(rest string) string {
+	i := strings.IndexFunc(rest, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[i:])
+}
+
+// noDevicesText is why this terminal cannot list or save devices.
+func (o *voiceOwner) noDevicesText() string {
+	if o.devicesErr != nil {
+		return voiceErrText(o.devicesErr)
+	}
+	return "voice: this terminal does not offer voice"
+}
+
+// voiceListDevices runs `conch-voice devices --json` in a command; its answer
+// opens the devices page.
+func (m Model) voiceListDevices() (tea.Model, tea.Cmd) {
+	run := m.vc.owner.devices
+	switch {
+	case run == nil:
+		m.setStatus(modeChannels, m.vc.owner.noDevicesText())
+		return m, nil
+	case m.vc.busy != "":
+		m.setStatus(modeChannels, "voice: still "+m.vc.busy+"…; wait for it")
+		return m, nil
+	}
+	m.input = ""
+	m.vc.busy = opDevices.asked("")
+	m.setStatus(modeChannels, "voice: listing devices…")
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		list, err := run.Devices(ctx)
+		return voiceDone{op: opDevices, list: list, err: err}
+	}
+}
+
+// deviceKind is the words and the list of /voice mic or /voice speakers.
+type deviceKind struct {
+	command string // as typed after /voice
+	one     string // one device, for a number not in the list
+	saved   string // what the status line says was saved
+	key     voicehelper.DeviceKey
+	mic     bool
+}
+
+// kindOf is the device a save is for: the speakers for opSaveSpeakers, else
+// the microphone.
+func kindOf(op voiceOp) deviceKind {
+	if op == opSaveSpeakers {
+		return deviceKind{command: "speakers", one: "speaker", saved: "speakers", key: voicehelper.DeviceOutput}
+	}
+	return deviceKind{command: "mic", one: "microphone", saved: "microphone", key: voicehelper.DeviceInput, mic: true}
+}
+
+// listed is the list of k's devices in d, and the one voice.toml names.
+func (k deviceKind) listed(d *schema.VoiceDevicesV1) (devs []schema.VoiceDevice, configured string) {
+	if k.mic {
+		return d.Microphones, d.ConfiguredInput
+	}
+	return d.Speakers, d.ConfiguredOutput
+}
+
+// voiceSaveDevice saves a microphone or speakers in voice.toml with
+// `conch-voice config set`, in a command: number n of the last list shown, a
+// device name, or PipeWire's default. A number with no list shown, or one not
+// in it, and a name that could not be saved, are refused here.
+func (m Model) voiceSaveDevice(op voiceOp, arg string) (tea.Model, tea.Cmd) {
+	k := kindOf(op)
+	run := m.vc.owner.devices
+	name := arg
+	switch {
+	case arg == "":
+		m.setStatus(modeChannels, "usage: /voice "+k.command+" <n>|<name>|default")
+		return m, nil
+	case run == nil:
+		m.setStatus(modeChannels, m.vc.owner.noDevicesText())
+		return m, nil
+	case strings.Trim(arg, "0123456789") == "":
+		// A number, which a name made of digits alone cannot be told from:
+		// the number wins.
+		if m.vc.devices == nil {
+			m.setStatus(modeChannels, "voice: list them first: /voice devices")
+			return m, nil
+		}
+		devs, _ := k.listed(m.vc.devices)
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 1 || n > len(devs) {
+			m.setStatus(modeChannels, "voice: the last list has no "+k.one+" "+fitCells(arg, 12)+"; /voice devices lists them again")
+			return m, nil
+		}
+		name = devs[n-1].Name
+	case !voicehelper.DeviceNameFits(name):
+		m.setStatus(modeChannels, "voice: "+strconv.Quote(fitCells(sanitize(name), 40))+" cannot be saved in voice.toml: a device name holds no quotation mark, backslash or control character")
+		return m, nil
+	}
+	if m.vc.busy != "" {
+		m.setStatus(modeChannels, "voice: still "+m.vc.busy+"…; wait for it")
+		return m, nil
+	}
+	m.input = ""
+	m.vc.busy = op.asked("")
+	m.setStatus(modeChannels, "voice: "+op.asked("")+"…")
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		return voiceDone{op: op, name: name, err: run.SetDevice(ctx, k.key, name)}
+	}
+}
+
+// deviceDone is the end of a one-shot run: the devices page for a list, and
+// for a save the status line and, with voice joined, the rejoin that applies
+// it.
+func (m Model) deviceDone(msg voiceDone) (tea.Model, tea.Cmd) {
+	// A /voice leave typed meanwhile put its own words there; they stay.
+	if m.vc.busy == msg.op.asked("") {
+		m.vc.busy = ""
+	}
+	if msg.err != nil {
+		m.setStatus(modeChannels, voiceDeviceErrText(msg.op, msg.err))
+		return m, nil
+	}
+	if msg.op == opDevices {
+		doc := msg.list.Devices
+		m.vc.devices, m.vc.devDiag = &doc, msg.list.Diagnostics
+		m.help, m.helpTop, m.helpTopic = true, 0, topicVoiceDevices
+		m.setStatus(modeChannels, "voice: devices listed; /voice mic <n> or /voice speakers <n> chooses one")
+		return m, nil
+	}
+	k := kindOf(msg.op)
+	saved := m.deviceWords(k, msg.name)
+	if m.vc.devices != nil {
+		// What voice.toml names now, for the marks and /voice status, until
+		// the next list. A save succeeds only with a file that could be read,
+		// so the configuration is ok.
+		d := *m.vc.devices
+		name := msg.name
+		if name == voicehelper.DefaultDevice {
+			name = ""
+		}
+		if k.mic {
+			d.ConfiguredInput = name
+		} else {
+			d.ConfiguredOutput = name
+		}
+		d.Config = schema.VoiceDevicesConfigOK
+		m.vc.devices = &d
+	}
+	ctl, serial, _ := m.vc.owner.current()
+	st := m.vc.status
+	switch st.Phase {
+	case voicehelper.PhaseStarting, voicehelper.PhaseConnecting, voicehelper.PhaseConnected, voicehelper.PhaseReconnecting:
+		if ctl == nil || m.vc.busy != "" {
+			break
+		}
+		// The helper reads [audio] only as it starts (§9): it is left and
+		// joined again to use the choice.
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.vc.rejoinCancel = cancel
+		m.vc.busy = opRejoin.asked(st.Channel)
+		m.setStatus(modeChannels, "voice: "+k.saved+" saved: rejoining #"+sanitize(st.Channel)+"'s voice…")
+		return m, voiceRejoin(ctx, cancel, ctl, serial, st.Channel)
+	}
+	m.setStatus(modeChannels, "voice: "+k.saved+" saved: "+saved)
+	return m, nil
+}
+
+// voiceRejoin applies a saved device to the voice running: leave, then join
+// the same channel, in one command. The supervisor keeps the mute and deafen
+// the helper last confirmed for the next start, so they carry over. Leaving
+// ends any transmission with no release tail (§8.2), and a talk key held
+// through the rejoin needs a fresh press (UX-10). A /voice leave typed
+// meanwhile ends ctx: a join that has not begun then never does, and one under
+// way is stopped.
+func voiceRejoin(ctx context.Context, cancel context.CancelFunc, ctl voiceController, serial int, channel string) tea.Cmd {
+	return func() tea.Msg {
+		defer cancel()
+		err := ctl.Leave(ctx)
+		if err == nil {
+			// Left, and then a /voice leave: no join.
+			err = ctx.Err()
+		}
+		if err == nil {
+			err = ctl.Join(ctx, channel)
+		}
+		return voiceDone{serial: serial, op: opRejoin, channel: channel, err: err}
+	}
+}
+
+// deviceWords is how a saved name is shown: PipeWire's default, or the device
+// as the last list shows it.
+func (m Model) deviceWords(k deviceKind, name string) string {
+	if name == voicehelper.DefaultDevice {
+		return "PipeWire default"
+	}
+	if m.vc.devices != nil {
+		devs, _ := k.listed(m.vc.devices)
+		for _, dev := range devs {
+			if dev.Name == name {
+				return deviceLabel(dev)
+			}
+		}
+	}
+	return sanitize(name)
+}
+
+// deviceLabel is a device for the terminal: its description, with its
+// node.name when that differs, or the name alone for a device with no
+// description (a virtual microphone, often). Both were held to the schema's
+// rules when the list was read; they are made safe again here, as message
+// text is.
+func deviceLabel(dev schema.VoiceDevice) string {
+	name := sanitize(dev.Name)
+	desc := strings.TrimSpace(sanitize(dev.Description))
+	if desc == "" || desc == name {
+		return name
+	}
+	return desc + " (" + name + ")"
+}
+
+// voiceDeviceErrText is a failed list or save for the status line.
+func voiceDeviceErrText(op voiceOp, err error) string {
+	save := op != opDevices
+	var e *voicehelper.Error
+	var re *voicehelper.RunError
+	var text string
+	switch {
+	case errors.As(err, &e) && (e.Reason == voicehelper.ReasonHelperNotFound || e.Reason == voicehelper.ReasonHelperUntrusted):
+		// The join's words, which say where to put conch-voice.
+		return voiceErrText(err)
+	case errors.Is(err, context.Canceled):
+		text = "voice: canceled"
+	case errors.Is(err, voicehelper.ErrBadDeviceName):
+		text = "voice: not saved: a device name holds no quotation mark, backslash or control character"
+	case errors.As(err, &re):
+		switch re.Reason {
+		case voicehelper.RunUnsupported:
+			if save {
+				text = "voice: not saved: this conch-voice cannot save devices: install the conch-voice from the same release as conch"
+			} else {
+				text = "voice: this conch-voice cannot list devices: install the conch-voice from the same release as conch"
+			}
+		case voicehelper.RunTimedOut:
+			if save {
+				text = "voice: conch-voice did not finish saving within 10 s and was stopped; /voice devices shows what voice.toml names"
+			} else {
+				text = "voice: conch-voice did not list the devices within 10 s and was stopped"
+			}
+		case voicehelper.RunTooMuchOutput:
+			text = "voice: conch-voice wrote more than a device list can hold; nothing was read"
+		case voicehelper.RunBadOutput:
+			text = "voice: conch-voice's device list was not valid and was not read; install the conch-voice from the same release as conch"
+		default:
+			line := strings.TrimPrefix(re.Line, "conch-voice: ")
+			if line == "" {
+				line = "conch-voice failed (exit status " + strconv.Itoa(re.ExitCode) + ")"
+			}
+			if save {
+				text = "voice: not saved: " + line
+			} else {
+				text = "voice: the devices could not be listed: " + line
+			}
+		}
+	default:
+		text = "voice: " + strings.TrimPrefix(err.Error(), "voicehelper: ")
+	}
+	return sanitize(text)
 }
 
 // openVoicePage opens the /voice status page with what was read.
@@ -950,6 +1302,10 @@ func (m Model) voiceStatusLines(cols int) []string {
 			add("retry", map[bool]string{true: "/voice retry may fix this", false: "a retry cannot fix this"}[st.Retryable])
 		}
 	}
+	if m.vc.owner != nil {
+		add("chosen microphone", m.chosenWords(kindOf(opSaveMic)))
+		add("chosen speakers", m.chosenWords(kindOf(opSaveSpeakers)))
+	}
 	if st.HelperVersion != "" {
 		add("helper version", sanitize(st.HelperVersion))
 	}
@@ -983,6 +1339,128 @@ func (m Model) voiceStatusLines(cols int) []string {
 	return lines
 }
 
+// chosenWords is the device voice.toml names, as the last list read showed it:
+// PipeWire's default when it names none, and the missing-device words of UX-11
+// when it names one the list does not have.
+func (m Model) chosenWords(k deviceKind) string {
+	d := m.vc.devices
+	switch {
+	case d == nil:
+		return "not read yet: /voice devices"
+	case d.Config == schema.VoiceDevicesConfigRefused:
+		return "not known: voice.toml was refused"
+	}
+	devs, configured := k.listed(d)
+	if configured == "" {
+		return "PipeWire default"
+	}
+	for _, dev := range devs {
+		if dev.Name == configured {
+			return deviceLabel(dev)
+		}
+	}
+	return sanitize(configured) + ": " + missingWords(k)
+}
+
+// missingWords is said of a device voice.toml names and PipeWire does not
+// have now. No microphone stands in for a missing one (conch-voice discards a
+// stand-in's audio), so nothing is sent; what conch-voice plays instead of
+// missing speakers is not this list's to say.
+func missingWords(k deviceKind) string {
+	if k.mic {
+		return "chosen in voice.toml, not available now: nothing is sent until it is"
+	}
+	return "chosen in voice.toml, not available now"
+}
+
+// voiceDevicesLines is the /voice devices page in lines of at most cols cells:
+// the microphones and the speakers, numbered as /voice mic and /voice speakers
+// take them, each with its marks; a device voice.toml names that is not
+// listed; a plain line for each way the list is incomplete; and what
+// conch-voice wrote on its standard error. Device-supplied text is made safe
+// again here, though the schema's reader has already held it to its rules.
+func (m Model) voiceDevicesLines(cols int) []string {
+	var lines []string
+	note := func(s string) {
+		for _, w := range wrapWords(s, max(1, cols-1), max(1, cols-1)) {
+			lines = append(lines, " "+statusStyle.Render(w))
+		}
+	}
+	d := m.vc.devices
+	if d == nil {
+		note("No list read yet: /voice devices lists the microphones and speakers.")
+		return lines
+	}
+	known := d.Config != schema.VoiceDevicesConfigRefused
+	section := func(title string, k deviceKind) {
+		devs, configured := k.listed(d)
+		lines = append(lines, " "+titleStyle.Render(title))
+		numW := len(strconv.Itoa(max(1, len(devs))))
+		row := func(num, label string) {
+			width := max(1, cols-numW-3)
+			for i, w := range wrapWords(label, width, width) {
+				if i > 0 {
+					num = ""
+				}
+				lines = append(lines, " "+activeStyle.Render(padCells(num, numW))+"  "+w)
+			}
+		}
+		if len(devs) == 0 {
+			row("", "none")
+		}
+		listed := false
+		for i, dev := range devs {
+			label := deviceLabel(dev)
+			if dev.Default {
+				label += " [default]"
+			}
+			if known && configured != "" && dev.Name == configured {
+				label += " [chosen]"
+				listed = true
+			}
+			row(strconv.Itoa(i+1), label)
+		}
+		switch {
+		case !known:
+		case configured == "":
+			row("", "chosen: PipeWire default, followed as it changes")
+		case !listed:
+			// UX-11: the missing device is named, and nothing else is
+			// marked as chosen in its place.
+			row("", sanitize(configured)+" [chosen]")
+			row("", missingWords(k))
+		}
+		lines = append(lines, "")
+	}
+	section("Microphones", kindOf(opSaveMic))
+	section("Speakers", kindOf(opSaveSpeakers))
+	if d.PipeWire == schema.VoiceDevicesPipeWireUnavailable {
+		note("PipeWire could not be reached, so nothing is listed: voice needs PipeWire on the machine conch runs on.")
+	} else if !d.Synced {
+		note("PipeWire did not finish listing in time: the lists may be incomplete; /voice devices reads them again.")
+	}
+	if n := d.UnshownMicrophones; n > 0 {
+		note(strconv.Itoa(n) + " more microphone(s) not shown: their names cannot be saved in voice.toml.")
+	}
+	if n := d.UnshownSpeakers; n > 0 {
+		note(strconv.Itoa(n) + " more speaker(s) not shown: their names cannot be saved in voice.toml.")
+	}
+	switch d.Config {
+	case schema.VoiceDevicesConfigRefused:
+		note("voice.toml was refused, so what it chooses is not known and nothing can be saved: fix it by hand (conch-voice's message is below).")
+	case schema.VoiceDevicesConfigNone:
+		note("There is no configuration directory, so nothing can be saved: set CONCH_CONFIG_DIR, XDG_CONFIG_HOME or HOME.")
+	}
+	note("Choose with /voice mic <n>|<name>|default and /voice speakers <n>|<name>|default. In voice, saving rejoins to use it.")
+	if len(m.vc.devDiag) > 0 {
+		lines = append(lines, "", " "+titleStyle.Render("conch-voice said"))
+		for _, l := range m.vc.devDiag {
+			lines = append(lines, " "+statusStyle.Render(fitCells(sanitize(l), max(1, cols-1))))
+		}
+	}
+	return lines
+}
+
 // voiceHelpEntries and voiceHelpNotes are the /voice help page.
 func voiceHelpEntries() []helpEntry {
 	return []helpEntry{
@@ -991,7 +1469,10 @@ func voiceHelpEntries() []helpEntry {
 		{"/voice mute on|off", "mute or unmute your microphone"},
 		{"/voice deafen on|off", "stop or start hearing others; undeafening leaves mute as it was"},
 		{"/voice retry", "try again after a failure that a new attempt could fix"},
-		{"/voice status", "everything voice is doing, conch-voice's version and path, and its log"},
+		{"/voice devices", "list the microphones and speakers, numbered, with PipeWire's default and the ones chosen in voice.toml"},
+		{"/voice mic n|name|default", "save the microphone in voice.toml: number n of the last list, a device name, or PipeWire's default; in voice, voice rejoins to use it"},
+		{"/voice speakers n|name|default", "save the speakers the same way"},
+		{"/voice status", "everything voice is doing, the chosen devices, conch-voice's version and path, and its log"},
 		{"/voice help", "this page"},
 	}
 }
@@ -1001,6 +1482,7 @@ func voiceHelpNotes() []string {
 		"Talking: hold the talk key that conch-voice reads from your keyboard, set under [keys] in voice.toml (conch-voice devices lists keyboards; conch-voice keys shows key codes). Nothing typed here transmits.",
 		"The microphone is open while you are in voice (\"mic on\"); audio leaves only while the talk key is held (\"TALKING\").",
 		"Over SSH: conch-voice runs on the machine where conch runs and uses that machine's microphone, speakers and keyboard, not those of the computer you connect from. No audio is carried over SSH.",
+		"Devices: the names are PipeWire's, and the devices are those of the machine conch runs on. A virtual microphone that another program makes is listed as a microphone while that program is running. Rejoining to use a new device ends any transmission; press the talk key again.",
 		"conch-voice is found through CONCH_VOICE_HELPER (an absolute path), then beside conch, then in PATH; conch and conch-voice must come from the same release. Voice needs Linux with PipeWire.",
 	}
 }

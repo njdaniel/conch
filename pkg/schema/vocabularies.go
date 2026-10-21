@@ -111,6 +111,10 @@ var Vocabularies = map[string][]string{
 		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
 		VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
 	),
+	"VoiceDevicesConfig": values(
+		VoiceDevicesConfigOK, VoiceDevicesConfigMissing, VoiceDevicesConfigRefused, VoiceDevicesConfigNone,
+	),
+	"VoiceDevicesPipeWire": values(VoiceDevicesPipeWireOK, VoiceDevicesPipeWireUnavailable),
 	"VoiceShareEndReason": values(
 		VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft,
 		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,

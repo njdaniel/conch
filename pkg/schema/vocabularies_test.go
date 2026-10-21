@@ -195,6 +195,8 @@ var validators = map[string]func(string) bool{
 	"VoiceControlPTT":          validOf[VoiceControlPTT](),
 	"VoiceControlPTTProblem":   validOf[VoiceControlPTTProblem](),
 	"VoiceControlReason":       validOf[VoiceControlReason](),
+	"VoiceDevicesConfig":       validOf[VoiceDevicesConfig](),
+	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 }

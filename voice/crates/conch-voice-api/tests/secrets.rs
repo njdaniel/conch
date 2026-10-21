@@ -17,7 +17,8 @@ use conch_voice_api::{
     Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
     ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlCommand,
     VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlProtocolErrorV1, VoiceControlRefusal,
-    VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
+    VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant,
+    VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
     VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_event,
 };
 use serde_json::json;
@@ -103,6 +104,25 @@ fn session_json() -> serde_json::Value {
     })
 }
 
+fn devices() -> VoiceDevicesV1 {
+    VoiceDevicesV1 {
+        schema: conch_voice_api::VOICE_DEVICES_SCHEMA_V1.into(),
+        pipewire: VoiceDevicesPipeWire::Ok,
+        synced: true,
+        microphones: vec![VoiceDevice {
+            name: "speech_out".into(),
+            description: String::new(),
+            default: false,
+        }],
+        speakers: Vec::new(),
+        unshown_microphones: 0,
+        unshown_speakers: 0,
+        config: VoiceDevicesConfig::Ok,
+        configured_input: Some("speech_out".into()),
+        configured_output: None,
+    }
+}
+
 fn presence() -> VoicePresenceV1 {
     VoicePresenceV1 {
         schema: "conch.voice_presence.v1".into(),
@@ -186,6 +206,11 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         debug("VoiceParticipant", &presence().rooms[0].participants[0]),
         debug("VoicePresenceRoom", &presence().rooms[0]),
         debug("VoicePresenceV1", &presence()),
+        // Names and descriptions are device-supplied; the document holds nothing else.
+        debug("VoiceDevicesV1", &devices()),
+        debug("VoiceDevice", &devices().microphones[0]),
+        debug("VoiceDevicesPipeWire", &VoiceDevicesPipeWire::Ok),
+        debug("VoiceDevicesConfig", &VoiceDevicesConfig::Refused),
         debug("VoiceTransmitReportV1", &report),
         debug("VoiceTransmitState", &VoiceTransmitState::Stopped),
         debug(

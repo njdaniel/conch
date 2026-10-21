@@ -4,7 +4,8 @@
 //! commands, the conditions a transmission depends on (connected, allowed to publish, a
 //! microphone, a key device), connection outcomes, and the time, which every call is given.
 //! Output: commands for the transmit gate, transmit reports to send, what to show, and what
-//! to do after a disconnect (stop, ask for a session now, or retry after a wait).
+//! to do after a disconnect (stop, ask for a session now, or retry after a wait); and the
+//! configuration file's text with one `[audio]` device changed, for the binary to save.
 //! Owns: the push-to-talk state machine, with `max_transmit_secs`, and the connection
 //! policy. It keeps nothing about any key other than the configured ones.
 //!
@@ -14,6 +15,8 @@
 //! other crates' types onto them.
 //!
 //! - [`Config`]: the TOML configuration, its defaults, and layers of overrides.
+//! - [`set_audio_value`]: the file's text with the microphone or the speakers changed, and
+//!   nothing else.
 //! - [`KeyDecoder`]: `input_event` records reduced to [`KeyEvent`]s of the configured keys.
 //! - [`Ptt`]: the push-to-talk state machine.
 //! - [`ConnectionPolicy`]: what to do after each [`Outcome`].
@@ -39,8 +42,9 @@ mod policy;
 mod ptt;
 
 pub use config::{
-    AudioConfig, Config, ConfigOverrides, DEFAULT_MAX_TRANSMIT_SECS, DEFAULT_RELEASE_TAIL_MS,
-    DEFAULT_SERVER, KeysConfig, MAX_MAX_TRANSMIT_SECS, MAX_RELEASE_TAIL_MS,
+    AudioConfig, AudioKey, Config, ConfigOverrides, DEFAULT_MAX_TRANSMIT_SECS,
+    DEFAULT_RELEASE_TAIL_MS, DEFAULT_SERVER, KeysConfig, MAX_MAX_TRANSMIT_SECS,
+    MAX_RELEASE_TAIL_MS, set_audio_value,
 };
 pub use error::Error;
 pub use keys::{KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent};
