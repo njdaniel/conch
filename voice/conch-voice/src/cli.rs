@@ -39,6 +39,7 @@ use conch_voice_control::{AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, Key
 use log::LevelFilter;
 
 use crate::error::Error;
+use crate::secrets::one_line;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
@@ -415,6 +416,28 @@ fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
             "the name must not be empty, and must hold no quotation mark, backslash or control character: use one `conch-voice devices` lists, or `default`",
         )),
     }
+}
+
+/// What clap's usage error says, with every control and bidirectional character of the
+/// arguments it quotes replaced by a space (the rule of `secrets::one_line`). Clap prints a
+/// rejected argument as it was typed, so an escape sequence or a line break in it would
+/// reach the terminal. The arguments that hold such a character are found first and
+/// replaced whole, so a line break inside one cannot start a line of its own; the line
+/// breaks clap itself writes are kept, and everything else reads as clap wrote it.
+#[must_use]
+pub fn usage_error_text(error: &clap::Error, args: &[OsString]) -> String {
+    let mut text = error.render().to_string();
+    for arg in args {
+        let arg = arg.to_string_lossy();
+        let clean = one_line(&arg);
+        if clean != arg {
+            text = text.replace(arg.as_ref(), &clean);
+        }
+    }
+    text.split('\n')
+        .map(one_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Parses a command line. `--help` and `--version` come back as errors of clap's, which
