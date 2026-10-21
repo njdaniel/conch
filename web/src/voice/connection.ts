@@ -23,6 +23,17 @@
 // new one, and a share in progress is resumed by its sharer (share.ts). A page
 // watching it keeps watching: the share went with the room, so it waits a
 // while for the same person's share to come back instead of letting go.
+//
+// The microphone is the person's choice (issue #658), handed to every new
+// room before it connects. It is kept by device id and by name: a browser
+// may give a device a new id on a reload (Chromium does while the site's
+// permission is not kept), and a choice whose id is no longer listed is the
+// one device listed under its name, if exactly one is. A switch shuts and
+// blocks the gate while the device changes, so a press held across it ends
+// and nothing is sent until a new press. A microphone lost (its capture
+// ended, or the device chosen is no longer listed) is missing: the gate stays
+// blocked, and nothing is captured, on this connection or the next, until
+// the person chooses one.
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
@@ -65,6 +76,20 @@ function errorName(err: unknown): unknown {
   return typeof err === 'object' && err !== null && 'name' in err ? err.name : undefined;
 }
 
+// What a join says when the microphone chosen is not there (issue #658). The
+// choice is let go, so joining again uses the system default.
+export const chosenGone = 'The microphone you chose is not connected. Connect it, or join again to use the system default.';
+
+// The names of a capture that failed because the device asked for is not there.
+const goneErrors: ReadonlySet<string> = new Set(['NotFoundError', 'OverconstrainedError']);
+
+// A microphone the browser lists, or the one chosen: its device id and its
+// name.
+export interface Microphone {
+  readonly id: string;
+  readonly label: string;
+}
+
 export interface RoomEvents {
   readonly onReconnecting: () => void;
   readonly onReconnected: () => void;
@@ -75,6 +100,11 @@ export interface RoomEvents {
   readonly onScreenEnded: (cause: ScreenEnd) => void;
   // Which of a watched share's tracks have arrived.
   readonly onShareTracks: (tracks: ShareTracks) => void;
+  // The microphone was lost: its capture ended, or the device chosen is no
+  // longer listed. The room has stopped the capture.
+  readonly onMicrophoneLost: () => void;
+  // The browser's devices changed: microphones came or went.
+  readonly onDevicesChanged: () => void;
 }
 
 export interface ShareTracks {
@@ -98,6 +128,18 @@ export interface Room extends ShareRoom {
   // Captures and publishes the microphone, muted, on a connection made
   // without it (watch only).
   publishMicrophone: () => Promise<void>;
+  // The microphone to capture: a device by id, captured exactly or not at
+  // all, or null for the system default. Set before connecting.
+  setMicrophone: (choice: string | null) => void;
+  // Moves the microphone to another device, keeping its publication and its
+  // mute; or captures and publishes it if nothing is. It rejects, with
+  // nothing captured, if the device cannot be had.
+  switchMicrophone: (choice: string | null) => Promise<void>;
+  // The microphones the browser lists, read without asking for any device;
+  // null when it does not name them.
+  microphones: () => Promise<readonly Microphone[] | null>;
+  // The device the microphone is captured from, or null while none is.
+  microphoneInUse: () => string | null;
   // Subscribes to a share's picture and sound, or lets them go. Microphones
   // are always subscribed.
   setWatching: (on: boolean) => void;
@@ -134,6 +176,16 @@ export interface VoiceState {
   // have arrived.
   readonly watching: boolean;
   readonly shareTracks: ShareTracks;
+  // The microphones to choose from, or null while they are not read (watch
+  // only, listen only) or the browser does not name them.
+  readonly microphones: readonly Microphone[] | null;
+  // The microphone chosen; null is the system default.
+  readonly microphone: Microphone | null;
+  // The device the capture is on, by id, or null while nothing is captured.
+  readonly inUse: string | null;
+  // The microphone was lost, or a switch failed: nothing is captured and the
+  // gate is blocked until the person chooses a microphone.
+  readonly missing: boolean;
 }
 
 export interface VoiceEnv {
@@ -146,6 +198,8 @@ export interface VoiceEnv {
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   readonly gate?: GateOptions;
+  // The microphone chosen earlier in this tab, if any (issue #658).
+  readonly microphone?: Microphone | null;
 }
 
 // How long the SDK's own reconnect is allowed before the client goes back to
@@ -179,6 +233,10 @@ export const initialVoice: VoiceState = {
   share: idleShare,
   watching: false,
   shareTracks: { video: false, audio: false },
+  microphones: null,
+  microphone: null,
+  inUse: null,
+  missing: false,
 };
 
 const noTracks: ShareTracks = { video: false, audio: false };
@@ -216,10 +274,15 @@ export class VoiceClient {
   private steps: Promise<void> = Promise.resolve();
   private talk = 0;
   private edge = 0;
+  // Whether a switch of microphone is under way, and which: the gate is
+  // blocked meanwhile, and only the last one's outcome counts.
+  private switching = false;
+  private switches = 0;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
     this.now = now;
+    this.state = { ...initialVoice, microphone: env.microphone ?? null };
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
@@ -265,7 +328,9 @@ export class VoiceClient {
     if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
     this.channel = channel;
     this.failures = 0;
-    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, watching: false, shareTracks: noTracks });
+    // Joining is the person's own choice: a microphone missing before is
+    // asked for again, as chosen.
+    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, watching: false, shareTracks: noTracks, missing: false });
     void this.connect();
   }
 
@@ -277,14 +342,81 @@ export class VoiceClient {
     const mine = this.attempt;
     this.set({ watchOnly: false });
     try {
+      await this.findChosen(room);
+      if (mine !== this.attempt) return;
+      room.setMicrophone(this.state.microphone?.id ?? null);
       await room.publishMicrophone();
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
-      // The connection stays: the person keeps watching, told why.
-      this.set({ watchOnly: true, why: deviceReason(errorName(err), true) ?? 'The microphone could not be used' });
+      // The connection stays: the person keeps watching, told why. A chosen
+      // device that is not there is let go, as at a join.
+      const name = errorName(err);
+      if (this.state.microphone !== null && typeof name === 'string' && goneErrors.has(name)) {
+        room.setMicrophone(null);
+        this.set({ watchOnly: true, microphone: null, why: chosenGone });
+        return;
+      }
+      this.set({ watchOnly: true, why: deviceReason(name, true) ?? 'The microphone could not be used' });
       return;
     }
-    if (mine === this.attempt) this.applyBlock();
+    if (mine !== this.attempt) return;
+    this.set({ inUse: room.microphoneInUse() });
+    this.applyBlock();
+    void this.readMicrophones(mine, room);
+  }
+
+  // chooseMicrophone chooses the microphone: a device listed, or null for the
+  // system default. The choice is kept for every later connection. In voice
+  // with the microphone, the capture moves to it at once, with the gate shut
+  // and blocked until it has: a press held across the switch ends, and
+  // nothing is sent until a new one. A switch that fails leaves the
+  // microphone missing, with the reason.
+  async chooseMicrophone(choice: Microphone | null): Promise<void> {
+    this.set({ microphone: choice });
+    const room = this.room;
+    const s = this.state;
+    if (room === null || s.watchOnly || s.listenOnly || (s.phase !== 'connected' && s.phase !== 'reconnecting')) return;
+    const mine = this.attempt;
+    const turn = ++this.switches;
+    this.switching = true;
+    this.applyBlock();
+    let failure: unknown = null;
+    try {
+      await room.switchMicrophone(choice?.id ?? null);
+    } catch (err: unknown) {
+      failure = err;
+    }
+    if (turn !== this.switches) return;
+    this.switching = false;
+    if (mine !== this.attempt) return;
+    if (failure === null) this.set({ missing: false, why: null, inUse: room.microphoneInUse() });
+    else this.set({ missing: true, inUse: null, why: deviceReason(errorName(failure)) ?? 'The microphone could not be used' });
+    this.applyBlock();
+    void this.readMicrophones(mine, room);
+  }
+
+  // findChosen finds the microphone chosen among those listed, before it is
+  // captured: a choice whose id is no longer listed takes the id of the one
+  // device listed under its name. With none, or more than one, it stays as
+  // it is, and its capture fails. The list is read without asking for any
+  // device, so a browser that does not name its devices yet finds nothing.
+  private async findChosen(room: Room): Promise<void> {
+    const chosen = this.state.microphone;
+    if (chosen === null) return;
+    const list = await room.microphones().catch(() => null);
+    if (list === null || list.some((m) => m.id === chosen.id) || this.state.microphone !== chosen) return;
+    const named = list.filter((m) => m.label === chosen.label);
+    const found = named.length === 1 ? named[0] : undefined;
+    if (found !== undefined) this.set({ microphone: found });
+  }
+
+  // readMicrophones reads the list of microphones and the device in use,
+  // while this page uses its microphone: never in watch only or listen only.
+  private async readMicrophones(mine: number, room: Room): Promise<void> {
+    if (this.state.watchOnly || this.state.listenOnly) return;
+    const microphones = await room.microphones().catch(() => null);
+    if (mine !== this.attempt) return;
+    this.set({ microphones, inUse: this.state.missing ? null : room.microphoneInUse() });
   }
 
   // startShare shares a screen into the room this page is connected to.
@@ -380,7 +512,21 @@ export class VoiceClient {
     this.channel = null;
     this.endAwaiting();
     this.watched = null;
-    this.set({ phase: 'idle', channel: null, why: null, transmitting: false, level: 0, speaking: new Set(), reportNote: null, watching: false, shareTracks: noTracks });
+    this.switching = false;
+    this.set({
+      phase: 'idle',
+      channel: null,
+      why: null,
+      transmitting: false,
+      level: 0,
+      speaking: new Set(),
+      reportNote: null,
+      watching: false,
+      shareTracks: noTracks,
+      microphones: null,
+      inUse: null,
+      missing: false,
+    });
     if (room !== null) await room.close().catch(() => undefined);
   }
 
@@ -425,7 +571,7 @@ export class VoiceClient {
 
   private applyBlock(): void {
     const s = this.state;
-    this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly || s.watchOnly);
+    this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly || s.watchOnly || s.missing || this.switching);
   }
 
   private clearTimers(): void {
@@ -523,7 +669,9 @@ export class VoiceClient {
     if (roomDeleted && next.kind !== 'stop' && this.state.watching && this.watched !== null) this.awaitShare();
     const room = this.room;
     this.room = null;
-    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks });
+    // A switch under way goes with its connection; its choice is kept.
+    this.switching = false;
+    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks, inUse: null });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -606,13 +754,33 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.set({ shareTracks: tracks });
       },
+      onMicrophoneLost: () => {
+        if (mine !== this.attempt) return;
+        this.set({ missing: true, inUse: null });
+        this.applyBlock();
+        void this.readMicrophones(mine, room);
+      },
+      onDevicesChanged: () => {
+        if (mine !== this.attempt) return;
+        void this.readMicrophones(mine, room);
+      },
     };
     // What a share needs is set before connecting, so that a track that
     // arrives with the connection already finds it.
     room.setWatching(this.state.watching);
     room.attachShare(this.sink);
+    // So is the microphone chosen, found by its name if its id has changed.
+    // A microphone missing is not captured at all: the connection is made
+    // without it, until the person chooses one.
+    const publish = grant.can_publish && !this.state.watchOnly;
+    if (publish && !this.state.missing) {
+      await this.findChosen(room);
+      // Left or dropped meanwhile: whoever did closed this room.
+      if (mine !== this.attempt) return;
+    }
+    room.setMicrophone(this.state.microphone?.id ?? null);
     try {
-      await room.connect(session.value.livekit_url, grant.token, grant.room, grant.can_publish && !this.state.watchOnly, events);
+      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
       const name = errorName(err);
@@ -625,7 +793,14 @@ export class VoiceClient {
       void room.close().catch(() => undefined);
       this.room = null;
       // A microphone that cannot be had stops: the next attempt is the
-      // person's own Join voice or Watch only. Anything else is retried.
+      // person's own Join voice or Watch only. Anything else is retried. The
+      // device chosen not being there is said as such, and the choice is let
+      // go, so the next Join voice uses the system default.
+      if (publish && this.state.microphone !== null && typeof name === 'string' && goneErrors.has(name)) {
+        this.set({ microphone: null });
+        this.act({ kind: 'stop', why: chosenGone }, next);
+        return;
+      }
       const why = deviceReason(name);
       this.act(why === null ? { kind: 'retry' } : { kind: 'stop', why }, next);
       return;
@@ -636,8 +811,9 @@ export class VoiceClient {
     }
     room.setDeafened(this.state.deafened);
     this.connectedAt = this.now();
-    this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish });
+    this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish, inUse: room.microphoneInUse() });
     this.applyBlock();
+    void this.readMicrophones(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
     // A connection that lasts starts the retry wait over.

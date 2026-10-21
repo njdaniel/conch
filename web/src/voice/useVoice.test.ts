@@ -153,6 +153,56 @@ describe('the talk key', () => {
   });
 });
 
+// Issue #658: the microphone chosen lasts for the tab, in sessionStorage
+// beside the talk key, and nowhere else: its device id, and its name, by
+// which it is found again under a new id.
+describe('the microphone chosen', () => {
+  const key = 'conch.web.voice.microphone';
+  const nameKey = 'conch.web.voice.microphone.name';
+  const webcam = { id: 'mic-2', label: 'Webcam' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+  });
+
+  it('is restored from the tab when the page loads, and is the system default without one', () => {
+    expect(hook({ channel: null }).result.current.state.microphone).toBeNull();
+    window.sessionStorage.setItem(key, 'mic-1');
+    window.sessionStorage.setItem(nameKey, 'Headset');
+    expect(hook({ channel: null }).result.current.state.microphone).toEqual({ id: 'mic-1', label: 'Headset' });
+  });
+
+  it('is stored when chosen, and the system default stores nothing', async () => {
+    const { result } = hook({ channel: null });
+    await act(async () => {
+      await result.current.client.chooseMicrophone(webcam);
+    });
+    expect(window.sessionStorage.getItem(key)).toBe('mic-2');
+    expect(window.sessionStorage.getItem(nameKey)).toBe('Webcam');
+    expect(window.localStorage.length).toBe(0);
+    await act(async () => {
+      await result.current.client.chooseMicrophone(null);
+    });
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('works without storage: a storage that throws is tolerated, and the choice lasts until a reload', async () => {
+    const refuse = () => {
+      throw new DOMException('storage is off', 'SecurityError');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(refuse);
+    const { result } = hook({ channel: null });
+    expect(result.current.state.microphone).toBeNull();
+    await act(async () => {
+      await result.current.client.chooseMicrophone(webcam);
+    });
+    expect(result.current.state.microphone).toEqual(webcam);
+  });
+});
+
 describe('presence of the channel on screen', () => {
   it('comes from its socket while not in voice, and each frame is the roster', async () => {
     const { result } = hook();

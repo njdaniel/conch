@@ -1497,6 +1497,19 @@ label {
   font-size: var(--small);
 }
 
+/* The choice of microphone (issue #658): a row of its own, the list as wide
+   as its longest name allows and never wider than the strip. */
+.voice-device {
+  flex-basis: 100%;
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.voice-device select {
+  min-width: 0;
+}
+
 /* Screen share (issue #444): the watch view, on the stage above the
    conversation. The picture is never wider than its column, and fills the
    screen when made full screen.

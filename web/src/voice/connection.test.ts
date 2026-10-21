@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, reconnectLimit, reportWait, type Phase, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, reconnectLimit, reportWait, type Microphone, type Phase, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -101,6 +101,44 @@ class StubRoom implements Room {
   adoptScreen = (): void => {
     this.calls.push('adopt');
   };
+  // Issue #658: the microphone chosen before connecting, each switch, the
+  // list the browser gives and the device in use. A switch can be held for
+  // the test to let finish, or fail.
+  choices: (string | null)[] = [];
+  switches: (string | null)[] = [];
+  switchFailure: Error | null = null;
+  holdSwitch = false;
+  heldSwitch: (() => void) | null = null;
+  list: readonly Microphone[] | null = [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'mic-1', label: 'Headset' },
+    { id: 'mic-2', label: 'Webcam' },
+  ];
+  listed = 0;
+  inUseNow: string | null = 'default';
+  setMicrophone = (choice: string | null): void => {
+    this.choices.push(choice);
+  };
+  switchMicrophone = (choice: string | null): Promise<void> => {
+    this.switches.push(choice);
+    const finish = (): Promise<void> => {
+      if (this.switchFailure !== null) {
+        this.inUseNow = null;
+        return Promise.reject(this.switchFailure);
+      }
+      this.inUseNow = choice ?? 'default';
+      return Promise.resolve();
+    };
+    if (!this.holdSwitch) return finish();
+    return new Promise<void>((resolve) => {
+      this.heldSwitch = resolve;
+    }).then(finish);
+  };
+  microphones = (): Promise<readonly Microphone[] | null> => {
+    this.listed++;
+    return Promise.resolve(this.list);
+  };
+  microphoneInUse = (): string | null => this.inUseNow;
 }
 
 const okSession = (canPublish = true): VoiceSessionResult => ({
@@ -117,7 +155,15 @@ const claim: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at
 // held: each report waits for the test to answer it (answer below), as a
 // slow conchd would.
 // prepare sets up each room as it is made, before it is connected.
-function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: TransmitAnswer[] = [], failFirst = 0, held = false, prepare?: (room: StubRoom, index: number) => void) {
+// microphone is the choice remembered from earlier in the tab.
+function setup(
+  sessions: VoiceSessionResult[] = [okSession()],
+  reportAnswers: TransmitAnswer[] = [],
+  failFirst = 0,
+  held = false,
+  prepare?: (room: StubRoom, index: number) => void,
+  microphone?: Microphone | null,
+) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
@@ -168,6 +214,7 @@ function setup(sessions: VoiceSessionResult[] = [okSession()], reportAnswers: Tr
         shares.push(`stop ${channel}`);
         return Promise.resolve();
       },
+      ...(microphone === undefined ? {} : { microphone }),
     },
     () => clock.now,
   );
@@ -861,5 +908,267 @@ describe('watching', () => {
     t.client.presence(presenceWith(null));
     expect(t.client.snapshot().watching).toBe(false);
     expect(t.rooms[1]?.watching).toEqual([true, false]);
+  });
+});
+
+// Issue #658: the microphone chosen, the switch, and the microphone missing.
+describe('the microphone chosen', () => {
+  const headset: Microphone = { id: 'mic-1', label: 'Headset' };
+  const webcam: Microphone = { id: 'mic-2', label: 'Webcam' };
+  const unplugged: Microphone = { id: 'unplugged', label: 'Old headset' };
+  const room = (t: { rooms: StubRoom[] }, i: number): StubRoom => {
+    const r = t.rooms[i];
+    if (r === undefined) throw new Error(`no room ${String(i)}`);
+    return r;
+  };
+
+  it('starts from the choice remembered in the tab, and the system default without one', () => {
+    expect(setup([okSession()], [], 0, false, undefined, headset).client.snapshot().microphone).toEqual(headset);
+    expect(setup().client.snapshot().microphone).toBeNull();
+  });
+
+  it('is handed to every new room before it connects: a new session, a renewed room, and Leave then Join', async () => {
+    const t = setup([okSession(), okSession(), okSession(), okSession()], [], 0, false, undefined, headset);
+    await joined(t);
+    expect(room(t, 0).choices).toEqual(['mic-1']);
+    expect(room(t, 0).connectArgs?.publish).toBe(true);
+    // Chosen in voice: the capture moves now, and every later room has it.
+    await t.client.chooseMicrophone(webcam);
+    expect(room(t, 0).switches).toEqual(['mic-2']);
+    room(t, 0).events?.onDisconnected('participant_removed');
+    await settle();
+    expect(room(t, 1).choices).toEqual(['mic-2']);
+    room(t, 1).events?.onDisconnected('room_deleted');
+    await settle();
+    expect(room(t, 2).choices).toEqual(['mic-2']);
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(room(t, 3).choices).toEqual(['mic-2']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: webcam, missing: false });
+  });
+
+  it('is only remembered while not in voice, and in watch only', async () => {
+    const t = setup();
+    await t.client.chooseMicrophone(headset);
+    expect(t.client.snapshot().microphone).toEqual(headset);
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    await t.client.chooseMicrophone(webcam);
+    expect(room(t, 0).switches).toEqual([]);
+    expect(room(t, 0).choices).toEqual(['mic-1']);
+    expect(t.client.snapshot().microphone).toEqual(webcam);
+  });
+
+  it('lists the microphones and the device in use while the microphone is used, and again when devices change', async () => {
+    const t = await joined();
+    expect(t.client.snapshot().microphones).toEqual(room(t, 0).list);
+    expect(t.client.snapshot().inUse).toBe('default');
+    room(t, 0).list = [{ id: 'mic-1', label: 'Headset' }];
+    room(t, 0).inUseNow = 'mic-1';
+    room(t, 0).events?.onDevicesChanged();
+    await settle();
+    expect(t.client.snapshot().microphones).toEqual([{ id: 'mic-1', label: 'Headset' }]);
+    expect(t.client.snapshot().inUse).toBe('mic-1');
+  });
+
+  it('reads no list in watch only, and does once the microphone is used', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    room(t, 0).events?.onDevicesChanged();
+    await settle();
+    expect(room(t, 0).listed).toBe(0);
+    expect(t.client.snapshot().microphones).toBeNull();
+    await t.client.useMicrophone();
+    await settle();
+    expect(room(t, 0).listed).toBe(1);
+    expect(t.client.snapshot().microphones).toEqual(room(t, 0).list);
+  });
+
+  it('a switch blocks the gate: a press held across it reports stopped, and nothing is sent until a new press', async () => {
+    const t = await joined();
+    const r = room(t, 0);
+    t.client.press();
+    await settle();
+    expect(r.sending).toEqual([true]);
+    expect(t.reports).toEqual(['started']);
+    r.holdSwitch = true;
+    const switching = t.client.chooseMicrophone(webcam);
+    expect(t.client.snapshot().transmitting).toBe(false);
+    await settle();
+    expect(r.sending).toEqual([true, false]);
+    expect(t.reports).toEqual(['started', 'stopped']);
+    // A press during the switch is refused.
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(false);
+    r.heldSwitch?.();
+    await switching;
+    await settle();
+    // The press still held does not open the gate again.
+    expect(t.client.snapshot().transmitting).toBe(false);
+    expect(t.client.snapshot().inUse).toBe('mic-2');
+    expect(t.reports).toEqual(['started', 'stopped']);
+    t.client.release();
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(r.sending).toEqual([true, false, true]);
+    expect(t.reports).toEqual(['started', 'stopped', 'started']);
+  });
+
+  it('a switch shuts the open microphone too; new speech after it opens it again', async () => {
+    const t = await joined();
+    const r = room(t, 0);
+    t.client.setMode('open');
+    r.levelNow = 0.5;
+    t.clock.advance(50);
+    expect(t.client.snapshot().transmitting).toBe(true);
+    r.holdSwitch = true;
+    const switching = t.client.chooseMicrophone(headset);
+    expect(t.client.snapshot().transmitting).toBe(false);
+    t.clock.advance(50);
+    expect(t.client.snapshot().transmitting).toBe(false);
+    r.heldSwitch?.();
+    await switching;
+    t.clock.advance(50);
+    expect(t.client.snapshot().transmitting).toBe(true);
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped', 'started']);
+  });
+
+  it('a microphone lost is missing: the gate stays blocked through presses, and choosing again ends it', async () => {
+    const t = await joined();
+    const r = room(t, 0);
+    t.client.press();
+    await settle();
+    r.inUseNow = null;
+    r.events?.onMicrophoneLost();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', missing: true, inUse: null, transmitting: false, why: null });
+    expect(t.reports).toEqual(['started', 'stopped']);
+    t.client.release();
+    for (let i = 0; i < 3; i++) {
+      t.client.press();
+      t.client.release();
+      t.clock.advance(100);
+    }
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped']);
+    expect(r.switches).toEqual([]);
+    // System default counts as a choice.
+    await t.client.chooseMicrophone(null);
+    expect(r.switches).toEqual([null]);
+    expect(t.client.snapshot()).toMatchObject({ missing: false, inUse: 'default', microphone: null });
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+  });
+
+  it('a microphone missing is not captured by the next connection either, until one is chosen', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    room(t, 0).events?.onMicrophoneLost();
+    room(t, 0).events?.onDisconnected('room_deleted');
+    await settle();
+    const next = room(t, 1);
+    expect(next.connectArgs?.publish).toBe(false);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', missing: true, watchOnly: false });
+    t.client.press();
+    await settle();
+    expect(t.reports).toEqual([]);
+    await t.client.chooseMicrophone(headset);
+    expect(next.switches).toEqual(['mic-1']);
+    expect(t.client.snapshot().missing).toBe(false);
+  });
+
+  it.each<[string, RegExp]>([
+    ['OverconstrainedError', /No microphone was found/],
+    ['NotAllowedError', /Your browser blocked the microphone/],
+    ['NotReadableError', /in use by another program/],
+  ])('a switch that fails (%s) stays in voice, missing, with the reason', async (name, why) => {
+    const t = await joined();
+    const r = room(t, 0);
+    r.switchFailure = deviceError(name);
+    await t.client.chooseMicrophone(webcam);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', missing: true, inUse: null });
+    expect(t.client.snapshot().why).toMatch(why);
+    expect(r.closed).toBe(false);
+    t.client.press();
+    await settle();
+    expect(t.reports).toEqual([]);
+    // Choosing again, and succeeding, clears it.
+    r.switchFailure = null;
+    await t.client.chooseMicrophone(headset);
+    expect(t.client.snapshot()).toMatchObject({ missing: false, why: null, inUse: 'mic-1' });
+  });
+
+  it('a remembered microphone missing at Join voice stops with the reason and lets the choice go', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (r, i) => {
+      if (i === 0) r.connectFailure = deviceError('OverconstrainedError');
+    }, unplugged);
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: chosenGone, microphone: null });
+    expect(t.clock.pending).toBe(0);
+    // The next Join voice uses the system default, because the person pressed it.
+    t.client.join('general');
+    await settle();
+    expect(room(t, 1).choices).toEqual([null]);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', why: null });
+  });
+
+  it('the system default, refused, is the device error it always was', async () => {
+    const t = setup([okSession()], [], 0, false, (r) => {
+      r.connectFailure = deviceError('OverconstrainedError');
+    });
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot().why).toMatch(/No microphone was found/);
+  });
+
+  it('a remembered microphone missing at Use microphone keeps watch only, says so, and lets the choice go', async () => {
+    const t = setup([okSession()], [], 0, false, (r) => {
+      r.microphoneFailure = deviceError('OverconstrainedError');
+    }, unplugged);
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    await t.client.useMicrophone();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true, why: chosenGone, microphone: null });
+    // Handed to the room at connecting and again at Use microphone, then let go.
+    expect(room(t, 0).choices).toEqual(['unplugged', 'unplugged', null]);
+  });
+
+  it('Leave ends the missing state; the choice is kept', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, undefined, headset);
+    await joined(t);
+    room(t, 0).events?.onMicrophoneLost();
+    await t.client.leave();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'idle', missing: false, microphones: null, inUse: null, microphone: headset });
+  });
+
+  // A browser may give a device a new id on a reload: the choice is found
+  // again by its name, before anything is captured.
+  it('finds a remembered microphone under a new id by its name, and keeps the new id', async () => {
+    const t = setup([okSession()], [], 0, false, (r) => {
+      r.list = [{ id: 'default', label: 'Default - Headset' }, { id: 'renamed-1', label: 'Headset' }, webcam];
+    }, headset);
+    await joined(t);
+    expect(room(t, 0).choices).toEqual(['renamed-1']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: { id: 'renamed-1', label: 'Headset' } });
+  });
+
+  it.each<[string, readonly Microphone[] | null]>([
+    ['no device by that name', [{ id: 'default', label: 'Default' }, webcam]],
+    ['two devices by that name', [{ id: 'a', label: 'Headset' }, { id: 'b', label: 'Headset' }]],
+    ['a browser that names no device', null],
+  ])('captures a remembered microphone by its own id when there is %s', async (_what, list) => {
+    const t = setup([okSession()], [], 0, false, (r) => {
+      r.list = list;
+    }, headset);
+    await joined(t);
+    expect(room(t, 0).choices).toEqual(['mic-1']);
+    expect(t.client.snapshot().microphone).toEqual(headset);
   });
 });
