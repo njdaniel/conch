@@ -51,9 +51,11 @@ a private communications alpha:
 - the browser client for invited testers, with chat, voice and screen share;
 - invite links as a way to get a credential.
 
-The rest of P7 (the full small-team GUI, presence preferences, human DMs, password and
-OIDC login) stays at P7. The rest of P9 (recording, agent visual participation) stays at
-P9. Single-tenancy, the deployment invariant and every other non-goal are unchanged.
+The rest of P7 (the full small-team GUI, presence preferences, human DMs and OIDC login)
+stays at P7. [ADR-009](ADR-009-guests-and-open-joining.md), proposed in #701, brings
+password sign-in, temporary guests and account creation into the first usable alpha;
+its acceptance is a separate owner decision. The rest of P9 (recording, agent visual
+participation) stays at P9. Single-tenancy and the deployment invariant are unchanged.
 
 ## Founding decisions (locked)
 
