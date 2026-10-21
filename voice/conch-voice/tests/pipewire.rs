@@ -603,6 +603,8 @@ async fn live_ten_minutes_of_pacing_from_the_rings_drops_nothing_and_inserts_no_
     let forwarded = Arc::new(AtomicU64::new(0));
     let config = transmit::gate_config(0, Duration::from_secs(secs + 3_600));
     let transmitter = transmit::spawn::<CountingFeed>(config).unwrap();
+    // As the session loop does once the track is unmuted: frames may reach it.
+    transmitter.track_lock.reopen();
     for command in [
         TxCommand::Microphone(Box::new(mic) as BoxedMic),
         TxCommand::Attach(CountingFeed(Arc::clone(&forwarded))),

@@ -164,5 +164,10 @@ pub trait MicFeed: Send + 'static {
     ///
     /// It takes a [`GatedFrame`], which only [`conch_voice_audio::TransmitGate::pass`] can
     /// make, so nothing can be sent that did not pass the gate.
+    ///
+    /// The frame must be handed over by the end of the first poll of the future returned;
+    /// what follows may only wait for the SDK. The transmit task makes the call and that
+    /// poll under the lock a mute takes (`transmit::TrackLock`), which is what keeps every
+    /// frame ahead of the mute after it.
     fn send(&mut self, frame: GatedFrame<'_>) -> impl Future<Output = ()> + Send;
 }

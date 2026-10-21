@@ -37,6 +37,9 @@
 //!     gate, and its transmission is over at once.
 //!   - A release mutes when the gate says it has shut, release tail included, and only then
 //!     does the machine produce `stopped`.
+//!   - A forced shut mutes at once, without waiting for the gate; a frame the gate let
+//!     through just before it is handed over before the mute or not at all
+//!     (`transmit::TrackLock`).
 //!
 //!   So the track is unmuted for the whole of a transmission's audio and for nothing else.
 //! - **No other wait for a report.** Reports are queued, in the order the machine produced
@@ -862,7 +865,7 @@ impl<T: Transport> Session<T> {
                     }
                     if matches!(command, GateCommand::ForceShut(_)) {
                         // A forced shut has no release tail: nothing is left to send.
-                        self.with_track(MicTrack::mute);
+                        self.mute_track();
                     }
                 }
                 PttOutput::Report(TransmitReport::Started) => match self.opening.as_mut() {
@@ -918,6 +921,7 @@ impl<T: Transport> Session<T> {
                 if self.opening.take().is_some() {
                     // Before the gate opens, so that no frame meets a muted track.
                     self.with_track(MicTrack::unmute);
+                    self.transmitter.track_lock.reopen();
                     let _ = self
                         .transmitter
                         .commands
@@ -943,6 +947,13 @@ impl<T: Transport> Session<T> {
         if let Some(track) = self.live.as_ref().and_then(|live| live.track.as_ref()) {
             act(track);
         }
+    }
+
+    /// Mutes the track once no frame can follow the mute into it: a frame the transmit
+    /// task is handing over is let finish, and none is handed over after (`TrackLock`).
+    fn mute_track(&self) {
+        self.transmitter.track_lock.close();
+        self.with_track(MicTrack::mute);
     }
 
     fn show(&mut self, connection: Connection) {
@@ -1124,10 +1135,8 @@ impl<T: Transport> Session<T> {
                 // Before anything else: the SDK has just enabled the track again, muted or
                 // not. Muting tells LiveKit about the new publication; disabling is what
                 // stops a track that was muted already.
-                self.with_track(|track| {
-                    track.mute();
-                    track.disable();
-                });
+                self.mute_track();
+                self.with_track(MicTrack::disable);
                 // The SDK republishes inside its own reconnect, when the gate is already
                 // forced shut. Should it ever do so at another time, a press in progress
                 // would go on against a track that sends nothing while the status says
@@ -1263,7 +1272,7 @@ impl<T: Transport> Session<T> {
         match event {
             TxEvent::GateShut { limit_reached } => {
                 // A release mutes: the gate has shut, release tail included.
-                self.with_track(MicTrack::mute);
+                self.mute_track();
                 if limit_reached && let Some(deadline) = self.ptt.deadline() {
                     // The gate has forwarded as much audio as one press may transmit. Its
                     // clock is the audio itself, and it runs a few milliseconds ahead of
@@ -1403,7 +1412,7 @@ impl<T: Transport> Session<T> {
     /// which forces the gate shut with no release tail, and the track is muted.
     fn shut_now(&mut self) {
         self.tell(PttInput::Connected(false));
-        self.with_track(MicTrack::mute);
+        self.mute_track();
     }
 
     fn ack(&mut self, id: i64, refusal: Option<VoiceControlErrorCode>) {
@@ -1561,7 +1570,7 @@ impl<T: Transport> Session<T> {
         let _ = self.transmitter.commands.send(TxCommand::Detach);
         // Leaving closes the microphone's stream: nothing is captured when not joined.
         let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
-        self.with_track(MicTrack::mute);
+        self.mute_track();
 
         let live = self.live.take();
         let close_limit = self.timings.close_limit;
@@ -1623,7 +1632,7 @@ impl<T: Transport> Session<T> {
         let _ = self.transmitter.commands.send(TxCommand::Detach);
         let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
         self.mic = Mic::Closed;
-        self.with_track(MicTrack::mute);
+        self.mute_track();
         // The mix task ends when its commands do, and the speakers close with it.
         let (none, _) = mpsc::unbounded_channel();
         drop(std::mem::replace(&mut self.receiver.commands, none));

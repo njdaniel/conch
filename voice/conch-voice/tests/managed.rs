@@ -591,6 +591,42 @@ async fn leave_while_the_talk_key_is_held_has_no_release_tail_and_ends_within_it
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
 }
 
+/// Issue #631: under load, the thread handing a frame to the track can be taken away after
+/// the gate let the frame through and before the SDK took it, while the session loop
+/// leaves and mutes the track. That frame reaches the track before the mute or not at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_on_its_way_into_the_track_at_leave_never_follows_the_mute() {
+    let mut rig = ManagedRig::start().await;
+    talking(&mut rig).await;
+    let hold = rig.sdk.hold_next_send();
+    // From here until the frame is let go the test waits on its own thread, and not on the
+    // runtime: one of the runtime's two threads is held by the frame, and the other may be
+    // held by the mute that waits for it.
+    let armed = Instant::now();
+    while !hold.reached() {
+        assert!(
+            armed.elapsed() < Duration::from_secs(10),
+            "no frame was held"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    let asked = Instant::now();
+    while !rig.sdk.is_muted() && asked.elapsed() < Duration::from_millis(300) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    hold.release();
+
+    assert_eq!(rig.exit_code().await, 0);
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert!(rig.sdk.is_muted());
+    let last = rig.state().unwrap();
+    assert_eq!(
+        (last.phase, last.reason),
+        (VoiceControlPhase::Stopped, Some(VoiceControlReason::Left))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_signal_while_the_talk_key_is_held_leaves_as_leave_does() {
     let mut rig = ManagedRig::start().await;
