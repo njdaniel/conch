@@ -3,7 +3,7 @@
 - **Status:** Proposed, 2026-10-17. This is the contract that #540 (Rust) and #541 (Go) implement independently; neither starts until it has been reviewed and merged (issue #539).
 - **Issues:** parent #537. This note and the schema: #539. Rust managed mode: #540. Go supervisor: #541. TUI wiring and acceptance: #542.
 - **Governed by:** [ADR-007](../adr/ADR-007-client-interfaces.md) ("Client lifecycle": a native client starts, monitors and stops a session-scoped helper over a versioned local control contract), [ADR-006](../adr/ADR-006-rust-voice-client.md), the client design [conch-voice.md](conch-voice.md), and the UX rules [client-experience.md](client-experience.md) (UX-08 to UX-12, UX-23).
-- **Wire shapes:** `conch.voice_control.v1`, in [pkg/schema/voice_control.go](../../pkg/schema/voice_control.go). Shared fixtures: [pkg/schema/testdata/voice-control/](../../pkg/schema/testdata/voice-control/) (§16).
+- **Wire shapes:** `conch.voice_control.v1`, in [pkg/schema/voice_control.go](../../pkg/schema/voice_control.go). Shared fixtures: [pkg/schema/testdata/voice-control/](../../pkg/schema/testdata/voice-control/) (§16). Version 2, `conch.voice_control.v2` (live device switching and the open microphone, issue #653), is §20: [pkg/schema/voice_control_v2.go](../../pkg/schema/voice_control_v2.go) and [pkg/schema/testdata/voice-control-v2/](../../pkg/schema/testdata/voice-control-v2/). §1 to §19 describe v1 and are unchanged by it; where v2 differs, §20 says so.
 
 A person launches `conch`, types `/voice join`, talks with the key they configured for `conch-voice`, mutes, deafens and leaves, without opening a second terminal. The TUI does this by starting `conch-voice` as its own child process for the length of one voice session, and driving it over two private pipes with a small, versioned protocol. The media engine, the gate, the key watcher and the connection policy are the ones `conch-voice` already has; this note adds a way to own them, not a second implementation.
 
@@ -82,7 +82,7 @@ Every message has `schema` and `kind`. Commands also have `id`; events have `seq
 | `get_state` | none | Write a state snapshot now, whether or not anything changed. |
 | `leave` | none | Shut the gate at once (no release tail), leave the room, exit 0. |
 
-- `schema` is the version the owner picked from the hello; in this version always `conch.voice_control.v1`.
+- `schema` is the version the owner picked from the hello; in this version always `conch.voice_control.v1` (for v2, §20.2).
 - `id` is chosen by the owner, starts at 1 for `start`, and is greater than every id before it.
 - `server` is the address as the owner's credential store keys it: `http` or `https`, host in lower case, no user, query or fragment, no trailing slash (`cli.NormalizeServer`). `channel` is the name as the TUI has it from the server: not blank, no control character. Neither is ever echoed back.
 - There is no command that presses or releases the talk key, and none that toggles. Typing in the TUI cannot transmit.
@@ -435,7 +435,7 @@ Secrets: `sensitive.json` lists the fake secrets the tests use and the fragments
 ## 17. Security and parity
 
 - **Nothing secret on the channel, by construction**: no field could carry a token (the field lists are pinned by `TestVoiceControlFieldsAreAnExactList`), events carry no free text, and the login travels as it already does (§9). Join tokens and room names never leave the helper, as today.
-- **Nothing on the channel can transmit.** Presses come only from the key device the person configured. A shut gate reopens only on a new press, after a rejoin too (UX-10).
+- **Nothing on the channel can transmit.** The gate is opened in push-to-talk mode by a press of the key device the person configured, and in open mode (v2, §20) by the microphone's own sound crossing the configured level; no command, timer, reconnection or cleared condition opens it in either mode. `set_talk_mode` only chooses which of the two may open it, and mute and deafen shut it in both. A shut gate reopens only on a new press, or in open mode on a fresh onset, after a rejoin too (UX-10).
 - **Nothing from the helper reaches the terminal unchecked.** The owner shows vocabularies mapped to its own words, and the helper's version only after the printable-ASCII check; fd 1 is discarded unread; fd 2 is shown only by `/voice status`, sanitized.
 - **Ownership.** One helper per TUI, signalled only through its own `*os.Process` before it is reaped (§8.5). The helper has no way to be reached by any other process.
 - **API parity (ADR-000 D6).** Every server action the helper takes is the public API (`/v1/whoami`, the voice session, transmit reports, presence), as `conch-voice` does today. Mute, deafen and the helper's life are local media state, not server capabilities, so there is nothing for the REST/WS API or MCP to gain.
@@ -468,4 +468,142 @@ What #542 built is §15: the `/voice` commands, the strip and the lifecycle, in 
 | The supervisor against a fake helper: two owners, kill and restart, stop bounds | `internal/cli/voicehelper` | automated, in `go test ./...` |
 | Real TUIs, their own `conch-voice`, `conchd` and LiveKit, tones and a counting sink: join, typing, talk key, mute, deafen, a second owner, the owner killed while transmitting, leave, quit while transmitting, one account in two TUIs, retry, removal, voice refused (no voice in the invite; a stored login that is another account's), LiveKit restarted, and a 40 s outage waited out (#559) | `go run ./e2e/voice managed` (Docker and the voice toolchain; not in CI) | automated, opt-in |
 | A real headset and talk key on the maintainer's Pop!_OS machine: press and release while typing and while another window has the focus, key device loss, quitting and `kill -9` while transmitting, the SSH note | [P3-15 in the walkthrough](../p3-walkthrough.md#p3-15-voice-in-the-tui-opt-in) | **pending**: not done; the synthetic runs are not this acceptance |
+
+## 20. Version 2: switching devices live, and an open microphone (#653)
+
+- **Status:** Proposed, 2026-10-19, for the project owner's sign-off (issue #653, parent #662). It is the contract that #654 (the open-microphone engine), #655 (live device switching), #656 (the helper speaking v2) and #657 (the TUI using v2) implement; none starts until it is merged.
+- **Decisions recorded on #653 and #662 before this was written:** the open microphone is level-triggered (not always on while unmuted); sound from a virtual microphone is the person's own transmission, under their login, with no capability or server change; the owner signs off this specification by reviewing its PR and merges it himself.
+- **Wire shapes:** `conch.voice_control.v2`, in [pkg/schema/voice_control_v2.go](../../pkg/schema/voice_control_v2.go). Shared fixtures: [pkg/schema/testdata/voice-control-v2/](../../pkg/schema/testdata/voice-control-v2/) (§20.8). The ADR is unchanged: ADR-004 makes push-to-talk the default transmit mode, and this adds an opt-in second mode beside it.
+
+v2 lets the owner do two things a v1 session cannot: change the microphone or the speakers without leaving voice (`set_devices`), and choose an **open microphone** (`set_talk_mode`), where the microphone's own sound opens the transmit gate so that a virtual microphone fed by another program (a text-to-speech program, for example) is heard without anyone holding the talk key. Everything else is v1: the processes and pipes (§2), the framing and limits (§3), the handshake and ordering rules (§5), the phases, reasons and blocks (§6), the errors (§7), the lifecycle bounds (§8), credentials (§9) and discovery (§10) hold unchanged, and every number of §3's table applies.
+
+### 20.1 Why a version, and why one
+
+Facts on `main` before this section:
+
+- **A v1 state cannot say "open microphone".** `VoiceControlStateV1.Validate` refuses `transmitting` unless `ptt` is `ready`, and the owner treats a state that fails `Validate` as a broken helper (`bad_event`, §7). A helper transmitting on sound with no talk key would be stopped, or would have to misreport itself.
+- **A command kind cannot be added to v1 safely.** A v1 helper answers an unknown kind with `unknown_kind`, and the supervisor treats any refusal as an owner bug and stops the helper (`helper_incompatible`, §14). A new TUI talking to an older helper would lose its voice session on the first `set_devices`.
+- **v1 is published and stays byte-identical** (`scripts/schema-compat.sh`). The protocol's own mechanism for this is the hello (§5): its shape is frozen, it lists every version the helper speaks, and the owner picks one.
+- **One version for both changes.** v2 and a v3 later would mean two sign-offs, two fixture sets and two negotiation paths for two features the same people need at the same time. If live switching were not wanted, dropping `set_devices` from v2 would still leave a v2 for the open microphone; it is wanted, so both are here.
+
+### 20.2 Negotiation
+
+1. The hello is unchanged: a v2 helper writes `{"schema": "conch.voice_control.v1", "kind": "hello", "seq": 1, "versions": ["conch.voice_control.v1", "conch.voice_control.v2"], ...}` (`event-hello-v1-and-v2.json`). Any owner reads it with the v1 reader.
+2. **The owner picks the version by the schema of its start.** A v2 owner writes `start` in v2 (`transcript-negotiation-v2-owner.json`); a v1 owner writes it in v1 and the whole session is v1, as today (`transcript-negotiation-v1-owner.json`). A new owner talking to a helper that offers only v1 uses v1 and falls back to #652's rejoin for a device change; a v1 session is always push-to-talk, even when `voice.toml` says `open` (§20.6).
+3. **The version is fixed for the session.** The helper reads its first line with the reader of the version that line names, if the hello offered it, and from then on with that reader alone; the owner reads with the reader of the version it chose. A line of the other version is `unknown_schema`, which ends the session as it does for a version nobody speaks (`transcript-version-fixed.json`). There is no hello in v2: a v2 reader given one refuses it as `invalid`, since it has already read the real one.
+4. In Go, v2 lines are read with `ParseVoiceControlCommandV2` and `ParseVoiceControlEventV2`, which apply the framing rules of §3 exactly as the v1 readers do and are the specification of the Rust helper's and the Go supervisor's reading. `MarshalVoiceControlLine` writes both versions. `VoiceControlCommandKind.KnownIn(version)` says which kinds a version has: `set_devices` and `set_talk_mode` are `unknown_kind` to a v1 reader, as they were before v2 existed.
+
+### 20.3 Messages
+
+Commands (owner to helper), in `conch.voice_control.v2`:
+
+| `kind` | Fields besides `schema`, `kind`, `id` | Does |
+|---|---|---|
+| `start` | as v1 | The first command. The talk mode is **not** carried: the helper reads it from `voice.toml` as it reads `[audio]` today, and the state reports what is in force, so the owner shows what is true rather than what was asked. |
+| `set_mute`, `set_deafen`, `get_state`, `leave` | as v1 | As v1. |
+| `set_devices` | `input`? (string), `output`? (string) | Use this microphone and these speakers from now on (§20.5). At least one of the two is present. Each is a PipeWire `node.name` under the device list's rule (#649: 1 to `VoiceDevicesMaxNameBytes` = 255 bytes of UTF-8, no control character, no `"` or `\`, so that it can be written into `voice.toml` between quotes as it stands), or `default` for PipeWire's default, followed as it changes. A side left out is left alone; a side present and empty is `invalid`, so that no reader can take an empty name for "leave it". |
+| `set_talk_mode` | `talk_mode` (`push_to_talk` or `open`) | Choose what may open the gate (§20.6). The field is named as the state's field, as `set_mute`'s `muted` and `set_deafen`'s `deafened` are; the issue's draft said `mode`. |
+
+Both new commands are **desired states**, like `set_mute`: sent twice, the second changes nothing, has no state before its ack, and is acknowledged `ok`. Neither writes `voice.toml`: the owner saves the choice itself with `conch-voice config set` (#651) and sends the command for the running session, so one program writes the file and the helper never holds a path. Refusals: a bad device name or a mode that does not exist is `invalid`; after leaving began, both are `stopping`, as `set_mute` is (`transcript-refused-commands.json`). The owner only ever writes valid commands, so §7's rule stands: any refusal is an owner bug and the supervisor stops the helper.
+
+Events (helper to owner), in `conch.voice_control.v2`: `ack` and `protocol_error` as v1; `state` with two fields more, `playback` and `talk_mode` (§20.4). **The helper names no device in any event.** The contract forbids free text from the helper (§4), and the owner knows what it asked for; whether it is there is said by `capture` and `playback`.
+
+### 20.4 State
+
+```text
+state: phase, reason?, retry_in_ms?, capture, playback, transmitting, muted, deafened, blocked, talk_mode, ptt, ptt_problem?
+```
+
+- `playback` is the speakers' stream, as `capture` is the microphone's: `on` while the stream is open with a device, `unavailable` when the speakers named are not there or went away, `off` when no stream is open. Speakers that are named and absent are `unavailable`, and never replaced by the default (`audio.rs` decides the same for the microphone at start-up: the stand-in's audio is discarded); playback resumes when they appear. Deafened is not `off`: the stream stays open and plays silence, as muted keeps `capture: on`. Transmitting does not need speakers, so `playback: unavailable` blocks nothing.
+- `talk_mode` is the mode in force: `push_to_talk` or `open`. It is `push_to_talk` in `starting`, before the configuration is read (as `ptt` is `unknown` then), and that is also the mode that sends less. It becomes `open` only once `voice.toml` or `set_talk_mode` said so.
+- `blocked` is every reason a press, or in open mode an onset, would do nothing now, in v1's order. In open mode `key_device_lost` is never among them: the talk key is ignored, so nothing held can be lost. `max_transmit` in open mode means one opening reached `max_transmit_secs` and stands until quiet (§20.6).
+- `ptt` and `ptt_problem` are reported in open mode too: the key device is still read for the mute and deafen keys. Transmitting does not depend on them there.
+
+A v2 state must hold together, and `VoiceControlStateV2.Validate` refuses one that does not. The rules are v1's (§6), changed in three places and with two added:
+
+- `transmitting` needs `ptt: ready` only in `push_to_talk`. In open mode it needs `connected`, `capture: on` and nothing in `blocked`, whatever `ptt` says (`event-state-open-transmitting.json`, `event-state-open-key-device-lost.json`).
+- `key_device_lost` is in `blocked` exactly when `ptt` is `lost` in `push_to_talk`, and never in open mode.
+- `playback` is `off` in `starting`, `stopped` and `failed`; `on` or `unavailable` in `connecting`, `connected` and `reconnecting` (the speakers are opened in `starting`, before connecting, §8.1, and absent ones are `unavailable`, so past `starting` there is nothing for `off` to mean); anything in `stopping`, which closes them.
+- `talk_mode` is `push_to_talk` in `starting`.
+- Everything else as §6: `not_connected` in every phase but `connected`, `capture` and `no_microphone`, `muted` and `deafened` with their blocks, `ptt: unknown` only before connecting, reasons and `retry_in_ms` by phase.
+
+### 20.5 Switching devices
+
+- **What a name may point at.** `input` names a PipeWire node of class `Audio/Source` (a microphone, real or virtual) and `output` one of class `Audio/Sink`. A name of the other class, or of no node, is `unavailable`, exactly as an absent device is: the helper never targets a sink's monitor as the microphone. (dmn-audio's capture stream pointed at a sink name would capture that sink's monitor, and in open mode that would re-broadcast everything the machine plays, the room's other speakers included.) `default` is PipeWire's default of the right class.
+- **The microphone, during a transmission:** the gate shuts at once, with no release tail, as it does for mute; the transmission ends and is reported `stopped`; the state that shows `transmitting: false` is written before the ack. A fresh press, or in open mode a fresh onset, is needed afterwards (UX-10: a shut gate reopens only on a new press). In open mode the onset detector starts sounding on the new device (§20.6), so the switch itself cannot open the gate: `open_hang_ms` of quiet and then an onset are needed, however loud the new microphone is (`transcript-open-mode-entered-loud.json`). Nothing captured from the old device after the command, and nothing from the new one before a new opening, is sent (`transcript-microphone-switch-while-transmitting.json`).
+- **The speakers:** the gate is not touched; a transmission under way goes on. When nothing the state shows changes, the ack has no state before it.
+- **Before the microphone is first opened** (listen-only, or not yet connected): the name is kept and used when it opens; the ack is `ok` with no state before it.
+- **A missing device after a switch:** the ack is `ok`, the session now targets that device. The state shows `capture: unavailable` with `no_microphone` (or `playback: unavailable`) until the device appears, and then capture (or playback) resumes. **There is no fallback to another device** (UX-11; `audio.rs` decides the same at start-up). (`transcript-device-missing-after-switch.json`.)
+- **The same name as the one in force** changes nothing: the gate is not touched and the ack has no state before it. `default` is PipeWire's default, followed as it changes, as today when `voice.toml` names nothing.
+- Whether `capture` passes through `unavailable` while the stream is moved from one device to another is the helper's (#655), and a reader shows what it is told; the transcript shows the plain case, where it stays `on`. What is not the helper's to choose (#655): the class rule above (a source for `input`, a sink for `output`, never a sink's monitor as the microphone, nothing of another class or of no node used in a name's place), and in open mode the detector starting sounding on the new device.
+
+### 20.6 The open microphone
+
+**Level-triggered, not always on while unmuted** (decided on #653; open question 1 of #662). A program's virtual microphone is digital silence between utterances, so any level separates speech from silence cleanly. "Always on" would show the person talking the whole time in every roster, make the server record one endless transmission, send the room's noise between utterances, and end every session at `max_transmit_secs`. The browser's open mode (`web/src/voice/gate.ts`) is level-triggered for the same reasons, with a threshold and a 400 ms hang; this follows it.
+
+The rule, restated for both modes (the header rule of `conch-voice-control/src/ptt.rs`, "the gate is opened by a press and by nothing else", and conch-voice.md §3): **in push-to-talk mode the gate is opened by a press; in open mode by the microphone's own sound crossing the level; no command, timer, reconnection or cleared condition opens it in either mode. `set_talk_mode` only chooses which of the two may open it, and mute and deafen shut it in both.**
+
+How open mode works, in the helper:
+
+- **The detector** runs on each captured 10 ms frame before the gate, only in open mode, and hands no frame onward: the only path to the track is still the gate. It has two states, *quiet* and *sounding*. It becomes sounding when one frame's RMS level is at or above `open_threshold_db` (dBFS: 20·log10 of the frame's RMS over its 480 samples in [−1, 1], so a full-scale sine is −3 dBFS). It becomes quiet after `open_hang_ms` with no frame at or above the level. **A stretch with no frames counts as quiet**: a virtual source that stops delivering must not hold the gate open, so the transmit task's pace timer feeds the detector the time that passed.
+- **The detector starts sounding.** On entering open mode (from `voice.toml` at start, or by `set_talk_mode open`), after a microphone switch in open mode, and whenever a block clears, the detector is put in the sounding state, whatever the microphone holds. So the first opening always follows `open_hang_ms` of quiet and then an onset, and no command can be the thing that opened the gate: a `set_talk_mode open` sent while the microphone is loud (a program already speaking, a noisy room) transmits nothing until the sound stops and starts again (`transcript-open-mode-entered-loud.json`). Were the detector to start quiet, the first loud frame after the ack, 10 ms later, would be an onset, and the command would have opened the gate. #654's detector tests must cover this: a detector created in open mode fed loud frames from its first frame never reports an onset until `open_hang_ms` of frames below the level (or of no frames) has passed; the same after a mode change, a microphone switch and each block clearing; and the quiet that counts is quiet observed after that moment, not before it.
+- **An onset** is the detector going from quiet to sounding. An onset while nothing blocks opens the gate; the gate then unmutes the track once `conchd` has answered the `started` report, or after at most 1 s, as for a press (conch-voice.md §6). **The onset frame, and what is captured before the gate has opened, is not sent:** nothing captured while the gate was shut is sent, which conch-voice.md §3 keeps. The cost is the first 10 ms and the report wait, as it is at the start of a press. An onset during the release tail of the previous opening waits for the gate to report shut and then opens it as a new transmission, as a press during the tail does (ptt.rs: "the gate is never told to open while it is still shutting"), so two openings' reports cannot run together.
+- **Quiet shuts the gate** (the detector going to quiet, `open_hang_ms` after the last frame at or above the level); the release tail then applies, as after a release. The `stopped` report follows the gate shutting, as today.
+- **Every v1 block applies**, and a block shuts the gate at once with no tail, as in v1: mute, deafen, not connected, no publish grant, no microphone, the limit. **Once a block clears, a fresh onset is needed**: the detector must go quiet and then sounding again after the clearing. This is the open-mode form of "a held key must be pressed again" (ptt.rs), so unmuting during speech does not send the rest of it, and reconnecting during speech does not resume it. (The browser's gate differs here: it reopens on the next loud frame. The native client fails closed.)
+- **`max_transmit_secs` limits each opening** (default 120, at most 600). When it is reached the gate shuts with no tail, `max_transmit` stands until `open_hang_ms` of quiet, and the next onset opens the gate again (`transcript-open-mode.json`).
+- **The talk key does nothing in open mode.** A press or a release is ignored, so a key held during a mode switch cannot hold the gate. The mute and deafen keys work as before. A lost key device is `ptt: lost` in the state and blocks nothing (§20.4).
+- **A mode switch shuts the gate** at once, with no release tail, in both directions: the person changed what transmission means, and the browser's `setMode` does the same. What was transmitting is reported `stopped`, and a fresh press or a fresh onset is needed (`transcript-mode-switch-while-transmitting.json`).
+- **Open mode is never automatic.** It is in force only when `voice.toml` says `talk_mode = "open"` or the owner sent `set_talk_mode open`. It is never a fallback when no key device is configured or the key device cannot be read (#537: no implicit toggle-to-talk or open-mic workaround): `ptt: not_configured` in push-to-talk mode still means nothing can transmit.
+- **A v1 session always runs push-to-talk**, even when `voice.toml` says `open`: it sends less, never more. The helper writes one line to its log, which `/voice status` shows (§15). Standalone `conch-voice join` honours `talk_mode` (#654).
+- **Transmit reports.** Each opening is one transmission, with `started` and `stopped` reports and the existing 1 s report wait (conch-voice.md §6); many short openings are many report pairs, as in the browser's open mode today. The server's bound is unchanged (`voiceReportBurst` 30, refilled at `voiceReportPerSecond` 4 a second). At the defaults an opening lasts at least one frame plus `open_hang_ms` plus `release_tail_ms`, 10 + 400 + 100 = 510 ms, two reports, so under 3.93 reports a second: below the refill, and the 429 cannot be reached however the sound comes. The arithmetic assumes the rule above: an onset during the tail waits for the gate to shut and begins a new opening after it, so the tail is part of every opening's length; an engine that let an onset cut the tail short would lose the 100 ms and the margin with it. With `open_hang_ms` at its minimum of 100 ms and the default tail, an opening can last 210 ms, 9.5 reports a second, and the burst of 30 lasts about 5.5 s of such chatter; with the tail set to 0 and the default hang, 4.88 a second drain the burst in about 34 s. A `stopped` answered 429 is handled as today: the status line says so, audio does not wait for it, and the poller records what it sees. The TUI's user notes should say that a short hang can hit the bound.
+- **Echo.** Echo cancellation does not work yet (#186 open; #566: `echo_cancellation = true` is accepted and does nothing). Open mode on speakers sends the other people's voices back to them. Clients warn and do not refuse (#657 has the words). A virtual microphone fed by a program, not by the room, does not pick the speakers up.
+
+**Configuration** (`voice.toml`, `[audio]`, read by the helper as `[audio]` is read today, §9; conch-voice.md §8): `talk_mode` (`"push_to_talk"` or `"open"`, default `push_to_talk`); `open_threshold_db` (integer dBFS, default −40, from −80 to −10); `open_hang_ms` (default 400, from 100 to 2000). A value outside its range is a refused configuration (`bad_config`), as an unknown key is. The threshold and hang are hand-edited; `conch-voice config set` (#651) takes `audio.talk_mode` so that the TUI can save the mode (#657). In managed mode the helper reads these keys and never writes them.
+
+### 20.7 Security and parity
+
+- **The transmit rule changed and was restated** (§17, conch-voice.md §3): nothing on the channel opens the gate in either mode. A security-reviewer pass on this section and the types is required (#653), on the rule change and on the two new owner-to-helper text fields.
+- **`input` and `output` are owner-to-helper text**, like `server` and `channel`: bounded (255 bytes), one line, no control character, never echoed by the helper in any event, and never logged by it unscrubbed. They name a PipeWire node and reach nothing but PipeWire's node lookup; a name that matches nothing is `unavailable`, not an error and not a fallback. The field lists are pinned by `TestVoiceControlV2FieldsAreAnExactList`, and `TestVoiceControlV2CarriesNoSecrets` holds every event string to a vocabulary.
+- **No secret and no path**: v2 adds no field that could hold a token, a room or a path; the helper never learns where `voice.toml` is written from the owner, because it never writes it.
+- **Sound from a virtual microphone is the person's own transmission**, reported and audited under their login, as any press is (decided on #662). It is a device choice, not agents in voice (P8, `publish:audio`), and needs no capability or server change.
+- **API parity (ADR-000 D6):** devices and the talk mode are local media state, like mute and deafen (§17). The server sees the same session, presence and transmit reports as before; nothing is added to the REST/WS API or to MCP.
+
+### 20.8 Fixtures
+
+All in `pkg/schema/testdata/voice-control-v2/`, read in place by `pkg/schema/voice_control_v2_test.go` and, from #656, by the Rust helper's tests. Immutable once merged, like v1's (§16).
+
+Golden messages, each byte-identical to its Go type's indented encoding:
+
+- Commands: `command-start.json`, `command-set-mute.json`, `command-set-deafen.json`, `command-get-state.json`, `command-leave.json`, `command-set-devices.json` (both sides), `command-set-devices-input.json` (the microphone only), `command-set-devices-default.json` (the speakers back to `default`), `command-set-talk-mode.json`.
+- Events: `event-hello-v1-and-v2.json` (a v1 hello offering both; read with the v1 reader), `event-ack.json`, `event-ack-refused.json`, `event-protocol-error.json`.
+- States: `event-state-starting.json`, `event-state-connected.json`, `event-state-transmitting.json`, `event-state-no-speakers.json`, `event-state-no-microphone.json`, `event-state-open-listening.json`, `event-state-open-transmitting.json`, `event-state-open-muted.json`, `event-state-open-key-device-lost.json`, `event-state-open-max-transmit.json`, `event-state-stopped.json`.
+
+Conformance, for both v2 readers: `cases.json`, in the form of v1's, covering the two new commands and their refusals (neither side, an empty name, a null, a name too long or with a quotation mark, a backslash, an escape sequence or a line feed, a mode that does not exist, the field under another name), that no command presses and none opens the gate, the state's two new fields and every changed consistency rule, a v1 line read as v2 and a v2 line as v1, a hello in v2, and one case for each framing code. The long lines are `lines/command-at-limit.txt`, `lines/command-too-long.txt`, `lines/event-at-limit.txt` and `lines/event-too-long.txt`.
+
+Transcripts, checked by `TestVoiceControlV2Transcripts` against §5's rules and v2's own (the hello offers both, the start fixes the version, a microphone or mode switch during a transmission ends it before the ack, the mode set is in the state before the ack): `transcript-negotiation-v2-owner.json`, `transcript-negotiation-v1-owner.json`, `transcript-microphone-switch-while-transmitting.json`, `transcript-device-missing-after-switch.json`, `transcript-open-mode.json` (an onset, quiet, mute while open and the fresh onset after, the limit reached then quiet), `transcript-mode-switch-while-transmitting.json` (both directions, with the key device lost while open), `transcript-open-mode-entered-loud.json` (`set_talk_mode open` and then a microphone switch while the microphone is loud: nothing transmits until quiet and then an onset), `transcript-refused-commands.json`, `transcript-version-fixed.json`.
+
+Secrets: `sensitive.json`, as v1's.
+
+### 20.9 Decisions
+
+Decided here, where the issue left a choice or asked for one to be recorded (continuing §18's numbering):
+
+11. **One version for both features** (§20.1).
+12. **The talk mode is not carried in `start`**; the helper reads it from `voice.toml` and the state reports it, so the owner shows what is true (§20.3).
+13. **`set_devices` and `set_talk_mode` are desired states that write nothing**; the owner saves with `config set` (§20.3).
+14. **The helper names no device in any event** (§20.3).
+15. **A side of `set_devices` left out is left alone; present and empty is `invalid`** (§20.3).
+16. **The command's field is `talk_mode`, as the state's**, not `mode` (§20.3).
+17. **`playback` is never `off` past `starting`**, and anything in `stopping` (§20.4).
+18. **`talk_mode` is `push_to_talk` in `starting`** (§20.4).
+19. **Level-triggered**, with a two-state detector, an onset as the transition to sounding, and no frames counting as quiet (§20.6).
+20. **The onset frame is not sent** (§20.6).
+21. **A fresh onset after a block clears, and the detector starts sounding** on entering open mode, after a microphone switch in open mode and whenever a block clears, so that the first opening always follows `open_hang_ms` of quiet and no command, switch or cleared condition is what opened the gate. Stricter than the browser's gate (§20.6).
+22. **A mode switch shuts the gate with no tail, in both directions** (§20.6).
+23. **`max_transmit` in open mode stands until quiet** (§20.6).
+24. **A v1 session is push-to-talk whatever `voice.toml` says**, with one log line (§20.6).
+25. **The version is fixed by the start; a hello in v2 does not exist** and is `invalid` to a v2 reader (§20.2).
+26. **`VoiceControlCommandKind` is one vocabulary across versions**, with `KnownIn(version)` saying which kinds a version has, so that the v1 reader still answers `set_devices` with `unknown_kind` (§20.2).
+
+Needs the project owner's sign-off, recorded on #653 before the first commit: (a) the version `conch.voice_control.v2`; (b) the restated transmit rule in conch-voice.md §3 and §17 above; (c) level-triggered rather than always-on. (c) is recorded there already; (a) and (b) were part of the plan on #662 that the owner approved on 2026-10-19 and are his to confirm on this PR.
 

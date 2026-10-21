@@ -2148,8 +2148,16 @@ mod tests {
                 ours(VoiceControlErrorCode::ALL, VoiceControlErrorCode::as_str),
             ),
         ];
+        // The command kinds that only conch.voice_control.v2 has (#653) are in the one
+        // Go vocabulary of command kinds, which serves both versions. This helper speaks
+        // v1 until #656 teaches it v2, which takes them off this list.
+        const V2_ONLY_KINDS: [&str; 2] = ["set_devices", "set_talk_mode"];
         for (go_type, ours) in table {
-            assert_eq!(words_of(go_type), ours, "{go_type}");
+            let mut theirs = words_of(go_type);
+            if go_type == "VoiceControlCommandKind" {
+                theirs.retain(|word| !V2_ONLY_KINDS.contains(&word.as_str()));
+            }
+            assert_eq!(theirs, ours, "{go_type}");
         }
     }
 

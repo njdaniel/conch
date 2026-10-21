@@ -10,13 +10,24 @@
 // this one component, wherever it shows. While not in voice it also says where
 // else people are talking (issue #596), with a way to open that channel: only
 // to open it, since joining is always Join voice, here.
+//
+// Voice options has the choice of microphone (issue #658): System default or
+// a device the browser lists, with the device the capture is on. A microphone
+// that goes is said in the notes, and nothing is sent until one is chosen.
+// It also has the switch for the browser's voice processing (issue #659),
+// with what the capture says of it.
+//
+// It has the choice of speakers too (issue #660), where the browser lets a
+// page choose: System default or an output the browser lists, the one in
+// use selected. A choice the browser refuses, and speakers that went, are
+// said in the notes.
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
 import { StageHost } from '../stage';
 import type { Person } from '../useLiveChannel';
-import type { Phase } from './connection';
+import type { Phase, Processing } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
@@ -242,8 +253,8 @@ export function VoicePanel({
   const canJoin = voice.secure && presence !== null && presence.available;
   // The microphone is captured while connected with it, whether or not
   // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
-  // the capture it had.
-  const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly;
+  // the capture it had. A microphone that went is not captured.
+  const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
   // Where voice is (UX-09): a button back to that channel while another is on
@@ -407,6 +418,17 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {state.outputNote === null ? null : (
+              <p role="status" className="hint">
+                {state.outputNote}
+              </p>
+            )}
+            {/* A switch that failed says why instead (state.why). */}
+            {state.missing && state.why === null ? (
+              <p role="status" className="hint">
+                {missingNote}
+              </p>
+            ) : null}
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
               <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
@@ -515,6 +537,165 @@ function Roster({ roster, people, viewer, elsewhere, speaking }: {
   );
 }
 
+// What the notes say while the microphone is missing.
+export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
+
+// The values of the microphone list: System default, a device by id, and
+// the entry shown while nothing is chosen (the microphone went), so that
+// choosing any other, System default included, is a change. A device id is
+// the browser's own string, so it is set apart by a prefix.
+const systemDefault = 'system';
+const devicePrefix = 'device:';
+const unchosen = '';
+
+export const followsNote = "System default follows your computer's sound settings.";
+
+// MicrophoneChoice is the choice of microphone in Voice options: in voice
+// with the microphone, the list and the device in use. In watch only nothing
+// is listed: the list is read only once the microphone is used, as it is
+// when the browser does not name its devices.
+function MicrophoneChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  if (state.listenOnly) return null;
+  const list = state.microphones;
+  const live = state.phase === 'connected' || state.phase === 'reconnecting';
+  if (state.watchOnly || list === null || !live) {
+    return <p className="hint">Microphones are listed once you use your microphone.</p>;
+  }
+  const chosen = state.microphone;
+  const listed = chosen === null || list.some((m) => m.id === chosen.id);
+  const value = state.missing || !listed ? unchosen : chosen === null ? systemDefault : devicePrefix + chosen.id;
+  const inUse = state.inUse === null ? undefined : list.find((m) => m.id === state.inUse);
+  return (
+    <div className="voice-device">
+      <label htmlFor="voice-microphone">Microphone</label>
+      <select
+        id="voice-microphone"
+        value={value}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === unchosen) return;
+          if (v === systemDefault) {
+            void client.chooseMicrophone(null);
+            return;
+          }
+          const picked = list.find((m) => devicePrefix + m.id === v);
+          if (picked !== undefined) void client.chooseMicrophone(picked);
+        }}
+      >
+        {value === unchosen ? (
+          <option value={unchosen} disabled>
+            Choose a microphone
+          </option>
+        ) : null}
+        <option value={systemDefault}>System default</option>
+        {list.map((m) => (
+          <option key={m.id} value={devicePrefix + m.id}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      {inUse === undefined ? null : <p className="hint">In use: {inUse.label}</p>}
+      {chosen === null ? <p className="hint">{followsNote}</p> : null}
+    </div>
+  );
+}
+
+// What Voice options says where the speakers cannot be chosen, and where the
+// browser lists none but the default (issue #660).
+export const noOutputChoice = 'This browser plays sound on its default output.';
+export const noOtherOutputs = 'This browser lists no other speakers yet.';
+
+// SpeakersChoice is the choice of speakers in Voice options: System default
+// first, then each output the browser lists, the one in use selected. One in
+// use that is not listed (the browser names none yet) is shown as well, so
+// that the list says what is in use.
+function SpeakersChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  if (!state.outputSelection) return <p className="hint">{noOutputChoice}</p>;
+  const list = state.outputs ?? [];
+  const inUse = state.output;
+  const shown = inUse === null || list.some((o) => o.id === inUse.id) ? list : [...list, inUse];
+  return (
+    <div className="voice-device">
+      <label htmlFor="voice-speakers">Speakers</label>
+      <select
+        id="voice-speakers"
+        value={inUse === null ? systemDefault : devicePrefix + inUse.id}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === systemDefault) {
+            void client.chooseOutput(null);
+            return;
+          }
+          const picked = shown.find((o) => devicePrefix + o.id === v);
+          if (picked !== undefined) void client.chooseOutput(picked);
+        }}
+      >
+        <option value={systemDefault}>System default</option>
+        {shown.map((o) => (
+          <option key={o.id} value={devicePrefix + o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {list.length === 0 ? <p className="hint">{noOtherOutputs}</p> : null}
+    </div>
+  );
+}
+
+// The voice processing switch (issue #659): its words, the note said while it
+// is off, and the hint by the open microphone's level.
+export const processingLabel = 'Voice processing (echo cancellation, noise suppression, automatic gain)';
+export const processingOffNote = 'Off: your microphone is sent as it is.';
+export const processingUseNote =
+  'Use this for a virtual microphone (such as one a text-to-speech program provides) or a studio microphone. With speakers rather than headphones, others may hear themselves.';
+export const thresholdHint = 'Without automatic gain your level may differ: check the meter and set the level.';
+
+// The filters, by the names the switch gives them.
+const filterNames: readonly (readonly [keyof Processing, string])[] = [
+  ['echoCancellation', 'echo cancellation'],
+  ['noiseSuppression', 'noise suppression'],
+  ['autoGainControl', 'automatic gain'],
+];
+
+// reportedNote says what a capture made with processing off reports: off, or
+// the filters the browser kept on. A browser that does not say, of a filter
+// it did not keep, is not said to have turned it off.
+export function reportedNote(reported: Processing | null): string | null {
+  if (reported === null) return null;
+  const kept = filterNames.filter(([key]) => reported[key] === true).map(([, name]) => name);
+  if (kept.length > 0) {
+    const last = kept.pop() ?? '';
+    const names = kept.length === 0 ? last : `${kept.join(', ')} and ${last}`;
+    return `Your browser kept ${names} on.`;
+  }
+  return filterNames.every(([key]) => reported[key] === false) ? processingOffNote : null;
+}
+
+// ProcessingChoice is the voice processing switch, for the microphone chosen,
+// and while it is off what the capture says and when to use it.
+function ProcessingChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const said = state.processing ? null : reportedNote(state.reported);
+  return (
+    <div className="voice-processing">
+      <label>
+        <input
+          type="checkbox"
+          checked={state.processing}
+          onChange={(e) => {
+            void client.setProcessing(e.target.checked);
+          }}
+        />
+        {processingLabel}
+      </label>
+      {said === null ? null : <p className="hint">{said}</p>}
+      {state.processing ? null : <p className="hint">{processingUseNote}</p>}
+    </div>
+  );
+}
+
 // Voice options: the less used choices, out of the strip.
 function Options({ voice, open, sharable, about }: {
   readonly voice: VoiceControl;
@@ -527,6 +708,8 @@ function Options({ voice, open, sharable, about }: {
   const { state, client, features } = voice;
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
+      <MicrophoneChoice voice={voice} />
+      <SpeakersChoice voice={voice} />
       <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
         <legend>Microphone</legend>
         <label>
@@ -537,6 +720,7 @@ function Options({ voice, open, sharable, about }: {
           <input type="radio" name="voice-mode" checked={state.mode === 'open'} onChange={() => { client.setMode('open'); }} />
           Open microphone
         </label>
+        <ProcessingChoice voice={voice} />
       </fieldset>
       {state.mode === 'ptt' ? (
         <p className="hint">
@@ -546,17 +730,27 @@ function Options({ voice, open, sharable, about }: {
           </button>
         </p>
       ) : (
-        <label className="threshold">
-          Level that opens the microphone
-          <input
-            type="range"
-            min={0.02}
-            max={0.6}
-            step={0.01}
-            value={state.threshold}
-            onChange={(e) => { client.setThreshold(Number(e.target.value)); }}
-          />
-        </label>
+        <>
+          <label className="threshold">
+            Level that opens the microphone
+            <input
+              type="range"
+              min={0.02}
+              max={0.6}
+              step={0.01}
+              value={state.threshold}
+              aria-describedby={state.processing ? undefined : 'voice-threshold-hint'}
+              onChange={(e) => { client.setThreshold(Number(e.target.value)); }}
+            />
+          </label>
+          {/* Without automatic gain a quiet microphone may not reach the
+              level, and a noisy room may (issue #659). */}
+          {state.processing ? null : (
+            <p id="voice-threshold-hint" className="hint">
+              {thresholdHint}
+            </p>
+          )}
+        </>
       )}
       <p className="hint">
         The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues

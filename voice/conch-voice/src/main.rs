@@ -45,10 +45,17 @@ fn main() {
         exit(101);
     }));
 
-    let args = match cli::parse(std::env::args_os()) {
+    let raw_args: Vec<_> = std::env::args_os().collect();
+    let args = match cli::parse(raw_args.iter().cloned()) {
         Ok(args) => args,
-        // Help, the version, or a mistake: clap prints it and knows the exit code.
-        Err(error) => error.exit(),
+        // Help and the version: clap prints them to standard output and exits 0.
+        Err(error) if !error.use_stderr() => error.exit(),
+        // A mistake: clap quotes what was typed, so it is scrubbed before it is printed.
+        Err(error) => {
+            let text = cli::usage_error_text(&error, &raw_args);
+            last_words(text.trim_end_matches('\n').to_owned());
+            exit(error.exit_code());
+        }
     };
     let result = match &args {
         Invocation::Join(args) => {
