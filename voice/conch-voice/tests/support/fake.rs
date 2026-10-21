@@ -7,7 +7,7 @@
 //! republished track stays enabled until it is disabled.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use conch_voice::sdk::{
@@ -70,6 +70,8 @@ struct Inner {
     feeds: u64,
     /// While set, handing over a frame never returns.
     sends_hang: bool,
+    /// While set, the next frame handed over waits here before the SDK takes it.
+    send_hold: Option<Arc<SendHold>>,
     close_takes: Duration,
     /// How long a mute holds the thread it is called on before it takes effect.
     mute_takes: Duration,
@@ -146,6 +148,17 @@ impl FakeSdk {
     /// From now on handing a frame to the track never returns: an SDK that has hung.
     pub fn hang_sends(&self) {
         self.lock().sends_hang = true;
+    }
+
+    /// Makes the next frame handed to the track stop, after the gate and before the SDK
+    /// takes it, until the returned hold is released. It holds the thread it is on, as a
+    /// thread the system has taken away under load would: whatever else that thread was to
+    /// do waits, and what runs elsewhere does not. Dropping the hold releases it, so that a
+    /// test that fails while a frame is held does not leave a thread of its runtime parked.
+    pub fn hold_next_send(&self) -> HeldSend {
+        let hold = Arc::new(SendHold::default());
+        self.lock().send_hold = Some(Arc::clone(&hold));
+        HeldSend(hold)
     }
 
     /// Leaving a room takes this long.
@@ -365,6 +378,53 @@ impl RoomHandle for FakeRoom {
     }
 }
 
+/// A test's hold on the next frame handed to the track: see [`FakeSdk::hold_next_send`].
+pub struct HeldSend(Arc<SendHold>);
+
+impl HeldSend {
+    /// Whether a frame is held, or was.
+    pub fn reached(&self) -> bool {
+        self.0.state.lock().unwrap().0
+    }
+
+    /// Lets the frame go on into the track.
+    pub fn release(&self) {
+        self.0.release();
+    }
+}
+
+impl Drop for HeldSend {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A frame stopped on its way into the track.
+#[derive(Default)]
+struct SendHold {
+    /// Whether the frame has reached the hold, and whether it has been released.
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+}
+
+impl SendHold {
+    fn release(&self) {
+        // Not `unwrap`: this runs from a drop, maybe while a failed test unwinds.
+        if let Ok(mut state) = self.state.lock() {
+            state.1 = true;
+        }
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+}
+
 /// The fake's published track.
 pub struct FakeTrack {
     inner: Arc<Mutex<Inner>>,
@@ -418,6 +478,11 @@ impl Drop for FakeFeed {
 
 impl MicFeed for FakeFeed {
     async fn send(&mut self, frame: GatedFrame<'_>) {
+        let hold = self.inner.lock().unwrap().send_hold.take();
+        if let Some(hold) = hold {
+            // On purpose not an await: the thread itself is held.
+            hold.wait();
+        }
         let hang = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.sends_hang {
