@@ -7,8 +7,9 @@
 //! instead of playing, and standard input instead of a key device. `conch-voice devices`
 //! lists the audio devices and helps set the key device up; `conch-voice keys <device>`
 //! helps with the keys. `conch-voice config set audio.input|audio.output <name>` saves the
-//! microphone or the speakers in `voice.toml` (`config_cmd.rs`), the one thing this program
-//! writes there. `conch-voice managed` is what `conch` starts to run voice inside
+//! microphone or the speakers in `voice.toml` (`config_cmd.rs`), and `config set
+//! audio.talk_mode push_to_talk|open` the talk mode: the only things this program writes
+//! there. `conch-voice managed` is what `conch` starts to run voice inside
 //! its TUI (`managed.rs`): it takes no channel, server or login on its command line, and
 //! its own test options are hidden from the help and never read from anywhere but the
 //! command line.
@@ -36,7 +37,9 @@ use conch_voice_api::{
     stored_servers,
 };
 use conch_voice_audio::{FRAME_MS, SAMPLE_RATE, SignalMeter};
-use conch_voice_control::{AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings};
+use conch_voice_control::{
+    AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings, TalkMode,
+};
 use log::LevelFilter;
 
 use crate::error::Error;
@@ -185,17 +188,19 @@ pub enum Invocation {
     },
     /// `conch-voice config set <key> <value>`.
     ConfigSet {
-        /// The device to save.
+        /// The device, or the talk mode, to save.
         key: AudioKey,
-        /// Its name, fit to be written into the file as it is, or `default`.
+        /// For a device its name, fit to be written into the file as it is, or `default`;
+        /// for the talk mode `push_to_talk` or `open`.
         value: String,
     },
 }
 
 /// The keys `config set` takes, as they are spelled on its command line. No other is
 /// written: `server`, `channel` and `[keys]` decide where the login goes and what is read
-/// from a keyboard, and are changed by hand only.
-pub const CONFIG_SET_KEYS: [&str; 2] = ["audio.input", "audio.output"];
+/// from a keyboard, and are changed by hand only; the open microphone's level and hang are
+/// changed by hand too.
+pub const CONFIG_SET_KEYS: [&str; 3] = ["audio.input", "audio.output", "audio.talk_mode"];
 
 /// One line: this binary's version and the audio frame it is built for.
 #[must_use]
@@ -337,9 +342,10 @@ pub fn command() -> Command {
                 .help("The keyboard's event device, by its path under /dev/input/by-id"),
         );
     let set = Command::new("set")
-        .about("Save the microphone or the speakers in voice.toml, keeping the rest of the file as written")
+        .about("Save the microphone, the speakers or the talk mode in voice.toml, keeping the rest of the file as written")
         .long_about(
-            "Saves the microphone (audio.input) or the speakers (audio.output) in voice.toml \
+            "Saves the microphone (audio.input), the speakers (audio.output) or the talk mode \
+             (audio.talk_mode: push_to_talk, or open for an open microphone) in voice.toml \
              in the configuration directory, which join, managed and conch's TUI read. Only \
              that one value changes: comments, the order of keys and every other key stay \
              as written. The file is created, private, if there is none; the directory is \
@@ -352,16 +358,16 @@ pub fn command() -> Command {
                 .required(true)
                 .value_name("KEY")
                 .value_parser(CONFIG_SET_KEYS)
-                .help("audio.input or audio.output"),
+                .help("audio.input, audio.output or audio.talk_mode"),
         )
         .arg(
             Arg::new("value")
                 .required(true)
-                .value_name("NAME")
-                .help("A device's name as `conch-voice devices` lists it, or `default` for PipeWire's default"),
+                .value_name("VALUE")
+                .help("For a device, its name as `conch-voice devices` lists it, or `default` for PipeWire's default; for audio.talk_mode, push_to_talk or open"),
         );
     let config = Command::new("config")
-        .about("Change voice.toml: the microphone and the speakers")
+        .about("Change voice.toml: the microphone, the speakers and the talk mode")
         .subcommand_required(true)
         .subcommand(set);
     Command::new("conch-voice")
@@ -388,8 +394,8 @@ pub fn command() -> Command {
 }
 
 /// What `config set` was given, checked: the key is one it writes, and the name can be
-/// written into the file as it is. A name that cannot is refused without being shown, as
-/// `devices` does not show one.
+/// written into the file as it is, or the talk mode is one there is. A value that cannot is
+/// refused without being shown, as `devices` does not show a name.
 fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
     let Some(("set", set)) = matches.subcommand() else {
         return Err(command().error(
@@ -400,13 +406,26 @@ fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
     let key = match set.get_one::<String>("key").map(String::as_str) {
         Some("audio.input") => AudioKey::Input,
         Some("audio.output") => AudioKey::Output,
+        Some("audio.talk_mode") => AudioKey::TalkMode,
         _ => {
             return Err(command().error(
                 clap::error::ErrorKind::InvalidValue,
-                "config set takes audio.input or audio.output",
+                "config set takes audio.input, audio.output or audio.talk_mode",
             ));
         }
     };
+    if key == AudioKey::TalkMode {
+        return match set.get_one::<String>("value") {
+            Some(value) if TalkMode::from_name(value).is_some() => Ok(Invocation::ConfigSet {
+                key,
+                value: value.clone(),
+            }),
+            _ => Err(command().error(
+                clap::error::ErrorKind::ValueValidation,
+                "audio.talk_mode is push_to_talk or open",
+            )),
+        };
+    }
     match set.get_one::<String>("value") {
         Some(value) if crate::devices::fit_for_the_config(value) => Ok(Invocation::ConfigSet {
             key,
@@ -1127,6 +1146,48 @@ mod tests {
                 assert!(!shown.contains(secret), "{bad:?}: {shown}");
             }
         }
+    }
+
+    /// The talk mode is saved by the same command, so that the TUI can keep the person's
+    /// choice; only its two names are taken, and the open microphone's level and hang are
+    /// not keys of the command at all.
+    #[test]
+    fn config_set_takes_the_talk_mode_by_its_two_names_only() {
+        for value in ["push_to_talk", "open"] {
+            assert_eq!(
+                parse(["conch-voice", "config", "set", "audio.talk_mode", value]).unwrap(),
+                Invocation::ConfigSet {
+                    key: AudioKey::TalkMode,
+                    value: value.to_owned()
+                }
+            );
+        }
+        for bad in [
+            &["set", "audio.talk_mode", "Open"][..],
+            &["set", "audio.talk_mode", "always"],
+            &["set", "audio.talk_mode", ""],
+            &["set", "audio.talk_mode", "default"],
+            &["set", "audio.talk_mode", "push-to-talk"],
+            &["set", "audio.talk_mode", "open\u{1b}[2J"],
+            &["set", "audio.talk_mode"],
+            &["set", "audio.talk_mode", "open", "open"],
+            &["set", "talk_mode", "open"],
+            &["set", "audio.open_threshold_db", "-40"],
+            &["set", "audio.open_hang_ms", "400"],
+        ] {
+            let mut line = vec!["conch-voice", "config"];
+            line.extend(bad);
+            let error = parse(line).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{bad:?}");
+            assert!(!error.to_string().contains('\u{1b}'), "{bad:?}");
+        }
+        let help = command()
+            .find_subcommand_mut("config")
+            .and_then(|config| config.find_subcommand_mut("set"))
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("audio.talk_mode"), "{help}");
     }
 
     #[test]

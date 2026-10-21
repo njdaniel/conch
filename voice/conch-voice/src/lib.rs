@@ -9,18 +9,21 @@
 //! session that may publish is joined ([`audio`]); the configured keyboard's event device, for the talk, mute and deafen keys and
 //! nothing else ([`keydev`]); and standard input, one command per line, `down`, `up`,
 //! `mute`, `deafen`, `quit`, where the end of input counts as `up`, and then as `quit`
-//! unless a key device is watched.
+//! unless a key device is watched. With `talk_mode = "open"` the microphone's own sound
+//! opens the transmit gate instead of the talk key, and `down`, `up` and the talk key do
+//! nothing.
 //!
 //! Output: on standard output, plain lines or, with `--json`, one JSON object per line
 //! ([`output`] documents the fields; a reader must skip any line that does not begin with
 //! `{`, because libwebrtc prints one of its own on a machine with an NVIDIA GPU). On
 //! standard error, log records and the one line that says why the client stopped. To
-//! `conchd`, a transmit report for each press and release. To LiveKit, a microphone track
+//! `conchd`, a transmit report for each press and release, or in open mode for each
+//! opening and its end. To LiveKit, a microphone track
 //! that carries audio only while the transmit gate is open. To the output PipeWire has, or
 //! the one `audio.output` names, the mix of what the channel's speakers say ([`audio`]). No join token, room name or
 //! login token is in anything this program writes, and nothing it does waits for what it
-//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device changed and
-//! nothing else ([`config_cmd`]): the one file this program writes.
+//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device, or the
+//! talk mode, changed and nothing else ([`config_cmd`]): the one file this program writes.
 //!
 //! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
 //! input is also its owner's commands on standard input, and the end of that input; its
@@ -241,6 +244,12 @@ pub fn join(
         },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
+        // `join` honours the configured mode; `down` and `up` then do nothing in open mode.
+        talk_mode: resolved.config.audio.talk_mode,
+        level: transmit::level_config(
+            resolved.config.audio.open_threshold_db,
+            resolved.config.audio.open_hang_ms,
+        ),
         key_device: key_device
             .as_ref()
             .map(|(device, _)| device.display().to_string()),
@@ -403,8 +412,8 @@ pub fn devices_with(
     keyboards(out).map_err(Error::Output)
 }
 
-/// `conch-voice config set <key> <value>`: saves the microphone or the speakers in
-/// `voice.toml`, and changes nothing else in it ([`config_cmd`]). Prints nothing.
+/// `conch-voice config set <key> <value>`: saves the microphone, the speakers or the talk
+/// mode in `voice.toml`, and changes nothing else in it ([`config_cmd`]). Prints nothing.
 ///
 /// # Errors
 ///

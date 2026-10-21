@@ -661,3 +661,84 @@ async fn a_started_answered_401_stops_the_client_before_the_track_opens() {
     assert_eq!(ended.sdk.frames(), 0);
     assert_eq!(ended.sdk.count(Call::Close), 1, "the room was left");
 }
+
+// ------------------------------------------------------------------ the open microphone
+
+use conch_voice::session::OPEN_MIC_WARNING;
+use conch_voice_control::TalkMode;
+use support::script::{After, Script};
+
+/// Each opening of the open microphone is one transmission: `started` before its track is
+/// unmuted, `stopped` once it has been muted again, and the next one only after. The two
+/// utterances of 1 s and 0.5 s give exactly two pairs, in order, and `self` says so.
+#[tokio::test]
+async fn in_open_mode_each_opening_is_reported_started_then_stopped_once() {
+    let (mic, _) = Script::make(
+        &[(100, false), (100, true), (100, false), (50, true)],
+        After::Quiet,
+    );
+    let setup = Setup {
+        talk_mode: TalkMode::Open,
+        microphone: Some(mic),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.connected(1).await;
+    rig.until("two transmissions", |rig| {
+        rig.conchd.reported().len() >= 4 && rig.own()["transmitting"] == false
+    })
+    .await;
+    several_frames().await;
+    assert_eq!(
+        rig.conchd.reported(),
+        ["started", "stopped", "started", "stopped"],
+        "two pairs, nothing more"
+    );
+    assert!(rig.events_named("report").is_empty(), "none needed a retry");
+
+    // What `self` said: talking twice, each time ended, never beside a reason.
+    let mut talking = Vec::new();
+    for own in rig.events_named("self") {
+        let now = own["transmitting"] == true;
+        if now {
+            assert_eq!(own["blocked"], serde_json::json!([]));
+        }
+        if talking.last() != Some(&now) {
+            talking.push(now);
+        }
+    }
+    assert_eq!(talking, [false, true, false, true, false]);
+    // `--json` is as ever: no line that is not an object (`events` would refuse one), and
+    // the warning is not among them.
+    assert!(!rig.out.text().contains(OPEN_MIC_WARNING));
+}
+
+/// In plain mode `join` says once, first, that the open microphone sends what it hears, and
+/// words the user's own state for it.
+#[tokio::test]
+async fn in_open_mode_plain_output_warns_once_and_says_open_microphone_and_talking() {
+    let (mic, _) = Script::make(&[(50, false), (40, true)], After::Quiet);
+    let setup = Setup {
+        json: false,
+        talk_mode: TalkMode::Open,
+        microphone: Some(mic),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    let line = |rig: &Rig, want: &str| rig.out.text().lines().any(|line| line == want);
+    support::until(
+        "talking and then not",
+        || rig.out.text(),
+        || {
+            let text = rig.out.text();
+            let talking = text.find("you: TALKING");
+            talking.is_some_and(|at| text[at..].contains("you: open microphone"))
+        },
+    )
+    .await;
+    let text = rig.out.text();
+    assert_eq!(text.lines().next(), Some(OPEN_MIC_WARNING), "{text}");
+    assert_eq!(text.matches(OPEN_MIC_WARNING).count(), 1, "{text}");
+    assert!(line(&rig, "you: open microphone"), "{text}");
+    assert!(!text.contains("ready to talk"), "{text}");
+}

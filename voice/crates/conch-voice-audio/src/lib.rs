@@ -1,10 +1,17 @@
 //! The audio logic of `conch-voice`, with no devices, no network and no native code.
 //!
 //! Input: 48 kHz mono `f32` frames of 10 ms (480 samples) from a microphone source and from
-//! each remote speaker, and commands to open and shut the transmit gate.
-//! Output: the frames the gate lets through, and one mixed frame per tick for the speakers.
-//! Owns: the transmit gate (microphone audio is handed onward only while it is open), one
-//! jitter buffer per speaker, and the mixer. Nothing here writes audio to disk.
+//! each remote speaker, commands to open and shut the transmit gate, and, for the open
+//! microphone, the time that passed with no captured frame.
+//! Output: the frames the gate lets through, one mixed frame per tick for the speakers, and
+//! for the open microphone when its sound starts and when quiet starts.
+//! Owns: the transmit gate (microphone audio is handed onward only while it is open), the
+//! open microphone's level detector, one jitter buffer per speaker, and the mixer. Nothing
+//! here writes audio to disk.
+//!
+//! The level detector ([`LevelDetector`]) looks at captured frames and hands none onward:
+//! it only says when the sound starts and stops, for the push-to-talk machine to decide
+//! with. It is no path to the track.
 //!
 //! The edges are two traits, [`MicSource`] and [`SpeakerSink`], so the binary can put real
 //! devices behind them. This crate ships the test implementations: [`ToneSource`] and
@@ -24,6 +31,7 @@
 mod error;
 mod gate;
 mod jitter;
+mod level;
 mod mixer;
 mod sink;
 mod source;
@@ -35,6 +43,7 @@ pub use gate::{
     TransmitGate,
 };
 pub use jitter::{JITTER_CAP_MS, JITTER_TARGET_MS, JitterBuffer, JitterStats, Popped, Pushed};
+pub use level::{LevelChange, LevelConfig, LevelDetector};
 pub use mixer::Mixer;
 pub use sink::{CountingSink, SignalMeter, SpeakerSink};
 pub use source::{MicRead, MicSource, Pacing, ToneSource};

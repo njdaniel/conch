@@ -77,9 +77,10 @@ use conch_voice_api::{
     Client, Error as ApiError, Secret, ServerAddress, VoiceControlErrorCode, VoiceControlPhase,
     VoiceControlReason, VoiceTransmitState,
 };
+use conch_voice_audio::LevelConfig;
 use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
-    PttOutput, ShutReason, TransmitReport,
+    PttOutput, ShutReason, TalkMode, TransmitReport,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -217,6 +218,11 @@ pub struct Settings {
     pub release_tail_ms: u32,
     /// `audio.max_transmit_secs`.
     pub max_transmit: Duration,
+    /// What opens the gate: `audio.talk_mode` for `join`. A managed helper speaking
+    /// `conch.voice_control.v1` is given push-to-talk whatever the file says.
+    pub talk_mode: TalkMode,
+    /// `audio.open_threshold_db` and `audio.open_hang_ms`, for the level detector.
+    pub level: LevelConfig,
     /// The key device being watched, as it is named when its state is shown. `None` when
     /// presses come from standard input only.
     pub key_device: Option<String>,
@@ -235,6 +241,10 @@ pub const MAX_TRACKS: usize = 64;
 /// more for the moment in which a track is replaced. Without it one participant who
 /// publishes many tracks would use up [`MAX_TRACKS`] and nobody else would be heard.
 pub const MAX_TRACKS_PER_SPEAKER: usize = 2;
+
+/// What `join` says once when it starts in open mode: echo cancellation does not work yet
+/// (#186, #566), so on speakers the open microphone sends the others' voices back to them.
+pub const OPEN_MIC_WARNING: &str = "open microphone: what the microphone hears is sent when it is loud enough; use headphones (no echo cancellation yet)";
 
 /// How long a session request or the opening of the presence socket may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -652,6 +662,12 @@ pub async fn join<T: Transport>(
     inputs: mpsc::UnboundedReceiver<Input>,
     out: Output,
 ) -> Result<(), Error> {
+    let mut out = out;
+    // Said once, first: with speakers, what the others say is sent back to them. With
+    // `--json` no object carries it, and it goes to the log instead.
+    if settings.talk_mode == TalkMode::Open && !out.note(OPEN_MIC_WARNING) {
+        log::warn!("{OPEN_MIC_WARNING}");
+    }
     let mut session = Session::new(settings, conchd, transport, scrubber, inputs, out)?;
     session.run().await;
     session.leave().await
@@ -735,11 +751,16 @@ impl<T: Transport> Session<T> {
             sink_tones,
             release_tail_ms,
             max_transmit,
+            talk_mode,
+            level,
             key_device,
             unreachable_note,
             timings,
         } = settings;
-        let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
+        let transmitter = transmit::spawn_with_level(
+            transmit::gate_config(release_tail_ms, max_transmit),
+            level,
+        )?;
         let receiver = receive::spawn(&sink_tones, open_sink()?)?;
         let reports = Reports::spawn(
             conchd.report_client,
@@ -747,7 +768,9 @@ impl<T: Transport> Session<T> {
             timings.reports.clone(),
         );
         let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
-        let (ptt, first) = Ptt::new(max_transmit);
+        let (ptt, first) = Ptt::with_talk_mode(max_transmit, talk_mode);
+        let mut out = out;
+        out.set_talk_mode(talk_mode);
         let mut session = Session {
             channel,
             release_tail: Duration::from_millis(u64::from(release_tail_ms)),
@@ -854,17 +877,24 @@ impl<T: Transport> Session<T> {
                     });
                 }
                 PttOutput::Gate(command) => {
-                    let ends = matches!(command, GateCommand::Shut | GateCommand::ForceShut(_));
+                    // What shuts the gate at once, with no release tail: a reason, and a
+                    // change of talk mode.
+                    let at_once = matches!(
+                        command,
+                        GateCommand::ForceShut(_) | GateCommand::TalkMode(_)
+                    );
+                    let ends = at_once || command == GateCommand::Shut;
                     let waited = ends && self.opening.take().is_some();
                     never_opened |= waited;
                     // The gate never opened for a press that waited, so a release has
-                    // nothing to shut; a reason is passed on all the same, so that the gate
-                    // holds the same reasons as the machine.
+                    // nothing to shut; a reason, or the mode, is passed on all the same, so
+                    // that the gate holds the same reasons as the machine and runs the
+                    // level detector in the mode the machine is in.
                     if !(waited && command == GateCommand::Shut) {
-                        let _ = self.transmitter.commands.send(TxCommand::Gate(command));
+                        self.transmitter.send(TxCommand::Gate(command));
                     }
-                    if matches!(command, GateCommand::ForceShut(_)) {
-                        // A forced shut has no release tail: nothing is left to send.
+                    if at_once {
+                        // Nothing is left to send.
                         self.mute_track();
                     }
                 }
@@ -922,10 +952,7 @@ impl<T: Transport> Session<T> {
                     // Before the gate opens, so that no frame meets a muted track.
                     self.with_track(MicTrack::unmute);
                     self.transmitter.track_lock.reopen();
-                    let _ = self
-                        .transmitter
-                        .commands
-                        .send(TxCommand::Gate(GateCommand::Open));
+                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
                 }
                 return;
             }
@@ -1036,7 +1063,7 @@ impl<T: Transport> Session<T> {
         self.tell(PttInput::PublishGrant(can_publish));
         let track = mic.map(|(track, feed)| {
             self.open_microphone();
-            let _ = self.transmitter.commands.send(TxCommand::Attach(feed));
+            self.transmitter.send(TxCommand::Attach(feed));
             track
         });
         self.policy.connected(self.now());
@@ -1063,7 +1090,7 @@ impl<T: Transport> Session<T> {
         };
         match open() {
             Ok(Some(mic)) => {
-                let _ = self.transmitter.commands.send(TxCommand::Microphone(mic));
+                self.transmitter.send(TxCommand::Microphone(mic));
                 self.mic = Mic::Open;
                 self.tell(PttInput::Microphone(true));
             }
@@ -1257,7 +1284,7 @@ impl<T: Transport> Session<T> {
                 subscribed: false,
             });
         }
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
+        self.transmitter.send(TxCommand::Detach);
         let _ = self.receiver.commands.send(MixCommand::Clear);
         let limit = self.timings.close_limit;
         self.phase = Phase::Closing(
@@ -1285,6 +1312,15 @@ impl<T: Transport> Session<T> {
                 self.tell(PttInput::GateShut);
             }
             TxEvent::Microphone(present) => self.tell(PttInput::Microphone(present)),
+            // Open mode: the level detector's word, for the machine to decide on, if it was
+            // made after the detector's last restart. One made before it (quiet, or an onset,
+            // on its way when a reason ended) is stale: passed on, quiet and an onset would
+            // open the gate on the reason's ending itself.
+            TxEvent::Sound { sounding, restarts } => {
+                if self.transmitter.is_current(restarts) {
+                    self.tell(PttInput::Sound(sounding));
+                }
+            }
         }
     }
 
@@ -1566,10 +1602,10 @@ impl<T: Transport> Session<T> {
         let shut = TxCommand::Gate(GateCommand::ForceShut(
             conch_voice_control::ShutReason::NotConnected,
         ));
-        let _ = self.transmitter.commands.send(shut);
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
+        self.transmitter.send(shut);
+        self.transmitter.send(TxCommand::Detach);
         // Leaving closes the microphone's stream: nothing is captured when not joined.
-        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
+        self.transmitter.send(TxCommand::CloseMicrophone);
         self.mute_track();
 
         let live = self.live.take();
@@ -1628,9 +1664,9 @@ impl<T: Transport> Session<T> {
         // Nothing more is sent, captured or played. The gate was shut when stopping began;
         // this makes sure of it whatever else happened, and closes what is open.
         let shut = TxCommand::Gate(GateCommand::ForceShut(ShutReason::NotConnected));
-        let _ = self.transmitter.commands.send(shut);
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
-        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
+        self.transmitter.send(shut);
+        self.transmitter.send(TxCommand::Detach);
+        self.transmitter.send(TxCommand::CloseMicrophone);
         self.mic = Mic::Closed;
         self.mute_track();
         // The mix task ends when its commands do, and the speakers close with it.

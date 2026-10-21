@@ -531,3 +531,402 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
         7
     );
 }
+
+// ------------------------------------------------------------------ the open microphone
+//
+// `talk_mode = "open"` (`docs/design/tui-voice.md` §20.6), with a scripted microphone read
+// every 10 ms, the default level (-40 dBFS) and hang (400 ms, forty frames), and the rig's
+// release tail of 20 ms (two frames).
+
+use conch_voice_control::{Key, KeyAction, KeyEvent, TalkMode};
+use support::MakeMic;
+use support::script::{After, Script, Switch, frame_number};
+
+/// The hang, in frames.
+const HANG: u64 = 40;
+/// The release tail, in frames.
+const TAIL: u64 = 2;
+/// Frames the gate may forward past the hang and tail while the session tells it quiet has
+/// come: the detector's word goes to the session loop and the shut back to the transmit
+/// task, between two frames of 10 ms.
+const SLACK: u64 = 2;
+
+fn open_mode(microphone: MakeMic) -> Setup {
+    Setup {
+        talk_mode: TalkMode::Open,
+        microphone: Some(microphone),
+        ..Setup::default()
+    }
+}
+
+/// The numbers of the scripted frames the track was handed, in order.
+fn sent(rig: &Rig) -> Vec<u64> {
+    rig.sdk
+        .first_samples()
+        .into_iter()
+        .map(frame_number)
+        .collect()
+}
+
+/// Waits for `pairs` transmissions to be over and reported.
+async fn transmissions(rig: &Rig, pairs: usize) {
+    rig.until("the transmissions reported", |rig| {
+        rig.conchd.reported().len() >= 2 * pairs && rig.own()["transmitting"] == false
+    })
+    .await;
+}
+
+/// Issue #654's first criterion: a microphone of 1 s silence, 1 s tone, 1 s silence and
+/// 0.5 s tone is two transmissions. Frames reach the track only from each tone's onset to
+/// its end, the hang and the release tail; the onset frame itself is not sent.
+#[tokio::test]
+async fn in_open_mode_two_utterances_are_two_transmissions_sent_from_onset_to_hang_and_tail() {
+    let (mic, played) = Script::make(
+        &[(100, false), (100, true), (100, false), (50, true)],
+        After::Quiet,
+    );
+    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    rig.connected(1).await;
+    transmissions(&rig, 2).await;
+    several_frames().await;
+    assert!(played.frames.load(std::sync::atomic::Ordering::SeqCst) > 350 + HANG);
+
+    assert_eq!(
+        rig.conchd.reported(),
+        ["started", "stopped", "started", "stopped"]
+    );
+    let sent = sent(&rig);
+    // (onset, end): the frames of each tone.
+    let tones = [(100, 200), (300, 350)];
+    for &(onset, end) in &tones {
+        let last = end - 1 + HANG + TAIL;
+        let of_this: Vec<u64> = sent
+            .iter()
+            .copied()
+            .filter(|n| (onset..=last + SLACK).contains(n))
+            .collect();
+        assert!(
+            !of_this.contains(&onset),
+            "the onset frame was sent: {sent:?}"
+        );
+        // The tone to its end, and the hang and tail after it, reached the track.
+        for n in [end - 1, end - 1 + HANG, last] {
+            assert!(of_this.contains(&n), "frame {n} is missing: {sent:?}");
+        }
+    }
+    for n in &sent {
+        let inside = tones
+            .iter()
+            .any(|&(onset, end)| *n > onset && *n <= end - 1 + HANG + TAIL + SLACK);
+        assert!(inside, "frame {n} outside every transmission: {sent:?}");
+    }
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_eq!(
+        rig.sdk.control_calls(),
+        [
+            Call::Connect,
+            Call::Publish,
+            Call::Mute,
+            Call::Unmute,
+            Call::Mute,
+            Call::Unmute,
+            Call::Mute
+        ]
+    );
+}
+
+/// Muted or deafened, nothing reaches the track in open mode, however loud the microphone.
+/// Unmuting during sound sends nothing until quiet and a new onset: the rest of what was
+/// being said is not sent.
+#[tokio::test]
+async fn in_open_mode_nothing_is_sent_muted_or_deafened_and_unmuting_needs_a_fresh_onset() {
+    let (mic, loud) = Switch::make();
+    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    rig.ready().await;
+    let set = |on: bool| loud.set(on);
+    // Sixty frames: longer than the hang of forty, counted as the detector counts.
+    let longer_than_the_hang = || loud.frames_pass(HANG + 20);
+    // The detector hears its first quiet.
+    longer_than_the_hang().await;
+
+    rig.line(Mute);
+    rig.until("muted", |rig| rig.own()["muted"] == true).await;
+    set(true);
+    longer_than_the_hang().await;
+    assert_eq!(rig.sdk.frames(), 0, "muted");
+    assert!(rig.events_named("press_ignored").is_empty());
+
+    // Unmuted while the sound goes on: nothing, for as long as it goes on.
+    rig.line(Mute);
+    rig.ready().await;
+    longer_than_the_hang().await;
+    longer_than_the_hang().await;
+    assert_eq!(rig.sdk.frames(), 0, "unmuted during sound");
+    assert_eq!(rig.conchd.reported(), Vec::<String>::new());
+
+    // Quiet, then sound: that transmits.
+    set(false);
+    longer_than_the_hang().await;
+    set(true);
+    rig.talking().await;
+    rig.frames_beyond(3).await;
+
+    // Deafened during the sound: the transmission ends at once, and nothing follows it.
+    let stops = rig.stopped();
+    rig.line(Deafen);
+    rig.until("deafened", |rig| {
+        rig.own()["deafened"] == true && rig.own()["transmitting"] == false
+    })
+    .await;
+    rig.stopped_beyond(stops).await;
+    let sent = rig.sdk.frames();
+    longer_than_the_hang().await;
+    assert_eq!(rig.sdk.frames(), sent, "deafened");
+    // Undeafened during the same sound: still nothing.
+    rig.line(Deafen);
+    rig.ready().await;
+    longer_than_the_hang().await;
+    assert_eq!(rig.sdk.frames(), sent, "undeafened during sound");
+
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+}
+
+/// With `max_transmit_secs = 1` a 3 s tone is cut at 1 s; the limit stands, and the gate does
+/// not open again until quiet and a new onset.
+#[tokio::test]
+async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_new_onset() {
+    let (mic, _) = Script::make(
+        &[(50, false), (300, true), (60, false), (30, true)],
+        After::Quiet,
+    );
+    let setup = Setup {
+        max_transmit: Duration::from_secs(1),
+        ..open_mode(mic)
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.connected(1).await;
+    rig.until("the limit", |rig| {
+        rig.own()["blocked"] == json!(["max_transmit"]) && rig.own()["transmitting"] == false
+    })
+    .await;
+    transmissions(&rig, 2).await;
+    several_frames().await;
+
+    assert_eq!(
+        rig.conchd.reported(),
+        ["started", "stopped", "started", "stopped"]
+    );
+    let sent = sent(&rig);
+    let (first, second): (Vec<u64>, Vec<u64>) = sent.iter().partition(|n| **n < 410);
+    // One second of the tone at most, and none of the rest of it.
+    assert!(first.len() <= 100, "{} frames in the first", first.len());
+    assert!(first.iter().all(|n| *n > 50), "{sent:?}");
+    let (lo, hi) = (first[0], first[first.len() - 1]);
+    assert!(hi - lo < 100, "the first opening ran from {lo} to {hi}");
+    assert!(hi < 349, "the tone was not cut: {sent:?}");
+    // The second opening: from the new onset to its hang and tail.
+    assert!(
+        !second.is_empty() && second.iter().all(|n| *n > 410),
+        "{sent:?}"
+    );
+    assert!(
+        second.iter().all(|n| *n <= 439 + HANG + TAIL + SLACK),
+        "{sent:?}"
+    );
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
+/// A microphone that trickles one quiet frame every 200 ms after an utterance (the review's
+/// S2): counted in frames, quiet would come only after twenty of them, 4 s. The gate shuts
+/// within the hang and the tail of the last loud frame, by the clock.
+#[tokio::test]
+async fn in_open_mode_a_trickling_microphone_shuts_the_gate_within_hang_and_tail() {
+    let (mic, played) = Script::make(
+        &[(50, false), (60, true)],
+        After::Trickle(Duration::from_millis(200)),
+    );
+    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    rig.talking().await;
+    rig.until("the last loud frame", |_| {
+        played.frames.load(std::sync::atomic::Ordering::SeqCst) > 110
+    })
+    .await;
+    rig.not_talking().await;
+    let last_loud = played.last_loud_at.lock().unwrap().unwrap();
+    let after = last_loud.elapsed();
+    assert!(
+        after >= Duration::from_millis(380),
+        "shut before the hang: {after:?}"
+    );
+    assert!(
+        after <= Duration::from_millis(400 + 20 + 300),
+        "shut {after:?} after the last loud frame"
+    );
+    transmissions(&rig, 1).await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
+/// A microphone that stops delivering frames during an opening shuts the gate within the
+/// hang and the tail: time with no frame is quiet, and the tail, counted in frames, is cut.
+#[tokio::test]
+async fn in_open_mode_a_microphone_that_stops_delivering_shuts_the_gate_within_hang_and_tail() {
+    let (mic, played) = Script::make(&[(50, false), (60, true)], After::Stop);
+    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    rig.talking().await;
+    rig.until("the script's end", |_| {
+        played.frames.load(std::sync::atomic::Ordering::SeqCst) == 110
+    })
+    .await;
+    rig.not_talking().await;
+    let last = played.last_at.lock().unwrap().unwrap();
+    let after = last.elapsed();
+    // The hang is 400 ms and the tail 20; the rest is the loop and this test looking.
+    assert!(
+        after >= Duration::from_millis(380),
+        "shut before the hang: {after:?}"
+    );
+    assert!(
+        after <= Duration::from_millis(400 + 20 + 300),
+        "shut {after:?} after the last frame"
+    );
+    transmissions(&rig, 1).await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+    assert!(sent(&rig).iter().all(|n| *n > 50 && *n < 110));
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
+/// In open mode the talk key and `down`/`up` open nothing and are not answered; a lost key
+/// device blocks nothing; the mute and deafen keys work.
+#[tokio::test]
+async fn in_open_mode_the_talk_key_opens_nothing_a_lost_key_device_blocks_nothing_and_mute_works() {
+    use conch_voice::keydev::{DeviceState, Problem};
+
+    let (mic, loud) = Switch::make();
+    let setup = Setup {
+        key_device: Some("the-test-keyboard".to_owned()),
+        ..open_mode(mic)
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.input(Input::KeyDevice(DeviceState::Ready));
+    rig.ready().await;
+    // The detector hears its first quiet.
+    loud.frames_pass(HANG + 20).await;
+    let talk = |action| {
+        Input::Key(KeyEvent {
+            key: Key::Talk,
+            action,
+        })
+    };
+    for input in [
+        Input::Line(Down),
+        Input::Line(Up),
+        talk(KeyAction::Press),
+        talk(KeyAction::Release),
+        Input::Line(Down),
+    ] {
+        rig.input(input);
+    }
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), 0, "the talk key opened something");
+    assert!(rig.events_named("press_ignored").is_empty());
+    assert_eq!(rig.conchd.reported(), Vec::<String>::new());
+
+    // The keyboard goes away: nothing is blocked, and sound transmits.
+    rig.input(Input::KeyDevice(DeviceState::Lost(Problem::Ended)));
+    rig.until("the loss shown", |rig| {
+        !rig.events_named("key_device").is_empty()
+            && rig.events_named("key_device").last().unwrap()["state"] == "missing"
+    })
+    .await;
+    assert_eq!(rig.own()["blocked"], json!([]));
+    loud.set(true);
+    rig.talking().await;
+    rig.frames_beyond(3).await;
+    assert!(
+        rig.events_named("self").iter().all(|own| !own["blocked"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("key_device_lost"))),
+        "key_device_lost is never a block in open mode"
+    );
+
+    // The mute key, from the device that came back.
+    rig.input(Input::KeyDevice(DeviceState::Ready));
+    let stops = rig.stopped();
+    rig.input(Input::Key(KeyEvent {
+        key: Key::Mute,
+        action: KeyAction::Press,
+    }));
+    rig.until("muted", |rig| {
+        rig.own()["muted"] == true && rig.own()["transmitting"] == false
+    })
+    .await;
+    rig.stopped_beyond(stops).await;
+    let sent = rig.sdk.frames();
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), sent);
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
+/// The transmit task alone: a change of talk mode shuts the gate at once, with no release
+/// tail, and no frame follows it.
+#[tokio::test]
+async fn a_change_of_talk_mode_shuts_the_gate_at_once_and_no_frame_follows() {
+    use conch_voice::sdk::{RoomHandle, Transport};
+    use conch_voice::secrets::Scrubber;
+    use conch_voice::transmit::{self, BoxedMic, TxCommand, TxEvent};
+    use conch_voice_api::Secret;
+    use conch_voice_audio::ToneSource;
+    use conch_voice_control::GateCommand;
+    use support::fake::{FakeFeed, FakeSdk};
+
+    let sdk = FakeSdk::new(Scrubber::new());
+    let (room, _events) = sdk
+        .connect("ws://livekit.invalid", &Secret::new("FAKE-join-token"))
+        .await
+        .unwrap();
+    let (_track, feed) = room.publish_microphone().await.unwrap();
+    // A release tail of a whole second, which a change of mode must not run.
+    let config = transmit::gate_config(1000, Duration::from_secs(60));
+    let mut transmitter = transmit::spawn::<FakeFeed>(config).unwrap();
+    transmitter.track_lock.reopen();
+    let mic = Box::new(ToneSource::new(440.0, 0.25).unwrap()) as BoxedMic;
+    for command in [
+        TxCommand::Microphone(mic),
+        TxCommand::Attach(feed),
+        TxCommand::Gate(GateCommand::Open),
+    ] {
+        assert!(transmitter.commands.send(command).is_ok());
+    }
+    support::until("frames", String::new, || sdk.frames() >= 3).await;
+
+    for mode in [TalkMode::Open, TalkMode::PushToTalk] {
+        let changed = TxCommand::Gate(GateCommand::TalkMode(mode));
+        assert!(transmitter.commands.send(changed).is_ok());
+        let event = tokio::time::timeout(Duration::from_millis(500), transmitter.events.recv())
+            .await
+            .expect("the gate says it shut at once")
+            .unwrap();
+        assert_eq!(
+            event,
+            TxEvent::GateShut {
+                limit_reached: false
+            }
+        );
+        let at_shut = sdk.frames();
+        several_frames().await;
+        assert_eq!(sdk.frames(), at_shut, "a frame after the change to {mode}");
+        // Nothing stands: the next open opens again.
+        let open = TxCommand::Gate(GateCommand::Open);
+        assert!(transmitter.commands.send(open).is_ok());
+        support::until("frames again", String::new, || sdk.frames() > at_shut).await;
+    }
+}
