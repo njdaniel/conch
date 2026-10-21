@@ -54,6 +54,12 @@ class StubRoom implements Room {
   stopScreen = (): Promise<void> => Promise.resolve();
   keepScreen = (): KeptScreen | null => ({ audio: true, live: () => true, onEnded: null, stop: () => undefined });
   adoptScreen = (): void => undefined;
+  setMicrophone = (): void => undefined;
+  switchMicrophone = (): Promise<void> => Promise.resolve();
+  microphones = (): Promise<null> => Promise.resolve(null);
+  microphoneInUse = (): null => null;
+  setProcessing = (): void => undefined;
+  microphoneProcessing = (): null => null;
 }
 
 const session: VoiceSessionResult = {

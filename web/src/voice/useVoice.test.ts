@@ -153,6 +153,138 @@ describe('the talk key', () => {
   });
 });
 
+// Issue #658: the microphone chosen lasts for the tab, in sessionStorage
+// beside the talk key, and nowhere else: its device id, and its name, by
+// which it is found again under a new id.
+describe('the microphone chosen', () => {
+  const key = 'conch.web.voice.microphone';
+  const nameKey = 'conch.web.voice.microphone.name';
+  const webcam = { id: 'mic-2', label: 'Webcam' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+  });
+
+  it('is restored from the tab when the page loads, and is the system default without one', () => {
+    expect(hook({ channel: null }).result.current.state.microphone).toBeNull();
+    window.sessionStorage.setItem(key, 'mic-1');
+    window.sessionStorage.setItem(nameKey, 'Headset');
+    expect(hook({ channel: null }).result.current.state.microphone).toEqual({ id: 'mic-1', label: 'Headset' });
+  });
+
+  it('is stored when chosen, and the system default stores nothing', async () => {
+    const { result } = hook({ channel: null });
+    await act(async () => {
+      await result.current.client.chooseMicrophone(webcam);
+    });
+    expect(window.sessionStorage.getItem(key)).toBe('mic-2');
+    expect(window.sessionStorage.getItem(nameKey)).toBe('Webcam');
+    expect(window.localStorage.length).toBe(0);
+    await act(async () => {
+      await result.current.client.chooseMicrophone(null);
+    });
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('works without storage: a storage that throws is tolerated, and the choice lasts until a reload', async () => {
+    const refuse = () => {
+      throw new DOMException('storage is off', 'SecurityError');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(refuse);
+    const { result } = hook({ channel: null });
+    expect(result.current.state.microphone).toBeNull();
+    await act(async () => {
+      await result.current.client.chooseMicrophone(webcam);
+    });
+    expect(result.current.state.microphone).toEqual(webcam);
+  });
+});
+
+// Issue #659: voice processing is kept per microphone for the tab, in
+// sessionStorage, System default under a key of its own; a device never set
+// has it on.
+describe('voice processing', () => {
+  const prefix = 'conch.web.voice.processing';
+  const headset = { id: 'mic-1', label: 'Headset' };
+  const webcam = { id: 'mic-2', label: 'Webcam' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+  });
+
+  it('round-trips per device through the tab: a reload finds each as it was left', async () => {
+    const first = hook({ channel: null });
+    expect(first.result.current.state.processing).toBe(true);
+    await act(async () => {
+      await first.result.current.client.setProcessing(false);
+    });
+    await act(async () => {
+      await first.result.current.client.chooseMicrophone(webcam);
+    });
+    // A device never set is on, whatever System default is.
+    expect(first.result.current.state.processing).toBe(true);
+    await act(async () => {
+      await first.result.current.client.chooseMicrophone(headset);
+    });
+    await act(async () => {
+      await first.result.current.client.setProcessing(false);
+    });
+    expect(window.sessionStorage.getItem(`${prefix}.system`)).toBe('off');
+    expect(window.sessionStorage.getItem(`${prefix}.device:mic-1`)).toBe('off');
+    expect(window.sessionStorage.getItem(`${prefix}.device:mic-2`)).toBeNull();
+    expect(window.localStorage.length).toBe(0);
+    first.unmount();
+
+    // The page loaded again, with Headset chosen.
+    const again = hook({ channel: null });
+    expect(again.result.current.state).toMatchObject({ microphone: headset, processing: false });
+    await act(async () => {
+      await again.result.current.client.chooseMicrophone(webcam);
+    });
+    expect(again.result.current.state.processing).toBe(true);
+    await act(async () => {
+      await again.result.current.client.chooseMicrophone(null);
+    });
+    expect(again.result.current.state.processing).toBe(false);
+    await act(async () => {
+      await again.result.current.client.setProcessing(true);
+    });
+    expect(window.sessionStorage.getItem(`${prefix}.system`)).toBe('on');
+  });
+
+  it('an unknown device is on', () => {
+    window.sessionStorage.setItem('conch.web.voice.microphone', 'never-set');
+    window.sessionStorage.setItem('conch.web.voice.microphone.name', 'Studio interface');
+    expect(hook({ channel: null }).result.current.state).toMatchObject({ microphone: { id: 'never-set' }, processing: true });
+  });
+
+  it('works without storage: a storage that throws is tolerated, and the setting lasts until a reload', async () => {
+    const refuse = () => {
+      throw new DOMException('storage is off', 'SecurityError');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(refuse);
+    const { result } = hook({ channel: null });
+    expect(result.current.state.processing).toBe(true);
+    await act(async () => {
+      await result.current.client.setProcessing(false);
+    });
+    await act(async () => {
+      await result.current.client.chooseMicrophone(webcam);
+    });
+    expect(result.current.state.processing).toBe(true);
+    await act(async () => {
+      await result.current.client.chooseMicrophone(null);
+    });
+    expect(result.current.state.processing).toBe(false);
+  });
+});
+
 describe('presence of the channel on screen', () => {
   it('comes from its socket while not in voice, and each frame is the roster', async () => {
     const { result } = hook();

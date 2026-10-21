@@ -5,6 +5,9 @@
 //! [`Config::parse`]; a file that does not exist is [`Config::default`]. Values from the
 //! environment and the command line are the caller's to collect, into a [`ConfigOverrides`]
 //! per layer, applied with [`Config::apply`] in the order it wants them to win.
+//!
+//! [`set_audio_value`] gives the text back with one `[audio]` device changed, for
+//! `conch-voice config set` to save. It changes nothing else in the text.
 
 use std::fmt;
 use std::ops::Range;
@@ -344,6 +347,211 @@ impl AudioConfig {
     pub fn max_transmit(&self) -> Duration {
         Duration::from_secs(u64::from(self.max_transmit_secs))
     }
+}
+
+/// A device under `[audio]`: the only keys [`set_audio_value`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioKey {
+    /// `input`: the microphone.
+    Input,
+    /// `output`: the speakers.
+    Output,
+}
+
+impl AudioKey {
+    /// The key's name in `[audio]`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            AudioKey::Input => "input",
+            AudioKey::Output => "output",
+        }
+    }
+
+    /// The key's name dotted from the top of the file, as errors and the command line give it.
+    #[must_use]
+    pub fn dotted(self) -> &'static str {
+        match self {
+            AudioKey::Input => "audio.input",
+            AudioKey::Output => "audio.output",
+        }
+    }
+
+    fn slot(self, config: &mut Config) -> &mut Option<String> {
+        match self {
+            AudioKey::Input => &mut config.audio.input,
+            AudioKey::Output => &mut config.audio.output,
+        }
+    }
+}
+
+/// `text`, the configuration file, with `[audio]`'s `key` set to `value` and nothing else
+/// changed: every comment, blank line, key and table stays as it was written, byte for byte.
+/// `file` names the text in errors, as for [`Config::parse`]. `"default"` is a value like
+/// any other, and is read as PipeWire's default.
+///
+/// The edit is the smallest one there is, in this order of preference:
+///
+/// - the key is in a `[audio]` table: its value's text is replaced;
+/// - a `[audio]` table is there without the key: one line, `key = "value"`, goes directly
+///   after its header, with the header's line ending;
+/// - `audio` is not in the file at all: a blank line, `[audio]` and the key's line are
+///   added at the end. Empty text becomes those two lines alone.
+///
+/// `value` is written between double quotes as it is, so it may hold no quotation mark,
+/// backslash or control character: then no escape is needed, and none is written. The
+/// result is checked before it is returned: [`Config::parse`] must read it as the old
+/// configuration with this one field changed, and the old text must be in it unchanged but
+/// for the old value's own text.
+///
+/// # Errors
+///
+/// - What [`Config::parse`] says of `text`: a file it refuses is not edited.
+/// - [`Error::InvalidConfigValue`] for a `value` that cannot be written as it is.
+/// - [`Error::AudioFormNotEditable`] when `audio` is an inline table or dotted keys, or the
+///   key's value is not a string.
+/// - [`Error::AudioEditUnchecked`] if the result does not pass the check.
+pub fn set_audio_value(
+    text: &str,
+    file: &str,
+    key: AudioKey,
+    value: &str,
+) -> Result<String, Error> {
+    let before = Config::parse(text, file)?;
+    if value.is_empty() || value.contains(['"', '\\']) || value.chars().any(char::is_control) {
+        return Err(Error::InvalidConfigValue {
+            file: file.to_owned(),
+            key: key.dotted().to_owned(),
+            message: "a device name must not be empty, and must hold no quotation mark, backslash or control character".to_owned(),
+        });
+    }
+    let quoted = format!("\"{value}\"");
+    let (range, replacement) = plan_audio_edit(text, file, key, &quoted)?;
+    let mut edited = String::with_capacity(text.len() + replacement.len());
+    edited.push_str(&text[..range.start]);
+    edited.push_str(&replacement);
+    edited.push_str(&text[range.end..]);
+
+    // The edit is checked by what it gives, not by how it was made: read back by the same
+    // parser that will read it, and compared byte for byte with the text it came from.
+    let unchecked = || Error::AudioEditUnchecked {
+        file: file.to_owned(),
+        key: key.dotted().to_owned(),
+    };
+    let after = Config::parse(&edited, file).map_err(|_| unchecked())?;
+    let mut want = before;
+    *key.slot(&mut want) = Some(value.to_owned());
+    if after != want {
+        return Err(unchecked());
+    }
+    // Either the old text is all there with one run added (an insertion), or what differs
+    // lies within the old value's own text.
+    let changed = changed_region(text, &edited);
+    let within = range.start <= changed.start && changed.end <= range.end;
+    if !changed.is_empty() && !within {
+        return Err(unchecked());
+    }
+    Ok(edited)
+}
+
+/// Where in `text` the edit goes, and what replaces that range: an empty range is an
+/// insertion.
+fn plan_audio_edit(
+    text: &str,
+    file: &str,
+    key: AudioKey,
+    quoted: &str,
+) -> Result<(Range<usize>, String), Error> {
+    let not_editable = || Error::AudioFormNotEditable {
+        file: file.to_owned(),
+    };
+    let document = DeTable::parse(text).map_err(|error| locate(text, file, &error))?;
+    let audio = document
+        .get_ref()
+        .iter()
+        .find(|(name, _)| name.get_ref() == "audio")
+        .map(|(_, value)| value);
+    let eol = line_ending(text);
+    let line = format!("{} = {quoted}", key.name());
+
+    let Some(audio) = audio else {
+        // A file with no `audio` at all: the table goes at the end, after a blank line.
+        let mut added = String::new();
+        if !text.is_empty() {
+            if !text.ends_with('\n') {
+                added.push_str(eol);
+            }
+            added.push_str(eol);
+        }
+        added.push_str("[audio]");
+        added.push_str(eol);
+        added.push_str(&line);
+        added.push_str(eol);
+        return Ok((text.len()..text.len(), added));
+    };
+
+    // A table opened by a `[audio]` header has the header's text as its span. An inline
+    // table's span starts with `{`, and a table made by dotted keys has the span of its
+    // name in the first of them, which never starts with `[`.
+    let span = audio.span();
+    let header = text
+        .get(span.clone())
+        .is_some_and(|header| header.starts_with('[') && !header.starts_with("[["));
+    let DeValue::Table(table) = audio.get_ref() else {
+        return Err(not_editable());
+    };
+    if !header {
+        return Err(not_editable());
+    }
+    let present = table
+        .iter()
+        .find(|(name, _)| name.get_ref() == key.name())
+        .map(|(_, value)| value);
+    match present {
+        Some(present) if present.get_ref().is_str() => Ok((present.span(), quoted.to_owned())),
+        Some(_) => Err(not_editable()),
+        // Directly after the header's line, which ends with a line ending unless it is the
+        // last line of the file.
+        None => match text[span.end..].find('\n') {
+            Some(newline) => {
+                let at = span.end + newline + 1;
+                let eol = if text[..at].ends_with("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                Ok((at..at, format!("{line}{eol}")))
+            }
+            None => Ok((text.len()..text.len(), format!("{eol}{line}"))),
+        },
+    }
+}
+
+/// The file's line ending, from its first line: CRLF if that line has one, else LF.
+fn line_ending(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(newline) if text[..newline].ends_with('\r') => "\r\n",
+        _ => "\n",
+    }
+}
+
+/// The range of `old` that differs from `new`: what is left once the bytes the two begin
+/// with and end with alike are taken away. It is empty when `new` is `old` with one run of
+/// bytes added.
+fn changed_region(old: &str, new: &str) -> Range<usize> {
+    let (old, new) = (old.as_bytes(), new.as_bytes());
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    prefix..old.len() - suffix
 }
 
 /// The file as serde reads it: every key optional, and no key that is not listed.
@@ -1087,5 +1295,254 @@ max_transmit_secs = 45
             Config::parse(&text, FILE).unwrap().keys.device.as_deref(),
             Some(good)
         );
+    }
+
+    /// A file as a person keeps one: comments everywhere, blank lines, keys in no order.
+    const KEPT: &str = "# conch-voice\n\
+                        channel = \"ops\"   # the usual one\n\
+                        \n\
+                        [keys]\n\
+                        talk = \"KEY_F13\"\n\
+                        \n\
+                        # devices\n\
+                        [audio]\n\
+                        release_tail_ms = 150\n\
+                        # the headset\n\
+                        input = \"alsa_input.old\" # chosen by hand\n\
+                        # end of audio\n\
+                        output = 'alsa_output.literal'\n\
+                        \n\
+                        # trailing comment\n";
+
+    /// `set_audio_value`'s results, as whole texts: (what, before, key, value, after).
+    #[test]
+    fn setting_a_device_changes_that_value_and_nothing_else() {
+        let replaced_input = KEPT.replace(
+            "\"alsa_input.old\"",
+            "\"alsa_input.usb-Example_Mic-00.mono-fallback\"",
+        );
+        let replaced_output = KEPT.replace("'alsa_output.literal'", "\"default\"");
+        let cases: &[(&str, &str, AudioKey, &str, &str)] = &[
+            (
+                "comments before, after and on the key's line",
+                KEPT,
+                AudioKey::Input,
+                "alsa_input.usb-Example_Mic-00.mono-fallback",
+                &replaced_input,
+            ),
+            (
+                "a single-quoted literal replaced",
+                KEPT,
+                AudioKey::Output,
+                "default",
+                &replaced_output,
+            ),
+            (
+                "CRLF line endings, the key present",
+                "[audio]\r\ninput = \"a\"\r\noutput = \"b\"\r\n",
+                AudioKey::Output,
+                "c",
+                "[audio]\r\ninput = \"a\"\r\noutput = \"c\"\r\n",
+            ),
+            (
+                "CRLF line endings, the key absent",
+                "channel = \"ops\"\r\n[audio] # devices\r\noutput = \"b\"\r\n",
+                AudioKey::Input,
+                "a",
+                "channel = \"ops\"\r\n[audio] # devices\r\ninput = \"a\"\r\noutput = \"b\"\r\n",
+            ),
+            (
+                "CRLF line endings, the table absent",
+                "channel = \"ops\"\r\n",
+                AudioKey::Input,
+                "a",
+                "channel = \"ops\"\r\n\r\n[audio]\r\ninput = \"a\"\r\n",
+            ),
+            (
+                "[ audio ] with spaces",
+                "[ audio ]\noutput = \"b\"\n",
+                AudioKey::Input,
+                "a",
+                "[ audio ]\ninput = \"a\"\noutput = \"b\"\n",
+            ),
+            (
+                "the key absent: inserted after the header",
+                "[audio]\nrelease_tail_ms = 150\n[keys]\ntalk = 97\n",
+                AudioKey::Output,
+                "b",
+                "[audio]\noutput = \"b\"\nrelease_tail_ms = 150\n[keys]\ntalk = 97\n",
+            ),
+            (
+                "the key absent, the header the last line with no line ending",
+                "channel = \"ops\"\n[audio]",
+                AudioKey::Input,
+                "a",
+                "channel = \"ops\"\n[audio]\ninput = \"a\"",
+            ),
+            (
+                "the table absent",
+                "server = \"http://127.0.0.1:8080\"\n\n[keys]\ntalk = 97\n",
+                AudioKey::Input,
+                "a",
+                "server = \"http://127.0.0.1:8080\"\n\n[keys]\ntalk = 97\n\n[audio]\ninput = \"a\"\n",
+            ),
+            (
+                "the table absent, the last line with no line ending",
+                "channel = \"ops\" # last",
+                AudioKey::Output,
+                "b",
+                "channel = \"ops\" # last\n\n[audio]\noutput = \"b\"\n",
+            ),
+            (
+                "an empty file",
+                "",
+                AudioKey::Input,
+                "default",
+                "[audio]\ninput = \"default\"\n",
+            ),
+            (
+                "the same value again",
+                "[audio]\ninput = \"a\"\n",
+                AudioKey::Input,
+                "a",
+                "[audio]\ninput = \"a\"\n",
+            ),
+            (
+                "a multi-line string, a quoted key and other characters in the name",
+                "[audio]\n\"input\" = \"\"\"\nold\"\"\"\n",
+                AudioKey::Input,
+                "alsa_input.pci-0000_00_1f.3.analog-stereo:é",
+                "[audio]\n\"input\" = \"alsa_input.pci-0000_00_1f.3.analog-stereo:é\"\n",
+            ),
+        ];
+        for (what, before, key, value, want) in cases {
+            let got = set_audio_value(before, FILE, *key, value)
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(&got, want, "{what}");
+
+            // The parsed configuration differs in exactly the one field.
+            let mut expected = Config::parse(before, FILE).unwrap();
+            *key.slot(&mut expected) = Some((*value).to_owned());
+            assert_eq!(Config::parse(&got, FILE).unwrap(), expected, "{what}");
+            if got != *before {
+                assert_ne!(Config::parse(before, FILE).unwrap(), expected, "{what}");
+            }
+
+            // Outside one run of bytes, the text is as it was.
+            let changed = changed_region(before, &got);
+            let after = before.len() - changed.end;
+            assert_eq!(
+                got.as_bytes()[..changed.start],
+                before.as_bytes()[..changed.start],
+                "{what}"
+            );
+            assert_eq!(
+                got.as_bytes()[got.len() - after..],
+                before.as_bytes()[changed.end..],
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_other_device_and_every_other_field_are_left_as_they_were() {
+        let mut want = Config::parse(KEPT, FILE).unwrap();
+        let got = set_audio_value(KEPT, FILE, AudioKey::Input, "x").unwrap();
+        want.audio.input = Some("x".to_owned());
+        let after = Config::parse(&got, FILE).unwrap();
+        assert_eq!(after, want);
+        assert_eq!(after.audio.output.as_deref(), Some("alsa_output.literal"));
+        assert_eq!(after.channel.as_deref(), Some("ops"));
+        assert_eq!(after.audio.release_tail_ms, 150);
+    }
+
+    #[test]
+    fn an_inline_or_dotted_audio_or_a_value_that_is_not_a_string_is_refused() {
+        let not_editable = Error::AudioFormNotEditable {
+            file: FILE.to_owned(),
+        };
+        for text in [
+            "audio = { input = \"a\" }\n",
+            "audio = {}\n",
+            "audio = { release_tail_ms = 150 }\n",
+            "audio.input = \"a\"\n",
+            "audio.release_tail_ms = 150\n",
+            "channel = \"ops\"\naudio.output = \"b\"\n",
+            "\"audio\".input = \"a\"\n",
+        ] {
+            for key in [AudioKey::Input, AudioKey::Output] {
+                assert_eq!(
+                    set_audio_value(text, FILE, key, "x"),
+                    Err(not_editable.clone()),
+                    "{text:?} {key:?}"
+                );
+            }
+        }
+        // A value that is not a string is refused before that, by the parser: a file it
+        // refuses is not edited.
+        for text in [
+            "[audio]\ninput = false\n",
+            "[audio]\ninput = [\"a\"]\n",
+            "[audio]\ninput = { name = \"a\" }\n",
+        ] {
+            let error = set_audio_value(text, FILE, AudioKey::Input, "x").unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key.starts_with("audio.input")),
+                "{text:?}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_the_parser_refuses_is_not_edited() {
+        for text in [
+            "chanel = \"typo\"\n",
+            "[audio]\ninput = \n",
+            "[audio]\nvolume = 3\n",
+            "[audio]\nmax_transmit_secs = 0\n",
+            "[[audio]]\ninput = \"a\"\n",
+        ] {
+            let parsed = Config::parse(text, FILE).unwrap_err();
+            assert_eq!(
+                set_audio_value(text, FILE, AudioKey::Input, "x"),
+                Err(parsed),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_cannot_be_written_as_it_is_is_refused_without_being_shown() {
+        for value in [
+            "",
+            "with \"quotes\"",
+            "back\\slash",
+            "new\nline",
+            "carriage\rreturn",
+            "tab\there",
+            "escape\u{1b}[2J",
+            "delete\u{7f}",
+        ] {
+            let error = set_audio_value("", FILE, AudioKey::Output, value).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == "audio.output"),
+                "{value:?}: {error:?}"
+            );
+            assert!(
+                value.is_empty() || !error.to_string().contains(value),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_changed_region_is_what_lies_between_the_common_ends() {
+        assert_eq!(changed_region("abc", "abc"), 3..3);
+        assert_eq!(changed_region("abc", "aXc"), 1..2);
+        assert_eq!(changed_region("ac", "abc"), 1..1);
+        assert_eq!(changed_region("aa", "aaa"), 2..2);
+        assert_eq!(changed_region("", "x"), 0..0);
+        assert_eq!(changed_region("abc", "xyz"), 0..3);
+        assert_eq!(changed_region("abc", ""), 0..3);
     }
 }

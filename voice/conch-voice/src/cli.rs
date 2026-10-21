@@ -6,7 +6,9 @@
 //! options replace hardware: a tone or a WAV file as the microphone, a sink that counts
 //! instead of playing, and standard input instead of a key device. `conch-voice devices`
 //! lists the audio devices and helps set the key device up; `conch-voice keys <device>`
-//! helps with the keys. `conch-voice managed` is what `conch` starts to run voice inside
+//! helps with the keys. `conch-voice config set audio.input|audio.output <name>` saves the
+//! microphone or the speakers in `voice.toml` (`config_cmd.rs`), the one thing this program
+//! writes there. `conch-voice managed` is what `conch` starts to run voice inside
 //! its TUI (`managed.rs`): it takes no channel, server or login on its command line, and
 //! its own test options are hidden from the help and never read from anywhere but the
 //! command line.
@@ -33,7 +35,7 @@ use conch_voice_api::{
     stored_servers,
 };
 use conch_voice_audio::{FRAME_MS, SAMPLE_RATE, SignalMeter};
-use conch_voice_control::{Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings};
+use conch_voice_control::{AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings};
 use log::LevelFilter;
 
 use crate::error::Error;
@@ -169,13 +171,29 @@ pub enum Invocation {
     /// `conch-voice managed`.
     Managed(ManagedArgs),
     /// `conch-voice devices`.
-    Devices,
+    Devices {
+        /// `--json`: write the device list as one `conch.voice_devices.v1` line instead of
+        /// the text, and probe no keyboard.
+        json: bool,
+    },
     /// `conch-voice keys <device>`.
     Keys {
         /// The keyboard's event device.
         device: PathBuf,
     },
+    /// `conch-voice config set <key> <value>`.
+    ConfigSet {
+        /// The device to save.
+        key: AudioKey,
+        /// Its name, fit to be written into the file as it is, or `default`.
+        value: String,
+    },
 }
+
+/// The keys `config set` takes, as they are spelled on its command line. No other is
+/// written: `server`, `channel` and `[keys]` decide where the login goes and what is read
+/// from a keyboard, and are changed by hand only.
+pub const CONFIG_SET_KEYS: [&str; 2] = ["audio.input", "audio.output"];
 
 /// One line: this binary's version and the audio frame it is built for.
 #[must_use]
@@ -293,6 +311,12 @@ pub fn command() -> Command {
              read it, and prints a udev rule that would grant you read access to that one \
              device. It opens each keyboard to see whether it can, and reads nothing from any \
              of them; it opens no audio device.",
+        )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .action(ArgAction::SetTrue)
+                .help("Write the microphones and speakers as one line of JSON (conch.voice_devices.v1) instead; no keyboard is looked at"),
         );
     let keys = Command::new("keys")
         .about("Show the code of EVERY key pressed on a keyboard until Ctrl-C, to find the key to talk with")
@@ -310,6 +334,34 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .help("The keyboard's event device, by its path under /dev/input/by-id"),
         );
+    let set = Command::new("set")
+        .about("Save the microphone or the speakers in voice.toml, keeping the rest of the file as written")
+        .long_about(
+            "Saves the microphone (audio.input) or the speakers (audio.output) in voice.toml \
+             in the configuration directory, which join, managed and conch's TUI read. Only \
+             that one value changes: comments, the order of keys and every other key stay \
+             as written. The file is created, private, if there is none; the directory is \
+             not. A voice.toml that is a link, that others can write, that is refused as it \
+             stands, or whose [audio] is written inline or with dotted keys is left alone, \
+             to be changed by hand. Prints nothing on success.",
+        )
+        .arg(
+            Arg::new("key")
+                .required(true)
+                .value_name("KEY")
+                .value_parser(CONFIG_SET_KEYS)
+                .help("audio.input or audio.output"),
+        )
+        .arg(
+            Arg::new("value")
+                .required(true)
+                .value_name("NAME")
+                .help("A device's name as `conch-voice devices` lists it, or `default` for PipeWire's default"),
+        );
+    let config = Command::new("config")
+        .about("Change voice.toml: the microphone and the speakers")
+        .subcommand_required(true)
+        .subcommand(set);
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
         .after_help(
@@ -330,6 +382,39 @@ pub fn command() -> Command {
         .subcommand(managed)
         .subcommand(devices)
         .subcommand(keys)
+        .subcommand(config)
+}
+
+/// What `config set` was given, checked: the key is one it writes, and the name can be
+/// written into the file as it is. A name that cannot is refused without being shown, as
+/// `devices` does not show one.
+fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
+    let Some(("set", set)) = matches.subcommand() else {
+        return Err(command().error(
+            clap::error::ErrorKind::MissingSubcommand,
+            "config needs a command: set",
+        ));
+    };
+    let key = match set.get_one::<String>("key").map(String::as_str) {
+        Some("audio.input") => AudioKey::Input,
+        Some("audio.output") => AudioKey::Output,
+        _ => {
+            return Err(command().error(
+                clap::error::ErrorKind::InvalidValue,
+                "config set takes audio.input or audio.output",
+            ));
+        }
+    };
+    match set.get_one::<String>("value") {
+        Some(value) if crate::devices::fit_for_the_config(value) => Ok(Invocation::ConfigSet {
+            key,
+            value: value.clone(),
+        }),
+        _ => Err(command().error(
+            clap::error::ErrorKind::ValueValidation,
+            "the name must not be empty, and must hold no quotation mark, backslash or control character: use one `conch-voice devices` lists, or `default`",
+        )),
+    }
 }
 
 /// Parses a command line. `--help` and `--version` come back as errors of clap's, which
@@ -363,7 +448,12 @@ where
                 test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
             }));
         }
-        Some(("devices", _)) => return Ok(Invocation::Devices),
+        Some(("devices", devices)) => {
+            return Ok(Invocation::Devices {
+                json: devices.get_flag("json"),
+            });
+        }
+        Some(("config", config)) => return config_set(config),
         Some(("keys", keys)) => {
             if let Some(device) = keys.get_one::<PathBuf>("device") {
                 return Ok(Invocation::Keys {
@@ -378,7 +468,7 @@ where
         _ => {
             return Err(command().error(
                 clap::error::ErrorKind::MissingSubcommand,
-                "a command is required: join, managed, devices or keys",
+                "a command is required: join, managed, devices, keys or config",
             ));
         }
     };
@@ -913,7 +1003,11 @@ mod tests {
     fn devices_and_keys_are_commands_and_keys_needs_its_device() {
         assert_eq!(
             parse(["conch-voice", "devices"]).unwrap(),
-            Invocation::Devices
+            Invocation::Devices { json: false }
+        );
+        assert_eq!(
+            parse(["conch-voice", "devices", "--json"]).unwrap(),
+            Invocation::Devices { json: true }
         );
         assert_eq!(
             parse([
@@ -930,6 +1024,8 @@ mod tests {
             &["keys"][..],
             &["keys", "one", "two"],
             &["devices", "extra"],
+            &["devices", "--json", "extra"],
+            &["devices", "--jsn"],
             // How a device is checked is not an option of any command.
             &["keys", "--any-file", "x"],
             &["join", "--key-device", "x"],
@@ -937,6 +1033,57 @@ mod tests {
             let mut line = vec!["conch-voice"];
             line.extend(bad);
             assert_eq!(parse(line).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn config_set_takes_a_device_key_and_a_name_fit_for_the_file() {
+        for (key, want) in [
+            ("audio.input", AudioKey::Input),
+            ("audio.output", AudioKey::Output),
+        ] {
+            for value in ["alsa_input.usb-Example_Mic-00.mono-fallback", "default"] {
+                assert_eq!(
+                    parse(["conch-voice", "config", "set", key, value]).unwrap(),
+                    Invocation::ConfigSet {
+                        key: want,
+                        value: value.to_owned()
+                    }
+                );
+            }
+        }
+        for bad in [
+            // Only the two devices: never what decides where the login goes, or which
+            // keyboard is read.
+            &["set", "server", "http://evil.example"][..],
+            &["set", "channel", "ops"],
+            &["set", "keys.device", "/dev/input/event3"],
+            &["set", "keys.talk", "KEY_F13"],
+            &["set", "audio.release_tail_ms", "100"],
+            &["set", "audio", "x"],
+            &["set", "input", "x"],
+            // Names that cannot be written into the file as they are.
+            &["set", "audio.input", ""],
+            &["set", "audio.input", "with \"quotes\""],
+            &["set", "audio.input", "back\\slash"],
+            &["set", "audio.input", "new\nline"],
+            &["set", "audio.input", "escape\u{1b}[2J"],
+            &["set", "audio.input", "bidi\u{202E}"],
+            // Not enough, or too much.
+            &["set", "audio.input"],
+            &["set"],
+            &[],
+            &["get", "audio.input"],
+            &["set", "audio.input", "a", "b"],
+        ] {
+            let mut line = vec!["conch-voice", "config"];
+            line.extend(bad);
+            let error = parse(line).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{bad:?}");
+            let shown = error.to_string();
+            for secret in ["evil.example", "\u{1b}", "\u{202E}", "quotes"] {
+                assert!(!shown.contains(secret), "{bad:?}: {shown}");
+            }
         }
     }
 
