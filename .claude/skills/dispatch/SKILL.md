@@ -67,8 +67,8 @@ delegated.
       reviewer amended.
 
 5a. **Escalate when a trigger fires** (table and rationale: the design doc's
-   "Escalation"). Ladder: Sonnet → Opus → Opus at max effort; Fable for
-   wire-shape, protocol or design work; the principal above all of them.
+   "Escalation"). Ladder: Sonnet → Opus → Opus at max effort; protocol-designer (fable)
+   for wire-shape, protocol or design work; the principal above all of them.
    - Fails the gate twice, or says it is stuck → resume once with the
      failure notes; fails again → redispatch one step up with the original
      brief plus the gate's findings.

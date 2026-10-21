@@ -125,8 +125,8 @@ instead. The principal session sits above the ladder.
 |---|---|
 | A worker fails the review gate twice on the same issue, or reports it is stuck | Resume it once with the failure notes. If it fails again, redispatch one step up the ladder with the original brief plus what failed (the gate's findings, not a summary of them). |
 | A worker runs past 2× the estimated time in the issue's Dispatch block | The principal reads its transcript, then either guides it (resume with a correction) or redispatches one step up. |
-| The same test fails for two different workers | Stop dispatching on that area. The principal investigates: two workers failing one test is a real bug, a flake or the environment, not the worker. Receipt: wave 2's Rust tests timed out for several workers under load, and the base failed them too (#654's acceptance record). |
-| A security review's must-fix, or a design question the issue didn't settle | The principal handles it. It is never sent back down to a lower tier, because a worker without the context is how it arose. Receipt: #656's security review caught a fail-open that the principal's own brief had asked for; the principal fixed the brief's rule, not the worker. |
+| The same test fails for two different workers | Stop dispatching on that area. The principal investigates: two workers failing one test is a real bug, a flake or the environment, not the worker. Receipt for the diagnosis: wave 2's Rust tests timed out for several workers under load, and the base failed them too (#654's acceptance record). |
+| A security review's must-fix, or a design question the issue didn't settle | The principal handles it. It is never sent back down to a lower tier, because a worker without the context is how it arose. Receipt: #656's security review caught a fail-open that the principal's own brief had asked for; the principal corrected the brief's rule, and the worker implemented it. #665's security follow-up was written by the principal. |
 
 **Hard stops don't move.** Escalation goes up the ladder, never around the
 dispatch hard stops: approval-path code, kill-criterion verdicts and release
