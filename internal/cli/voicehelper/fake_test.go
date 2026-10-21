@@ -21,8 +21,9 @@ import (
 
 // This test binary is also the fake helper: started with "managed" as its
 // first argument, as the supervisor starts conch-voice, it speaks the
-// protocol from scripted behaviour instead of running the tests. No
-// microphone, PipeWire or LiveKit is involved.
+// protocol from scripted behaviour instead of running the tests; started with
+// "devices" or "config", as a one-shot run starts it, it answers those
+// commands as scripted. No microphone, PipeWire or LiveKit is involved.
 
 // fakePath is a private copy of this binary that passes the trust checks of
 // §10 wherever the build put the original.
@@ -37,8 +38,13 @@ var fixtureDir string
 const mismatch = "fake: MISMATCH"
 
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == schema.VoiceControlSubcommand {
-		os.Exit(fakeMain(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case schema.VoiceControlSubcommand:
+			os.Exit(fakeMain(os.Args[2:]))
+		case "devices", "config":
+			os.Exit(fakeOneShot(os.Args[1:]))
+		}
 	}
 	code, err := runTests(m)
 	if err != nil {
@@ -672,4 +678,86 @@ func sleepForever() {
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+// oneShotOptions is the one-shot fake's script, from the arguments after the
+// command's own.
+type oneShotOptions struct {
+	dump   string
+	doc    string
+	raw    string
+	flood  int
+	stderr string
+	exit   int
+	hang   bool
+}
+
+// fakeOneShot answers `devices --json` and `config set <key> <value>` as
+// scripted. A command line of another shape is refused as conch-voice
+// refuses one: exit status 2.
+func fakeOneShot(args []string) int {
+	time.AfterFunc(60*time.Second, func() { os.Exit(4) })
+	var rest []string
+	switch {
+	case len(args) >= 2 && args[0] == "devices" && args[1] == "--json":
+		rest = args[2:]
+	case len(args) >= 5 && args[0] == "config" && args[1] == "set" && args[3] == "--":
+		rest = args[5:]
+	default:
+		_, _ = fmt.Fprintf(os.Stderr, "error: unexpected arguments %q\n", args)
+		return 2
+	}
+	var o oneShotOptions
+	fs := flag.NewFlagSet("fake", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.dump, "dump", "", "write what the fake was started with to this file")
+	fs.StringVar(&o.doc, "doc", "", "write this device-list fixture, encoded by MarshalVoiceDevices")
+	fs.StringVar(&o.raw, "raw", "", "write this to standard output as it is")
+	fs.IntVar(&o.flood, "flood", 0, "write this many bytes to standard output")
+	fs.StringVar(&o.stderr, "stderr", "", "write this to standard error")
+	fs.IntVar(&o.exit, "exit", 0, "exit with this status")
+	fs.BoolVar(&o.hang, "hang", false, "ignore SIGTERM and never end")
+	if err := fs.Parse(rest); err != nil {
+		return fakeFail("bad arguments: %v", err)
+	}
+	if o.dump != "" {
+		if err := writeDump(o.dump, nil); err != nil {
+			return fakeFail("dump: %v", err)
+		}
+	}
+	if o.stderr != "" {
+		_, _ = io.WriteString(os.Stderr, o.stderr)
+	}
+	if o.doc != "" {
+		data, err := os.ReadFile(o.doc) // #nosec G304 -- a fixture named by the test
+		if err != nil {
+			return fakeFail("fixture: %v", err)
+		}
+		doc, err := schema.ParseVoiceDevices(data)
+		if err != nil {
+			return fakeFail("fixture: %v", err)
+		}
+		line, err := schema.MarshalVoiceDevices(doc)
+		if err != nil {
+			return fakeFail("fixture: %v", err)
+		}
+		_, _ = os.Stdout.Write(line)
+	}
+	if o.raw != "" {
+		_, _ = io.WriteString(os.Stdout, o.raw)
+	}
+	if o.flood > 0 {
+		chunk := bytes.Repeat([]byte("x"), 32*1024)
+		for left := o.flood; left > 0; left -= len(chunk) {
+			if _, err := os.Stdout.Write(chunk[:min(left, len(chunk))]); err != nil {
+				// The reader stopped reading and was killed or closed.
+				return 0
+			}
+		}
+	}
+	if o.hang {
+		signal.Ignore(syscall.SIGTERM)
+		sleepForever()
+	}
+	return o.exit
 }

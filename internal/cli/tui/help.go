@@ -26,6 +26,8 @@ const (
 	topicVoice
 	// topicVoiceStatus is everything voice is doing: /voice status.
 	topicVoiceStatus
+	// topicVoiceDevices is the microphones and speakers: /voice devices.
+	topicVoiceDevices
 )
 
 // helpName is the name of the view the help is about, as the tabs name it.
@@ -35,6 +37,8 @@ func (m Model) helpName() string {
 		return "Voice"
 	case topicVoiceStatus:
 		return "Voice status"
+	case topicVoiceDevices:
+		return "Voice devices"
 	}
 	switch m.mode {
 	case modeInbox:
@@ -68,7 +72,7 @@ func (m Model) helpEntries() []helpEntry {
 			{"//TEXT", "send TEXT that starts with /"},
 		}
 		if m.vc.owner != nil {
-			entries = append(entries, helpEntry{"/voice …", "join, leave, mute and deafen voice; /voice help says how"})
+			entries = append(entries, helpEntry{"/voice …", "join, leave, mute and deafen voice, and choose the microphone and speakers; /voice help says how"})
 		}
 		entries = append(entries, []helpEntry{
 			{"/help", "this help"},
@@ -183,8 +187,11 @@ func helpWidth(l layout, md mode) int {
 // helpBody is the whole help in lines of at most cols cells: the keys of the
 // view, then the notes.
 func (m Model) helpBody(cols int) []string {
-	if m.helpTopic == topicVoiceStatus {
+	switch m.helpTopic {
+	case topicVoiceStatus:
 		return m.voiceStatusLines(cols)
+	case topicVoiceDevices:
+		return m.voiceDevicesLines(cols)
 	}
 	entries := m.helpEntries()
 	keyW := 0
