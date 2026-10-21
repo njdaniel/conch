@@ -11,6 +11,11 @@
 //!   the gate did not let through. It is the only call of `send` in the crate.
 //! - The gate has its own limit on a transmission, counted in frames (`max_open_ms`), so
 //!   the limit holds even if no timer anywhere fires.
+//! - No frame reaches the track after it was muted. The session loop mutes the track as
+//!   soon as it decides to, without waiting for this task to take its forced shut, and a
+//!   frame the gate had already let through could otherwise follow the mute into the track
+//!   (issue #631). The frame's hand-over and the mute both take one [`TrackLock`]: a frame
+//!   is handed over before the mute, or not at all.
 //!
 //! The task is told what to do with [`TxCommand`]s and says what happened with
 //! [`TxEvent`]s. Commands are taken before the next frame, so a forced shut is never behind
@@ -24,8 +29,11 @@
 //! of a frame included, so that neither catching up nor the first frame of a transmission
 //! sends audio captured while the gate was shut.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
 use conch_voice_audio::{
@@ -80,6 +88,72 @@ pub struct Transmitter<F> {
     pub events: mpsc::UnboundedReceiver<TxEvent>,
     /// Frames handed to a track since the task started.
     pub frames_sent: Arc<AtomicU64>,
+    /// Closed before the track is muted, and reopened after it is unmuted.
+    pub track_lock: TrackLock,
+}
+
+/// What puts every frame handed to the track before the mute that follows it.
+///
+/// The session loop mutes the track the moment a forced shut is decided, and this task
+/// takes that shut only between two frames: a frame the gate let through just before it
+/// would otherwise reach the track after the mute. So the hand-over of a frame (the call of
+/// [`MicFeed::send`] and the first poll of what it returns, by the end of which the frame
+/// is in the track) is made under this lock, and only while it is open; the session loop
+/// closes it before it mutes the track. A frame is then handed over before the mute, or not
+/// at all. One that is not was let through by the gate while it was open, and the track it
+/// would have reached is muted: it goes nowhere.
+///
+/// It starts closed, as a track is muted straight after it is published.
+#[derive(Clone)]
+pub struct TrackLock(Arc<Mutex<bool>>);
+
+impl TrackLock {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(false)))
+    }
+
+    /// No frame is handed over from now on. If one is being handed over, this waits until
+    /// it has been: no longer than the SDK's first poll of it, which hands it over and
+    /// returns. Call it before muting the track.
+    pub fn close(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = false;
+    }
+
+    /// Frames may be handed over again. Call it after unmuting the track, and before the
+    /// gate is told to open. Its only caller in the program is the session loop's answer
+    /// to a press (`Session::on_answer`), straight after the unmute: a call anywhere else
+    /// could let a frame reach a muted track again. It is public for the tests that drive
+    /// a transmitter with no session.
+    pub fn reopen(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Hands a frame over, if the lock is open: `send` is called, and what it returns polled
+    /// once, under the lock, and the rest of it is waited for after. Says whether the frame
+    /// was handed over.
+    async fn hand_over<S: Future<Output = ()>>(&self, send: impl FnOnce() -> S) -> bool {
+        let mut send = Some(send);
+        let mut sending = pin!(None::<S>);
+        let first = std::future::poll_fn(|cx| {
+            let open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*open {
+                return Poll::Ready(None);
+            }
+            if let Some(send) = send.take() {
+                sending.set(Some(send()));
+            }
+            // The guard is held for this poll and dropped before anything waits.
+            Poll::Ready(sending.as_mut().as_pin_mut().map(|future| future.poll(cx)))
+        })
+        .await;
+        match (first, sending.as_pin_mut()) {
+            (Some(Poll::Pending), Some(rest)) => {
+                rest.await;
+                true
+            }
+            (first, _) => first.is_some(),
+        }
+    }
 }
 
 /// The gate's settings for a release tail and a transmit limit. The limit becomes the
@@ -116,6 +190,7 @@ pub fn spawn<F: MicFeed>(config: GateConfig) -> Result<Transmitter<F>, AudioErro
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let frames_sent = Arc::new(AtomicU64::new(0));
+    let track_lock = TrackLock::new();
     let task = Task {
         gate,
         mic: None,
@@ -125,12 +200,14 @@ pub fn spawn<F: MicFeed>(config: GateConfig) -> Result<Transmitter<F>, AudioErro
         commands: command_rx,
         events: event_tx,
         frames_sent: Arc::clone(&frames_sent),
+        track_lock: track_lock.clone(),
     };
     tokio::spawn(task.run());
     Ok(Transmitter {
         commands,
         events,
         frames_sent,
+        track_lock,
     })
 }
 
@@ -146,6 +223,7 @@ struct Task<F> {
     commands: mpsc::UnboundedReceiver<TxCommand<F>>,
     events: mpsc::UnboundedSender<TxEvent>,
     frames_sent: Arc<AtomicU64>,
+    track_lock: TrackLock,
 }
 
 impl<F: MicFeed> Task<F> {
@@ -246,9 +324,11 @@ impl<F: MicFeed> Task<F> {
         }
         let gated = self.gate.pass(captured);
         if let (Some(frame), Some(feed)) = (gated.frame(), self.feed.as_mut()) {
-            // The only call of `MicFeed::send` in this crate.
-            feed.send(frame).await;
-            self.frames_sent.fetch_add(1, Ordering::Relaxed);
+            // The only call of `MicFeed::send` in this crate, handed over under the lock a
+            // mute takes.
+            if self.track_lock.hand_over(|| feed.send(frame)).await {
+                self.frames_sent.fetch_add(1, Ordering::Relaxed);
+            }
         }
         if let Gated::Last(_, shut) = gated {
             self.shut(shut);
@@ -355,6 +435,13 @@ mod tests {
         }
     }
 
+    /// A lock as the session loop leaves it while the track is unmuted.
+    fn open_lock() -> TrackLock {
+        let lock = TrackLock::new();
+        lock.reopen();
+        lock
+    }
+
     fn open(commands: &mpsc::UnboundedSender<TxCommand<Record>>) {
         assert!(commands.send(TxCommand::Gate(GateCommand::Open)).is_ok());
     }
@@ -380,6 +467,7 @@ mod tests {
         ] {
             assert!(transmitter.commands.send(command).is_ok());
         }
+        transmitter.track_lock.reopen();
         open(&transmitter.commands);
         // Let the task take the commands: audio already waiting at a press is discarded.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -437,6 +525,7 @@ mod tests {
             commands,
             events,
             frames_sent: Arc::new(AtomicU64::new(0)),
+            track_lock: open_lock(),
         };
         for n in 1..=5 {
             ring.push(n);
@@ -475,6 +564,7 @@ mod tests {
             commands,
             events,
             frames_sent: Arc::clone(&counted),
+            track_lock: open_lock(),
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=4 {
@@ -517,6 +607,7 @@ mod tests {
             commands,
             events,
             frames_sent: Arc::new(AtomicU64::new(0)),
+            track_lock: open_lock(),
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=3 {
@@ -528,5 +619,86 @@ mod tests {
         let mut captured = SILENCE;
         while task.frame(&mut captured).await {}
         assert_eq!(record.heard(), [1.0, 2.0, 3.0]);
+    }
+
+    /// Issue #631. A frame the gate has let through can be held up on its way into the track,
+    /// on a thread the system took away, while the session loop mutes: the mute waits for
+    /// it, and no frame is handed over once the mute has begun.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mute_comes_after_a_frame_being_handed_over_and_before_any_other() {
+        let lock = open_lock();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (reached, at_sdk) = std::sync::mpsc::channel();
+        let (let_go, held) = std::sync::mpsc::channel::<()>();
+
+        // The frame's hand-over holds its thread until it is let go, as a thread the system
+        // has descheduled would.
+        let handing = tokio::spawn({
+            let (lock, order) = (lock.clone(), Arc::clone(&order));
+            async move {
+                let send = || async move {
+                    reached.send(()).unwrap();
+                    held.recv().unwrap();
+                    order.lock().unwrap().push("frame");
+                };
+                lock.hand_over(send).await
+            }
+        });
+        at_sdk.recv().unwrap();
+        let muting = std::thread::spawn({
+            let (lock, order) = (lock.clone(), Arc::clone(&order));
+            move || {
+                lock.close();
+                order.lock().unwrap().push("mute");
+            }
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(order.lock().unwrap().is_empty(), "the mute did not wait");
+        let_go.send(()).unwrap();
+        muting.join().unwrap();
+        assert!(handing.await.unwrap(), "the frame was handed over");
+        assert_eq!(*order.lock().unwrap(), ["frame", "mute"]);
+
+        // Once closed, a frame is not handed over at all: its send is never polled.
+        let late = || async { order.lock().unwrap().push("late frame") };
+        assert!(!lock.hand_over(late).await);
+        assert_eq!(*order.lock().unwrap(), ["frame", "mute"]);
+        // Until the track is unmuted again.
+        lock.reopen();
+        let next = || async { order.lock().unwrap().push("next press") };
+        assert!(lock.hand_over(next).await);
+        assert_eq!(*order.lock().unwrap(), ["frame", "mute", "next press"]);
+    }
+
+    /// The task drops a frame the gate let through once the lock is closed, and counts it
+    /// as nothing sent.
+    #[tokio::test]
+    async fn a_frame_let_through_after_the_mute_goes_nowhere() {
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let counted = Arc::new(AtomicU64::new(0));
+        let track_lock = open_lock();
+        let mut task = Task {
+            gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::clone(&counted),
+            track_lock: track_lock.clone(),
+        };
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        ring.push(1);
+        ring.push(2);
+        let mut captured = SILENCE;
+        assert!(task.frame(&mut captured).await);
+        // The session loop mutes before the task has taken the forced shut.
+        track_lock.close();
+        assert!(task.frame(&mut captured).await);
+        assert_eq!(record.heard(), [1.0]);
+        assert_eq!(counted.load(Ordering::Relaxed), 1);
     }
 }

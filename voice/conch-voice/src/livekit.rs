@@ -50,6 +50,13 @@ use crate::secrets::Scrubber;
 /// the gate while the gate was open.
 const SOURCE_QUEUE_MS: u32 = 100;
 
+// `MicFeed::send` must hand the frame over in its first poll (`transmit::TrackLock`). The
+// SDK's `capture_frame` copies the frame in chunks of the source's queue, each chunk before
+// it first waits: with a queue of at least one frame, a frame is one chunk and is in the
+// source by the end of the first poll. A smaller queue would hand part of it over after the
+// lock is let go, so it is refused here (issue #631).
+const _: () = assert!(SOURCE_QUEUE_MS >= conch_voice_audio::FRAME_MS);
+
 /// Frames of one speaker waiting for the mixer. The mixer takes them every 10 ms and its
 /// jitter buffer holds at most 200 ms, so more than this is a mixer that has stopped.
 const RECEIVE_QUEUE_FRAMES: usize = 64;
@@ -321,6 +328,10 @@ impl MicFeed for LiveKitFeed {
             num_channels: 1,
             samples_per_channel: FRAME_LEN as u32,
         };
+        // The SDK copies the frame into its source before it first waits, so the frame is
+        // handed over in the first poll, as `MicFeed::send` requires: checked against
+        // libwebrtc 0.3.51's `capture_frame` (one chunk while `SOURCE_QUEUE_MS` holds a
+        // frame). Check it again whenever `scripts/voice-pins.sh` moves the SDK.
         match self.source.capture_frame(&frame).await {
             Ok(()) => self.failed = false,
             Err(error) if !self.failed => {

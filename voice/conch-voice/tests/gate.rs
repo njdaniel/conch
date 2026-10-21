@@ -496,6 +496,8 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
     // max_transmit of 70 ms: seven frames.
     let config = transmit::gate_config(0, Duration::from_millis(70));
     let mut transmitter = transmit::spawn::<FakeFeed>(config).unwrap();
+    // As the session loop does once the track is unmuted: frames may reach it.
+    transmitter.track_lock.reopen();
     let mic = Box::new(ToneSource::new(440.0, 0.25).unwrap()) as BoxedMic;
     for command in [
         TxCommand::Microphone(mic),
