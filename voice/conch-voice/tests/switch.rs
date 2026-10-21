@@ -20,10 +20,11 @@ use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource, SpeakerSink};
 use conch_voice_control::LineCommand::{Down, Mute, Up};
 use conch_voice_control::TalkMode;
 use serde_json::json;
+use tokio::sync::Notify;
 
 use support::fake::Call;
 use support::script::Switch;
-use support::stub::Stub;
+use support::stub::{Reply, Stub};
 use support::{OpenNamedMic, OpenNamedSink, Rig, Setup, several_frames};
 
 /// What the test's devices did, in order: `"<name> read"` the first time a microphone is
@@ -237,6 +238,67 @@ async fn a_switch_during_a_press_ends_it_and_nothing_is_sent_until_a_new_press()
         rig.conchd.reported(),
         ["started", "stopped", "started", "stopped"]
     );
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+}
+
+/// Issue #656 (from #655's review): a switch while a press still waits for `conchd`'s
+/// answer to its `started` report. The press ends there: the track is never unmuted, nothing
+/// is sent though the key is still held, the transmission has its one `stopped` once the
+/// answer comes, and the answer opens nothing, since no press waits for it any more.
+#[tokio::test]
+async fn a_switch_while_a_press_waits_for_its_started_answer_ends_it_before_the_track_opens() {
+    let log = Log::default();
+    let mut timings = support::quick();
+    // Long enough that the press is still waiting when the switch comes.
+    timings.report_wait = Duration::from_secs(5);
+    let setup = Setup {
+        timings,
+        report_timeout: Duration::from_secs(5),
+        ..with_microphones(&log)
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    let answer = Arc::new(Notify::new());
+    rig.conchd.next_transmit(Reply::Held(
+        Arc::clone(&answer),
+        Box::new(Reply::Empty(204)),
+    ));
+    rig.ready().await;
+    rig.line(Down);
+    rig.until("the started report at conchd", |rig| {
+        rig.conchd.reported() == ["started"]
+    })
+    .await;
+    rig.talking().await;
+
+    rig.switch(Some("usb-mic"), None);
+    rig.not_talking().await;
+    rig.ready().await;
+    several_frames().await;
+    // The answer comes after the press was ended: it opens nothing.
+    answer.notify_one();
+    rig.reported(2).await;
+    several_frames().await;
+    several_frames().await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"], "one stopped");
+    assert_eq!(
+        rig.sdk.frames(),
+        0,
+        "nothing was sent, though the key is held"
+    );
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert!(
+        !rig.sdk.calls().contains(&Call::Unmute),
+        "the track was never unmuted: {:?}",
+        rig.sdk.calls()
+    );
+    assert!(rig.sdk.is_muted());
+
+    // A fresh press sends, from the new microphone.
+    rig.line(Up);
+    rig.line(Down);
+    rig.talking().await;
+    rig.frames_beyond(3).await;
+    assert!(levels_sent(&rig, 0).iter().all(|level| *level == USB_LEVEL));
     assert_frames_only_while_unmuted(&rig.sdk.calls());
 }
 
