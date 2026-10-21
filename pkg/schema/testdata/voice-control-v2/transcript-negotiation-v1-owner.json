@@ -1,0 +1,195 @@
+{
+  "description": "The same helper, offering v1 and v2, with an owner that speaks only v1: it writes its start in v1 and the whole session is v1, as today. A v1 session is always push-to-talk, whatever voice.toml says (it sends less, never more); the helper logs one line about it and nothing on the channel changes.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1",
+          "conch.voice_control.v2"
+        ],
+        "helper_version": "0.2.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "unknown"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "set_mute",
+        "id": 2,
+        "muted": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 6,
+        "phase": "connected",
+        "capture": "on",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 7,
+        "id": 2,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "leave",
+        "id": 3
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 8,
+        "phase": "stopping",
+        "reason": "left",
+        "capture": "on",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "ack",
+        "seq": 9,
+        "id": 3,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "state",
+        "seq": 10,
+        "phase": "stopped",
+        "reason": "left",
+        "capture": "off",
+        "transmitting": false,
+        "muted": true,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "muted"
+        ],
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}
