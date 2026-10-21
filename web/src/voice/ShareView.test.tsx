@@ -31,6 +31,7 @@ class StubRoom implements Room {
   };
   setSending = (): Promise<void> => Promise.resolve();
   setDeafened = (): void => undefined;
+  setVolume = (): void => undefined;
   level = (): number => 0;
   close = (): Promise<void> => Promise.resolve();
   publishMicrophone = (): Promise<void> => {
