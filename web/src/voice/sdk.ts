@@ -30,6 +30,14 @@
 // in use goes, the SDK moves sound to another one by itself, and the client
 // is told where; on the system default it is put back on the system default.
 //
+// Each other person has a volume of their own on this page (issue #661), 0
+// to 1, kept by principal. It is set here on the element that plays their
+// microphone, when it is attached and at every change: the SDK keeps a volume
+// for an element attached later only when it is not 0, so a person turned
+// right down would come back at full volume. Deafen is the element's mute,
+// which is apart from its volume. A share's sound has a volume of its own,
+// in the watch view, and is never touched here.
+//
 // Leave can come at any point of a connection. Once the adapter is closed,
 // every step that resumes after an await stops, and a microphone or screen
 // captured or published after the close is stopped, so nothing keeps a device
@@ -418,7 +426,10 @@ class LiveKitAdapter implements Room {
   // The output every voice plays on, by id: the empty id is the system
   // default (issue #660).
   private output = '';
-  private readonly elements = new Map<string, HTMLMediaElement>();
+  // The elements playing each microphone, by track sid, and whose it is; and
+  // the volume of each person not at full volume, by principal (issue #661).
+  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null }>();
+  private readonly volumes = new Map<number, number>();
   private readonly buffer = new Uint8Array(1024);
   // The share this page captured, until it is stopped; and whether this
   // adapter is the one taking it down, so its own unpublish is not reported.
@@ -462,7 +473,7 @@ class LiveKitAdapter implements Room {
       .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication) => {
         this.subscribe(pub);
       })
-      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant: RemoteParticipant) => {
         // Nothing is played, or left in the page, after a close.
         if (this.closed) return;
         if (isShare(track.source)) {
@@ -471,8 +482,10 @@ class LiveKitAdapter implements Room {
         }
         if (track.kind !== Track.Kind.Audio) return;
         const el = track.attach();
+        const principal = principalOf(participant.identity);
         el.muted = this.deafened;
-        this.elements.set(track.sid ?? '', el);
+        el.volume = this.volumeOf(principal);
+        this.elements.set(track.sid ?? '', { el, principal });
         document.body.appendChild(el);
       })
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
@@ -735,7 +748,21 @@ class LiveKitAdapter implements Room {
 
   setDeafened(on: boolean): void {
     this.deafened = on;
-    for (const el of this.elements.values()) el.muted = on;
+    for (const { el } of this.elements.values()) el.muted = on;
+  }
+
+  // setVolume sets how loud this page plays one person's microphone, 0 to
+  // 1: now, and on every element attached for them later.
+  setVolume(principal: number, volume: number): void {
+    if (volume >= 1) this.volumes.delete(principal);
+    else this.volumes.set(principal, volume);
+    for (const entry of this.elements.values()) {
+      if (entry.principal === principal) entry.el.volume = this.volumeOf(principal);
+    }
+  }
+
+  private volumeOf(principal: number | null): number {
+    return principal === null ? 1 : (this.volumes.get(principal) ?? 1);
   }
 
   level(): number {
@@ -980,7 +1007,7 @@ class LiveKitAdapter implements Room {
     this.wantSending = false;
     // A share's publish waiting for a grant stops waiting.
     this.wakeGrant();
-    for (const el of this.elements.values()) el.remove();
+    for (const { el } of this.elements.values()) el.remove();
     this.elements.clear();
     this.attachShare(null);
     this.shareVideo = null;

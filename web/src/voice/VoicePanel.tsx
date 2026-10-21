@@ -21,6 +21,10 @@
 // page choose: System default or an output the browser lists, the one in
 // use selected. A choice the browser refuses, and speakers that went, are
 // said in the notes.
+//
+// And a volume for each other person in voice (issue #661), on this page
+// only: a slider each, under Voice options, and on a person's chip in the
+// roster how loud they are played while it is not 100%.
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
@@ -282,6 +286,8 @@ export function VoicePanel({
   const { features } = voice;
   const busyLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
   const sharable = busyLine && theirs === null;
+  // Everyone else in the room joined, whose volumes Voice options sets.
+  const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
   const more = () => {
     setOptions(true);
     setToAbout(true);
@@ -294,7 +300,9 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. */}
       <div className="voice-bar">
-        {roster.length === 0 ? null : <Roster roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} />}
+        {roster.length === 0 ? null : (
+          <Roster roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+        )}
         {awayLine}
         <div className="voice-row">
           <div className="voice-state">
@@ -463,7 +471,7 @@ export function VoicePanel({
         )}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options} sharable={sharable} about={about} /> : null}
+      {inVoice ? <Options voice={voice} open={options} sharable={sharable} about={about} others={others} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
   );
@@ -501,13 +509,15 @@ const phoneChips = 3;
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone the first three show, and "+N more" shows the rest.
-function Roster({ roster, people, viewer, elsewhere, speaking }: {
+function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
   // The viewer listed is in voice on another page, not on this one.
   readonly elsewhere: boolean;
   readonly speaking: ReadonlySet<number>;
+  // How loud this page plays each person not at full volume.
+  readonly volumes: ReadonlyMap<number, number>;
 }) {
   const [all, setAll] = useState(false);
   const more = roster.length - phoneChips;
@@ -525,6 +535,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking }: {
             {o.transmitting ? <Tag text="transmitting" /> : null}
             {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
+            {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
         ))}
       </ul>
@@ -534,6 +545,55 @@ function Roster({ roster, people, viewer, elsewhere, speaking }: {
         </button>
       ) : null}
     </div>
+  );
+}
+
+// Nobody turned down: the roster while this page is not in voice.
+const noVolumes: ReadonlyMap<number, number> = new Map();
+
+// percent is a volume as the page shows it: 0.4 is 40.
+const percent = (volume: number): number => Math.round(volume * 100);
+
+// VolumeTag says on a chip that this page plays the person at other than
+// full volume (issue #661): why they may sound quiet.
+function VolumeTag({ volume }: { readonly volume: number | undefined }) {
+  if (volume === undefined || percent(volume) === 100) return null;
+  return <Tag text={`volume ${String(percent(volume))}%`} />;
+}
+
+// Volumes is a slider for each other person in the room, 0 to 100% in steps
+// of 5%. It changes only how loud this page plays them.
+function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly others: readonly { readonly principal: number; readonly name: string }[] }) {
+  const { state, client } = voice;
+  if (others.length === 0) return null;
+  return (
+    <fieldset className="voice-volumes">
+      <legend>Volume of each person</legend>
+      {others.map((o) => {
+        const id = `voice-volume-${String(o.principal)}`;
+        const value = percent(state.volumes.get(o.principal) ?? 1);
+        return (
+          <div key={o.principal} className="voice-volume">
+            <label htmlFor={id}>Volume of {o.name}</label>
+            <input
+              id={id}
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={value}
+              aria-valuetext={`${String(value)}%`}
+              onChange={(e) => {
+                client.setVolume(o.principal, Number(e.target.value) / 100);
+              }}
+            />
+            <span className="voice-volume-value" aria-hidden="true">
+              {value}%
+            </span>
+          </div>
+        );
+      })}
+    </fieldset>
   );
 }
 
@@ -697,9 +757,11 @@ function ProcessingChoice({ voice }: { readonly voice: VoiceControl }) {
 }
 
 // Voice options: the less used choices, out of the strip.
-function Options({ voice, open, sharable, about }: {
+function Options({ voice, open, sharable, about, others }: {
   readonly voice: VoiceControl;
   readonly open: boolean;
+  // Everyone else in the room joined, by name, for their volumes.
+  readonly others: readonly { readonly principal: number; readonly name: string }[];
   // Whether the full share notes are said: while the strip's line about
   // sharing shows.
   readonly sharable: boolean;
@@ -710,6 +772,7 @@ function Options({ voice, open, sharable, about }: {
     <div id="voice-options" className="voice-options" hidden={!open}>
       <MicrophoneChoice voice={voice} />
       <SpeakersChoice voice={voice} />
+      <Volumes voice={voice} others={others} />
       <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
         <legend>Microphone</legend>
         <label>

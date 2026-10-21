@@ -48,6 +48,11 @@
 // name. One the browser refuses, or no longer lists, is let go for the
 // system default, and the page says so; one the SDK moved away from, its
 // output gone, is the output it moved to.
+//
+// Each other person has a volume on this page alone (issue #661), held here
+// until the page is reloaded and never stored: handed to every new room
+// before it connects, so that it holds through a reconnect, a renewed room,
+// and a Leave and a Join. Nobody else hears a difference.
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
@@ -225,6 +230,10 @@ export interface Room extends ShareRoom {
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
+  // How loud this page plays one person's microphone, by principal, 0 to 1:
+  // now and whenever their microphone arrives later on this connection.
+  // Deafen silences everyone whatever their volume.
+  setVolume: (principal: number, volume: number) => void;
   // The microphone level, 0 to 1.
   level: () => number;
   close: () => Promise<void>;
@@ -275,6 +284,9 @@ export interface VoiceState {
   readonly outputs: readonly Output[] | null;
   readonly output: Output | null;
   readonly outputNote: string | null;
+  // The volume of each person this page does not play at full volume, by
+  // principal, 0 to 1 (issue #661). Anyone not in it is at 1.
+  readonly volumes: ReadonlyMap<number, number>;
 }
 
 export interface VoiceEnv {
@@ -339,6 +351,7 @@ export const initialVoice: VoiceState = {
   outputs: null,
   output: null,
   outputNote: null,
+  volumes: new Map(),
 };
 
 const noTracks: ShareTracks = { video: false, audio: false };
@@ -778,6 +791,18 @@ export class VoiceClient {
     this.applyBlock();
   }
 
+  // setVolume sets how loud this page plays one person, 0 to 1, in steps of
+  // 5%: on this connection at once, and on every one after it until the page
+  // is reloaded.
+  setVolume(principal: number, volume: number): void {
+    const v = Number.isFinite(volume) ? Math.round(Math.min(1, Math.max(0, volume)) * 20) / 20 : 1;
+    const volumes = new Map(this.state.volumes);
+    if (v === 1) volumes.delete(principal);
+    else volumes.set(principal, v);
+    this.room?.setVolume(principal, v);
+    this.set({ volumes });
+  }
+
   setThreshold(threshold: number): void {
     this.gate.setThreshold(threshold);
     this.set({ threshold });
@@ -1008,6 +1033,9 @@ export class VoiceClient {
     // arrives with the connection already finds it.
     room.setWatching(this.state.watching);
     room.attachShare(this.sink);
+    // So is each person's volume, so that nobody is heard at full volume
+    // first.
+    for (const [principal, volume] of this.state.volumes) room.setVolume(principal, volume);
     // So are the speakers chosen, so that no voice plays elsewhere first.
     if (this.state.outputSelection && this.state.output !== null) {
       await this.applyOutput(room);

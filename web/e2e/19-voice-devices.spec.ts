@@ -20,6 +20,11 @@
 // element on the page that plays a voice plays on it, before and after a
 // reload.
 //
+// The volume of each person (issue #661): a member turns another down to 0%
+// on their own page. The element that plays them there is at 0, and stays
+// at 0 through a change of speakers and both of them leaving and joining
+// again; the other page plays everyone as before.
+//
 // An init script, installed before the page's own scripts as
 // 17-voice-microphone.spec.ts installs its own, counts and keeps every
 // capture the page asks the browser for, and what it asked, hides devices
@@ -63,6 +68,16 @@ const sinks = (page: Page): Promise<string[]> =>
     Array.from(document.querySelectorAll('audio'))
       .filter((el) => el.srcObject !== null)
       .map((el) => (el as HTMLAudioElement & { readonly sinkId: string }).sinkId),
+  );
+
+// The volume of each element playing a voice (issue #661), read from the
+// element itself: the volume acts after the network, so bytes received do
+// not show it.
+const volumes = (page: Page): Promise<number[]> =>
+  page.evaluate(() =>
+    Array.from(document.querySelectorAll('audio'))
+      .filter((el) => el.srcObject !== null)
+      .map((el) => el.volume),
   );
 
 const captures = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __captures: number }).__captures);
@@ -159,6 +174,17 @@ test.describe('choosing the microphone', () => {
     const list = voice.getByRole('combobox', { name: 'Microphone' });
     await expect(list).toBeVisible();
     return list;
+  }
+
+  // joinAgain joins voice again on a page that was in voice: Voice options
+  // stays open across a Leave, so it is opened only if it is not.
+  async function joinAgain(page: Page): Promise<void> {
+    const voice = voiceRegion(page);
+    await voice.getByRole('button', { name: 'Join voice' }).click();
+    await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+    const options = voice.getByRole('button', { name: 'Voice options' });
+    if ((await options.getAttribute('aria-expanded')) !== 'true') await options.click();
+    await expect(voice.getByRole('combobox', { name: 'Microphone' })).toBeVisible();
   }
 
   // The id of a listed microphone, from the list's own entry.
@@ -351,6 +377,54 @@ test.describe('choosing the microphone', () => {
       await expect(again.locator('option:checked')).toHaveText('Fake Audio Output 1');
       const reloaded = await idOf(again, 'Fake Audio Output 1');
       await expect.poll(() => sinks(a.page), { timeout: 15_000 }).toEqual([reloaded]);
+      expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
+
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await a.context.close();
+      await b.context.close();
+    }
+  });
+
+  test('one person turned down plays at that volume on this page alone, through a change of speakers and both leaving and joining again', async ({ browser }) => {
+    test.setTimeout(150_000);
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      const voice = voiceRegion(a.page);
+      await join(a.page);
+      await join(b.page);
+      const slider = voice.getByRole('slider', { name: `Volume of ${vw.bob.name}` });
+      await expect(slider).toHaveValue('100');
+      await expect.poll(() => volumes(a.page), { timeout: 15_000 }).toEqual([1]);
+
+      // Bob turned right down on Alice's page: the element that plays him
+      // there, at once; nothing on Bob's page; and his chip says so.
+      await slider.fill('0');
+      await expect.poll(() => volumes(a.page), { timeout: 2_000 }).toEqual([0]);
+      await expect(voice.getByRole('listitem').filter({ hasText: vw.bob.name })).toContainText('volume 0%');
+      await expect.poll(() => volumes(b.page), { timeout: 15_000 }).toEqual([1]);
+
+      // A change of speakers keeps it.
+      await voice.getByRole('combobox', { name: 'Speakers' }).selectOption({ label: 'Fake Audio Output 1' });
+      await expect.poll(() => sinks(a.page), { timeout: 5_000 }).not.toEqual(['']);
+      expect(await volumes(a.page)).toEqual([0]);
+
+      // Bob leaves and joins again: his new element plays at 0 from the first.
+      const bobVoice = voiceRegion(b.page);
+      await bobVoice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(bobVoice).toContainText('Not in voice', { timeout: 10_000 });
+      await expect.poll(() => volumes(a.page), { timeout: 15_000 }).toEqual([]);
+      await joinAgain(b.page);
+      await expect.poll(() => volumes(a.page), { timeout: 15_000 }).toEqual([0]);
+
+      // Alice leaves and joins again: still 0, and the slider says so.
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await joinAgain(a.page);
+      await expect.poll(() => volumes(a.page), { timeout: 15_000 }).toEqual([0]);
+      await expect(slider).toHaveValue('0');
       expect(a.watch.console.filter((l) => /Content Security Policy|Refused to/.test(l))).toEqual([]);
 
       await voice.getByRole('button', { name: 'Leave voice' }).click();

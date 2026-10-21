@@ -47,6 +47,12 @@ class StubRoom implements Room {
   setDeafened = (on: boolean): void => {
     this.deafened.push(on);
   };
+  // Issue #661: each volume handed to the room, and whether the room was
+  // connected by then.
+  volumes: { readonly principal: number; readonly volume: number; readonly connected: boolean }[] = [];
+  setVolume = (principal: number, volume: number): void => {
+    this.volumes.push({ principal, volume, connected: this.connectArgs !== null });
+  };
   level = (): number => this.levelNow;
   // When set, closing the room reports it disconnected, as the SDK does for
   // a room that had joined.
@@ -1622,5 +1628,72 @@ describe('the speakers chosen', () => {
     expect(room(t, 0).outputCalls).toEqual([]);
     expect(room(t, 0).outputsRead).toBe(0);
     expect(t.client.snapshot()).toMatchObject({ outputSelection: false, outputs: null });
+  });
+});
+
+// Issue #661: each other person's volume, on this page only. Held by the
+// client until the page is reloaded, never stored, and handed to every room
+// before it connects, so it holds through a reconnect, a renewed room, and a
+// Leave and a Join.
+describe('the volume of each person', () => {
+  it('is handed to the room at once, and is in the state; 100% leaves the person out', async () => {
+    const t = await joined();
+    t.client.setVolume(8, 0.4);
+    expect(t.rooms[0]?.volumes).toEqual([{ principal: 8, volume: 0.4, connected: true }]);
+    expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0.4]]));
+    t.client.setVolume(8, 1);
+    expect(t.rooms[0]?.volumes.at(-1)).toEqual({ principal: 8, volume: 1, connected: true });
+    expect(t.client.snapshot().volumes.size).toBe(0);
+  });
+
+  it('is kept between 0 and 1, in steps of 5%', async () => {
+    const t = await joined();
+    t.client.setVolume(8, -1);
+    t.client.setVolume(9, 7);
+    t.client.setVolume(10, 0.42);
+    t.client.setVolume(11, Number.NaN);
+    expect(t.rooms[0]?.volumes.map((v) => v.volume)).toEqual([0, 1, 0.4, 1]);
+    expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0], [10, 0.4]]));
+  });
+
+  it('set before joining is handed to the first room before it connects', async () => {
+    const t = setup();
+    t.client.setVolume(8, 0);
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[0]?.volumes).toEqual([{ principal: 8, volume: 0, connected: false }]);
+  });
+
+  it('is handed to every new room before it connects: a reconnect, a renewed room, and a Leave and a Join', async () => {
+    const t = await joined();
+    t.client.setVolume(8, 0);
+    t.client.setVolume(9, 0.25);
+    const kept = [
+      { principal: 8, volume: 0, connected: false },
+      { principal: 9, volume: 0.25, connected: false },
+    ];
+    // A connection lost, and a room renewed.
+    t.rooms[0]?.events?.onDisconnected('lost');
+    t.clock.advance(1000);
+    await settle();
+    t.rooms[1]?.events?.onDisconnected('room_deleted');
+    await settle();
+    // Left, and joined again.
+    await t.client.leave();
+    expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0], [9, 0.25]]));
+    t.client.join('general');
+    await settle();
+    expect(t.rooms).toHaveLength(4);
+    for (const room of t.rooms.slice(1)) expect(room.volumes).toEqual(kept);
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('deafen is apart from it: undeafen leaves every volume as it was', async () => {
+    const t = await joined();
+    t.client.setVolume(8, 0.4);
+    t.client.setDeafened(true);
+    t.client.setDeafened(false);
+    expect(t.rooms[0]?.volumes).toHaveLength(1);
+    expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0.4]]));
   });
 });

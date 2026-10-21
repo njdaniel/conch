@@ -1001,3 +1001,70 @@ describe('the speakers chosen', () => {
     expect(choice(options(voice)).selectedOptions[0]?.textContent).toBe('Desk speakers');
   });
 });
+
+// Issue #661: a volume for each other person, on this page only. A slider
+// each under Voice options, labelled by name, 0 to 100% in steps of 5%, and
+// none for the viewer; on a chip, the volume while it is not 100%.
+describe('the volume of each person', () => {
+  const people: ReadonlyMap<number, Person> = new Map([
+    [3, { name: 'bob', kind: null }],
+    [5, { name: 'carol', kind: null }],
+  ]);
+  const one = (principal: number) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' });
+  const room: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [one(7), one(3), one(5)] }] } };
+  const joined = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+  const options = (voice: HTMLElement) => {
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    return voice.querySelector<HTMLElement>('#voice-options') ?? voice;
+  };
+  const chip = (voice: HTMLElement, name: string) => within(voice).getByText(name, { selector: '.who' }).closest('li');
+
+  it.each<[string, Partial<VoiceState>]>([
+    ['in voice', {}],
+    ['in listen only', { listenOnly: true }],
+    ['in watch only', { watchOnly: true }],
+  ])('lists a slider for each other person by name, and none for You, %s', (_what, patch) => {
+    const { voice } = panel(joined(patch), 'c', room, people);
+    const opts = options(voice);
+    const group = within(opts).getByRole('group', { name: 'Volume of each person' });
+    // Each slider's label, in the roster's order.
+    expect(within(group).getAllByRole('slider').map((s) => group.querySelector(`label[for="${s.id}"]`)?.textContent)).toEqual(['Volume of bob', 'Volume of carol']);
+    expect(within(opts).queryByRole('slider', { name: /You/ })).toBeNull();
+    const bob = within(opts).getByRole<HTMLInputElement>('slider', { name: 'Volume of bob' });
+    expect([bob.min, bob.max, bob.step, bob.value]).toEqual(['0', '100', '5', '100']);
+    expect(bob.getAttribute('aria-valuetext')).toBe('100%');
+  });
+
+  it('shows each value as a percentage', () => {
+    const { voice } = panel(joined({ volumes: new Map([[3, 0.4]]) }), 'c', room, people);
+    const bob = within(options(voice)).getByRole<HTMLInputElement>('slider', { name: 'Volume of bob' });
+    expect(bob.value).toBe('40');
+    expect(bob.getAttribute('aria-valuetext')).toBe('40%');
+    expect(bob.closest('.voice-volume')?.textContent).toBe('Volume of bob40%');
+  });
+
+  it('moving a slider calls the client for that person alone', () => {
+    const { voice, client } = panel(joined(), 'c', room, people);
+    const set = vi.spyOn(client, 'setVolume').mockReturnValue();
+    const opts = options(voice);
+    fireEvent.change(within(opts).getByRole('slider', { name: 'Volume of carol' }), { target: { value: '0' } });
+    fireEvent.change(within(opts).getByRole('slider', { name: 'Volume of bob' }), { target: { value: '45' } });
+    expect(set.mock.calls).toEqual([[5, 0], [3, 0.45]]);
+  });
+
+  it('lists nobody while the viewer is alone', () => {
+    const alone: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [one(7)] }] } };
+    const { voice } = panel(joined(), 'c', alone, people);
+    expect(within(options(voice)).queryByRole('group', { name: 'Volume of each person' })).toBeNull();
+  });
+
+  it('tags a chip with the volume while it is not 100%, read as " (volume 40%)"', () => {
+    const { voice, redraw } = panel(joined({ volumes: new Map([[3, 0.4], [5, 0]]) }), 'c', room, people);
+    expect(chip(voice, 'bob')?.textContent).toBe('bob (volume 40%)');
+    expect(chip(voice, 'carol')?.textContent).toBe('carol (volume 0%)');
+    expect(within(chip(voice, 'bob') ?? voice).getByText('volume 40%', { selector: '.tag' })).toBeTruthy();
+    expect(chip(voice, 'You')?.querySelector('.tag')).toBeNull();
+    redraw(joined());
+    expect(chip(voice, 'bob')?.querySelector('.tag')).toBeNull();
+  });
+});
