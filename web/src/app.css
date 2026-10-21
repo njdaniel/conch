@@ -1491,10 +1491,31 @@ label {
   gap: var(--s1) var(--s3);
 }
 
+/* The voice processing switch (issue #659): a row of its own under the
+   modes, with what the capture says beneath it. */
+.voice-processing {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+}
+
 .threshold {
   display: grid;
   gap: var(--s1);
   font-size: var(--small);
+}
+
+/* The choice of microphone (issue #658): a row of its own, the list as wide
+   as its longest name allows and never wider than the strip. */
+.voice-device {
+  flex-basis: 100%;
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.voice-device select {
+  min-width: 0;
 }
 
 /* Screen share (issue #444): the watch view, on the stage above the

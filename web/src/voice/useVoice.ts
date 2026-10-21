@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import * as api from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
-import { VoiceClient, type VoiceState } from './connection';
+import { VoiceClient, type Microphone, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { newLiveKitRoom } from './sdk';
@@ -35,6 +35,73 @@ function writeKey(code: string): void {
   } catch {
     // The choice lasts until the page is reloaded.
   }
+}
+
+// The microphone chosen (issue #658), by device id and by name, for as long
+// as the tab lasts: none stored is the system default.
+const microphoneStore = 'conch.web.voice.microphone';
+const microphoneNameStore = 'conch.web.voice.microphone.name';
+
+function readMicrophone(): Microphone | null {
+  try {
+    const id = window.sessionStorage.getItem(microphoneStore);
+    if (id === null) return null;
+    return { id, label: window.sessionStorage.getItem(microphoneNameStore) ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeMicrophone(choice: Microphone | null): void {
+  try {
+    if (choice === null) {
+      window.sessionStorage.removeItem(microphoneStore);
+      window.sessionStorage.removeItem(microphoneNameStore);
+    } else {
+      window.sessionStorage.setItem(microphoneStore, choice.id);
+      window.sessionStorage.setItem(microphoneNameStore, choice.label);
+    }
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// The voice processing chosen for each microphone (issue #659), for as long
+// as the tab lasts: a device under its id, and System default under a key of
+// its own. A device never set has it on.
+const processingStore = 'conch.web.voice.processing';
+
+function processingKey(device: string | null): string {
+  return device === null ? `${processingStore}.system` : `${processingStore}.device:${device}`;
+}
+
+function readProcessing(device: string | null): boolean {
+  try {
+    return window.sessionStorage.getItem(processingKey(device)) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function writeProcessing(device: string | null, on: boolean): void {
+  try {
+    window.sessionStorage.setItem(processingKey(device), on ? 'on' : 'off');
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// processingChoices reads and keeps the choices in the tab, and holds them
+// in memory too, so that they last until a reload where storage refuses.
+function processingChoices(): ProcessingStore {
+  const known = new Map<string | null, boolean>();
+  return {
+    get: (device) => known.get(device) ?? readProcessing(device),
+    set: (device, on) => {
+      known.set(device, on);
+      writeProcessing(device, on);
+    },
+  };
 }
 
 // What is known about the channel's voice, as the strip says it. loading is
@@ -98,6 +165,8 @@ export function useVoice({
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
       stopShare: api.stopVoiceShare,
+      microphone: readMicrophone(),
+      processing: processingChoices(),
     });
   }
   const client = clientRef.current;
@@ -117,6 +186,13 @@ export function useVoice({
 
   const joined = state.phase !== 'idle' && state.phase !== 'stopped' ? state.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
+
+  // The microphone chosen is kept for the tab: the person's choice, the same
+  // device found again under a new id, and the client letting go of one that
+  // was not there at a join.
+  useEffect(() => {
+    writeMicrophone(state.microphone);
+  }, [state.microphone]);
 
   // Signing out ends voice.
   useEffect(() => {

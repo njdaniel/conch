@@ -2,7 +2,8 @@
 // small Room interface of connection.ts, and quiets the SDK's logging.
 //
 // The microphone is captured here with echo cancellation, noise suppression and
-// auto gain on, muted, published once, and muted again straight after
+// auto gain on, unless the person has turned voice processing off for it
+// (issue #659), muted, published once, and muted again straight after
 // publishing, as conch-voice.md section 3 does: the SDK enables a track when it
 // publishes it, and again when it republishes after a long interruption, so the
 // track is muted after each unless the gate is open. The client counts as
@@ -10,6 +11,17 @@
 // for one) is undone the same way while the gate is shut. The mute before
 // publishing is so that LiveKit never lists the microphone unmuted at a join
 // (issue #501; publishMicrophone).
+//
+// The microphone is the person's choice (issue #658): a device by id,
+// captured exactly or not at all, or the system default, which follows the
+// computer's sound settings. The capture is published as a track the page
+// provides, so the SDK never captures a device by itself: not the first
+// device listed after a device change, not the default when a capture ends
+// while the gate is open, and not on the next unmute after an end. Every
+// change of device is the page's own restart of the track, which keeps the
+// publication and its mute. A capture that ends, or a chosen device that is
+// no longer listed, is lost: its capture is stopped and the client is told,
+// and nothing is captured again until the person chooses.
 //
 // Leave can come at any point of a connection. Once the adapter is closed,
 // every step that resumes after an await stops, and a microphone or screen
@@ -52,9 +64,11 @@ import {
   Room as LiveKitRoom,
   RoomEvent,
   Track,
+  TrackEvent,
   VideoPreset,
   createLocalAudioTrack,
   getLogger,
+  type AudioCaptureOptions,
   type LocalTrack,
   type LocalTrackPublication,
   type Participant,
@@ -68,7 +82,7 @@ import {
   type TrackPublishOptions,
 } from 'livekit-client';
 import type { DisconnectCause } from './disconnect';
-import type { Room, RoomEvents, ShareSink } from './connection';
+import type { Microphone, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
 import type { Captured, KeptScreen } from './share';
@@ -115,6 +129,57 @@ export function wanted(source: Track.Source, watching: boolean): boolean {
   if (source === Track.Source.Microphone) return true;
   if (source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio) return watching;
   return false;
+}
+
+// ---- the microphone
+
+// microphoneOptions is what a capture of the microphone asks for: the chosen
+// device exactly, as an object, which the SDK leaves alone (a bare id it
+// tries as exact and then again as ideal, which captures some other device);
+// or, with none chosen, the system default as before. The browser's three
+// voice filters are all on or all off (issue #659). A restart replaces every
+// constraint with these, so each field is given every time; the SDK gives a
+// restart without a device its own default-device preference, so the filters
+// are asked for on the system default too.
+//
+// With processing off, voice isolation is asked off as well: the SDK asks for
+// it on at a first capture unless told otherwise, and a filter left on is not
+// a microphone sent as it is.
+export function microphoneOptions(choice: string | null, processing = true): AudioCaptureOptions {
+  const filters: AudioCaptureOptions = processing
+    ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    : { echoCancellation: false, noiseSuppression: false, autoGainControl: false, voiceIsolation: false };
+  return choice === null ? filters : { deviceId: { exact: choice }, ...filters };
+}
+
+// filterOf reads one filter from a capture's settings: on, off, or null where
+// the browser does not say. Echo cancellation may be named by its mode
+// ("all", "remote-only" or "none") rather than as a flag.
+function filterOf(value: unknown): boolean | null {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value !== 'none';
+  return null;
+}
+
+// processingOf is what a capture says of its voice processing.
+export function processingOf(settings: MediaTrackSettings): Processing {
+  return {
+    echoCancellation: filterOf(settings.echoCancellation),
+    noiseSuppression: filterOf(settings.noiseSuppression),
+    autoGainControl: filterOf(settings.autoGainControl),
+  };
+}
+
+// captureMicrophone captures the microphone and wraps the capture as a track
+// the page provides. The SDK manages a track it captured itself: it switches
+// it to another device after a device change, restarts it on the default
+// device when it ends while unmuted, and captures it again at the next unmute
+// after an end. It does none of these to a track the page provides.
+export async function captureMicrophone(choice: string | null, processing = true): Promise<LocalAudioTrack> {
+  const captured = await createLocalAudioTrack(microphoneOptions(choice, processing));
+  const track = new LocalAudioTrack(captured.mediaStreamTrack, captured.constraints, true);
+  track.source = Track.Source.Microphone;
+  return track;
 }
 
 // ---- the share's sizes and bitrates
@@ -329,6 +394,12 @@ class LiveKitAdapter implements Room {
   private publication: LocalTrackPublication | null = null;
   private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack } | null = null;
   private wantSending = false;
+  // The microphone chosen, by device id, or null for the system default; and
+  // whether the capture was lost, when nothing captures until a new choice.
+  private choice: string | null = null;
+  private lost = false;
+  // Whether the browser's voice processing is asked for (issue #659).
+  private processing = true;
   private deafened = false;
   private readonly elements = new Map<string, HTMLMediaElement>();
   private readonly buffer = new Uint8Array(1024);
@@ -416,6 +487,9 @@ class LiveKitAdapter implements Room {
       .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, participant: Participant) => {
         if (participant === room.localParticipant) this.wakeGrant();
       })
+      .on(RoomEvent.MediaDevicesChanged, () => {
+        void this.devicesChanged();
+      })
       .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
         // again. An unmute of our own comes with the gate open.
@@ -430,16 +504,28 @@ class LiveKitAdapter implements Room {
     await this.publishMicrophone();
   }
 
+  setMicrophone(choice: string | null): void {
+    this.choice = choice;
+  }
+
+  setProcessing(on: boolean): void {
+    this.processing = on;
+  }
+
   async publishMicrophone(): Promise<void> {
     this.ensureOpen();
     if (this.track !== null) return;
     const room = this.room;
-    const track = await createLocalAudioTrack({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    const track = await captureMicrophone(this.choice, this.processing);
     // From here the microphone is open: any failure, or a close that came
     // while a step was pending, stops it before the error goes on.
     try {
       this.ensureOpen();
       this.track = track;
+      this.lost = false;
+      track.on(TrackEvent.Ended, () => {
+        this.microphoneLost(track);
+      });
       // Muted before it is published, so that LiveKit lists it muted from the
       // first: published unmuted and muted after, it was listed unmuted for
       // about 5 ms of every join (measured on the pinned LiveKit), and a pass
@@ -462,6 +548,96 @@ class LiveKitAdapter implements Room {
     this.listen(track);
   }
 
+  // switchMicrophone moves the published microphone to another device, or
+  // captures the same one again with voice processing as now set (issue #659:
+  // the browser ignores a change of the filters on a live capture): the
+  // track is restarted on it, which keeps its publication and its mute (the
+  // client has shut the gate for the switch). With nothing published yet (the
+  // microphone was missing when this connection was made) it is captured and
+  // published as at a join. A capture that fails leaves nothing captured: the
+  // SDK stops the old capture before it asks for the new one.
+  async switchMicrophone(choice: string | null): Promise<void> {
+    this.ensureOpen();
+    this.choice = choice;
+    const track = this.track;
+    if (track === null) {
+      await this.publishMicrophone();
+      return;
+    }
+    // The tap's clone keeps the old device open: it goes first.
+    await this.untap();
+    try {
+      await track.restartTrack(microphoneOptions(choice, this.processing));
+    } catch (err) {
+      this.lost = true;
+      track.stop();
+      throw err;
+    }
+    // Closed while the device was being opened: close() stopped the track
+    // before the restart had its new capture, so it is stopped again here.
+    if (this.closed || track !== this.track) {
+      track.stop();
+      throw new ClosedError();
+    }
+    this.lost = false;
+    this.listen(track);
+  }
+
+  // microphones lists the browser's microphones without asking for any:
+  // permission requests off, so reading the list never captures a device.
+  // A browser that has not been allowed a microphone lists them without
+  // names, and then there is no list to choose from (null).
+  async microphones(): Promise<readonly Microphone[] | null> {
+    const inputs = await LiveKitRoom.getLocalDevices('audioinput', false);
+    if (inputs.some((d) => d.label === '')) return null;
+    return inputs.map((d) => ({ id: d.deviceId, label: d.label }));
+  }
+
+  // microphoneInUse is the device the capture is on, as the capture itself
+  // says. Not the SDK's own reading, which lists the devices with permission
+  // requests on.
+  microphoneInUse(): string | null {
+    const track = this.track;
+    if (track === null || this.lost) return null;
+    const capture = track.mediaStreamTrack;
+    if (capture.readyState !== 'live') return null;
+    return capture.getSettings().deviceId ?? null;
+  }
+
+  // microphoneProcessing is what the capture says of its voice processing,
+  // which may not be what was asked: a browser can keep a filter on.
+  microphoneProcessing(): Processing | null {
+    const track = this.track;
+    if (track === null || this.lost) return null;
+    const capture = track.mediaStreamTrack;
+    if (capture.readyState !== 'live') return null;
+    return processingOf(capture.getSettings());
+  }
+
+  // devicesChanged follows the browser's devices. A chosen device no longer
+  // listed is lost, whether or not its capture has ended: on Linux the sound
+  // server may move a stream whose device has gone to another device rather
+  // than end it.
+  private async devicesChanged(): Promise<void> {
+    const track = this.track;
+    const choice = this.choice;
+    if (track !== null && choice !== null && !this.lost && !this.closed) {
+      const inputs = await LiveKitRoom.getLocalDevices('audioinput', false).catch(() => null);
+      if (inputs !== null && !inputs.some((d) => d.deviceId === choice) && choice === this.choice) this.microphoneLost(track);
+    }
+    if (!this.closed) this.events?.onDevicesChanged();
+  }
+
+  // microphoneLost stops a capture that ended or whose device went, once,
+  // and tells the client. Nothing captures again until the person chooses.
+  private microphoneLost(track: LocalAudioTrack): void {
+    if (this.closed || track !== this.track || this.lost) return;
+    this.lost = true;
+    track.stop();
+    void this.untap();
+    this.events?.onMicrophoneLost();
+  }
+
   private ensureOpen(): void {
     if (this.closed) throw new ClosedError();
   }
@@ -471,6 +647,8 @@ class LiveKitAdapter implements Room {
   // muted track carries silence.
   private listen(track: LocalAudioTrack): void {
     if (this.closed) return;
+    // A tap left from an earlier capture is let go: one device open at a time.
+    void this.untap();
     const clone = track.mediaStreamTrack.clone();
     // A clone copies the track's enabled flag, and the track was muted just
     // before this: the tap must hear the room whatever the published track does.
@@ -483,6 +661,15 @@ class LiveKitAdapter implements Room {
     // The page was interacted with to get here, so the browser lets it run;
     // a context that starts suspended would read silence.
     void context.resume().catch(() => undefined);
+  }
+
+  // untap stops the tap's clone and closes its audio context.
+  private async untap(): Promise<void> {
+    const tap = this.tap;
+    this.tap = null;
+    if (tap === null) return;
+    tap.clone.stop();
+    await tap.context.close().catch(() => undefined);
   }
 
   async setSending(on: boolean): Promise<void> {
@@ -713,12 +900,7 @@ class LiveKitAdapter implements Room {
     this.attachShare(null);
     this.shareVideo = null;
     this.shareAudio = null;
-    const tap = this.tap;
-    this.tap = null;
-    if (tap !== null) {
-      tap.clone.stop();
-      await tap.context.close().catch(() => undefined);
-    }
+    const untapped = this.untap();
     const track = this.track;
     this.track = null;
     this.publication = null;
@@ -727,6 +909,7 @@ class LiveKitAdapter implements Room {
     track?.stop();
     for (const t of this.screen) t.stop();
     this.screen = [];
+    await untapped;
     try {
       await this.room.disconnect(true);
     } finally {
