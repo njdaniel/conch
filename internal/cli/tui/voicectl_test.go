@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1039,5 +1040,608 @@ func TestLateAnswerOfADroppedSupervisor(t *testing.T) {
 	}
 	if m.vc.busy != "" || !strings.Contains(m.status(), "started for #general") {
 		t.Errorf("the current supervisor's answer: busy %q, status %q", m.vc.busy, m.status())
+	}
+}
+
+// fakeDevices stands in for voicehelper.OneShot. It records into the fake
+// supervisor's log, so that a test sees saves, leaves and joins in one order,
+// and takes its errors from there too ("devices", "set").
+type fakeDevices struct {
+	voice *fakeVoice
+	list  voicehelper.DeviceList
+}
+
+func (f *fakeDevices) Devices(context.Context) (voicehelper.DeviceList, error) {
+	if err := f.voice.record("devices"); err != nil {
+		return voicehelper.DeviceList{}, err
+	}
+	return f.list, nil
+}
+
+func (f *fakeDevices) SetDevice(_ context.Context, key voicehelper.DeviceKey, name string) error {
+	return f.voice.record("set " + string(key) + " " + name)
+}
+
+// devicesTestModel is voiceTestModel with a fake one-shot runner.
+func devicesTestModel(t *testing.T) (Model, *fakeVoice, *fakeDevices) {
+	t.Helper()
+	m, fake, _ := voiceTestModel(t)
+	runner := &fakeDevices{voice: fake}
+	m.vc.owner.devices = runner
+	return m, fake, runner
+}
+
+// devicesFixture is one of #649's device lists, read as the TUI reads one.
+func devicesFixture(t *testing.T, name string) schema.VoiceDevicesV1 {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "pkg", "schema", "testdata", "voice-devices", name)) // #nosec G304 -- a fixture of this repository
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := schema.ParseVoiceDevices(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// listShown is m after /voice devices has shown doc.
+func listShown(t *testing.T, m Model, runner *fakeDevices, doc schema.VoiceDevicesV1) Model {
+	t.Helper()
+	runner.list = voicehelper.DeviceList{Devices: doc}
+	m, cmd := submitText(t, m, "/voice devices")
+	for _, msg := range drain(cmd) {
+		m, _ = update(m, msg)
+	}
+	runner.voice.taken()
+	if m.vc.devices == nil {
+		t.Fatalf("no list shown: status %q", m.status())
+	}
+	m.help = false
+	return m
+}
+
+// /voice devices runs the lister in a command and opens a page of the
+// numbered microphones and speakers, with their marks, the missing chosen
+// device, and a plain line for each way the list is incomplete; one for each
+// #649 fixture.
+func TestVoiceDevicesPage(t *testing.T) {
+	tests := []struct {
+		fixture string
+		diag    []string
+		want    []string
+		notWant []string
+	}{
+		{
+			fixture: "voice-devices-v1.json",
+			want: []string{
+				"Microphones", "1  Built-in Audio Analog Stereo (alsa_input.pci-0000_00_1f.3.analog-stereo) [default]",
+				"2  USB Audio Mono (alsa_input.usb-Generic_USB_Audio-00.mono-fallback) [chosen]",
+				"Speakers", "1  Built-in Audio Analog Stereo (alsa_output.pci-0000_00_1f.3.analog-stereo) [default]",
+				"2  USB Audio Analog Stereo (alsa_output.usb-Generic_USB_Audio-00.analog-stereo)",
+				"chosen: PipeWire default", "/voice mic <n>|<name>|default",
+			},
+			notWant: []string{"analog-stereo) [default] [chosen]", "not available now", "not shown", "PipeWire could not", "conch-voice said"},
+		},
+		{
+			// A virtual microphone, with no description, by its node.name.
+			fixture: "voice-devices-v1-virtual-microphone.json",
+			want:    []string{"2  speech_out", "chosen: PipeWire default"},
+			notWant: []string{"speech_out (", "[chosen]"},
+		},
+		{
+			// UX-11: the chosen microphone is not there; it is named, and
+			// nothing is marked as chosen in its place.
+			fixture: "voice-devices-v1-configured-input-absent.json",
+			want: []string{
+				"1  Built-in Audio Analog Stereo (alsa_input.pci-0000_00_1f.3.analog-stereo) [default]",
+				"alsa_input.usb-Generic_USB_Headset-00.mono-fallback [chosen]",
+				"chosen in voice.toml, not available now: nothing is sent until it is",
+				"1  Built-in Audio Analog Stereo (alsa_output.pci-0000_00_1f.3.analog-stereo) [default] [chosen]",
+			},
+			notWant: []string{"alsa_input.pci-0000_00_1f.3.analog-stereo) [default] [chosen]"},
+		},
+		{
+			fixture: "voice-devices-v1-unshown.json",
+			want:    []string{"2 more microphone(s) not shown: their names cannot be saved in voice.toml", "1 more speaker(s) not shown"},
+		},
+		{
+			fixture: "voice-devices-v1-pipewire-unavailable.json",
+			want:    []string{"Microphones", "none", "PipeWire could not be reached, so nothing is listed"},
+			notWant: []string{"1  "},
+		},
+		{
+			fixture: "voice-devices-v1-config-refused.json",
+			diag:    []string{"conch-voice: voice.toml may be changed by other users"},
+			want:    []string{"voice.toml was refused", "conch-voice said", "voice.toml may be changed by other users"},
+			notWant: []string{"[chosen]", "chosen: PipeWire default"},
+		},
+		{
+			fixture: "voice-devices-v1-config-none.json",
+			want:    []string{"There is no configuration directory, so nothing can be saved", "PipeWire did not finish listing in time"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			m, fake, runner := devicesTestModel(t)
+			runner.list = voicehelper.DeviceList{Devices: devicesFixture(t, tt.fixture), Diagnostics: tt.diag}
+			m, cmd := submitText(t, m, "/voice devices")
+			if calls := fake.taken(); len(calls) != 0 {
+				t.Fatalf("Update ran conch-voice: %v", calls)
+			}
+			if m.input != "" || m.vc.busy != "listing devices" {
+				t.Fatalf("input %q busy %q", m.input, m.vc.busy)
+			}
+			msgs := drain(cmd)
+			if got := fake.taken(); strings.Join(got, ",") != "devices" {
+				t.Fatalf("calls %v", got)
+			}
+			for _, msg := range msgs {
+				m, _ = update(m, msg)
+			}
+			if !m.help || m.helpTopic != topicVoiceDevices || m.vc.busy != "" {
+				t.Fatalf("help %v topic %v busy %q status %q", m.help, m.helpTopic, m.vc.busy, m.status())
+			}
+			m.width, m.height = 180, 60
+			view := m.View()
+			for _, want := range append([]string{"HELP · Voice devices"}, tt.want...) {
+				if !strings.Contains(view, want) {
+					t.Errorf("the page lacks %q:\n%s", want, view)
+				}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(view, nw) {
+					t.Errorf("the page has %q:\n%s", nw, view)
+				}
+			}
+			// At any width the page fits.
+			for _, cols := range []int{20, 40, 80} {
+				for _, l := range m.voiceDevicesLines(cols) {
+					if w := cellWidth(l); w > cols {
+						t.Errorf("at %d cells a line is %d: %q", cols, w, l)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Device-supplied text the schema lets through (format characters, a line
+// separator) and what conch-voice wrote on standard error reach the terminal
+// only made safe, on the page, in the status line and on /voice status.
+func TestVoiceDeviceTextIsSanitized(t *testing.T) {
+	m, fake, runner := devicesTestModel(t)
+	m = withHelper(t, m, voicehelper.Status{Phase: voicehelper.PhaseIdle})
+	evil := schema.VoiceDevice{Name: "mic\u202e1", Description: "Evil\u202eMic\u2028next line\u200f", Default: true}
+	doc := devicesFixture(t, "voice-devices-v1.json")
+	doc.Microphones = []schema.VoiceDevice{evil}
+	doc.ConfiguredInput = ""
+	if err := doc.Validate(); err != nil {
+		t.Fatalf("the schema refuses the test's device: %v", err)
+	}
+	runner.list = voicehelper.DeviceList{Devices: doc, Diagnostics: []string{"\x1b]0;title\x07 bell"}}
+	m = listShown(t, m, runner, doc)
+	m.vc.devDiag = runner.list.Diagnostics
+	m.width, m.height = 160, 50
+	m.help, m.helpTopic = true, topicVoiceDevices
+	page := m.View()
+	if !strings.Contains(page, "EvilMic ↵ next line (mic1) [default]") {
+		t.Errorf("the device as shown:\n%s", page)
+	}
+	m.help = false
+	m, cmd := submitText(t, m, "/voice mic 1")
+	for _, msg := range drain(cmd) {
+		m, _ = update(m, msg)
+	}
+	// The name saved is the device's own, not what was shown.
+	if got := fake.taken(); strings.Join(got, ",") != "set audio.input "+evil.Name {
+		t.Errorf("calls %q", got)
+	}
+	if !strings.Contains(m.status(), "microphone saved: EvilMic ↵ next line (mic1)") {
+		t.Errorf("status %q", m.status())
+	}
+	m.help, m.helpTopic = true, topicVoiceStatus
+	for _, view := range []string{page, m.status(), m.View()} {
+		for _, bad := range []string{"\u202e", "\u2028", "\u200f", "\x1b", "\x07"} {
+			if strings.Contains(view, bad) {
+				t.Errorf("%q reached the terminal", bad)
+			}
+		}
+	}
+}
+
+// /voice mic and /voice speakers save a number of the last list, a name or the
+// default, in a command; each refusal says why and runs nothing.
+func TestVoiceDeviceCommands(t *testing.T) {
+	v1 := devicesFixture(t, "voice-devices-v1.json")
+	tests := []struct {
+		name     string
+		list     *schema.VoiceDevicesV1 // shown before
+		input    string
+		want     []string
+		status   string
+		keepText bool
+	}{
+		{name: "mic by number", list: &v1, input: "/voice mic 2", want: []string{"set audio.input alsa_input.usb-Generic_USB_Audio-00.mono-fallback"},
+			status: "voice: microphone saved: USB Audio Mono (alsa_input.usb-Generic_USB_Audio-00.mono-fallback)"},
+		{name: "mic by name, no list needed", input: "/voice mic speech_out", want: []string{"set audio.input speech_out"}, status: "voice: microphone saved: speech_out"},
+		{name: "mic default", input: "/voice mic default", want: []string{"set audio.input default"}, status: "voice: microphone saved: PipeWire default"},
+		{name: "speakers by number", list: &v1, input: "/voice speakers 1", want: []string{"set audio.output alsa_output.pci-0000_00_1f.3.analog-stereo"},
+			status: "voice: speakers saved: Built-in Audio Analog Stereo (alsa_output.pci-0000_00_1f.3.analog-stereo)"},
+		{name: "speakers default", list: &v1, input: "/voice speakers default", want: []string{"set audio.output default"}, status: "voice: speakers saved: PipeWire default"},
+		{name: "a name with spaces", input: "/voice speakers  Desk speakers ", want: []string{"set audio.output Desk speakers"}},
+		{name: "a number with no list shown", input: "/voice mic 2", status: "voice: list them first: /voice devices", keepText: true},
+		{name: "a speakers number with no list shown", input: "/voice speakers 1", status: "list them first", keepText: true},
+		{name: "a number past the list", list: &v1, input: "/voice mic 3", status: "the last list has no microphone 3", keepText: true},
+		{name: "number 0", list: &v1, input: "/voice speakers 0", status: "the last list has no speaker 0", keepText: true},
+		{name: "a huge number", list: &v1, input: "/voice mic 99999999999999999999999", status: "the last list has no microphone", keepText: true},
+		{name: "no argument", input: "/voice mic", status: "usage: /voice mic <n>|<name>|default", keepText: true},
+		{name: "speakers, no argument", input: "/voice speakers", status: "usage: /voice speakers <n>|<name>|default", keepText: true},
+		{name: "a name that cannot be saved", input: `/voice mic bad"name`, status: "cannot be saved in voice.toml", keepText: true},
+		{name: "a backslash", input: `/voice speakers a\b`, status: "cannot be saved in voice.toml", keepText: true},
+		{name: "devices with an argument", input: "/voice devices all", status: "usage: /voice devices", keepText: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, fake, runner := devicesTestModel(t)
+			if tt.list != nil {
+				m = listShown(t, m, runner, *tt.list)
+			}
+			m, cmd := submitText(t, m, tt.input)
+			if calls := fake.taken(); len(calls) != 0 {
+				t.Fatalf("Update ran conch-voice: %v", calls)
+			}
+			if tt.keepText != (m.input == tt.input) {
+				t.Errorf("input %q after %q (kept: want %v)", m.input, tt.input, tt.keepText)
+			}
+			msgs := drain(cmd)
+			if got := fake.taken(); strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("calls %q, want %q", got, tt.want)
+			}
+			for _, msg := range msgs {
+				m, _ = update(m, msg)
+			}
+			if tt.status != "" && !strings.Contains(m.status(), tt.status) {
+				t.Errorf("status %q, want %q in it", m.status(), tt.status)
+			}
+			if m.vc.busy != "" {
+				t.Errorf("still busy %q", m.vc.busy)
+			}
+		})
+	}
+	// A device command waits for the voice command in flight, and the other
+	// way round.
+	m, fake, runner := devicesTestModel(t)
+	m = listShown(t, m, runner, v1)
+	m.vc.busy = "muting"
+	for _, input := range []string{"/voice devices", "/voice mic 1", "/voice speakers default"} {
+		var cmd tea.Cmd
+		m, cmd = submitText(t, m, input)
+		if cmd != nil || !strings.Contains(m.status(), "still muting…; wait for it") {
+			t.Errorf("%s while muting: status %q", input, m.status())
+		}
+	}
+	m.vc.busy = ""
+	m, _ = submitText(t, m, "/voice mic 1")
+	if m.vc.busy != "saving the microphone" {
+		t.Fatalf("busy %q", m.vc.busy)
+	}
+	m, _ = submitText(t, m, "/voice join")
+	if !strings.Contains(m.status(), "still saving the microphone…") || len(fake.taken()) != 0 {
+		t.Errorf("a join while saving: %q", m.status())
+	}
+}
+
+// With voice joined, a save is applied by leaving and joining the same
+// channel again: leave before join, nothing else asked of the supervisor (mute
+// and deafen are its to keep), and the strip goes through leaving and joining
+// to connected. Without voice joined, nothing is started.
+func TestVoiceSaveThenRejoin(t *testing.T) {
+	v1 := devicesFixture(t, "voice-devices-v1.json")
+	mutedConnected := connected("general")
+	mutedConnected.Muted, mutedConnected.Deafened = true, true
+	mutedConnected.Blocked = []schema.VoiceControlBlock{schema.VoiceControlBlockDeafened, schema.VoiceControlBlockMuted}
+	m, fake, runner := devicesTestModel(t)
+	m = withHelper(t, m, mutedConnected)
+	m = listShown(t, m, runner, v1)
+	m, cmd := submitText(t, m, "/voice mic 1")
+	if got := m.voiceStrip(200); !strings.Contains(got, "saving the microphone…") {
+		t.Errorf("strip while saving: %q", got)
+	}
+	msgs := drain(cmd)
+	if got := fake.taken(); strings.Join(got, ",") != "set audio.input alsa_input.pci-0000_00_1f.3.analog-stereo" {
+		t.Fatalf("calls %v", got)
+	}
+	m, rejoin := update(m, msgs[0])
+	if calls := fake.taken(); len(calls) != 0 {
+		t.Fatalf("Update called the supervisor: %v", calls)
+	}
+	if rejoin == nil || m.status() != "voice: microphone saved: rejoining #general's voice…" || m.vc.busy != "rejoining #general" {
+		t.Fatalf("after the save: status %q busy %q", m.status(), m.vc.busy)
+	}
+	if m.vc.devices.ConfiguredInput != "alsa_input.pci-0000_00_1f.3.analog-stereo" {
+		t.Errorf("the list still names %q", m.vc.devices.ConfiguredInput)
+	}
+	done := drain(rejoin)
+	if got := fake.taken(); strings.Join(got, ",") != "leave,join general" {
+		t.Fatalf("calls %v, want leave then join general", got)
+	}
+	// The strip, as the supervisor publishes the rejoin.
+	_, serial, _ := m.vc.owner.current()
+	stopping := mutedConnected
+	stopping.Phase, stopping.Reason = voicehelper.PhaseStopping, "left"
+	starting := voicehelper.Status{Gen: 2, Channel: "general", Phase: voicehelper.PhaseStarting, Muted: true, Deafened: true,
+		Capture: schema.VoiceControlCaptureOff, PTT: schema.VoiceControlPTTUnknown,
+		Blocked: []schema.VoiceControlBlock{schema.VoiceControlBlockNotConnected}}
+	back := mutedConnected
+	back.Gen = 2
+	for _, step := range []struct {
+		st   voicehelper.Status
+		want string
+	}{
+		{stopping, "voice: leaving #general… · rejoining #general…"},
+		{voicehelper.Status{Gen: 1, Phase: voicehelper.PhaseIdle}, "voice: rejoining #general…"},
+		{starting, "voice: joining #general… · rejoining #general…"},
+		{back, "voice: #general · mic on · muted · deafened · rejoining #general…"},
+	} {
+		m, _ = update(m, voiceStatusMsg{serial: serial, st: step.st})
+		if got := m.voiceStrip(200); !strings.HasPrefix(got, step.want) {
+			t.Errorf("strip %q, want it to start with %q", got, step.want)
+		}
+	}
+	for _, msg := range done {
+		m, _ = update(m, msg)
+	}
+	if m.vc.busy != "" || !strings.Contains(m.status(), "rejoined #general") || m.vc.rejoinCancel != nil {
+		t.Errorf("after the rejoin: busy %q status %q", m.vc.busy, m.status())
+	}
+	if got := m.voiceStrip(200); !strings.HasPrefix(got, "voice: #general · mic on · muted · deafened") {
+		t.Errorf("strip %q", got)
+	}
+
+	t.Run("not in voice", func(t *testing.T) {
+		for _, st := range []voicehelper.Status{
+			{Phase: voicehelper.PhaseIdle},
+			failed("general", "duplicate_identity"),
+			func() voicehelper.Status { s := connected("general"); s.Phase = voicehelper.PhaseStopping; return s }(),
+		} {
+			m, fake, runner := devicesTestModel(t)
+			m = withHelper(t, m, st)
+			m = listShown(t, m, runner, v1)
+			m, cmd := submitText(t, m, "/voice speakers 2")
+			for _, msg := range drain(cmd) {
+				var next tea.Cmd
+				m, next = update(m, msg)
+				drain(next)
+			}
+			if got := fake.taken(); strings.Join(got, ",") != "set audio.output alsa_output.usb-Generic_USB_Audio-00.analog-stereo" {
+				t.Errorf("%s: calls %v", st.Phase, got)
+			}
+			if !strings.Contains(m.status(), "speakers saved: USB Audio Analog Stereo") || m.vc.busy != "" {
+				t.Errorf("%s: status %q busy %q", st.Phase, m.status(), m.vc.busy)
+			}
+		}
+	})
+	t.Run("no supervisor yet", func(t *testing.T) {
+		m, fake, _ := devicesTestModel(t)
+		m, cmd := submitText(t, m, "/voice mic default")
+		for _, msg := range drain(cmd) {
+			var next tea.Cmd
+			m, next = update(m, msg)
+			drain(next)
+		}
+		if got := fake.taken(); strings.Join(got, ",") != "set audio.input default" {
+			t.Errorf("calls %v", got)
+		}
+		if c, _, _ := m.vc.owner.current(); c != nil {
+			t.Error("a save made a supervisor")
+		}
+	})
+	t.Run("a leave typed while saving", func(t *testing.T) {
+		m, fake, runner := devicesTestModel(t)
+		m = withHelper(t, m, connected("general"))
+		m = listShown(t, m, runner, v1)
+		m, save := submitText(t, m, "/voice mic 1")
+		m, leave := submitText(t, m, "/voice leave")
+		for _, msg := range drain(save) {
+			var next tea.Cmd
+			m, next = update(m, msg)
+			if next != nil {
+				t.Error("a rejoin after a leave")
+			}
+		}
+		drain(leave)
+		if got := fake.taken(); strings.Join(got, ",") != "set audio.input alsa_input.pci-0000_00_1f.3.analog-stereo,leave" {
+			t.Errorf("calls %v", got)
+		}
+		if m.vc.busy != "leaving" {
+			t.Errorf("busy %q, want the leave's", m.vc.busy)
+		}
+	})
+	t.Run("a leave typed before the rejoin joins", func(t *testing.T) {
+		m, fake, runner := devicesTestModel(t)
+		m = withHelper(t, m, connected("general"))
+		m = listShown(t, m, runner, v1)
+		m, save := submitText(t, m, "/voice mic 1")
+		m, rejoin := update(m, drain(save)[0])
+		fake.taken()
+		m, leave := submitText(t, m, "/voice leave")
+		done := drain(rejoin)
+		if got := fake.taken(); strings.Join(got, ",") != "leave" {
+			t.Errorf("the rejoin after a leave called %v, want only its leave", got)
+		}
+		for _, msg := range done {
+			m, _ = update(m, msg)
+		}
+		if m.vc.busy != "leaving" || strings.Contains(m.status(), "rejoined") || strings.Contains(m.status(), "canceled") {
+			t.Errorf("busy %q status %q", m.vc.busy, m.status())
+		}
+		drain(leave)
+	})
+	t.Run("the rejoin fails", func(t *testing.T) {
+		m, fake, runner := devicesTestModel(t)
+		m = withHelper(t, m, connected("general"))
+		m = listShown(t, m, runner, v1)
+		fake.errs["join"] = voiceErrFrom(t, voicehelper.ReasonHelperExited)
+		m, save := submitText(t, m, "/voice mic 1")
+		m, rejoin := update(m, drain(save)[0])
+		for _, msg := range drain(rejoin) {
+			m, _ = update(m, msg)
+		}
+		if got := m.status(); got != "voice stopped: conch-voice ended without saying why · /voice retry" || m.vc.busy != "" {
+			t.Errorf("status %q busy %q", got, m.vc.busy)
+		}
+		m.input = "still typing"
+		if m, cmd := keys(t, m, "enter"); !m.sending || cmd == nil {
+			t.Error("text does not send after a failed rejoin")
+		}
+	})
+}
+
+// voiceErrFrom is a supervisor error with reason, as the real supervisor makes
+// one: a helper that ends before its hello.
+func voiceErrFrom(t *testing.T, reason string) error {
+	t.Helper()
+	return &voicehelper.Error{Reason: reason}
+}
+
+// Each failure of a one-shot run is one status line, made safe, and text chat
+// goes on as before.
+func TestVoiceDeviceFailures(t *testing.T) {
+	// Real runs that never start anything: the helper cannot be found, or is
+	// refused by the trust rules.
+	ctx := context.Background()
+	_, notFound := voicehelper.NewOneShot(voicehelper.Profile{}, voicehelper.Options{HelperPath: filepath.Join(t.TempDir(), "conch-voice")}).Devices(ctx)
+	_, untrusted := voicehelper.NewOneShot(voicehelper.Profile{}, voicehelper.Options{HelperPath: "conch-voice"}).Devices(ctx)
+	tests := []struct {
+		name  string
+		input string
+		err   error
+		want  string
+	}{
+		{name: "not found", input: "/voice devices", err: notFound, want: "voice: the file CONCH_VOICE_HELPER names does not exist"},
+		{name: "untrusted", input: "/voice devices", err: untrusted, want: "voice: CONCH_VOICE_HELPER must be an absolute path"},
+		{name: "untrusted, saving", input: "/voice mic default", err: untrusted, want: "voice: CONCH_VOICE_HELPER must be an absolute path"},
+		{name: "too old to list", input: "/voice devices", err: &voicehelper.RunError{Reason: voicehelper.RunUnsupported, ExitCode: 2},
+			want: "voice: this conch-voice cannot list devices: install the conch-voice from the same release as conch"},
+		{name: "too old to save", input: "/voice mic default", err: &voicehelper.RunError{Reason: voicehelper.RunUnsupported, ExitCode: 2},
+			want: "voice: not saved: this conch-voice cannot save devices: install the conch-voice from the same release as conch"},
+		{name: "config set refuses", input: "/voice mic speech_out",
+			err:  &voicehelper.RunError{Reason: voicehelper.RunFailed, ExitCode: 1, Line: "conch-voice: voice.toml may be changed by other users\x1b[2J"},
+			want: "voice: not saved: voice.toml may be changed by other users[2J"},
+		{name: "config set fails without a word", input: "/voice speakers default", err: &voicehelper.RunError{Reason: voicehelper.RunFailed, ExitCode: 101},
+			want: "voice: not saved: conch-voice failed (exit status 101)"},
+		{name: "listing fails", input: "/voice devices", err: &voicehelper.RunError{Reason: voicehelper.RunFailed, ExitCode: 1, Line: "conch-voice: no"},
+			want: "voice: the devices could not be listed: no"},
+		{name: "listing times out", input: "/voice devices", err: &voicehelper.RunError{Reason: voicehelper.RunTimedOut, ExitCode: -1},
+			want: "voice: conch-voice did not list the devices within 10 s and was stopped"},
+		{name: "saving times out", input: "/voice mic default", err: &voicehelper.RunError{Reason: voicehelper.RunTimedOut, ExitCode: -1},
+			want: "voice: conch-voice did not finish saving within 10 s and was stopped"},
+		{name: "a bad JSON object", input: "/voice devices", err: &voicehelper.RunError{Reason: voicehelper.RunBadOutput},
+			want: "voice: conch-voice's device list was not valid and was not read"},
+		{name: "too much output", input: "/voice devices", err: &voicehelper.RunError{Reason: voicehelper.RunTooMuchOutput, ExitCode: -1},
+			want: "voice: conch-voice wrote more than a device list can hold"},
+		{name: "the TUI ends", input: "/voice devices", err: context.Canceled, want: "voice: canceled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, fake, runner := devicesTestModel(t)
+			before := devicesFixture(t, "voice-devices-v1.json")
+			m = listShown(t, m, runner, before)
+			fake.errs["devices"], fake.errs["set"] = tt.err, tt.err
+			m, cmd := submitText(t, m, tt.input)
+			m.input = "half a message"
+			for _, msg := range drain(cmd) {
+				m, _ = update(m, msg)
+			}
+			if got := m.status(); !strings.HasPrefix(got, tt.want) || strings.ContainsAny(got, "\n\x1b") {
+				t.Errorf("status %q, want it to start with %q", got, tt.want)
+			}
+			if m.vc.busy != "" || m.help {
+				t.Errorf("busy %q, help %v", m.vc.busy, m.help)
+			}
+			// The last list shown stays, with what it chose.
+			if m.vc.devices == nil || m.vc.devices.ConfiguredInput != before.ConfiguredInput {
+				t.Errorf("the list shown changed: %+v", m.vc.devices)
+			}
+			if m.input != "half a message" || m.current() != "general" {
+				t.Fatalf("text changed: input %q channel %q", m.input, m.current())
+			}
+			m, cmd = keys(t, m, "enter")
+			if !m.sending || cmd == nil {
+				t.Fatalf("enter did not send: status %q", m.status())
+			}
+		})
+	}
+	// A terminal without voice, and a setup that cannot offer it, say so and
+	// run nothing.
+	m := richModel(t)
+	if m, cmd := submitText(t, m, "/voice devices"); cmd != nil || !strings.Contains(m.status(), "does not offer voice") {
+		t.Errorf("no controls: status %q", m.status())
+	}
+	m = richModel(t).WithVoice(VoiceSetup{err: errors.New("no configuration directory")})
+	if m, cmd := submitText(t, m, "/voice mic default"); cmd != nil || m.status() != "voice: no configuration directory" {
+		t.Errorf("a setup error: status %q", m.status())
+	}
+	// Listing and saving need no login: a terminal with none still has them.
+	if m := richModel(t).WithVoice(VoiceSetup{server: "http://127.0.0.1:1"}); m.vc.owner.devices == nil {
+		t.Error("no runner without a login")
+	}
+}
+
+// /voice status names the chosen devices from the last list read.
+func TestVoiceStatusShowsChosenDevices(t *testing.T) {
+	tests := []struct {
+		name    string
+		fixture string
+		want    []string
+	}{
+		{name: "no list read", want: []string{"chosen microphone  not read yet: /voice devices", "chosen speakers    not read yet"}},
+		{name: "a chosen microphone, the default speakers", fixture: "voice-devices-v1.json",
+			want: []string{"chosen microphone  USB Audio Mono (alsa_input.usb-Generic_USB_Audio-00.mono-fallback)", "chosen speakers    PipeWire default"}},
+		{name: "a chosen microphone that is missing", fixture: "voice-devices-v1-configured-input-absent.json",
+			want: []string{"alsa_input.usb-Generic_USB_Headset-00.mono-fallback: chosen in voice.toml, not available now"}},
+		{name: "voice.toml refused", fixture: "voice-devices-v1-config-refused.json", want: []string{"not known: voice.toml was refused"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _, runner := devicesTestModel(t)
+			if tt.fixture != "" {
+				m = listShown(t, m, runner, devicesFixture(t, tt.fixture))
+			}
+			m, cmd := submitText(t, m, "/voice status")
+			if cmd != nil {
+				t.Fatal("no supervisor, yet a command")
+			}
+			m.width, m.height = 180, 50
+			view := m.View()
+			for _, want := range tt.want {
+				if !strings.Contains(view, want) {
+					t.Errorf("the page lacks %q:\n%s", want, view)
+				}
+			}
+		})
+	}
+}
+
+// /voice help lists the device commands and the device note, and the usage
+// line names them.
+func TestVoiceHelpNamesDevices(t *testing.T) {
+	m, _, _ := devicesTestModel(t)
+	m, _ = submitText(t, m, "/voice help")
+	m.width, m.height = 160, 60
+	view := m.View()
+	for _, want := range []string{"/voice devices", "/voice mic n|name|default", "/voice speakers n|name|default",
+		"the names are PipeWire's", "devices are those of the machine conch runs on", "virtual microphone", "the chosen devices"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the page lacks %q:\n%s", want, view)
+		}
+	}
+	m, _, _ = devicesTestModel(t)
+	m, _ = submitText(t, m, "/voice talk")
+	for _, want := range []string{"| devices |", "| mic <n>|<name>|default |", "| speakers <n>|<name>|default |"} {
+		if !strings.Contains(m.status(), want) {
+			t.Errorf("usage %q lacks %q", m.status(), want)
+		}
 	}
 }

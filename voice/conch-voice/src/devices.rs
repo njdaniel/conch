@@ -3,7 +3,9 @@
 //! read access to one (`docs/design/conch-voice.md` §4 and §8).
 //!
 //! Input: PipeWire's list of devices (a `NodeTable`, which the caller reads and this module
-//! only formats), and the entries of `/dev/input/by-id/`. Output: text on standard output.
+//! only formats), and the entries of `/dev/input/by-id/`. Output: text on standard output; or,
+//! for `--json`, the audio half only, as one `conch.voice_devices.v1` document
+//! ([`device_list`]), built from the same table without looking at any keyboard.
 //! Owns nothing: **no audio device is opened**, and each keyboard is opened read-only to see
 //! whether it can be, and closed at once; **nothing is read from any of them**.
 //!
@@ -30,11 +32,18 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use conch_voice_api::{
+    VOICE_DEVICES_MAX_DESCRIPTION_CHARS, VOICE_DEVICES_MAX_LISTED, VOICE_DEVICES_SCHEMA_V1,
+    VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, default_config_dir,
+    is_writable_device_name,
+};
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
 use dmn_audio::NodeTable;
 
+use crate::cli::{Environment, read_config};
+use crate::error::Error;
 use crate::keydev::{self, DeviceRule, Problem};
-use crate::secrets::{cut, one_line};
+use crate::secrets::{CUT_MARK, cut, one_line};
 
 /// The longest description shown; PipeWire's descriptions are a device's marketing name.
 const DESCRIPTION_CHARS: usize = 80;
@@ -47,7 +56,7 @@ struct Listed<'a> {
 }
 
 /// Whether a `node.name` can be written between quotes in the configuration file as it is.
-fn fit_for_the_config(name: &str) -> bool {
+pub(crate) fn fit_for_the_config(name: &str) -> bool {
     !name.is_empty() && one_line(name) == name && !name.contains(['"', '\\'])
 }
 
@@ -451,6 +460,186 @@ pub fn report(
     out.flush()
 }
 
+/// What `voice.toml` came to for the device list: the state, and the two device names the
+/// `[audio]` table holds when it was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigView {
+    /// What became of the file.
+    pub state: VoiceDevicesConfig,
+    /// `[audio] input`, only for [`VoiceDevicesConfig::Ok`], and only a name that can be
+    /// shown. `default` is not a name: it is PipeWire's default, said by `None`.
+    pub input: Option<String>,
+    /// `[audio] output`, by the same rules.
+    pub output: Option<String>,
+}
+
+impl ConfigView {
+    fn without_names(state: VoiceDevicesConfig) -> Self {
+        Self {
+            state,
+            input: None,
+            output: None,
+        }
+    }
+}
+
+/// Reads `voice.toml` in the configuration directory `environment` names, by the rules
+/// `join` reads it by, only to say what became of it and what `[audio]` names. A refused
+/// file (or a configuration directory that is refused) is returned as the error, to be
+/// told to the person on standard error, and is not a failure of the command.
+#[must_use]
+pub fn config_view(environment: &Environment) -> (ConfigView, Option<Error>) {
+    let dir = match default_config_dir(
+        environment.conch_config_dir.as_deref(),
+        environment.xdg_config_home.as_deref(),
+        environment.home.as_deref(),
+    ) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return (ConfigView::without_names(VoiceDevicesConfig::None), None),
+        Err(error) => {
+            return (
+                ConfigView::without_names(VoiceDevicesConfig::Refused),
+                Some(Error::Api(error)),
+            );
+        }
+    };
+    let path = dir.join("voice.toml");
+    // `read_config` takes a missing file for the default configuration, which is what
+    // `join` wants and is not what this says.
+    if matches!(std::fs::metadata(&path), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+        return (ConfigView::without_names(VoiceDevicesConfig::Missing), None);
+    }
+    match read_config(&path) {
+        Ok(config) => (
+            ConfigView {
+                state: VoiceDevicesConfig::Ok,
+                input: configured_name(config.audio.input),
+                output: configured_name(config.audio.output),
+            },
+            None,
+        ),
+        Err(error) => (
+            ConfigView::without_names(VoiceDevicesConfig::Refused),
+            Some(error),
+        ),
+    }
+}
+
+/// A configured device name as the document says it: absent for PipeWire's default (no
+/// name, or `default`), and absent for a name the document cannot carry.
+fn configured_name(name: Option<String>) -> Option<String> {
+    name.filter(|name| {
+        name != "default" && fit_for_the_config(name) && is_writable_device_name(name)
+    })
+}
+
+/// One kind of device for the document: those under a name fit for the configuration file
+/// (and for the document), in PipeWire's order, at most [`VOICE_DEVICES_MAX_LISTED`]; the
+/// count of the rest.
+fn device_section<'a>(
+    devices: impl Iterator<Item = (&'a str, &'a str)>,
+    default: Option<&str>,
+) -> (Vec<VoiceDevice>, usize) {
+    let mut listed = Vec::new();
+    let mut unshown = 0_usize;
+    for (name, description) in devices {
+        if listed.len() >= VOICE_DEVICES_MAX_LISTED
+            || !fit_for_the_config(name)
+            || !is_writable_device_name(name)
+        {
+            unshown += 1;
+            continue;
+        }
+        listed.push(VoiceDevice {
+            name: name.to_owned(),
+            description: document_description(name, description),
+            default: default == Some(name),
+        });
+    }
+    (listed, unshown)
+}
+
+/// A description for the document: one line, empty when it says nothing the name does not,
+/// and at most [`VOICE_DEVICES_MAX_DESCRIPTION_CHARS`] characters counting the mark that
+/// says it was cut.
+fn document_description(name: &str, description: &str) -> String {
+    let one = one_line(description);
+    let one = one.trim();
+    if one == name {
+        return String::new();
+    }
+    if one.chars().count() <= VOICE_DEVICES_MAX_DESCRIPTION_CHARS {
+        return one.to_owned();
+    }
+    cut(
+        one.to_owned(),
+        VOICE_DEVICES_MAX_DESCRIPTION_CHARS - CUT_MARK.chars().count(),
+    )
+}
+
+/// The device list as the document `conch-voice devices --json` writes it. Only reads
+/// `table`: nothing is opened, and no keyboard is looked at.
+#[must_use]
+pub fn device_list(table: &NodeTable, config: &ConfigView) -> VoiceDevicesV1 {
+    let (microphones, unshown_microphones) = device_section(
+        table
+            .sources()
+            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.default_source.as_deref(),
+    );
+    let (speakers, unshown_speakers) = device_section(
+        table
+            .sinks()
+            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.default_sink.as_deref(),
+    );
+    VoiceDevicesV1 {
+        schema: VOICE_DEVICES_SCHEMA_V1.to_owned(),
+        pipewire: VoiceDevicesPipeWire::Ok,
+        synced: table.synced,
+        microphones,
+        speakers,
+        unshown_microphones,
+        unshown_speakers,
+        config: config.state,
+        configured_input: config.input.clone(),
+        configured_output: config.output.clone(),
+    }
+}
+
+/// The device list when PipeWire could not be reached: nothing listed, nothing counted.
+#[must_use]
+pub fn device_list_unavailable(config: &ConfigView) -> VoiceDevicesV1 {
+    VoiceDevicesV1 {
+        schema: VOICE_DEVICES_SCHEMA_V1.to_owned(),
+        pipewire: VoiceDevicesPipeWire::Unavailable,
+        synced: false,
+        microphones: Vec::new(),
+        speakers: Vec::new(),
+        unshown_microphones: 0,
+        unshown_speakers: 0,
+        config: config.state,
+        configured_input: config.input.clone(),
+        configured_output: config.output.clone(),
+    }
+}
+
+/// Writes the device list as one line of JSON and a line feed.
+///
+/// # Errors
+///
+/// What the operating system said, if `out` cannot be written to; or, as
+/// [`io::ErrorKind::InvalidData`], a document that fails its own validation, which is a
+/// fault of this program's and is not written.
+pub fn write_device_list(list: &VoiceDevicesV1, out: &mut dyn Write) -> io::Result<()> {
+    list.validate()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the device list is not valid"))?;
+    let line = serde_json::to_string(list)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the device list is not JSON"))?;
+    writeln!(out, "{line}")?;
+    out.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use dmn_audio::RegistryEvent;
@@ -620,5 +809,270 @@ Speakers (`output`)
             assert_eq!(udev_rule(name, 1000), None, "{name:?}");
         }
         assert!(udev_rule("usb-0c45:7403_USB#Kbd+a=b@c.d-event-kbd", 1000).is_some());
+    }
+
+    // The device list for a program (`--json`).
+
+    fn golden(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../pkg/schema/testdata/voice-devices")
+            .join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Go's indented encoding, made into the line the helper writes.
+        let mut out = String::new();
+        let (mut in_string, mut escaped) = (false, false);
+        for c in text.chars() {
+            if in_string {
+                out.push(c);
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_string = false,
+                    _ => {}
+                }
+            } else if c == '"' {
+                in_string = true;
+                out.push(c);
+            } else if !c.is_whitespace() {
+                out.push(c);
+            }
+        }
+        out.push('\n');
+        out
+    }
+
+    fn written(list: &VoiceDevicesV1) -> String {
+        let mut out = Vec::new();
+        write_device_list(list, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn config(state: VoiceDevicesConfig) -> ConfigView {
+        ConfigView::without_names(state)
+    }
+
+    const MIC: &str = "alsa_input.pci-0000_00_1f.3.analog-stereo";
+    const SPEAKER: &str = "alsa_output.pci-0000_00_1f.3.analog-stereo";
+
+    fn built_in() -> Vec<RegistryEvent> {
+        vec![
+            node(1, "Audio/Source", MIC, "Built-in Audio Analog Stereo"),
+            node(2, "Audio/Sink", SPEAKER, "Built-in Audio Analog Stereo"),
+            RegistryEvent::DefaultSource(Some(MIC.to_owned())),
+            RegistryEvent::DefaultSink(Some(SPEAKER.to_owned())),
+            RegistryEvent::Synced,
+        ]
+    }
+
+    #[test]
+    fn a_default_on_each_side_is_the_golden_document_byte_for_byte() {
+        let mut events = built_in();
+        events.push(node(
+            3,
+            "Audio/Source",
+            "alsa_input.usb-Generic_USB_Audio-00.mono-fallback",
+            "USB Audio Mono",
+        ));
+        events.push(node(
+            4,
+            "Audio/Sink",
+            "alsa_output.usb-Generic_USB_Audio-00.analog-stereo",
+            "USB Audio Analog Stereo",
+        ));
+        let view = ConfigView {
+            state: VoiceDevicesConfig::Ok,
+            input: Some("alsa_input.usb-Generic_USB_Audio-00.mono-fallback".to_owned()),
+            output: None,
+        };
+        assert_eq!(
+            written(&device_list(&table(events), &view)),
+            golden("voice-devices-v1.json")
+        );
+    }
+
+    #[test]
+    fn a_source_with_no_description_is_listed_with_an_empty_one() {
+        // The virtual microphone: a text-to-speech program's Audio/Source.
+        let mut events = built_in();
+        events.push(node(3, "Audio/Source", "speech_out", ""));
+        assert_eq!(
+            written(&device_list(
+                &table(events),
+                &config(VoiceDevicesConfig::Missing)
+            )),
+            golden("voice-devices-v1-virtual-microphone.json")
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_its_own_description_says_nothing_twice() {
+        let list = device_list(
+            &table(vec![node(1, "Audio/Source", "speech_out", "speech_out")]),
+            &config(VoiceDevicesConfig::Missing),
+        );
+        assert_eq!(list.microphones[0].description, "");
+    }
+
+    #[test]
+    fn the_configured_names_are_echoed_and_the_default_is_absent() {
+        let view = ConfigView {
+            state: VoiceDevicesConfig::Ok,
+            input: Some("alsa_input.usb-Generic_USB_Headset-00.mono-fallback".to_owned()),
+            output: Some(SPEAKER.to_owned()),
+        };
+        assert_eq!(
+            written(&device_list(&table(built_in()), &view)),
+            golden("voice-devices-v1-configured-input-absent.json")
+        );
+        assert_eq!(
+            written(&device_list(
+                &table(built_in()),
+                &config(VoiceDevicesConfig::Refused)
+            )),
+            golden("voice-devices-v1-config-refused.json")
+        );
+        assert_eq!(configured_name(Some("default".to_owned())), None);
+        assert_eq!(configured_name(None), None);
+        assert_eq!(configured_name(Some("a\"b".to_owned())), None);
+        assert_eq!(
+            configured_name(Some("speech_out".to_owned())),
+            Some("speech_out".to_owned())
+        );
+    }
+
+    #[test]
+    fn unfit_names_and_entries_past_the_most_are_counted_and_not_listed() {
+        let mut events = vec![node(1, "Audio/Source", MIC, "Built-in Audio Analog Stereo")];
+        events.push(RegistryEvent::DefaultSource(Some(MIC.to_owned())));
+        for (id, name) in [
+            (2, "has\"quote"),
+            (3, "has\\backslash"),
+            (4, "two\nlines"),
+            (5, ""),
+        ] {
+            events.push(node(id, "Audio/Source", name, "x"));
+        }
+        // Too long for the document, though fit for the file.
+        events.push(node(6, "Audio/Source", &"n".repeat(256), "x"));
+        for id in 100..170 {
+            events.push(node(id, "Audio/Sink", &format!("sink_{id}"), "x"));
+        }
+        events.push(RegistryEvent::Synced);
+        let list = device_list(&table(events), &config(VoiceDevicesConfig::Missing));
+        assert_eq!(list.microphones.len(), 1);
+        assert_eq!(list.unshown_microphones, 5);
+        assert_eq!(list.speakers.len(), 64);
+        assert_eq!(list.unshown_speakers, 6);
+        assert!(list.speakers.iter().all(|d| !d.default));
+        assert!(list.validate().is_ok());
+    }
+
+    #[test]
+    fn a_description_is_one_line_of_at_most_eighty_characters() {
+        let long = "é".repeat(200);
+        let list = device_list(
+            &table(vec![
+                node(1, "Audio/Source", "a", "two\nlines\u{202e}"),
+                node(2, "Audio/Source", "b", &long),
+                node(3, "Audio/Source", "c", &"d".repeat(80)),
+            ]),
+            &config(VoiceDevicesConfig::None),
+        );
+        assert_eq!(list.microphones[0].description, "two lines");
+        assert_eq!(list.microphones[1].description.chars().count(), 80);
+        assert!(list.microphones[1].description.ends_with(" [cut]"));
+        assert_eq!(list.microphones[2].description, "d".repeat(80));
+        assert!(list.validate().is_ok());
+    }
+
+    #[test]
+    fn a_table_that_has_not_synced_says_so() {
+        // PipeWire answered, but not all of it within the wait.
+        let list = device_list(
+            &table(vec![
+                node(1, "Audio/Source", MIC, "Built-in Audio Analog Stereo"),
+                RegistryEvent::DefaultSource(Some(MIC.to_owned())),
+            ]),
+            &config(VoiceDevicesConfig::None),
+        );
+        assert!(!list.synced);
+        assert_eq!(written(&list), golden("voice-devices-v1-config-none.json"));
+    }
+
+    #[test]
+    fn no_pipewire_is_an_empty_document_that_still_names_the_configuration() {
+        let view = config(VoiceDevicesConfig::Ok);
+        assert_eq!(
+            written(&device_list_unavailable(&view)),
+            golden("voice-devices-v1-pipewire-unavailable.json")
+        );
+    }
+
+    #[test]
+    fn the_line_is_one_line_with_one_line_feed() {
+        let text = written(&device_list(
+            &table(built_in()),
+            &config(VoiceDevicesConfig::None),
+        ));
+        assert_eq!(text.matches('\n').count(), 1);
+        assert!(text.ends_with("}\n"));
+    }
+
+    #[test]
+    fn a_document_that_breaks_its_own_rules_is_not_written() {
+        let mut list = device_list_unavailable(&config(VoiceDevicesConfig::None));
+        list.unshown_speakers = 1;
+        let mut out = Vec::new();
+        assert!(write_device_list(&list, &mut out).is_err());
+        assert!(out.is_empty());
+    }
+
+    fn environment(dir: &std::path::Path) -> Environment {
+        Environment {
+            conch_config_dir: Some(dir.as_os_str().to_owned()),
+            ..Environment::default()
+        }
+    }
+
+    fn voice_toml(dir: &std::path::Path, text: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("voice.toml");
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn the_configuration_is_ok_missing_refused_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (view, why) = config_view(&environment(dir.path()));
+        assert_eq!(view.state, VoiceDevicesConfig::Missing);
+        assert!(why.is_none());
+
+        voice_toml(
+            dir.path(),
+            "[audio]\ninput = \"speech_out\"\noutput = \"default\"\n",
+            0o600,
+        );
+        let (view, why) = config_view(&environment(dir.path()));
+        assert!(why.is_none());
+        assert_eq!(view.state, VoiceDevicesConfig::Ok);
+        assert_eq!(view.input.as_deref(), Some("speech_out"));
+        assert_eq!(view.output, None);
+
+        voice_toml(dir.path(), "[audio]\ninput = \"speech_out\"\n", 0o666);
+        let (view, why) = config_view(&environment(dir.path()));
+        assert_eq!(view.state, VoiceDevicesConfig::Refused);
+        assert_eq!(view.input, None);
+        assert!(why.is_some());
+
+        voice_toml(dir.path(), "this is [not toml", 0o600);
+        let (view, why) = config_view(&environment(dir.path()));
+        assert_eq!(view.state, VoiceDevicesConfig::Refused);
+        assert!(why.is_some());
+
+        // No configuration directory at all.
+        let (view, why) = config_view(&Environment::default());
+        assert_eq!(view.state, VoiceDevicesConfig::None);
+        assert!(why.is_none());
     }
 }

@@ -1,0 +1,396 @@
+{
+  "description": "Cases for the reader of the device list (ParseVoiceDevices): what the TUI accepts and refuses when it reads what `conch-voice devices --json` wrote. Each case is one document, given by line (text), line_hex (bytes) or line_file (a file under this directory). want.result is accept, or refuse with a fragment of the error. A refusal that depends on size alone (more than the most a reader accepts, more than the most a list holds) is built by the Go test, not kept here.",
+  "cases": [
+    {
+      "name": "the full list, as the golden fixture has it, white space and all",
+      "line_file": "voice-devices-v1.json",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "one line, as the helper writes it",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"alsa_input.pci-0000_00_1f.3.analog-stereo\",\"description\":\"Built-in Audio Analog Stereo\",\"default\":true}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\"}\n",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "white space around the object, carriage return included",
+      "line": " \t{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"} \r\n",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "a field the document does not declare, named keyboards: ignored",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\",\"keyboards\":[{\"name\":\"usb-Keyboard-event-kbd\"}]}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "a field a device does not declare, named media_class: ignored",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"speech_out\",\"description\":\"\",\"default\":false,\"media_class\":\"Audio/Source\"}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\"}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "a name of exactly the most bytes, and a description of exactly the most characters",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n234567890n2345\",\"description\":\"d234567890d234567890d234567890d234567890d234567890d234567890d234567890d234567890\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\"}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "a name and a description with characters outside ASCII, and a description with a space in the name's place",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"alsa_input.usb-Mikrofon_für_Sprache-00.mono\",\"description\":\"Mikrofon für Sprache (USB) \\u2014 vorne\",\"default\":true}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\"}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "configured output alone, with config ok",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"ok\",\"configured_output\":\"alsa_output.pci-0000_00_1f.3.analog-stereo\"}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "pipewire unavailable with nothing listed",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"unavailable\",\"synced\":false,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"ok\"}",
+      "want": {
+        "result": "accept"
+      }
+    },
+    {
+      "name": "empty input",
+      "line": "",
+      "want": {
+        "result": "refuse",
+        "error": "not one JSON object"
+      }
+    },
+    {
+      "name": "a JSON array",
+      "line": "[]",
+      "want": {
+        "result": "refuse",
+        "error": "not one JSON object"
+      }
+    },
+    {
+      "name": "text that is not JSON",
+      "line": "Audio devices (PipeWire)\n",
+      "want": {
+        "result": "refuse",
+        "error": "not one JSON object"
+      }
+    },
+    {
+      "name": "an object cut short",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\"",
+      "want": {
+        "result": "refuse",
+        "error": "not one JSON object"
+      }
+    },
+    {
+      "name": "two JSON values",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}\n{\"schema\":\"conch.voice_devices.v1\"}",
+      "want": {
+        "result": "refuse",
+        "error": "more than one JSON value"
+      }
+    },
+    {
+      "name": "a key given twice",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\",\"config\":\"ok\"}",
+      "want": {
+        "result": "refuse",
+        "error": "gives a key twice"
+      }
+    },
+    {
+      "name": "a key given twice in a device",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"a\",\"name\":\"b\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "gives a key twice"
+      }
+    },
+    {
+      "name": "not valid UTF-8 (a lone 0xff in a description)",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f646576696365732e7631222c227069706577697265223a226f6b222c2273796e636564223a747275652c226d6963726f70686f6e6573223a5b7b226e616d65223a2261222c226465736372697074696f6e223a22ff222c2264656661756c74223a66616c73657d5d2c22737065616b657273223a5b5d2c22756e73686f776e5f6d6963726f70686f6e6573223a302c22756e73686f776e5f737065616b657273223a302c22636f6e666967223a226e6f6e65227d",
+      "want": {
+        "result": "refuse",
+        "error": "not valid UTF-8"
+      }
+    },
+    {
+      "name": "no schema",
+      "line": "{\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "schema is not conch.voice_devices.v1"
+      }
+    },
+    {
+      "name": "another version",
+      "line": "{\"schema\":\"conch.voice_devices.v2\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "schema is not conch.voice_devices.v1"
+      }
+    },
+    {
+      "name": "the control protocol's schema",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0\"}",
+      "want": {
+        "result": "refuse",
+        "error": "schema is not conch.voice_devices.v1"
+      }
+    },
+    {
+      "name": "a schema that is not a string",
+      "line": "{\"schema\":1,\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "schema is not conch.voice_devices.v1"
+      }
+    },
+    {
+      "name": "Schema in another case",
+      "line": "{\"Schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "schema is not conch.voice_devices.v1"
+      }
+    },
+    {
+      "name": "pipewire missing",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs pipewire of the right type"
+      }
+    },
+    {
+      "name": "pipewire null",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":null,\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs pipewire of the right type"
+      }
+    },
+    {
+      "name": "synced a string",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":\"true\",\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs synced of the right type"
+      }
+    },
+    {
+      "name": "microphones null",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":null,\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs microphones of the right type"
+      }
+    },
+    {
+      "name": "speakers an object",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":{},\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs speakers of the right type"
+      }
+    },
+    {
+      "name": "a device that is a string",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[\"alsa_input.pci-0000_00_1f.3.analog-stereo\"],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs microphones of the right type"
+      }
+    },
+    {
+      "name": "a device without default",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"speech_out\",\"description\":\"\"}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs microphones.default of the right type"
+      }
+    },
+    {
+      "name": "a device whose description is null",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[{\"name\":\"alsa_output.pci-0000_00_1f.3.analog-stereo\",\"description\":null,\"default\":true}],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs speakers.description of the right type"
+      }
+    },
+    {
+      "name": "unshown_microphones a fraction",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":1.5,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs unshown_microphones of the right type"
+      }
+    },
+    {
+      "name": "unshown_speakers a string",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":\"0\",\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "needs unshown_speakers of the right type"
+      }
+    },
+    {
+      "name": "config missing",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0}",
+      "want": {
+        "result": "refuse",
+        "error": "needs config of the right type"
+      }
+    },
+    {
+      "name": "configured_input null",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"ok\",\"configured_input\":null}",
+      "want": {
+        "result": "refuse",
+        "error": "needs configured_input of the right type"
+      }
+    },
+    {
+      "name": "pipewire of a value this version does not know",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"starting\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "pipewire \"starting\" is not one of ok, unavailable"
+      }
+    },
+    {
+      "name": "config of a value this version does not know",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"invalid\"}",
+      "want": {
+        "result": "refuse",
+        "error": "config \"invalid\" is not one of ok, missing, refused, none"
+      }
+    },
+    {
+      "name": "an empty name",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "microphones[0].name must be 1 to 255 bytes"
+      }
+    },
+    {
+      "name": "a name with a quotation mark",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[{\"name\":\"alsa_output.\\\"quoted\\\"\",\"description\":\"\",\"default\":false}],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "speakers[0].name must not contain a quotation mark or a backslash"
+      }
+    },
+    {
+      "name": "a name with a backslash",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"alsa_input.a\\\\b\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "microphones[0].name must not contain a quotation mark or a backslash"
+      }
+    },
+    {
+      "name": "a name with a line feed",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"alsa_input.a\\nb\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "microphones[0].name must not contain control characters"
+      }
+    },
+    {
+      "name": "a name with an escape character",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"\\u001b[31malsa_input\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "microphones[0].name must not contain control characters"
+      }
+    },
+    {
+      "name": "a description one character too long",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[{\"name\":\"a\",\"description\":\"d234567890d234567890d234567890d234567890d234567890d234567890d234567890d234567890x\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "microphones[0].description must be at most 80 characters"
+      }
+    },
+    {
+      "name": "a description with a carriage return",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[{\"name\":\"a\",\"description\":\"Built-in\\rAudio\",\"default\":false}],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "speakers[0].description must not contain control characters"
+      }
+    },
+    {
+      "name": "a negative count",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":-1,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "unshown_speakers must not be negative, got -1"
+      }
+    },
+    {
+      "name": "a microphone listed while pipewire is unavailable",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"unavailable\",\"synced\":false,\"microphones\":[{\"name\":\"a\",\"description\":\"\",\"default\":false}],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "must list and count nothing while pipewire is unavailable"
+      }
+    },
+    {
+      "name": "a count while pipewire is unavailable",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"unavailable\",\"synced\":false,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":1,\"unshown_speakers\":0,\"config\":\"none\"}",
+      "want": {
+        "result": "refuse",
+        "error": "must list and count nothing while pipewire is unavailable"
+      }
+    },
+    {
+      "name": "configured_input while config is missing",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"missing\",\"configured_input\":\"alsa_input.pci-0000_00_1f.3.analog-stereo\"}",
+      "want": {
+        "result": "refuse",
+        "error": "configured_input is only for config ok, got config \"missing\""
+      }
+    },
+    {
+      "name": "configured_output while config is refused",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"refused\",\"configured_output\":\"alsa_output.pci-0000_00_1f.3.analog-stereo\"}",
+      "want": {
+        "result": "refuse",
+        "error": "configured_output is only for config ok, got config \"refused\""
+      }
+    },
+    {
+      "name": "configured_input of the value default, which is said by absence",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"ok\",\"configured_input\":\"default\"}",
+      "want": {
+        "result": "refuse",
+        "error": "configured_input says the default by absence, not by the value \"default\""
+      }
+    },
+    {
+      "name": "configured_output with a quotation mark",
+      "line": "{\"schema\":\"conch.voice_devices.v1\",\"pipewire\":\"ok\",\"synced\":true,\"microphones\":[],\"speakers\":[],\"unshown_microphones\":0,\"unshown_speakers\":0,\"config\":\"ok\",\"configured_output\":\"a\\\"b\"}",
+      "want": {
+        "result": "refuse",
+        "error": "configured_output must not contain a quotation mark or a backslash"
+      }
+    }
+  ]
+}

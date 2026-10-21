@@ -30,6 +30,7 @@
 //!   [`Client::presence`], [`Client::presence_stream`].
 //! - [`parse_command`], [`parse_event`], [`to_line`]: the managed helper's control
 //!   protocol (`docs/design/tui-voice.md`).
+//! - [`VoiceDevicesV1`]: the device list `conch-voice devices --json` writes.
 //! - [`PresenceStream`]: snapshots in order, then a [`StreamEnd`].
 //!
 //! Design: `docs/design/conch-voice.md` §2, §5 to §8; the server it talks to is
@@ -45,6 +46,7 @@ mod login;
 mod presence;
 mod server;
 mod types;
+mod voice_devices;
 
 pub use client::Client;
 pub use control::{
@@ -71,6 +73,11 @@ pub use types::{
     Audience, AudienceKind, ErrorBody, MAX_AUDIENCE_PRINCIPALS, Secret, Timestamp,
     VOICE_PRESENCE_SCHEMA_V1, VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant,
     VoiceSessionResponseV1, VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1,
+};
+pub use voice_devices::{
+    VOICE_DEVICES_MAX_DESCRIPTION_CHARS, VOICE_DEVICES_MAX_LISTED, VOICE_DEVICES_MAX_NAME_BYTES,
+    VOICE_DEVICES_SCHEMA_V1, VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1,
+    is_writable_device_name,
 };
 
 /// The crate's version, as built.
