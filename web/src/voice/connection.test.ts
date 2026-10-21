@@ -1417,3 +1417,60 @@ describe('voice processing', () => {
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', processing: false, reported: off });
   });
 });
+
+// Issue #669: a microphone chosen while connecting is the one captured once
+// connected, as #659 does for voice processing.
+describe('a microphone chosen while connecting', () => {
+  const webcam: Microphone = { id: 'mic-2', label: 'Webcam' };
+
+  // A client whose first connection waits for the test, as a slow one does.
+  function slow() {
+    let connected = (): void => undefined;
+    const t = setup([okSession()], [], 0, false, (r) => {
+      const connect = r.connect;
+      r.connect = (...args) =>
+        new Promise<void>((resolve) => {
+          connected = () => {
+            resolve(connect(...args));
+          };
+        });
+    });
+    return {
+      t,
+      connect: () => {
+        connected();
+      },
+    };
+  }
+
+  it('is captured once connected, and is the one in use', async () => {
+    const { t, connect } = slow();
+    t.client.join('general');
+    await settle();
+    const r = t.rooms[0];
+    if (r === undefined) throw new Error('no room');
+    expect(r.choices).toEqual([null]);
+    await t.client.chooseMicrophone(webcam);
+    expect(t.client.snapshot().phase).toBe('connecting');
+    expect(r.switches).toEqual([]);
+    connect();
+    await settle();
+    expect(r.switches).toEqual(['mic-2']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: webcam, inUse: 'mic-2', missing: false });
+    // The same connection moved its capture: no other room, none closed.
+    expect(t.rooms).toHaveLength(1);
+    expect(r.closed).toBe(false);
+  });
+
+  it('chosen back to what the room was given, nothing is captured again', async () => {
+    const { t, connect } = slow();
+    t.client.join('general');
+    await settle();
+    await t.client.chooseMicrophone(webcam);
+    await t.client.chooseMicrophone(null);
+    connect();
+    await settle();
+    expect(t.rooms[0]?.switches).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: null, inUse: 'default' });
+  });
+});

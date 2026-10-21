@@ -431,7 +431,8 @@ export class VoiceClient {
   // and blocked until it has: a press held across the switch ends, and
   // nothing is sent until a new one. A switch that fails leaves the
   // microphone missing, with the reason. The device is captured with the
-  // voice processing chosen for it.
+  // voice processing chosen for it. Chosen while connecting, it is captured
+  // once connected (connect).
   async chooseMicrophone(choice: Microphone | null): Promise<void> {
     this.set(this.chosen(choice));
     const room = this.room;
@@ -872,7 +873,8 @@ export class VoiceClient {
       // Left or dropped meanwhile: whoever did closed this room.
       if (mine !== this.attempt) return;
     }
-    room.setMicrophone(this.state.microphone?.id ?? null);
+    const microphone = this.state.microphone?.id ?? null;
+    room.setMicrophone(microphone);
     const processing = this.state.processing;
     room.setProcessing(processing);
     try {
@@ -909,9 +911,11 @@ export class VoiceClient {
     this.connectedAt = this.now();
     this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish, ...inUseOn(room) });
     this.applyBlock();
-    // Voice processing changed while connecting: the capture may have been
-    // made as it was, so it is made again as it is now.
-    if (publish && !this.state.missing && this.state.processing !== processing) void this.switchTo(room, this.state.microphone?.id ?? null);
+    // The microphone chosen, or its voice processing, changed while
+    // connecting: the capture may have been made as it was, so it is made
+    // again as it is now (issue #669 for the device).
+    const now = this.state.microphone?.id ?? null;
+    if (publish && !this.state.missing && (now !== microphone || this.state.processing !== processing)) void this.switchTo(room, now);
     void this.readMicrophones(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
