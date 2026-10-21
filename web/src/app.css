@@ -1491,6 +1491,14 @@ label {
   gap: var(--s1) var(--s3);
 }
 
+/* The voice processing switch (issue #659): a row of its own under the
+   modes, with what the capture says beneath it. */
+.voice-processing {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+}
+
 .threshold {
   display: grid;
   gap: var(--s1);
