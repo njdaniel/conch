@@ -6,10 +6,10 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import * as api from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
-import { VoiceClient, type Microphone, type ProcessingStore, type VoiceState } from './connection';
+import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
-import { newLiveKitRoom } from './sdk';
+import { canChooseOutput, newLiveKitRoom } from './sdk';
 import { browserFeatures, type ShareFeatures } from './share';
 
 const realClock = {
@@ -60,6 +60,35 @@ function writeMicrophone(choice: Microphone | null): void {
     } else {
       window.sessionStorage.setItem(microphoneStore, choice.id);
       window.sessionStorage.setItem(microphoneNameStore, choice.label);
+    }
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// The speakers chosen (issue #660), by device id and by name, for as long as
+// the tab lasts: none stored is the system default.
+const outputStore = 'conch.web.voice.speakers';
+const outputNameStore = 'conch.web.voice.speakers.name';
+
+function readOutput(): Output | null {
+  try {
+    const id = window.sessionStorage.getItem(outputStore);
+    if (id === null) return null;
+    return { id, label: window.sessionStorage.getItem(outputNameStore) ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeOutput(choice: Output | null): void {
+  try {
+    if (choice === null) {
+      window.sessionStorage.removeItem(outputStore);
+      window.sessionStorage.removeItem(outputNameStore);
+    } else {
+      window.sessionStorage.setItem(outputStore, choice.id);
+      window.sessionStorage.setItem(outputNameStore, choice.label);
     }
   } catch {
     // The choice lasts until the page is reloaded.
@@ -167,6 +196,8 @@ export function useVoice({
       stopShare: api.stopVoiceShare,
       microphone: readMicrophone(),
       processing: processingChoices(),
+      outputSelection: canChooseOutput(),
+      output: readOutput(),
     });
   }
   const client = clientRef.current;
@@ -193,6 +224,13 @@ export function useVoice({
   useEffect(() => {
     writeMicrophone(state.microphone);
   }, [state.microphone]);
+
+  // So are the speakers: the person's choice, the same output found again
+  // under a new id, the one the SDK moved sound to, and the system default
+  // after one the browser refused.
+  useEffect(() => {
+    writeOutput(state.output);
+  }, [state.output]);
 
   // Signing out ends voice.
   useEffect(() => {

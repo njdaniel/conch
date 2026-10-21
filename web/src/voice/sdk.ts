@@ -23,6 +23,13 @@
 // no longer listed, is lost: its capture is stopped and the client is told,
 // and nothing is captured again until the person chooses.
 //
+// The speakers are the person's choice too (issue #660), where the browser
+// lets a page choose them: every voice, and a watched share's sound, plays
+// on the output chosen, or on the system default (the empty id). The SDK
+// keeps the choice for tracks and people that come later. When the output
+// in use goes, the SDK moves sound to another one by itself, and the client
+// is told where; on the system default it is put back on the system default.
+//
 // Leave can come at any point of a connection. Once the adapter is closed,
 // every step that resumes after an await stops, and a microphone or screen
 // captured or published after the close is stopped, so nothing keeps a device
@@ -68,6 +75,7 @@ import {
   VideoPreset,
   createLocalAudioTrack,
   getLogger,
+  supportsAudioOutputSelection,
   type AudioCaptureOptions,
   type LocalTrack,
   type LocalTrackPublication,
@@ -82,7 +90,7 @@ import {
   type TrackPublishOptions,
 } from 'livekit-client';
 import type { DisconnectCause } from './disconnect';
-import type { Microphone, Processing, Room, RoomEvents, ShareSink } from './connection';
+import type { Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
 import type { Captured, KeptScreen } from './share';
@@ -407,6 +415,9 @@ class LiveKitAdapter implements Room {
   private publishing: Promise<void> | null = null;
   private switches = 0;
   private deafened = false;
+  // The output every voice plays on, by id: the empty id is the system
+  // default (issue #660).
+  private output = '';
   private readonly elements = new Map<string, HTMLMediaElement>();
   private readonly buffer = new Uint8Array(1024);
   // The share this page captured, until it is stopped; and whether this
@@ -495,6 +506,19 @@ class LiveKitAdapter implements Room {
       })
       .on(RoomEvent.MediaDevicesChanged, () => {
         void this.devicesChanged();
+      })
+      .on(RoomEvent.ActiveDeviceChanged, (kind: MediaDeviceKind, id: string) => {
+        // A switch of our own names the output chosen. Any other is the
+        // SDK's, after the output in use went (or, on the system default, a
+        // change of the devices listed): the system default is chosen again,
+        // and any other output the client is told of.
+        if (kind !== 'audiooutput' || this.closed || id === this.output) return;
+        if (this.output === '') {
+          void room.switchActiveDevice('audiooutput', '').catch(() => undefined);
+          return;
+        }
+        this.output = id;
+        events.onOutputMoved(id);
       })
       .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
@@ -727,6 +751,38 @@ class LiveKitAdapter implements Room {
     return Math.min(1, Math.sqrt(sum / this.buffer.length) * 4);
   }
 
+  // ---- the speakers
+
+  // switchOutput plays every voice, and a watched share's sound, on the
+  // output given ('' for the system default): those playing now, and those
+  // to come on this connection. Called before connecting, it is where the
+  // first track plays. A browser that cannot choose is not asked. A refusal
+  // puts sound back where it was, and rejects.
+  async switchOutput(id: string): Promise<void> {
+    if (!supportsAudioOutputSelection()) return;
+    const before = this.output;
+    this.output = id;
+    try {
+      await this.room.switchActiveDevice('audiooutput', id);
+    } catch (err) {
+      // Some voices may have moved before the refusal: all go back.
+      if (this.output === id) {
+        this.output = before;
+        await this.room.switchActiveDevice('audiooutput', before).catch(() => undefined);
+      }
+      throw err;
+    }
+  }
+
+  // outputs lists the browser's outputs without asking for any device:
+  // permission requests off, so reading the list never captures one. An
+  // output the browser does not name is left out.
+  async outputs(): Promise<readonly Output[]> {
+    if (!supportsAudioOutputSelection()) return [];
+    const outputs = await LiveKitRoom.getLocalDevices('audiooutput', false);
+    return outputs.filter((d) => d.label !== '').map((d) => ({ id: d.deviceId, label: d.label }));
+  }
+
   // ---- sharing
 
   async pickScreen(): Promise<Captured> {
@@ -945,6 +1001,12 @@ class LiveKitAdapter implements Room {
       redactor.release(this);
     }
   }
+}
+
+// canChooseOutput is whether this browser lets a page choose the output it
+// plays on (issue #660): not Safari.
+export function canChooseOutput(): boolean {
+  return supportsAudioOutputSelection();
 }
 
 export function newLiveKitRoom(): Room {

@@ -48,7 +48,7 @@ vi.mock('../api', () => ({
   claimVoiceShare: () => new Promise(() => undefined),
   stopVoiceShare: () => new Promise(() => undefined),
 }));
-vi.mock('./sdk', () => ({ newLiveKitRoom: () => ({}) }));
+vi.mock('./sdk', () => ({ newLiveKitRoom: () => ({}), canChooseOutput: () => true }));
 
 import { defaultTalkKey } from './keys';
 import { useVoice } from './useVoice';
@@ -200,6 +200,55 @@ describe('the microphone chosen', () => {
       await result.current.client.chooseMicrophone(webcam);
     });
     expect(result.current.state.microphone).toEqual(webcam);
+  });
+});
+
+// Issue #660: the speakers chosen last for the tab, in sessionStorage beside
+// the microphone, and nowhere else: the output's id and its name.
+describe('the speakers chosen', () => {
+  const key = 'conch.web.voice.speakers';
+  const nameKey = 'conch.web.voice.speakers.name';
+  const desk = { id: 'out-1', label: 'Desk speakers' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    window.sessionStorage.clear();
+  });
+
+  it('is stored when chosen, restored when the page loads again, and the system default stores nothing', async () => {
+    const first = hook({ channel: null });
+    expect(first.result.current.state).toMatchObject({ outputSelection: true, output: null });
+    await act(async () => {
+      await first.result.current.client.chooseOutput(desk);
+    });
+    expect(window.sessionStorage.getItem(key)).toBe('out-1');
+    expect(window.sessionStorage.getItem(nameKey)).toBe('Desk speakers');
+    expect(window.localStorage.length).toBe(0);
+    first.unmount();
+
+    // The page loaded again.
+    const again = hook({ channel: null });
+    expect(again.result.current.state.output).toEqual(desk);
+    await act(async () => {
+      await again.result.current.client.chooseOutput(null);
+    });
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    expect(window.sessionStorage.getItem(nameKey)).toBeNull();
+  });
+
+  it('works without storage: a storage that throws is tolerated, and the choice lasts until a reload', async () => {
+    const refuse = () => {
+      throw new DOMException('storage is off', 'SecurityError');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(refuse);
+    const { result } = hook({ channel: null });
+    expect(result.current.state.output).toBeNull();
+    await act(async () => {
+      await result.current.client.chooseOutput(desk);
+    });
+    expect(result.current.state.output).toEqual(desk);
   });
 });
 

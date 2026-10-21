@@ -40,6 +40,14 @@
 // person turned it off for that device, System default being a device of its
 // own. A change in voice captures the same device again, through the same
 // switch: the browser ignores a change of the filters on a live capture.
+//
+// The speakers are the person's choice too (issue #660), where the browser
+// lets a page choose: the system default, or an output the browser lists,
+// handed to every new room before it connects, so that no voice plays
+// elsewhere first. Like the microphone, the choice is kept by id and by
+// name. One the browser refuses, or no longer lists, is let go for the
+// system default, and the page says so; one the SDK moved away from, its
+// output gone, is the output it moved to.
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
@@ -96,6 +104,25 @@ export interface Microphone {
   readonly label: string;
 }
 
+// An output the browser lists, or the one chosen (issue #660): its device id
+// and its name.
+export type Output = Microphone;
+
+// outputName names an output: null is the system default.
+function outputName(output: Output | null): string {
+  return output === null ? 'System default' : output.label;
+}
+
+// What the page says when the browser refuses an output, or no longer lists
+// it; and when the output in use went and the SDK moved sound to another.
+export function outputRefused(choice: Output | null, inUse: Output | null): string {
+  return `Could not play sound on ${outputName(choice)}; it stays on ${outputName(inUse)}.`;
+}
+
+export function outputMoved(now: Output | null): string {
+  return `Your speakers were disconnected; sound now plays on ${outputName(now)}.`;
+}
+
 // What a capture says of the browser's voice processing (issue #659): each
 // filter on, off, or null where the browser does not say.
 export interface Processing {
@@ -138,6 +165,8 @@ export interface RoomEvents {
   readonly onMicrophoneLost: () => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
+  // The output in use went, and the SDK moved every voice to this one.
+  readonly onOutputMoved: (id: string) => void;
 }
 
 export interface ShareTracks {
@@ -180,6 +209,14 @@ export interface Room extends ShareRoom {
   // What the capture says of its voice processing, or null while nothing is
   // captured.
   microphoneProcessing: () => Processing | null;
+  // Plays every voice, and a watched share's sound, on this output ('' for
+  // the system default), now and on what comes later on this connection;
+  // before connecting, from the first. It rejects if the browser refuses
+  // it, with sound left where it was.
+  switchOutput: (id: string) => Promise<void>;
+  // The outputs the browser lists and names, read without asking for any
+  // device.
+  outputs: () => Promise<readonly Output[]>;
   // Subscribes to a share's picture and sound, or lets them go. Microphones
   // are always subscribed.
   setWatching: (on: boolean) => void;
@@ -230,6 +267,14 @@ export interface VoiceState {
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
+  // Whether this browser lets the page choose the speakers (issue #660);
+  // the outputs it lists, or null while they are not read; the output chosen
+  // and in use, null being the system default; and what the page says of a
+  // refusal, or of a move by the SDK.
+  readonly outputSelection: boolean;
+  readonly outputs: readonly Output[] | null;
+  readonly output: Output | null;
+  readonly outputNote: string | null;
 }
 
 export interface VoiceEnv {
@@ -247,6 +292,10 @@ export interface VoiceEnv {
   // The voice processing chosen for each microphone (issue #659); without
   // it, the choices last as long as the client.
   readonly processing?: ProcessingStore;
+  // Whether the speakers may be chosen, and the output chosen earlier in
+  // this tab, if any (issue #660).
+  readonly outputSelection?: boolean;
+  readonly output?: Output | null;
 }
 
 // How long the SDK's own reconnect is allowed before the client goes back to
@@ -286,6 +335,10 @@ export const initialVoice: VoiceState = {
   processing: true,
   reported: null,
   missing: false,
+  outputSelection: false,
+  outputs: null,
+  output: null,
+  outputNote: null,
 };
 
 const noTracks: ShareTracks = { video: false, audio: false };
@@ -336,12 +389,14 @@ export class VoiceClient {
   private switching = false;
   private switches = 0;
   private readonly processing: ProcessingStore;
+  // Numbers the changes of output: only the last one's refusal counts.
+  private outputTurn = 0;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
     this.now = now;
     this.processing = env.processing ?? memoryStore();
-    this.state = { ...initialVoice, ...this.chosen(env.microphone ?? null) };
+    this.state = { ...initialVoice, ...this.chosen(env.microphone ?? null), outputSelection: env.outputSelection === true, output: env.output ?? null };
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
@@ -507,11 +562,91 @@ export class VoiceClient {
 
   // readMicrophones reads the list of microphones and the device in use,
   // while this page uses its microphone: never in watch only or listen only.
+  // The outputs are read at the same times, in watch only and listen only
+  // too: sound plays there as well.
   private async readMicrophones(mine: number, room: Room): Promise<void> {
+    void this.readOutputs(mine, room);
     if (this.state.watchOnly || this.state.listenOnly) return;
     const microphones = await room.microphones().catch(() => null);
     if (mine !== this.attempt) return;
     this.set({ microphones, ...(this.state.missing ? nothingInUse : inUseOn(room)) });
+  }
+
+  // chooseOutput chooses the speakers: an output listed, or null for the
+  // system default. The choice is kept for every later connection. In voice,
+  // every voice moves there at once; one the browser refuses leaves sound
+  // where it was, and the page says so.
+  async chooseOutput(choice: Output | null): Promise<void> {
+    const before = this.state.output;
+    const turn = ++this.outputTurn;
+    this.set({ output: choice, outputNote: null });
+    const room = this.room;
+    if (room === null || !this.state.outputSelection) return;
+    try {
+      await room.switchOutput(choice?.id ?? '');
+    } catch {
+      if (turn !== this.outputTurn || room !== this.room) return;
+      this.set({ output: before, outputNote: outputRefused(choice, before) });
+    }
+  }
+
+  // findOutput finds the output chosen among those listed: by its id, or,
+  // if that is no longer listed, the one output listed under its name. It is
+  // null if neither is listed. While the browser names no output it cannot
+  // be told, and is taken as it is.
+  private findOutput(list: readonly Output[] | null, chosen: Output): Output | null {
+    if (list === null || list.length === 0) return chosen;
+    const listed = list.find((o) => o.id === chosen.id);
+    if (listed !== undefined) return listed;
+    const named = list.filter((o) => o.label === chosen.label);
+    return named.length === 1 ? (named[0] ?? null) : null;
+  }
+
+  // applyOutput hands the output chosen to a new room before it connects,
+  // found by its name if its id has changed. One not listed, or refused, is
+  // let go: the room plays on the system default, and the page says so.
+  private async applyOutput(room: Room): Promise<void> {
+    const chosen = this.state.output;
+    if (chosen === null) return;
+    const found = this.findOutput(await room.outputs().catch(() => null), chosen);
+    // Chosen again meanwhile: chooseOutput handed that to this room.
+    if (this.state.output !== chosen) return;
+    if (found !== null) {
+      try {
+        await room.switchOutput(found.id);
+        if (this.state.output === chosen) this.set({ output: found });
+        return;
+      } catch {
+        // Let go, below.
+      }
+    }
+    if (this.state.output === chosen) this.set({ output: null, outputNote: outputRefused(chosen, null) });
+  }
+
+  // readOutputs reads the outputs the browser lists, and finds the output
+  // chosen among them again: the browser may name its outputs only once the
+  // microphone is allowed, and give them new ids then. One under a new id
+  // is played on by that id; one no longer listed is let go.
+  private async readOutputs(mine: number, room: Room): Promise<void> {
+    if (!this.state.outputSelection) return;
+    const outputs = await room.outputs().catch(() => null);
+    if (mine !== this.attempt) return;
+    this.set({ outputs });
+    const chosen = this.state.output;
+    if (chosen === null) return;
+    const found = this.findOutput(outputs, chosen);
+    if (found !== null && found.id === chosen.id) {
+      if (found.label !== chosen.label) this.set({ output: found });
+      return;
+    }
+    const turn = ++this.outputTurn;
+    this.set(found === null ? { output: null, outputNote: outputRefused(chosen, null) } : { output: found });
+    try {
+      await room.switchOutput(found?.id ?? '');
+    } catch {
+      if (turn !== this.outputTurn || mine !== this.attempt || found === null) return;
+      this.set({ output: null, outputNote: outputRefused(found, null) });
+    }
   }
 
   // startShare shares a screen into the room this page is connected to.
@@ -621,6 +756,8 @@ export class VoiceClient {
       microphones: null,
       ...nothingInUse,
       missing: false,
+      outputs: null,
+      outputNote: null,
     });
     if (room !== null) await room.close().catch(() => undefined);
   }
@@ -859,11 +996,23 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         void this.readMicrophones(mine, room);
       },
+      onOutputMoved: (id) => {
+        if (mine !== this.attempt) return;
+        // Named from the list read before: the output moved to was in it.
+        const now = id === '' ? null : (this.state.outputs?.find((o) => o.id === id) ?? { id, label: 'another output' });
+        this.outputTurn++;
+        this.set({ output: now, outputNote: outputMoved(now) });
+      },
     };
     // What a share needs is set before connecting, so that a track that
     // arrives with the connection already finds it.
     room.setWatching(this.state.watching);
     room.attachShare(this.sink);
+    // So are the speakers chosen, so that no voice plays elsewhere first.
+    if (this.state.outputSelection && this.state.output !== null) {
+      await this.applyOutput(room);
+      if (mine !== this.attempt) return;
+    }
     // So is the microphone chosen, found by its name if its id has changed.
     // A microphone missing is not captured at all: the connection is made
     // without it, until the person chooses one.

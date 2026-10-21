@@ -60,6 +60,8 @@ class StubRoom implements Room {
   microphoneInUse = (): null => null;
   setProcessing = (): void => undefined;
   microphoneProcessing = (): null => null;
+  switchOutput = (): Promise<void> => Promise.resolve();
+  outputs = (): Promise<never[]> => Promise.resolve([]);
 }
 
 const session: VoiceSessionResult = {
