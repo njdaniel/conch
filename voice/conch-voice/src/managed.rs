@@ -69,7 +69,7 @@ use conch_voice_api::{
 };
 use conch_voice_control::{
     Config, Key, KeyAction, KeyBindings, KeyEvent, LineCommand, Ptt, PttInput, PttStatus,
-    ShutReason,
+    ShutReason, TalkMode,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -1423,6 +1423,11 @@ impl Boot {
             sink_tones,
             release_tail_ms: config.audio.release_tail_ms,
             max_transmit: Duration::from_secs(u64::from(config.audio.max_transmit_secs)),
+            talk_mode: v1_talk_mode(config.audio.talk_mode),
+            level: crate::transmit::level_config(
+                config.audio.open_threshold_db,
+                config.audio.open_hang_ms,
+            ),
             key_device,
             unreachable_note: None,
             timings,
@@ -1443,6 +1448,21 @@ impl Boot {
             }
         }
     }
+}
+
+/// The one log line of a managed session whose `voice.toml` asks for the open microphone.
+pub const V1_PUSH_TO_TALK: &str = "managed: talk_mode = \"open\" in voice.toml is not used: a conch.voice_control.v1 session is push-to-talk";
+
+/// The talk mode a managed session runs in. Only `conch.voice_control.v1` is spoken here,
+/// and a v1 state cannot say "open microphone" (`docs/design/tui-voice.md` §20.1): a v1
+/// session is push-to-talk whatever the file says, which sends less, never more (§20.6).
+/// When the file asked for open mode, one log line says so, for `/voice status` to show.
+/// #656 lifts this for a v2 session.
+fn v1_talk_mode(configured: TalkMode) -> TalkMode {
+    if configured == TalkMode::Open {
+        log::warn!("{V1_PUSH_TO_TALK}");
+    }
+    TalkMode::PushToTalk
 }
 
 /// What a failed whoami is told to the owner as.

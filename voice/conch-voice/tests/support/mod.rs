@@ -13,6 +13,7 @@
 pub mod fake;
 pub mod keyboard;
 pub mod managed;
+pub mod script;
 pub mod stub;
 
 use std::io::Write;
@@ -27,10 +28,10 @@ use conch_voice::receive::BoxedSink;
 use conch_voice::reports::ReportTimings;
 use conch_voice::secrets::Scrubber;
 use conch_voice::session::{self, Conchd, Input, Settings, Timings};
-use conch_voice::transmit::BoxedMic;
+use conch_voice::transmit::{self, BoxedMic};
 use conch_voice_api::{Secret, ServerAddress};
 use conch_voice_audio::{CountingSink, MicSource, ToneSource};
-use conch_voice_control::LineCommand;
+use conch_voice_control::{DEFAULT_OPEN_HANG_MS, DEFAULT_OPEN_THRESHOLD_DB, LineCommand, TalkMode};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -208,7 +209,17 @@ pub struct Setup {
     /// [`Reader`] that the test can stop. Otherwise each line is written where it is
     /// shown, which keeps a test's view of the output exact.
     pub queued: bool,
+    /// `audio.talk_mode`, `audio.open_threshold_db` and `audio.open_hang_ms`.
+    pub talk_mode: TalkMode,
+    pub open_threshold_db: i32,
+    pub open_hang_ms: u32,
+    /// Makes the microphone instead of the tone that never stops: a scripted one, for the
+    /// open microphone ([`script`]).
+    pub microphone: Option<MakeMic>,
 }
+
+/// Makes a microphone, each time the session opens one.
+pub type MakeMic = Arc<dyn Fn() -> BoxedMic + Send + Sync>;
 
 impl Default for Setup {
     fn default() -> Self {
@@ -224,6 +235,10 @@ impl Default for Setup {
             key_device: None,
             unreachable_note: None,
             queued: false,
+            talk_mode: TalkMode::PushToTalk,
+            open_threshold_db: DEFAULT_OPEN_THRESHOLD_DB,
+            open_hang_ms: DEFAULT_OPEN_HANG_MS,
+            microphone: None,
         }
     }
 }
@@ -280,15 +295,19 @@ impl Rig {
         let opened = Arc::clone(&mic_opened);
         let mic_closed = Arc::new(AtomicU32::new(0));
         let closed = Arc::clone(&mic_closed);
+        let microphone = setup.microphone.clone();
         let settings = Settings {
             channel: CHANNEL.to_owned(),
             // A tone that is never silent and never stops: whatever does not reach the
             // fake's audio source was stopped by the gate, not by there being nothing to send.
             open_mic: Box::new(move || {
                 opened.fetch_add(1, Ordering::SeqCst);
-                let tone = ToneSource::new(440.0, 0.25)?;
+                let mic: BoxedMic = match &microphone {
+                    Some(make) => make(),
+                    None => Box::new(ToneSource::new(440.0, 0.25)?),
+                };
                 Ok(Some(
-                    Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
+                    Box::new(Closing(Forward(mic), Arc::clone(&closed))) as BoxedMic
                 ))
             }),
             open_sink: {
@@ -298,6 +317,8 @@ impl Rig {
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
+            talk_mode: setup.talk_mode,
+            level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,
             unreachable_note: setup.unreachable_note,
             timings: setup.timings,
@@ -493,6 +514,23 @@ struct Closing<M>(M, Arc<AtomicU32>);
 impl<M: MicSource> MicSource for Closing<M> {
     fn read(&mut self, frame: &mut conch_voice_audio::Frame) -> conch_voice_audio::MicRead {
         self.0.read(frame)
+    }
+}
+
+/// A boxed microphone, as a microphone: what it is asked, it passes on.
+struct Forward(BoxedMic);
+
+impl MicSource for Forward {
+    fn read(&mut self, frame: &mut conch_voice_audio::Frame) -> conch_voice_audio::MicRead {
+        self.0.read(frame)
+    }
+
+    fn pacing(&self) -> conch_voice_audio::Pacing {
+        self.0.pacing()
+    }
+
+    fn forget_waiting(&mut self) {
+        self.0.forget_waiting();
     }
 }
 

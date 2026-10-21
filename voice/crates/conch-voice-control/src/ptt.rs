@@ -1,4 +1,5 @@
-//! The push-to-talk state machine (`docs/design/conch-voice.md` §3, §4 and §6 "Client side").
+//! The push-to-talk state machine (`docs/design/conch-voice.md` §3, §4 and §6 "Client side"),
+//! and its open-microphone mode (`docs/design/tui-voice.md` §20.6).
 //!
 //! [`Ptt`] is told what happened and when, and answers with what to do: commands for the
 //! transmit gate, transmit reports to send, what to show, and when to quit. It does none of
@@ -6,25 +7,40 @@
 //!
 //! The rules it keeps:
 //!
-//! - **The gate is opened by a press and by nothing else.** No condition clearing, no
-//!   reconnection and no timer opens it. A key that was held when the gate was forced shut
-//!   has to be pressed again.
-//! - **While any [`ShutReason`] stands, no press opens the gate.** Each reason is passed on
-//!   to the gate when it starts ([`GateCommand::ForceShut`]) and when it ends
-//!   ([`GateCommand::Clear`]), so the gate can refuse on its own account as well.
+//! - **What opens the gate depends on the [`TalkMode`], and nothing else opens it.** In
+//!   push-to-talk mode a press opens it; in open mode an onset of sound does
+//!   ([`PttInput::Sound`]). No condition clearing, no reconnection, no change of mode and no
+//!   timer opens it. A key that was held when the gate was forced shut has to be pressed
+//!   again; in open mode, once a reason ends, the sound has to stop and start again (quiet
+//!   reported after the reason ended, then an onset).
+//! - **While any [`ShutReason`] stands, neither a press nor an onset opens the gate.** Each
+//!   reason is passed on to the gate when it starts ([`GateCommand::ForceShut`]) and when it
+//!   ends ([`GateCommand::Clear`]), so the gate can refuse on its own account as well.
 //! - **One `started` and one `stopped` per transmission, in that order.** `started` is
 //!   produced with the command that opens the gate. `stopped` is produced when the caller
 //!   says the gate has actually shut ([`PttInput::GateShut`]), because the release tail
 //!   belongs to the gate and counts as part of the transmission.
-//! - **The gate is never told to open while it is still shutting.** A press during the
-//!   release tail waits for the gate to report shut, and then opens it as a new transmission.
-//!   So the reports of two quick presses cannot run together, whatever the gate does with
-//!   its tail.
+//! - **The gate is never told to open while it is still shutting.** A press, or an onset,
+//!   during the release tail waits for the gate to report shut, and then opens it as a new
+//!   transmission. So the reports of two quick presses or two quick utterances cannot run
+//!   together, whatever the gate does with its tail.
+//!
+//! In open mode, besides: quiet shuts the gate as a release does, tail included; the talk
+//! key and `down`/`up` do nothing, while mute and deafen work as before; a lost key device
+//! blocks nothing, since nothing held on it can be lost; and `max_transmit_secs` limits each
+//! opening, the [`ShutReason::MaxTransmit`] standing until quiet. A change of mode ends any
+//! transmission at once.
 //!
 //! Where the caller's reports about the gate go wrong, the machine fails closed. If
 //! [`PttInput::GateShut`] is never delivered after a shut, nothing opens again. If one is
 //! delivered during a transmission that nothing ended, the machine ends it and commands the
-//! gate shut, so the gate is not left open while the machine believes it shut.
+//! gate shut, so the gate is not left open while the machine believes it shut. Reports from
+//! the level detector are taken the same way: an onset that does not follow quiet heard
+//! since the mode was entered or a reason last ended opens nothing, so an onset that was on
+//! its way when a reason ended cannot be what opens the gate. Quiet and an onset both on
+//! their way would be a fresh pair to the machine, which cannot tell when they were made:
+//! the caller must not deliver reports made before the detector last started sounding (the
+//! session does not, `transmit::Transmitter::is_current`).
 
 use std::fmt;
 use std::str::FromStr;
@@ -50,10 +66,12 @@ pub enum ShutReason {
     /// The user has muted.
     Muted,
     /// A key device that was being read has gone away. A client that never had one does not
-    /// have this reason.
+    /// have this reason. Only in push-to-talk mode: in open mode the talk key is ignored, so
+    /// nothing held on the device can be lost.
     KeyDeviceLost,
     /// One press lasted longer than `max_transmit_secs`: a stuck key, or something resting
-    /// on the keyboard. It stands until that press is released.
+    /// on the keyboard. It stands until that press is released. In open mode, one opening
+    /// lasted that long, and it stands until quiet.
     MaxTransmit,
 }
 
@@ -154,6 +172,46 @@ impl fmt::Debug for ShutReasons {
     }
 }
 
+/// What may open the gate (`docs/design/tui-voice.md` §20.6): `[audio] talk_mode` in the
+/// configuration, and the managed helper's `set_talk_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TalkMode {
+    /// A press of the talk key, and nothing else. The default (ADR-004), and the mode that
+    /// sends less.
+    #[default]
+    PushToTalk,
+    /// The microphone's own sound: an onset, as the level detector reports it. Never a
+    /// fallback for a key device that is missing: it is in force only when chosen.
+    Open,
+}
+
+impl TalkMode {
+    /// Both modes, the default first.
+    pub const ALL: [TalkMode; 2] = [TalkMode::PushToTalk, TalkMode::Open];
+
+    /// The mode's name, as `voice.toml` and the control protocol write it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            TalkMode::PushToTalk => "push_to_talk",
+            TalkMode::Open => "open",
+        }
+    }
+
+    /// The mode a name stands for: exactly `push_to_talk` or `open`, nothing looser.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        TalkMode::ALL.into_iter().find(|mode| mode.name() == name)
+    }
+}
+
+/// The mode's name, as [`TalkMode::name`] gives it.
+impl fmt::Display for TalkMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A command read from standard input, one per line (the note's §4). It is how the tests
 /// drive the client, and the fallback when there is no key device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -189,10 +247,21 @@ impl FromStr for LineCommand {
 /// Something that happened, for [`Ptt::handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PttInput {
-    /// A press or release from the key decoder.
+    /// A press or release from the key decoder. In open mode the talk key's are ignored.
     Key(KeyEvent),
     /// A command from standard input. A `quit` here is also how the caller passes on Ctrl-C.
+    /// In open mode `down` and `up` are ignored.
     Line(LineCommand),
+    /// The level detector's report, in open mode: sound started (`true`, an onset) or quiet
+    /// started (`false`, `open_hang_ms` after the last frame at or above the level, frames or
+    /// no frames). Ignored in push-to-talk mode. Send one for each change the detector
+    /// reports, none for the detector being put back in its sounding state (that is no
+    /// onset), and none made before it was last put back there: quiet and an onset from
+    /// before a reason ended would open the gate on that ending.
+    Sound(bool),
+    /// Use this talk mode from now on. A change ends any transmission at once; the same mode
+    /// again changes nothing.
+    TalkMode(TalkMode),
     /// The connection to the room was established (`true`) or is gone (`false`).
     Connected(bool),
     /// Whether the current session's grant allows publishing.
@@ -220,8 +289,14 @@ pub enum GateCommand {
     Shut,
     /// This reason now stands: shut, and stay shut while it does.
     ForceShut(ShutReason),
-    /// This reason no longer stands. The gate stays shut until the next `Open`.
+    /// This reason no longer stands. The gate stays shut until the next `Open`. In open
+    /// mode the level detector starts sounding again, except for `MaxTransmit`, which ends
+    /// with quiet: a fresh onset is needed after a reason, observed from now.
     Clear(ShutReason),
+    /// The talk mode is now this. Shut at once, with no release tail, as for a reason, and
+    /// leave nothing standing: what was being sent is over. In open mode the level detector
+    /// runs from now, starting sounding; in push-to-talk mode it does not run.
+    TalkMode(TalkMode),
 }
 
 /// A transmit report for the caller to queue for `conchd` (the note's §6).
@@ -284,9 +359,10 @@ enum Transmission {
     Idle,
     /// The gate was told to open at `since`, and `started` was reported.
     Open { since: Duration },
-    /// The gate was told to shut and has not yet said that it has. `press_pending` is a
-    /// press that arrived meanwhile and has not been released.
-    Shutting { press_pending: bool },
+    /// The gate was told to shut and has not yet said that it has. `pending` is a press
+    /// that arrived meanwhile and has not been released, or in open mode an onset that
+    /// arrived meanwhile and has not gone quiet.
+    Shutting { pending: bool },
 }
 
 /// Whether the user has asked to quit.
@@ -311,6 +387,15 @@ pub struct Ptt {
     cut: bool,
     reasons: ShutReasons,
     key_device_present: bool,
+    /// The key device went away and has not come back. In push-to-talk mode this is
+    /// [`ShutReason::KeyDeviceLost`]; in open mode it blocks nothing, and is kept so that a
+    /// change back to push-to-talk blocks again.
+    key_device_lost: bool,
+    talk_mode: TalkMode,
+    /// In open mode: the detector has reported quiet since the mode was entered or a reason
+    /// last ended, so the next onset is a fresh one and may open the gate. The open-mode
+    /// form of "a held key must be pressed again".
+    quiet_heard: bool,
     stage: Stage,
     shown: PttStatus,
 }
@@ -318,13 +403,27 @@ pub struct Ptt {
 impl Ptt {
     /// A machine for a client that has just started: not connected, with no session and no
     /// microphone yet, so three reasons stand. Returned with it are the first outputs, which
-    /// tell a new (shut) gate about those reasons and give the first status.
+    /// tell a new (shut) gate about those reasons and give the first status. It is in
+    /// push-to-talk mode.
     ///
     /// `max_transmit` is the longest one press may transmit (`max_transmit_secs`).
     #[must_use]
     pub fn new(max_transmit: Duration) -> (Self, Vec<PttOutput>) {
+        Self::with_talk_mode(max_transmit, TalkMode::PushToTalk)
+    }
+
+    /// As [`Ptt::new`], in `talk_mode` from the start. In open mode the first outputs begin
+    /// with [`GateCommand::TalkMode`], so that the gate's side runs the level detector; the
+    /// rest are as in push-to-talk mode. The first opening then needs quiet and an onset, as
+    /// after any change into open mode: the detector starts in its sounding state, so a
+    /// microphone that is already loud opens nothing until it has been quiet.
+    #[must_use]
+    pub fn with_talk_mode(max_transmit: Duration, talk_mode: TalkMode) -> (Self, Vec<PttOutput>) {
         let mut reasons = ShutReasons::none();
         let mut outputs = Vec::new();
+        if talk_mode == TalkMode::Open {
+            outputs.push(PttOutput::Gate(GateCommand::TalkMode(TalkMode::Open)));
+        }
         for reason in [
             ShutReason::NotConnected,
             ShutReason::NoPublishGrant,
@@ -344,6 +443,9 @@ impl Ptt {
             cut: false,
             reasons,
             key_device_present: false,
+            key_device_lost: false,
+            talk_mode,
+            quiet_heard: false,
             stage: Stage::Running,
             shown,
         };
@@ -358,7 +460,8 @@ impl Ptt {
             return out;
         }
 
-        // Whatever else happened, a press that has gone on too long ends first.
+        // Whatever else happened, a press, or an opening, that has gone on too long ends
+        // first.
         if let Transmission::Open { since } = self.transmission
             && now.saturating_sub(since) >= self.max_transmit
         {
@@ -373,8 +476,12 @@ impl Ptt {
             self.key_device_present = true;
         }
 
+        let open_mode = self.talk_mode == TalkMode::Open;
         match input {
             PttInput::Key(KeyEvent { key, action }) => match (key, action) {
+                // The talk key does nothing in open mode, so a key held across a change of
+                // mode cannot hold the gate.
+                (Key::Talk, _) if open_mode => {}
                 (Key::Talk, KeyAction::Press) => self.press(now, &mut out),
                 (Key::Talk, KeyAction::Release) => self.release(&mut out),
                 (Key::Mute, KeyAction::Press) => self.toggle(ShutReason::Muted, &mut out),
@@ -382,12 +489,17 @@ impl Ptt {
                 (Key::Mute | Key::Deafen, KeyAction::Release) => {}
             },
             PttInput::Line(command) => match command {
+                LineCommand::Down | LineCommand::Up if open_mode => {}
                 LineCommand::Down => self.press(now, &mut out),
                 LineCommand::Up => self.release(&mut out),
                 LineCommand::Mute => self.toggle(ShutReason::Muted, &mut out),
                 LineCommand::Deafen => self.toggle(ShutReason::Deafened, &mut out),
                 LineCommand::Quit => self.quit(&mut out),
             },
+            PttInput::Sound(_) if !open_mode => {}
+            PttInput::Sound(true) => self.onset(now, &mut out),
+            PttInput::Sound(false) => self.quiet(&mut out),
+            PttInput::TalkMode(mode) => self.set_talk_mode(mode, &mut out),
             PttInput::Connected(connected) => {
                 self.set(ShutReason::NotConnected, !connected, &mut out);
             }
@@ -415,13 +527,20 @@ impl Ptt {
     }
 
     /// When the caller must deliver a [`PttInput::Tick`] at the latest: the moment the
-    /// current press reaches the transmit limit. `None` while nothing is being transmitted.
+    /// current press, or opening, reaches the transmit limit. `None` while nothing is being
+    /// transmitted.
     #[must_use]
     pub fn deadline(&self) -> Option<Duration> {
         match self.transmission {
             Transmission::Open { since } => since.checked_add(self.max_transmit),
             Transmission::Idle | Transmission::Shutting { .. } => None,
         }
+    }
+
+    /// The talk mode in force.
+    #[must_use]
+    pub fn talk_mode(&self) -> TalkMode {
+        self.talk_mode
     }
 
     /// The user's state as of the last call.
@@ -459,19 +578,49 @@ impl Ptt {
             out.push(PttOutput::PressIgnored(reason));
             return;
         }
+        self.begin(now, out);
+    }
+
+    fn release(&mut self, out: &mut Vec<PttOutput>) {
+        self.clear(ShutReason::MaxTransmit, out);
+        self.end(out);
+    }
+
+    /// An onset, in open mode. It opens the gate only if it is a fresh one (quiet has been
+    /// heard since the mode was entered or a reason last ended) and nothing stands. The
+    /// transmit limit stands until quiet, so an onset never ends it. A refused onset is not
+    /// said, as a refused press is: sound comes and goes by itself, and a status line that
+    /// answered each would only repeat the reason it already shows.
+    fn onset(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
+        if self.stage != Stage::Running || !self.quiet_heard || !self.reasons.is_empty() {
+            return;
+        }
+        self.begin(now, out);
+    }
+
+    /// Quiet, in open mode: a release of the sound. It ends the transmit limit, which in
+    /// open mode stands until quiet, and makes the next onset a fresh one.
+    fn quiet(&mut self, out: &mut Vec<PttOutput>) {
+        self.clear(ShutReason::MaxTransmit, out);
+        self.quiet_heard = true;
+        self.end(out);
+    }
+
+    /// A press, or an onset, that nothing stands in the way of: open the gate now, or once
+    /// it has said it shut if it is still shutting.
+    fn begin(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
         match self.transmission {
             Transmission::Idle => self.open(now, out),
             Transmission::Shutting { .. } => {
-                self.transmission = Transmission::Shutting {
-                    press_pending: true,
-                };
+                self.transmission = Transmission::Shutting { pending: true };
             }
             Transmission::Open { .. } => {}
         }
     }
 
-    fn release(&mut self, out: &mut Vec<PttOutput>) {
-        self.clear(ShutReason::MaxTransmit, out);
+    /// A release, or quiet: shut after the release tail, and forget a press or an onset
+    /// that was waiting for the tail to end.
+    fn end(&mut self, out: &mut Vec<PttOutput>) {
         match self.transmission {
             Transmission::Open { .. } => {
                 out.push(PttOutput::Gate(GateCommand::Shut));
@@ -482,6 +631,37 @@ impl Ptt {
         }
     }
 
+    /// A change of mode. The person changed what transmission means, so what was being
+    /// sent ends now: the status stops saying "transmitting" in this same step, the gate is
+    /// told to shut, and the `stopped` report follows the gate's word as always. The
+    /// transmit limit goes with the transmission it limited. Afterwards a fresh press, or a
+    /// fresh onset, is needed.
+    fn set_talk_mode(&mut self, mode: TalkMode, out: &mut Vec<PttOutput>) {
+        if mode == self.talk_mode {
+            return;
+        }
+        self.talk_mode = mode;
+        // Told even with nothing under way: the gate's side needs the mode to know whether
+        // to run the level detector.
+        out.push(PttOutput::Gate(GateCommand::TalkMode(mode)));
+        if self.transmission != Transmission::Idle {
+            self.cut = true;
+            self.shutting();
+        }
+        self.clear(ShutReason::MaxTransmit, out);
+        match mode {
+            // Nothing held on a key device can be lost in open mode.
+            TalkMode::Open => self.clear(ShutReason::KeyDeviceLost, out),
+            TalkMode::PushToTalk if self.key_device_lost => {
+                self.force_shut(ShutReason::KeyDeviceLost, out);
+            }
+            TalkMode::PushToTalk => {}
+        }
+        // Entering open mode, the detector starts in its sounding state: quiet must be heard
+        // before an onset counts, however loud the microphone is now.
+        self.quiet_heard = false;
+    }
+
     fn toggle(&mut self, reason: ShutReason, out: &mut Vec<PttOutput>) {
         let stands = self.reasons.contains(reason);
         self.set(reason, !stands, out);
@@ -489,18 +669,22 @@ impl Ptt {
 
     fn key_device(&mut self, present: bool, out: &mut Vec<PttOutput>) {
         if present {
+            self.key_device_lost = false;
             self.clear(ShutReason::KeyDeviceLost, out);
         } else if self.key_device_present {
-            // Losing the device is a release of whatever was held on it: that release will
-            // never be read.
-            self.clear(ShutReason::MaxTransmit, out);
-            self.force_shut(ShutReason::KeyDeviceLost, out);
+            self.key_device_lost = true;
+            if self.talk_mode == TalkMode::PushToTalk {
+                // Losing the device is a release of whatever was held on it: that release
+                // will never be read.
+                self.clear(ShutReason::MaxTransmit, out);
+                self.force_shut(ShutReason::KeyDeviceLost, out);
+            }
         }
         self.key_device_present = present;
     }
 
     fn gate_shut(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
-        let press_pending = match self.transmission {
+        let pending = match self.transmission {
             Transmission::Idle => return,
             Transmission::Open { .. } => {
                 // The gate says it shut although nothing told it to. Take its word that the
@@ -510,12 +694,13 @@ impl Ptt {
                 out.push(PttOutput::Gate(GateCommand::Shut));
                 false
             }
-            Transmission::Shutting { press_pending } => press_pending,
+            Transmission::Shutting { pending } => pending,
         };
         self.transmission = Transmission::Idle;
         self.cut = false;
         out.push(PttOutput::Report(TransmitReport::Stopped));
-        if press_pending && self.stage == Stage::Running && self.reasons.is_empty() {
+        let fresh = self.talk_mode == TalkMode::PushToTalk || self.quiet_heard;
+        if pending && fresh && self.stage == Stage::Running && self.reasons.is_empty() {
             self.open(now, out);
         }
     }
@@ -525,8 +710,12 @@ impl Ptt {
             return;
         }
         self.stage = Stage::Quitting;
-        // As for a release. `Quit` follows the `stopped` report, once the gate has shut.
-        self.release(out);
+        // As for a release, or for quiet. `Quit` follows the `stopped` report, once the
+        // gate has shut.
+        match self.talk_mode {
+            TalkMode::PushToTalk => self.release(out),
+            TalkMode::Open => self.end(out),
+        }
     }
 
     fn open(&mut self, now: Duration, out: &mut Vec<PttOutput>) {
@@ -536,11 +725,9 @@ impl Ptt {
         out.push(PttOutput::Report(TransmitReport::Started));
     }
 
-    /// The gate has been told to shut, or told again: no press is waiting any more.
+    /// The gate has been told to shut, or told again: nothing is waiting any more.
     fn shutting(&mut self) {
-        self.transmission = Transmission::Shutting {
-            press_pending: false,
-        };
+        self.transmission = Transmission::Shutting { pending: false };
     }
 
     fn set(&mut self, reason: ShutReason, stands: bool, out: &mut Vec<PttOutput>) {
@@ -564,10 +751,15 @@ impl Ptt {
         }
     }
 
-    /// A reason stops standing. Nothing opens.
+    /// A reason stops standing. Nothing opens. In open mode the sound must then stop and
+    /// start again: unmuting during speech does not send the rest of it. The transmit limit
+    /// is the exception: in open mode it ends with quiet, which is that fresh start.
     fn clear(&mut self, reason: ShutReason, out: &mut Vec<PttOutput>) {
         if self.reasons.remove(reason) {
             out.push(PttOutput::Gate(GateCommand::Clear(reason)));
+            if reason != ShutReason::MaxTransmit {
+                self.quiet_heard = false;
+            }
         }
     }
 }
@@ -736,6 +928,14 @@ mod tests {
                             "{reason:?} was not standing"
                         );
                         self.gate_reasons.retain(|&standing| standing != reason);
+                    }
+                    // A change of mode shuts as a reason does, with no tail, and leaves
+                    // nothing standing.
+                    Gate(GateCommand::TalkMode(_)) => {
+                        if self.gate != FakeGate::Shut {
+                            self.gate = FakeGate::Shut;
+                            forced_shut = true;
+                        }
                     }
                     Report(Started) => {
                         assert_ne!(self.last_report, Some(Started), "two started in a row");
@@ -1842,6 +2042,710 @@ mod tests {
             assert!(harness.quit, "seed {seed}");
             assert_ne!(harness.last_report, Some(Started), "seed {seed}");
             assert_eq!(harness.gate, FakeGate::Shut, "seed {seed}");
+        }
+    }
+
+    /// The open microphone (`docs/design/tui-voice.md` §20.6), on the same fake gate and with
+    /// the same checks on every call as push-to-talk.
+    mod open_mode {
+        use super::*;
+
+        const SOUND: PttInput = PttInput::Sound(true);
+        const QUIET: PttInput = PttInput::Sound(false);
+        const OPEN_MODE: PttInput = PttInput::TalkMode(TalkMode::Open);
+        const PUSH_TO_TALK: PttInput = PttInput::TalkMode(TalkMode::PushToTalk);
+        const TO_OPEN: PttOutput = Gate(GateCommand::TalkMode(TalkMode::Open));
+        const TO_PUSH_TO_TALK: PttOutput = Gate(GateCommand::TalkMode(TalkMode::PushToTalk));
+
+        /// The reasons that stand until something outside the machine ends them. The key
+        /// device blocks nothing in open mode, and the transmit limit ends with quiet; each
+        /// has a test of its own.
+        const OUTSIDE_REASONS: [ShutReason; 5] = [
+            ShutReason::NotConnected,
+            ShutReason::NoPublishGrant,
+            ShutReason::NoMicrophone,
+            ShutReason::Deafened,
+            ShutReason::Muted,
+        ];
+
+        /// A machine made in open mode, as `talk_mode = "open"` in `voice.toml` makes it.
+        fn fresh() -> (Harness, Vec<PttOutput>) {
+            let (ptt, first) = Ptt::with_talk_mode(MAX, TalkMode::Open);
+            assert_eq!(ptt.talk_mode(), TalkMode::Open);
+            let mut harness = Harness {
+                ptt,
+                now: Duration::from_secs(1000),
+                gate: FakeGate::Shut,
+                gate_reasons: Vec::new(),
+                last_report: None,
+                opens: 0,
+                quit: false,
+            };
+            assert!(!harness.check(None, &first));
+            (harness, first)
+        }
+
+        /// Open mode with everything in place, a key device included, and the detector
+        /// still in the sounding state it starts in.
+        fn ready() -> Harness {
+            let (mut harness, _) = fresh();
+            harness.send(PttInput::KeyDevice(true));
+            harness.send(PttInput::Microphone(true));
+            harness.send(PttInput::PublishGrant(true));
+            harness.send(PttInput::Connected(true));
+            assert_eq!(harness.ptt.status().blocked, ShutReasons::none());
+            harness
+        }
+
+        /// Open mode once the detector has heard quiet: the next onset transmits.
+        fn listening() -> Harness {
+            let mut harness = ready();
+            assert_eq!(harness.send(QUIET), []);
+            harness
+        }
+
+        /// Open mode in the middle of an opening.
+        fn talking() -> Harness {
+            let mut harness = listening();
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            harness
+        }
+
+        /// Ends an open-mode scenario: the sound stops, the gate finishes, and every started
+        /// report has had its stopped. Returns how many times the gate was opened.
+        fn finish(mut harness: Harness) -> usize {
+            harness.send(QUIET);
+            harness.finish()
+        }
+
+        #[test]
+        fn an_onset_opens_the_gate_and_quiet_shuts_it_with_one_report_each() {
+            let mut harness = talking();
+            harness.advance(Duration::from_secs(2));
+            // More sound is the same opening.
+            assert_eq!(harness.send(SOUND), []);
+            // Quiet shuts the gate; the report waits for the gate's release tail.
+            assert_eq!(harness.send(QUIET), [Gate(Shut)]);
+            assert!(harness.ptt.status().transmitting);
+            harness.advance(Duration::from_millis(100));
+            assert_eq!(harness.tail_ends(), [Report(Stopped), status(false, &[])]);
+            // A second utterance is a second transmission.
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 2);
+        }
+
+        /// The detector starts sounding, so no microphone, however loud when the mode
+        /// begins, opens the gate before it has been quiet: neither at start-up nor after a
+        /// change of mode, and quiet heard before the change does not count.
+        #[test]
+        fn the_first_opening_needs_quiet_and_then_an_onset_however_loud_the_start() {
+            let mut harness = ready();
+            for _ in 0..3 {
+                assert_eq!(harness.send(SOUND), []);
+                harness.advance(Duration::from_secs(5));
+                assert_eq!(harness.send(PttInput::Tick), []);
+            }
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 1);
+
+            let mut harness = Harness::ready();
+            // Quiet in push-to-talk mode is no report at all: the detector does not run.
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(harness.send(OPEN_MODE), [TO_OPEN]);
+            assert_eq!(harness.ptt.talk_mode(), TalkMode::Open);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 1);
+        }
+
+        /// The gate's side is told the mode first, so that it runs the level detector; the
+        /// rest is as for a push-to-talk machine.
+        #[test]
+        fn a_machine_made_in_open_mode_tells_the_gate_its_mode_and_otherwise_starts_alike() {
+            let (_, push_to_talk) = Harness::new();
+            let (harness, open) = fresh();
+            assert_eq!(open[0], TO_OPEN);
+            assert_eq!(open[1..], push_to_talk);
+            assert_eq!(Ptt::new(MAX).0.talk_mode(), TalkMode::PushToTalk);
+            assert_eq!(harness.finish(), 0);
+        }
+
+        /// The acceptance criterion for one reason in open mode: it shuts the gate at once
+        /// with one stopped report, and once it ends nothing is sent until the sound has
+        /// stopped and started again. Unmuting during speech does not send the rest of it.
+        fn shuts_the_gate_until_a_fresh_onset(reason: ShutReason) {
+            let mut harness = talking();
+            harness.advance(Duration::from_secs(3));
+            assert_eq!(
+                cause(&mut harness, reason),
+                [
+                    Gate(ForceShut(reason)),
+                    status(false, &[reason]),
+                    Report(Stopped),
+                ],
+                "{reason:?}"
+            );
+            assert_eq!(harness.gate, FakeGate::Shut);
+
+            // While it stands the sound comes and goes: nothing opens, and nothing is said.
+            for input in [SOUND, QUIET, SOUND, PttInput::Tick] {
+                assert_eq!(harness.send(input), [], "{reason:?}");
+            }
+
+            // It ends while the sound goes on. The detector's word that was on its way, an
+            // onset, opens nothing, however long the sound lasts: quiet heard during the
+            // reason does not count after it.
+            assert_eq!(
+                end(&mut harness, reason),
+                [Gate(Clear(reason)), status(false, &[])],
+                "{reason:?}"
+            );
+            assert_eq!(harness.send(SOUND), [], "{reason:?}");
+            for _ in 0..5 {
+                harness.advance(Duration::from_secs(60));
+                assert_eq!(harness.send(PttInput::Tick), [], "{reason:?}");
+            }
+            assert_eq!(harness.gate, FakeGate::Shut);
+            assert_eq!(harness.opens, 1);
+
+            // Quiet, then an onset: that transmits.
+            assert_eq!(harness.send(QUIET), [], "{reason:?}");
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])],
+                "{reason:?}"
+            );
+            assert_eq!(finish(harness), 2, "{reason:?}");
+        }
+
+        #[test]
+        fn every_reason_shuts_the_gate_at_once_and_a_fresh_onset_is_needed_after_it() {
+            for reason in OUTSIDE_REASONS {
+                shuts_the_gate_until_a_fresh_onset(reason);
+            }
+        }
+
+        #[test]
+        fn an_onset_while_a_reason_stands_opens_nothing_and_says_nothing() {
+            for reason in OUTSIDE_REASONS {
+                let mut harness = listening();
+                cause(&mut harness, reason);
+                assert_eq!(harness.send(SOUND), [], "{reason:?}");
+                assert_eq!(harness.send(QUIET), [], "{reason:?}");
+                assert_eq!(harness.gate, FakeGate::Shut);
+                assert_eq!(finish(harness), 0, "{reason:?}");
+            }
+        }
+
+        #[test]
+        fn the_transmit_limit_cuts_one_opening_and_stands_until_quiet() {
+            let mut harness = listening();
+            harness.send(SOUND);
+            assert_eq!(harness.ptt.deadline(), Some(harness.now + MAX));
+            harness.advance(MAX - Duration::from_millis(1));
+            assert_eq!(harness.send(PttInput::Tick), []);
+            assert_eq!(harness.gate, FakeGate::Open);
+
+            harness.advance(Duration::from_millis(1));
+            assert_eq!(
+                harness.send(PttInput::Tick),
+                [
+                    Gate(ForceShut(ShutReason::MaxTransmit)),
+                    status(false, &[ShutReason::MaxTransmit]),
+                    Report(Stopped),
+                ]
+            );
+            assert_eq!(harness.ptt.deadline(), None);
+
+            // The sound goes on for an hour: the limit stands, and no onset ends it.
+            harness.advance(Duration::from_secs(3600));
+            assert_eq!(harness.send(PttInput::Tick), []);
+            assert_eq!(harness.send(SOUND), []);
+            // The talk key is no way out of it in open mode.
+            assert_eq!(harness.send(UP), []);
+            assert_eq!(harness.send(DOWN), []);
+
+            // Quiet ends it, and the next onset is a new opening with a limit of its own.
+            assert_eq!(
+                harness.send(QUIET),
+                [Gate(Clear(ShutReason::MaxTransmit)), status(false, &[])]
+            );
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(harness.ptt.deadline(), Some(harness.now + MAX));
+            assert_eq!(finish(harness), 2);
+        }
+
+        #[test]
+        fn the_limit_counts_from_each_opening_not_from_the_first() {
+            let mut harness = talking();
+            harness.advance(MAX - Duration::from_secs(1));
+            harness.send(QUIET);
+            harness.tail_ends();
+            harness.send(SOUND);
+            harness.advance(MAX - Duration::from_secs(1));
+            assert_eq!(harness.send(PttInput::Tick), []);
+            assert_eq!(harness.gate, FakeGate::Open);
+            assert_eq!(finish(harness), 2);
+        }
+
+        #[test]
+        fn the_talk_key_and_down_and_up_do_nothing_while_mute_and_deafen_work() {
+            let talk = [
+                DOWN,
+                UP,
+                key(Key::Talk, KeyAction::Press),
+                key(Key::Talk, KeyAction::Release),
+            ];
+            let mut harness = listening();
+            for input in talk {
+                assert_eq!(harness.send(input), [], "{input:?}");
+            }
+            assert_eq!(harness.opens, 0);
+
+            let mut harness = talking();
+            for input in talk {
+                assert_eq!(harness.send(input), [], "{input:?}");
+            }
+            // A release of the talk key does not end an opening.
+            assert_eq!(harness.gate, FakeGate::Open);
+
+            assert_eq!(
+                harness.send(key(Key::Mute, KeyAction::Press)),
+                [
+                    Gate(ForceShut(ShutReason::Muted)),
+                    status(false, &[ShutReason::Muted]),
+                    Report(Stopped),
+                ]
+            );
+            assert_eq!(harness.send(key(Key::Mute, KeyAction::Release)), []);
+            assert_eq!(
+                harness.send(key(Key::Mute, KeyAction::Press)),
+                [Gate(Clear(ShutReason::Muted)), status(false, &[])]
+            );
+            assert_eq!(
+                harness.send(key(Key::Deafen, KeyAction::Press)),
+                [
+                    Gate(ForceShut(ShutReason::Deafened)),
+                    status(false, &[ShutReason::Deafened])
+                ]
+            );
+            assert_eq!(
+                harness.send(DEAFEN),
+                [Gate(Clear(ShutReason::Deafened)), status(false, &[])]
+            );
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 2);
+        }
+
+        #[test]
+        fn a_lost_key_device_blocks_nothing_in_open_mode_and_blocks_again_in_push_to_talk() {
+            let mut harness = talking();
+            // The keyboard goes away during an opening: it goes on until quiet.
+            assert_eq!(harness.send(PttInput::KeyDevice(false)), []);
+            assert_eq!(harness.gate, FakeGate::Open);
+            assert_eq!(harness.ptt.status().blocked, ShutReasons::none());
+            assert_eq!(harness.send(QUIET), [Gate(Shut)]);
+            assert_eq!(harness.tail_ends(), [Report(Stopped), status(false, &[])]);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            harness.send(QUIET);
+            harness.tail_ends();
+
+            // Back in push-to-talk mode the loss is a block, until the device returns.
+            assert_eq!(
+                harness.send(PUSH_TO_TALK),
+                [
+                    TO_PUSH_TO_TALK,
+                    Gate(ForceShut(ShutReason::KeyDeviceLost)),
+                    status(false, &[ShutReason::KeyDeviceLost])
+                ]
+            );
+            assert_eq!(
+                harness.send(DOWN),
+                [PressIgnored(ShutReason::KeyDeviceLost)]
+            );
+            assert_eq!(harness.send(UP), []);
+            assert_eq!(
+                harness.send(PttInput::KeyDevice(true)),
+                [Gate(Clear(ShutReason::KeyDeviceLost)), status(false, &[])]
+            );
+            assert_eq!(
+                harness.send(DOWN),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(harness.finish(), 3);
+
+            // A loss that stands in push-to-talk mode ends with the change to open mode.
+            let mut harness = Harness::ready();
+            harness.send(PttInput::KeyDevice(false));
+            assert_eq!(
+                harness.send(OPEN_MODE),
+                [
+                    TO_OPEN,
+                    Gate(Clear(ShutReason::KeyDeviceLost)),
+                    status(false, &[])
+                ]
+            );
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 1);
+        }
+
+        /// A change of mode shuts the gate as a reason does: at once, with no release tail
+        /// (the fake gate reports shut on the spot, as the transmit task does), and the
+        /// transmission is reported stopped. It leaves nothing standing.
+        #[test]
+        fn a_change_of_mode_ends_the_transmission_at_once_in_both_directions() {
+            // A press is held when open mode is chosen.
+            let mut harness = Harness::talking();
+            assert_eq!(
+                harness.send(OPEN_MODE),
+                [TO_OPEN, status(false, &[]), Report(Stopped)]
+            );
+            assert_eq!(harness.gate, FakeGate::Shut);
+            assert_eq!(harness.ptt.talk_mode(), TalkMode::Open);
+            assert!(!harness.ptt.transmission_under_way());
+            assert_eq!(harness.ptt.deadline(), None);
+            // The key held across the change does nothing now, down or up.
+            assert_eq!(harness.send(UP), []);
+            assert_eq!(harness.send(DOWN), []);
+            // The sound that was going on is no onset; quiet and then sound is.
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+
+            // Push-to-talk is chosen during an utterance.
+            assert_eq!(
+                harness.send(PUSH_TO_TALK),
+                [TO_PUSH_TO_TALK, status(false, &[]), Report(Stopped)]
+            );
+            assert_eq!(harness.ptt.talk_mode(), TalkMode::PushToTalk);
+            // The detector's word means nothing in push-to-talk mode.
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(
+                harness.send(DOWN),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+
+            // The mode in force, chosen again, changes nothing.
+            assert_eq!(harness.send(PUSH_TO_TALK), []);
+            assert_eq!(
+                harness.ptt.status(),
+                PttStatus {
+                    transmitting: true,
+                    blocked: ShutReasons::none(),
+                }
+            );
+            assert_eq!(harness.finish(), 3);
+
+            // With nothing under way the gate is told the mode, and nothing else changes.
+            let mut harness = Harness::ready();
+            assert_eq!(harness.send(OPEN_MODE), [TO_OPEN]);
+            assert_eq!(harness.send(PUSH_TO_TALK), [TO_PUSH_TO_TALK]);
+            assert_eq!(harness.finish(), 0);
+        }
+
+        #[test]
+        fn a_change_of_mode_during_the_release_tail_ends_it_and_drops_a_waiting_press() {
+            let mut harness = Harness::talking();
+            assert_eq!(harness.send(UP), [Gate(Shut)]);
+            assert_eq!(harness.send(DOWN), []);
+            // The tail counts as transmitting until the change, and not after it.
+            assert!(harness.ptt.status().transmitting);
+            assert_eq!(
+                harness.send(OPEN_MODE),
+                [TO_OPEN, status(false, &[]), Report(Stopped)]
+            );
+            assert_eq!(harness.gate, FakeGate::Shut);
+            assert_eq!(finish(harness), 1);
+
+            // The same from open mode, with an onset waiting.
+            let mut harness = talking();
+            assert_eq!(harness.send(QUIET), [Gate(Shut)]);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(
+                harness.send(PUSH_TO_TALK),
+                [TO_PUSH_TO_TALK, status(false, &[]), Report(Stopped)]
+            );
+            assert_eq!(harness.gate, FakeGate::Shut);
+            assert_eq!(harness.finish(), 1);
+        }
+
+        #[test]
+        fn a_change_of_mode_ends_a_transmit_limit_that_stands() {
+            let mut harness = Harness::talking();
+            harness.advance(MAX);
+            harness.send(PttInput::Tick);
+            assert_eq!(
+                harness.send(OPEN_MODE),
+                [
+                    TO_OPEN,
+                    Gate(Clear(ShutReason::MaxTransmit)),
+                    status(false, &[])
+                ]
+            );
+            // A fresh onset is still needed.
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(
+                harness.send(SOUND),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+            assert_eq!(finish(harness), 2);
+        }
+
+        #[test]
+        fn an_onset_during_the_release_tail_waits_for_the_gate_and_is_a_new_transmission() {
+            let mut harness = talking();
+            assert_eq!(harness.send(QUIET), [Gate(Shut)]);
+            harness.advance(Duration::from_millis(40));
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.ptt.deadline(), None);
+            harness.advance(Duration::from_millis(60));
+            assert_eq!(
+                harness.tail_ends(),
+                [Report(Stopped), Gate(Open), Report(Started)]
+            );
+            assert_eq!(harness.ptt.deadline(), Some(harness.now + MAX));
+            assert_eq!(finish(harness), 2);
+        }
+
+        #[test]
+        fn an_onset_and_quiet_both_inside_the_release_tail_open_nothing() {
+            let mut harness = talking();
+            harness.send(QUIET);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(harness.tail_ends(), [Report(Stopped), status(false, &[])]);
+            assert_eq!(finish(harness), 1);
+        }
+
+        #[test]
+        fn an_onset_waiting_on_the_release_tail_is_dropped_if_a_reason_starts() {
+            for reason in OUTSIDE_REASONS {
+                let mut harness = talking();
+                harness.send(QUIET);
+                assert_eq!(harness.send(SOUND), []);
+                assert_eq!(
+                    cause(&mut harness, reason),
+                    [
+                        Gate(ForceShut(reason)),
+                        status(false, &[reason]),
+                        Report(Stopped),
+                    ],
+                    "{reason:?}"
+                );
+                assert_eq!(
+                    end(&mut harness, reason),
+                    [Gate(Clear(reason)), status(false, &[])]
+                );
+                assert_eq!(harness.gate, FakeGate::Shut);
+                assert_eq!(finish(harness), 1, "{reason:?}");
+            }
+        }
+
+        #[test]
+        fn the_detectors_word_does_nothing_in_push_to_talk_mode() {
+            let mut harness = Harness::ready();
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.send(QUIET), []);
+            harness.send(DOWN);
+            // Quiet is no release.
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(harness.gate, FakeGate::Open);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.finish(), 1);
+        }
+
+        #[test]
+        fn quit_in_open_mode_reports_stopped_before_quitting() {
+            let mut harness = talking();
+            assert_eq!(harness.send(QUIT), [Gate(Shut)]);
+            // While the gate finishes, an onset is not a new transmission.
+            assert_eq!(harness.send(QUIET), []);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(
+                harness.tail_ends(),
+                [Report(Stopped), status(false, &[]), Quit]
+            );
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.opens, 1);
+
+            let mut harness = listening();
+            assert_eq!(harness.send(QUIT), [Quit]);
+            assert_eq!(harness.send(SOUND), []);
+            assert_eq!(harness.opens, 0);
+        }
+
+        #[test]
+        fn talk_modes_have_one_name_each_and_push_to_talk_is_the_default() {
+            assert_eq!(TalkMode::default(), TalkMode::PushToTalk);
+            let cases = [
+                ("push_to_talk", Some(TalkMode::PushToTalk)),
+                ("open", Some(TalkMode::Open)),
+                ("", None),
+                ("Open", None),
+                ("OPEN", None),
+                (" open", None),
+                ("open\n", None),
+                ("push-to-talk", None),
+                ("pushtotalk", None),
+                ("ptt", None),
+                ("always", None),
+            ];
+            for (name, want) in cases {
+                assert_eq!(TalkMode::from_name(name), want, "{name:?}");
+            }
+            for mode in TalkMode::ALL {
+                assert_eq!(TalkMode::from_name(mode.name()), Some(mode));
+                assert_eq!(mode.to_string(), mode.name());
+            }
+        }
+
+        /// Random inputs in both modes, with the checks of [`Harness::check`] on every call
+        /// and three more: the gate opens only on a press (push-to-talk) or an onset (open),
+        /// or when a gate that was shutting says it shut with one of those waiting; never on
+        /// a change of mode or a reason ending; and in open mode only after quiet heard
+        /// since the mode was entered and since the last reason ended.
+        #[test]
+        fn no_sequence_of_inputs_opens_the_gate_but_a_press_or_a_fresh_onset() {
+            for seed in 0..200 {
+                let mut random = Lcg(seed + 5000);
+                let mut harness = if seed % 2 == 0 {
+                    ready()
+                } else {
+                    Harness::ready()
+                };
+                // The test's own account of the rule: quiet heard since the last reason
+                // ended or open mode was entered.
+                let mut fresh = false;
+                for _ in 0..400 {
+                    let input = match random.next(26) {
+                        0..=3 => SOUND,
+                        4..=7 => QUIET,
+                        8 => OPEN_MODE,
+                        9 => PUSH_TO_TALK,
+                        10..=11 => DOWN,
+                        12 => UP,
+                        13 => key(Key::Talk, KeyAction::Press),
+                        14 => key(Key::Talk, KeyAction::Release),
+                        15 => MUTE,
+                        16 => DEAFEN,
+                        17 => key(Key::Mute, KeyAction::Press),
+                        18 => PttInput::Connected(random.next(3) > 0),
+                        19 => PttInput::PublishGrant(random.next(3) > 0),
+                        20 => PttInput::Microphone(random.next(3) > 0),
+                        21 => PttInput::KeyDevice(random.next(3) > 0),
+                        22 => PttInput::Tick,
+                        23 => {
+                            harness.advance(MAX / 3);
+                            PttInput::Tick
+                        }
+                        _ => {
+                            if harness.gate == FakeGate::Tail {
+                                harness.gate = FakeGate::Shut;
+                                PttInput::GateShut
+                            } else {
+                                PttInput::Tick
+                            }
+                        }
+                    };
+                    harness.advance(Duration::from_millis(random.next(500)));
+                    let before = harness.ptt.talk_mode();
+                    let outputs = harness.send(input);
+                    let after = harness.ptt.talk_mode();
+
+                    if outputs.contains(&Gate(Open)) {
+                        let by = match after {
+                            TalkMode::PushToTalk => {
+                                [DOWN, key(Key::Talk, KeyAction::Press), PttInput::GateShut]
+                                    .contains(&input)
+                            }
+                            TalkMode::Open => {
+                                assert!(fresh, "seed {seed}: an onset that was not fresh");
+                                [SOUND, PttInput::GateShut].contains(&input)
+                            }
+                        };
+                        assert!(by, "seed {seed}: {input:?} opened the gate in {after}");
+                        assert_eq!(before, after, "seed {seed}");
+                    }
+                    let cleared = outputs.iter().any(|output| {
+                        matches!(output, Gate(Clear(reason)) if *reason != ShutReason::MaxTransmit)
+                    });
+                    if cleared || (after == TalkMode::Open && before != after) {
+                        fresh = false;
+                    }
+                    if input == QUIET && after == TalkMode::Open {
+                        fresh = true;
+                    }
+                }
+
+                // Put everything right, in open mode, and the client can talk again:
+                // nothing is left stuck.
+                if harness.gate == FakeGate::Tail {
+                    harness.tail_ends();
+                }
+                harness.send(OPEN_MODE);
+                if harness.gate == FakeGate::Tail {
+                    harness.tail_ends();
+                }
+                harness.send(PttInput::Connected(true));
+                harness.send(PttInput::PublishGrant(true));
+                harness.send(PttInput::Microphone(true));
+                harness.send(PttInput::KeyDevice(true));
+                if harness.ptt.status().muted() {
+                    harness.send(MUTE);
+                }
+                if harness.ptt.status().deafened() {
+                    harness.send(DEAFEN);
+                }
+                harness.send(QUIET);
+                if harness.gate == FakeGate::Tail {
+                    harness.tail_ends();
+                }
+                assert_eq!(
+                    harness.ptt.status().blocked,
+                    ShutReasons::none(),
+                    "seed {seed}"
+                );
+                let opened = harness.opens;
+                assert_eq!(
+                    harness.send(SOUND),
+                    [Gate(Open), Report(Started), status(true, &[])],
+                    "seed {seed}"
+                );
+                assert_eq!(finish(harness), opened + 1, "seed {seed}");
+            }
         }
     }
 }

@@ -1298,3 +1298,94 @@ async fn a_withheld_voice_is_named_to_the_owner_and_join_says_what_it_always_sai
     );
     assert!(!written.contains("voice_not_allowed"), "{written}");
 }
+
+// ------------------------------------------------------------------ the open microphone
+
+/// What the helper logs, from the moment the one test that reads it first asks. The log
+/// is the process's, so it holds the other tests' records too; that test looks for its
+/// own line only.
+fn helper_log() -> &'static Captured {
+    use conch_voice::logger::Logger;
+    use conch_voice::secrets::Scrubber;
+    use log::LevelFilter;
+    use std::sync::OnceLock;
+
+    static LOG: OnceLock<Captured> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let captured = Captured::default();
+        let logger = Logger::new(
+            LevelFilter::Warn,
+            Box::new(captured.clone()),
+            Scrubber::new(),
+        );
+        log::set_logger(Box::leak(Box::new(logger))).unwrap();
+        log::set_max_level(LevelFilter::Warn);
+        captured
+    })
+}
+
+/// Log records, as they were written.
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Captured {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A managed helper speaks only `conch.voice_control.v1`, whose state cannot say "open
+/// microphone": with `talk_mode = "open"` in `voice.toml` it runs push-to-talk, and says
+/// so in one log line (`docs/design/tui-voice.md` §20.6). The talk key transmits, as it
+/// would not in open mode.
+#[tokio::test]
+async fn a_v1_helper_with_open_mode_configured_runs_push_to_talk_and_logs_one_line() {
+    use conch_voice::managed::V1_PUSH_TO_TALK;
+
+    let log = helper_log();
+    let setup = ManagedSetup {
+        voice_toml: Some(format!(
+            "{}talk_mode = \"open\"\n",
+            support::managed::KEYS_TOML
+        )),
+        ..ManagedSetup::default()
+    };
+    let mut rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.send_start();
+    rig.ready().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(rig.sdk.frames(), 0, "nothing transmits by itself");
+
+    // The talk key, which open mode would ignore, transmits.
+    rig.press_talk();
+    rig.transmitting().await;
+    let before = rig.sdk.frames();
+    rig.until("audio reaching the track", |rig| {
+        rig.sdk.frames() > before + 3
+    })
+    .await;
+    rig.release_talk();
+    rig.until("the press over", |rig| {
+        rig.state().is_some_and(|state| !state.transmitting)
+    })
+    .await;
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+
+    let written = log.text();
+    assert_eq!(
+        written.matches(V1_PUSH_TO_TALK).count(),
+        1,
+        "one line, once:\n{written}"
+    );
+}

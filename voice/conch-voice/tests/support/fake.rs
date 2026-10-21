@@ -83,6 +83,9 @@ struct Inner {
     loud_frames: u64,
     /// Frames handed over while the track was muted or disabled.
     frames_while_muted: u64,
+    /// The first sample of each frame handed over, in order: a scripted microphone
+    /// (`support::Script`) tells its frames apart by it.
+    first_samples: Vec<f32>,
     tracks: u64,
 }
 
@@ -251,6 +254,11 @@ impl FakeSdk {
     /// Of those, the ones handed over while the track was muted or disabled.
     pub fn frames_while_muted(&self) -> u64 {
         self.lock().frames_while_muted
+    }
+
+    /// The first sample of every frame handed over, in order.
+    pub fn first_samples(&self) -> Vec<f32> {
+        self.lock().first_samples.clone()
     }
 
     /// The join token of every connection attempt, in order.
@@ -488,6 +496,7 @@ impl MicFeed for FakeFeed {
             if !inner.sends_hang {
                 inner.calls.push(Call::Frame);
                 inner.frames += 1;
+                inner.first_samples.push(frame.samples()[0]);
                 if frame.samples().iter().any(|sample| *sample != 0.0) {
                     inner.loud_frames += 1;
                 }

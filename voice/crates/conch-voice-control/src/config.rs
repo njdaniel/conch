@@ -6,8 +6,8 @@
 //! environment and the command line are the caller's to collect, into a [`ConfigOverrides`]
 //! per layer, applied with [`Config::apply`] in the order it wants them to win.
 //!
-//! [`set_audio_value`] gives the text back with one `[audio]` device changed, for
-//! `conch-voice config set` to save. It changes nothing else in the text.
+//! [`set_audio_value`] gives the text back with one `[audio]` device, or the talk mode,
+//! changed, for `conch-voice config set` to save. It changes nothing else in the text.
 
 use std::fmt;
 use std::ops::Range;
@@ -19,6 +19,7 @@ use toml::de::{DeTable, DeValue};
 
 use crate::error::Error;
 use crate::keys::{KeyBindings, KeyCode};
+use crate::ptt::TalkMode;
 
 /// The server address when neither the command line, `CONCH_SERVER` nor the file gives one,
 /// and no single stored login stands in for them ([`Config::server_or`]): the same default
@@ -28,6 +29,12 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_RELEASE_TAIL_MS: u32 = 100;
 /// The longest a single press may transmit. It catches a stuck key.
 pub const DEFAULT_MAX_TRANSMIT_SECS: u32 = 120;
+/// The level, in dBFS, at or above which one frame is sound in open mode
+/// (`docs/design/tui-voice.md` §20.6).
+pub const DEFAULT_OPEN_THRESHOLD_DB: i32 = -40;
+/// How long, in open mode, with no frame at or above the level before the gate shuts. The
+/// browser's open mode holds for as long.
+pub const DEFAULT_OPEN_HANG_MS: u32 = 400;
 
 /// The whole configuration, with defaults filled in where the design note states one.
 ///
@@ -71,8 +78,16 @@ pub struct AudioConfig {
     /// `release_tail_ms`: see [`DEFAULT_RELEASE_TAIL_MS`]. The gate applies it.
     pub release_tail_ms: u32,
     /// `max_transmit_secs`: see [`DEFAULT_MAX_TRANSMIT_SECS`]. At least 1. The push-to-talk
-    /// state machine applies it.
+    /// state machine applies it, to each press and, in open mode, to each opening.
     pub max_transmit_secs: u32,
+    /// `talk_mode`: what may open the gate, `"push_to_talk"` (the default) or `"open"`.
+    pub talk_mode: TalkMode,
+    /// `open_threshold_db`: see [`DEFAULT_OPEN_THRESHOLD_DB`]. From
+    /// [`MIN_OPEN_THRESHOLD_DB`] to [`MAX_OPEN_THRESHOLD_DB`]. The level detector applies it.
+    pub open_threshold_db: i32,
+    /// `open_hang_ms`: see [`DEFAULT_OPEN_HANG_MS`]. From [`MIN_OPEN_HANG_MS`] to
+    /// [`MAX_OPEN_HANG_MS`]. The level detector applies it.
+    pub open_hang_ms: u32,
 }
 
 impl Default for AudioConfig {
@@ -83,6 +98,9 @@ impl Default for AudioConfig {
             echo_cancellation: false,
             release_tail_ms: DEFAULT_RELEASE_TAIL_MS,
             max_transmit_secs: DEFAULT_MAX_TRANSMIT_SECS,
+            talk_mode: TalkMode::PushToTalk,
+            open_threshold_db: DEFAULT_OPEN_THRESHOLD_DB,
+            open_hang_ms: DEFAULT_OPEN_HANG_MS,
         }
     }
 }
@@ -92,6 +110,20 @@ impl Default for AudioConfig {
 pub const MAX_RELEASE_TAIL_MS: u32 = 2_000;
 /// The longest transmit limit accepted, in seconds. Beyond this it would not be a limit.
 pub const MAX_MAX_TRANSMIT_SECS: u32 = 600;
+/// The lowest open-mode level accepted, in dBFS. Lower, a quiet room's own hiss would be
+/// sound.
+pub const MIN_OPEN_THRESHOLD_DB: i32 = -80;
+/// The highest open-mode level accepted, in dBFS. Higher, speech would not be.
+pub const MAX_OPEN_THRESHOLD_DB: i32 = -10;
+/// The shortest open-mode hang accepted, in milliseconds. Shorter would cut words at each
+/// pause, and send a pair of transmit reports for each piece.
+pub const MIN_OPEN_HANG_MS: u32 = 100;
+/// The longest open-mode hang accepted, in milliseconds. The gate stays open this long
+/// after the sound stops, as it does for the longest release tail after a release.
+pub const MAX_OPEN_HANG_MS: u32 = 2_000;
+
+/// What a talk mode may be, for an error.
+const TALK_MODE_MUST_BE: &str = "must be \"push_to_talk\" or \"open\"";
 
 /// One layer of values to put over a [`Config`]: the environment, or the command line. A
 /// field left `None` leaves the configuration as it was.
@@ -122,6 +154,12 @@ pub struct ConfigOverrides {
     pub release_tail_ms: Option<u32>,
     /// Replaces `audio.max_transmit_secs`.
     pub max_transmit_secs: Option<u32>,
+    /// Replaces `audio.talk_mode`.
+    pub talk_mode: Option<TalkMode>,
+    /// Replaces `audio.open_threshold_db`.
+    pub open_threshold_db: Option<i32>,
+    /// Replaces `audio.open_hang_ms`.
+    pub open_hang_ms: Option<u32>,
 }
 
 impl Config {
@@ -161,6 +199,11 @@ impl Config {
             deafen: key_code("keys.deafen", raw.keys.deafen)?,
         };
         let defaults = AudioConfig::default();
+        let talk_mode = match raw.audio.talk_mode {
+            None => defaults.talk_mode,
+            Some(name) => TalkMode::from_name(&name)
+                .ok_or_else(|| invalid("audio.talk_mode", TALK_MODE_MUST_BE.to_owned()))?,
+        };
         let audio = AudioConfig {
             input: raw.audio.input,
             output: raw.audio.output,
@@ -176,6 +219,12 @@ impl Config {
                 .audio
                 .max_transmit_secs
                 .unwrap_or(defaults.max_transmit_secs),
+            talk_mode,
+            open_threshold_db: raw
+                .audio
+                .open_threshold_db
+                .unwrap_or(defaults.open_threshold_db),
+            open_hang_ms: raw.audio.open_hang_ms.unwrap_or(defaults.open_hang_ms),
         };
         let config = Self {
             server: raw.server,
@@ -193,7 +242,9 @@ impl Config {
     ///
     /// The two times are bounded because each keeps the microphone open: the release tail
     /// after the key is up (nothing else limits it), and the longest single press, which is
-    /// the only thing that ends a transmission whose release was lost.
+    /// the only thing that ends a transmission whose release was lost. The open-mode hang
+    /// keeps it open after the sound stops and is bounded as the tail is; the open-mode
+    /// level is bounded so that neither a quiet room nor nothing at all counts as sound.
     ///
     /// # Errors
     ///
@@ -217,6 +268,23 @@ impl Config {
                 "audio.max_transmit_secs",
                 format!(
                     "must be from 1 to {MAX_MAX_TRANSMIT_SECS}: 0 would shut the gate on every press, and more would be no limit on a stuck key"
+                ),
+            ));
+        }
+        let threshold = self.audio.open_threshold_db;
+        if !(MIN_OPEN_THRESHOLD_DB..=MAX_OPEN_THRESHOLD_DB).contains(&threshold) {
+            return Err(invalid(
+                "audio.open_threshold_db",
+                format!(
+                    "must be from {MIN_OPEN_THRESHOLD_DB} to {MAX_OPEN_THRESHOLD_DB} (dBFS): lower would count a quiet room as sound, higher would miss speech"
+                ),
+            ));
+        }
+        if !(MIN_OPEN_HANG_MS..=MAX_OPEN_HANG_MS).contains(&self.audio.open_hang_ms) {
+            return Err(invalid(
+                "audio.open_hang_ms",
+                format!(
+                    "must be from {MIN_OPEN_HANG_MS} to {MAX_OPEN_HANG_MS}: in open mode the microphone stays open this long after the sound stops"
                 ),
             ));
         }
@@ -302,6 +370,15 @@ impl Config {
         if let Some(value) = overrides.max_transmit_secs {
             self.audio.max_transmit_secs = value;
         }
+        if let Some(value) = overrides.talk_mode {
+            self.audio.talk_mode = value;
+        }
+        if let Some(value) = overrides.open_threshold_db {
+            self.audio.open_threshold_db = value;
+        }
+        if let Some(value) = overrides.open_hang_ms {
+            self.audio.open_hang_ms = value;
+        }
     }
 
     /// The server address, or [`DEFAULT_SERVER`] if no layer set one.
@@ -347,15 +424,25 @@ impl AudioConfig {
     pub fn max_transmit(&self) -> Duration {
         Duration::from_secs(u64::from(self.max_transmit_secs))
     }
+
+    /// `open_hang_ms` as a duration, for the level detector.
+    #[must_use]
+    pub fn open_hang(&self) -> Duration {
+        Duration::from_millis(u64::from(self.open_hang_ms))
+    }
 }
 
-/// A device under `[audio]`: the only keys [`set_audio_value`] writes.
+/// A key under `[audio]` that [`set_audio_value`] writes: a device, or the talk mode. It
+/// writes no other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioKey {
     /// `input`: the microphone.
     Input,
     /// `output`: the speakers.
     Output,
+    /// `talk_mode`: what may open the gate, so that a client can save its choice. The
+    /// open-mode level and hang are changed by hand only.
+    TalkMode,
 }
 
 impl AudioKey {
@@ -365,6 +452,7 @@ impl AudioKey {
         match self {
             AudioKey::Input => "input",
             AudioKey::Output => "output",
+            AudioKey::TalkMode => "talk_mode",
         }
     }
 
@@ -374,21 +462,27 @@ impl AudioKey {
         match self {
             AudioKey::Input => "audio.input",
             AudioKey::Output => "audio.output",
+            AudioKey::TalkMode => "audio.talk_mode",
         }
     }
 
+    /// The device field this key names, for the tests to say by hand what an edit must
+    /// give. Only the two devices have one.
+    #[cfg(test)]
     fn slot(self, config: &mut Config) -> &mut Option<String> {
         match self {
             AudioKey::Input => &mut config.audio.input,
             AudioKey::Output => &mut config.audio.output,
+            AudioKey::TalkMode => panic!("talk_mode is not a device"),
         }
     }
 }
 
 /// `text`, the configuration file, with `[audio]`'s `key` set to `value` and nothing else
 /// changed: every comment, blank line, key and table stays as it was written, byte for byte.
-/// `file` names the text in errors, as for [`Config::parse`]. `"default"` is a value like
-/// any other, and is read as PipeWire's default.
+/// `file` names the text in errors, as for [`Config::parse`]. For a device, `"default"` is
+/// a value like any other, and is read as PipeWire's default; for the talk mode, `value` is
+/// `push_to_talk` or `open`.
 ///
 /// The edit is the smallest one there is, in this order of preference:
 ///
@@ -407,7 +501,8 @@ impl AudioKey {
 /// # Errors
 ///
 /// - What [`Config::parse`] says of `text`: a file it refuses is not edited.
-/// - [`Error::InvalidConfigValue`] for a `value` that cannot be written as it is.
+/// - [`Error::InvalidConfigValue`] for a `value` that cannot be written as it is, or a talk
+///   mode that does not exist.
 /// - [`Error::AudioFormNotEditable`] when `audio` is an inline table or dotted keys, or the
 ///   key's value is not a string.
 /// - [`Error::AudioEditUnchecked`] if the result does not pass the check.
@@ -418,12 +513,35 @@ pub fn set_audio_value(
     value: &str,
 ) -> Result<String, Error> {
     let before = Config::parse(text, file)?;
-    if value.is_empty() || value.contains(['"', '\\']) || value.chars().any(char::is_control) {
-        return Err(Error::InvalidConfigValue {
-            file: file.to_owned(),
-            key: key.dotted().to_owned(),
-            message: "a device name must not be empty, and must hold no quotation mark, backslash or control character".to_owned(),
-        });
+    let refuse = |message: &str| Error::InvalidConfigValue {
+        file: file.to_owned(),
+        key: key.dotted().to_owned(),
+        message: message.to_owned(),
+    };
+    // What the file must read as afterwards: the old configuration with this one field set.
+    let mut want = before;
+    match key {
+        AudioKey::Input | AudioKey::Output => {
+            if value.is_empty()
+                || value.contains(['"', '\\'])
+                || value.chars().any(char::is_control)
+            {
+                return Err(refuse(
+                    "a device name must not be empty, and must hold no quotation mark, backslash or control character",
+                ));
+            }
+            let device = if key == AudioKey::Input {
+                &mut want.audio.input
+            } else {
+                &mut want.audio.output
+            };
+            *device = Some(value.to_owned());
+        }
+        // Either name is written as it is; anything else is refused before it is written.
+        AudioKey::TalkMode => {
+            want.audio.talk_mode =
+                TalkMode::from_name(value).ok_or_else(|| refuse(TALK_MODE_MUST_BE))?;
+        }
     }
     let quoted = format!("\"{value}\"");
     let (range, replacement) = plan_audio_edit(text, file, key, &quoted)?;
@@ -439,8 +557,6 @@ pub fn set_audio_value(
         key: key.dotted().to_owned(),
     };
     let after = Config::parse(&edited, file).map_err(|_| unchecked())?;
-    let mut want = before;
-    *key.slot(&mut want) = Some(value.to_owned());
     if after != want {
         return Err(unchecked());
     }
@@ -583,6 +699,9 @@ struct RawAudio {
     echo_cancellation: Option<bool>,
     release_tail_ms: Option<u32>,
     max_transmit_secs: Option<u32>,
+    talk_mode: Option<String>,
+    open_threshold_db: Option<i32>,
+    open_hang_ms: Option<u32>,
 }
 
 /// A key as the file gives it: a name (`"KEY_RIGHTCTRL"`), or its code as a number (`97`) or
@@ -722,6 +841,9 @@ output = "alsa_output.example-headset"
 echo_cancellation = true
 release_tail_ms = 250
 max_transmit_secs = 45
+talk_mode = "open"
+open_threshold_db = -55
+open_hang_ms = 650
 "#;
 
     fn key(name: &str) -> Option<KeyCode> {
@@ -744,6 +866,9 @@ max_transmit_secs = 45
                 echo_cancellation: true,
                 release_tail_ms: 250,
                 max_transmit_secs: 45,
+                talk_mode: TalkMode::Open,
+                open_threshold_db: -55,
+                open_hang_ms: 650,
             },
         }
     }
@@ -770,6 +895,9 @@ max_transmit_secs = 45
                 echo_cancellation: false,
                 release_tail_ms: 100,
                 max_transmit_secs: 120,
+                talk_mode: TalkMode::PushToTalk,
+                open_threshold_db: -40,
+                open_hang_ms: 400,
             },
         };
         for text in ["", "\n", "# nothing set\n", "[keys]\n", "[audio]\n[keys]\n"] {
@@ -1064,6 +1192,9 @@ max_transmit_secs = 45
                     echo_cancellation: Some(true),
                     release_tail_ms: Some(250),
                     max_transmit_secs: Some(45),
+                    talk_mode: Some(TalkMode::Open),
+                    open_threshold_db: Some(-55),
+                    open_hang_ms: Some(650),
                 },
                 SOURCE,
             )
@@ -1544,5 +1675,245 @@ max_transmit_secs = 45
         assert_eq!(changed_region("", "x"), 0..0);
         assert_eq!(changed_region("abc", "xyz"), 0..3);
         assert_eq!(changed_region("abc", ""), 0..3);
+    }
+
+    /// The open-microphone keys (`docs/design/tui-voice.md` §20.6): each read with its
+    /// default when left out, its whole range accepted, and anything else refused naming
+    /// the key, in the file and in every layer over it.
+    #[test]
+    fn the_open_microphone_keys_have_defaults_and_ranges() {
+        let defaults = Config::parse("[audio]\ninput = \"a\"\n", FILE)
+            .unwrap()
+            .audio;
+        assert_eq!(
+            (
+                defaults.talk_mode,
+                defaults.open_threshold_db,
+                defaults.open_hang_ms
+            ),
+            (TalkMode::PushToTalk, -40, 400)
+        );
+        assert_eq!(defaults.open_hang(), Duration::from_millis(400));
+
+        // (the text, the mode, the level, the hang)
+        let accepted = [
+            (
+                "talk_mode = \"push_to_talk\"",
+                TalkMode::PushToTalk,
+                -40,
+                400,
+            ),
+            ("talk_mode = \"open\"", TalkMode::Open, -40, 400),
+            ("talk_mode = 'open'", TalkMode::Open, -40, 400),
+            ("open_threshold_db = -80", TalkMode::PushToTalk, -80, 400),
+            ("open_threshold_db = -10", TalkMode::PushToTalk, -10, 400),
+            ("open_hang_ms = 100", TalkMode::PushToTalk, -40, 100),
+            ("open_hang_ms = 2000", TalkMode::PushToTalk, -40, 2000),
+            (
+                "talk_mode = \"open\"\nopen_threshold_db = -60\nopen_hang_ms = 250",
+                TalkMode::Open,
+                -60,
+                250,
+            ),
+        ];
+        for (text, mode, level, hang) in accepted {
+            let audio = Config::parse(&format!("[audio]\n{text}\n"), FILE)
+                .unwrap()
+                .audio;
+            assert_eq!(
+                (audio.talk_mode, audio.open_threshold_db, audio.open_hang_ms),
+                (mode, level, hang),
+                "{text}"
+            );
+            // The keys that were there before are untouched.
+            assert_eq!(audio.release_tail_ms, DEFAULT_RELEASE_TAIL_MS, "{text}");
+            assert_eq!(audio.max_transmit_secs, DEFAULT_MAX_TRANSMIT_SECS, "{text}");
+        }
+
+        let refused = [
+            ("talk_mode = \"Open\"", "audio.talk_mode"),
+            ("talk_mode = \"always\"", "audio.talk_mode"),
+            ("talk_mode = \"\"", "audio.talk_mode"),
+            ("talk_mode = \"push-to-talk\"", "audio.talk_mode"),
+            ("talk_mode = \" open\"", "audio.talk_mode"),
+            ("talk_mode = true", "audio.talk_mode"),
+            ("talk_mode = 1", "audio.talk_mode"),
+            ("talk_mode = [\"open\"]", "audio.talk_mode"),
+            ("open_threshold_db = -81", "audio.open_threshold_db"),
+            ("open_threshold_db = -9", "audio.open_threshold_db"),
+            ("open_threshold_db = 0", "audio.open_threshold_db"),
+            ("open_threshold_db = 40", "audio.open_threshold_db"),
+            ("open_threshold_db = -40.5", "audio.open_threshold_db"),
+            ("open_threshold_db = \"-40\"", "audio.open_threshold_db"),
+            ("open_threshold_db = -2147483649", "audio.open_threshold_db"),
+            ("open_hang_ms = 99", "audio.open_hang_ms"),
+            ("open_hang_ms = 0", "audio.open_hang_ms"),
+            ("open_hang_ms = 2001", "audio.open_hang_ms"),
+            ("open_hang_ms = -400", "audio.open_hang_ms"),
+            ("open_hang_ms = 4294967295", "audio.open_hang_ms"),
+            ("open_hang_ms = \"400\"", "audio.open_hang_ms"),
+        ];
+        for (text, key) in refused {
+            let error = Config::parse(&format!("[audio]\n{text}\n"), FILE).unwrap_err();
+            match &error {
+                Error::InvalidConfigValue {
+                    file,
+                    key: got,
+                    message,
+                } => {
+                    assert_eq!((file.as_str(), got.as_str()), (FILE, key), "{text}");
+                    assert!(
+                        !message.is_empty() && !message.contains('\n'),
+                        "{message:?}"
+                    );
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let error = Config::parse("[audio]\ntalk_mode = \"always\"\n", FILE).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{FILE}: `audio.talk_mode`: must be \"push_to_talk\" or \"open\"")
+        );
+        // A misspelt key is still an unknown key.
+        assert_eq!(
+            Config::parse("[audio]\ntalkmode = \"open\"\n", FILE),
+            Err(Error::UnknownConfigKey {
+                file: FILE.to_owned(),
+                key: "audio.talkmode".to_owned()
+            })
+        );
+
+        let layers = [
+            (
+                ConfigOverrides {
+                    open_threshold_db: Some(-81),
+                    ..ConfigOverrides::default()
+                },
+                "audio.open_threshold_db",
+            ),
+            (
+                ConfigOverrides {
+                    open_threshold_db: Some(i32::MAX),
+                    ..ConfigOverrides::default()
+                },
+                "audio.open_threshold_db",
+            ),
+            (
+                ConfigOverrides {
+                    open_hang_ms: Some(0),
+                    ..ConfigOverrides::default()
+                },
+                "audio.open_hang_ms",
+            ),
+            (
+                ConfigOverrides {
+                    open_hang_ms: Some(u32::MAX),
+                    ..ConfigOverrides::default()
+                },
+                "audio.open_hang_ms",
+            ),
+        ];
+        for (layer, want) in layers {
+            let mut config = Config::default();
+            let error = config.apply(layer, SOURCE).unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key, .. } if key == want),
+                "{error:?}"
+            );
+            assert_eq!(config, Config::default());
+        }
+        let mut config = Config::default();
+        config
+            .apply(
+                ConfigOverrides {
+                    talk_mode: Some(TalkMode::Open),
+                    ..ConfigOverrides::default()
+                },
+                SOURCE,
+            )
+            .unwrap();
+        assert_eq!(config.audio.talk_mode, TalkMode::Open);
+        assert_eq!(config.audio.open_hang_ms, DEFAULT_OPEN_HANG_MS);
+    }
+
+    /// `config set audio.talk_mode`: the mode is saved as a device is, by changing its value
+    /// alone, or adding its line after the header.
+    #[test]
+    fn setting_the_talk_mode_changes_that_value_and_nothing_else() {
+        let with_mode = "# conch-voice\n\
+                         [audio]\n\
+                         # how to talk\n\
+                         talk_mode = \"push_to_talk\" # for now\n\
+                         input = \"alsa_input.old\"\n";
+        // (what, before, value, after)
+        let cases = [
+            (
+                "the key absent: inserted after the header",
+                KEPT.to_owned(),
+                "open",
+                KEPT.replace("[audio]\n", "[audio]\ntalk_mode = \"open\"\n"),
+            ),
+            (
+                "the key present, its comments kept",
+                with_mode.to_owned(),
+                "open",
+                with_mode.replace("\"push_to_talk\"", "\"open\""),
+            ),
+            (
+                "back to push-to-talk",
+                with_mode.replace("\"push_to_talk\"", "'open'"),
+                "push_to_talk",
+                with_mode.to_owned(),
+            ),
+            (
+                "the same value again",
+                with_mode.to_owned(),
+                "push_to_talk",
+                with_mode.to_owned(),
+            ),
+            (
+                "an empty file",
+                String::new(),
+                "open",
+                "[audio]\ntalk_mode = \"open\"\n".to_owned(),
+            ),
+        ];
+        for (what, before, value, want) in cases {
+            let got = set_audio_value(&before, FILE, AudioKey::TalkMode, value)
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(got, want, "{what}");
+            let mut expected = Config::parse(&before, FILE).unwrap();
+            expected.audio.talk_mode = TalkMode::from_name(value).unwrap();
+            assert_eq!(Config::parse(&got, FILE).unwrap(), expected, "{what}");
+        }
+
+        // Only the two names: nothing else is written, and the value is not shown.
+        for value in ["", "Open", "always", "open\n", "open\" # x", "push-to-talk"] {
+            let error = set_audio_value(KEPT, FILE, AudioKey::TalkMode, value).unwrap_err();
+            assert_eq!(
+                error,
+                Error::InvalidConfigValue {
+                    file: FILE.to_owned(),
+                    key: "audio.talk_mode".to_owned(),
+                    message: TALK_MODE_MUST_BE.to_owned(),
+                },
+                "{value:?}"
+            );
+        }
+        // An `[audio]` this does not edit is refused for the mode as for a device.
+        assert_eq!(
+            set_audio_value(
+                "audio = { input = \"a\" }\n",
+                FILE,
+                AudioKey::TalkMode,
+                "open"
+            ),
+            Err(Error::AudioFormNotEditable {
+                file: FILE.to_owned()
+            })
+        );
+        assert_eq!(AudioKey::TalkMode.dotted(), "audio.talk_mode");
+        assert_eq!(AudioKey::TalkMode.name(), "talk_mode");
     }
 }
