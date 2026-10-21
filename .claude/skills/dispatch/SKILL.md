@@ -66,6 +66,23 @@ delegated.
       the worker, its version, what was unverified at handoff, and what the
       reviewer amended.
 
+5a. **Escalate when a trigger fires** (table and rationale: the design doc's
+   "Escalation"). Ladder: Sonnet → Opus → Opus at max effort; protocol-designer (fable)
+   for wire-shape, protocol or design work; the principal above all of them.
+   - Fails the gate twice, or says it is stuck → resume once with the
+     failure notes; fails again → redispatch one step up with the original
+     brief plus the gate's findings.
+   - Runs past 2× the Dispatch block's estimated time → read its
+     transcript, then guide it or redispatch one step up.
+   - The same test fails for two different workers → stop dispatching on
+     that area and investigate yourself (bug, flake or environment).
+   - A security must-fix, or a design question the issue didn't settle →
+     handle it yourself; never send it back down.
+   Escalation never routes around step 1's hard stops. Record each one in
+   the PR's Attribution section (who, model, effort, which trigger and why);
+   the rerun is charged to the issue, and if it at least doubles the cost,
+   update the Dispatch block's estimate.
+
 6. **Open the PR referencing the issue.** Never merge — merges are Nick's;
    verify merge state with `gh pr view`, never assume it.
 
