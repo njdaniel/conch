@@ -1,0 +1,726 @@
+{
+  "description": "Conformance cases for the two v2 readers: direction command is the helper reading the owner's lines (ParseVoiceControlCommandV2), direction event is the owner reading the helper's (ParseVoiceControlEventV2). The forms and results are those of voice-control/cases.json; a hello never comes out of the v2 event reader (the hello is v1, read before the version is chosen), so there is no offers field. The framing rules are v1's and are not repeated case by case here beyond one of each code; what these cases pin is what v2 adds: set_devices and set_talk_mode, the state's talk_mode and playback, the changed consistency rules, and that neither reader takes a line of the other version.",
+  "cases": [
+    {
+      "name": "start",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a talk_mode field: the mode is not carried in start, and the field is ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false,\"talk_mode\":\"open\"}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a field it does not declare, named token: ignored, and never repeated",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false,\"token\":\"conch_FAKE_login_token_do_not_print\"}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "set_mute",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "set_mute"
+      }
+    },
+    {
+      "name": "set_deafen",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_deafen\",\"id\":7,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "set_deafen"
+      }
+    },
+    {
+      "name": "get_state",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"get_state\",\"id\":7}",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "leave",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"leave\",\"id\":7}",
+      "want": {
+        "result": "accept",
+        "kind": "leave"
+      }
+    },
+    {
+      "name": "set_devices, both sides",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"speech_out\",\"output\":\"alsa_output.usb-Generic_USB_Audio-00.analog-stereo\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_devices, the microphone only",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"alsa_input.pci-0000_00_1f.3.analog-stereo\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_devices, the speakers back to the default",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"output\":\"default\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_devices with the longest name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_devices with a name in another script",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"микрофон\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_talk_mode open",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"open\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_talk_mode"
+      }
+    },
+    {
+      "name": "set_talk_mode push_to_talk",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"push_to_talk\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_talk_mode"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "command",
+      "line_file": "lines/command-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "command",
+      "line_file": "lines/command-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "not JSON: a standalone line command",
+      "direction": "command",
+      "line": "down",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a key given twice",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"a\",\"input\":\"b\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "not valid UTF-8",
+      "direction": "command",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f636f6e74726f6c2e7632222c226b696e64223a227365745f64657669636573222c226964223a372c22696e707574223a22c328227d",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a v1 line: the version is fixed when the owner writes its start",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a later version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no schema",
+      "direction": "command",
+      "line": "{\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no id",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"input\":\"speech_out\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "there is still no command to press or release the talk key",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"press\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "no command opens the gate in open mode either",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"open_gate\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "a kind of no version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_volume\",\"id\":7,\"level\":3}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices naming neither side",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with an empty name: leaving a side alone is done by leaving it out",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"\",\"output\":\"default\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a name that is null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":null,\"output\":\"default\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a name that is not a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a name one byte too long",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"output\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a quotation mark in the name: it could not be written into voice.toml as it stands",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"my \\\"mic\\\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a backslash in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"a\\\\b\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with an escape sequence in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"\\u001b[2Jspeech_out\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a line feed in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_devices\",\"id\":7,\"output\":\"two\\nlines\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_talk_mode without a mode",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_talk_mode with a mode of no version: always on is not a mode",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"always_on\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_talk_mode with the browser's short names: the vocabulary is this one",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"ptt\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_talk_mode with the field under another name: field names are exact",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_talk_mode\",\"id\":7,\"mode\":\"open\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_mute with muted as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_mute\",\"id\":7,\"muted\":\"yes\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "start without deafened",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a trailing slash",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org/\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "ack",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack refusing with stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"stopping\"}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack with a code that only a protocol_error may carry",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"too_long\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "protocol_error",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"protocol_error\",\"seq\":8,\"code\":\"unknown_schema\"}",
+      "want": {
+        "result": "accept",
+        "kind": "protocol_error"
+      }
+    },
+    {
+      "name": "state, push to talk, as v1 with the two new fields",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "transmitting in open mode without a talk key",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "transmitting in open mode with the key device lost: the talk key is ignored, so nothing held can be lost",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"open\",\"ptt\":\"lost\",\"ptt_problem\":\"ended\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "open mode at the limit: max_transmit stands until quiet",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":11,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"max_transmit\"],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "the speakers named are not there: nothing blocks",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"unavailable\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "playback may be anything while stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":10,\"phase\":\"stopping\",\"reason\":\"left\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"open\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "state with a field it does not declare: ignored",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"open\",\"ptt\":\"ready\",\"level_db\":-31}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "event",
+      "line_file": "lines/event-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "event",
+      "line_file": "lines/event-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "a line of native output on the event descriptor",
+      "direction": "event",
+      "line": "NVIDIA: could not open the device file",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "an event of a kind this version does not know",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"level\",\"seq\":7,\"db\":-31}",
+      "want": {
+        "result": "skip",
+        "kind": "level"
+      }
+    },
+    {
+      "name": "a v1 state: not read as v2",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a hello, which is v1, is not read by the v2 reader: the owner reads it with the v1 reader before choosing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\",\"conch.voice_control.v2\"],\"helper_version\":\"0.2.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a hello written in v2: there is no such thing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v2\"],\"helper_version\":\"0.2.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "an event of a later version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "an event with no seq",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"ack\",\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without talk_mode",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without playback",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with a talk_mode of no version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"always_on\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting in push_to_talk without ptt ready: the v1 rule stands in that mode",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting in open mode while muted",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":true,\"deafened\":false,\"blocked\":[\"muted\"],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting in open mode while capture is unavailable",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":6,\"phase\":\"connected\",\"capture\":\"unavailable\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[\"no_microphone\"],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "key_device_lost in open mode",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"key_device_lost\"],\"talk_mode\":\"open\",\"ptt\":\"lost\",\"ptt_problem\":\"ended\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ptt lost in push_to_talk without the key_device_lost block",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"lost\",\"ptt_problem\":\"ended\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "open mode while starting: the configuration has not been read",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"open\",\"ptt\":\"unknown\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "playback on while starting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"unknown\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "playback on after stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":17,\"phase\":\"stopped\",\"reason\":\"left\",\"capture\":\"off\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "playback off while connected: the speakers are opened in starting, and absent ones are unavailable",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "playback off while reconnecting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":9,\"phase\":\"reconnecting\",\"reason\":\"connection_lost\",\"retry_in_ms\":0,\"capture\":\"on\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"open\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a playback of no version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"muted\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "not connected but nothing blocks an onset",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":9,\"phase\":\"reconnecting\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "block reasons out of order",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":9,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":true,\"blocked\":[\"muted\",\"deafened\"],\"talk_mode\":\"open\",\"ptt\":\"not_configured\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}

@@ -78,6 +78,7 @@ var Vocabularies = map[string][]string{
 	"VoiceControlCommandKind": values(
 		VoiceControlCommandStart, VoiceControlCommandSetMute, VoiceControlCommandSetDeafen,
 		VoiceControlCommandGetState, VoiceControlCommandLeave,
+		VoiceControlCommandSetDevices, VoiceControlCommandSetTalkMode,
 	),
 	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
 	"VoiceControlErrorCode": values(
@@ -88,6 +89,7 @@ var Vocabularies = map[string][]string{
 	"VoiceControlEventKind": values(
 		VoiceControlEventHello, VoiceControlEventAck, VoiceControlEventState, VoiceControlEventProtocolError,
 	),
+	"VoiceControlPlayback": values(VoiceControlPlaybackOff, VoiceControlPlaybackOn, VoiceControlPlaybackUnavailable),
 	"VoiceControlPhase": values(
 		VoiceControlPhaseStarting, VoiceControlPhaseConnecting, VoiceControlPhaseConnected,
 		VoiceControlPhaseReconnecting, VoiceControlPhaseStopping, VoiceControlPhaseStopped,
@@ -111,6 +113,7 @@ var Vocabularies = map[string][]string{
 		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
 		VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
 	),
+	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(
 		VoiceDevicesConfigOK, VoiceDevicesConfigMissing, VoiceDevicesConfigRefused, VoiceDevicesConfigNone,
 	),

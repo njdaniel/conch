@@ -5,8 +5,13 @@
 // kept off the console. The screen share (issue #444): what the picker is
 // asked for, the simulcast layers and the sound published, how a share's end
 // is told apart, and the watch view's subscription choices. The share's
-// encodings follow what was captured (issue #565). No network, no
-// microphone, no screen.
+// encodings follow what was captured (issue #565). The microphone chosen
+// (issue #658): captured exactly, published as a track the page provides,
+// moved to another device by a restart of that track, and lost when its
+// capture ends or its device is no longer listed. Voice processing (issue
+// #659): all three filters on or off at every capture, a change made by a
+// restart and never on the live capture, and reported as the capture says.
+// No network, no microphone, no screen.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
 import { VoiceClient } from './connection';
@@ -18,11 +23,43 @@ interface Deferred<T> {
   resolve: (value: T) => void;
   reject: (err: unknown) => void;
 }
+// One capture of a device, as the browser gives it: the device it is on, and
+// the clones the tap made of it.
+interface StubMedia {
+  deviceId: string;
+  readyState: string;
+  stopped: number;
+  clones: { enabled: boolean; stopped: number; stop: () => void }[];
+  clone: () => { enabled: boolean; stopped: number; stop: () => void };
+  stop: () => void;
+  // Issue #659: the voice processing the capture says it has.
+  filters: StubFilters;
+  getSettings: () => { deviceId: string } & StubFilters;
+}
+interface StubFilters {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+}
+// The track the adapter publishes: the page's own (user-provided) wrapper of
+// a capture, as LocalAudioTrack is.
 interface StubTrack {
   stopped: number;
-  mediaStreamTrack: { clone: () => { enabled: boolean; stop: () => void } };
+  userProvided: boolean;
+  source: string;
+  constraints: unknown;
+  mediaStreamTrack: StubMedia;
   stop: () => void;
   mute: () => Promise<void>;
+  restartTrack: (options: unknown) => Promise<void>;
+  on: (event: string, fn: () => void) => StubTrack;
+  // The browser ends the capture (the device unplugged).
+  ended: () => void;
+}
+interface StubDevice {
+  kind: string;
+  deviceId: string;
+  label: string;
 }
 interface StubPub {
   source: string;
@@ -38,7 +75,7 @@ interface Stub {
   levelCalls: unknown[][];
   // When set, the next capture, mute of the captured track, or publish waits
   // for the test to settle it.
-  capture: Deferred<StubTrack> | null;
+  capture: Deferred<undefined> | null;
   premute: Deferred<undefined> | null;
   publish: Deferred<StubPub> | null;
   publishFails: boolean;
@@ -77,6 +114,18 @@ interface Stub {
   // Issue #565: the size and frame rate the next picture captured says it
   // has (its track's settings); 1080p at 30 fps unless a test says otherwise.
   captured: { width?: number; height?: number; frameRate?: number };
+  // Issue #658: the captures made, what each restart was asked for, when set
+  // the next restart waits for the test or fails, the devices the browser
+  // lists, what each listing was asked, and the audio contexts made.
+  medias: StubMedia[];
+  restarts: unknown[];
+  restart: Deferred<undefined> | null;
+  restartFails: Error | null;
+  devices: StubDevice[];
+  listed: unknown[][];
+  contexts: { closed: number }[];
+  // Issue #659: the filters the browser keeps on whatever it is asked.
+  keptOn: string[];
 }
 interface StubSettings {
   channelCount?: number;
@@ -134,6 +183,14 @@ const state = vi.hoisted((): Stub => {
     pending: new Map(),
     owners: new Map(),
     captured: { width: 1920, height: 1080, frameRate: 30 },
+    medias: [],
+    restarts: [],
+    restart: null,
+    restartFails: null,
+    devices: [],
+    listed: [],
+    contexts: [],
+    keptOn: [],
   };
 });
 
@@ -176,7 +233,99 @@ vi.mock('livekit-client', () => {
     };
     return track;
   };
+  // A capture of the device a constraint names exactly, or of the default.
+  // It has the voice processing asked for, but for any filter the browser
+  // keeps on (state.keptOn).
+  const media = (options: unknown): StubMedia => {
+    const asked: Record<string, unknown> = typeof options === 'object' && options !== null ? { ...options } : {};
+    const deviceId = asked['deviceId'];
+    const exact = typeof deviceId === 'object' && deviceId !== null && 'exact' in deviceId ? String(deviceId.exact) : 'default';
+    const filters: StubFilters = {};
+    for (const name of ['echoCancellation', 'noiseSuppression', 'autoGainControl'] as const) {
+      const value = asked[name];
+      if (typeof value === 'boolean') filters[name] = value || state.keptOn.includes(name);
+    }
+    const m: StubMedia = {
+      deviceId: exact,
+      filters,
+      readyState: 'live',
+      stopped: 0,
+      clones: [],
+      clone: () => {
+        const c = {
+          enabled: false,
+          stopped: 0,
+          stop: () => {
+            c.stopped++;
+          },
+        };
+        m.clones.push(c);
+        return c;
+      },
+      stop: () => {
+        m.stopped++;
+        m.readyState = 'ended';
+      },
+      getSettings: () => ({ deviceId: m.deviceId, ...m.filters }),
+    };
+    state.medias.push(m);
+    return m;
+  };
+  class LocalAudioTrack implements StubTrack {
+    stopped = 0;
+    userProvided: boolean;
+    source = 'unknown';
+    constraints: unknown;
+    mediaStreamTrack: StubMedia;
+    private readonly ends: (() => void)[] = [];
+    constructor(mediaStreamTrack: StubMedia, constraints: unknown, userProvided = true) {
+      this.mediaStreamTrack = mediaStreamTrack;
+      this.constraints = constraints;
+      this.userProvided = userProvided;
+      state.tracks.push(this);
+    }
+    stop = () => {
+      this.stopped++;
+      this.mediaStreamTrack.stop();
+    };
+    // The captured track's own mute, before it is published.
+    mute = () => {
+      state.calls.push('premute');
+      return state.premute === null ? Promise.resolve() : state.premute.promise;
+    };
+    // As the SDK's: the old capture is stopped before the new one is asked
+    // for, and a failed one leaves none.
+    restartTrack = async (options: unknown) => {
+      state.calls.push('restart');
+      state.restarts.push(options);
+      this.mediaStreamTrack.stop();
+      const held = state.restart;
+      state.restart = null;
+      if (held !== null) await held.promise;
+      if (state.restartFails !== null) throw state.restartFails;
+      this.mediaStreamTrack = media(options);
+    };
+    // The browser's own change of a live capture's filters, which Chromium
+    // ignores (issue #659): never to be called.
+    applyConstraints = () => {
+      state.calls.push('applyConstraints');
+      return Promise.resolve();
+    };
+    on = (event: string, fn: () => void) => {
+      if (event === 'ended') this.ends.push(fn);
+      return this;
+    };
+    ended = () => {
+      this.mediaStreamTrack.readyState = 'ended';
+      for (const fn of this.ends) fn();
+    };
+  }
   class Room {
+    // Read with permission requests as asked: the stub never asks for any.
+    static getLocalDevices(kind: string, requestPermissions: boolean) {
+      state.listed.push([kind, requestPermissions]);
+      return Promise.resolve(state.devices.filter((d) => d.kind === kind));
+    }
     remoteParticipants = state.remote;
     localParticipant = {
       identity: 'p7',
@@ -258,6 +407,12 @@ vi.mock('livekit-client', () => {
       state.calls.push('disconnect');
       return Promise.resolve();
     }
+    // The SDK's own switch, which leaves a muted track on its old device
+    // until the next unmute: never to be called for the microphone.
+    switchActiveDevice(kind: string) {
+      state.calls.push(`switchActiveDevice ${kind}`);
+      return Promise.resolve(true);
+    }
   }
   return {
     Room,
@@ -273,7 +428,9 @@ vi.mock('livekit-client', () => {
       LocalTrackUnpublished: 'ltu',
       TrackUnmuted: 'tum',
       ParticipantPermissionsChanged: 'ppc',
+      MediaDevicesChanged: 'mdc',
     },
+    TrackEvent: { Ended: 'ended' },
     PublishTrackError,
     DisconnectReason: { ROOM_DELETED: 5, PARTICIPANT_REMOVED: 4, DUPLICATE_IDENTITY: 2, SERVER_SHUTDOWN: 3 },
     LogLevel: { warn: 3 },
@@ -293,28 +450,16 @@ vi.mock('livekit-client', () => {
       }
     },
     AudioPresets: { musicHighQuality: { maxBitrate: 96000 }, musicHighQualityStereo: { maxBitrate: 128000 } },
-    LocalAudioTrack: function LocalAudioTrack() {
-      return undefined;
-    },
+    LocalAudioTrack,
+    // The SDK's capture: the browser's track and the constraints it was
+    // captured with, which the adapter wraps as its own.
     createLocalAudioTrack: (options: unknown) => {
       state.captureOptions = options;
       state.calls.push('capture');
-      const track: StubTrack = {
-        stopped: 0,
-        mediaStreamTrack: { clone: () => ({ enabled: false, stop: () => undefined }) },
-        stop: () => {
-          track.stopped++;
-        },
-        // The captured track's own mute, before it is published.
-        mute: () => {
-          state.calls.push('premute');
-          return state.premute === null ? Promise.resolve() : state.premute.promise;
-        },
-      };
-      state.tracks.push(track);
-      if (state.capture === null) return Promise.resolve(track);
+      const captured = () => ({ mediaStreamTrack: media(options), constraints: options });
+      if (state.capture === null) return Promise.resolve(captured());
       const pending = state.capture;
-      return pending.promise.then(() => track);
+      return pending.promise.then(captured);
     },
     getLogger: () => state.logger,
     // The SDK's own setLogLevel persists the level; the adapter must not call it.
@@ -363,11 +508,21 @@ beforeEach(() => {
   state.pending.clear();
   state.owners.clear();
   state.captured = { width: 1920, height: 1080, frameRate: 30 };
+  state.medias.length = 0;
+  state.restarts.length = 0;
+  state.restart = null;
+  state.restartFails = null;
+  state.devices = [];
+  state.listed.length = 0;
+  state.contexts.length = 0;
+  state.keptOn = [];
   vi.stubGlobal(
     'AudioContext',
     class {
+      private readonly made = { closed: 0 };
       constructor() {
         state.audioContexts++;
+        state.contexts.push(this.made);
       }
       createAnalyser() {
         return { fftSize: 0, getByteTimeDomainData: () => undefined };
@@ -379,6 +534,7 @@ beforeEach(() => {
         return Promise.resolve();
       }
       close() {
+        this.made.closed++;
         return Promise.resolve();
       }
     },
@@ -395,6 +551,8 @@ const events = {
   onSpeakers: () => undefined,
   onScreenEnded: () => undefined,
   onShareTracks: () => undefined,
+  onMicrophoneLost: () => undefined,
+  onDevicesChanged: () => undefined,
 };
 
 describe('the SDK adapter', () => {
@@ -471,7 +629,7 @@ describe('the SDK adapter', () => {
     await settle();
     expect(state.calls).toEqual(['connect', 'capture']);
     await room.close();
-    state.capture.resolve(undefined as unknown as StubTrack);
+    state.capture.resolve(undefined);
     expect(await outcome).toBe('rejected');
     expect(state.tracks).toHaveLength(1);
     expect(state.tracks[0]?.stopped).toBeGreaterThan(0);
@@ -546,6 +704,250 @@ describe('watch only', () => {
     // Once is enough.
     await room.publishMicrophone();
     expect(state.calls.filter((c) => c === 'capture')).toHaveLength(1);
+  });
+});
+
+// Issue #658: the microphone chosen. Captured exactly or not at all,
+// published as the page's own track, moved by restarting that track, and lost
+// (stopped, and the client told once) when its capture ends or its device is
+// no longer listed.
+describe('the microphone chosen', () => {
+  const processing = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  const inputs = (...ids: string[]): StubDevice[] => ids.map((id) => ({ kind: 'audioinput', deviceId: id, label: `Microphone ${id}` }));
+
+  async function connected(choice: string | null, told: { lost: number; changed: number } = { lost: 0, changed: 0 }, filters = true) {
+    const room = newLiveKitRoom();
+    room.setMicrophone(choice);
+    room.setProcessing(filters);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, {
+      ...events,
+      onMicrophoneLost: () => {
+        told.lost++;
+      },
+      onDevicesChanged: () => {
+        told.changed++;
+      },
+    });
+    const track = state.tracks[0];
+    if (track === undefined) throw new Error('no microphone captured');
+    return { room, track, told };
+  }
+
+  it('captures a chosen device exactly, as an object, with voice processing on; and the system default as before', async () => {
+    await connected('mic-1');
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-1' }, ...processing });
+    state.tracks.length = 0;
+    await connected(null);
+    expect(state.captureOptions).toEqual(processing);
+  });
+
+  it('publishes the capture as a track the page provides, on the device it was captured from', async () => {
+    const { track } = await connected('mic-1');
+    expect(track.userProvided).toBe(true);
+    expect(track.source).toBe('microphone');
+    expect(track.mediaStreamTrack).toBe(state.medias[0]);
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+  });
+
+  it('lists the microphones with permission requests off, and none when the browser does not name them', async () => {
+    const { room } = await connected(null);
+    state.devices = [...inputs('default', 'mic-1'), { kind: 'audiooutput', deviceId: 'out', label: 'Speakers' }];
+    expect(await room.microphones()).toEqual([
+      { id: 'default', label: 'Microphone default' },
+      { id: 'mic-1', label: 'Microphone mic-1' },
+    ]);
+    expect(state.listed).toEqual([['audioinput', false]]);
+    state.devices = [{ kind: 'audioinput', deviceId: 'mic-1', label: '' }];
+    expect(await room.microphones()).toBeNull();
+    // Reading the list captured nothing.
+    expect(state.calls.filter((c) => c === 'capture')).toHaveLength(1);
+  });
+
+  it('reads the device in use from the capture itself', async () => {
+    const { room, track } = await connected('mic-1');
+    expect(room.microphoneInUse()).toBe('mic-1');
+    track.mediaStreamTrack.deviceId = 'other';
+    expect(room.microphoneInUse()).toBe('other');
+    // Nothing captured, nothing in use.
+    track.stop();
+    expect(room.microphoneInUse()).toBeNull();
+  });
+
+  it("switches by restarting the published track with every field, never by the SDK's switchActiveDevice, and never republishes", async () => {
+    const { room, track } = await connected(null);
+    state.calls.length = 0;
+    await room.switchMicrophone('mic-2');
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-2' }, ...processing }]);
+    expect(room.microphoneInUse()).toBe('mic-2');
+    // Back to the system default: no device named.
+    await room.switchMicrophone(null);
+    expect(state.restarts.at(-1)).toEqual(processing);
+    expect(room.microphoneInUse()).toBe('default');
+    expect(state.calls).toEqual(['restart', 'restart']);
+    expect(state.tracks).toEqual([track]);
+  });
+
+  it('after a switch the tap hears the new device: the old clone is stopped and its audio context closed', async () => {
+    const { room } = await connected('mic-1');
+    const old = state.medias[0];
+    expect(old?.clones).toHaveLength(1);
+    expect(state.contexts).toHaveLength(1);
+    await room.switchMicrophone('mic-2');
+    expect(old?.clones[0]?.stopped).toBe(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    // One tap again, of the new capture.
+    expect(state.contexts).toHaveLength(2);
+    expect(state.contexts[1]?.closed).toBe(0);
+    expect(state.medias[1]?.clones).toHaveLength(1);
+    expect(state.medias[1]?.clones[0]?.enabled).toBe(true);
+  });
+
+  it('a switch that fails leaves nothing captured and says so', async () => {
+    const { room, track } = await connected('mic-1');
+    state.restartFails = new DOMException('gone', 'OverconstrainedError');
+    await expect(room.switchMicrophone('mic-2')).rejects.toThrow('gone');
+    expect(track.stopped).toBeGreaterThan(0);
+    expect(state.medias.every((m) => m.readyState === 'ended')).toBe(true);
+    expect(room.microphoneInUse()).toBeNull();
+    expect(state.contexts.every((c) => c.closed > 0)).toBe(true);
+  });
+
+  it('a close during a switch leaves no capture open', async () => {
+    const { room } = await connected('mic-1');
+    const held = deferred<undefined>();
+    state.restart = held;
+    const switching = room.switchMicrophone('mic-2').then(
+      () => 'switched',
+      () => 'rejected',
+    );
+    await settle();
+    await room.close();
+    held.resolve(undefined);
+    expect(await switching).toBe('rejected');
+    expect(state.medias.map((m) => m.readyState)).toEqual(['ended', 'ended']);
+    // No tap was made of the new capture.
+    expect(state.contexts).toHaveLength(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+  });
+
+  it('switching with nothing published captures and publishes, muted, as a join does', async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.switchMicrophone('mic-2');
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-2' }, ...processing });
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+  });
+
+  it('a capture that ends is lost once: stopped, untapped, and the client told', async () => {
+    const { room, track, told } = await connected('mic-1');
+    track.ended();
+    track.ended();
+    expect(told.lost).toBe(1);
+    expect(track.stopped).toBe(1);
+    expect(state.medias[0]?.clones[0]?.stopped).toBe(1);
+    expect(room.microphoneInUse()).toBeNull();
+    // Nothing captured since.
+    expect(state.calls.filter((c) => c === 'capture' || c === 'restart')).toEqual(['capture']);
+  });
+
+  it('a device change whose list lacks the chosen device is lost once; one that lists it, or a system default, is not', async () => {
+    state.devices = inputs('default', 'mic-1');
+    const listed = await connected('mic-1');
+    state.handlers.get('mdc')?.();
+    await settle();
+    expect(listed.told).toEqual({ lost: 0, changed: 1 });
+    expect(listed.track.stopped).toBe(0);
+    state.devices = inputs('default');
+    state.handlers.get('mdc')?.();
+    await settle();
+    state.handlers.get('mdc')?.();
+    await settle();
+    expect(listed.told).toEqual({ lost: 1, changed: 3 });
+    expect(listed.track.stopped).toBe(1);
+    // Every listing was made with permission requests off.
+    expect(state.listed.every(([, ask]) => ask === false)).toBe(true);
+
+    // The system default follows the computer: nothing chosen is missing.
+    state.tracks.length = 0;
+    state.devices = inputs('default', 'mic-1');
+    const following = await connected(null);
+    state.devices = [];
+    state.handlers.get('mdc')?.();
+    await settle();
+    expect(following.told).toEqual({ lost: 0, changed: 1 });
+    expect(following.track.stopped).toBe(0);
+    expect(state.calls).not.toContain('switchActiveDevice audioinput');
+  });
+
+  it('chosen again after it was lost, the track is restarted on the device', async () => {
+    const { room, track } = await connected('mic-1');
+    track.ended();
+    await room.switchMicrophone('mic-1');
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-1' }, ...processing }]);
+    expect(room.microphoneInUse()).toBe('mic-1');
+  });
+
+  // Issue #659: the browser's voice processing, all on or all off. Voice
+  // isolation, which the SDK asks on at a first capture unless told, is
+  // asked off with the rest.
+  const unprocessed = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, voiceIsolation: false };
+
+  it('captures with the voice processing given: all three on, or all three off', async () => {
+    await connected('mic-1', undefined, false);
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-1' }, ...unprocessed });
+    state.tracks.length = 0;
+    await connected(null, undefined, false);
+    expect(state.captureOptions).toEqual(unprocessed);
+    state.tracks.length = 0;
+    await connected('mic-1', undefined, true);
+    expect(state.captureOptions).toEqual({ deviceId: { exact: 'mic-1' }, ...processing });
+  });
+
+  it('a change restarts the track with the device and all three filters, and never changes the live capture', async () => {
+    const { room, track } = await connected('mic-1');
+    state.calls.length = 0;
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-1' }, ...unprocessed }]);
+    room.setProcessing(true);
+    await room.switchMicrophone('mic-1');
+    expect(state.restarts.at(-1)).toEqual({ deviceId: { exact: 'mic-1' }, ...processing });
+    // System default: the filters are given with no device named.
+    room.setProcessing(false);
+    await room.switchMicrophone(null);
+    expect(state.restarts.at(-1)).toEqual(unprocessed);
+    expect(state.calls).toEqual(['restart', 'restart', 'restart']);
+    expect(state.calls).not.toContain('applyConstraints');
+    // The same track, published once: no republish.
+    expect(state.tracks).toEqual([track]);
+  });
+
+  it('reports the filters as the capture says them, not as they were asked', async () => {
+    const { room, track } = await connected('mic-1');
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    state.keptOn = ['noiseSuppression'];
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: false, noiseSuppression: true, autoGainControl: false });
+    // A browser that does not say is not taken to have done either.
+    track.mediaStreamTrack.filters = {};
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: null, noiseSuppression: null, autoGainControl: null });
+    // Nothing captured, nothing said.
+    track.stop();
+    expect(room.microphoneProcessing()).toBeNull();
+  });
+
+  it('after a change the tap hears the new capture: the old clone is stopped and a new one tapped', async () => {
+    const { room } = await connected('mic-1');
+    const old = state.medias[0];
+    room.setProcessing(false);
+    await room.switchMicrophone('mic-1');
+    expect(old?.clones[0]?.stopped).toBe(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(state.contexts).toHaveLength(2);
+    expect(state.medias[1]?.filters).toEqual({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+    expect(state.medias[1]?.clones).toHaveLength(1);
+    expect(state.medias[1]?.clones[0]?.enabled).toBe(true);
   });
 });
 

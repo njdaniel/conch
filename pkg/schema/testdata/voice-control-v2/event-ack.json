@@ -1,0 +1,7 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "ack",
+  "seq": 3,
+  "id": 1,
+  "ok": true
+}

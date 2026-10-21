@@ -1,0 +1,8 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "ack",
+  "seq": 9,
+  "id": 6,
+  "ok": false,
+  "error": "invalid"
+}

@@ -1,0 +1,324 @@
+{
+  "description": "Commands the helper refuses and goes on after, in v2: set_devices naming neither side, set_devices with a name that breaks the rule, set_talk_mode with a mode that does not exist, a kind of no version (there is still no command that presses, and none that opens the gate), a second start, and set_devices and set_talk_mode after leaving began. A second leave while stopping is ok. Leave then completes with standard input still open.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1",
+          "conch.voice_control.v2"
+        ],
+        "helper_version": "0.2.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "unknown"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "set_devices",
+        "id": 2
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 6,
+        "id": 2,
+        "ok": false,
+        "error": "invalid"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "set_devices",
+        "id": 3,
+        "input": "my \"mic\""
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 7,
+        "id": 3,
+        "ok": false,
+        "error": "invalid"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "set_talk_mode",
+        "id": 4,
+        "talk_mode": "always_on"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 8,
+        "id": 4,
+        "ok": false,
+        "error": "invalid"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "press",
+        "id": 5
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 9,
+        "id": 5,
+        "ok": false,
+        "error": "unknown_kind"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "start",
+        "id": 6,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 10,
+        "id": 6,
+        "ok": false,
+        "error": "already_started"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "leave",
+        "id": 7
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "state",
+        "seq": 11,
+        "phase": "stopping",
+        "reason": "left",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 12,
+        "id": 7,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "set_devices",
+        "id": 8,
+        "input": "default"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 13,
+        "id": 8,
+        "ok": false,
+        "error": "stopping"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "set_talk_mode",
+        "id": 9,
+        "talk_mode": "open"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 14,
+        "id": 9,
+        "ok": false,
+        "error": "stopping"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "leave",
+        "id": 10
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "ack",
+        "seq": 15,
+        "id": 10,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v2",
+        "kind": "state",
+        "seq": 16,
+        "phase": "stopped",
+        "reason": "left",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready"
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}

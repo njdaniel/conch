@@ -1,0 +1,11 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "start",
+  "id": 1,
+  "server": "https://conch.example.org",
+  "channel": "general",
+  "principal_id": 7,
+  "credential": "stored",
+  "muted": false,
+  "deafened": false
+}

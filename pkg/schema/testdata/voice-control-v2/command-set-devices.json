@@ -1,0 +1,7 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "set_devices",
+  "id": 6,
+  "input": "speech_out",
+  "output": "alsa_output.usb-Generic_USB_Audio-00.analog-stereo"
+}

@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "set_talk_mode",
+  "id": 7,
+  "talk_mode": "open"
+}
