@@ -4,9 +4,12 @@
 //! Input: PipeWire's graph, as `dmn-audio` follows it. The microphone is a `MicCapture` and
 //! the speakers a `Playback`, both mono `f32` at 48 kHz. Output: a [`MicSource`] that gives
 //! the captured audio a frame at a time, and a [`SpeakerSink`] that takes the mix a frame at a
-//! time. Owns: the one connection to PipeWire ([`PipeWire`]), the capture stream from the
-//! moment the microphone is opened until it is dropped, and the playback stream from the
-//! moment the speakers are opened until they are.
+//! time, and says whether it is playing ([`Speakers`]). Owns: the one connection to PipeWire
+//! ([`PipeWire`]), the capture stream from the moment the microphone is opened until it is
+//! dropped, and the playback stream from the moment the speakers are opened until they are.
+//! A switch of device inside a session opens a new stream for the new name and drops the
+//! old one, so a name that is absent, or names a device of the other kind, is treated the
+//! same for the first stream and for every later one: never replaced by another device.
 //!
 //! What runs where. PipeWire's callbacks are `dmn-audio`'s: `mic_process` and
 //! `playback_process`, in its `src/mic.rs` and `src/playback.rs`, each documented there call
@@ -41,6 +44,7 @@ use dmn_audio::{
 };
 
 use crate::error::Error;
+use crate::receive::Speakers;
 
 /// How much audio the capture ring holds. It has to outlast a look that is late: the
 /// transmit task looks every [`RING_LOOK`](crate::pace::RING_LOOK), and a stall of the
@@ -185,6 +189,11 @@ pub enum Availability {
 ///   later is not stood in for either: `dmn-audio` reports it `Disconnected`.
 /// - A named speaker that is absent is never replaced by the default one, which needs no
 ///   decision here: playback is `Disconnected` until it returns ([`put_frame`]).
+/// - A microphone switched to inside a session (`docs/design/tui-voice.md` §20.5) is a new
+///   stream, started as the first one was, so the same holds for it. So does a name that is
+///   not a microphone's: `dmn-audio` looks for the name among sources only, so a speaker's
+///   name is a microphone that is absent, and its monitor is never captured. The speakers
+///   likewise look for their name among sinks only.
 #[must_use]
 pub fn availability(state: CaptureState, delivering: bool, stand_in: bool) -> Availability {
     if stand_in {
@@ -260,6 +269,10 @@ pub fn take_frame(ring: &mut impl Samples, usable: bool, frame: &mut Frame) -> M
 /// gate has passed it (`transmit.rs`).
 pub struct PipeWireMic {
     // Declaration order is drop order: the stream closes before its ring goes.
+    #[expect(
+        dead_code,
+        reason = "held so the stream stays open until this is dropped"
+    )]
     capture: MicCapture,
     ring: MicReader,
     status: Arc<MicStatus>,
@@ -326,9 +339,8 @@ impl MicSource for PipeWireMic {
 
 impl std::fmt::Debug for PipeWireMic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PipeWireMic")
-            .field("capturing", &self.capture.target())
-            .finish_non_exhaustive()
+        // The device's name is left out: names are never logged (tui-voice.md §20.7).
+        f.debug_struct("PipeWireMic").finish_non_exhaustive()
     }
 }
 
@@ -445,6 +457,10 @@ pub fn frames_wanted(ring: &impl Room, playing: bool, idle: &mut IdleClock, now:
 /// stream is open from [`PipeWire::speakers`] until it is dropped.
 pub struct PipeWireSpeakers {
     // Declaration order is drop order: the stream closes before its ring goes.
+    #[expect(
+        dead_code,
+        reason = "held so the stream stays open until this is dropped"
+    )]
     playback: Playback,
     ring: PlaybackWriter,
     status: Arc<PlaybackStatus>,
@@ -484,11 +500,18 @@ impl SpeakerSink for PipeWireSpeakers {
     }
 }
 
+/// Playing while the stream is up and playing the ring: not while it is still being set up,
+/// nor while speakers named and absent are waited for, which are never replaced by others.
+impl Speakers for PipeWireSpeakers {
+    fn playing(&self) -> bool {
+        PipeWireSpeakers::playing(self)
+    }
+}
+
 impl std::fmt::Debug for PipeWireSpeakers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PipeWireSpeakers")
-            .field("playing_to", &self.playback.target())
-            .finish_non_exhaustive()
+        // The device's name is left out: names are never logged (tui-voice.md §20.7).
+        f.debug_struct("PipeWireSpeakers").finish_non_exhaustive()
     }
 }
 
