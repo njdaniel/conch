@@ -120,6 +120,101 @@ fn a_configuration_file_with_a_typo_is_refused_by_name() {
     assert!(stderr.contains("unknown key `chanel`"), "{stderr}");
 }
 
+/// `config set` as a process: 0 and nothing printed when it saves; 2 for a key it does not
+/// write or a name it cannot; 1 and one line when the file cannot be saved, which is then
+/// as it was. The login stored beside it is never touched.
+#[test]
+fn config_set_saves_quietly_refuses_in_one_line_and_exits_by_the_rule() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let private = tempfile::tempdir().unwrap();
+    let directory = private.path().join("config").join("conch");
+
+    // No configuration directory: refused, and none is made.
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "default"]));
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "conch-voice: no configuration directory: run `conch login` first\n"
+    );
+    assert!(!directory.exists());
+
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("voice.toml");
+    let credentials = directory.join("credentials.json");
+    let stored = format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}");
+    std::fs::write(&credentials, &stored).unwrap();
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let kept = "# mine\nchannel = \"ops\"\n\n[audio]\ninput = \"old\" # by hand\n";
+    write_voice_toml(&path, kept);
+
+    let (code, stdout, stderr) = run(conch_voice(private.path()).args([
+        "config",
+        "set",
+        "audio.input",
+        "alsa_input.usb-Example_Mic-00.mono-fallback",
+    ]));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.output", "default"]));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    let saved = "# mine\nchannel = \"ops\"\n\n[audio]\noutput = \"default\"\ninput = \"alsa_input.usb-Example_Mic-00.mono-fallback\" # by hand\n";
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+    // A mistake on the command line: exit 2, and the file as it was.
+    for args in [
+        &["config", "set", "server", "http://evil.example"][..],
+        &["config", "set", "channel", "ops"],
+        &["config", "set", "keys.talk", "KEY_F13"],
+        &["config", "set", "keys.device", "/dev/input/event3"],
+        &["config", "set", "audio.input", "with \"quotes\""],
+        &["config", "set", "audio.input", "escape\u{1b}[2J"],
+        &["config", "set", "audio.input", ""],
+        &["config", "set", "audio.input"],
+        &["config"],
+    ] {
+        let (code, stdout, stderr) = run(conch_voice(private.path()).args(args));
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert_eq!(stdout, "", "{args:?}");
+        assert!(!stderr.contains('\u{1b}'), "{args:?}: {stderr}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved, "{args:?}");
+    }
+
+    // A file that cannot be saved: exit 1 with one line, and the file as it was.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+    let (code, stdout, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "other"]));
+    assert_eq!(code, Some(1));
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.starts_with("conch-voice: ") && stderr.ends_with('\n'),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("chmod go-w"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+    write_voice_toml(&path, "audio.input = \"a\"\n");
+    let (code, _, stderr) =
+        run(conch_voice(private.path()).args(["config", "set", "audio.input", "other"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.ends_with(
+            "`[audio]` is written in a form this command does not edit: change it by hand\n"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "audio.input = \"a\"\n"
+    );
+
+    assert_eq!(std::fs::read_to_string(&credentials).unwrap(), stored);
+}
+
 #[test]
 fn conch_config_dir_moves_voice_toml_and_a_relative_one_is_refused_by_name() {
     let private = tempfile::tempdir().unwrap();
@@ -1060,4 +1155,91 @@ fn on_a_terminal_keys_refuses_a_file_and_a_pipe_itself_and_reads_nothing_from_th
         assert_eq!(code, Some(2), "{option}");
         assert_eq!(stdout, "", "{option}");
     }
+}
+
+/// `devices --json` as the process: with no PipeWire server to reach (a socket that is not
+/// there), one line of JSON, the exit code 0 whatever became of `voice.toml`, and no
+/// keyboard text.
+#[test]
+fn devices_json_is_one_line_and_exits_0_for_a_valid_a_refused_and_a_missing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let private = tempfile::tempdir().unwrap();
+    let config = private.path().join("conch");
+    std::fs::create_dir(&config).unwrap();
+    let toml = config.join("voice.toml");
+    let json = |private: &Path, config: &Path| {
+        let mut command = conch_voice(private);
+        command
+            .env("CONCH_CONFIG_DIR", config)
+            .env("XDG_RUNTIME_DIR", private)
+            .env("PIPEWIRE_REMOTE", "conch-voice-test-no-such-socket");
+        let (code, stdout, stderr) = run(command.args(["devices", "--json"]));
+        // libpipewire logs to standard error itself when it cannot load its own
+        // configuration (as on a machine without PipeWire installed, like CI): those
+        // lines are its, not conch-voice's, and are left out of what is checked.
+        let ours: String = stderr
+            .lines()
+            .filter(|line| !line.starts_with('[') || line.get(2..4) != Some("]["))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        (code, stdout, ours)
+    };
+    let document = |stdout: &str| -> serde_json::Value {
+        assert_eq!(stdout.matches('\n').count(), 1, "{stdout:?}");
+        assert!(stdout.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(stdout).unwrap();
+        assert_eq!(value["schema"], "conch.voice_devices.v1");
+        assert_eq!(value["pipewire"], "unavailable", "{stdout}");
+        assert_eq!(value["microphones"], serde_json::json!([]));
+        assert_eq!(value["speakers"], serde_json::json!([]));
+        assert!(!stdout.contains("What granting access means"));
+        assert!(
+            !stdout.contains(private.path().to_str().unwrap()),
+            "{stdout}"
+        );
+        value
+    };
+
+    // No file.
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    assert_eq!(document(&stdout)["config"], "missing");
+
+    // A valid one.
+    write_voice_toml(
+        &toml,
+        "[audio]\ninput = \"speech_out\"\noutput = \"default\"\n",
+    );
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "");
+    let value = document(&stdout);
+    assert_eq!(value["config"], "ok");
+    assert_eq!(value["configured_input"], "speech_out");
+    assert!(value.get("configured_output").is_none(), "{stdout}");
+
+    // A refused one: the document says so and one line says why.
+    std::fs::set_permissions(&toml, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let (code, stdout, stderr) = json(private.path(), &config);
+    assert_eq!(code, Some(0));
+    assert_eq!(document(&stdout)["config"], "refused");
+    assert!(stderr.starts_with("conch-voice: "), "{stderr}");
+    assert_eq!(stderr.matches('\n').count(), 1, "{stderr}");
+
+    // No directory at all.
+    let mut command = conch_voice(private.path());
+    command
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("XDG_RUNTIME_DIR", private.path())
+        .env("PIPEWIRE_REMOTE", "conch-voice-test-no-such-socket");
+    let (code, stdout, _) = run(command.args(["devices", "--json"]));
+    assert_eq!(code, Some(0));
+    assert_eq!(document(&stdout)["config"], "none");
+
+    // A mistake on the command line is still 2, and writes no document.
+    let (code, stdout, _) = run(conch_voice(private.path()).args(["devices", "--json", "x"]));
+    assert_eq!(code, Some(2));
+    assert_eq!(stdout, "");
 }
