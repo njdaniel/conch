@@ -1,0 +1,10 @@
+{
+  "schema": "conch.voice_control.v1",
+  "kind": "hello",
+  "seq": 1,
+  "versions": [
+    "conch.voice_control.v1",
+    "conch.voice_control.v2"
+  ],
+  "helper_version": "0.2.0 (48000 Hz, 10 ms frames)"
+}
