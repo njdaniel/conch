@@ -123,6 +123,27 @@ fn a_rejected_argument_is_shown_without_control_or_bidi_characters() {
 }
 
 #[test]
+fn a_line_break_in_part_of_an_argument_does_not_start_a_line_of_its_own() {
+    // Clap quotes only part of these: the value of `--mic=…`, the key of an unknown
+    // `--key=…`.
+    for args in [
+        &["join", "--mic=x\nfake: line\u{1b}[2J"][..],
+        &["join", "--un\nfake: line=1"][..],
+    ] {
+        let private = tempfile::tempdir().unwrap();
+        let mut command = conch_voice(private.path());
+        let (code, stdout, stderr) = run(command.args(args));
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert_eq!(stdout, "", "{args:?}");
+        assert!(!stderr.contains('\u{1b}'), "{args:?}: {stderr:?}");
+        assert!(
+            !stderr.lines().any(|line| line.starts_with("fake:")),
+            "{args:?}: {stderr:?}"
+        );
+    }
+}
+
+#[test]
 fn without_a_login_it_says_to_sign_in_and_exits_1() {
     let private = tempfile::tempdir().unwrap();
     let (code, stdout, stderr) = run(conch_voice(private.path()).args(["join", "ops"]));

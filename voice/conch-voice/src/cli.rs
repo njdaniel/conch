@@ -29,6 +29,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::error::ContextValue;
 use clap::{Arg, ArgAction, Command};
 use conch_voice_api::{
     Error as ApiError, Secret, ServerAddress, TOKEN_ENV, default_config_dir, resolve_token,
@@ -421,18 +422,36 @@ fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
 /// What clap's usage error says, with every control and bidirectional character of the
 /// arguments it quotes replaced by a space (the rule of `secrets::one_line`). Clap prints a
 /// rejected argument as it was typed, so an escape sequence or a line break in it would
-/// reach the terminal. The arguments that hold such a character are found first and
-/// replaced whole, so a line break inside one cannot start a line of its own; the line
-/// breaks clap itself writes are kept, and everything else reads as clap wrote it.
+/// reach the terminal. The pieces that hold such a character are found first and replaced
+/// whole, so a line break inside one cannot start a line of its own; the line breaks clap
+/// itself writes are kept, and everything else reads as clap wrote it.
+///
+/// The pieces are the arguments and the strings in the error's context. Clap sometimes
+/// quotes only part of an argument (the value of `--mic=…`, or the `--key` of an unknown
+/// `--key=…`), and the context holds exactly what it quotes. Longer pieces go first, so
+/// one that contains another is replaced whole. A piece that is nothing but control
+/// characters is left to the line-by-line pass, so it cannot replace clap's own line breaks.
 #[must_use]
 pub fn usage_error_text(error: &clap::Error, args: &[OsString]) -> String {
-    let mut text = error.render().to_string();
-    for arg in args {
-        let arg = arg.to_string_lossy();
-        let clean = one_line(&arg);
-        if clean != arg {
-            text = text.replace(arg.as_ref(), &clean);
+    let mut pieces: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    for (_, value) in error.context() {
+        match value {
+            ContextValue::String(piece) => pieces.push(piece.clone()),
+            ContextValue::Strings(more) => pieces.extend(more.iter().cloned()),
+            _ => {}
         }
+    }
+    pieces.retain(|piece| {
+        let clean = one_line(piece);
+        clean != *piece && !clean.trim().is_empty()
+    });
+    pieces.sort_by_key(|piece| std::cmp::Reverse(piece.len()));
+    let mut text = error.render().to_string();
+    for piece in &pieces {
+        text = text.replace(piece.as_str(), &one_line(piece));
     }
     text.split('\n')
         .map(one_line)
