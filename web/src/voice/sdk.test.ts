@@ -1591,3 +1591,98 @@ describe('the join token and room name', () => {
     expect(holds(pageText())).toBe(false);
   });
 });
+
+// Issue #669: one capture of the microphone at a time. A switch, or a change
+// of voice processing, made while the first capture is under way waits for
+// it and then moves it; it never captures beside it.
+describe('a switch while the first capture is under way', () => {
+  const processing = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  const unprocessed = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, voiceIsolation: false };
+  const live = () => state.medias.filter((m) => m.readyState === 'live');
+
+  // A connection made without the microphone, whose first capture is then
+  // asked for and held.
+  async function capturing(choice: string | null) {
+    const room = newLiveKitRoom();
+    room.setMicrophone(choice);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    const held = deferred<undefined>();
+    state.capture = held;
+    const publishing = room.publishMicrophone();
+    await settle();
+    expect(state.calls).toEqual(['connect', 'capture']);
+    return { room, held, publishing };
+  }
+
+  it('waits for it, then moves it: one capture live, on the new choice, published once, the earlier one stopped', async () => {
+    const { room, held, publishing } = await capturing('mic-1');
+    const switching = room.switchMicrophone('mic-2');
+    await settle();
+    // Nothing else is captured while the first is under way.
+    expect(state.calls).toEqual(['connect', 'capture']);
+    held.resolve(undefined);
+    await publishing;
+    await switching;
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute', 'restart']);
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-2' }, ...processing }]);
+    expect(state.medias.map((m) => [m.deviceId, m.readyState])).toEqual([
+      ['mic-1', 'ended'],
+      ['mic-2', 'live'],
+    ]);
+    expect(state.tracks).toHaveLength(1);
+    expect(room.microphoneInUse()).toBe('mic-2');
+    // One tap, of the capture that is live.
+    expect(state.contexts.filter((c) => c.closed === 0)).toHaveLength(1);
+    expect(state.medias[1]?.clones).toHaveLength(1);
+  });
+
+  it('a switch and a change of processing both made meanwhile: one move, to the latest of each', async () => {
+    const { room, held, publishing } = await capturing(null);
+    const first = room.switchMicrophone('mic-2');
+    room.setProcessing(false);
+    const second = room.switchMicrophone('mic-2');
+    held.resolve(undefined);
+    await publishing;
+    await first;
+    await second;
+    expect(state.calls.filter((c) => c === 'capture')).toHaveLength(1);
+    expect(state.restarts).toEqual([{ deviceId: { exact: 'mic-2' }, ...unprocessed }]);
+    expect(live()).toHaveLength(1);
+    expect(room.microphoneInUse()).toBe('mic-2');
+    expect(room.microphoneProcessing()).toEqual({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+  });
+
+  it('a second publish joins the one under way', async () => {
+    const { room, held, publishing } = await capturing('mic-1');
+    const again = room.publishMicrophone();
+    held.resolve(undefined);
+    await publishing;
+    await again;
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+    expect(live()).toHaveLength(1);
+  });
+
+  it('a first capture that fails fails the switch waiting for it, and nothing is captured', async () => {
+    const { room, held, publishing } = await capturing('mic-1');
+    const switching = room.switchMicrophone('mic-2');
+    held.reject(new DOMException('gone', 'OverconstrainedError'));
+    await expect(publishing).rejects.toThrow('gone');
+    await expect(switching).rejects.toThrow('gone');
+    expect(state.calls).toEqual(['connect', 'capture']);
+    expect(live()).toHaveLength(0);
+    expect(room.microphoneInUse()).toBeNull();
+  });
+
+  it('a close while both wait leaves no capture open', async () => {
+    const { room, held, publishing } = await capturing('mic-1');
+    const switching = room.switchMicrophone('mic-2');
+    await room.close();
+    held.resolve(undefined);
+    await expect(publishing).rejects.toThrow();
+    await expect(switching).rejects.toThrow();
+    expect(state.calls).not.toContain('restart');
+    expect(state.calls).not.toContain('publish');
+    expect(live()).toHaveLength(0);
+    expect(state.contexts).toHaveLength(0);
+  });
+});

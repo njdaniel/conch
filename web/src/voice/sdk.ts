@@ -400,6 +400,12 @@ class LiveKitAdapter implements Room {
   private lost = false;
   // Whether the browser's voice processing is asked for (issue #659).
   private processing = true;
+  // The first capture and publish of the microphone while it is under way,
+  // and the switches asked for: one capture at a time (issue #669). A second
+  // publish joins the one under way, and a switch waits for it and then
+  // moves it, the last switch alone.
+  private publishing: Promise<void> | null = null;
+  private switches = 0;
   private deafened = false;
   private readonly elements = new Map<string, HTMLMediaElement>();
   private readonly buffer = new Uint8Array(1024);
@@ -514,7 +520,18 @@ class LiveKitAdapter implements Room {
 
   async publishMicrophone(): Promise<void> {
     this.ensureOpen();
-    if (this.track !== null) return;
+    // One under way is joined, to its end: its track is set before it is
+    // published.
+    if (this.publishing === null) {
+      if (this.track !== null) return;
+      this.publishing = this.capturePublish().finally(() => {
+        this.publishing = null;
+      });
+    }
+    await this.publishing;
+  }
+
+  private async capturePublish(): Promise<void> {
     const room = this.room;
     const track = await captureMicrophone(this.choice, this.processing);
     // From here the microphone is open: any failure, or a close that came
@@ -556,9 +573,21 @@ class LiveKitAdapter implements Room {
   // microphone was missing when this connection was made) it is captured and
   // published as at a join. A capture that fails leaves nothing captured: the
   // SDK stops the old capture before it asks for the new one.
+  //
+  // A switch while the first capture is under way waits for it, and fails
+  // with it, rather than capture beside it: a second capture would never be
+  // published and would keep its device open until Leave (issue #669). Only
+  // the last switch waiting moves the capture, to the choice as it is then.
   async switchMicrophone(choice: string | null): Promise<void> {
     this.ensureOpen();
     this.choice = choice;
+    const turn = ++this.switches;
+    const publishing = this.publishing;
+    if (publishing !== null) {
+      await publishing;
+      this.ensureOpen();
+      if (turn !== this.switches) return;
+    }
     const track = this.track;
     if (track === null) {
       await this.publishMicrophone();
