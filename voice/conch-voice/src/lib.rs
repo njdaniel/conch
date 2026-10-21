@@ -9,18 +9,21 @@
 //! session that may publish is joined ([`audio`]); the configured keyboard's event device, for the talk, mute and deafen keys and
 //! nothing else ([`keydev`]); and standard input, one command per line, `down`, `up`,
 //! `mute`, `deafen`, `quit`, where the end of input counts as `up`, and then as `quit`
-//! unless a key device is watched.
+//! unless a key device is watched. With `talk_mode = "open"` the microphone's own sound
+//! opens the transmit gate instead of the talk key, and `down`, `up` and the talk key do
+//! nothing.
 //!
 //! Output: on standard output, plain lines or, with `--json`, one JSON object per line
 //! ([`output`] documents the fields; a reader must skip any line that does not begin with
 //! `{`, because libwebrtc prints one of its own on a machine with an NVIDIA GPU). On
 //! standard error, log records and the one line that says why the client stopped. To
-//! `conchd`, a transmit report for each press and release. To LiveKit, a microphone track
+//! `conchd`, a transmit report for each press and release, or in open mode for each
+//! opening and its end. To LiveKit, a microphone track
 //! that carries audio only while the transmit gate is open. To the output PipeWire has, or
 //! the one `audio.output` names, the mix of what the channel's speakers say ([`audio`]). No join token, room name or
 //! login token is in anything this program writes, and nothing it does waits for what it
-//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device changed and
-//! nothing else ([`config_cmd`]): the one file this program writes.
+//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device, or the
+//! talk mode, changed and nothing else ([`config_cmd`]): the one file this program writes.
 //!
 //! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
 //! input is also its owner's commands on standard input, and the end of that input; its
@@ -33,8 +36,10 @@
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
 //! ([`presence`]); the connection to PipeWire and the microphone and speaker streams
 //! opened through it ([`audio`]), the microphone's from the moment a session first allows
-//! publishing until the session ends, the speakers' for the whole session. It keeps no
-//! file, and writes one only for `config set`: `voice.toml`. It keeps no token to use again: a join token goes to
+//! publishing until the session ends, the speakers' for the whole session. A switch of
+//! either to another device inside the session closes the old stream and opens one for the
+//! new device, and never falls back to a third. It keeps no file, and writes one only for
+//! `config set`: `voice.toml`. It keeps no token to use again: a join token goes to
 //! the SDK for the one join it was issued for, and the only copies held here are the
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
@@ -111,21 +116,16 @@ use crate::session::{
 };
 use crate::transmit::BoxedMic;
 
-/// What opens the microphone `--mic` chose. Nothing is opened until this is called, which
-/// is when a session first allows publishing: a client that may only listen never captures.
-/// `pipewire` is the connection, if the choice needs one, and `configured` the name
-/// `audio.input` gave.
-pub(crate) fn mic_opener(
-    choice: MicChoice,
-    pipewire: Option<PipeWire>,
-    configured: Option<String>,
-) -> OpenMic {
-    Box::new(move || {
+/// What opens the microphone `--mic` chose, by the name it is given (`audio.input` first,
+/// then whatever a switch names; `None` for PipeWire's default). Nothing is opened until this
+/// is called, which is first when a session first allows publishing: a client that may only
+/// listen never captures. `pipewire` is the connection, if the choice needs one. The test
+/// choices, a tone, a WAV file or none, take no name and open the same each time.
+pub(crate) fn mic_opener(choice: MicChoice, pipewire: Option<PipeWire>) -> OpenMic {
+    Box::new(move |name| {
         Ok(match &choice {
             MicChoice::PipeWire => match &pipewire {
-                Some(pipewire) => {
-                    Some(Box::new(pipewire.microphone(configured.as_deref())?) as BoxedMic)
-                }
+                Some(pipewire) => Some(Box::new(pipewire.microphone(name)?) as BoxedMic),
                 None => None,
             },
             MicChoice::None => None,
@@ -137,18 +137,14 @@ pub(crate) fn mic_opener(
     })
 }
 
-/// What opens the speakers `--sink` chose, when the session starts.
-pub(crate) fn sink_opener(
-    choice: SinkChoice,
-    pipewire: Option<PipeWire>,
-    configured: Option<String>,
-) -> OpenSink {
-    Box::new(move || {
+/// What opens the speakers `--sink` chose, by the name it is given (`audio.output` when the
+/// session starts, then whatever a switch names; `None` for PipeWire's default). The
+/// counting sink takes no name.
+pub(crate) fn sink_opener(choice: SinkChoice, pipewire: Option<PipeWire>) -> OpenSink {
+    Box::new(move |name| {
         Ok(match (&choice, &pipewire) {
             (SinkChoice::Count(tones), _) => Box::new(CountingSink::new(tones)?) as BoxedSink,
-            (SinkChoice::PipeWire, Some(pipewire)) => {
-                Box::new(pipewire.speakers(configured.as_deref())?)
-            }
+            (SinkChoice::PipeWire, Some(pipewire)) => Box::new(pipewire.speakers(name)?),
             // Not reached: `join` connects whenever either choice is PipeWire.
             (SinkChoice::PipeWire, None) => Box::new(CountingSink::new(&[])?),
         })
@@ -225,22 +221,22 @@ pub fn join(
     };
     let settings = Settings {
         channel: resolved.channel,
-        open_mic: mic_opener(
-            args.mic.clone(),
-            pipewire.clone(),
-            resolved.config.audio.input.clone(),
-        ),
-        open_sink: sink_opener(
-            args.sink.clone(),
-            pipewire,
-            resolved.config.audio.output.clone(),
-        ),
+        open_mic: mic_opener(args.mic.clone(), pipewire.clone()),
+        open_sink: sink_opener(args.sink.clone(), pipewire),
+        input: resolved.config.audio.input.clone(),
+        output: resolved.config.audio.output.clone(),
         sink_tones: match &args.sink {
             SinkChoice::Count(tones) => tones.clone(),
             SinkChoice::PipeWire => Vec::new(),
         },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
+        // `join` honours the configured mode; `down` and `up` then do nothing in open mode.
+        talk_mode: resolved.config.audio.talk_mode,
+        level: transmit::level_config(
+            resolved.config.audio.open_threshold_db,
+            resolved.config.audio.open_hang_ms,
+        ),
         key_device: key_device
             .as_ref()
             .map(|(device, _)| device.display().to_string()),
@@ -403,8 +399,8 @@ pub fn devices_with(
     keyboards(out).map_err(Error::Output)
 }
 
-/// `conch-voice config set <key> <value>`: saves the microphone or the speakers in
-/// `voice.toml`, and changes nothing else in it ([`config_cmd`]). Prints nothing.
+/// `conch-voice config set <key> <value>`: saves the microphone, the speakers or the talk
+/// mode in `voice.toml`, and changes nothing else in it ([`config_cmd`]). Prints nothing.
 ///
 /// # Errors
 ///

@@ -37,6 +37,9 @@
 //!     gate, and its transmission is over at once.
 //!   - A release mutes when the gate says it has shut, release tail included, and only then
 //!     does the machine produce `stopped`.
+//!   - A forced shut mutes at once, without waiting for the gate; a frame the gate let
+//!     through just before it is handed over before the mute or not at all
+//!     (`transmit::TrackLock`).
 //!
 //!   So the track is unmuted for the whole of a transmission's audio and for nothing else.
 //! - **No other wait for a report.** Reports are queued, in the order the machine produced
@@ -56,12 +59,30 @@
 //!   limit, past which the attempt has failed and the policy decides what follows.
 //! - **An error's text is scrubbed where it is put into a status line.** `conchd`'s words,
 //!   or a proxy's, are shown as the `detail` of a refused session or a failed report.
+//! - **A switch of device falls back to nothing** (`docs/design/tui-voice.md` §20.5,
+//!   [`Input::SwitchDevices`]). A microphone switched during a transmission ends it at once,
+//!   by the path every reason takes (the machine is told there is no microphone, the gate is
+//!   forced shut and the track muted at once), so no frame of either microphone follows the
+//!   switch, and a fresh press, or in open mode quiet and a fresh onset, is needed after it.
+//!   The old stream is closed before the new one is handed over, and the new one counts as
+//!   a microphone only once it has given a frame, so that one that is not there is
+//!   unavailable from the switch on. Speakers are replaced in the mix and the gate is not
+//!   touched. A device that cannot be opened, or is not there, is unavailable until it is:
+//!   nothing else is opened, captured or played in its place. Only exactly `default` is
+//!   PipeWire's default; a name `dmn-audio` would read as another (white space around it,
+//!   or nothing but white space, which it takes for the default) opens nothing at all
+//!   (`switched_name`). Neither an opener's error nor a name is logged.
+//! - **A change of talk mode shuts the gate at once** (§20.6): the machine is told the mode
+//!   ([`PttInput::TalkMode`]), cuts what was being sent with no release tail, and the track
+//!   is muted at once (`mute_track`), as for a reason.
 //!
 //! The same loop runs a managed helper (`managed.rs`, [`serve`]). It is then given an
 //! [`Owner`] to tell, and its owner's commands as inputs: once each step of the loop has
 //! been applied in full the owner is sent a snapshot if anything it shows changed; a
 //! command's ack follows the snapshot its effect changed; and leaving, the owner going and
-//! a signal all shut the gate at once, with no release tail, before anything is said.
+//! a signal all shut the gate at once, with no release tail, before anything is said. In
+//! `conch.voice_control.v2` the owner's `set_devices` is the switch above and its
+//! `set_talk_mode` the change of mode, and a snapshot says `playback` and `talk_mode` too.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -72,11 +93,12 @@ use std::time::Duration;
 
 use conch_voice_api::{
     Client, Error as ApiError, Secret, ServerAddress, VoiceControlErrorCode, VoiceControlPhase,
-    VoiceControlReason, VoiceTransmitState,
+    VoiceControlPlayback, VoiceControlReason, VoiceTransmitState,
 };
+use conch_voice_audio::LevelConfig;
 use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
-    PttOutput, ShutReason, TransmitReport,
+    PttOutput, ShutReason, TalkMode, TransmitReport,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -89,24 +111,140 @@ use crate::managed::{
 };
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
 use crate::presence::{self, PresenceTimings, Roster};
-use crate::receive::{self, BoxedSink, MixCommand, MixStats};
+use crate::receive::{self, BoxedSink, MixCommand, MixStats, Playing};
 use crate::reports::{Answer, MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
 use crate::secrets::Scrubber;
 use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
 
-/// Opens the microphone source. Called at most once, and only when a session's grant allows
-/// publishing: a client that may only listen never opens a microphone. `Ok(None)` means
-/// there is none to open.
-pub type OpenMic = Box<dyn FnMut() -> Result<Option<BoxedMic>, Error> + Send>;
+/// Opens the microphone source with this name, a PipeWire `node.name`, or PipeWire's default
+/// for `None`. Called first when a session's grant first allows publishing, and then once
+/// for each switch to another microphone: a client that may only listen never opens a
+/// microphone. `Ok(None)` means there is none to open.
+pub type OpenMic = Box<dyn FnMut(Option<&str>) -> Result<Option<BoxedMic>, Error> + Send>;
 
-/// Opens the speakers. Called once, when the session starts: the client hears the channel
-/// from the moment it is joined.
-pub type OpenSink = Box<dyn FnOnce() -> Result<BoxedSink, Error> + Send>;
+/// Opens the speakers with this name, or PipeWire's default for `None`. Called first when
+/// the session starts, so that the client hears the channel from the moment it is joined,
+/// and then once for each switch to other speakers.
+pub type OpenSink = Box<dyn FnMut(Option<&str>) -> Result<BoxedSink, Error> + Send>;
+
+/// How a device is named for PipeWire's default, in the configuration and in a switch.
+const DEFAULT_DEVICE: &str = "default";
+
+/// What a managed helper says of a microphone that could not be opened. No name, and none
+/// of the opener's words, which may hold one.
+const MICROPHONE_NOT_OPENED: &str = "the microphone named could not be opened";
+
+/// What is logged of speakers a switch named that could not be opened, or that cannot be
+/// opened by their name. No name, and none of the opener's words.
+pub const SPEAKERS_NOT_OPENED: &str = "the speakers named could not be opened: nothing is heard until other speakers are chosen, and no others are used in their place";
+
+/// A name from the configuration (`audio.input`, `audio.output`) as the openers take it:
+/// `None` for PipeWire's default, which no name, or exactly `default`, asks for; any other
+/// name as it is written, as before switches existed.
+pub(crate) fn configured_name(name: Option<&str>) -> Option<String> {
+    name.filter(|name| *name != DEFAULT_DEVICE)
+        .map(str::to_owned)
+}
+
+/// A name from a switch (an owner's `set_devices`) as the openers take it: `Some(None)` for
+/// exactly `default`, `Some(Some(name))` for any other name that is opened as it is written,
+/// and `None` for a name that cannot be: `dmn-audio` takes the white space off around a name
+/// and reads an empty one as the default, so a name with white space around it, or nothing
+/// but white space, would open another device than the one named, the default among them.
+/// Nothing is opened for one (`docs/design/tui-voice.md` §20.5: no fallback).
+pub(crate) fn switched_name(name: &str) -> Option<Option<String>> {
+    if name == DEFAULT_DEVICE {
+        Some(None)
+    } else if name.is_empty() || name.trim() != name {
+        None
+    } else {
+        Some(Some(name.to_owned()))
+    }
+}
+
+/// A microphone or speakers, as the session targets them.
+#[derive(Clone, PartialEq, Eq)]
+enum Device {
+    /// PipeWire's default.
+    Default,
+    /// The device of this `node.name`, as it is written.
+    Named(String),
+    /// A name from a switch that cannot be opened as it is written ([`switched_name`]):
+    /// nothing is opened, and the side is unavailable. Kept, so that the same name again
+    /// changes nothing.
+    Unusable(String),
+}
+
+impl Device {
+    /// A device the configuration names: as before switches existed.
+    fn configured(name: Option<&str>) -> Self {
+        match configured_name(name) {
+            None => Device::Default,
+            Some(name) => Device::Named(name),
+        }
+    }
+
+    /// A device a switch names.
+    fn switched(name: &str) -> Self {
+        match switched_name(name) {
+            Some(None) => Device::Default,
+            Some(Some(name)) => Device::Named(name),
+            None => Device::Unusable(name.to_owned()),
+        }
+    }
+
+    /// The name the openers are given: `Some(None)` for the default, and `None` when
+    /// nothing is to be opened.
+    fn opened_as(&self) -> Option<Option<&str>> {
+        match self {
+            Device::Default => Some(None),
+            Device::Named(name) => Some(Some(name)),
+            Device::Unusable(_) => None,
+        }
+    }
+}
+
+/// The microphone and the speakers to use from now on (`docs/design/tui-voice.md` §20.5),
+/// as a managed owner's `set_devices` asks. A side that is `None` is left alone; a name is
+/// a PipeWire `node.name`, or `default` for PipeWire's default.
+///
+/// `Debug` shows which sides are there and no name: the helper names no device in what it
+/// writes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceSwitch {
+    /// The microphone.
+    pub input: Option<String>,
+    /// The speakers.
+    pub output: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let side = |name: &Option<String>| name.as_ref().map(|_| "..");
+        f.debug_struct("DeviceSwitch")
+            .field("input", &side(&self.input))
+            .field("output", &side(&self.output))
+            .finish()
+    }
+}
+
+/// Where the speakers are, as a managed owner is told it in `playback`
+/// (`docs/design/tui-voice.md` §20.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Playback {
+    /// Their stream is open with a device, and playing.
+    On,
+    /// The speakers named are not there, went away, or could not be opened. Nothing else
+    /// plays in their place; they play once they are there.
+    Unavailable,
+    /// No stream is open: the session has closed the speakers.
+    Off,
+}
 
 /// Something from outside the loop: a line on standard input, its end, a signal, or what
 /// the key device's watcher (`keydev.rs`) saw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     /// One of the five commands.
     Line(LineCommand),
@@ -127,6 +265,10 @@ pub enum Input {
     /// A managed helper's owner is gone: its control pipe ended, or it is no longer the
     /// helper's parent (`managed.rs`).
     OwnerLost,
+    /// Use this microphone and these speakers from now on, as a managed owner's
+    /// `set_devices` does (which reaches the loop as a [`Control`]). Nothing on standard
+    /// input or the key device sends it.
+    SwitchDevices(DeviceSwitch),
 }
 
 /// Every wait and limit of the loop. The defaults are the design's; tests shorten them.
@@ -208,12 +350,23 @@ pub struct Settings {
     pub open_mic: OpenMic,
     /// How the speakers are opened.
     pub open_sink: OpenSink,
+    /// `audio.input`: the microphone to open, a `node.name`; `None` or `default` for
+    /// PipeWire's default.
+    pub input: Option<String>,
+    /// `audio.output`: the speakers to open, as `input` is named.
+    pub output: Option<String>,
     /// The tones the mix is measured for in the reports.
     pub sink_tones: Vec<f32>,
     /// `audio.release_tail_ms`.
     pub release_tail_ms: u32,
     /// `audio.max_transmit_secs`.
     pub max_transmit: Duration,
+    /// What opens the gate: `audio.talk_mode` for `join`. A managed helper speaking
+    /// `conch.voice_control.v1` is given push-to-talk whatever the file says; one speaking
+    /// v2, the file's mode, or the one its owner set while it was starting.
+    pub talk_mode: TalkMode,
+    /// `audio.open_threshold_db` and `audio.open_hang_ms`, for the level detector.
+    pub level: LevelConfig,
     /// The key device being watched, as it is named when its state is shown. `None` when
     /// presses come from standard input only.
     pub key_device: Option<String>,
@@ -232,6 +385,10 @@ pub const MAX_TRACKS: usize = 64;
 /// more for the moment in which a track is replaced. Without it one participant who
 /// publishes many tracks would use up [`MAX_TRACKS`] and nobody else would be heard.
 pub const MAX_TRACKS_PER_SPEAKER: usize = 2;
+
+/// What `join` says once when it starts in open mode: echo cancellation does not work yet
+/// (#186, #566), so on speakers the open microphone sends the others' voices back to them.
+pub const OPEN_MIC_WARNING: &str = "open microphone: what the microphone hears is sent when it is loud enough; use headphones (no echo cancellation yet)";
 
 /// How long a session request or the opening of the presence socket may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -583,7 +740,12 @@ struct Session<T: Transport> {
     channel: String,
     timings: Timings,
     release_tail: Duration,
-    open_mic: Option<OpenMic>,
+    open_mic: OpenMic,
+    open_sink: OpenSink,
+    /// The microphone in use, or to open when a session first allows publishing.
+    input: Device,
+    /// The speakers in use.
+    output: Device,
     client: Client,
     transport: Arc<T>,
     scrubber: Arc<Scrubber>,
@@ -619,6 +781,8 @@ struct Session<T: Transport> {
     talk_key: bool,
     /// The microphone, for the owner's `capture`.
     mic: Mic,
+    /// The speakers, for the owner's `playback`.
+    playback: Playback,
 }
 
 /// Where the microphone is, as a managed helper's owner is told it.
@@ -649,6 +813,12 @@ pub async fn join<T: Transport>(
     inputs: mpsc::UnboundedReceiver<Input>,
     out: Output,
 ) -> Result<(), Error> {
+    let mut out = out;
+    // Said once, first: with speakers, what the others say is sent back to them. With
+    // `--json` no object carries it, and it goes to the log instead.
+    if settings.talk_mode == TalkMode::Open && !out.note(OPEN_MIC_WARNING) {
+        log::warn!("{OPEN_MIC_WARNING}");
+    }
     let mut session = Session::new(settings, conchd, transport, scrubber, inputs, out)?;
     session.run().await;
     session.leave().await
@@ -687,6 +857,7 @@ pub async fn serve<T: Transport>(
         deafened,
         key_state,
         talk_key,
+        switch,
     } = handoff;
     session.owner = Some(owner);
     session.key_state = key_state;
@@ -706,6 +877,10 @@ pub async fn serve<T: Transport>(
         }
         Some(DeviceState::Missing(_)) | None => {}
     }
+    // The devices the owner named while starting, as a switch: the microphone is not open
+    // yet, so its name is kept for when it is; speakers other than those opened are opened
+    // in their place.
+    session.switch_devices(switch);
     // The first attempt now, so that the first state the owner is told is the connecting
     // one, with the key device already tried.
     session.on_progress(Progress::Ask);
@@ -728,28 +903,50 @@ impl<T: Transport> Session<T> {
         let Settings {
             channel,
             open_mic,
-            open_sink,
+            mut open_sink,
+            input,
+            output,
             sink_tones,
             release_tail_ms,
             max_transmit,
+            talk_mode,
+            level,
             key_device,
             unreachable_note,
             timings,
         } = settings;
-        let transmitter = transmit::spawn(transmit::gate_config(release_tail_ms, max_transmit))?;
-        let receiver = receive::spawn(&sink_tones, open_sink()?)?;
+        let transmitter = transmit::spawn_with_level(
+            transmit::gate_config(release_tail_ms, max_transmit),
+            level,
+        )?;
+        let output = Device::configured(output.as_deref());
+        let speakers = match output.opened_as() {
+            Some(name) => open_sink(name)?,
+            None => Box::new(receive::NoSpeakers),
+        };
+        let playback = if speakers.playing() {
+            Playback::On
+        } else {
+            Playback::Unavailable
+        };
+        let receiver = receive::spawn(&sink_tones, speakers)?;
         let reports = Reports::spawn(
             conchd.report_client,
             channel.clone(),
             timings.reports.clone(),
         );
         let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
-        let (ptt, first) = Ptt::new(max_transmit);
+        let (ptt, first) = Ptt::with_talk_mode(max_transmit, talk_mode);
+        let mut out = out;
+        out.set_talk_mode(talk_mode);
         let mut session = Session {
             channel,
             release_tail: Duration::from_millis(u64::from(release_tail_ms)),
             timings,
-            open_mic: Some(open_mic),
+            open_mic,
+            open_sink,
+            input: Device::configured(input.as_deref()),
+            output,
             client: conchd.client,
             transport: Arc::new(transport),
             scrubber,
@@ -776,6 +973,7 @@ impl<T: Transport> Session<T> {
             key_state: None,
             talk_key: true,
             mic: Mic::NotOpened,
+            playback,
         };
         // The machine's first words: the gate is told why it is shut, and the first status.
         session.obey(first);
@@ -820,6 +1018,7 @@ impl<T: Transport> Session<T> {
                 Some(roster) = self.rosters.recv() => self.out.show(&Event::Presence(&roster)),
                 Some(report) = self.reports.events.recv() => self.on_report(&report),
                 Some(received) = self.receiver.stats.recv() => self.on_stats(received),
+                Some(said) = self.receiver.playing.recv() => self.on_playing(said),
                 // Asked for whether connected or not, so that each answer covers one
                 // interval; it is shown only while connected.
                 _ = stats.tick(), if self.out.is_json() => {
@@ -851,18 +1050,25 @@ impl<T: Transport> Session<T> {
                     });
                 }
                 PttOutput::Gate(command) => {
-                    let ends = matches!(command, GateCommand::Shut | GateCommand::ForceShut(_));
+                    // What shuts the gate at once, with no release tail: a reason, and a
+                    // change of talk mode.
+                    let at_once = matches!(
+                        command,
+                        GateCommand::ForceShut(_) | GateCommand::TalkMode(_)
+                    );
+                    let ends = at_once || command == GateCommand::Shut;
                     let waited = ends && self.opening.take().is_some();
                     never_opened |= waited;
                     // The gate never opened for a press that waited, so a release has
-                    // nothing to shut; a reason is passed on all the same, so that the gate
-                    // holds the same reasons as the machine.
+                    // nothing to shut; a reason, or the mode, is passed on all the same, so
+                    // that the gate holds the same reasons as the machine and runs the
+                    // level detector in the mode the machine is in.
                     if !(waited && command == GateCommand::Shut) {
-                        let _ = self.transmitter.commands.send(TxCommand::Gate(command));
+                        self.transmitter.send(TxCommand::Gate(command));
                     }
-                    if matches!(command, GateCommand::ForceShut(_)) {
-                        // A forced shut has no release tail: nothing is left to send.
-                        self.with_track(MicTrack::mute);
+                    if at_once {
+                        // Nothing is left to send.
+                        self.mute_track();
                     }
                 }
                 PttOutput::Report(TransmitReport::Started) => match self.opening.as_mut() {
@@ -918,10 +1124,8 @@ impl<T: Transport> Session<T> {
                 if self.opening.take().is_some() {
                     // Before the gate opens, so that no frame meets a muted track.
                     self.with_track(MicTrack::unmute);
-                    let _ = self
-                        .transmitter
-                        .commands
-                        .send(TxCommand::Gate(GateCommand::Open));
+                    self.transmitter.track_lock.reopen();
+                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
                 }
                 return;
             }
@@ -943,6 +1147,13 @@ impl<T: Transport> Session<T> {
         if let Some(track) = self.live.as_ref().and_then(|live| live.track.as_ref()) {
             act(track);
         }
+    }
+
+    /// Mutes the track once no frame can follow the mute into it: a frame the transmit
+    /// task is handing over is let finish, and none is handed over after (`TrackLock`).
+    fn mute_track(&self) {
+        self.transmitter.track_lock.close();
+        self.with_track(MicTrack::mute);
     }
 
     fn show(&mut self, connection: Connection) {
@@ -1024,8 +1235,12 @@ impl<T: Transport> Session<T> {
         } = established;
         self.tell(PttInput::PublishGrant(can_publish));
         let track = mic.map(|(track, feed)| {
-            self.open_microphone();
-            let _ = self.transmitter.commands.send(TxCommand::Attach(feed));
+            // The first time a session allows publishing, and never again: a microphone
+            // opened once stays open across reconnections, and is replaced only by a switch.
+            if self.mic == Mic::NotOpened {
+                self.open_microphone();
+            }
+            self.transmitter.send(TxCommand::Attach(feed));
             track
         });
         self.policy.connected(self.now());
@@ -1045,21 +1260,43 @@ impl<T: Transport> Session<T> {
         self.tell(PttInput::Connected(true));
     }
 
-    /// Opens the microphone, the first time a session allows publishing and never again.
+    /// Opens the microphone `input` names and hands it to the transmit task. One that cannot
+    /// be opened, or that there is none of, leaves the session with no microphone: nothing
+    /// else is opened in its place.
     fn open_microphone(&mut self) {
-        let Some(mut open) = self.open_mic.take() else {
+        self.open_microphone_as(true);
+    }
+
+    /// As [`Session::open_microphone`]. When `present` is false the microphone opened is
+    /// not yet taken to be there: the machine is told so by the transmit task's word on
+    /// its first frame, or on its having none (a switch, §20.5).
+    fn open_microphone_as(&mut self, present: bool) {
+        let Some(name) = self.input.opened_as() else {
+            // A name nothing is opened for: no microphone, and none other in its place.
+            self.mic = Mic::Unavailable;
             return;
         };
-        match open() {
-            Ok(Some(mic)) => {
-                let _ = self.transmitter.commands.send(TxCommand::Microphone(mic));
+        match (self.open_mic)(name) {
+            Ok(Some(mic)) if present => {
+                self.transmitter.send(TxCommand::Microphone(mic));
                 self.mic = Mic::Open;
                 self.tell(PttInput::Microphone(true));
+            }
+            Ok(Some(mic)) => {
+                self.transmitter.send(TxCommand::SwitchedMicrophone(mic));
+                self.mic = Mic::Open;
             }
             Ok(None) => self.mic = Mic::Unavailable,
             Err(error) => {
                 self.mic = Mic::Unavailable;
-                let detail = self.shown_text(&error);
+                // A managed helper names no device in anything it writes (§20.7), and an
+                // opener's error may hold the name: it is told in words of this program's
+                // own. `join` shows its own person why their microphone did not open.
+                let detail = if self.owner.is_some() {
+                    MICROPHONE_NOT_OPENED.to_owned()
+                } else {
+                    self.shown_text(&error)
+                };
                 self.out.show(&Event::Microphone { detail });
             }
         }
@@ -1124,10 +1361,8 @@ impl<T: Transport> Session<T> {
                 // Before anything else: the SDK has just enabled the track again, muted or
                 // not. Muting tells LiveKit about the new publication; disabling is what
                 // stops a track that was muted already.
-                self.with_track(|track| {
-                    track.mute();
-                    track.disable();
-                });
+                self.mute_track();
+                self.with_track(MicTrack::disable);
                 // The SDK republishes inside its own reconnect, when the gate is already
                 // forced shut. Should it ever do so at another time, a press in progress
                 // would go on against a track that sends nothing while the status says
@@ -1248,7 +1483,7 @@ impl<T: Transport> Session<T> {
                 subscribed: false,
             });
         }
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
+        self.transmitter.send(TxCommand::Detach);
         let _ = self.receiver.commands.send(MixCommand::Clear);
         let limit = self.timings.close_limit;
         self.phase = Phase::Closing(
@@ -1263,7 +1498,7 @@ impl<T: Transport> Session<T> {
         match event {
             TxEvent::GateShut { limit_reached } => {
                 // A release mutes: the gate has shut, release tail included.
-                self.with_track(MicTrack::mute);
+                self.mute_track();
                 if limit_reached && let Some(deadline) = self.ptt.deadline() {
                     // The gate has forwarded as much audio as one press may transmit. Its
                     // clock is the audio itself, and it runs a few milliseconds ahead of
@@ -1275,7 +1510,22 @@ impl<T: Transport> Session<T> {
                 }
                 self.tell(PttInput::GateShut);
             }
-            TxEvent::Microphone(present) => self.tell(PttInput::Microphone(present)),
+            // About the microphone in use, if it is: one about a microphone a switch closed,
+            // still on its way, is about nothing the gate can send from.
+            TxEvent::Microphone { present, changes } => {
+                if self.transmitter.is_current_microphone(changes) {
+                    self.tell(PttInput::Microphone(present));
+                }
+            }
+            // Open mode: the level detector's word, for the machine to decide on, if it was
+            // made after the detector's last restart. One made before it (quiet, or an onset,
+            // on its way when a reason ended) is stale: passed on, quiet and an onset would
+            // open the gate on the reason's ending itself.
+            TxEvent::Sound { sounding, restarts } => {
+                if self.transmitter.is_current(restarts) {
+                    self.tell(PttInput::Sound(sounding));
+                }
+            }
         }
     }
 
@@ -1309,6 +1559,7 @@ impl<T: Transport> Session<T> {
                 self.exit.get_or_insert(Ok(()));
             }
             Some(Input::Control(control)) => self.on_control(control),
+            Some(Input::SwitchDevices(switch)) => self.switch_devices(switch),
             Some(Input::OwnerLost) => self.begin_stopping(VoiceControlReason::OwnerLost),
             // A managed helper's inputs end only with its owner.
             Some(Input::Eof) | None if self.owner.is_some() => {
@@ -1337,6 +1588,27 @@ impl<T: Transport> Session<T> {
             }
             Control::Leave { id } => {
                 self.begin_stopping(VoiceControlReason::Left);
+                self.settle(false);
+                self.ack(id, None);
+            }
+            Control::SetDevices { id, switch } => {
+                if self.stopping() {
+                    self.ack(id, Some(VoiceControlErrorCode::Stopping));
+                    return;
+                }
+                self.switch_devices(switch);
+                self.settle(false);
+                self.ack(id, None);
+            }
+            Control::SetTalkMode { id, talk_mode } => {
+                if self.stopping() {
+                    self.ack(id, Some(VoiceControlErrorCode::Stopping));
+                    return;
+                }
+                // The machine's own input: the same mode again changes nothing; another one
+                // cuts what was being sent at once and mutes the track (`obey`), and only a
+                // fresh press, or a fresh onset, sends after it.
+                self.tell(PttInput::TalkMode(talk_mode));
                 self.settle(false);
                 self.ack(id, None);
             }
@@ -1375,6 +1647,101 @@ impl<T: Transport> Session<T> {
         self.ack(id, None);
     }
 
+    /// Uses this microphone and these speakers from now on (`docs/design/tui-voice.md`
+    /// §20.5). A side left out, or naming the device in use, is left alone. Nothing here
+    /// falls back to another device: one that cannot be opened, or is not there, is
+    /// unavailable until it is there. Once the session is on its way out, nothing is opened.
+    fn switch_devices(&mut self, switch: DeviceSwitch) {
+        if self.stopping() || self.exit.is_some() {
+            return;
+        }
+        if let Some(input) = switch.input {
+            self.switch_microphone(Device::switched(&input));
+        }
+        if let Some(output) = switch.output {
+            self.switch_speakers(Device::switched(&output));
+        }
+    }
+
+    /// Closes the microphone and opens `name` in its place; before the microphone is first
+    /// opened, only keeps the name for when it is.
+    fn switch_microphone(&mut self, name: Device) {
+        if name == self.input {
+            return;
+        }
+        self.input = name;
+        match self.mic {
+            // Listen-only, or not yet connected: what is opened when publishing is first
+            // allowed is the new name. Or closed as the session ends: nothing is opened.
+            Mic::NotOpened | Mic::Closed => return,
+            Mic::Open | Mic::Unavailable => {}
+        }
+        // What was being sent ends here, with no release tail, by the path every reason
+        // takes: the machine forces the gate shut and the track is muted at once
+        // (`mute_track`), so no frame of either microphone reaches the track after this.
+        // Its `stopped` follows the gate's word, after the mute. Once the new microphone is
+        // there the reason ends, and a held key must be pressed again, or in open mode the
+        // detector, started sounding, must hear quiet and a fresh onset: the switch itself
+        // opens nothing.
+        self.tell(PttInput::Microphone(false));
+        // The transmit task takes its commands in order: the old stream is closed before
+        // the new one is handed to it. The new one is no microphone to the machine until
+        // the task has had a frame of it (`TxEvent::Microphone`): one that is not there is
+        // unavailable from now, in the state written before the switch is answered, and one
+        // that is there is a moment later.
+        self.transmitter.send(TxCommand::CloseMicrophone);
+        self.mic = Mic::Unavailable;
+        self.open_microphone_as(false);
+    }
+
+    /// Opens the speakers `name` names and plays the mix to them from now on; the old ones
+    /// are closed. The gate is not touched.
+    fn switch_speakers(&mut self, name: Device) {
+        if name == self.output {
+            return;
+        }
+        self.output = name;
+        let opened = match self.output.opened_as() {
+            Some(name) => (self.open_sink)(name).ok(),
+            None => None,
+        };
+        let speakers = opened.unwrap_or_else(|| {
+            // The opener's error is not repeated: it may hold the name, and no name is
+            // logged (§20.7).
+            log::warn!("{SPEAKERS_NOT_OPENED}");
+            Box::new(receive::NoSpeakers)
+        });
+        let playback = if speakers.playing() {
+            Playback::On
+        } else {
+            Playback::Unavailable
+        };
+        self.receiver.replace_speakers(speakers);
+        self.set_playback(playback);
+    }
+
+    /// The mix task's word on whether the speakers are playing, if it is about those in use.
+    fn on_playing(&mut self, said: Playing) {
+        if self.receiver.is_current(said) {
+            self.set_playback(if said.playing {
+                Playback::On
+            } else {
+                Playback::Unavailable
+            });
+        }
+    }
+
+    fn set_playback(&mut self, now: Playback) {
+        let was = std::mem::replace(&mut self.playback, now);
+        match (was, now) {
+            (Playback::On, Playback::Unavailable) => {
+                log::info!("the speakers are not playing: nothing is heard until they are back");
+            }
+            (Playback::Unavailable, Playback::On) => log::info!("the speakers are playing"),
+            _ => {}
+        }
+    }
+
     /// Whether a managed helper is on its way out: leaving, failing, or closing a
     /// connection that ended for a reason the policy stops on.
     fn stopping(&self) -> bool {
@@ -1403,7 +1770,7 @@ impl<T: Transport> Session<T> {
     /// which forces the gate shut with no release tail, and the track is muted.
     fn shut_now(&mut self) {
         self.tell(PttInput::Connected(false));
-        self.with_track(MicTrack::mute);
+        self.mute_track();
     }
 
     fn ack(&mut self, id: i64, refusal: Option<VoiceControlErrorCode>) {
@@ -1455,7 +1822,13 @@ impl<T: Transport> Session<T> {
                 talk: self.talk_key,
             },
         };
+        let playback = match self.playback {
+            Playback::On => VoiceControlPlayback::On,
+            Playback::Unavailable => VoiceControlPlayback::Unavailable,
+            Playback::Off => VoiceControlPlayback::Off,
+        };
         Snapshot::new(phase, reason, retry_in, capture, status, key)
+            .with_playback_and_mode(playback, self.ptt.talk_mode())
     }
 
     /// The phase a managed owner is shown, with its reason and how long until `conchd` is
@@ -1557,11 +1930,11 @@ impl<T: Transport> Session<T> {
         let shut = TxCommand::Gate(GateCommand::ForceShut(
             conch_voice_control::ShutReason::NotConnected,
         ));
-        let _ = self.transmitter.commands.send(shut);
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
+        self.transmitter.send(shut);
+        self.transmitter.send(TxCommand::Detach);
         // Leaving closes the microphone's stream: nothing is captured when not joined.
-        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
-        self.with_track(MicTrack::mute);
+        self.transmitter.send(TxCommand::CloseMicrophone);
+        self.mute_track();
 
         let live = self.live.take();
         let close_limit = self.timings.close_limit;
@@ -1619,14 +1992,15 @@ impl<T: Transport> Session<T> {
         // Nothing more is sent, captured or played. The gate was shut when stopping began;
         // this makes sure of it whatever else happened, and closes what is open.
         let shut = TxCommand::Gate(GateCommand::ForceShut(ShutReason::NotConnected));
-        let _ = self.transmitter.commands.send(shut);
-        let _ = self.transmitter.commands.send(TxCommand::Detach);
-        let _ = self.transmitter.commands.send(TxCommand::CloseMicrophone);
+        self.transmitter.send(shut);
+        self.transmitter.send(TxCommand::Detach);
+        self.transmitter.send(TxCommand::CloseMicrophone);
         self.mic = Mic::Closed;
-        self.with_track(MicTrack::mute);
+        self.mute_track();
         // The mix task ends when its commands do, and the speakers close with it.
         let (none, _) = mpsc::unbounded_channel();
         drop(std::mem::replace(&mut self.receiver.commands, none));
+        self.set_playback(Playback::Off);
 
         // A press that was open is over: the machine produces its `stopped` once the gate
         // says it has shut, which after a forced shut it says at once.
@@ -1755,7 +2129,10 @@ fn answer_while_stopping(
         return;
     };
     match control {
-        Control::SetMute { id, .. } | Control::SetDeafen { id, .. } => {
+        Control::SetMute { id, .. }
+        | Control::SetDeafen { id, .. }
+        | Control::SetDevices { id, .. }
+        | Control::SetTalkMode { id, .. } => {
             owner.ack(id, Some(VoiceControlErrorCode::Stopping));
         }
         Control::GetState { id } => {
@@ -1772,5 +2149,223 @@ fn answer_while_stopping(
             *ending = Ending::failed(VoiceControlReason::ProtocolError);
             *result = Err(Error::Managed(PROTOCOL_ERROR));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    use conch_voice_audio::{CountingSink, Frame, GatedFrame, SpeakerSink};
+
+    use super::*;
+    use crate::receive::Speakers;
+    use crate::sdk::{Joined, MicFeed};
+
+    /// A LiveKit that is never reached: the tests here drive the loop's steps by hand.
+    struct Nowhere;
+
+    impl Transport for Nowhere {
+        type Room = NoRoom;
+
+        async fn connect(&self, _url: &str, _token: &Secret) -> Result<Joined<NoRoom>, SdkError> {
+            std::future::pending().await
+        }
+    }
+
+    struct NoRoom;
+
+    impl RoomHandle for NoRoom {
+        type Track = NoTrack;
+        type Feed = NoFeed;
+
+        async fn publish_microphone(&self) -> Result<(NoTrack, NoFeed), SdkError> {
+            std::future::pending().await
+        }
+
+        async fn close(self) {}
+    }
+
+    struct NoTrack;
+
+    impl MicTrack for NoTrack {
+        fn mute(&self) {}
+        fn unmute(&self) {}
+        fn disable(&self) {}
+    }
+
+    struct NoFeed;
+
+    impl MicFeed for NoFeed {
+        async fn send(&mut self, _frame: GatedFrame<'_>) {}
+    }
+
+    /// Speakers whose playing the test decides.
+    struct Plugged(Arc<AtomicBool>);
+
+    impl SpeakerSink for Plugged {
+        fn play(&mut self, _frame: &Frame) {}
+    }
+
+    impl Speakers for Plugged {
+        fn playing(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A session as `join` makes it, with speakers opened by `open_sink`, not yet running.
+    fn session(open_sink: OpenSink) -> Session<Nowhere> {
+        let server = ServerAddress::parse("http://127.0.0.1:9").unwrap();
+        let conchd = Conchd::new(
+            &server,
+            &Secret::new("FAKE-login-token-do-not-print"),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let settings = Settings {
+            channel: "ops".to_owned(),
+            open_mic: Box::new(|_| Ok(None)),
+            open_sink,
+            input: None,
+            output: Some("default".to_owned()),
+            sink_tones: Vec::new(),
+            release_tail_ms: 0,
+            max_transmit: Duration::from_secs(120),
+            talk_mode: TalkMode::PushToTalk,
+            level: transmit::level_config(-40, 400),
+            key_device: None,
+            unreachable_note: None,
+            timings: Timings::default(),
+        };
+        let (_inputs, received) = mpsc::unbounded_channel();
+        let out = Output::new(false, Box::new(std::io::sink()));
+        Session::new(settings, conchd, Nowhere, Scrubber::new(), received, out).unwrap()
+    }
+
+    fn switch_speakers(session: &mut Session<Nowhere>, name: &str) {
+        session.on_input(Some(Input::SwitchDevices(DeviceSwitch {
+            input: None,
+            output: Some(name.to_owned()),
+        })));
+    }
+
+    /// Takes the mix task's words until the session shows `wanted`.
+    async fn until_playback(session: &mut Session<Nowhere>, wanted: Playback) {
+        while session.playback != wanted {
+            let said =
+                tokio::time::timeout(Duration::from_secs(10), session.receiver.playing.recv())
+                    .await
+                    .expect("a word on the speakers")
+                    .expect("the mix task is running");
+            session.on_playing(said);
+        }
+    }
+
+    /// Issue #655: the session says whether the speakers are playing (`playback`, #656).
+    /// Speakers that are not there are unavailable until they appear; speakers that cannot
+    /// be opened are unavailable, and nothing else is opened in their place; the same name
+    /// again changes nothing; `default` is PipeWire's default.
+    #[tokio::test]
+    async fn the_speakers_are_on_or_unavailable_and_nothing_else_is_opened_in_their_place() {
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let absent = Arc::new(AtomicBool::new(false));
+        let open_sink: OpenSink = Box::new({
+            let (names, absent) = (Arc::clone(&names), Arc::clone(&absent));
+            move |name: Option<&str>| {
+                names.lock().unwrap().push(name.map(str::to_owned));
+                match name {
+                    None => Ok(Box::new(CountingSink::new(&[])?) as BoxedSink),
+                    Some("headset") => Ok(Box::new(Plugged(Arc::clone(&absent))) as BoxedSink),
+                    Some(_) => Err(Error::PipeWire {
+                        doing: "open the speakers",
+                        detail: "FAKE: the stream could not be made".to_owned(),
+                    }),
+                }
+            }
+        });
+        let mut session = session(open_sink);
+        assert_eq!(session.playback, Playback::On);
+        assert_eq!(*names.lock().unwrap(), [None], "`default` is the default");
+
+        // Named, and not there: unavailable at once, and until they appear.
+        switch_speakers(&mut session, "headset");
+        assert_eq!(session.playback, Playback::Unavailable);
+        absent.store(true, Ordering::SeqCst);
+        until_playback(&mut session, Playback::On).await;
+        // Unplugged again.
+        absent.store(false, Ordering::SeqCst);
+        until_playback(&mut session, Playback::Unavailable).await;
+
+        // Speakers that cannot be opened: unavailable, and no others are opened.
+        switch_speakers(&mut session, "broken");
+        assert_eq!(session.playback, Playback::Unavailable);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        while let Ok(said) = session.receiver.playing.try_recv() {
+            session.on_playing(said);
+        }
+        assert_eq!(session.playback, Playback::Unavailable);
+        // The same name again changes nothing.
+        switch_speakers(&mut session, "broken");
+        let opened = |names: &Mutex<Vec<Option<String>>>| names.lock().unwrap().clone();
+        let want = [None, Some("headset".to_owned()), Some("broken".to_owned())];
+        assert_eq!(opened(&names), want);
+
+        // Back to the default.
+        switch_speakers(&mut session, "default");
+        assert_eq!(session.playback, Playback::On);
+        assert_eq!(opened(&names).last(), Some(&None));
+    }
+
+    /// Only the exact `default` is the default. A name from a switch that `dmn-audio` would
+    /// read as another (white space around it, or nothing else) opens nothing; one from the
+    /// configuration is passed on as written, as it was before switches existed.
+    #[test]
+    fn only_default_is_the_default_and_a_padded_switched_name_opens_nothing() {
+        for (name, switched) in [
+            ("default", Some(None)),
+            ("speech_out", Some(Some("speech_out"))),
+            (
+                "alsa_input.usb-Mic_x-00.mono",
+                Some(Some("alsa_input.usb-Mic_x-00.mono")),
+            ),
+            ("Default", Some(Some("Default"))),
+            ("", None),
+            (" ", None),
+            ("   ", None),
+            (" default", None),
+            ("default ", None),
+            ("  default  ", None),
+            (" speech_out", None),
+            ("speech_out ", None),
+        ] {
+            assert_eq!(
+                switched_name(name),
+                switched.map(|named: Option<&str>| named.map(str::to_owned)),
+                "{name:?}"
+            );
+        }
+        assert_eq!(configured_name(None), None);
+        assert_eq!(configured_name(Some("default")), None);
+        assert_eq!(configured_name(Some(" mic ")), Some(" mic ".to_owned()));
+        assert_eq!(configured_name(Some("mic")), Some("mic".to_owned()));
+        assert!(Device::switched(" ").opened_as().is_none());
+        assert_eq!(Device::switched("default").opened_as(), Some(None));
+        assert!(Device::switched(" ") != Device::switched("  "));
+        assert!(Device::switched(" ") == Device::switched(" "));
+    }
+
+    #[test]
+    fn a_switch_shows_which_sides_it_has_and_never_a_name() {
+        let switch = DeviceSwitch {
+            input: Some("alsa_input.FAKE-usb-mic".to_owned()),
+            output: None,
+        };
+        let shown = format!("{:?}", Input::SwitchDevices(switch));
+        assert_eq!(
+            shown,
+            "SwitchDevices(DeviceSwitch { input: Some(\"..\"), output: None })"
+        );
     }
 }

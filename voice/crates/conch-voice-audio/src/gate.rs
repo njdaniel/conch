@@ -52,6 +52,9 @@ pub enum ShutReason {
     Released,
     /// A forcing condition.
     Forced(ForceShut),
+    /// A cut ([`TransmitGate::cut`]): shut at once, with no release tail and nothing left
+    /// standing.
+    Cut,
 }
 
 /// The gate's two settings.
@@ -205,8 +208,9 @@ enum State {
 /// - It starts shut and opens only on an [`open`](Self::open) command, and only when no
 ///   forcing condition is set. Clearing a condition never opens it: after any shut, forced or
 ///   not, the next thing that opens it is a new open command.
-/// - A forced shut is immediate, with no release tail. A shut command is followed by exactly
-///   the release tail and no more, however many times the command is repeated.
+/// - A forced shut, and a cut, is immediate, with no release tail. A shut command is
+///   followed by exactly the release tail and no more, however many times the command is
+///   repeated.
 /// - Every transmission is reported once as opened ([`OpenOutcome::Opened`]) and once as shut
 ///   (a [`GateShut`]), in that order.
 /// - Its time is the frames it is offered, 10 ms each; it reads no clock.
@@ -305,6 +309,19 @@ impl TransmitGate {
         self.forced |= why.bit();
         match self.state {
             State::Open | State::Tail { .. } => Some(self.close(ShutReason::Forced(why))),
+            State::Shut(_) => None,
+        }
+    }
+
+    /// Shuts the gate now, as a forced shut does, with no release tail, and sets no
+    /// condition: the next open command opens it again. For a transmission that is over
+    /// although nothing stands in its way: the talk mode changed, or the microphone stopped
+    /// delivering during the release tail, which is counted in frames and so would never
+    /// run out. If the gate was open, or in its release tail, this returns the report.
+    #[must_use = "if the gate was open this is the report that the transmission ended"]
+    pub fn cut(&mut self) -> Option<GateShut> {
+        match self.state {
+            State::Open | State::Tail { .. } => Some(self.close(ShutReason::Cut)),
             State::Shut(_) => None,
         }
     }
@@ -709,6 +726,49 @@ mod tests {
             }
         );
         assert_eq!(samples_forwarded(&mut gate, 100), 0);
+    }
+
+    /// A cut shuts as a forced shut does, open or in the tail, and leaves nothing standing:
+    /// the next open command opens the gate, and nothing else does.
+    #[test]
+    fn a_cut_shuts_at_once_with_no_tail_and_leaves_nothing_standing() {
+        for in_tail in [false, true] {
+            let what = if in_tail {
+                "in the release tail"
+            } else {
+                "open"
+            };
+            let mut gate = gate(100, None);
+            assert_eq!(gate.open(), OpenOutcome::Opened);
+            if in_tail {
+                assert!(gate.shut().is_none());
+            }
+            assert_eq!(samples_forwarded(&mut gate, 4), 4 * FRAME_LEN, "{what}");
+            assert_eq!(
+                gate.cut(),
+                Some(GateShut {
+                    reason: ShutReason::Cut,
+                    at_frame: 4,
+                    forwarded_frames: 4,
+                }),
+                "{what}"
+            );
+            assert_eq!(gate.status(), GateStatus::Shut(ShutReason::Cut), "{what}");
+            assert_eq!(gate.blocked_by(), None, "{what}");
+            assert_eq!(samples_forwarded(&mut gate, 100), 0, "{what}");
+            // A cut gate is cut again for nothing, and reports nothing.
+            assert_eq!(gate.cut(), None, "{what}");
+            assert!(gate.shut().is_none(), "{what}");
+            assert_eq!(gate.open(), OpenOutcome::Opened, "{what}");
+            assert_eq!(samples_forwarded(&mut gate, 2), 2 * FRAME_LEN, "{what}");
+        }
+        // On a gate that was never opened, or is forced shut, it changes nothing.
+        let mut gate = gate(100, None);
+        assert_eq!(gate.cut(), None);
+        assert!(gate.force_shut(ForceShut::Muted).is_none());
+        assert_eq!(gate.cut(), None);
+        assert_eq!(gate.blocked_by(), Some(ForceShut::Muted));
+        assert_eq!(gate.open(), OpenOutcome::Refused(ForceShut::Muted));
     }
 
     #[test]

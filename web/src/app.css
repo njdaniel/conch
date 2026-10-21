@@ -1491,10 +1491,61 @@ label {
   gap: var(--s1) var(--s3);
 }
 
+/* The voice processing switch (issue #659): a row of its own under the
+   modes, with what the capture says beneath it. */
+.voice-processing {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+}
+
 .threshold {
   display: grid;
   gap: var(--s1);
   font-size: var(--small);
+}
+
+/* The choice of microphone (issue #658): a row of its own, the list as wide
+   as its longest name allows and never wider than the strip. */
+.voice-device {
+  flex-basis: 100%;
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.voice-device select {
+  min-width: 0;
+}
+
+/* The volume of each person (issue #661): a row of its own, one line per
+   person with their name, the slider and its value, the slider taking what
+   is left of a narrow strip. */
+.voice-volumes {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+}
+
+.voice-volume {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) minmax(4rem, 14rem) 3rem;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--small);
+}
+
+.voice-volume label {
+  overflow-wrap: anywhere;
+}
+
+.voice-volume input {
+  width: 100%;
+  min-width: 0;
+}
+
+.voice-volume-value {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Screen share (issue #444): the watch view, on the stage above the

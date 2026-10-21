@@ -31,6 +31,7 @@ class StubRoom implements Room {
   };
   setSending = (): Promise<void> => Promise.resolve();
   setDeafened = (): void => undefined;
+  setVolume = (): void => undefined;
   level = (): number => 0;
   close = (): Promise<void> => Promise.resolve();
   publishMicrophone = (): Promise<void> => {
@@ -54,6 +55,14 @@ class StubRoom implements Room {
   stopScreen = (): Promise<void> => Promise.resolve();
   keepScreen = (): KeptScreen | null => ({ audio: true, live: () => true, onEnded: null, stop: () => undefined });
   adoptScreen = (): void => undefined;
+  setMicrophone = (): void => undefined;
+  switchMicrophone = (): Promise<void> => Promise.resolve();
+  microphones = (): Promise<null> => Promise.resolve(null);
+  microphoneInUse = (): null => null;
+  setProcessing = (): void => undefined;
+  microphoneProcessing = (): null => null;
+  switchOutput = (): Promise<void> => Promise.resolve();
+  outputs = (): Promise<never[]> => Promise.resolve([]);
 }
 
 const session: VoiceSessionResult = {

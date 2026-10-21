@@ -1,8 +1,10 @@
-//! `conch-voice config set`: saves the microphone or the speakers in `voice.toml`, keeping
-//! the rest of the file as it was written (`docs/design/conch-voice.md` §8).
+//! `conch-voice config set`: saves the microphone, the speakers or the talk mode in
+//! `voice.toml`, keeping the rest of the file as it was written (`docs/design/conch-voice.md`
+//! §8).
 //!
-//! Input: the key, `audio.input` or `audio.output`; a device name the command line has
-//! already checked; and the configuration directory, by the rule `join` uses. Output:
+//! Input: the key, `audio.input`, `audio.output` or `audio.talk_mode`; a device name, or a
+//! talk mode, the command line has already checked; and the configuration directory, by the
+//! rule `join` uses. Output:
 //! `voice.toml` with that one value changed, or an error and the file as it was. Nothing
 //! on standard output.
 //! Owns: `voice.toml`, for as long as the save takes, and the temporary file beside it.
@@ -57,7 +59,8 @@ const TEMPORARY_NAMES: u32 = 16;
 
 /// Sets `key` to `value` in `voice.toml` in the configuration directory `environment`
 /// names, and changes nothing else. `value` must be one the command line accepts (a
-/// device name fit for the file, or `default`): `set_audio_value` refuses any other.
+/// device name fit for the file, or `default`; for the talk mode, `push_to_talk` or
+/// `open`): `set_audio_value` refuses any other.
 ///
 /// # Errors
 ///
@@ -269,6 +272,8 @@ mod tests {
     use std::ffi::OsString;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    use conch_voice_control::TalkMode;
 
     use super::*;
 
@@ -620,5 +625,47 @@ mod tests {
         std::os::unix::fs::symlink("/dev/null", &path).unwrap();
         let error = save_now(&dir, AudioKey::Input, "x").unwrap_err();
         assert!(!error.to_string().contains('\n'), "{error}");
+    }
+
+    /// `config set audio.talk_mode open`, as the TUI saves the toggle: the file keeps its
+    /// comments, its mode and every other key, and `join` and `managed` read the mode back.
+    #[test]
+    fn the_talk_mode_is_saved_keeping_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        write(&path, KEPT, 0o640);
+        save_now(dir.path(), AudioKey::TalkMode, "open").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            KEPT.replace("[audio]\n", "[audio]\ntalk_mode = \"open\"\n")
+        );
+        assert_eq!(mode(&path), 0o640);
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+        let config = crate::cli::read_config(&path).unwrap();
+        assert_eq!(config.audio.talk_mode, TalkMode::Open);
+        assert_eq!(config.audio.input.as_deref(), Some("alsa_input.old"));
+        assert_eq!(config.audio.release_tail_ms, 150);
+
+        // And back, changing the value alone.
+        save_now(dir.path(), AudioKey::TalkMode, "push_to_talk").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            KEPT.replace("[audio]\n", "[audio]\ntalk_mode = \"push_to_talk\"\n")
+        );
+
+        // A mode that does not exist is refused, and the file is as it was.
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(save_now(dir.path(), AudioKey::TalkMode, "always").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+
+        // A missing file is created with only the table and the key.
+        let empty = tempfile::tempdir().unwrap();
+        save_now(empty.path(), AudioKey::TalkMode, "open").unwrap();
+        assert_eq!(
+            fs::read_to_string(empty.path().join(FILE_NAME)).unwrap(),
+            "[audio]\ntalk_mode = \"open\"\n"
+        );
+        assert_eq!(mode(&empty.path().join(FILE_NAME)), NEW_FILE_MODE);
     }
 }

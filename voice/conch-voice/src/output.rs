@@ -43,7 +43,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use conch_voice_api::VoiceTransmitState;
-use conch_voice_control::{PttStatus, ShutReason};
+use conch_voice_control::{PttStatus, ShutReason, TalkMode};
 use serde_json::{Value, json};
 
 use crate::keydev::DeviceState;
@@ -139,6 +139,41 @@ pub struct Stats {
     pub reports_dropped: u64,
     /// What was received and mixed.
     pub received: MixStats,
+}
+
+/// What the open microphone says when the user's own state is shown. Push-to-talk mode
+/// keeps its own words, in [`Event::plain`].
+pub(crate) const OPEN_IDLE: &str = "open microphone";
+/// What the open microphone says while it sends: loud on purpose, since nobody is holding a
+/// key that would remind them.
+pub(crate) const OPEN_TALKING: &str = "TALKING";
+
+/// A reason in words, in `mode`. In open mode the transmit limit ends with quiet, not with
+/// a release of the key.
+#[must_use]
+pub fn reason_words(reason: ShutReason, mode: TalkMode) -> String {
+    match (reason, mode) {
+        (ShutReason::MaxTransmit, TalkMode::Open) => {
+            "transmit limit reached: it opens again after quiet".to_owned()
+        }
+        _ => reason.to_string(),
+    }
+}
+
+/// The user's own state in open mode, after `you: `.
+fn own_words(status: PttStatus, mode: TalkMode) -> String {
+    if status.transmitting {
+        return OPEN_TALKING.to_owned();
+    }
+    if status.blocked.is_empty() {
+        return OPEN_IDLE.to_owned();
+    }
+    let reasons: Vec<String> = status
+        .blocked
+        .iter()
+        .map(|reason| reason_words(reason, mode))
+        .collect();
+    reasons.join("; ")
 }
 
 /// The name a reason has in `--json`.
@@ -305,9 +340,21 @@ impl Event<'_> {
         }
     }
 
-    /// The event as a plain line, or `None` for an event that is only for `--json`.
+    /// The event as a plain line, or `None` for an event that is only for `--json`, as
+    /// push-to-talk mode words it.
     #[must_use]
     pub fn plain(&self) -> Option<String> {
+        self.plain_in(TalkMode::PushToTalk)
+    }
+
+    /// The event as a plain line in `mode`. Only the user's own state reads differently in
+    /// open mode: "open microphone" when nothing stands in the way, "TALKING" while the
+    /// microphone's own sound is being sent, and the transmit limit as what ends it there.
+    #[must_use]
+    pub fn plain_in(&self, mode: TalkMode) -> Option<String> {
+        if let (Event::Own(status), TalkMode::Open) = (self, mode) {
+            return Some(format!("you: {}", own_words(*status, mode)));
+        }
         Some(match self {
             Event::Connection(connection) => match connection {
                 Connection::Connecting => "connecting".to_owned(),
@@ -435,6 +482,8 @@ pub struct Output {
     out: Sink,
     /// The status that is redrawn in place, when the output is a terminal.
     screen: Option<Screen>,
+    /// The talk mode, for the words of the user's own state. `--json` does not change.
+    talk_mode: TalkMode,
 }
 
 impl fmt::Debug for Output {
@@ -454,6 +503,7 @@ impl Output {
             json,
             out: Sink::Direct(out),
             screen: None,
+            talk_mode: TalkMode::PushToTalk,
         }
     }
 
@@ -467,6 +517,7 @@ impl Output {
             json: false,
             out: Sink::Direct(out),
             screen: Some(screen),
+            talk_mode: TalkMode::PushToTalk,
         }
     }
 
@@ -480,6 +531,7 @@ impl Output {
             json,
             out: Sink::Queued(LineQueue::spawn(out, QUEUE_LINES, Box::new(marker))),
             screen: None,
+            talk_mode: TalkMode::PushToTalk,
         }
     }
 
@@ -518,6 +570,42 @@ impl Output {
         self.json
     }
 
+    /// The talk mode in force, for the words of the user's own state, in plain lines and on
+    /// a terminal. What `--json` writes does not change with it.
+    pub fn set_talk_mode(&mut self, mode: TalkMode) {
+        self.talk_mode = mode;
+        if let Some(screen) = &mut self.screen {
+            screen.set_talk_mode(mode);
+        }
+    }
+
+    /// Says `text` once, in words: a plain line, or on a terminal the status's last line.
+    /// With `--json` nothing is written, since no object carries it, and this returns false
+    /// for the caller to say it elsewhere.
+    pub fn note(&mut self, text: &str) -> bool {
+        if let Some(screen) = &mut self.screen {
+            if let Some(drawn) = screen.note(text)
+                && let Sink::Direct(out) = &mut self.out
+            {
+                let _ = out.write_all(drawn.as_bytes());
+                let _ = out.flush();
+            }
+            return true;
+        }
+        if self.json {
+            return false;
+        }
+        let line = one_line(text);
+        match &mut self.out {
+            Sink::Direct(out) => {
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+            Sink::Queued(queue) => queue.push(line),
+        }
+        true
+    }
+
     /// Shows one event: on a terminal, drawn into the status; otherwise one line, flushed,
     /// so a reader sees it when it happens. With a queued output this hands the line over
     /// and returns at once, whatever the reader is doing.
@@ -537,7 +625,7 @@ impl Output {
             // An object, so the line begins with `{`.
             event.json().to_string()
         } else {
-            match event.plain() {
+            match event.plain_in(self.talk_mode) {
                 // A detail in it is an error's text. Each source already makes its text
                 // printable; this is the one place every line passes, so it is made sure
                 // of here that a line is one line and drives no terminal.
@@ -933,5 +1021,103 @@ mod tests {
         output.show(&Event::UnknownCommand);
         assert!(output.flush(Duration::ZERO).await);
         assert_eq!(written.text(), "{\"event\":\"unknown_command\"}\n");
+    }
+
+    /// The open microphone's words for the user's own state, in plain lines and on the
+    /// terminal: "open microphone" and "TALKING", and the limit as what quiet ends. What
+    /// `--json` writes is the same in both modes.
+    #[test]
+    fn open_mode_words_the_own_state_for_itself_and_json_is_unchanged() {
+        use crate::status::{State, render};
+
+        let ready = status_after(&[
+            PttInput::Connected(true),
+            PttInput::PublishGrant(true),
+            PttInput::Microphone(true),
+        ]);
+        let talking = PttStatus {
+            transmitting: true,
+            ..ready
+        };
+        let muted = status_after(&[
+            PttInput::Connected(true),
+            PttInput::PublishGrant(true),
+            PttInput::Microphone(true),
+            PttInput::Line(LineCommand::Mute),
+        ]);
+        let at_limit = {
+            let (mut ptt, _) = Ptt::with_talk_mode(Duration::from_millis(10), TalkMode::Open);
+            for input in [
+                PttInput::Connected(true),
+                PttInput::PublishGrant(true),
+                PttInput::Microphone(true),
+                PttInput::Sound(false),
+                PttInput::Sound(true),
+            ] {
+                ptt.handle(Duration::ZERO, input);
+            }
+            ptt.handle(Duration::from_secs(1), PttInput::Tick);
+            ptt.status()
+        };
+        assert_eq!(at_limit.blocked.first(), Some(ShutReason::MaxTransmit));
+
+        // (status, plain in push-to-talk mode, plain in open mode)
+        let cases = [
+            (ready, "you: ready to talk", "you: open microphone"),
+            (talking, "you: talking", "you: TALKING"),
+            (muted, "you: muted", "you: muted"),
+            (
+                at_limit,
+                "you: transmit limit reached: release the key to talk again",
+                "you: transmit limit reached: it opens again after quiet",
+            ),
+        ];
+        for (status, push_to_talk, open) in cases {
+            let event = Event::Own(status);
+            assert_eq!(event.plain().as_deref(), Some(push_to_talk));
+            assert_eq!(
+                event.plain_in(TalkMode::PushToTalk).as_deref(),
+                Some(push_to_talk)
+            );
+            assert_eq!(event.plain_in(TalkMode::Open).as_deref(), Some(open));
+            // The terminal's line says the same.
+            for (mode, want) in [(TalkMode::PushToTalk, push_to_talk), (TalkMode::Open, open)] {
+                let state = State {
+                    own: Some(status),
+                    talk_mode: mode,
+                    ..State::default()
+                };
+                assert_eq!(render(&state)[1], want, "{mode}");
+            }
+        }
+        // Every other event reads the same in both modes.
+        let other = Event::PressIgnored(ShutReason::MaxTransmit);
+        assert_eq!(other.plain_in(TalkMode::Open), other.plain());
+
+        // An output set to open mode writes the open words, and `--json` the same object.
+        let written = Buffer::default();
+        let mut output = Output::new(false, Box::new(written.clone()));
+        output.set_talk_mode(TalkMode::Open);
+        output.show(&Event::Own(ready));
+        assert_eq!(written.text(), "you: open microphone\n");
+        let written = Buffer::default();
+        let mut output = Output::new(true, Box::new(written.clone()));
+        output.set_talk_mode(TalkMode::Open);
+        output.show(&Event::Own(talking));
+        assert_eq!(written.text(), format!("{}\n", Event::Own(talking).json()));
+    }
+
+    /// A note is said once in words, and with `--json` not written at all, for the caller
+    /// to put in the log instead.
+    #[test]
+    fn a_note_is_a_plain_line_and_nothing_with_json() {
+        let written = Buffer::default();
+        let mut output = Output::new(false, Box::new(written.clone()));
+        assert!(output.note("open microphone: a note\x1b[2J"));
+        assert_eq!(written.text(), "open microphone: a note [2J\n");
+        let written = Buffer::default();
+        let mut output = Output::new(true, Box::new(written.clone()));
+        assert!(!output.note("open microphone: a note"));
+        assert_eq!(written.text(), "");
     }
 }

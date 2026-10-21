@@ -25,10 +25,10 @@
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use conch_voice_control::{PttStatus, ShutReason};
+use conch_voice_control::{PttStatus, ShutReason, TalkMode};
 
 use crate::keydev::DeviceState;
-use crate::output::{Connection, Event};
+use crate::output::{Connection, Event, OPEN_IDLE, OPEN_TALKING, reason_words};
 use crate::presence::Roster;
 use crate::reports::ReportProblem;
 use crate::secrets::one_line;
@@ -74,8 +74,10 @@ pub struct State {
     pub roster: Option<Roster>,
     /// The last thing that is said once and is not a state: a refused press, a line that
     /// was not a command, why the key device or the microphone is not there, a report's
-    /// failure.
+    /// failure, the open microphone's warning.
     pub notice: Option<String>,
+    /// The talk mode, for the words of the user's own state.
+    pub talk_mode: TalkMode,
 }
 
 impl State {
@@ -116,17 +118,20 @@ fn own_line(state: &State) -> String {
     let lost = state
         .own
         .is_some_and(|own| own.blocked.contains(ShutReason::KeyDeviceLost));
+    let open = state.talk_mode == TalkMode::Open;
     match state.own {
+        Some(own) if own.transmitting && open => parts.push(OPEN_TALKING.to_owned()),
         Some(own) if own.transmitting => parts.push("talking".to_owned()),
         Some(own) => {
             parts.extend(
                 own.blocked
                     .iter()
                     .filter(|reason| *reason != ShutReason::KeyDeviceLost)
-                    .map(|reason| reason.to_string()),
+                    .map(|reason| reason_words(reason, state.talk_mode)),
             );
             if parts.is_empty() && !lost {
-                parts.push("ready to talk".to_owned());
+                let idle = if open { OPEN_IDLE } else { "ready to talk" };
+                parts.push(idle.to_owned());
             }
         }
         None => parts.push(ShutReason::NotConnected.to_string()),
@@ -255,6 +260,22 @@ impl Screen {
         if !self.state.apply(event) {
             return None;
         }
+        self.draw()
+    }
+
+    /// The talk mode, for the words of the user's own state. Drawn with the next change.
+    pub fn set_talk_mode(&mut self, mode: TalkMode) {
+        self.state.talk_mode = mode;
+    }
+
+    /// Says `text` once, as the last line, and returns what to write to the terminal.
+    pub fn note(&mut self, text: &str) -> Option<String> {
+        self.state.notice = Some(text.to_owned());
+        self.draw()
+    }
+
+    /// What to write to the terminal for the state as it is now, if it changed.
+    fn draw(&mut self) -> Option<String> {
         if self.log_shares && DISTURBED.swap(false, Ordering::Relaxed) {
             self.in_place = false;
         }

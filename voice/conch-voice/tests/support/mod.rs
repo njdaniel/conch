@@ -13,6 +13,7 @@
 pub mod fake;
 pub mod keyboard;
 pub mod managed;
+pub mod script;
 pub mod stub;
 
 use std::io::Write;
@@ -26,11 +27,11 @@ use conch_voice::presence::PresenceTimings;
 use conch_voice::receive::BoxedSink;
 use conch_voice::reports::ReportTimings;
 use conch_voice::secrets::Scrubber;
-use conch_voice::session::{self, Conchd, Input, Settings, Timings};
-use conch_voice::transmit::BoxedMic;
+use conch_voice::session::{self, Conchd, DeviceSwitch, Input, Settings, Timings};
+use conch_voice::transmit::{self, BoxedMic};
 use conch_voice_api::{Secret, ServerAddress};
 use conch_voice_audio::{CountingSink, MicSource, ToneSource};
-use conch_voice_control::LineCommand;
+use conch_voice_control::{DEFAULT_OPEN_HANG_MS, DEFAULT_OPEN_THRESHOLD_DB, LineCommand, TalkMode};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -208,7 +209,26 @@ pub struct Setup {
     /// [`Reader`] that the test can stop. Otherwise each line is written where it is
     /// shown, which keeps a test's view of the output exact.
     pub queued: bool,
+    /// `audio.talk_mode`, `audio.open_threshold_db` and `audio.open_hang_ms`.
+    pub talk_mode: TalkMode,
+    pub open_threshold_db: i32,
+    pub open_hang_ms: u32,
+    /// Makes the microphone instead of the tone that never stops: a scripted one, for the
+    /// open microphone ([`script`]).
+    pub microphone: Option<MakeMic>,
+    /// Opens the microphone by the name the session asks for, instead of `microphone`: for
+    /// the tests of a switch of device.
+    pub open_mic: Option<OpenNamedMic>,
+    /// Opens the speakers by the name the session asks for, instead of a counting sink.
+    pub open_sink: Option<OpenNamedSink>,
 }
+
+/// Makes a microphone, each time the session opens one.
+pub type MakeMic = Arc<dyn Fn() -> BoxedMic + Send + Sync>;
+/// Opens the microphone named, or the default one for `None`.
+pub type OpenNamedMic = Arc<dyn Fn(Option<&str>) -> Result<Option<BoxedMic>, Error> + Send + Sync>;
+/// Opens the speakers named, or the default ones for `None`.
+pub type OpenNamedSink = Arc<dyn Fn(Option<&str>) -> Result<BoxedSink, Error> + Send + Sync>;
 
 impl Default for Setup {
     fn default() -> Self {
@@ -224,6 +244,12 @@ impl Default for Setup {
             key_device: None,
             unreachable_note: None,
             queued: false,
+            talk_mode: TalkMode::PushToTalk,
+            open_threshold_db: DEFAULT_OPEN_THRESHOLD_DB,
+            open_hang_ms: DEFAULT_OPEN_HANG_MS,
+            microphone: None,
+            open_mic: None,
+            open_sink: None,
         }
     }
 }
@@ -241,8 +267,15 @@ pub struct Rig {
     mic_opened: Arc<AtomicU32>,
     /// How many microphone sources have been dropped, which is what closes a real one.
     mic_closed: Arc<AtomicU32>,
+    /// The name the microphone was opened with, each time.
+    mic_names: Names,
+    /// The name the speakers were opened with, each time.
+    sink_names: Names,
     session: JoinHandle<Result<(), Error>>,
 }
+
+/// The names devices were opened with, in order: `None` for the default.
+type Names = Arc<Mutex<Vec<Option<String>>>>;
 
 impl Rig {
     /// Starts a session with the usual setup.
@@ -280,24 +313,48 @@ impl Rig {
         let opened = Arc::clone(&mic_opened);
         let mic_closed = Arc::new(AtomicU32::new(0));
         let closed = Arc::clone(&mic_closed);
+        let microphone = setup.microphone.clone();
+        let named_mic = setup.open_mic.clone();
+        let mic_names = Names::default();
+        let sink_names = Names::default();
         let settings = Settings {
             channel: CHANNEL.to_owned(),
             // A tone that is never silent and never stops: whatever does not reach the
             // fake's audio source was stopped by the gate, not by there being nothing to send.
-            open_mic: Box::new(move || {
-                opened.fetch_add(1, Ordering::SeqCst);
-                let tone = ToneSource::new(440.0, 0.25)?;
-                Ok(Some(
-                    Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
-                ))
+            open_mic: Box::new({
+                let names = Arc::clone(&mic_names);
+                move |name| {
+                    opened.fetch_add(1, Ordering::SeqCst);
+                    names.lock().unwrap().push(name.map(str::to_owned));
+                    let mic: Option<BoxedMic> = match (&named_mic, &microphone) {
+                        (Some(open), _) => open(name)?,
+                        (None, Some(make)) => Some(make()),
+                        (None, None) => Some(Box::new(ToneSource::new(440.0, 0.25)?)),
+                    };
+                    Ok(mic.map(|mic| {
+                        Box::new(Closing(Forward(mic), Arc::clone(&closed))) as BoxedMic
+                    }))
+                }
             }),
             open_sink: {
                 let tones = setup.sink_tones.clone();
-                Box::new(move || Ok(Box::new(CountingSink::new(&tones)?) as BoxedSink))
+                let (names, named) = (Arc::clone(&sink_names), setup.open_sink.clone());
+                Box::new(move |name| {
+                    names.lock().unwrap().push(name.map(str::to_owned));
+                    match &named {
+                        Some(open) => open(name),
+                        None => Ok(Box::new(CountingSink::new(&tones)?) as BoxedSink),
+                    }
+                })
             },
+            // The defaults: PipeWire's, as when `voice.toml` names none.
+            input: None,
+            output: None,
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
+            talk_mode: setup.talk_mode,
+            level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,
             unreachable_note: setup.unreachable_note,
             timings: setup.timings,
@@ -335,6 +392,8 @@ impl Rig {
             inputs,
             mic_opened,
             mic_closed,
+            mic_names,
+            sink_names,
             session,
         }
     }
@@ -361,6 +420,25 @@ impl Rig {
     /// How many microphone sources have been dropped: a real one closes its stream then.
     pub fn mic_closed(&self) -> u32 {
         self.mic_closed.load(Ordering::SeqCst)
+    }
+
+    /// The names the microphone was opened with so far, in order: `None` for the default.
+    pub fn mic_names(&self) -> Vec<Option<String>> {
+        self.mic_names.lock().unwrap().clone()
+    }
+
+    /// The names the speakers were opened with so far, in order.
+    pub fn sink_names(&self) -> Vec<Option<String>> {
+        self.sink_names.lock().unwrap().clone()
+    }
+
+    /// Asks the session to use this microphone and these speakers from now on: `None`
+    /// leaves a side alone.
+    pub fn switch(&self, input: Option<&str>, output: Option<&str>) {
+        self.input(Input::SwitchDevices(DeviceSwitch {
+            input: input.map(str::to_owned),
+            output: output.map(str::to_owned),
+        }));
     }
 
     pub fn events(&self) -> Vec<Value> {
@@ -493,6 +571,23 @@ struct Closing<M>(M, Arc<AtomicU32>);
 impl<M: MicSource> MicSource for Closing<M> {
     fn read(&mut self, frame: &mut conch_voice_audio::Frame) -> conch_voice_audio::MicRead {
         self.0.read(frame)
+    }
+}
+
+/// A boxed microphone, as a microphone: what it is asked, it passes on.
+struct Forward(BoxedMic);
+
+impl MicSource for Forward {
+    fn read(&mut self, frame: &mut conch_voice_audio::Frame) -> conch_voice_audio::MicRead {
+        self.0.read(frame)
+    }
+
+    fn pacing(&self) -> conch_voice_audio::Pacing {
+        self.0.pacing()
+    }
+
+    fn forget_waiting(&mut self) {
+        self.0.forget_waiting();
     }
 }
 

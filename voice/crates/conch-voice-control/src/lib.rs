@@ -2,12 +2,16 @@
 //!
 //! Input: the configuration file's text, bytes read from a keyboard's event device, line
 //! commands, the conditions a transmission depends on (connected, allowed to publish, a
-//! microphone, a key device), connection outcomes, and the time, which every call is given.
+//! microphone, a key device), the talk mode, the open microphone's word that sound or quiet
+//! started, connection outcomes, and the time, which every call is given.
 //! Output: commands for the transmit gate, transmit reports to send, what to show, and what
 //! to do after a disconnect (stop, ask for a session now, or retry after a wait); and the
-//! configuration file's text with one `[audio]` device changed, for the binary to save.
-//! Owns: the push-to-talk state machine, with `max_transmit_secs`, and the connection
-//! policy. It keeps nothing about any key other than the configured ones.
+//! configuration file's text with one `[audio]` device, or the talk mode, changed, for the
+//! binary to save.
+//! Owns: the push-to-talk state machine in both talk modes (a press, or in open mode an
+//! onset of sound, is what opens the gate), with `max_transmit_secs`, and the connection
+//! policy. It keeps nothing about any key other than the configured ones, and no audio: the
+//! level itself is measured in `conch-voice-audio`.
 //!
 //! It opens no file, device or socket, starts no thread, reads no clock and draws no random
 //! number, and it logs nothing. It depends on neither `conch-voice-api` nor
@@ -15,10 +19,10 @@
 //! other crates' types onto them.
 //!
 //! - [`Config`]: the TOML configuration, its defaults, and layers of overrides.
-//! - [`set_audio_value`]: the file's text with the microphone or the speakers changed, and
-//!   nothing else.
+//! - [`set_audio_value`]: the file's text with the microphone, the speakers or the talk
+//!   mode changed, and nothing else.
 //! - [`KeyDecoder`]: `input_event` records reduced to [`KeyEvent`]s of the configured keys.
-//! - [`Ptt`]: the push-to-talk state machine.
+//! - [`Ptt`]: the push-to-talk state machine, and its open-microphone mode ([`TalkMode`]).
 //! - [`ConnectionPolicy`]: what to do after each [`Outcome`].
 //!
 //! Design: `docs/design/conch-voice.md` §3 to §6 and §8.
@@ -43,8 +47,9 @@ mod ptt;
 
 pub use config::{
     AudioConfig, AudioKey, Config, ConfigOverrides, DEFAULT_MAX_TRANSMIT_SECS,
-    DEFAULT_RELEASE_TAIL_MS, DEFAULT_SERVER, KeysConfig, MAX_MAX_TRANSMIT_SECS,
-    MAX_RELEASE_TAIL_MS, set_audio_value,
+    DEFAULT_OPEN_HANG_MS, DEFAULT_OPEN_THRESHOLD_DB, DEFAULT_RELEASE_TAIL_MS, DEFAULT_SERVER,
+    KeysConfig, MAX_MAX_TRANSMIT_SECS, MAX_OPEN_HANG_MS, MAX_OPEN_THRESHOLD_DB,
+    MAX_RELEASE_TAIL_MS, MIN_OPEN_HANG_MS, MIN_OPEN_THRESHOLD_DB, set_audio_value,
 };
 pub use error::Error;
 pub use keys::{KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent};
@@ -53,7 +58,7 @@ pub use policy::{
 };
 pub use ptt::{
     GateCommand, LineCommand, Ptt, PttInput, PttOutput, PttStatus, ShutReason, ShutReasons,
-    TransmitReport,
+    TalkMode, TransmitReport,
 };
 
 /// Bytes in one Linux `input_event` record on a 64-bit system: 16 of time, then a `u16`
