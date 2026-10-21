@@ -31,6 +31,12 @@
 //!   when it was made. A report made before the last restart the session asked for is
 //!   stale, and the session does not pass it on ([`Transmitter::is_current`]): quiet and an
 //!   onset on their way when a reason ends cannot open the gate on that ending.
+//! - The microphone can be replaced while the task runs (a switch of device inside a
+//!   session, `docs/design/tui-voice.md` §20.5): [`TxCommand::CloseMicrophone`] drops the
+//!   old one, which closes its stream, and [`TxCommand::Microphone`] hands over the new one.
+//!   What the task says of a microphone ([`TxEvent::Microphone`]) carries how many times the
+//!   microphone had been changed, so that a word about one that is gone, still on its way,
+//!   is not taken for a word about the one in use ([`Transmitter::is_current_microphone`]).
 //!
 //! The task is told what to do with [`TxCommand`]s and says what happened with
 //! [`TxEvent`]s. Commands are taken before the next frame, so a forced shut is never behind
@@ -72,11 +78,12 @@ pub type BoxedMic = Box<dyn MicSource + Send>;
 pub enum TxCommand<F> {
     /// A command for the gate, from the push-to-talk machine.
     Gate(GateCommand),
-    /// The microphone, opened because a session allowed publishing. It is read from now
-    /// until the task ends, and taken to have audio until it says otherwise.
+    /// The microphone, opened because a session allowed publishing, or in place of one that
+    /// was closed. It is read from now until it is closed or the task ends, and taken to have
+    /// audio until it says otherwise.
     Microphone(BoxedMic),
-    /// The session is over: the microphone is dropped, which closes its stream. Nothing is
-    /// captured after this.
+    /// The microphone is dropped, which closes its stream: the session is over, or another
+    /// microphone is to be used. Nothing is captured after this until the next `Microphone`.
     CloseMicrophone,
     /// The audio source of a newly published track: gated frames go here from now on.
     Attach(F),
@@ -94,9 +101,14 @@ pub enum TxEvent {
         /// may hold: its own cap, which needs no timer.
         limit_reached: bool,
     },
-    /// The microphone source stopped having audio to give (`false`), or has it again
-    /// (`true`).
-    Microphone(bool),
+    /// The microphone source stopped having audio to give, or has it again, if it is the
+    /// one in use ([`Transmitter::is_current_microphone`]).
+    Microphone {
+        /// Whether it has audio to give.
+        present: bool,
+        /// How many times the microphone had been changed when this was said.
+        changes: u64,
+    },
     /// In open mode, the level detector's word, for the push-to-talk machine as
     /// `PttInput::Sound`, if it is current ([`Transmitter::is_current`]).
     Sound {
@@ -121,6 +133,8 @@ pub struct Transmitter<F> {
     pub track_lock: TrackLock,
     /// Commands sent through [`Transmitter::send`] that restart the level detector.
     restarts_sent: u64,
+    /// Commands sent through [`Transmitter::send`] that change the microphone.
+    mic_changes_sent: u64,
 }
 
 impl<F> Transmitter<F> {
@@ -128,6 +142,9 @@ impl<F> Transmitter<F> {
     pub fn send(&mut self, command: TxCommand<F>) {
         if restarts_detector(&command) {
             self.restarts_sent += 1;
+        }
+        if changes_microphone(&command) {
+            self.mic_changes_sent += 1;
         }
         // If the task is gone the session is ending; there is nothing to tell.
         let _ = self.commands.send(command);
@@ -145,6 +162,17 @@ impl<F> Transmitter<F> {
     #[must_use]
     pub fn is_current(&self, restarts: u64) -> bool {
         restarts == self.restarts_sent
+    }
+
+    /// Whether a word about the microphone, made after `changes` changes of it, is about
+    /// the microphone in use: made after the task took the last command sent that closes
+    /// or replaces it. One made before is about a microphone that is gone. Passed on, a
+    /// word that the old one had audio again would clear "no microphone" after a switch
+    /// to one that could not be opened, and one that the old one had none would block the
+    /// new one until it went away and came back.
+    #[must_use]
+    pub fn is_current_microphone(&self, changes: u64) -> bool {
+        changes == self.mic_changes_sent
     }
 }
 
@@ -287,6 +315,7 @@ pub fn spawn_with_level<F: MicFeed>(
         frames_sent: Arc::clone(&frames_sent),
         track_lock: track_lock.clone(),
         listen,
+        mic_changes: 0,
     };
     tokio::spawn(task.run());
     Ok(Transmitter {
@@ -295,6 +324,7 @@ pub fn spawn_with_level<F: MicFeed>(
         frames_sent,
         track_lock,
         restarts_sent: 0,
+        mic_changes_sent: 0,
     })
 }
 
@@ -313,6 +343,8 @@ struct Task<F> {
     track_lock: TrackLock,
     /// The talk mode, and in open mode the level detector.
     listen: Listen,
+    /// How many commands that change the microphone have been taken ([`changes_microphone`]).
+    mic_changes: u64,
 }
 
 /// The open microphone's part of the task: which talk mode is in force, and the level
@@ -431,6 +463,15 @@ fn restarts_detector<F>(command: &TxCommand<F>) -> bool {
     }
 }
 
+/// Whether this command closes or replaces the microphone. The task and
+/// [`Transmitter::send`] both ask this one function, so their counts cannot drift apart.
+fn changes_microphone<F>(command: &TxCommand<F>) -> bool {
+    matches!(
+        command,
+        TxCommand::Microphone(_) | TxCommand::CloseMicrophone
+    )
+}
+
 impl<F: MicFeed> Task<F> {
     async fn run(mut self) {
         // What wakes this loop is the microphone's pace (`pace.rs`): a source with a clock of
@@ -473,6 +514,9 @@ impl<F: MicFeed> Task<F> {
         // Asked before the command is taken apart: the same question the session's count
         // asks of what it sends.
         let restart = restarts_detector(&command);
+        if changes_microphone(&command) {
+            self.mic_changes += 1;
+        }
         match command {
             TxCommand::Gate(GateCommand::Open) => {
                 self.discard_waiting();
@@ -546,7 +590,10 @@ impl<F: MicFeed> Task<F> {
         };
         if present != self.mic_present {
             self.mic_present = present;
-            self.report(TxEvent::Microphone(present));
+            self.report(TxEvent::Microphone {
+                present,
+                changes: self.mic_changes,
+            });
         }
         if !present {
             self.no_frame();
@@ -790,6 +837,7 @@ mod tests {
             frames_sent: Arc::new(AtomicU64::new(0)),
             track_lock: open_lock(),
             listen: push_to_talk(),
+            mic_changes: 0,
         };
         for n in 1..=5 {
             ring.push(n);
@@ -830,6 +878,7 @@ mod tests {
             frames_sent: Arc::clone(&counted),
             track_lock: open_lock(),
             listen: push_to_talk(),
+            mic_changes: 0,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=4 {
@@ -874,6 +923,7 @@ mod tests {
             frames_sent: Arc::new(AtomicU64::new(0)),
             track_lock: open_lock(),
             listen: push_to_talk(),
+            mic_changes: 0,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=3 {
@@ -956,6 +1006,7 @@ mod tests {
             frames_sent: Arc::clone(&counted),
             track_lock: track_lock.clone(),
             listen: push_to_talk(),
+            mic_changes: 0,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         ring.push(1);
@@ -1005,6 +1056,7 @@ mod tests {
                     Duration::from_millis(u64::from(tail_ms)),
                 )
                 .unwrap(),
+                mic_changes: 0,
             };
             (task, ring, record, said)
         }
@@ -1463,5 +1515,48 @@ mod tests {
             assert!(opened, "a fresh quiet and onset open the gate");
             assert!(record.heard().is_empty(), "nothing was sent before");
         }
+    }
+
+    /// A microphone that is not there: a named one that is absent.
+    struct Absent;
+
+    impl MicSource for Absent {
+        fn read(&mut self, _frame: &mut Frame) -> MicRead {
+            MicRead::NoMicrophone
+        }
+    }
+
+    /// Issue #655. What the task says of a microphone can be on its way when the session
+    /// closes it for a switch: it is then about a microphone that is gone, and is not
+    /// current, whether the switch opened another or found none to open.
+    #[tokio::test]
+    async fn a_word_about_a_microphone_that_was_closed_is_not_current() {
+        let mut transmitter = spawn::<Record>(gate_config(0, Duration::from_secs(60))).unwrap();
+        transmitter.send(TxCommand::Microphone(Box::new(Absent)));
+        let said = tokio::time::timeout(Duration::from_secs(10), transmitter.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TxEvent::Microphone { present, changes } = said else {
+            panic!("not about the microphone: {said:?}");
+        };
+        assert!(!present);
+        assert!(transmitter.is_current_microphone(changes));
+
+        transmitter.send(TxCommand::CloseMicrophone);
+        assert!(
+            !transmitter.is_current_microphone(changes),
+            "about a microphone that was closed, with none in its place"
+        );
+        let reads = Arc::new(AtomicU64::new(0));
+        transmitter.send(TxCommand::Microphone(Box::new(CountedTone(Arc::clone(
+            &reads,
+        )))));
+        assert!(!transmitter.is_current_microphone(changes));
+        // The new one is read, and is there: nothing more is said of it.
+        while reads.load(Ordering::Relaxed) < 3 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(transmitter.events.try_recv().is_err());
     }
 }

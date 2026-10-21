@@ -1256,8 +1256,11 @@ impl Boot {
                 None
             }
             // Not connected: a press does nothing yet. Standard input is the owner's, so
-            // there are no line commands.
-            Some(Input::Key(_) | Input::Line(_) | Input::UnknownLine) => None,
+            // there are no line commands. Nothing asks for a switch of device before the
+            // session loop runs: no command of v1 does (#656 brings one).
+            Some(Input::Key(_) | Input::Line(_) | Input::UnknownLine | Input::SwitchDevices(_)) => {
+                None
+            }
         }
     }
 
@@ -1382,8 +1385,8 @@ impl Boot {
                     SinkChoice::Count(tones) => tones.clone(),
                     SinkChoice::PipeWire => Vec::new(),
                 };
-                let open_mic = crate::mic_opener(mic, pipewire.clone(), config.audio.input.clone());
-                let open_sink = crate::sink_opener(sink, pipewire, config.audio.output.clone());
+                let open_mic = crate::mic_opener(mic, pipewire.clone());
+                let open_sink = crate::sink_opener(sink, pipewire);
                 (open_mic, open_sink, sink_tones)
             }
             Devices::Given {
@@ -1392,8 +1395,17 @@ impl Boot {
                 sink_tones,
             } => (open_mic, open_sink, sink_tones),
         };
-        let speakers: BoxedSink = sink().map_err(audio_unavailable)?;
-        let open_sink: OpenSink = Box::new(move || Ok(speakers));
+        // The speakers `voice.toml` names are opened now, so that speakers that cannot be
+        // opened fail the start. The session's first call of the opener, which is for the
+        // same speakers, is given these; a switch later opens others.
+        let mut sink = sink;
+        let speakers: BoxedSink =
+            sink(config.audio.output.as_deref()).map_err(audio_unavailable)?;
+        let mut opened = Some(speakers);
+        let open_sink: OpenSink = Box::new(move |name| match opened.take() {
+            Some(speakers) => Ok(speakers),
+            None => sink(name),
+        });
 
         // The key device, tried before the first connection: the first state of the loop
         // says whether hold-to-talk can work.
@@ -1420,6 +1432,8 @@ impl Boot {
             channel: start.channel.clone(),
             open_mic,
             open_sink,
+            input: config.audio.input.clone(),
+            output: config.audio.output.clone(),
             sink_tones,
             release_tail_ms: config.audio.release_tail_ms,
             max_transmit: Duration::from_secs(u64::from(config.audio.max_transmit_secs)),

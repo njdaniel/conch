@@ -98,6 +98,8 @@ impl conch_voice_audio::SpeakerSink for Silenced {
     }
 }
 
+impl conch_voice::receive::Speakers for Silenced {}
+
 impl Drop for Silenced {
     fn drop(&mut self) {
         self.1.fetch_add(1, Ordering::SeqCst);
@@ -192,15 +194,18 @@ impl ManagedRig {
         let devices = Devices::Given {
             // A tone that never stops: whatever does not reach the fake's audio source was
             // stopped by the gate.
-            open_mic: Box::new(move || {
+            open_mic: Box::new(move |_| {
                 opened.fetch_add(1, Ordering::SeqCst);
                 let tone = ToneSource::new(440.0, 0.25)?;
                 Ok(Some(
                     Box::new(Closing(tone, Arc::clone(&closed))) as BoxedMic
                 ))
             }),
-            open_sink: Box::new(move || {
-                Ok(Box::new(Silenced(CountingSink::new(&[440.0])?, silenced)) as BoxedSink)
+            open_sink: Box::new(move |_| {
+                Ok(Box::new(Silenced(
+                    CountingSink::new(&[440.0])?,
+                    Arc::clone(&silenced),
+                )) as BoxedSink)
             }),
             sink_tones: vec![440.0],
         };
