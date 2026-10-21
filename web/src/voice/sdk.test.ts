@@ -15,6 +15,9 @@
 // switched by the SDK's own switch for outputs, '' being the system default,
 // handed to a new room before it connects, and followed when the SDK moves
 // sound by itself; not asked at all where the browser cannot choose.
+// Each person's volume (issue #661): set on the elements that play their
+// microphone, at attach and at every change, 0 included; apart from deafen,
+// kept through an output switch, and never on a share's sound.
 // No network, no microphone, no screen.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
@@ -1631,9 +1634,9 @@ describe('the speakers chosen', () => {
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
     await room.switchOutput('out-1');
-    state.handlers.get('ts')?.(voice('a'));
+    state.handlers.get('ts')?.(voice('a'), undefined, { identity: 'p8' });
     room.setDeafened(true);
-    state.handlers.get('ts')?.(voice('b'));
+    state.handlers.get('ts')?.(voice('b'), undefined, { identity: 'p9' });
     const played = [...document.body.querySelectorAll('audio')];
     expect(played).toHaveLength(2);
     expect(played.every((el) => el.muted)).toBe(true);
@@ -1650,6 +1653,111 @@ describe('the speakers chosen', () => {
     await room.switchOutput('');
     expect(state.outputs).toEqual([]);
     expect(state.listed).toEqual([]);
+  });
+});
+
+describe('the volume of each person', () => {
+  // A remote microphone, as the SDK hands it over: each attach makes a new
+  // element, and a detach gives back those it made.
+  const voice = (sid: string) => {
+    const made: HTMLAudioElement[] = [];
+    return {
+      source: 'microphone',
+      kind: 'audio',
+      sid,
+      attach: () => {
+        const el = document.createElement('audio');
+        made.push(el);
+        return el;
+      },
+      detach: () => made.splice(0),
+    };
+  };
+  const arrive = (track: ReturnType<typeof voice>, identity: string) => {
+    state.handlers.get('ts')?.(track, undefined, { identity });
+  };
+  const played = () => [...document.body.querySelectorAll('audio')];
+
+  async function connected() {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    return room;
+  }
+
+  it('a volume set before the track arrives is applied when it arrives, 0 included', async () => {
+    const room = newLiveKitRoom();
+    room.setVolume(8, 0);
+    room.setVolume(9, 0.4);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    arrive(voice('a'), 'p8');
+    arrive(voice('b'), 'p9');
+    arrive(voice('c'), 'p10');
+    expect(played().map((el) => el.volume)).toEqual([0, 0.4, 1]);
+    await room.close();
+  });
+
+  it('0 stays 0 when the track is attached again: the person leaving and coming back', async () => {
+    const room = await connected();
+    room.setVolume(8, 0);
+    const first = voice('a');
+    arrive(first, 'p8');
+    state.handlers.get('tu')?.(first);
+    expect(played()).toHaveLength(0);
+    arrive(voice('a2'), 'p8');
+    expect(played().map((el) => el.volume)).toEqual([0]);
+    await room.close();
+  });
+
+  it("a change applies to that person's attached elements alone", async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    arrive(voice('b'), 'p9');
+    room.setVolume(8, 0.25);
+    expect(played().map((el) => el.volume)).toEqual([0.25, 1]);
+    room.setVolume(8, 0);
+    expect(played().map((el) => el.volume)).toEqual([0, 1]);
+    room.setVolume(8, 1);
+    expect(played().map((el) => el.volume)).toEqual([1, 1]);
+    await room.close();
+  });
+
+  it('deafen mutes everyone at every volume, and undeafen leaves each volume as it was', async () => {
+    const room = await connected();
+    room.setVolume(8, 0);
+    room.setVolume(9, 0.4);
+    arrive(voice('a'), 'p8');
+    arrive(voice('b'), 'p9');
+    arrive(voice('c'), 'p10');
+    room.setDeafened(true);
+    expect(played().map((el) => [el.muted, el.volume])).toEqual([[true, 0], [true, 0.4], [true, 1]]);
+    room.setDeafened(false);
+    expect(played().map((el) => [el.muted, el.volume])).toEqual([[false, 0], [false, 0.4], [false, 1]]);
+    await room.close();
+  });
+
+  it('holds through a switch of the speakers', async () => {
+    const room = await connected();
+    room.setVolume(8, 0.4);
+    arrive(voice('a'), 'p8');
+    await room.switchOutput('out-1');
+    arrive(voice('b'), 'p8');
+    expect(state.outputs).toEqual(['out-1']);
+    expect(played().map((el) => el.volume)).toEqual([0.4, 0.4]);
+    await room.close();
+  });
+
+  it("never touches a share's sound, which has its own volume", async () => {
+    const room = await connected();
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    sink.audio.volume = 0.7;
+    room.attachShare(sink);
+    const sound = { source: 'screen_share_audio', kind: 'audio', sid: 's', attach: (el?: HTMLMediaElement) => el, detach: () => [] };
+    room.setVolume(8, 0);
+    state.handlers.get('ts')?.(sound, undefined, { identity: 'p8' });
+    room.setVolume(8, 0.2);
+    expect(sink.audio.volume).toBe(0.7);
+    expect(played()).toHaveLength(0);
+    await room.close();
   });
 });
 
