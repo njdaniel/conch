@@ -50,6 +50,9 @@ var TSTypes = []TSType{
 	{Value: WhoAmIResponseV1{}, Family: "whoami-response-v1"},
 	{Value: ChannelV0{}, Family: "channel-v0"},
 	{Value: ListChannelsResponse{}, Family: "list-channels-response"},
+	// An operator creates a channel from the browser (issue #695).
+	{Value: CreateChannelRequest{}, Family: "create-channel-request-v0"},
+	{Value: CreateChannelResponse{}, Family: "create-channel-response-v0"},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},

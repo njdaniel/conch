@@ -192,3 +192,20 @@ describe('a voice count', () => {
     expect(screen.queryByRole('img', { name: /in voice/ })).toBeNull();
   });
 });
+
+// An empty list says who can change that (issue #695): by default an
+// operator, and for someone who may make a channel, less, since the control
+// to do it is beside the list.
+describe('an empty list', () => {
+  it('says an operator needs to add the person, by default', () => {
+    render(<ChannelList channels={[]} selected={null} unread={new Map()} onOpen={() => undefined} />);
+    expect(screen.getByText('No channels yet: an operator needs to add you to one')).toBeTruthy();
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  it('says what it is given instead', () => {
+    render(<ChannelList channels={[]} selected={null} unread={new Map()} empty="No channels yet" onOpen={() => undefined} />);
+    expect(screen.getByText('No channels yet')).toBeTruthy();
+    expect(screen.queryByText(/an operator needs to add you/)).toBeNull();
+  });
+});

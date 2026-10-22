@@ -112,6 +112,10 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 		body   func() string
 		want   int
 		check  func(t *testing.T, rec *httptest.ResponseRecorder)
+		// await names a frame the member's socket must have received before
+		// the next call is made, and what matches it.
+		await      string
+		awaitMatch func(eventFrame) bool
 	}{
 		{
 			name: "register", token: f.ciTok, method: "POST",
@@ -134,6 +138,8 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 				return send(t, schema.CreateRunRequestV1{Channel: "general", Task: externalTask, Link: "https://ci.example.com/jobs/7421"})
 			},
 			want: http.StatusCreated, check: func(t *testing.T, rec *httptest.ResponseRecorder) { run = validRun(t, rec) },
+			await:      "the session running in a roster",
+			awaitMatch: isRoster(rosterHas(f.ci.ID, schema.SessionStatusRunning)),
 		},
 		{
 			name: "state starting", token: f.ciTok, method: "POST",
@@ -146,6 +152,8 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 			path: func() string { return runPath(run.ID, "/state") },
 			body: func() string { return send(t, schema.SetRunStateRequestV1{State: schema.RunStateRunning}) },
 			want: http.StatusOK, check: func(t *testing.T, rec *httptest.ResponseRecorder) { validRun(t, rec) },
+			await:      "the run running",
+			awaitMatch: isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateRunning }),
 		},
 		{
 			name: "activity: a step starts", token: f.ciTok, method: "POST",
@@ -162,6 +170,10 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 				return send(t, schema.AppendActivityRequestV1{Kind: schema.ActivityKindCommandFinished, Summary: "go test ./...", Outcome: "passed", Data: json.RawMessage(`{"exit":0}`)})
 			},
 			want: http.StatusCreated, check: func(t *testing.T, rec *httptest.ResponseRecorder) { validActivity(t, rec) },
+			await: "an activity entry",
+			awaitMatch: func(fr eventFrame) bool {
+				return fr.schema == schema.AgentActivitySchemaV1 && fr.activity.Kind == schema.ActivityKindCommandFinished
+			},
 		},
 		{
 			name: "a person asks for a cancel", token: f.aliceTok, method: "POST",
@@ -212,6 +224,12 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 			want: http.StatusNoContent,
 		},
 	}
+	// A socket builds each document when it sends it, from the state then, and
+	// folds what is owed into one batch: a call that follows another too soon
+	// can hide it (the roster that showed the session running, the activity
+	// entries read after the run frame the test stops at). So where the test
+	// asserts a frame, it waits for it before the runtime acts again.
+	var seen []eventFrame
 	for _, st := range steps {
 		body := ""
 		if st.body != nil {
@@ -224,12 +242,15 @@ func TestExternalRuntimeHappyPath(t *testing.T) {
 		if st.check != nil {
 			st.check(t, rec)
 		}
+		if st.awaitMatch != nil {
+			seen = append(seen, alice.until(st.await, st.awaitMatch)...)
+		}
 	}
 
 	// A member's socket was sent the session, the run and the activity. Runs
 	// that change state twice within one tick may arrive as the later state
 	// only, so the early states are not asked for.
-	seen := alice.until("the run's end", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateCancelled }))
+	seen = append(seen, alice.until("the run's end", isRun(func(r schema.RunV1) bool { return r.ID == run.ID && r.State == schema.RunStateCancelled }))...)
 	for _, w := range []struct {
 		what  string
 		match func(eventFrame) bool
