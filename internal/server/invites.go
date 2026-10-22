@@ -676,6 +676,8 @@ func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 	case errors.Is(err, store.ErrInviteNotAllowed):
 		writeError(w, http.StatusBadRequest, "invalid_request", "only a person may hold the right to invite")
+	case errors.Is(err, store.ErrGuestNotAllowed):
+		writeError(w, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed, "a guest cannot be given the right to invite")
 	case err != nil:
 		slog.ErrorContext(ctx, "invites: set invite permission failed", "principal", id, "error", err)
 		writeInternalError(w)

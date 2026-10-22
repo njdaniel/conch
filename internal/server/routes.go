@@ -40,7 +40,7 @@ func (s *Server) routeTable() []route {
 		rt("GET /v2/channels/{channel}/messages/search", accessAuthenticated, hf(s.handleSearchMessagesV2)),
 		// Files (issue #23). Humans only; an agent is refused before the
 		// handler runs. Who may fetch a file is decided by the store.
-		rt("POST /v2/channels/{channel}/files", accessAuthenticated, s.humansOnlyFiles(hf(s.handleUploadFile))),
+		rt("POST /v2/channels/{channel}/files", accessAuthenticated, s.humansOnlyFiles(s.membersOnly(hf(s.handleUploadFile)))),
 		rt("GET /v2/files/{id}/meta", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFileMeta))),
 		rt("GET /v2/files/{id}", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFile))),
 		// Members of the channel and operators (checked in the handler); anyone
@@ -96,7 +96,7 @@ func (s *Server) routeTable() []route {
 		// Interventions (issue #287). A human who can see the run asks; the
 		// readers who can see the run read; the credential that owns the
 		// run's session polls and answers. Checked in the handlers.
-		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleCreateIntervention)),
+		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, s.membersOnly(hf(s.handleCreateIntervention))),
 		rt("GET /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleListRunInterventions)),
 		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
 		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
@@ -151,7 +151,7 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
-		rt("POST /v1/invites", accessAuthenticated, hf(s.handleCreateInvite)),
+		rt("POST /v1/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateInvite))),
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
@@ -208,10 +208,10 @@ func (s *Server) routeTable() []route {
 		// These are the human surface for approvals. Agents request and observe
 		// approvals through MCP, where the manifest and membership gates apply,
 		// so an agent credential is refused here (issue #79).
-		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleCreateApproval))),
-		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleListOpenApprovals))),
-		rt("GET /v1/approvals/{id}", accessAuthenticated, s.humansOnly(hf(s.handleGetApproval))),
-		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(hf(s.handleCastDecision))),
+		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCreateApproval)))),
+		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleListOpenApprovals)))),
+		rt("GET /v1/approvals/{id}", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleGetApproval)))),
+		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCastDecision)))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
 	}
