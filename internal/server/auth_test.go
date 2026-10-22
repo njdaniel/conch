@@ -342,6 +342,10 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/setup/redeem": {classExempt, "/v1/setup/redeem", `{}`, 403},
 	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
 	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
+
+	// Renaming a channel (issue #727): an empty body is a 400 before the
+	// channel is looked up, so it changes and audits nothing.
+	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
 }
 
 // isDeviceLinkRoute reports whether pattern is one of a member's own device
