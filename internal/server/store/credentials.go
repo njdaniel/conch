@@ -97,18 +97,25 @@ func nullableMillis(t *time.Time) any {
 // insertCredentialTx inserts a credential row for token and returns its wire
 // form. A renew above zero makes it renewable (issue #439): its expiry then
 // moves to renew past each day's first use. A renewable credential must have
-// an expiry, which the table enforces.
+// an expiry, which the table enforces. The row records the principal's
+// authentication generation as it is in this transaction (issue #707), so a
+// credential lives only until the generation next moves.
 func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration) (schema.CredentialV1, error) {
 	var renewMs any
 	if renew > 0 {
 		renewMs = renew.Milliseconds()
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs)
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation)
+		 SELECT ?, ?, ?, ?, ?, ?, auth_generation FROM principals WHERE id = ?`,
+		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, principalID)
 	if err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
+	} else if n != 1 {
+		return schema.CredentialV1{}, ErrPrincipalNotFound
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
@@ -232,10 +239,14 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 func (s *Store) ListLiveCredentials(ctx context.Context, principalID int64) ([]schema.CredentialV1, error) {
 	now := credentialNow()
 	rows, err := s.db.QueryContext(ctx,
+		// The generation and scope are checked through a subquery, not a
+		// join, so idleExpirySQL's bare column names stay unambiguous; the
+		// condition is currentAuthSQL's (issue #707).
 		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL, `+idleExpirySQL+`
 		 FROM credentials
 		 WHERE principal_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
 		   AND (idle_ms IS NULL OR COALESCE(last_used_at, created_at) + idle_ms > ?)
+		   AND scope = 'full' AND auth_generation = (SELECT auth_generation FROM principals WHERE id = credentials.principal_id)
 		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("store: list live credentials: %w", err)
@@ -291,10 +302,15 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			principalID                   int64
 			label                         string
 			expiresAt, revokedAt, renewMs sql.NullInt64
+			// current is currentAuthSQL (issue #707): a credential that
+			// no longer resolves is dead, and rotating it must not make a
+			// live one.
+			current bool
 		)
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id, label, expires_at, revoked_at, renew_ms FROM credentials WHERE id = ?", credentialID,
-		).Scan(&principalID, &label, &expiresAt, &revokedAt, &renewMs); {
+			`SELECT c.principal_id, c.label, c.expires_at, c.revoked_at, c.renew_ms, `+currentAuthSQL+`
+			 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, credentialID,
+		).Scan(&principalID, &label, &expiresAt, &revokedAt, &renewMs, &current); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
@@ -315,7 +331,7 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
 			return ErrGuestNotAllowed
 		}
-		if revokedAt.Valid {
+		if revokedAt.Valid || !current {
 			return ErrCredentialRevoked
 		}
 		now := credentialNow().Truncate(time.Millisecond)

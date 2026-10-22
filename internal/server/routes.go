@@ -155,7 +155,16 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
+		// v2 (issue #707) makes the account with a password, taken with the
+		// name, over HTTPS or loopback only. v1 makes one without, as before,
+		// until the browser has moved to v2 (#713).
 		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
+		rt("POST /v2/invites/redeem", accessExempt, hf(s.handleRedeemInviteV2)),
+		// Password sign-in (issue #707): exempt, as the invite routes are,
+		// and limited before any hashing; over HTTPS or loopback only. A
+		// member's right password answers a credential, an operator's only a
+		// challenge for the second factor. See login.go.
+		rt("POST /v1/login", accessExempt, hf(s.handleLogin)),
 		// Operator administration of invites (issue #438): who joined through
 		// an invite, disabling them or everyone a person invited, the right to
 		// invite, and the pause switch. Operators only; GET /v1/invites and

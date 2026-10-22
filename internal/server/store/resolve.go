@@ -12,6 +12,16 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// currentAuthSQL is the SQL condition, over credential c and its
+// principal p, that the credential was issued under the principal's present
+// authentication generation and has full scope (issue #707). Moving the
+// generation on ends every credential issued before it without touching
+// their rows. A setup-scoped credential does not resolve in this build: the
+// check that lets one reach its few routes belongs in the authentication
+// middleware, and until it is there such a credential is refused
+// everywhere, which fails closed.
+const currentAuthSQL = `(c.auth_generation = p.auth_generation AND c.scope = 'full')`
+
 // credentialRenewStep is how far a renewable credential's expiry must have
 // fallen behind before a use moves it (issue #439): at most one write a day
 // per credential, however often it is used.
@@ -53,15 +63,16 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 		kind, role                     string
 		createdAt                      int64
 		idle                           credentialIdle
+		current                        bool
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at,
-		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`
+		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`, `+currentAuthSQL+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
 	).Scan(&credID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
 		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
-		&idle.guestState, &idle.guestExpiresAt)
+		&idle.guestState, &idle.guestExpiresAt, &current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
@@ -71,7 +82,7 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(want)) != 1 {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
-	if revokedAt.Valid || disabled.Valid {
+	if revokedAt.Valid || disabled.Valid || !current {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
 	now := credentialNow()
@@ -123,27 +134,29 @@ func (s *Store) renewCredential(ctx context.Context, credID, expiresAt, renewMs 
 
 // CredentialLive reports whether credential id is still usable: it exists, is
 // not revoked, has not expired, has not been idle past its idle bound, its
-// principal is not disabled, and, for a guest, the visit is active and
-// before its deadline (credentialIdle.live). It is one primary-key read
-// joined to the principal's primary key and is how an open connection
-// re-checks the credential it authenticated with. A database
-// failure is returned as an error; callers must treat it as "not live".
+// principal is not disabled, for a guest the visit is active and before its
+// deadline (credentialIdle.live), and it is current (currentAuthSQL). It is
+// one primary-key read joined to the principal's primary key and is how an
+// open connection re-checks the credential it authenticated with. A
+// database failure is returned as an error; callers must treat it as "not
+// live".
 func (s *Store) CredentialLive(ctx context.Context, id int64) (bool, error) {
 	var expiresAt, revokedAt, disabledAt sql.NullInt64
 	var idle credentialIdle
+	var current bool
 	err := s.db.QueryRowContext(ctx,
-		`SELECT c.expires_at, c.revoked_at, p.disabled_at, `+idleBoundColumns+`
+		`SELECT c.expires_at, c.revoked_at, p.disabled_at, `+idleBoundColumns+`, `+currentAuthSQL+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.id = ?`, id,
 	).Scan(&expiresAt, &revokedAt, &disabledAt, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
-		&idle.guestState, &idle.guestExpiresAt)
+		&idle.guestState, &idle.guestExpiresAt, &current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("store: credential liveness: %w", err)
 	}
-	if revokedAt.Valid || disabledAt.Valid {
+	if revokedAt.Valid || disabledAt.Valid || !current {
 		return false, nil
 	}
 	now := credentialNow()

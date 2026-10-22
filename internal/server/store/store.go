@@ -732,6 +732,68 @@ END`,
 )`,
 		`ALTER TABLE invites ADD COLUMN join_as TEXT NOT NULL DEFAULT 'account' CHECK (join_as IN ('account', 'guest', 'both'))`,
 	},
+	// 32 (passwordsMigration): Passwords and operator authentication (issue #707,
+	// docs/design/guests-and-accounts.md §7.3). passwords holds one Argon2id
+	// record per principal that has a password, never a password; a
+	// principal with no row has none. auth_generation is the principal's
+	// authentication generation: every credential, link, pending login and
+	// setup token records the one it was issued under and is live only
+	// while it is still the principal's, so one bump ends them all. Every
+	// existing row is generation 0 and every principal starts at 0, so
+	// nothing is invalidated by the migration itself. scope and
+	// recent_auth_until are a credential's reach and its re-authentication
+	// proof; purpose and label make a sign-in link one of the purposes of
+	// schema.SignInLinkPurpose, every existing one sign_in. pending_logins
+	// are the challenges an operator's password yields, bound to the
+	// address they were issued to by address_key, a keyed HMAC of it that
+	// the server makes and only it can check, never the address itself;
+	// totp and setup_tokens are the operator's second factor and the
+	// host-made setup tokens. Nothing is backfilled.
+	{
+		`CREATE TABLE passwords (
+	principal_id INTEGER PRIMARY KEY REFERENCES principals (id),
+	hash         TEXT    NOT NULL,
+	created_at   INTEGER NOT NULL,
+	updated_at   INTEGER NOT NULL
+)`,
+		`ALTER TABLE principals ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE credentials ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE credentials ADD COLUMN scope TEXT NOT NULL DEFAULT 'full' CHECK (scope IN ('full', 'setup'))`,
+		`ALTER TABLE credentials ADD COLUMN recent_auth_until INTEGER`,
+		`ALTER TABLE sign_in_links ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sign_in_links ADD COLUMN purpose TEXT NOT NULL DEFAULT 'sign_in' CHECK (purpose IN ('sign_in', 'device', 'reset', 'enrollment', 'conversion'))`,
+		`ALTER TABLE sign_in_links ADD COLUMN label TEXT`,
+		`CREATE TABLE pending_logins (
+	id              INTEGER PRIMARY KEY,
+	challenge_hash  TEXT    NOT NULL UNIQUE,
+	principal_id    INTEGER NOT NULL REFERENCES principals (id),
+	address_key     TEXT    NOT NULL,
+	auth_generation INTEGER NOT NULL,
+	created_at      INTEGER NOT NULL,
+	expires_at      INTEGER NOT NULL,
+	attempts        INTEGER NOT NULL DEFAULT 0,
+	spent_at        INTEGER
+)`,
+		`CREATE INDEX pending_logins_by_principal ON pending_logins (principal_id)`,
+		`CREATE TABLE totp (
+	principal_id   INTEGER PRIMARY KEY REFERENCES principals (id),
+	secret         BLOB,
+	enrolled_at    INTEGER,
+	pending_secret BLOB,
+	pending_at     INTEGER,
+	last_step      INTEGER NOT NULL DEFAULT 0
+)`,
+		`CREATE TABLE setup_tokens (
+	id              INTEGER PRIMARY KEY,
+	token_hash      TEXT    NOT NULL UNIQUE,
+	principal_id    INTEGER NOT NULL REFERENCES principals (id),
+	auth_generation INTEGER NOT NULL,
+	created_at      INTEGER NOT NULL,
+	expires_at      INTEGER NOT NULL,
+	spent_at        INTEGER
+)`,
+		`CREATE INDEX setup_tokens_by_principal ON setup_tokens (principal_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

@@ -19,7 +19,8 @@ var ErrLastOperator = errors.New("store: this would leave no operator able to si
 
 // liveOperatorCredentialsTx counts the live credentials held by enabled
 // operators, leaving out one principal and one credential (pass 0 to leave
-// nothing out). It is what the lock-out guards ask: "if this principal, or
+// nothing out). Live includes current (currentAuthSQL, issue #707): a
+// credential from an old authentication generation signs nobody in. It is what the lock-out guards ask: "if this principal, or
 // this credential, went away, could an operator still sign in?"
 func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID int64, now time.Time) (int, error) {
 	var n int
@@ -27,6 +28,7 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE p.role = 'operator' AND p.disabled_at IS NULL
 		   AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
+		   AND `+currentAuthSQL+`
 		   AND p.id <> ? AND c.id <> ?`,
 		now.UnixMilli(), exceptPrincipalID, exceptCredentialID,
 	).Scan(&n)

@@ -195,6 +195,15 @@ func matrixRows() []row {
 		operator("PUT /v1/principals/{id}/name", "renames an A member", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/name", schema.RenamePrincipalRequestV1{Name: "renamed"})
 		}),
+		// Password sign-in (issue #707): B tries an A member's name with a
+		// password of her own. The answer is the one auth_failed, and the
+		// ghost comparison shows it is the same bytes for a name nobody has,
+		// so it does not even say that A's member exists.
+		{route: "POST /v1/login", what: "signs in as an A member with a password of her own", pick: aMemberName,
+			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/login", schema.LoginRequestV1{Name: s.name, Password: "a password of the prober's own"})
+			}},
 
 		// Messages, every version, search and threads.
 		byChannel("POST /v0/channels/{channel}/messages", "posts to A's channel (v0)", func(w *world, s subject) probe {
@@ -524,6 +533,7 @@ var exempt = map[string]string{
 	"POST /v1/hooks/{token}":         "authenticated by the hook's own URL token, which only an operator is shown",
 	"POST /v1/invites/preview":       "takes an invite code and answers only with what that code grants; B does not hold A's codes, and every other code answers the one invite_invalid (the revocation step checks a closed one)",
 	"POST /v1/invites/redeem":        "as preview: the code is the credential; a closed or unknown one answers invite_invalid (the revocation step checks it)",
+	"POST /v2/invites/redeem":        "as the v1 redeem, with a password beside the name: the code is the credential, and a closed or unknown one answers invite_invalid before anything is hashed",
 	"POST /v1/sign-in-links/preview": "takes a sign-in link's code and answers only with the name it signs in as; only an operator is shown a code, and A's are never given to B",
 	"POST /v1/sign-in-links/redeem":  "as preview: the code is the credential, made by an operator for one principal; B holds no code of A's",
 }
