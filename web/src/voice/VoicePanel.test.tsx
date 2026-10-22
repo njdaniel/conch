@@ -122,6 +122,59 @@ describe('Join voice and Watch only', () => {
   });
 });
 
+// Issue #643 (N07, N09): a control that cannot act says why, and a hint that
+// promises what it cannot give is not shown.
+describe('controls that cannot act', () => {
+  const watchHint = 'Microphone off. You hear the room and can watch a share.';
+  const snapshots: readonly (readonly [string, Snapshot, string | null])[] = [
+    ['loading', { kind: 'loading' }, 'Checking whether voice is available.'],
+    ['unreachable', { kind: 'unreachable' }, 'Voice status unavailable: the server cannot be reached.'],
+    ['gone', { kind: 'gone' }, 'Voice status could not be read.'],
+    ['down', { kind: 'presence', presence: { ...presence, available: false } }, 'Voice is unavailable right now; chat still works.'],
+  ];
+
+  it.each(snapshots)('does not say you hear the room while joins are disabled (%s), and says why', (_what, snapshot, reason) => {
+    const { voice } = panel(initialVoice, 'c', snapshot);
+    expect(voice.textContent).not.toContain('You hear the room');
+    expect(voice.textContent).toContain(reason);
+    const watch = within(voice).getByRole('button', { name: 'Watch only in #c' });
+    expect(watch.hasAttribute('disabled')).toBe(true);
+    expect(watch.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  it('shows the hint again once joins are open', () => {
+    const { voice, redraw } = panel(initialVoice, 'c', { kind: 'loading' });
+    expect(voice.textContent).not.toContain(watchHint);
+    redraw(initialVoice, { kind: 'presence', presence });
+    expect(within(voice).getByRole('button', { name: 'Watch only in #c', description: watchHint })).toBeTruthy();
+  });
+
+  const silenced = (patch: Partial<VoiceState>): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+  it.each([
+    ['muted', { muted: true }, 'Hold to talk sends nothing while you are muted. Unmute to talk.'],
+    ['deafened', { muted: true, deafened: true }, 'Hold to talk sends nothing while you are deafened. Undeafen to talk.'],
+  ])('Hold to talk says why it will not send while %s, and a press sends nothing', (_what, patch, said) => {
+    const { voice, client } = panel(silenced(patch), 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk', description: said });
+    expect(talk.getAttribute('aria-disabled')).toBe('true');
+    expect(document.getElementById('voice-talk-why')?.textContent).toBe(said);
+    // The press still reaches the client, whose gate is shut while muted or
+    // deafened (gate.test.ts; the browser test holds it against a live room).
+    const press = vi.spyOn(client, 'press');
+    fireEvent.keyDown(talk, { key: ' ', code: 'Space' });
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(client.snapshot().transmitting).toBe(false);
+  });
+
+  it('Hold to talk is not marked off, or described, while it can send', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    expect(talk.hasAttribute('aria-disabled')).toBe(false);
+    expect(talk.hasAttribute('aria-describedby')).toBe(false);
+    expect(voice.querySelector('#voice-talk-why')).toBeNull();
+  });
+});
+
 describe('the channel voice is in', () => {
   for (const [phase, label] of [
     ['connected', 'Connected'],
