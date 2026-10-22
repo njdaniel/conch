@@ -70,6 +70,12 @@ const instrument = () => {
 // opens to LiveKit from then gets its frames from the server 500 ms late, in
 // order. Installed before the page loads: a route reaches only the sockets
 // made after it.
+//
+// The server's close is as late as its frames, and comes after them, as on a
+// slow network (issue #781). LiveKit closes the socket straight after the
+// leave that says the room was deleted: a close passed on at once overtook
+// that leave, which never reached the page, and the page took the deleted
+// room for a lost connection.
 interface LateSignal {
   on: boolean;
 }
@@ -78,17 +84,27 @@ async function routeSignal(page: Page, late: LateSignal): Promise<void> {
   await page.routeWebSocket(/\/rtc/, (ws) => {
     const server = ws.connectToServer();
     const slow = late.on;
+    const after = (send: () => void) => {
+      if (slow) setTimeout(send, 500);
+      else send();
+    };
     ws.onMessage((m) => {
       server.send(m);
     });
     server.onMessage((m) => {
-      if (slow) {
-        setTimeout(() => {
-          ws.send(m);
-        }, 500);
-      } else {
+      after(() => {
         ws.send(m);
-      }
+      });
+    });
+    // Handled here, closes are no longer passed on by Playwright: each side's
+    // is passed on to the other, the server's in its turn.
+    ws.onClose((code, reason) => {
+      void server.close({ code, reason });
+    });
+    server.onClose((code, reason) => {
+      after(() => {
+        void ws.close({ code, reason });
+      });
     });
   });
 }
