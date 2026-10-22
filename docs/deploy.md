@@ -395,6 +395,28 @@ A second server on the same droplet (plan §3) is these steps, with `beta` as th
 
 From now on name `beta` in `conch-upgrade.sh` too.
 
+## A member who forgot their password
+
+There is no self-service recovery and no email: conchd sends no mail and needs no mail service. An operator recovers a member's account by hand, with a one-time **reset link** (design: [guests-and-accounts.md §6.1](design/guests-and-accounts.md)). Operators do not recover this way; their own recovery is offline, on the host.
+
+1. **Check who is asking**, out of band: in person, on a call, or over a channel you already trust for that person. A message in Conch from "their" account proves nothing; that account may be the one that was lost.
+2. **Make the reset link** for their principal id (`conch admin principal list` shows ids). The CLI flag for it is still to come (#713), so call the API. The token goes in on standard input, never on a command line:
+
+   ```sh
+   read -rsp 'operator token: ' tok && echo
+   printf 'Authorization: Bearer %s\n' "$tok" | curl -sS --fail-with-body -H @- -H 'Content-Type: application/json' \
+     -d '{"purpose":"reset"}' https://alpha.your.domain/v1/principals/<id>/sign-in-links
+   unset tok
+   ```
+
+   The answer carries the link's `code`, shown this once. It works once, for ten minutes (`"expires_at"` may ask for up to an hour), and only for a password reset: it signs nobody in and is good for nothing else. It is refused for an operator, a guest, a disabled or a hidden account.
+3. **Give the member the code** over the same trusted channel, and have them choose a new password with it at once: `POST /v1/password/reset` with `{"code": "...", "password": "..."}`, over HTTPS (the browser's page for it, and a `conch` command that reads the code from standard input, are #711 and #713).
+4. **What it does.** The new password replaces the old one, and everything of theirs that was signed in ends: every credential, every open sign-in, reset or enrollment link, any pending sign-in and any recent-password proof. Their open sockets close and they leave voice. No session is issued: they sign in with the new password, as on a new device.
+
+A link that leaked before it was used: close it with `conch admin sign-in-link close <link id>`. A member who joined before passwords existed and still has a working session sets a first password the same way, with `{"purpose":"enrollment"}` in step 2: they use that code on their own session (`POST /v1/password/mine` with `{"password": "...", "proof": "..."}`), which keeps them signed in there and ends nothing else. If they have lost their browser too, a reset link sets their first password.
+
+The audit log records each step, never a password or a code: `password_reset_issued` or `enrollment_issued` when you make the link; then, for a reset, `password_reset`, `auth_generation_bumped` and one `credential_revoked` for each sign-in that ended, and for an enrollment, `password_set` and `credential_rotated`.
+
 ## What to watch
 
 - `systemctl --failed`, and `systemctl list-timers 'conch-backup@*'`: a failed backup unit means no off-site copy last night.

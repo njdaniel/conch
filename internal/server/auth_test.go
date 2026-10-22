@@ -286,6 +286,12 @@ var routeExpectations = map[string]routeExpectation{
 	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
 	"POST /v2/invites/redeem": {classExempt, "/v2/invites/redeem", `{}`, 403},
 	"POST /v1/login":          {classExempt, "/v1/login", `{}`, 403},
+	// The password routes (issue #708) take a password too: the same 403
+	// for every caller, before anything is read.
+	"POST /v1/password/mine":  {classAuth, "/v1/password/mine", `{}`, 403},
+	"PUT /v1/password/mine":   {classAuth, "/v1/password/mine", `{}`, 403},
+	"POST /v1/password/reset": {classExempt, "/v1/password/reset", `{}`, 403},
+	"POST /v1/reauth":         {classAuth, "/v1/reauth", `{}`, 403},
 	// Operator administration of invites (issue #438). Each names an invite
 	// or a principal that does not exist, or sets the pause switch to the
 	// value it has, so it changes and audits nothing. Like the routes above,
@@ -399,7 +405,7 @@ func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
 		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
-		"POST /v1/login":                 true,
+		"POST /v1/login": true, "POST /v1/password/reset": true,
 		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
 
 	for _, rt := range f.srv.routes {
@@ -805,9 +811,13 @@ func TestWhoAmI(t *testing.T) {
 		// An operator may always invite (issue #437); a member may not until
 		// granted the right, and an agent never. People hold voice unless an
 		// invite withheld it; an agent never does (issue #468). Each is
-		// classed (issue #705); a guest's case is in guests_test.go.
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember}},
+		// classed (issue #705); a guest's case is in guests_test.go. People
+		// are told how they are authenticated (issue #708): neither has a
+		// password yet, so neither has finished setting up.
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
 		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},
 	}
 	for _, tt := range tests {

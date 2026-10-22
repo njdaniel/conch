@@ -308,6 +308,15 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	// How the caller is authenticated, and whether setup is complete
+	// (issue #708).
+	if credID, ok := credentialIDFrom(r.Context()); ok {
+		if err := s.authWhoAmI(r.Context(), caller, credID, &resp); err != nil {
+			slog.ErrorContext(r.Context(), "whoami: read authentication state failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+	}
 	// Only a person with an allowance is told what is left of it (issue
 	// #468): operators have none, and nobody else may invite.
 	if resp.MayInvite && !isOperator(caller) {

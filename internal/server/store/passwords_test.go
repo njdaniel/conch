@@ -759,3 +759,553 @@ func TestSetPasswordRefusesGuests(t *testing.T) {
 		t.Errorf("SetPassword(converted) = %v, want stored", err)
 	}
 }
+
+// recoveryWorld is the invite fixture (op, alice, bob) for issue #708's
+// transactions: alice has a password and two sessions, bob is a member who
+// predates passwords with one session.
+type recoveryWorld struct {
+	*inviteFixture
+	aliceA, aliceB, bobCred int64
+	aliceATok               string
+}
+
+func newRecoveryWorld(t *testing.T) *recoveryWorld {
+	t.Helper()
+	w := &recoveryWorld{inviteFixture: newInviteFixture(t)}
+	if _, err := w.s.SetPassword(w.ctx, "system", w.alice.ID, testRecord("alice"), "test", w.now); err != nil {
+		t.Fatal(err)
+	}
+	w.aliceA, w.aliceATok = w.session(w.alice.ID)
+	w.aliceB, _ = w.session(w.alice.ID)
+	w.bobCred, _ = w.session(w.bob.ID)
+	return w
+}
+
+// session issues id a renewable credential, as a browser sign-in is.
+func (w *recoveryWorld) session(id int64) (int64, string) {
+	w.t.Helper()
+	c, tok, err := w.s.CreateRenewableCredential(w.ctx, "system", id, "browser", 30*24*time.Hour)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return c.ID, tok
+}
+
+func (w *recoveryWorld) link(purpose schema.SignInLinkPurpose, target Principal) schema.CreateSignInLinkResponseV1 {
+	w.t.Helper()
+	resp, err := w.makeSignInLink(w.op, target, schema.CreateSignInLinkRequestV1{Purpose: purpose})
+	if err != nil {
+		w.t.Fatalf("CreateSignInLink(%s): %v", purpose, err)
+	}
+	return resp
+}
+
+func (w *recoveryWorld) live(id int64) bool {
+	w.t.Helper()
+	ok, err := w.s.CredentialLive(w.ctx, id)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return ok
+}
+
+func (w *recoveryWorld) generation(id int64) int64 {
+	w.t.Helper()
+	var g int64
+	if err := w.s.db.QueryRow("SELECT auth_generation FROM principals WHERE id = ?", id).Scan(&g); err != nil {
+		w.t.Fatal(err)
+	}
+	return g
+}
+
+func (w *recoveryWorld) record(id int64) string {
+	w.t.Helper()
+	var r sql.NullString
+	if err := w.s.db.QueryRow("SELECT hash FROM passwords WHERE principal_id = ?", id).Scan(&r); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		w.t.Fatal(err)
+	}
+	return r.String
+}
+
+func (w *recoveryWorld) change(cred int64, record string) PasswordChange {
+	return PasswordChange{PrincipalID: w.alice.ID, CredentialID: cred, AuthGeneration: w.generation(w.alice.ID),
+		Record: w.record(w.alice.ID), NewRecord: record}
+}
+
+// A link records its person's generation and is good only while it is
+// theirs, whatever its purpose; each purpose is taken only where it is
+// named, and the making of a reset or an enrollment link is audited by name.
+func TestSignInLinkPurposes(t *testing.T) {
+	tests := []struct {
+		purpose  schema.SignInLinkPurpose
+		action   string
+		previews bool
+		redeems  bool
+		lifetime time.Duration
+	}{
+		{schema.SignInLinkPurposeSignIn, AuditSignInLinkCreated, true, true, schema.DefaultSignInLinkLifetime},
+		{schema.SignInLinkPurposeReset, AuditPasswordResetIssued, true, false, schema.DefaultRestrictedLinkLifetime},
+		{schema.SignInLinkPurposeEnrollment, AuditEnrollmentIssued, false, false, schema.DefaultRestrictedLinkLifetime},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.purpose), func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			l := w.link(tt.purpose, w.alice)
+			if l.SignInLink.Purpose != tt.purpose || !l.SignInLink.ExpiresAt.Time().Equal(w.now.Add(tt.lifetime)) {
+				t.Errorf("link = %+v, want purpose %s for %s", l.SignInLink, tt.purpose, tt.lifetime)
+			}
+			var purpose string
+			var gen int64
+			if err := w.s.db.QueryRow("SELECT purpose, auth_generation FROM sign_in_links WHERE id = ?", l.SignInLink.ID).Scan(&purpose, &gen); err != nil {
+				t.Fatal(err)
+			}
+			if purpose != string(tt.purpose) || gen != w.generation(w.alice.ID) {
+				t.Errorf("row purpose %q generation %d, want %q and alice's %d", purpose, gen, tt.purpose, w.generation(w.alice.ID))
+			}
+			evs := w.audit()
+			if last := evs[len(evs)-1]; last.Action != tt.action || last.Subject != principalActor(w.alice.ID) {
+				t.Errorf("audit = %+v, want %s about alice", last, tt.action)
+			}
+			p, err := w.s.PreviewSignInLink(w.ctx, HashSignInLinkCode(l.Code), w.now)
+			if tt.previews != (err == nil) || (err == nil && (p.Name != "alice" || p.Purpose != tt.purpose)) {
+				t.Errorf("preview = %+v, %v; want previews=%v with the purpose", p, err, tt.previews)
+			}
+			if _, err := w.useSignInLink(l.Code, w.now); tt.redeems != (err == nil) {
+				t.Errorf("redeem = %v, want redeems=%v", err, tt.redeems)
+			}
+		})
+	}
+}
+
+// A link made before the generation moved on is refused by the generation
+// check itself, before anything closes it; and a bump closes every open link
+// of the principal, audited with reason auth_changed.
+func TestSignInLinkGeneration(t *testing.T) {
+	w := newRecoveryWorld(t)
+	stale := w.link(schema.SignInLinkPurposeSignIn, w.alice)
+	w.exec("UPDATE principals SET auth_generation = auth_generation + 1 WHERE id = ?", w.alice.ID)
+	if _, err := w.s.PreviewSignInLink(w.ctx, HashSignInLinkCode(stale.Code), w.now); !errors.Is(err, ErrSignInLinkInvalid) {
+		t.Errorf("preview of a link of an old generation = %v, want ErrSignInLinkInvalid", err)
+	}
+	if _, err := w.useSignInLink(stale.Code, w.now); !errors.Is(err, ErrSignInLinkInvalid) {
+		t.Errorf("redeem of a link of an old generation = %v, want ErrSignInLinkInvalid", err)
+	}
+
+	open := w.link(schema.SignInLinkPurposeReset, w.alice)
+	bobs := w.link(schema.SignInLinkPurposeSignIn, w.bob)
+	if _, err := w.s.BumpAuthGeneration(w.ctx, "system", w.alice.ID, "test", w.now); err != nil {
+		t.Fatal(err)
+	}
+	var closed bool
+	if err := w.s.db.QueryRow("SELECT closed_at IS NOT NULL FROM sign_in_links WHERE id = ?", open.SignInLink.ID).Scan(&closed); err != nil || !closed {
+		t.Errorf("alice's open link closed = %v, %v; want closed by the bump", closed, err)
+	}
+	want := fmt.Sprintf("sign_in_link=%d reason=%s", open.SignInLink.ID, SignInLinkCloseAuthChanged)
+	found := false
+	for _, e := range w.audit() {
+		if e.Action == AuditSignInLinkClosed && e.Detail == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no sign_in_link_closed row %q", want)
+	}
+	if _, err := w.useSignInLink(bobs.Code, w.now); err != nil {
+		t.Errorf("bob's link after alice's bump = %v, want it to work", err)
+	}
+}
+
+// Enrolment: a first password needs a usable enrollment link for the
+// caller, and anything else writes nothing.
+func TestEnrollPasswordRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		// in builds the enrolment; it may prepare the world.
+		in   func(w *recoveryWorld) PasswordEnrollment
+		want error
+	}{
+		{"no proof", func(w *recoveryWorld) PasswordEnrollment {
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred, Record: testRecord("b")}
+		}, ErrEnrollmentProofRequired},
+		{"a proof for somebody else", func(w *recoveryWorld) PasswordEnrollment {
+			l := w.link(schema.SignInLinkPurposeEnrollment, w.alice)
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred, Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}
+		}, ErrSignInLinkInvalid},
+		{"a reset link", func(w *recoveryWorld) PasswordEnrollment {
+			l := w.link(schema.SignInLinkPurposeReset, w.bob)
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred, Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}
+		}, ErrSignInLinkInvalid},
+		{"a replayed proof", func(w *recoveryWorld) PasswordEnrollment {
+			l := w.link(schema.SignInLinkPurposeEnrollment, w.bob)
+			w.exec("UPDATE sign_in_links SET closed_at = ? WHERE id = ?", w.now.UnixMilli(), l.SignInLink.ID)
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred, Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}
+		}, ErrSignInLinkInvalid},
+		{"a dead credential", func(w *recoveryWorld) PasswordEnrollment {
+			l := w.link(schema.SignInLinkPurposeEnrollment, w.bob)
+			if err := w.s.RevokeCredential(w.ctx, "system", w.bobCred); err != nil {
+				w.t.Fatal(err)
+			}
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred, Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}
+		}, ErrLoginStale},
+		{"another's credential", func(w *recoveryWorld) PasswordEnrollment {
+			l := w.link(schema.SignInLinkPurposeEnrollment, w.bob)
+			return PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.aliceA, Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}
+		}, ErrLoginStale},
+		{"a password already set", func(w *recoveryWorld) PasswordEnrollment {
+			return PasswordEnrollment{PrincipalID: w.alice.ID, CredentialID: w.aliceA, Record: testRecord("a2")}
+		}, ErrPasswordAlreadySet},
+		{"an operator", func(w *recoveryWorld) PasswordEnrollment {
+			c, _, err := w.s.CreateCredential(w.ctx, "system", w.op.ID, "cli", nil)
+			if err != nil {
+				w.t.Fatal(err)
+			}
+			return PasswordEnrollment{PrincipalID: w.op.ID, CredentialID: c.ID, Record: testRecord("o")}
+		}, ErrSetupOnHost},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			in := tt.in(w)
+			before := len(w.audit())
+			if _, err := w.s.EnrollPassword(w.ctx, "system", in, w.now); !errors.Is(err, tt.want) {
+				t.Fatalf("EnrollPassword = %v, want %v", err, tt.want)
+			}
+			if w.record(w.bob.ID) != "" || w.record(w.op.ID) != "" {
+				t.Error("a refused enrolment stored a password")
+			}
+			if n := len(w.audit()); n != before {
+				t.Errorf("a refused enrolment wrote %d audit rows", n-before)
+			}
+		})
+	}
+}
+
+// A member's enrolment spends the proof, rotates the session it came on and
+// ends nothing else: the generation stays.
+func TestEnrollPassword(t *testing.T) {
+	w := newRecoveryWorld(t)
+	other, _ := w.session(w.bob.ID)
+	l := w.link(schema.SignInLinkPurposeEnrollment, w.bob)
+	res, err := w.s.EnrollPassword(w.ctx, principalActor(w.bob.ID), PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: w.bobCred,
+		Record: testRecord("b"), ProofHash: HashSignInLinkCode(l.Code)}, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rotated != w.bobCred || res.Token == "" || res.Bumped || res.Revoked != 0 {
+		t.Errorf("result = %+v, want the session rotated and nothing else", res)
+	}
+	if w.record(w.bob.ID) != testRecord("b") || w.generation(w.bob.ID) != 0 {
+		t.Errorf("record %q generation %d, want stored at generation 0", w.record(w.bob.ID), w.generation(w.bob.ID))
+	}
+	if w.live(w.bobCred) || !w.live(res.Credential.ID) || !w.live(other) {
+		t.Error("want the old session dead, the rotated one and bob's other session live")
+	}
+	if _, err := w.s.EnrollPassword(w.ctx, "system", PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: res.Credential.ID,
+		Record: testRecord("b2"), ProofHash: HashSignInLinkCode(l.Code)}, w.now); !errors.Is(err, ErrPasswordAlreadySet) {
+		t.Errorf("second enrolment = %v, want ErrPasswordAlreadySet", err)
+	}
+}
+
+// One proof, used from several of the member's sessions at once: exactly one
+// enrolment stores a password; every other is refused and writes nothing.
+func TestEnrollPasswordConcurrently(t *testing.T) {
+	w := newRecoveryWorld(t)
+	l := w.link(schema.SignInLinkPurposeEnrollment, w.bob)
+	const n = 4
+	creds := []int64{w.bobCred}
+	for len(creds) < n {
+		c, _ := w.session(w.bob.ID)
+		creds = append(creds, c)
+	}
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i, c := range creds {
+		wg.Add(1)
+		go func(i int, c int64) {
+			defer wg.Done()
+			_, err := w.s.EnrollPassword(w.ctx, "system", PasswordEnrollment{PrincipalID: w.bob.ID, CredentialID: c,
+				Record: testRecord(fmt.Sprint("b", i)), ProofHash: HashSignInLinkCode(l.Code)}, w.now)
+			errs <- err
+		}(i, c)
+	}
+	wg.Wait()
+	close(errs)
+	won := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case !errors.Is(err, ErrPasswordAlreadySet) && !errors.Is(err, ErrSignInLinkInvalid):
+			t.Errorf("a racing enrolment = %v", err)
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d enrolments won, want 1", won)
+	}
+	var sets int
+	for _, e := range w.audit() {
+		if e.Action == AuditPasswordSet && e.Subject == principalActor(w.bob.ID) {
+			sets++
+		}
+	}
+	if sets != 1 {
+		t.Errorf("password_set rows for bob = %d, want 1", sets)
+	}
+}
+
+// On a setup-scoped credential the token was the proof: an operator's first
+// password ends nothing, and a replacement moves the generation on and
+// revokes every other credential while the setup credential carries on.
+func TestEnrollPasswordSetupScope(t *testing.T) {
+	w := newRecoveryWorld(t)
+	setup, _, err := w.s.CreateCredential(w.ctx, "system", w.op.ID, "setup", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.exec("UPDATE credentials SET scope = 'setup' WHERE id = ?", setup.ID)
+	script, _, err := w.s.CreateCredential(w.ctx, "system", w.op.ID, "cli", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := PasswordEnrollment{PrincipalID: w.op.ID, CredentialID: setup.ID, Record: testRecord("o1")}
+	res, err := w.s.EnrollPassword(w.ctx, "system", in, w.now)
+	if err != nil || res.Bumped || res.Token != "" || res.Rotated != 0 || w.generation(w.op.ID) != 0 || !w.live(script.ID) {
+		t.Fatalf("first setup password = %+v, %v; want stored, nothing ended", res, err)
+	}
+	in.Record = testRecord("o2")
+	res, err = w.s.EnrollPassword(w.ctx, "system", in, w.now)
+	if err != nil || !res.Bumped || res.Token != "" || res.Revoked < 1 || w.generation(w.op.ID) != 1 {
+		t.Fatalf("replacement = %+v, %v; want a bump and the others revoked", res, err)
+	}
+	if w.live(script.ID) {
+		t.Error("the operator's script credential survived the replacement")
+	}
+	var current bool
+	if err := w.s.db.QueryRow(`SELECT c.auth_generation = p.auth_generation AND c.revoked_at IS NULL
+		FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, setup.ID).Scan(&current); err != nil || !current {
+		t.Errorf("the setup credential after the replacement current = %v, %v; want it carried on", current, err)
+	}
+	if w.record(w.op.ID) != testRecord("o2") {
+		t.Error("the replacement was not stored")
+	}
+}
+
+// A change re-checks everything its verification relied on: any change in
+// between is ErrLoginStale and writes nothing; an operator is always
+// refused.
+func TestChangePasswordRechecks(t *testing.T) {
+	tests := []struct {
+		name string
+		// between runs after the change was read and before it is written.
+		between func(w *recoveryWorld)
+		cred    func(w *recoveryWorld) int64
+		want    error
+	}{
+		{"the password changed", func(w *recoveryWorld) {
+			w.exec("UPDATE passwords SET hash = ? WHERE principal_id = ?", testRecord("other"), w.alice.ID)
+		}, func(w *recoveryWorld) int64 { return w.aliceA }, ErrLoginStale},
+		{"the generation moved", func(w *recoveryWorld) {
+			if _, err := w.s.BumpAuthGeneration(w.ctx, "system", w.alice.ID, "test", w.now); err != nil {
+				w.t.Fatal(err)
+			}
+		}, func(w *recoveryWorld) int64 { return w.aliceA }, ErrLoginStale},
+		{"the credential was revoked", func(w *recoveryWorld) {
+			if err := w.s.RevokeCredential(w.ctx, "system", w.aliceA); err != nil {
+				w.t.Fatal(err)
+			}
+		}, func(w *recoveryWorld) int64 { return w.aliceA }, ErrLoginStale},
+		{"the member was disabled", func(w *recoveryWorld) {
+			if _, err := w.s.DisablePrincipal(w.ctx, "system", w.alice.ID); err != nil {
+				w.t.Fatal(err)
+			}
+		}, func(w *recoveryWorld) int64 { return w.aliceA }, ErrPrincipalDisabled},
+		{"a setup-scoped credential", func(w *recoveryWorld) {
+			w.exec("UPDATE credentials SET scope = 'setup' WHERE id = ?", w.aliceA)
+		}, func(w *recoveryWorld) int64 { return w.aliceA }, ErrLoginStale},
+		{"another's credential", func(*recoveryWorld) {}, func(w *recoveryWorld) int64 { return w.bobCred }, ErrLoginStale},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			in := w.change(tt.cred(w), testRecord("new"))
+			tt.between(w)
+			before := len(w.audit())
+			if _, err := w.s.ChangePassword(w.ctx, "system", in, w.now); !errors.Is(err, tt.want) {
+				t.Fatalf("ChangePassword = %v, want %v", err, tt.want)
+			}
+			if w.record(w.alice.ID) == testRecord("new") || len(w.audit()) != before {
+				t.Error("a refused change wrote something")
+			}
+		})
+	}
+	w := newRecoveryWorld(t)
+	c, _, err := w.s.CreateCredential(w.ctx, "system", w.op.ID, "cli", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.s.SetPassword(w.ctx, "system", w.op.ID, testRecord("op"), "test", w.now); err != nil {
+		t.Fatal(err)
+	}
+	in := PasswordChange{PrincipalID: w.op.ID, CredentialID: c.ID, AuthGeneration: w.generation(w.op.ID), Record: testRecord("op"), NewRecord: testRecord("op2")}
+	if _, err := w.s.ChangePassword(w.ctx, "system", in, w.now); !errors.Is(err, ErrSecondFactorRequired) {
+		t.Errorf("an operator's change = %v, want ErrSecondFactorRequired", err)
+	}
+}
+
+// A change stores the password, moves the generation on, revokes the other
+// credentials, spends every pending login, clears every proof and rotates
+// the session it came on, keeping its label and lifetime.
+func TestChangePasswordEndsTheRest(t *testing.T) {
+	w := newRecoveryWorld(t)
+	w.exec(`INSERT INTO pending_logins (challenge_hash, principal_id, address_key, auth_generation, created_at, expires_at)
+		VALUES ('h', ?, 'k', 0, ?, ?)`, w.alice.ID, w.now.UnixMilli(), w.now.Add(time.Minute).UnixMilli())
+	if _, err := w.s.RecordRecentAuth(w.ctx, LoginIssue{PrincipalID: w.alice.ID, AuthGeneration: 0, Record: testRecord("alice")}, w.aliceB, w.now); err != nil {
+		t.Fatal(err)
+	}
+	res, err := w.s.ChangePassword(w.ctx, principalActor(w.alice.ID), w.change(w.aliceA, testRecord("new")), w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Bumped || res.Revoked != 1 || res.Rotated != w.aliceA || res.Token == "" || res.Credential.Label != "browser" || !res.Credential.Renews {
+		t.Errorf("result = %+v, want B revoked and A rotated", res)
+	}
+	if w.record(w.alice.ID) != testRecord("new") || w.generation(w.alice.ID) != 1 {
+		t.Error("the change is not stored, or the generation did not move")
+	}
+	if w.live(w.aliceA) || w.live(w.aliceB) || !w.live(res.Credential.ID) || !w.live(w.bobCred) {
+		t.Error("want A and B dead, the rotated session and bob live")
+	}
+	var spent, proofs int
+	if err := w.s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM pending_logins WHERE spent_at IS NOT NULL),
+		(SELECT COUNT(*) FROM credentials WHERE recent_auth_until IS NOT NULL)`).Scan(&spent, &proofs); err != nil {
+		t.Fatal(err)
+	}
+	if spent != 1 || proofs != 0 {
+		t.Errorf("%d pending logins spent, %d proofs left; want 1 and 0", spent, proofs)
+	}
+}
+
+// A reset is the link's to make, once: of concurrent uses one wins, and a
+// target that may no longer be given a link is refused at completion.
+func TestResetPasswordStore(t *testing.T) {
+	w := newRecoveryWorld(t)
+	l := w.link(schema.SignInLinkPurposeReset, w.alice)
+	if p, err := w.s.CheckResetLink(w.ctx, HashSignInLinkCode(l.Code), w.now); err != nil || p.ID != w.alice.ID {
+		t.Fatalf("CheckResetLink = %+v, %v", p, err)
+	}
+	const n = 4
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := w.s.ResetPassword(w.ctx, HashSignInLinkCode(l.Code), testRecord(fmt.Sprint("r", i)), w.now)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	won := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case !errors.Is(err, ErrSignInLinkInvalid):
+			t.Errorf("a racing reset = %v", err)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d resets won, want 1", won)
+	}
+	if w.live(w.aliceA) || w.live(w.aliceB) || w.generation(w.alice.ID) != 1 {
+		t.Error("the reset left a credential live or the generation in place")
+	}
+
+	for _, tt := range []struct {
+		name   string
+		change string
+	}{
+		{"made an operator", "UPDATE principals SET role = 'operator' WHERE id = ?"},
+		{"disabled", "UPDATE principals SET disabled_at = 1 WHERE id = ?"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			l := w.link(schema.SignInLinkPurposeReset, w.bob)
+			w.exec(tt.change, w.bob.ID)
+			if _, err := w.s.ResetPassword(w.ctx, HashSignInLinkCode(l.Code), testRecord("b"), w.now); !errors.Is(err, ErrSignInLinkInvalid) {
+				t.Errorf("ResetPassword = %v, want ErrSignInLinkInvalid", err)
+			}
+			if w.record(w.bob.ID) != "" {
+				t.Error("a refused reset stored a password")
+			}
+		})
+	}
+}
+
+// The recent-password proof is recorded only on a sign-in session that is
+// still live and current, for a verification that still holds, and every
+// bump (a sign-out everywhere and a disable among them) ends it.
+func TestRecordRecentAuth(t *testing.T) {
+	w := newRecoveryWorld(t)
+	issue := LoginIssue{PrincipalID: w.alice.ID, AuthGeneration: 0, Record: testRecord("alice")}
+	script, _, err := w.s.CreateCredential(w.ctx, "system", w.alice.ID, "cli", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.s.RecordRecentAuth(w.ctx, issue, script.ID, w.now); !errors.Is(err, ErrNotASession) {
+		t.Errorf("a script credential = %v, want ErrNotASession", err)
+	}
+	if _, err := w.s.RecordRecentAuth(w.ctx, LoginIssue{PrincipalID: w.alice.ID, Record: testRecord("stale")}, w.aliceA, w.now); !errors.Is(err, ErrLoginStale) {
+		t.Errorf("a stale verification = %v, want ErrLoginStale", err)
+	}
+	until, err := w.s.RecordRecentAuth(w.ctx, issue, w.aliceA, w.now)
+	if err != nil || !until.Equal(w.now.Add(schema.RecentAuthLifetimeSeconds*time.Second)) {
+		t.Fatalf("RecordRecentAuth = %v, %v", until, err)
+	}
+	for _, c := range []struct {
+		cred int64
+		at   time.Time
+		want bool
+	}{
+		{w.aliceA, w.now, true}, {w.aliceA, until.Add(-time.Millisecond), true}, {w.aliceA, until, false}, {w.aliceB, w.now, false},
+	} {
+		if got, err := w.s.RecentAuthStands(w.ctx, c.cred, c.at); err != nil || got != c.want {
+			t.Errorf("RecentAuthStands(%d, %v) = %v, %v; want %v", c.cred, c.at, got, err, c.want)
+		}
+	}
+
+	for _, tt := range []struct {
+		name string
+		end  func(w *recoveryWorld)
+	}{
+		{"a sign-out everywhere", func(w *recoveryWorld) {
+			if _, err := w.s.RevokeAllCredentials(w.ctx, principalActor(w.alice.ID), w.alice.ID); err != nil {
+				w.t.Fatal(err)
+			}
+		}},
+		{"a disable", func(w *recoveryWorld) {
+			if _, err := w.s.DisablePrincipal(w.ctx, "system", w.alice.ID); err != nil {
+				w.t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			w.exec(`INSERT INTO pending_logins (challenge_hash, principal_id, address_key, auth_generation, created_at, expires_at)
+				VALUES ('h', ?, 'k', 0, ?, ?)`, w.alice.ID, w.now.UnixMilli(), w.now.Add(time.Minute).UnixMilli())
+			if _, err := w.s.RecordRecentAuth(w.ctx, issue, w.aliceA, w.now); err != nil {
+				t.Fatal(err)
+			}
+			tt.end(w)
+			var proofs, unspent int
+			if err := w.s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM credentials WHERE recent_auth_until IS NOT NULL),
+				(SELECT COUNT(*) FROM pending_logins WHERE spent_at IS NULL)`).Scan(&proofs, &unspent); err != nil {
+				t.Fatal(err)
+			}
+			if proofs != 0 || unspent != 0 || w.generation(w.alice.ID) != 1 {
+				t.Errorf("after %s: %d proofs, %d unspent pending logins, generation %d; want 0, 0, 1", tt.name, proofs, unspent, w.generation(w.alice.ID))
+			}
+		})
+	}
+}
