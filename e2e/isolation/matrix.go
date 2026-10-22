@@ -552,6 +552,21 @@ func matrixRows() []row {
 			probe: func(w *world, s subject) probe {
 				return post("/v1/approvals/"+id(s.id)+"/decisions", schema.CastDecisionRequestV1{PrincipalID: w.prober.id, OptionID: "yes", Reason: "r"})
 			}},
+
+		// Device links (issue #712): a member's own, and nothing of A's is
+		// named by making or listing one. B holds no recent proof of a
+		// password, so making one is refused before anything is written; her
+		// list holds nothing of A's; and closing A's link by its id as if it
+		// were hers is the answer for an id never issued.
+		{route: "POST /v1/sign-in-links/mine", what: "makes a device link without a recent proof of her password",
+			want: answer{http.StatusForbidden, schema.ErrorCodeReauthRequired},
+			probe: func(*world, subject) probe {
+				return post("/v1/sign-in-links/mine", schema.CreateDeviceLinkRequestV1{Label: "prober's phone"})
+			}},
+		own("GET /v1/sign-in-links/mine", "lists her device links", func(*world, subject) probe { return get("/v1/sign-in-links/mine") }),
+		{route: "DELETE /v1/sign-in-links/mine/{id}", what: "closes an A member's sign-in link as a device link of her own", pick: aSignInLink,
+			want:  answer{http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound},
+			probe: func(_ *world, s subject) probe { return del("/v1/sign-in-links/mine/" + id(s.id)) }},
 	}
 }
 
