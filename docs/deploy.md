@@ -148,7 +148,8 @@ Set, for `alpha`:
 - `CONCHD_LIVEKIT_URL=wss://livekit.your.domain`, `CONCHD_LIVEKIT_API_URL=http://127.0.0.1:7880`;
 - `CONCHD_LIVEKIT_ROOM_PREFIX=alpha-` (per instance);
 - `CONCHD_LIVEKIT_API_KEY` and `CONCHD_LIVEKIT_API_SECRET`: the pair from step 4;
-- `CONCHD_TRUSTED_PROXIES=127.0.0.1/32,::1/128` (Caddy, on loopback), as the example has it, so the invite routes' rate limits see each client's address rather than Caddy's.
+- `CONCHD_TRUSTED_PROXIES=127.0.0.1/32,::1/128` (Caddy, on loopback), as the example has it, so the invite routes' rate limits see each client's address rather than Caddy's;
+- `CONCHD_TOTP_KEY`: the key operators' authenticator secrets are encrypted under, made with `openssl rand -base64 32`, one per instance. Copy it into your password manager now, beside the backup passwords of step 8: the database holds the secrets only encrypted, so a restored backup without this key signs no operator in with a password (see [Restoring for real](#10-restoring-for-real)). Without the key `conchd` starts and everything but operators' password sign-in works; a value that is not such a key stops it at start.
 
 ## 6. The first operator
 
@@ -160,6 +161,26 @@ sudo -u conch-alpha /opt/conch/current/conchd bootstrap-operator --data /var/lib
 ```
 
 It prints the token once on stdout. Copy it into your password manager from the terminal; do not redirect it to a file on the droplet, and do not leave it in your scrollback on a shared machine. `bootstrap-operator` refuses to run a second time. From then on you administer the server with `conch admin` from your own machine, using this token (`CONCH_SERVER=https://alpha.your.domain`).
+
+That token is a **script credential**: it is as powerful as you are, it has no second factor, and anyone who copies it can act as you until you revoke it. Keep it for `conch admin` and scripts. Signing in **in a browser** is with a password and an authenticator app (any app that does TOTP: six digits, every 30 seconds), set up once from the host after the first start (step 7):
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd operator setup --data /var/lib/conch/alpha 1
+```
+
+`1` is the operator's principal id (`conch admin principal list` shows ids). It prints a **setup token** once on stdout and revokes nothing. The token works once, within ten minutes, over HTTPS only: open the server's setup page and paste it (until the browser has one, `POST /v1/setup/redeem` with `{"token": "..."}`). What it answers is a setup credential that lives fifteen minutes and can do three things and nothing else: show who you are, set your password (`POST /v1/password/mine`) and enrol the authenticator (`POST /v1/totp/enroll`, then `POST /v1/totp/confirm` with a code from the app). **The enrolment shows the authenticator's secret once**, as text and as an `otpauth://` link: type it into the app (or let a QR code made from the link on your own machine be scanned), on a screen nobody else is watching and that you are not sharing, and do not keep a copy of it anywhere else. The server never shows it again, and keeps it only encrypted under `CONCHD_TOTP_KEY`. Confirming completes the setup and ends the setup credential. From then on the browser signs you in with your name, your password and a current code; that session lasts twelve hours at most and ends after an hour without use. Actions that create or grant access, or end someone's (making a credential, a link, a hook or a principal, membership, disabling, hiding), ask for your password and a code again if you last gave them more than ten minutes ago. Script credentials are not asked: that is why they must be guarded.
+
+`conchd operator bootstrap --data /var/lib/conch/alpha your-name` makes the first operator with a setup token instead of a script credential, if you want no script credential at all; it refuses when an operator exists, as `bootstrap-operator` does.
+
+### An operator who lost their password or authenticator
+
+There is no way to reset an operator over the network; it is done on the host, by whoever can run `conchd` there:
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd operator recover --data /var/lib/conch/alpha <id>
+```
+
+It revokes **every** credential of that operator (their script credentials too: make new ones afterwards), removes their authenticator, ends their pending sign-ins, links and re-authentication, audits `operator_recovered`, and prints a setup token, used as above: the password you set through it replaces the old one, and you enrol the authenticator afresh. A running server stops accepting what it revoked at once on REST, and closes open sockets within its re-check interval. The audit trail records `setup_token_issued`, `setup_token_redeemed`, `password_set`, `totp_enrolled` and the revocations, and never a secret, a code or a token.
 
 ## 7. Start it: services, Caddy, firewall
 
@@ -360,6 +381,8 @@ Use this when the data is lost or corrupt. The archive's `conch.db` and `files/`
 ```
 
 `conch-backup` checks and reads the archive and the instance's user unpacks it from that stream, so root opens no file `conch-backup` owns, no owner or mode is taken from the archive, and nothing needs a `chown` afterwards. Everything written after the archive was made is gone: say so to the people using it. Run the drill on the archive first if there is any doubt about it. Keep the `.broken-*` directory until you are sure; the service cannot see it.
+
+**The TOTP key is not in the archive.** A backup holds the operators' authenticator secrets only encrypted under `CONCHD_TOTP_KEY`, which lives in `/etc/conch/alpha.env` and is never backed up with the data. Restoring onto the same droplet keeps the env file, and operators sign in as before. Restoring onto a new one, put the key back from your password manager into the new env file before the first start. If the key is lost, the data is not: start without it (or with a new one; `conchd` logs at start that the key does not open the stored secrets), and recover each operator with `conchd operator recover` (step 6), which removes the authenticator the old key protected and lets them enrol a new one. Members, messages and script credentials do not depend on the key.
 
 ## 11. Upgrading and rolling back
 
