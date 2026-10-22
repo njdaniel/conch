@@ -274,6 +274,14 @@ func New(cfg Config, st *store.Store) *Server {
 	// revoke, a disable); the store reports each after its commit (issue
 	// #705), and what follows is the same whichever it was.
 	st.OnGuestsEnded(s.guestsEnded)
+	// A restore run on a store this server holds moves every principal's
+	// authentication generation on (issue #716); what they have open closes
+	// as after any other bump.
+	st.OnAuthChanged(func(ids []int64) {
+		for _, id := range ids {
+			s.authChanged(context.Background(), id)
+		}
+	})
 	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))

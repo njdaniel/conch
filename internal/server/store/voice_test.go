@@ -527,6 +527,20 @@ func TestInvalidVoiceRooms(t *testing.T) {
 			}
 			return time.Now()
 		}, VoiceRotateRevoked},
+		// Moving the generation on ends the credential without revoking its
+		// row (issue #716): a restore does only that.
+		{"the generation moved on", func(t *testing.T, f holderFixture) time.Time {
+			if _, err := f.s.BumpAuthGeneration(ctx, "system", f.p.ID, "test", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			return time.Now()
+		}, VoiceRotateRevoked},
+		{"a restore", func(t *testing.T, f holderFixture) time.Time {
+			if _, err := f.s.InvalidateRestored(ctx, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			return time.Now()
+		}, VoiceRotateRevoked},
 		{"credential expired", func(t *testing.T, f holderFixture) time.Time {
 			return f.exp.Add(time.Second)
 		}, VoiceRotateExpired},
@@ -1045,5 +1059,46 @@ func TestValidateVoiceRoomPrefix(t *testing.T) {
 				t.Errorf("error is more than one line: %q", err)
 			}
 		})
+	}
+}
+
+// IsVoiceRoomName is exactly the shape newVoiceRoomName makes: every name it
+// makes matches its own prefix and no other, a prefix nested in another
+// ("alpha-" and "alpha-2-") never claims the other's rooms, and any other
+// suffix is refused (issue #716).
+func TestIsVoiceRoomName(t *testing.T) {
+	for _, prefix := range []string{DefaultVoiceRoomPrefix, "alpha-", "alpha-2-", "a-"} {
+		for range 20 {
+			name, err := newVoiceRoomName(prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !IsVoiceRoomName(prefix, name) {
+				t.Errorf("newVoiceRoomName(%q) = %q, which IsVoiceRoomName refuses", prefix, name)
+			}
+		}
+	}
+	nested, err := newVoiceRoomName("alpha-2-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, prefix, room string
+		want               bool
+	}{
+		{"its own shape", "alpha-", "alpha-" + strings.Repeat("a", 26), true},
+		{"every base32 character", "alpha-", "alpha-abcdefghijklmnopqrstuvwxyz"[:6+26], true},
+		{"digits 2-7", "alpha-", "alpha-" + strings.Repeat("234567", 5)[:26], true},
+		{"a nested prefix's room", "alpha-", nested, false},
+		{"another prefix", "alpha-", "beta-" + strings.Repeat("a", 26), false},
+		{"too short", "alpha-", "alpha-" + strings.Repeat("a", 25), false},
+		{"too long", "alpha-", "alpha-" + strings.Repeat("a", 27), false},
+		{"upper case", "alpha-", "alpha-" + strings.Repeat("A", 26), false},
+		{"not base32", "alpha-", "alpha-" + strings.Repeat("1", 26), false},
+		{"the prefix alone", "alpha-", "alpha-", false},
+	} {
+		if got := IsVoiceRoomName(tt.prefix, tt.room); got != tt.want {
+			t.Errorf("%s: IsVoiceRoomName(%q, %q) = %v, want %v", tt.name, tt.prefix, tt.room, got, tt.want)
+		}
 	}
 }

@@ -819,6 +819,9 @@ type Store struct {
 	// guestsEnded, when set, is told which guest visits a committed
 	// transaction ended (issue #705).
 	guestsEnded func([]EndedGuest)
+	// authChanged, when set, is told which principals' authentication
+	// generation a committed restore moved on (issue #716).
+	authChanged func([]int64)
 	// voiceRoomPrefix starts the name of each new voice room; empty means
 	// the default. See SetVoiceRoomPrefix.
 	voiceRoomPrefix string

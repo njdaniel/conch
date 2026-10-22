@@ -347,7 +347,7 @@ latest=$(as conch-backup sh -c 'ls -1t /var/backups/conch/alpha/conch-alpha-*.ta
 drill /var/backups/conch/alpha "${latest##*/}"
 ```
 
-It checks the archive's SHA-256, unpacks it, runs `PRAGMA integrity_check`, checks that every uploaded file the database names is present with its stored SHA-256, starts `conchd` on the copy (loopback, a spare port, no web client, no LiveKit) and requires `/healthz` to say `"status":"ok","db":"ok"`, then stops it and prints the schema version, the message count and the number of files.
+It checks the archive's SHA-256, unpacks it, runs `PRAGMA integrity_check`, checks that every uploaded file the database names is present with its stored SHA-256, runs `conchd restore` on the copy (as a real restore does, step 10: nothing in the backup signs anyone in afterwards, so the drill's `conchd` serves none of the backup's sign-ins), starts `conchd` on the copy (loopback, a spare port, no web client, no LiveKit) and requires `/healthz` to say `"status":"ok","db":"ok"`, then stops it and prints the schema version, the message count, the number of files and what `conchd restore` did, as counts. It prints no credential, code or secret. If any step fails, the copy keeps the `restore-pending` file it was unpacked with, so no `conchd` serves it.
 
 Do it also from the **off-site** copy once, since that is the copy that would be needed. `conch-backup` downloads it, and `rclone` decrypts on the way down:
 
@@ -362,7 +362,7 @@ Once, also check that the crypt passwords in your password manager are the right
 
 ## 10. Restoring for real
 
-Use this when the data is lost or corrupt. The archive's `conch.db` and `files/` go back as the instance's data directory. With the helpers from step 9 in root's shell:
+Use this when the data is lost or corrupt. The archive's `conch.db` and `files/` go back as the instance's data directory. Restoring onto a new host, check its clock first (`timedatectl` must say `System clock synchronized: yes`): a clock that runs behind lets an authenticator code someone saw before the restore be used again after the minute in which codes are refused (below). With the helpers from step 9 in root's shell:
 
 ```sh
 (
@@ -373,8 +373,13 @@ Use this when the data is lost or corrupt. The archive's `conch.db` and `files/`
   systemctl stop conchd@alpha
   mv /var/lib/conch/alpha "/var/lib/conch/alpha.broken-$(date -u +%Y%m%dT%H%M%SZ)"
   install -d -m 0700 -o conch-alpha -g conch-alpha /var/lib/conch/alpha
+  # First, before anything is unpacked: conchd serve refuses the directory
+  # until conchd restore has finished with it. (Archives made since #716
+  # carry this file too; the touch covers older ones.)
+  as conch-alpha touch /var/lib/conch/alpha/restore-pending </dev/null
   as conch-backup cat -- "/var/backups/conch/alpha/$a" </dev/null |
     as conch-alpha tar --no-same-owner --no-same-permissions -xzf - -C /var/lib/conch/alpha
+  as conch-alpha /opt/conch/current/conchd restore --data /var/lib/conch/alpha </dev/null | clean
   systemctl start conchd@alpha
   curl -fsS https://alpha.your.domain/healthz
 )
@@ -382,7 +387,31 @@ Use this when the data is lost or corrupt. The archive's `conch.db` and `files/`
 
 `conch-backup` checks and reads the archive and the instance's user unpacks it from that stream, so root opens no file `conch-backup` owns, no owner or mode is taken from the archive, and nothing needs a `chown` afterwards. Everything written after the archive was made is gone: say so to the people using it. Run the drill on the archive first if there is any doubt about it. Keep the `.broken-*` directory until you are sure; the service cannot see it.
 
-**The TOTP key is not in the archive.** A backup holds the operators' authenticator secrets only encrypted under `CONCHD_TOTP_KEY`, which lives in `/etc/conch/alpha.env` and is never backed up with the data. Restoring onto the same droplet keeps the env file, and operators sign in as before. Restoring onto a new one, put the key back from your password manager into the new env file before the first start. If the key is lost, the data is not: start without it (or with a new one; `conchd` logs at start that the key does not open the stored secrets), and recover each operator with `conchd operator recover` (step 6), which removes the authenticator the old key protected and lets them enrol a new one. Members, messages and script credentials do not depend on the key.
+**Restoring signs everyone out.** The backup may be older than a sign-out, a revoked credential, a used or closed link, or the end of a guest's visit, and served as it is it would bring all of them back. So `conchd restore` (offline, as the instance's user, before the first start) makes everything in it that signs someone in stop working: every credential (browser sessions, script credentials and agents' credentials alike), every open sign-in, device, reset or enrollment link, every pending sign-in and recent re-authentication, and every setup token; and it ends every guest visit that was active in the backup, with reason `restore`. It also **pauses invites**, because an invite closed after the backup is open again in it (audited `invites_paused`). It does it all in one transaction, prints how many principals it signed out, visits it ended and setup tokens it deleted and how many webhook hooks are live, and audits `restore_invalidated`, with one `auth_generation_bumped` (cause `restore`) per principal and one `guest_ended` per visit. Accounts, passwords, authenticators, roles, memberships and messages stay, and a guest's posts keep their guest name.
+
+The `restore-pending` file is what keeps a half-done restore off the network: `conchd serve` refuses to start while it is there, naming the command to run, and so do `conchd bootstrap-operator` and the `conchd operator` commands; `conchd restore` removes it only once its transaction has committed. Every archive `conch-backup.sh` makes holds an empty `restore-pending`, so data unpacked from one, by this procedure or any other way, starts refused. If anything above fails, or the droplet restarts in the middle, the instance does not come up (`systemctl status conchd@alpha` says why); run `conchd restore` as above, which is safe to run again, then start it. Do not remove the file by hand to get past it. `conchd restore` refuses a directory without the file, which is most likely a live one where it would sign everyone out; `--force` runs it anyway.
+
+**Voice.** LiveKit keeps its own rooms, and the people in them joined under sign-ins the restore ended. The first start on restored data deletes every LiveKit room named the way this instance names its rooms (its `CONCHD_LIVEKIT_ROOM_PREFIX` and then the 26-character random part, nothing else) before it accepts traffic, which disconnects everyone in them (they join again through `conchd`), and logs how many. Other instances' rooms on the same LiveKit are left alone, even when one prefix begins with another (`alpha-` and `alpha-2-`). If LiveKit does not answer, `conchd` starts anyway (voice is optional) and logs an error: then run `systemctl restart livekit`, which ends every room on it, before people sign in again.
+
+Authenticator codes are refused for about a minute after the first start, whatever the code: the record of which codes were already used went back with the backup, and that is the whole time a code used before could be used again. The first start logs this and audits `restore_started`; later starts do nothing of the kind.
+
+After the start:
+
+- **Members** sign in again with their password, on each device. A member who joined before passwords and has none gets a reset link ([A member who forgot their password](#a-member-who-forgot-their-password)).
+- **Operators** sign in with password and code, a minute or more after the start. One with no password or authenticator yet uses `conchd operator setup`, and one who lost either uses `conchd operator recover` (step 6).
+- **Script and agent credentials** are gone: issue new ones (`conch admin credential issue`) and replace them where they are configured. Tokens given to `conchd` with `--mcp-token` are configuration, not data, and are not affected.
+- **Guests** join again as new guests; an ended visit never comes back.
+
+**What a restore does not undo.** Apart from sign-ins, the restored data is the server as it was when the backup was taken, and every change made after it is lost, including ones made for safety. Nothing can reconstruct them: their record went with the data (if the database in `.broken-*` still opens, its audit log shows what happened). Before people return, check and redo what matters:
+
+- invites closed since are open again: `conch admin invite list --state open`, and `conch admin invite pause` until you have looked;
+- webhook hooks deleted since work again at their old URLs: `GET /v1/hooks`, and `DELETE /v1/hooks/{id}` for each that should be gone;
+- passwords and authenticators are as the backup has them: a password reset, a password change or a `conchd operator recover` made since is undone, and the old password or authenticator works again. Do each again;
+- approvals resolved since are pending again, and can be decided again;
+- invites are paused by the restore: once you have closed the ones that should be closed, resume them with `conch admin invite resume`;
+- people disabled or hidden since are enabled again, and roles, invite and voice rights, channel memberships, agent manifests, open channels and the joining and guest settings are as the backup has them.
+
+**The TOTP key is not in the archive.** A backup holds the operators' authenticator secrets only encrypted under `CONCHD_TOTP_KEY`, which lives in `/etc/conch/alpha.env` and is never backed up with the data. Restoring onto the same droplet keeps the env file, and operators sign in as before. Restoring onto a new one, put the key back from your password manager into the new env file before the first start. If the key is lost, the data is not: start without it (or with a new one; `conchd` logs at start that the key does not open the stored secrets), and recover each operator with `conchd operator recover` (step 6), which removes the authenticator the old key protected and lets them enrol a new one. Members and messages do not depend on the key.
 
 ## 11. Upgrading and rolling back
 
@@ -401,6 +430,10 @@ Releases are tagged, built by `.github/workflows/release.yml`, and name themselv
 **Rollback without a migration** (the schema version is unchanged): `conch-upgrade.sh --rollback alpha` repoints `current` at the previous release and restarts. The data is kept as it is, including what was written since the upgrade.
 
 **Rollback with a migration** (the schema version went up): the old binary refuses a newer database (`database schema version N is newer than this binary`), so the same command also replaces the instance's data directory with the pre-upgrade backup, unpacked as the instance's user. It checks that backup is there and intact before stopping anything. What was written since the upgrade is lost, and the replaced directory is kept; the script prints its path (`/var/lib/conch/alpha.rolled-back-<time>`) in case something in it is needed. The script says which of the two it did. Check the result with `curl https://alpha.your.domain/healthz`, which must report the old tag.
+
+A backup restored this way is made safe as in step 10 before the instance starts: the script unpacks it with `restore-pending` in place and runs the previous release's `conchd restore` on it, so everyone signs in again afterwards, and the rest of [Restoring for real](#10-restoring-for-real) applies. If `conchd restore` fails, the script stops there, with the instance stopped and its data refusing to start; once the cause is fixed, run the same rollback again: it finds the unfinished restore, runs `conchd restore` on it and starts the instance.
+
+A previous release from before `conchd restore` cannot make restored data safe, and its `conchd serve` does not know `restore-pending`, so on restored data it would serve every sign-in the backup holds. When a rollback would need the pre-upgrade backup, the script checks first that the previous release's usage names `conchd restore`, and if not it stops with **nothing stopped**: the instance keeps running the new release. The script only goes back to the release it recorded, so then roll back **by hand**: either to a release that has `conchd restore`, following [Restoring for real](#10-restoring-for-real) with that release's binary, or, if it has to be the old release, like this: stop the instances, point `/opt/conch/current` at the old release, and restore the pre-upgrade backup as in [Restoring for real](#10-restoring-for-real), knowing that the old release cannot run its `conchd restore` step. On that path nothing the restore would have done is done: every sign-in in the backup works, and the old release also leaves the authenticator record (`totp.last_step`) rolled back, so a code used since the backup can be used again for about a minute. Keep the instance off the network (stop Caddy for it, or firewall it) until, as an operator, you have signed everyone out with `POST /v1/principals/{id}/credentials/revoke-all` for each principal (which also ends a guest's visit) and paused invites; then remove `restore-pending`, which the old release ignores and the next one would refuse.
 
 A release you installed stays in `/opt/conch/releases/`; remove old ones by hand when you are sure.
 

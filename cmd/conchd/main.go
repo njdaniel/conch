@@ -60,6 +60,8 @@ func run(args []string) error {
 		return runBootstrapOperator(args[1:], os.Stdout, os.Stderr)
 	case "operator":
 		return runOperator(args[1:], os.Stdout, os.Stderr)
+	case "restore":
+		return runRestore(args[1:], os.Stdout, os.Stderr)
 	case "version":
 		fmt.Println(buildVersion())
 		fmt.Println("web: " + embeddedWebName())
@@ -87,6 +89,7 @@ Usage:
   conchd operator bootstrap --data <dir> [--keep-existing-credentials] <name>
   conchd operator setup     --data <dir> <principal id>
   conchd operator recover   --data <dir> <principal id>
+  conchd restore --data <dir> [--force]
   conchd version
 
 bootstrap-operator works offline on the data directory: it creates the first
@@ -105,6 +108,18 @@ gives an existing operator whose setup is incomplete a token and revokes
 nothing; "operator recover" revokes every credential of the operator, removes
 its authenticator and ends its pending sign-ins first. There is no network
 route that resets an operator.
+
+restore works offline too, on a data directory unpacked from a backup and
+before any conchd serves it: every credential, sign-in link, pending sign-in,
+re-authentication and setup token in the backup stops working, every guest
+visit in it ends, and authenticator codes are refused for about a minute
+after the first start. Accounts, passwords, authenticators and messages stay.
+The restore procedure (docs/deploy.md) puts a file named restore-pending in
+the data directory before it unpacks the backup; serve refuses to start while
+it is there, and restore removes it once it has finished. Running restore
+again is safe. restore refuses a directory without restore-pending, which is
+most likely a live one, unless --force is given; bootstrap-operator and the
+operator commands refuse one with it.
 
 Authentication is required by default: every REST and WebSocket request needs
 a bearer credential, so run bootstrap-operator first. --auth off opens every
@@ -422,11 +437,27 @@ func runServe(args []string) error {
 		return err
 	}
 
+	// A backup unpacked here and not yet made safe holds every credential
+	// and visit it held when it was taken: it is not served (issue #716).
+	if err := refuseUnfinishedRestore("serve", opts.dataDir); err != nil {
+		return err
+	}
 	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	// The first start after conchd restore refuses the TOTP steps an
+	// operator may have used before, from this start's clock; any other
+	// start finds nothing to do.
+	floor, restored, err := st.StartRestored(ctx, time.Now())
+	if err != nil {
+		return err
+	}
+	if restored {
+		slog.Warn("restore: first start on restored data; authenticator codes are refused until this time step has passed",
+			"totp_floor_step", floor, "until", time.Unix((floor+1)*schema.TOTPPeriodSeconds, 0).UTC().Format(time.RFC3339))
+	}
 	if err := st.SetVoiceRoomPrefix(opts.livekitRoomPrefix); err != nil {
 		return err
 	}
@@ -457,6 +488,9 @@ func runServe(args []string) error {
 			Timeout:        2 * time.Second,
 		},
 	}, st)
+	if restored {
+		clearRestoredVoice(ctx, srv)
+	}
 	if err := srv.Listen(); err != nil {
 		return err
 	}
@@ -469,6 +503,26 @@ func runServe(args []string) error {
 		fmt.Println("conchd metrics: off")
 	}
 	return srv.Serve(ctx)
+}
+
+// clearRestoredVoice ends, before the first start on restored data accepts
+// traffic, every media session LiveKit holds for this instance: they were
+// joined under sign-ins the restore ended (issue #716). LiveKit is optional,
+// so a LiveKit that does not answer does not stop the start; it is logged
+// with what to do instead.
+func clearRestoredVoice(ctx context.Context, srv *server.Server) {
+	if !srv.VoiceConfigured() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	n, err := srv.ClearVoiceRooms(ctx)
+	if err != nil {
+		slog.Error("restore: could not end the media sessions LiveKit holds for this instance; restart LiveKit (systemctl restart livekit), which ends them all",
+			"rooms_deleted", n, "error", err)
+		return
+	}
+	slog.Info("restore: ended every media session LiveKit held for this instance", "rooms_deleted", n)
 }
 
 // runBootstrapOperator creates the instance's first operator offline. The token
@@ -494,6 +548,9 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	// terminal like any principal name, so the same rule applies as to
 	// POST /v0/principals (issue #204).
 	if err := schema.ValidateDisplayName("operator name", *name, schema.MaxPrincipalNameLength); err != nil {
+		return err
+	}
+	if err := refuseUnfinishedRestore("bootstrap-operator", *dataDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path

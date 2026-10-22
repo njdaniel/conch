@@ -4,7 +4,9 @@
 #
 # Makes one dated archive of the instance's database and uploaded files, with
 # a SHA-256 beside it, keeps it locally for CONCH_BACKUP_KEEP_DAYS days, and
-# copies it off the host with rclone or s3cmd when one is configured.
+# copies it off the host with rclone or s3cmd when one is configured. The
+# archive also holds an empty restore-pending file, so data unpacked from it
+# is not served until conchd restore has run on it (docs/deploy.md).
 #
 # It is safe while conchd runs: the database is copied with SQLite's online
 # backup (`sqlite3 .backup`), which takes a consistent snapshot of a database
@@ -99,9 +101,14 @@ snapshot() {
     sqlite3 -cmd '.timeout 10000' "$db" ".backup '$stage/conch.db'" >&2
     check=$(sqlite3 "$stage/conch.db" 'PRAGMA integrity_check')
     [ "$check" = ok ] || die "the copied database failed its integrity check: $check"
+    # An empty restore-pending goes into every archive (issue #716): unpacked
+    # anywhere, the data is refused by conchd serve until conchd restore has
+    # made it safe, whoever unpacks it and however. The live data directory
+    # never holds it.
+    : >"$stage/restore-pending"
     # Uploads are written to .upload-* first and renamed; a half-written one
     # is not part of any row.
-    local tar_args=(--exclude='.upload-*' -C "$stage" conch.db)
+    local tar_args=(--exclude='.upload-*' -C "$stage" conch.db restore-pending)
     if [ -d "$data/files" ]; then
         tar_args+=(-C "$data" files)
     fi
