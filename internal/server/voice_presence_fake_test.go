@@ -105,6 +105,8 @@ type scriptedLiveKit struct {
 	// deleteStatus is the status of DeleteRoom; 0 means 200, or 404 not_found
 	// when LiveKit does not have the room, as it answers.
 	deleteStatus int
+	// deleteFail names rooms whose DeleteRoom fails while others succeed.
+	deleteFail map[string]bool
 	// keepAfterRemove makes RemoveParticipant answer 200 without dropping the
 	// participant, as when LiveKit is slow to close the connection.
 	keepAfterRemove bool
@@ -119,6 +121,10 @@ type scriptedLiveKit struct {
 	// onCreate runs while CreateRoom is being answered, before the answer: the
 	// moment between a session request's room lookup and its token.
 	onCreate func(room string)
+	// onList runs while ListRooms is being answered, before the rooms are
+	// read: the moment a room can appear between a sweep's list and its
+	// reads of the store.
+	onList func()
 	// onRemove runs while RemoveParticipant is being answered, before it takes
 	// effect: the moment a snapshot taken mid-removal would catch.
 	onRemove func(room, identity string)
@@ -172,6 +178,11 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		writeFakeJSON(w, http.StatusOK, map[string]any{"sid": "RM_test", "name": req.Name})
 	case "ListRooms":
 		f.record(method, "", "")
+		if hook := f.onList; hook != nil {
+			f.mu.Unlock()
+			hook()
+			f.mu.Lock()
+		}
 		status, hold, count := f.listStatus, f.holdRooms, f.reportedCount
 		names := make([]string, 0, len(f.rooms))
 		for name := range f.rooms {
@@ -287,6 +298,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		// Deleting a room disconnects everyone in it and forgets it.
 		f.record(method, req.Room, "")
 		status := f.deleteStatus
+		if f.deleteFail[req.Room] {
+			status = http.StatusInternalServerError
+		}
 		_, had := f.rooms[req.Room]
 		if status == 0 && had {
 			delete(f.rooms, req.Room)
@@ -356,6 +370,9 @@ func (f *scriptedLiveKit) setHoldList(c chan struct{}) {
 }
 func (f *scriptedLiveKit) setOnCreate(fn func(room string)) {
 	f.config(func(l *scriptedLiveKit) { l.onCreate = fn })
+}
+func (f *scriptedLiveKit) setOnList(fn func()) {
+	f.config(func(l *scriptedLiveKit) { l.onList = fn })
 }
 func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 	f.config(func(l *scriptedLiveKit) { l.onRemove = fn })
