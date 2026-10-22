@@ -70,7 +70,7 @@ test('P3-05 browser-test cannot open test-private and nothing about a run there 
 });
 
 // The browser as sender (issue #352). nets-demo has two nets: red (nick-test
-// transmits, guest-test monitors) and blue (guest-test and browser-test). Who
+// transmits, jamie-test monitors) and blue (jamie-test and browser-test). Who
 // reads what is checked through the API with the participants' own
 // credentials, as the TUI's would be: the server decides the audience.
 test('P3-05 the browser composes to a net and to a whisper, and only the audience reads it', async ({ meet, world }) => {
@@ -83,7 +83,7 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   const to = page.getByLabel('To:');
   await expect(to.getByRole('option')).toHaveText(['#nets-demo', 'net blue', 'Whisper to…']);
 
-  // A net post: a member (guest-test) reads it with the net's audience; a
+  // A net post: a member (jamie-test) reads it with the net's audience; a
   // non-member (nick-test) never does.
   // Unique per run: a repeated run on the same server must not see an
   // earlier run's message as a second copy.
@@ -110,12 +110,12 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   // Still once after the round trips: a late duplicate would show here.
   await expect(netItems).toHaveCount(1);
 
-  // A whisper to guest-test only; the composer is the channel's again after it,
+  // A whisper to jamie-test only; the composer is the channel's again after it,
   // and the audit notice shows.
   await to.selectOption({ label: 'Whisper to…' });
-  await page.getByRole('group', { name: 'Whisper to' }).getByRole('checkbox', { name: 'guest-test' }).check();
+  await page.getByRole('group', { name: 'Whisper to' }).getByRole('checkbox', { name: 'jamie-test' }).check();
   const whisperBody = `p3-05 browser whispers to guest ${runTag}`;
-  await page.getByLabel('Whisper to guest-test').fill(whisperBody);
+  await page.getByLabel('Whisper to jamie-test').fill(whisperBody);
   await page.getByRole('button', { name: 'Send' }).click();
   // As for the net: the settled copy, once, with the whisper's badge.
   const whisperItems = messages(page).getByRole('listitem').filter({ hasText: whisperBody });

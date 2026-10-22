@@ -174,7 +174,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeUnauthenticated(w)
 			return
 		}
-		principal, credentialID, err := s.store.ResolveCredentialDetail(r.Context(), token)
+		principal, cred, err := s.store.ResolveRequestCredential(r.Context(), token)
 		switch {
 		case errors.Is(err, store.ErrCredentialInvalid):
 			s.metrics.authFailed("invalid_credential")
@@ -187,16 +187,45 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withCredentialID(withCaller(r.Context(), principal), credentialID)))
+		// A setup-scoped credential reaches the routes that finish setup and
+		// nothing else (design §5.3, review F6), checked here once, beside
+		// expiry, so no route can forget it. A scope this code does not
+		// know reaches nothing.
+		if cred.Scope != schema.CredentialScopeFull && (cred.Scope != schema.CredentialScopeSetup || !matched || !setupScopeRoutes[pattern]) {
+			writeSetupScopeRefused(w)
+			return
+		}
+		// A REST request moves an idle-bounded credential's idle expiry (a
+		// guest's, an operator's browser session); opening a socket does
+		// not, and nothing on an open socket does (issue #705, review F5),
+		// so a stolen token kept alive by a ping loop still runs out.
+		if cred.IdleBounded && !isSocketRoute(pattern) {
+			s.store.NoteGuestUse(r.Context(), cred.ID)
+		}
+		ctx := withRequestCredential(withCredentialID(withCaller(r.Context(), principal), cred.ID), cred)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+// isSocketRoute reports whether pattern is a WebSocket route: every one of
+// them ends in /ws (routes.go).
+func isSocketRoute(pattern string) bool { return strings.HasSuffix(pattern, "/ws") }
+
 // guard returns the handler to register for rt. Under AuthOff it is the bare
 // handler, so behaviour is unchanged. Under AuthRequired operator routes are
-// wrapped with the role check.
+// wrapped with the role check, and the routes of the re-authentication class
+// (recentAuthRoutes) with the recent-auth gate inside it, so a member is
+// told the role is missing before anything about a proof.
 func (s *Server) guard(rt route) http.Handler {
-	if !s.cfg.authRequired() || rt.access != accessOperator {
+	if !s.cfg.authRequired() {
 		return rt.handler
+	}
+	handler := rt.handler
+	if rule := recentAuthRoutes[rt.pattern]; rule != reauthNone {
+		handler = s.recentAuthGate(rule, handler)
+	}
+	if rt.access != accessOperator {
+		return handler
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, ok := callerFrom(r.Context())
@@ -210,7 +239,7 @@ func (s *Server) guard(rt route) http.Handler {
 			s.denyForbidden(w, r, caller, "forbidden", "operator role required")
 			return
 		}
-		rt.handler.ServeHTTP(w, r)
+		handler.ServeHTTP(w, r)
 	})
 }
 
@@ -290,6 +319,22 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		ServerVersion: s.cfg.Version,
 		MayInvite:     mayInvite(caller),
 		VoiceAllowed:  &voice,
+	}
+	// What the caller is, and a guest's visit (issue #705). Only with
+	// authentication on, where there is a caller to classify.
+	if err := s.guestWhoAmI(r.Context(), caller, &resp); err != nil {
+		slog.ErrorContext(r.Context(), "whoami: read guest visit failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	// How the caller is authenticated, and whether setup is complete
+	// (issue #708).
+	if credID, ok := credentialIDFrom(r.Context()); ok {
+		if err := s.authWhoAmI(r.Context(), caller, credID, &resp); err != nil {
+			slog.ErrorContext(r.Context(), "whoami: read authentication state failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
 	}
 	// Only a person with an allowance is told what is left of it (issue
 	// #468): operators have none, and nobody else may invite.

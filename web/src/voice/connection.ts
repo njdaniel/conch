@@ -1045,6 +1045,10 @@ export class VoiceClient {
       await this.applyOutput(room);
       if (mine !== this.attempt) return;
     }
+    // So is deafen, so that a voice attached while connecting is muted from
+    // the first. It is not set again after the connection: a change made
+    // meanwhile reaches this room through setDeafened.
+    room.setDeafened(this.state.deafened);
     // So is the microphone chosen, found by its name if its id has changed.
     // A microphone missing is not captured at all: the connection is made
     // without it, until the person chooses one.
@@ -1094,7 +1098,6 @@ export class VoiceClient {
       void room.close().catch(() => undefined);
       return;
     }
-    room.setDeafened(this.state.deafened);
     this.connectedAt = this.now();
     this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish, ...inUseOn(room) });
     this.applyBlock();

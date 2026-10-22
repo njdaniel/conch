@@ -250,7 +250,11 @@ export function VoicePanel({
     );
   }
 
-  const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
+  // Joined while the server reports voice down (the signalling cut while
+  // media runs on, issue #644): presence has nothing true to list, so the
+  // roster goes and the strip says so.
+  const cutOff = inVoice && presence !== null && !presence.available;
+  const roster = cutOff ? [] : occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
@@ -258,6 +262,7 @@ export function VoicePanel({
   // The microphone is captured while connected with it, whether or not
   // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
   // the capture it had. A microphone that went is not captured.
+  const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
@@ -335,6 +340,11 @@ export function VoicePanel({
                     className="talk"
                     aria-pressed={state.transmitting}
                     disabled={state.listenOnly || state.watchOnly}
+                    // Muted or deafened it stays pressable (a press reaches the
+                    // gate, which is shut and sends nothing), but it looks off
+                    // and says why in the note below (UX-07).
+                    aria-disabled={silenced ? true : undefined}
+                    aria-describedby={silenced ? 'voice-talk-why' : undefined}
                     onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
                     onPointerUp={() => { client.release(); }}
                     onPointerCancel={() => { client.release(); }}
@@ -411,7 +421,7 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   Join voice {dest}
                 </button>
-                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
+                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
                   Watch only {dest}
                 </button>
               </>
@@ -426,6 +436,7 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
             {state.outputNote === null ? null : (
               <p role="status" className="hint">
                 {state.outputNote}
@@ -435,6 +446,11 @@ export function VoicePanel({
             {state.missing && state.why === null ? (
               <p role="status" className="hint">
                 {missingNote}
+              </p>
+            ) : null}
+            {state.mode === 'ptt' && silenced && !state.listenOnly && !state.watchOnly ? (
+              <p id="voice-talk-why" className="hint">
+                {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
               </p>
             ) : null}
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
@@ -456,7 +472,13 @@ export function VoicePanel({
           </>
         ) : (
           <>
-            <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            {/* The hint is a promise Watch only cannot keep while joins are
+                off, so the reason stands in its place. */}
+            {canJoin ? (
+              <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            ) : voice.secure && snapshot.kind === 'loading' ? (
+              <p className="hint">Checking whether voice is available.</p>
+            ) : null}
             {elsewhere ? <p className="hint">You are in voice on another device. Joining here moves your voice to this device.</p> : null}
             {theirs === null ? null : <p className="hint">{theirName} is sharing a screen. Join, or watch only, to see it.</p>}
             {!voice.secure ? (
@@ -612,6 +634,7 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 }
 
 // What the notes say while the microphone is missing.
+export const cutOffNote = 'Voice server unreachable. You may be cut off.';
 export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
 
 // The values of the microphone list: System default, a device by id, and

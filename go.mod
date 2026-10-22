@@ -10,7 +10,8 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/prometheus/client_golang v1.24.1
-	golang.org/x/term v0.42.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.53.0
 )

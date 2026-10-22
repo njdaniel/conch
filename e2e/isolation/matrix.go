@@ -129,9 +129,13 @@ func aApproval(w *world) subject     { return subject{kind: "approval", id: w.a.
 func aOpenLink(w *world) subject     { return subject{kind: "invite", id: w.a.openInviteID} }
 func aPersonal(w *world) subject     { return subject{kind: "invite", id: w.a.invites[1]} }
 func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: w.a.signInLink} }
-func aReport(w *world) subject       { return subject{kind: "report", id: w.a.reportID} }
-func aMemberName(w *world) subject   { return subject{kind: "principal", name: w.a.people[0].name} }
-func aWord(w *world) subject         { return subject{name: w.aName("word-root")} }
+
+// aSignInCode is the code of A's sign-in link, by name: the password rows
+// present it, and the ghost's name is a code nobody was given.
+func aSignInCode(w *world) subject { return subject{kind: "sign_in_link", name: w.a.signInCode} }
+func aReport(w *world) subject     { return subject{kind: "report", id: w.a.reportID} }
+func aMemberName(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} }
+func aWord(w *world) subject       { return subject{name: w.aName("word-root")} }
 
 // ghost is the subject of the comparison request: nothing by that name or id
 // was ever made.
@@ -195,6 +199,41 @@ func matrixRows() []row {
 		operator("PUT /v1/principals/{id}/name", "renames an A member", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/name", schema.RenamePrincipalRequestV1{Name: "renamed"})
 		}),
+		// Password sign-in (issue #707): B tries an A member's name with a
+		// password of her own. The answer is the one auth_failed, and the
+		// ghost comparison shows it is the same bytes for a name nobody has,
+		// so it does not even say that A's member exists.
+		{route: "POST /v1/login", what: "signs in as an A member with a password of her own", pick: aMemberName,
+			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/login", schema.LoginRequestV1{Name: s.name, Password: "a password of the prober's own"})
+			}},
+		// Passwords (issue #708). B presents the operator's sign-in link for
+		// an A member as her own enrollment proof, and as a reset: a link is
+		// for one person and one purpose, and either way the answer is the one
+		// sign_in_link_invalid, the same bytes as for a code nobody was given.
+		// The change and the re-authentication name nothing of A's: B has no password, and
+		// is told so.
+		{route: "POST /v1/password/mine", what: "sets her first password with an A member's sign-in link as the proof", pick: aSignInCode,
+			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: "a long password of the prober's own", Proof: s.name})
+			}},
+		{route: "POST /v1/password/reset", what: "resets an A member's password with A's sign-in link", pick: aSignInCode,
+			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/password/reset", schema.ResetPasswordRequestV1{Code: s.name, Password: "a long password of the prober's own"})
+			}},
+		{route: "PUT /v1/password/mine", what: "changes a password she does not have",
+			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			probe: func(*world, subject) probe {
+				return put("/v1/password/mine", schema.ChangePasswordRequestV1{Current: "a guess at somebody's password", Password: "a long password of the prober's own"})
+			}},
+		{route: "POST /v1/reauth", what: "proves a password she does not have",
+			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			probe: func(*world, subject) probe {
+				return post("/v1/reauth", schema.ReauthRequestV1{Password: "a guess at somebody's password"})
+			}},
 
 		// Messages, every version, search and threads.
 		byChannel("POST /v0/channels/{channel}/messages", "posts to A's channel (v0)", func(w *world, s subject) probe {
@@ -422,6 +461,11 @@ func matrixRows() []row {
 		{route: "DELETE /v1/credentials/mine/{id}", what: "ends an A member's sign-in", pick: aCredential,
 			want:  answer{http.StatusNotFound, "credential_not_found"},
 			probe: func(_ *world, s subject) probe { return del("/v1/credentials/mine/" + id(s.id)) }},
+		// End visit (issue #705): only a guest has a visit, and no B member
+		// is one; the route names nothing of A's.
+		{route: "POST /v1/guest/end", what: "ends a guest visit she does not have",
+			want:  answer{http.StatusForbidden, schema.ErrorCodeNotAGuest},
+			probe: func(*world, subject) probe { return post("/v1/guest/end", nil) }},
 		operator("POST /v1/principals/{id}/disable", "disables an A member", aMember, func(_ *world, s subject) probe {
 			return post("/v1/principals/"+id(s.id)+"/disable", nil)
 		}),
@@ -508,6 +552,45 @@ func matrixRows() []row {
 			probe: func(w *world, s subject) probe {
 				return post("/v1/approvals/"+id(s.id)+"/decisions", schema.CastDecisionRequestV1{PrincipalID: w.prober.id, OptionID: "yes", Reason: "r"})
 			}},
+
+		// Device links (issue #712): a member's own, and nothing of A's is
+		// named by making or listing one. B holds no recent proof of a
+		// password, so making one is refused before anything is written; her
+		// list holds nothing of A's; and closing A's link by its id as if it
+		// were hers is the answer for an id never issued.
+		{route: "POST /v1/sign-in-links/mine", what: "makes a device link without a recent proof of her password",
+			want: answer{http.StatusForbidden, schema.ErrorCodeReauthRequired},
+			probe: func(*world, subject) probe {
+				return post("/v1/sign-in-links/mine", schema.CreateDeviceLinkRequestV1{Label: "prober's phone"})
+			}},
+		own("GET /v1/sign-in-links/mine", "lists her device links", func(*world, subject) probe { return get("/v1/sign-in-links/mine") }),
+		{route: "DELETE /v1/sign-in-links/mine/{id}", what: "closes an A member's sign-in link as a device link of her own", pick: aSignInLink,
+			want:  answer{http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound},
+			probe: func(_ *world, s subject) probe { return del("/v1/sign-in-links/mine/" + id(s.id)) }},
+		// Operator sign-in and setup (issue #709). A challenge is bound to
+		// the operator and the address it was issued to, and a setup token is
+		// made on the host and printed there: B holds neither of A's, and a
+		// made-up one answers the one auth_failed or setup_token_invalid,
+		// naming nobody. The TOTP enrolment is for a setup-scoped credential,
+		// which B's are not: setup_on_host, whatever she sends.
+		{route: "POST /v1/login/totp", what: "completes an operator's sign-in with a challenge nobody gave her",
+			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
+			probe: func(*world, subject) probe {
+				return post("/v1/login/totp", schema.TOTPLoginRequestV1{Challenge: schema.PendingLoginPrefix + strings.Repeat("A", 43), Code: "123456"})
+			}},
+		{route: "POST /v1/setup/redeem", what: "redeems an operator's setup token nobody gave her",
+			want: answer{http.StatusNotFound, schema.ErrorCodeSetupTokenInvalid},
+			probe: func(*world, subject) probe {
+				return post("/v1/setup/redeem", schema.RedeemSetupTokenRequestV1{Token: schema.SetupTokenPrefix + strings.Repeat("A", 43)})
+			}},
+		{route: "POST /v1/totp/enroll", what: "enrols a second factor on her own credential",
+			want:  answer{http.StatusForbidden, schema.ErrorCodeSetupOnHost},
+			probe: func(*world, subject) probe { return post("/v1/totp/enroll", nil) }},
+		{route: "POST /v1/totp/confirm", what: "confirms a second factor on her own credential",
+			want: answer{http.StatusForbidden, schema.ErrorCodeSetupOnHost},
+			probe: func(*world, subject) probe {
+				return post("/v1/totp/confirm", schema.ConfirmTOTPRequestV1{Code: "123456"})
+			}},
 	}
 }
 
@@ -519,6 +602,7 @@ var exempt = map[string]string{
 	"POST /v1/hooks/{token}":         "authenticated by the hook's own URL token, which only an operator is shown",
 	"POST /v1/invites/preview":       "takes an invite code and answers only with what that code grants; B does not hold A's codes, and every other code answers the one invite_invalid (the revocation step checks a closed one)",
 	"POST /v1/invites/redeem":        "as preview: the code is the credential; a closed or unknown one answers invite_invalid (the revocation step checks it)",
+	"POST /v2/invites/redeem":        "as the v1 redeem, with a password beside the name: the code is the credential, and a closed or unknown one answers invite_invalid before anything is hashed",
 	"POST /v1/sign-in-links/preview": "takes a sign-in link's code and answers only with the name it signs in as; only an operator is shown a code, and A's are never given to B",
 	"POST /v1/sign-in-links/redeem":  "as preview: the code is the credential, made by an operator for one principal; B holds no code of A's",
 }
