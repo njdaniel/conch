@@ -312,6 +312,11 @@ type voicePoller struct {
 	// retryAt holds back every LiveKit call until it passes, during an outage.
 	retryAt   time.Time
 	nextSweep time.Time
+	// orphansDeleted and orphansFailed are what the last sweep that looked
+	// for orphans did (sweepOrphans): whether it deleted one that was not
+	// left over from a failure, and the names it could not delete.
+	orphansDeleted bool
+	orphansFailed  map[string]struct{}
 
 	subs map[*voiceSub]struct{}
 	// occSubs are the occupancy sockets' subscriptions (voice_occupancy.go):
@@ -600,9 +605,19 @@ func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 // going through a hook. Then one ListRooms call: every live stored room that
 // LiveKit lists is marked for the next pass, and every retired room that
 // LiveKit still lists is deleted, which is how a rotation whose DeleteRoom
-// failed, or that a restart interrupted, is finished. The listed participant
-// count is never read (it lags a join by seconds, design note §10 finding 5).
-// It reports whether it made the call.
+// failed, or that a restart interrupted, is finished. Every room LiveKit lists
+// that has this instance's exact name shape and that the store holds neither
+// live nor retired is deleted as well (orphanRooms): that finishes a clear after a restore that a crash
+// or a LiveKit timeout skipped (issue #782), and anything orphaned some other
+// way. The listed participant count is never read (it lags a join by
+// seconds, design note §10 finding 5). It reports whether it made the call.
+//
+// The store is read after LiveKit's list, never before, and the orphan rule
+// depends on it. Every room this instance makes has its row committed before
+// LiveKit is asked to create it (voiceGrantOnce), and a join token is signed
+// only for a stored room, so a room in the list already has its row when the
+// store is read. A room created a moment ago is therefore never taken for an
+// orphan, and no grace period is needed.
 func (p *voicePoller) runSweep(ctx context.Context) bool {
 	if p.s.lk == nil {
 		return false
@@ -677,6 +692,13 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 		}
 	}
 	p.deleteRooms(ctx, stale)
+	// A room of this instance's that the store holds neither live nor
+	// retired is deleted too (issue #782). Only when both were read: with
+	// the retired rooms unknown every retired room would count as one, and
+	// a failed read already brings the next sweep a second closer.
+	if retiredErr == nil {
+		p.sweepOrphans(ctx, p.orphanRooms(listed, stored, retired))
+	}
 	// A retired room LiveKit has not listed for a day has nothing left to be
 	// found for: its row goes. The day is counted from the last sweep that
 	// still found the room in LiveKit, so those rows are stamped first; if
@@ -1767,6 +1789,108 @@ func (p *voicePoller) deleteRooms(ctx context.Context, rooms []store.VoiceRoom) 
 		}()
 	}
 	wg.Wait()
+}
+
+// orphanRooms returns the rooms in LiveKit's list whose name is exactly the
+// shape this instance gives its rooms (store.IsOwnVoiceRoomName: its prefix
+// and the random part) and that the store holds neither live nor retired. A
+// room of another instance on the same LiveKit never matches, even one whose
+// prefix begins with this one's. A room under a prefix this instance used
+// before is not matched either: it is known by its row, if at all, and
+// deleted as a retired room.
+func (p *voicePoller) orphanRooms(listed []livekit.Room, stored, retired []store.VoiceRoom) []string {
+	known := make(map[string]struct{}, len(stored)+len(retired))
+	for _, r := range stored {
+		known[r.RoomName] = struct{}{}
+	}
+	for _, r := range retired {
+		known[r.RoomName] = struct{}{}
+	}
+	var orphans []string
+	for _, r := range listed {
+		if _, ok := known[r.Name]; ok || !p.s.store.IsOwnVoiceRoomName(r.Name) {
+			continue
+		}
+		orphans = append(orphans, r.Name)
+	}
+	return orphans
+}
+
+// sweepOrphans deletes a sweep's orphans (deleteOrphans) and says so. A
+// restore, a pruned row or a crash leaves orphans once, and the next sweep
+// finds none: that is logged at Info. Orphans deleted on two sweeps in a row
+// mean rooms keep appearing under this instance's prefix that its database
+// never made, most likely another server on the same LiveKit with the same
+// --livekit-room-prefix, whose calls this one keeps ending: that is a Warn
+// naming the likely cause. A room the previous sweep failed to delete and
+// this one deletes is a retry, not a new orphan, and does not count.
+func (p *voicePoller) sweepOrphans(ctx context.Context, names []string) {
+	p.mu.Lock()
+	before, retry := p.orphansDeleted, p.orphansFailed
+	p.mu.Unlock()
+	deleted, failed := p.deleteOrphans(ctx, names)
+	fresh := 0
+	for _, name := range deleted {
+		if _, ok := retry[name]; !ok {
+			fresh++
+		}
+	}
+	p.mu.Lock()
+	p.orphansDeleted, p.orphansFailed = fresh > 0, failed
+	p.mu.Unlock()
+	switch {
+	case fresh > 0 && before:
+		slog.WarnContext(ctx, "voice: deleted rooms of this instance the database does not know, on two sweeps in a row; another server may be using this room prefix",
+			"rooms", len(deleted))
+	case len(deleted) > 0:
+		slog.InfoContext(ctx, "voice: deleted rooms of this instance the database does not know", "rooms", len(deleted))
+	}
+}
+
+// deleteOrphans deletes the named rooms in LiveKit, which disconnects
+// everyone in them: they belong to no channel the store knows, so nobody is
+// entitled to be there. It returns the names it deleted and those it could
+// not. A failure is logged once for the sweep, with how many rooms are left,
+// and the next sweep is brought forward; it finds them again. An orphan has
+// no channel, so no room is named in the log at all.
+func (p *voicePoller) deleteOrphans(ctx context.Context, names []string) (deleted []string, failed map[string]struct{}) {
+	if p.s.lk == nil || len(names) == 0 {
+		return nil, nil
+	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		failure error
+		sem     = make(chan struct{}, voicePollConcurrency)
+	)
+	for _, name := range names {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			err := p.s.lk.DeleteRoom(ctx, name)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				deleted = append(deleted, name)
+				return
+			}
+			if failed == nil {
+				failed = make(map[string]struct{})
+			}
+			failed[name] = struct{}{}
+			if failure == nil {
+				failure = err
+			}
+		}()
+	}
+	wg.Wait()
+	if len(failed) > 0 && ctx.Err() == nil {
+		slog.WarnContext(ctx, "voice: deleting rooms of this instance the database does not know failed; the sweep retries", "rooms", len(failed), "error", failure)
+		p.sweepSoon()
+	}
+	return deleted, failed
 }
 
 // voiceEnforceHolders checks the invariant now and finishes what it finds: rotate

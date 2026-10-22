@@ -2779,3 +2779,239 @@ func TestVoiceSweepLeavesAnotherServersRoomsAlone(t *testing.T) {
 		}
 	}
 }
+
+// The sweep deletes every room LiveKit lists that has this instance's exact
+// name shape and that the store holds neither live nor retired: what a clear
+// after a restore that a crash skipped leaves behind, or anything orphaned
+// another way (issue #782). A room of another instance is kept, even one
+// whose prefix begins with this one's ("alpha-2-" beside "alpha-"), and so
+// is any other name with this prefix. A room the store holds under a prefix
+// this instance used before is kept while live and deleted once retired.
+func TestVoiceSweepDeletesOrphanedRooms(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	if err := f.srv.store.SetVoiceRoomPrefix("old-"); err != nil {
+		t.Fatal(err)
+	}
+	oldRetired := f.holder(t, "ann", f.ops)
+	oldLive := f.room(t, f.ops2)
+	if err := f.srv.store.SetVoiceRoomPrefix("alpha-"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := f.srv.store.RotateVoiceRoom(ctx, oldRetired.ID, store.VoiceRotateMemberRemoved); err != nil || !ok {
+		t.Fatalf("rotate: %v %v", ok, err)
+	}
+	live := f.room(t, f.ops) // the rotation's next room, under the new prefix
+
+	tests := []struct {
+		name    string
+		room    string
+		deleted bool
+	}{
+		{"an orphan", roomOf("alpha-", 'a'), true},
+		{"another orphan", roomOf("alpha-", '7'), true},
+		{"a retired room under an earlier prefix", oldRetired.RoomName, true},
+		{"a live room", live, false},
+		{"a live room under an earlier prefix", oldLive, false},
+		{"a nested prefix's room", roomOf("alpha-2-", 'a'), false},
+		{"another instance's room", roomOf("beta-", 'a'), false},
+		{"an earlier prefix's room the store does not hold", roomOf("old-", 'a'), false},
+		{"too short", "alpha-" + strings.Repeat("a", 25), false},
+		{"too long", "alpha-" + strings.Repeat("a", 27), false},
+		{"not lower-case base32", "alpha-" + strings.Repeat("A", 26), false},
+		{"1 is not base32", "alpha-" + strings.Repeat("1", 26), false},
+	}
+	for i, tt := range tests {
+		f.lk.setRoom(tt.room, fakeParticipant{identity: fmt.Sprintf("p%d", i+1), joinedMs: 1_000})
+	}
+	f.sweep(t)
+	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deletes := f.lk.callsFor("DeleteRoom", tt.room)
+			switch {
+			case tt.deleted && (f.lk.has(tt.room) || deletes != 1):
+				t.Errorf("in LiveKit = %v after %d deletes; want deleted, once over two sweeps", f.lk.has(tt.room), deletes)
+			case !tt.deleted && (!f.lk.has(tt.room) || deletes != 0):
+				t.Errorf("in LiveKit = %v after %d deletes; want kept and never deleted", f.lk.has(tt.room), deletes)
+			}
+		})
+	}
+	if got := f.lk.count("ListRooms"); got != 2 {
+		t.Errorf("ListRooms calls = %d over two sweeps, want 2", got)
+	}
+	for _, tt := range tests {
+		if strings.Contains(f.logs.buf.String(), tt.room) {
+			t.Errorf("a log line names the room of %q", tt.name)
+		}
+	}
+}
+
+// A room created while the sweep lists LiveKit's rooms, as a session creates
+// one (its row first, then LiveKit's room), is not taken for an orphan: the
+// sweep reads the store after the list (issue #782).
+func TestVoiceSweepKeepsARoomCreatedDuringItsList(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	// The hook runs on the fake's goroutine, so it reports through a
+	// channel, and only once.
+	made := make(chan string, 1)
+	var once sync.Once
+	f.lk.setOnList(func() {
+		once.Do(func() {
+			room, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+			if err != nil {
+				made <- ""
+				return
+			}
+			f.lk.setRoom(room.RoomName)
+			made <- room.RoomName
+		})
+	})
+	f.sweep(t)
+	var created string
+	select {
+	case created = <-made:
+	default:
+		t.Fatal("the hook did not run")
+	}
+	if created == "" {
+		t.Fatal("the hook could not create the room")
+	}
+	if !f.lk.has(created) || f.lk.callsFor("DeleteRoom", created) != 0 {
+		t.Error("a room created during the sweep's list was deleted")
+	}
+}
+
+// LiveKit is optional: when the sweep cannot finish deleting an orphan it
+// logs and tries again at the next sweep, which is brought forward, and the
+// room goes once LiveKit answers. With the retired rooms unreadable no
+// orphan is deleted until they can be read (issue #782).
+func TestVoiceSweepRetriesOrphans(t *testing.T) {
+	tests := []struct {
+		name string
+		// fail makes the first sweep fail and returns the undo.
+		fail func(f *presenceFixture) func()
+		// log is what the first sweep logs.
+		log string
+	}{
+		{
+			name: "LiveKit refuses the delete",
+			fail: func(f *presenceFixture) func() {
+				f.lk.setDeleteStatus(http.StatusInternalServerError)
+				return func() { f.lk.setDeleteStatus(0) }
+			},
+			log: "the database does not know failed; the sweep retries",
+		},
+		{
+			name: "LiveKit cannot list",
+			fail: func(f *presenceFixture) func() {
+				f.lk.setListStatus(http.StatusServiceUnavailable)
+				return func() { f.lk.setListStatus(0) }
+			},
+			log: "livekit unreachable",
+		},
+		{
+			name: "the retired rooms cannot be read",
+			fail: func(f *presenceFixture) func() {
+				read := f.srv.voice.retiredRooms
+				f.srv.voice.retiredRooms = func(context.Context) ([]store.VoiceRoom, error) {
+					return nil, errors.New("store unavailable")
+				}
+				return func() { f.srv.voice.retiredRooms = read }
+			},
+			log: "could not read retired rooms",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			ctx := context.Background()
+			orphan := roomOf(f.srv.store.VoiceRoomPrefix(), 'q')
+			f.lk.setRoom(orphan, fakeParticipant{identity: "p1", joinedMs: 1_000})
+			undo := tt.fail(f)
+			f.srv.voice.runSweep(ctx)
+			if !f.lk.has(orphan) {
+				t.Fatal("the orphan is gone although the sweep failed")
+			}
+			if !strings.Contains(f.logs.buf.String(), tt.log) {
+				t.Errorf("no %q in the log:\n%s", tt.log, f.logs.buf.String())
+			}
+			if strings.Contains(f.logs.buf.String(), orphan) {
+				t.Error("a log line names the room")
+			}
+			undo()
+			// The next attempt is due after the shortest backoff, not a
+			// whole sweep interval away.
+			f.clock.Advance(voiceBackoffMin)
+			f.srv.voice.tick(ctx)
+			if f.lk.has(orphan) {
+				t.Error("the orphan is still in LiveKit after the next sweep")
+			}
+		})
+	}
+}
+
+// Orphans deleted once are logged at Info. Orphans deleted on two sweeps in
+// a row are a Warn that names the likely cause, another server using this
+// room prefix; a sweep that finds none ends the run. A room the previous
+// sweep could not delete and this one does is a retry and does not count
+// (issue #782).
+func TestVoiceSweepWarnsOfOrphansOnConsecutiveSweeps(t *testing.T) {
+	const (
+		info = `level=INFO msg="voice: deleted rooms of this instance the database does not know"`
+		warn = "another server may be using this room prefix"
+	)
+	// A step is one sweep: the orphans that appear in LiveKit before it,
+	// those whose delete fails during it, and what it should log.
+	type step struct {
+		add, fail []byte
+		want      string // info, warn, or "" for neither
+	}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{"a one-off", []step{{add: []byte("a"), want: info}, {want: ""}, {want: ""}}},
+		{"two sweeps in a row", []step{{add: []byte("a"), want: info}, {add: []byte("b"), want: warn}}},
+		{"and a third", []step{{add: []byte("a"), want: info}, {add: []byte("b"), want: warn}, {add: []byte("c"), want: warn}}},
+		{"a quiet sweep between", []step{{add: []byte("a"), want: info}, {want: ""}, {add: []byte("b"), want: info}}},
+		{"a retry is not a new orphan", []step{{add: []byte("ab"), fail: []byte("b"), want: info}, {want: info}, {add: []byte("c"), want: info}}},
+		{"a failed sweep between", []step{{add: []byte("a"), want: info}, {add: []byte("b"), fail: []byte("b"), want: ""}, {want: info}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			prefix := f.srv.store.VoiceRoomPrefix()
+			for i, s := range tt.steps {
+				fail := map[string]bool{}
+				for _, c := range s.add {
+					f.lk.setRoom(roomOf(prefix, c))
+				}
+				for _, c := range s.fail {
+					fail[roomOf(prefix, c)] = true
+				}
+				f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = fail })
+				f.logs.buf.Reset()
+				f.clock.Advance(voiceSweepInterval)
+				f.sweep(t)
+				logs := f.logs.buf.String()
+				gotWarn, gotInfo := strings.Contains(logs, warn), strings.Contains(logs, info)
+				switch s.want {
+				case warn:
+					if !gotWarn || !strings.Contains(logs, "level=WARN") {
+						t.Errorf("sweep %d logged no Warn naming another server:\n%s", i+1, logs)
+					}
+				case info:
+					if !gotInfo || gotWarn {
+						t.Errorf("sweep %d: want Info alone:\n%s", i+1, logs)
+					}
+				default:
+					if gotInfo || gotWarn {
+						t.Errorf("sweep %d: want no deleted-rooms line:\n%s", i+1, logs)
+					}
+				}
+			}
+		})
+	}
+}

@@ -288,3 +288,70 @@ func TestClearVoiceRooms(t *testing.T) {
 		}
 	})
 }
+
+// A room the restored database holds as live, with nobody recorded in it and
+// a name under an earlier prefix, is one the start's clear does not match and
+// no rotation reaches; someone who joined after the backup may still be
+// talking in it. The first start retires it, and the next sweep deletes it in
+// LiveKit (issue #782). Nothing at start trips over the retired row, a member
+// who joins afterwards gets a new room, and that room is left alone. An
+// ordinary start retires nothing: the room stays.
+func TestRestoredStartRetiresEveryRoom(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	st := f.srv.store
+	if err := st.SetVoiceRoomPrefix("old-"); err != nil {
+		t.Fatal(err)
+	}
+	old := f.room(t, f.ops)
+	if err := st.SetVoiceRoomPrefix("alpha-"); err != nil {
+		t.Fatal(err)
+	}
+	f.lk.setRoom(old, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+
+	// An ordinary start: the room stays live and in LiveKit.
+	if _, restored, err := st.StartRestored(ctx, time.Now()); err != nil || restored {
+		t.Fatalf("an ordinary start = %v, %v", restored, err)
+	}
+	f.sweep(t)
+	if !f.lk.has(old) || f.lk.callsFor("DeleteRoom", old) != 0 {
+		t.Fatal("an ordinary start and sweep deleted a live room")
+	}
+
+	if _, err := st.InvalidateRestored(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, restored, err := st.StartRestored(ctx, time.Now()); err != nil || !restored {
+		t.Fatalf("the first start = %v, %v", restored, err)
+	}
+	// The clear matches only the current prefix: it finds nothing here.
+	if n, err := f.srv.ClearVoiceRooms(ctx); err != nil || n != 0 {
+		t.Fatalf("ClearVoiceRooms = %d, %v; want 0, nil", n, err)
+	}
+	if !f.lk.has(old) {
+		t.Fatal("the clear deleted a room of an earlier prefix")
+	}
+	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t)
+	f.pass(t)
+	if f.lk.has(old) || f.lk.callsFor("DeleteRoom", old) != 1 {
+		t.Errorf("the room under an earlier prefix: in LiveKit = %v after %d deletes; want deleted once", f.lk.has(old), f.lk.callsFor("DeleteRoom", old))
+	}
+
+	// ann signs in again and joins: a new room, under the current prefix.
+	_, tok, err := st.CreateCredential(ctx, "system", f.ids["ann"], "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tokens["ann"] = tok
+	resp := decodeSession(t, f.session(t, "ann", "ops"))
+	room := resp.Rooms[0].Room
+	if room == old || !strings.HasPrefix(room, "alpha-") {
+		t.Errorf("the room after the restore is the old one or not under the current prefix (%v)", room == old)
+	}
+	f.clock.Advance(voiceSweepInterval)
+	f.sweep(t)
+	if !f.lk.has(room) || f.lk.callsFor("DeleteRoom", room) != 0 {
+		t.Error("the sweep deleted the room a member joined after the restore")
+	}
+}
