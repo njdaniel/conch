@@ -1,0 +1,15 @@
+{
+  "dry_run": false,
+  "count": 2,
+  "guests": [
+    {
+      "id": 12,
+      "handle": "guest-a7k4m2q9x3h5t8wz"
+    },
+    {
+      "id": 13,
+      "handle": "guest-zx9w8v7t6s5r4q3p"
+    }
+  ],
+  "remaining": 0
+}

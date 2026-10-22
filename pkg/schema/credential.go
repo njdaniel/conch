@@ -36,14 +36,25 @@ const (
 // omitted while the credential is active. Renews is true for a credential
 // whose expiry moves forward as it is used (issue #439): ExpiresAt is where
 // the expiry stands now, and a later read may show it later.
+//
+// IdleExpiresAt is present for a credential with an idle bound (issue #704,
+// ADR-009): a guest's and an operator's browser session. It is where the
+// idle bound stands now: a REST request carrying the bearer moves it, at
+// most once a minute and never past ExpiresAt, and nothing else does (not a
+// socket, a ping, a ticket or the voice poller; security review F5). The
+// credential is live until the earlier of the two. Scope is the
+// credential's reach; absent means full, which every credential had before
+// setup tokens existed.
 type CredentialV1 struct {
-	ID          int64      `json:"id"`
-	PrincipalID int64      `json:"principal_id"`
-	Label       string     `json:"label"`
-	CreatedAt   Timestamp  `json:"created_at"`
-	ExpiresAt   *Timestamp `json:"expires_at,omitempty"`
-	RevokedAt   *Timestamp `json:"revoked_at,omitempty"`
-	Renews      bool       `json:"renews,omitempty"`
+	ID            int64           `json:"id"`
+	PrincipalID   int64           `json:"principal_id"`
+	Label         string          `json:"label"`
+	CreatedAt     Timestamp       `json:"created_at"`
+	ExpiresAt     *Timestamp      `json:"expires_at,omitempty"`
+	RevokedAt     *Timestamp      `json:"revoked_at,omitempty"`
+	Renews        bool            `json:"renews,omitempty"`
+	IdleExpiresAt *Timestamp      `json:"idle_expires_at,omitempty"`
+	Scope         CredentialScope `json:"scope,omitempty"`
 }
 
 // CreateCredentialRequestV1 is the body of POST /v1/principals/{id}/credentials.
@@ -112,14 +123,16 @@ type ListCredentialsResponseV1 struct {
 // principal, which is the caller. Current is true for the credential the
 // listing request itself came with ("this browser"). A credential made by a
 // sign-in link is labelled "sign-in link <id>", so the person can see that a
-// link was used for their account.
+// link was used for their account; one made by a device link carries the
+// label its maker gave the link. IdleExpiresAt is as on CredentialV1.
 type OwnCredentialV1 struct {
-	ID        int64      `json:"id"`
-	Label     string     `json:"label"`
-	CreatedAt Timestamp  `json:"created_at"`
-	ExpiresAt *Timestamp `json:"expires_at,omitempty"`
-	Renews    bool       `json:"renews,omitempty"`
-	Current   bool       `json:"current,omitempty"`
+	ID            int64      `json:"id"`
+	Label         string     `json:"label"`
+	CreatedAt     Timestamp  `json:"created_at"`
+	ExpiresAt     *Timestamp `json:"expires_at,omitempty"`
+	Renews        bool       `json:"renews,omitempty"`
+	Current       bool       `json:"current,omitempty"`
+	IdleExpiresAt *Timestamp `json:"idle_expires_at,omitempty"`
 }
 
 // ListOwnCredentialsResponseV1 is the response to GET /v1/credentials/mine:

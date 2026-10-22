@@ -1,0 +1,12 @@
+{
+  "id": 13,
+  "handle": "guest-zx9w8v7t6s5r4q3p",
+  "tag": "zx9w",
+  "state": "active",
+  "origin": "invite",
+  "invite_id": 7,
+  "started_at": "2026-10-21T12:00:00.000Z",
+  "last_active_at": "2026-10-21T12:10:00.000Z",
+  "expires_at": "2026-10-22T09:00:00.000Z",
+  "idle_expires_at": "2026-10-21T14:10:00.000Z"
+}
