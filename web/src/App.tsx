@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { ChangeName } from './ChangeName';
+import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
 import { Invite } from './Invite';
 import { InvitePanel } from './InvitePanel';
@@ -486,6 +487,17 @@ export function App({ origin }: { readonly origin: string }) {
               onUnauthorized={onUnauthorized}
               onOpen={onOpen}
             />
+          }
+          newChannel={
+            // The server allows operators alone; anyone else is not offered it.
+            auth.principal.role === 'operator' ? (
+              <CreateChannel
+                onCreated={(channel) => {
+                  dispatchChannels({ type: 'created', channel });
+                }}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : null
           }
           invites={
             auth.principal.may_invite === true ? (

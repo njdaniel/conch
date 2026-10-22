@@ -695,6 +695,37 @@ label {
   flex-basis: 100%;
 }
 
+/* "New channel" (issue #695), under the channel list: the field takes the
+   list's width and its buttons wrap below it rather than widen the column. */
+.create-channel {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+}
+
+.create-channel form:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+}
+
+.create-channel label {
+  flex-basis: 100%;
+}
+
+.create-channel input {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.create-channel p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 /* "Your sign-ins" (issue #496): a list that wraps a long label rather than
    widening the panel. */
 .signins {
