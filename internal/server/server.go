@@ -111,6 +111,12 @@ const shutdownTimeout = 10 * time.Second
 // Server is conchd's HTTP server wrapped around the store. It owns the HTTP
 // listener and mux; the store's lifecycle belongs to the caller.
 type Server struct {
+	// awaitPolled, when set, is called after each authorized poll of
+	// await_decision, before it waits for the next. Tests only (#740): it
+	// lets a test withdraw the authorization once the wait is polling, not
+	// after a guess at how long that takes. Nil in production, where it does
+	// nothing.
+	awaitPolled func()
 	cfg         Config
 	store       *store.Store
 	hub         *hub.Hub
