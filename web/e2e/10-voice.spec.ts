@@ -348,6 +348,23 @@ test.describe('with LiveKit', () => {
     const a = await person(browser, 'alice');
     try {
       const voice = voiceRegion(a.page);
+      // A disabled primary button loses its fill as far as any other disabled
+      // button differs from its enabled self (issue #643), measured on the
+      // page's own stylesheet.
+      const fills = await a.page.evaluate(() => {
+        const fill = (primary: boolean, disabled: boolean) => {
+          const b = document.createElement('button');
+          if (primary) b.className = 'primary';
+          b.disabled = disabled;
+          document.body.append(b);
+          const c = getComputedStyle(b).backgroundColor;
+          b.remove();
+          return c;
+        };
+        return { plain: [fill(false, false), fill(false, true)], primary: [fill(true, false), fill(true, true)] };
+      });
+      expect(fills.primary[1]).not.toBe(fills.primary[0]);
+      expect(fills.primary[1]).toBe(fills.plain[1]);
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected', { timeout: 30_000 });
       const talk = voice.getByRole('button', { name: 'Hold to talk' });
@@ -370,6 +387,8 @@ test.describe('with LiveKit', () => {
 
       await voice.getByRole('button', { name: 'Mute' }).click();
       await expect(voice).toContainText('Muted.');
+      await expect(talk).toHaveAttribute('aria-disabled', 'true');
+      await expect(talk).toHaveAccessibleDescription(/sends nothing while you are muted/);
       await pressTalk();
       await expect(voice).toContainText('Not transmitting');
       await a.page.mouse.up();
@@ -1168,8 +1187,11 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Connected', { timeout: 30_000 });
       vw.stopLiveKit();
       await expect(voice).not.toContainText('Connected in', { timeout: 60_000 });
+      // Presence reports voice down while this page is joined (issue #644).
+      await expect(voice).toContainText('Voice server unreachable. You may be cut off.', { timeout: 60_000 });
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
+      await expect(voice).not.toContainText('Voice server unreachable');
       await expectClean(a);
     } finally {
       await a.context.close();

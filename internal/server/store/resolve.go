@@ -16,10 +16,10 @@ import (
 // principal p, that the credential was issued under the principal's present
 // authentication generation and has full scope (issue #707). Moving the
 // generation on ends every credential issued before it without touching
-// their rows. A setup-scoped credential does not resolve in this build: the
-// check that lets one reach its few routes belongs in the authentication
-// middleware, and until it is there such a credential is refused
-// everywhere, which fails closed.
+// their rows. A setup-scoped credential does not meet it: only
+// ResolveRequestCredential admits one, for the authentication middleware,
+// which lets it reach the few routes that finish setup (issue #709); every
+// other check refuses it, which fails closed.
 const currentAuthSQL = `(c.auth_generation = p.auth_generation AND c.scope = 'full')`
 
 // credentialRenewStep is how far a renewable credential's expiry must have
@@ -48,54 +48,90 @@ func (s *Store) ResolveCredential(ctx context.Context, token string) (Principal,
 // A renewable credential is renewed here, and only once it has resolved: see
 // renewCredential.
 func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Principal, int64, error) {
+	p, c, err := s.resolveCredential(ctx, token, false)
+	return p, c.ID, err
+}
+
+// RequestCredential is what the authentication middleware learns of the
+// credential a request came with, beside its principal (issue #709).
+type RequestCredential struct {
+	ID    int64
+	Scope schema.CredentialScope
+	// Session says it is a sign-in session (signInSessionSQL), not a script
+	// credential: the recent-auth gate applies to it.
+	Session bool
+	// IdleBounded says it has an idle bound, which a REST request moves
+	// (NoteGuestUse): a guest's, or an operator's browser session.
+	IdleBounded bool
+	// RecentAuthUntil is its recent-auth proof as it was read, nil when it
+	// has none.
+	RecentAuthUntil *time.Time
+}
+
+// ResolveRequestCredential is ResolveCredentialDetail for the authentication
+// middleware, the one caller that may meet a setup-scoped credential: such a
+// credential resolves here (and nowhere else), and the middleware lets it
+// reach only the routes that finish setup (design §5.3, review F6). Every
+// other caller resolves full scope only, so a setup credential that reached
+// one of them by mistake would still be refused.
+func (s *Store) ResolveRequestCredential(ctx context.Context, token string) (Principal, RequestCredential, error) {
+	return s.resolveCredential(ctx, token, true)
+}
+
+func (s *Store) resolveCredential(ctx context.Context, token string, admitSetup bool) (Principal, RequestCredential, error) {
 	if !wellFormedCredentialToken(token) {
-		return Principal{}, 0, ErrCredentialInvalid
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
 	want := hashCredentialToken(token)
 
 	var (
-		credID                         int64
-		storedHash                     string
+		cred                           RequestCredential
+		storedHash, scope              string
 		expiresAt, revokedAt, disabled sql.NullInt64
-		renewMs                        sql.NullInt64
+		renewMs, recentAuth            sql.NullInt64
 		invitedBy, inviteID            sql.NullInt64
 		p                              Principal
 		kind, role                     string
 		createdAt                      int64
 		idle                           credentialIdle
-		current                        bool
+		generationCurrent              bool
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at,
-		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`, `+currentAuthSQL+`
+		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`,
+		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
-	).Scan(&credID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
+	).Scan(&cred.ID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
 		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
-		&idle.guestState, &idle.guestExpiresAt, &current)
+		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Principal{}, 0, ErrCredentialInvalid
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
 	if err != nil {
-		return Principal{}, 0, fmt.Errorf("store: resolve credential: %w", err)
+		return Principal{}, RequestCredential{}, fmt.Errorf("store: resolve credential: %w", err)
 	}
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(want)) != 1 {
-		return Principal{}, 0, ErrCredentialInvalid
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
-	if revokedAt.Valid || disabled.Valid || !current {
-		return Principal{}, 0, ErrCredentialInvalid
+	// The scope check is currentAuthSQL's, with setup let through only when
+	// the caller asked for it. A scope this code does not know is refused.
+	cred.Scope = schema.CredentialScope(scope)
+	scopeOK := cred.Scope == schema.CredentialScopeFull || (admitSetup && cred.Scope == schema.CredentialScopeSetup)
+	if revokedAt.Valid || disabled.Valid || !generationCurrent || !scopeOK {
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
 	now := credentialNow()
 	if expiresAt.Valid && expiresAt.Int64 <= now.UnixMilli() {
-		return Principal{}, 0, ErrCredentialInvalid
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
 	if !idle.live(now) {
-		return Principal{}, 0, ErrCredentialInvalid
+		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}
 	// Every refusal has returned above: only a credential that resolved is
 	// ever renewed.
 	if renewMs.Valid && expiresAt.Valid {
-		s.renewCredential(ctx, credID, expiresAt.Int64, renewMs.Int64, now)
+		s.renewCredential(ctx, cred.ID, expiresAt.Int64, renewMs.Int64, now)
 	}
 	p.Kind = PrincipalKind(kind)
 	p.Role = Role(role)
@@ -103,7 +139,10 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	p.InvitedBy = invitedBy.Int64
 	p.InviteID = inviteID.Int64
 	p.GuestState = schema.GuestState(idle.guestState.String)
-	return p, credID, nil
+	cred.Session = renewMs.Valid || idle.idleMs.Valid
+	cred.IdleBounded = idle.idleMs.Valid
+	cred.RecentAuthUntil = millisPtr(recentAuth)
+	return p, cred, nil
 }
 
 // renewCredential moves a renewable credential's expiry to renewMs past now,

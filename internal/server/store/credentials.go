@@ -380,18 +380,26 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 // an already-revoked credential succeeds and changes nothing (the original
 // revoked_at stands and no second audit event is written). A credential_revoked
 // audit event is appended in the same transaction as the first revocation.
-// It returns ErrCredentialNotFound for an unknown id.
+// It returns ErrCredentialNotFound for an unknown id. The principal's open
+// device links close with it (issue #712, design §6.2: revocation is an
+// invalidator), each audited sign_in_link_closed with
+// reason=credential_revoked: a thief who held the credential inside its
+// proof window may have made some, and revoking it must end them too.
 func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, 0, "")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "", SignInLinkCloseCredentialRevoked)
 }
 
 // RevokeOwnCredential is RevokeCredential for a caller signing itself out
 // (issue #439): credentialID must be the credential the request authenticated
 // with, which the caller takes from the request, never from its body. The
 // audit detail carries reason=self. The last operator guard applies as to any
-// revocation.
+// revocation. Signing out also closes, in the same transaction, every device
+// link the principal has open (issue #712, design §7.2: a sign-out ends
+// the ways in it would otherwise leave behind), each audited
+// sign_in_link_closed with reason=signed_out; the recent-password proof
+// ends with the credential it is bound to.
 func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, 0, "self")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "self", SignInLinkCloseSignedOut)
 }
 
 // RevokeCredentialOf is RevokeOwnCredential for a person ending one of their
@@ -399,19 +407,23 @@ func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentia
 // principalID, the caller. One that belongs to anyone else is
 // ErrCredentialNotFound, exactly as an id that was never issued, and nothing
 // is written. The audit detail carries reason=self, and the last operator
-// guard applies.
+// guard applies. As for RevokeCredential, the person's open device links
+// close with it (reason=credential_revoked): ending a sign-in they do not
+// recognize must also end the links it may have made.
 func (s *Store) RevokeCredentialOf(ctx context.Context, actor string, principalID, credentialID int64) error {
 	if principalID <= 0 {
 		// Fail closed: with no owner, revokeCredential would revoke anyone's.
 		return ErrCredentialNotFound
 	}
-	return s.revokeCredential(ctx, actor, credentialID, principalID, "self")
+	return s.revokeCredential(ctx, actor, credentialID, principalID, "self", SignInLinkCloseCredentialRevoked)
 }
 
 // revokeCredential is RevokeCredential with a reason for the audit detail,
 // none when empty. An owner above zero limits it to that principal's
-// credentials: another's is ErrCredentialNotFound.
-func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason string) error {
+// credentials: another's is ErrCredentialNotFound. The principal's open
+// device links close with it, audited with linkReason. Only a member has
+// any, so for anyone else this closes nothing.
+func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason, linkReason string) error {
 	var runs []EndedRun
 	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
@@ -443,7 +455,7 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		if role == RoleOperator && !disabled {
-			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, now)
+			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, 0, now)
 			if err != nil {
 				return err
 			}
@@ -472,6 +484,9 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 		}
 		// Its sessions end with it, in this transaction (issue #265).
 		if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs); err != nil {
+			return err
+		}
+		if err := closeDeviceLinksTx(ctx, tx, actor, principalID, linkReason, now); err != nil {
 			return err
 		}
 		// A guest's one credential is its visit (issue #705, design B4):

@@ -113,19 +113,19 @@ test('P536 at every size the lobby fits, its composer and voice strip are uncove
 // in this test; the product shows only who the server reports.
 interface Presence {
   // show sends a new document on every socket the page has open.
-  show: (who: readonly number[]) => void;
+  show: (who: readonly number[], sharing?: number) => void;
 }
 
 async function servePresence(page: Page, world: World, token: string, channel: string, who: readonly number[]): Promise<Presence> {
   const real = await ok(world, token, 'GET', `/v1/channels/${encodeURIComponent(channel)}/voice`, voicePresenceV1);
-  const doc = (people: readonly number[]): string => {
+  const doc = (people: readonly number[], sharing?: number): string => {
     const presence: VoicePresenceV1 = {
       ...real,
       configured: true,
       available: true,
       rooms: [
         {
-          participants: people.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })),
+          participants: people.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', ...(id === sharing ? { sharing: true } : {}) })),
         },
       ],
     };
@@ -143,8 +143,8 @@ async function servePresence(page: Page, world: World, token: string, channel: s
     return route.fulfill({ status: 200, contentType: 'application/json', body: current });
   });
   return {
-    show: (people) => {
-      current = doc(people);
+    show: (people, sharing) => {
+      current = doc(people, sharing);
       for (const ws of sockets) ws.send(current);
     },
   };
@@ -245,5 +245,79 @@ test("P587 the voice roster shows everyone and how many, and the strip's control
     }
     await expectFits(page, `${size}: the lobby with eight in voice`);
     await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer`);
+  }
+});
+
+// ---------------------------------------------------------------- issue #641
+
+// On a phone, with eight in voice and nobody sharing, the roster is one row
+// (the count, three chips with the viewer's own among them, and "+5 more")
+// and the dock is at most 200 px: #600's bound, which four or more in voice
+// broke by wrapping the chips into a column. With someone sharing the dock
+// says so and still leaves the composer on screen. Watching a share with this
+// many in voice is in 12-screen-share, which has LiveKit.
+test('P641 a phone keeps the voice strip compact with eight in voice, the viewer among those shown', async ({ meet, secrets, world }) => {
+  const tag = `p641-${String(Date.now())}`;
+  const channel = `${tag}-voice`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  // The viewer is made last, so has the highest principal id among the eight.
+  const others: Member[] = [];
+  for (let i = 0; i < 7; i++) others.push(await member(world, channel, `${tag}-in-voice-${String(i)}`));
+  const me = await member(world, channel, `${tag}-me`);
+  secrets.push(me.token);
+  for (const o of others) secrets.push(o.token);
+  const everyone = [...others.map((o) => o.id), me.id];
+
+  for (const [size, options] of phones) {
+    const { page } = await meet(options);
+    const presence = await servePresence(page, world, me.token, channel, [me.id]);
+    await signIn(page, world, me.token, me.name);
+    await channelButton(page, channel).click();
+    const strip = page.getByRole('region', { name: 'Voice' });
+    await expect(strip.getByRole('heading', { name: '1 in voice' })).toBeVisible();
+    const dock = page.locator('.dock');
+    // Not in voice (nothing here can join: the server has no LiveKit) the
+    // strip's notes are longer than #600's 200 px allows for, so the bound
+    // here is that eight are no taller than one; the 200 px itself is in
+    // 12-screen-share, joined.
+    const alone = (await boxOf(dock, `${size}: the dock with one in voice`)).height;
+
+    presence.show(everyone);
+    await expect(strip.getByRole('heading', { name: '8 in voice' })).toBeVisible();
+    const chips = strip.getByRole('list', { name: '8 in voice' }).locator('li');
+    await expect(chips).toHaveCount(8);
+
+    // Three chips show, and the viewer's is one of them.
+    const shown: Box[] = [];
+    let mine = false;
+    for (let i = 0; i < 8; i++) {
+      if (!(await chips.nth(i).isVisible())) continue;
+      shown.push(await boxOf(chips.nth(i), `${size}: chip ${String(i)}`));
+      if ((await chips.nth(i).locator('.who').textContent())?.startsWith('You') === true) mine = true;
+    }
+    expect(shown.length, `${size}: chips shown`).toBe(3);
+    expect(mine, `${size}: the viewer's own chip is shown`).toBe(true);
+
+    // One row: the count, the chips and "+5 more" lie on one line.
+    const row = [
+      await boxOf(strip.getByRole('heading', { name: '8 in voice' }), `${size}: the count`),
+      ...shown,
+      await boxOf(strip.getByRole('button', { name: '+5 more' }), `${size}: +5 more`),
+    ];
+    const tops = row.map((b) => b.y + b.height / 2);
+    expect(Math.max(...tops) - Math.min(...tops), `${size}: the roster is one row, centres at ${tops.join(', ')}`).toBeLessThanOrEqual(8);
+    const edge = page.viewportSize()?.width ?? 0;
+    for (const b of row) expect(b.x + b.width, `${size}: the roster fits the screen`).toBeLessThanOrEqual(edge);
+
+    const height = (await boxOf(dock, `${size}: the dock`)).height;
+    expect(height, `${size}: the dock is ${String(height)} px with eight in voice, ${String(alone)} px with one`).toBeLessThanOrEqual(alone + 6);
+    await expectFits(page, `${size}: eight in voice`);
+    await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer`);
+
+    // Someone else shares: the strip says so, and the composer is still there.
+    presence.show(everyone, others[0]?.id);
+    await expect(strip).toContainText('is sharing a screen');
+    await expectFits(page, `${size}: eight in voice, one sharing`);
+    await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer, one sharing`);
   }
 });

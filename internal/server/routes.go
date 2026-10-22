@@ -44,7 +44,7 @@ func (s *Server) routeTable() []route {
 		rt("GET /v2/channels/{channel}/messages/search", accessAuthenticated, hf(s.handleSearchMessagesV2)),
 		// Files (issue #23). Humans only; an agent is refused before the
 		// handler runs. Who may fetch a file is decided by the store.
-		rt("POST /v2/channels/{channel}/files", accessAuthenticated, s.humansOnlyFiles(hf(s.handleUploadFile))),
+		rt("POST /v2/channels/{channel}/files", accessAuthenticated, s.humansOnlyFiles(s.membersOnly(hf(s.handleUploadFile)))),
 		rt("GET /v2/files/{id}/meta", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFileMeta))),
 		rt("GET /v2/files/{id}", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFile))),
 		// Members of the channel and operators (checked in the handler); anyone
@@ -100,7 +100,7 @@ func (s *Server) routeTable() []route {
 		// Interventions (issue #287). A human who can see the run asks; the
 		// readers who can see the run read; the credential that owns the
 		// run's session polls and answers. Checked in the handlers.
-		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleCreateIntervention)),
+		rt("POST /v1/runs/{id}/interventions", accessAuthenticated, s.membersOnly(hf(s.handleCreateIntervention))),
 		rt("GET /v1/runs/{id}/interventions", accessAuthenticated, hf(s.handleListRunInterventions)),
 		rt("GET /v1/interventions/{id}", accessAuthenticated, hf(s.handleGetIntervention)),
 		rt("GET /v1/sessions/{id}/interventions", accessAuthenticated, hf(s.handleListSessionInterventions)),
@@ -155,7 +155,7 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
-		rt("POST /v1/invites", accessAuthenticated, hf(s.handleCreateInvite)),
+		rt("POST /v1/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateInvite))),
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
@@ -212,11 +212,74 @@ func (s *Server) routeTable() []route {
 		// These are the human surface for approvals. Agents request and observe
 		// approvals through MCP, where the manifest and membership gates apply,
 		// so an agent credential is refused here (issue #79).
-		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleCreateApproval))),
-		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(hf(s.handleListOpenApprovals))),
-		rt("GET /v1/approvals/{id}", accessAuthenticated, s.humansOnly(hf(s.handleGetApproval))),
-		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(hf(s.handleCastDecision))),
+		rt("POST /v1/approvals", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCreateApproval)))),
+		rt("GET /v1/approvals", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleListOpenApprovals)))),
+		rt("GET /v1/approvals/{id}", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleGetApproval)))),
+		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCastDecision)))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
+		// Device links (issue #712): a member's own links that sign their
+		// account in on another device, made under a recent-password proof.
+		// Members only (the handler refuses agents, guests and operators);
+		// redeemed by POST /v1/sign-in-links/redeem. See sign_in_links.go.
+		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
+		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
+		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
+		// Operator sign-in and setup (issue #709). The second step of an
+		// operator's sign-in and the setup token's redemption are exempt, as
+		// the sign-in is, limited before any work and over HTTPS or loopback
+		// only; the TOTP enrolment is for a setup-scoped credential, which
+		// reaches nothing else (setupScopeRoutes). See operator_auth.go.
+		rt("POST /v1/login/totp", accessExempt, hf(s.handleLoginTOTP)),
+		rt("POST /v1/setup/redeem", accessExempt, hf(s.handleRedeemSetupToken)),
+		rt("POST /v1/totp/enroll", accessAuthenticated, hf(s.handleEnrollTOTP)),
+		rt("POST /v1/totp/confirm", accessAuthenticated, hf(s.handleConfirmTOTP)),
 	}
+}
+
+// setupScopeRoutes are the only routes a setup-scoped credential reaches
+// (design §5.3, review F6): whoami, the password enrolment and the TOTP
+// enrolment. The authentication middleware checks it for every request, so
+// a route added later is closed to such a credential unless it is named
+// here.
+var setupScopeRoutes = map[string]bool{
+	"GET /v1/whoami":         true,
+	"POST /v1/password/mine": true,
+	"POST /v1/totp/enroll":   true,
+	"POST /v1/totp/confirm":  true,
+}
+
+// recentAuthRoutes is the re-authentication class (design §5.3, §7.2,
+// review F8): the routes on which an operator's browser session needs a
+// recent proof of password and code (recentAuthGate). The class is a rule,
+// not a list: every operator route that creates a principal, credential,
+// link, permit or hook; grants a right or access; or removes or ends a
+// person; and every route anyone may use that does one of those when an
+// operator uses it. A route absent here is outside it, and
+// TestRecentAuthClass holds every operator route and every authenticated
+// write to a decision either way, with the reason.
+var recentAuthRoutes = map[string]reauthRule{
+	"POST /v0/principals":                                          reauthAlways,
+	"PUT /v1/channels/{channel}/members/{principal_id}":            reauthAlways,
+	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}": reauthAlways,
+	"PUT /v1/principals/{id}/manifest":                             reauthAlways,
+	"POST /v1/principals/{id}/credentials":                         reauthAlways,
+	"POST /v1/credentials/{credential_id}/rotate":                  reauthAlways,
+	"DELETE /v1/credentials/{credential_id}":                       reauthAlways,
+	"POST /v1/principals/{id}/disable":                             reauthAlways,
+	"POST /v1/principals/{id}/enable":                              reauthAlways,
+	"POST /v1/principals/{id}/hide":                                reauthAlways,
+	"POST /v1/principals/hide":                                     reauthAlways,
+	"POST /v1/hooks":                                               reauthAlways,
+	"POST /v1/invites/{id}/disable-joiners":                        reauthAlways,
+	"POST /v1/principals/{id}/disable-invitees":                    reauthAlways,
+	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
+	"PUT /v1/invites/settings":                                     reauthAlways,
+	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
+	// Signing out everywhere is anyone's for themself; an operator doing it
+	// to someone else is the bulk revoke of the rule.
+	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
+	// An invite makes principals; an operator's has no allowance and may be
+	// open to anyone. A member's invites are not in the class.
+	"POST /v1/invites": reauthOperators,
 }

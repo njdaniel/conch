@@ -356,14 +356,15 @@ export function App({ origin }: { readonly origin: string }) {
   const signOut = useCallback(() => {
     if (signingOut.current) return;
     signingOut.current = true;
-    // The session is ended first: the request needs the credential that
-    // signing out revokes.
-    releaseSession();
-    void api.signOut().then((told) => {
-      signingOut.current = false;
-      forgetChannel();
-      dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
-    });
+    // The session is ended first, and waited for: the request needs the
+    // credential that signing out revokes, and the revoke ends the session.
+    void releaseSession()
+      .then(() => api.signOut())
+      .then((told) => {
+        signingOut.current = false;
+        forgetChannel();
+        dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
+      });
   }, [releaseSession]);
 
   // Sign out everywhere revokes every credential of the person. If the server
@@ -427,7 +428,7 @@ export function App({ origin }: { readonly origin: string }) {
   // whoever is signed in is signed out properly first, their credential
   // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
-    releaseSession();
+    await releaseSession();
     const told = await api.signOut();
     forgetChannel();
     dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });

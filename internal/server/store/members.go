@@ -245,8 +245,12 @@ func setCanDecideTx(ctx context.Context, tx execer, actor string, channelID, pri
 // cannot.
 func (s *Store) CanDecideApprovals(ctx context.Context, channelID, principalID int64) (bool, error) {
 	var can int
+	// A guest never holds the right, whatever its row says (issue #706): the
+	// same condition the deciding transaction applies.
 	err := s.db.QueryRowContext(ctx,
-		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&can)
+		`SELECT m.can_decide AND NOT `+activeGuestSQL+` FROM channel_members m
+		 JOIN principals p ON p.id = m.principal_id
+		 WHERE m.channel_id = ? AND m.principal_id = ?`, channelID, principalID).Scan(&can)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -336,6 +340,26 @@ func (s *Store) IsChannelMember(ctx context.Context, channelID, principalID int6
 		return false, fmt.Errorf("store: check member %d of channel %d: %w", principalID, channelID, err)
 	}
 	return true, nil
+}
+
+// HistoryBounded reports whether principalID reads channelID under a history
+// bound (issue #719): it is a guest now, or its membership there carries one
+// (history_after, kept through conversion). The bound itself is applied by
+// the visibility condition in audience.go; this says only whether a reader
+// is held to it, so that a socket can ask that condition about each live
+// frame for those readers and spare everyone else the reads. It reads no
+// message.
+func (s *Store) HistoryBounded(ctx context.Context, channelID, principalID int64) (bool, error) {
+	var bounded bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM guest_visits WHERE principal_id = ? AND state = 'active')
+		     OR EXISTS (SELECT 1 FROM channel_members
+		                WHERE channel_id = ? AND principal_id = ? AND history_after IS NOT NULL)`,
+		principalID, channelID, principalID).Scan(&bounded)
+	if err != nil {
+		return false, fmt.Errorf("store: history bound of %d in channel %d: %w", principalID, channelID, err)
+	}
+	return bounded, nil
 }
 
 // guestMemberTx reports whether principalID is a guest, for a membership

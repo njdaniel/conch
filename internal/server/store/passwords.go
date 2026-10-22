@@ -469,9 +469,9 @@ var (
 	// ErrEnrollmentProofRequired is a member's first password with no
 	// enrollment link: a long-lived bearer alone must not set one.
 	ErrEnrollmentProofRequired = errors.New("store: a first password needs an operator's enrollment link")
-	// ErrSecondFactorRequired is an operator's password change: it needs a
-	// TOTP code as well, which this build cannot check (issue #709), so it is
-	// refused whatever else is right.
+	// ErrSecondFactorRequired is an operator's password change or
+	// re-authentication with no TOTP code to check: it needs one as well
+	// (design §5.2, §5.3), so it is refused whatever else is right.
 	ErrSecondFactorRequired = errors.New("store: an operator's password change needs a second factor")
 	// ErrNotASession is a recent-password proof asked for on a script
 	// credential: the proof is for sign-in sessions only (design §7.2, the
@@ -625,18 +625,19 @@ func callerCredentialTx(ctx context.Context, tx execer, principalID, credentialI
 // with the same label, expiry and renewal, audited credential_rotated as
 // RotateCredential is; the old one's sessions end with it. The new one
 // records the principal's generation as it is now, so a caller that bumped
-// first gets a credential of the new generation. Only a member's session
-// reaches it: a guest's or an operator's idle bound is not carried over,
-// and neither ever changes a password here.
+// first gets a credential of the new generation. An idle bound is carried
+// over too, counted since the new credential's creation and never past the
+// kept expiry (issue #709): an operator's browser session keeps both its
+// bounds. A guest never reaches it: a guest has no password.
 func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID int64, token string, now time.Time, runs *[]EndedRun) (schema.CredentialV1, error) {
 	var (
-		principalID       int64
-		label             string
-		expiresAt, renews sql.NullInt64
+		principalID             int64
+		label                   string
+		expiresAt, renews, idle sql.NullInt64
 	)
 	if err := tx.QueryRowContext(ctx,
-		"SELECT principal_id, label, expires_at, renew_ms FROM credentials WHERE id = ?", credentialID,
-	).Scan(&principalID, &label, &expiresAt, &renews); err != nil {
+		"SELECT principal_id, label, expires_at, renew_ms, idle_ms FROM credentials WHERE id = ?", credentialID,
+	).Scan(&principalID, &label, &expiresAt, &renews, &idle); err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: rotate session: read: %w", err)
 	}
 	res, err := tx.ExecContext(ctx,
@@ -652,6 +653,17 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, millisPtr(expiresAt), time.Duration(renews.Int64)*time.Millisecond)
 	if err != nil {
 		return schema.CredentialV1{}, err
+	}
+	if idle.Valid {
+		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Int64, c.ID); err != nil {
+			return schema.CredentialV1{}, fmt.Errorf("store: rotate session: idle bound: %w", err)
+		}
+		at := now.Add(time.Duration(idle.Int64) * time.Millisecond)
+		if expiresAt.Valid && at.UnixMilli() > expiresAt.Int64 {
+			at = time.UnixMilli(expiresAt.Int64)
+		}
+		ts := schema.NewTimestamp(at)
+		c.IdleExpiresAt = &ts
 	}
 	if err := appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID),
 		credentialDetail(c.ID, c.Label)+fmt.Sprintf(" replaces=%d", credentialID), now); err != nil {
@@ -709,6 +721,9 @@ type PasswordUpdate struct {
 	// Bumped says the authentication generation moved on: the caller drops
 	// the principal's live sockets and media, as after a revocation.
 	Bumped bool
+	// SetupEnded is the setup credential the write revoked because the
+	// operator's setup is now complete (issue #709), 0 when none.
+	SetupEnded int64
 }
 
 // EnrollPassword stores in.Record as the caller's password, by the rules of
@@ -730,8 +745,10 @@ type PasswordUpdate struct {
 // recovers, design §5.3), and the credential stays as it is. Replacing one
 // moves the generation on and revokes every other credential, as a change
 // does; the setup credential moves to the new generation with its
-// principal, so the setup it is for can finish. A proof sent on it is held
-// to the same rule as above.
+// principal, so the setup it is for can finish. When the operator already
+// has a confirmed second factor, the password completes the setup and the
+// setup credential is revoked (PasswordUpdate.SetupEnded). A proof sent on
+// it is held to the same rule as above.
 //
 // password_set is audited (via=enrollment or via=setup), with
 // credential_rotated, or the bump and revocations, in the same transaction.
@@ -811,20 +828,32 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 			out.Credential, out.Rotated = c, in.CredentialID
 			return nil
 		}
-		if !replaced {
-			return nil
+		if replaced {
+			generation, err := bumpAuthGenerationTx(ctx, tx, actor, in.PrincipalID, "password_replaced", now)
+			if err != nil {
+				return err
+			}
+			out.Bumped = true
+			if out.Revoked, err = revokeCredentialsExceptTx(ctx, tx, actor, in.PrincipalID, in.CredentialID,
+				"password replaced", SessionEndedByRevocation, now, &runs); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE credentials SET auth_generation = ? WHERE id = ?", generation, in.CredentialID); err != nil {
+				return fmt.Errorf("store: enroll password: %w", err)
+			}
 		}
-		generation, err := bumpAuthGenerationTx(ctx, tx, actor, in.PrincipalID, "password_replaced", now)
-		if err != nil {
+		// With a confirmed second factor already, the password completes the
+		// setup: the setup credential has done its work and ends here, so
+		// it cannot replace the password again (issue #709).
+		enrolled, err := totpEnrolledTx(ctx, tx, in.PrincipalID)
+		if err != nil || !enrolled {
 			return err
 		}
-		out.Bumped = true
-		if out.Revoked, err = revokeCredentialsExceptTx(ctx, tx, actor, in.PrincipalID, in.CredentialID,
-			"password replaced", SessionEndedByRevocation, now, &runs); err != nil {
+		if err := endSetupCredentialTx(ctx, tx, actor, in.PrincipalID, in.CredentialID, now, &runs); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE credentials SET auth_generation = ? WHERE id = ?", generation, in.CredentialID)
-		return err
+		out.SetupEnded = in.CredentialID
+		return nil
 	})
 	if err != nil {
 		return PasswordUpdate{}, err
@@ -859,15 +888,20 @@ type PasswordChange struct {
 	PrincipalID, CredentialID int64
 	AuthGeneration            int64
 	Record, NewRecord         string
+	// SecondFactor checks an operator's TOTP code (issue #709); a member's
+	// change has none. An operator's change without it is
+	// ErrSecondFactorRequired.
+	SecondFactor TOTPCheck
 }
 
 // ChangePassword replaces a member's password, in one IMMEDIATE transaction
 // that first re-reads what the verification relied on (recheckLoginTx) and
 // the credential the request came with, which must have full scope:
-// anything changed since is ErrLoginStale and writes nothing. An operator
-// is ErrSecondFactorRequired, always: the change needs a TOTP code, and
-// until the second factor exists (issue #709) none can be checked, so it
-// fails closed.
+// anything changed since is ErrLoginStale and writes nothing. An operator's
+// change needs a TOTP code as well (design §5.2): without in.SecondFactor it
+// is ErrSecondFactorRequired, and a wrong or replayed code is
+// ErrSecondFactorWrong; either writes nothing. An accepted code's step is
+// recorded with the change.
 //
 // The new password is stored and password_changed audited; the
 // authentication generation moves on, which ends every pending login, link
@@ -894,11 +928,11 @@ func (s *Store) ChangePassword(ctx context.Context, actor string, in PasswordCha
 		switch {
 		case err != nil:
 			return err
-		case p.Role == RoleOperator:
+		case p.Role == RoleOperator && in.SecondFactor == nil:
 			return ErrSecondFactorRequired
 		}
 		if _, err := recheckLoginTx(ctx, tx, LoginIssue{PrincipalID: in.PrincipalID, AuthGeneration: in.AuthGeneration, Record: in.Record},
-			RoleMember, now); err != nil {
+			p.Role, now); err != nil {
 			return err
 		}
 		cred, err := callerCredentialTx(ctx, tx, in.PrincipalID, in.CredentialID, now)
@@ -907,6 +941,11 @@ func (s *Store) ChangePassword(ctx context.Context, actor string, in PasswordCha
 		}
 		if cred.scope != schema.CredentialScopeFull {
 			return ErrLoginStale
+		}
+		if p.Role == RoleOperator {
+			if err := consumeTOTPTx(ctx, tx, in.PrincipalID, in.SecondFactor); err != nil {
+				return err
+			}
 		}
 		if _, err := setPasswordTx(ctx, tx, in.PrincipalID, in.NewRecord, now); err != nil {
 			return err
@@ -1017,10 +1056,17 @@ func (s *Store) ResetPassword(ctx context.Context, codeHash, record string, now 
 // reauth is audited. Any later bump of the generation clears the proof, and
 // revoking the credential ends it with the credential.
 func (s *Store) RecordRecentAuth(ctx context.Context, in LoginIssue, credentialID int64, now time.Time) (time.Time, error) {
+	return s.recordRecentAuth(ctx, in, credentialID, RoleMember, nil, now)
+}
+
+// recordRecentAuth is RecordRecentAuth for a principal of role; with a
+// check, the second factor is consumed (consumeTOTPTx) after the credential
+// is re-read, in the same transaction (RecordOperatorRecentAuth).
+func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialID int64, role Role, check TOTPCheck, now time.Time) (time.Time, error) {
 	now = now.Truncate(time.Millisecond)
 	until := now.Add(schema.RecentAuthLifetimeSeconds * time.Second)
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		if _, err := recheckLoginTx(ctx, tx, in, RoleMember, now); err != nil {
+		if _, err := recheckLoginTx(ctx, tx, in, role, now); err != nil {
 			return err
 		}
 		cred, err := callerCredentialTx(ctx, tx, in.PrincipalID, credentialID, now)
@@ -1031,6 +1077,11 @@ func (s *Store) RecordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 			return ErrLoginStale
 		case !cred.session:
 			return ErrNotASession
+		}
+		if check != nil {
+			if err := consumeTOTPTx(ctx, tx, in.PrincipalID, check); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET recent_auth_until = ? WHERE id = ?", until.UnixMilli(), credentialID); err != nil {
 			return fmt.Errorf("store: record recent auth: %w", err)
@@ -1047,23 +1098,32 @@ func (s *Store) RecordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 // RecentAuthStands reports whether credentialID holds a recent-password
 // proof at now: the credential is live (unrevoked, unexpired, its principal
 // enabled, of the present generation and full scope) and its proof has not
-// run out. It is what a route of the re-authentication class asks (#712).
+// run out. It is what a route of the re-authentication class asks; making a
+// device link (#712) asks it again inside its transaction (recentAuthTx).
 // An unknown credential is false, with no error.
 func (s *Store) RecentAuthStands(ctx context.Context, credentialID int64, now time.Time) (bool, error) {
-	var stands bool
-	err := s.db.QueryRowContext(ctx,
-		`SELECT c.recent_auth_until IS NOT NULL AND c.recent_auth_until > ?
+	_, stands, err := recentAuthTx(ctx, s.db, credentialID, now)
+	return stands, err
+}
+
+// recentAuthTx is RecentAuthStands on tx, and also says whose the credential
+// is (0 for an unknown one), so a write that needs the proof
+// (CreateDeviceLink) checks it, and that it is the caller's, inside its own
+// transaction.
+func recentAuthTx(ctx context.Context, tx execer, credentialID int64, now time.Time) (owner int64, stands bool, err error) {
+	err = tx.QueryRowContext(ctx,
+		`SELECT c.principal_id, c.recent_auth_until IS NOT NULL AND c.recent_auth_until > ?
 		        AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		        AND p.disabled_at IS NULL AND `+currentAuthSQL+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`,
-		now.UnixMilli(), now.UnixMilli(), credentialID).Scan(&stands)
+		now.UnixMilli(), now.UnixMilli(), credentialID).Scan(&owner, &stands)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
+		return 0, false, nil
 	case err != nil:
-		return false, fmt.Errorf("store: recent auth: %w", err)
+		return 0, false, fmt.Errorf("store: recent auth: %w", err)
 	}
-	return stands, nil
+	return owner, stands, nil
 }
 
 // newOpaqueSecret returns prefix followed by n bytes from crypto/rand in

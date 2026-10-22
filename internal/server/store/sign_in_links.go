@@ -35,12 +35,23 @@ import (
 // records its person's authentication generation when it is made and works
 // only while that is still theirs: a password change or reset, a sign-out
 // everywhere or a disable ends every link made before it.
+//
+// A device link (issue #712, design §6.2) is the one link a member makes,
+// for their own account, to sign it in on another device: made under a
+// recent-password proof of the session asking, at most
+// schema.MaxOpenDeviceLinks open at once, ten minutes by default and an
+// hour at most. It is redeemed as a sign_in link is, and works only while
+// its maker is still the member it is for; the credential it issues
+// carries the label its maker gave it.
 
 // Audit actions written by the sign-in link store.
 const (
 	AuditSignInLinkCreated  = "sign_in_link_created"
 	AuditSignInLinkRedeemed = "sign_in_link_redeemed"
 	AuditSignInLinkClosed   = "sign_in_link_closed"
+	// AuditDeviceLinkIssued is a member making a device link for
+	// themselves (design §7.3).
+	AuditDeviceLinkIssued = "device_link_issued"
 )
 
 // Why a sign-in link was closed, the reason= of its sign_in_link_closed row:
@@ -53,6 +64,15 @@ const (
 	// SignInLinkCloseAuthChanged: the person's authentication generation
 	// moved on (bumpAuthGenerationTx), so a link made before it is dead.
 	SignInLinkCloseAuthChanged = "auth_changed"
+	// SignInLinkCloseSelf: the member closed a device link of their own.
+	SignInLinkCloseSelf = "self"
+	// SignInLinkCloseSignedOut: the member signed out of a session, which
+	// ends the device links they have open (design §7.2).
+	SignInLinkCloseSignedOut = "signed_out"
+	// SignInLinkCloseCredentialRevoked: one of the member's credentials was
+	// revoked by id, by the member or an operator, which ends the device
+	// links they have open (design §6.2).
+	SignInLinkCloseCredentialRevoked = "credential_revoked" // #nosec G101 -- an audit reason, not a credential
 )
 
 // Errors returned by the sign-in link store, in addition to
@@ -74,6 +94,16 @@ var (
 	ErrPrincipalHidden = errors.New("store: principal hidden")
 	// ErrSignInLinkRequestInvalid wraps a request the schema refuses.
 	ErrSignInLinkRequestInvalid = errors.New("store: invalid sign-in link request")
+	// ErrDeviceLinkNotAllowed is a device link asked for by someone who is
+	// not a member who may be given a link: an agent, an operator, a guest,
+	// a hidden or a disabled principal.
+	ErrDeviceLinkNotAllowed = errors.New("store: only a member makes a device link")
+	// ErrReauthRequired is a device link asked for on a credential that
+	// holds no recent-password proof, or one that is not the caller's.
+	ErrReauthRequired = errors.New("store: a recent password proof is required")
+	// ErrTooManyDeviceLinks is a device link asked for by a member who
+	// already holds schema.MaxOpenDeviceLinks open ones.
+	ErrTooManyDeviceLinks = errors.New("store: too many open device links")
 )
 
 // signInLinkCreatedAction is the audit action of making a link of purpose p:
@@ -204,11 +234,12 @@ func (s *Store) CreateSignInLink(ctx context.Context, actor string, creatorID, p
 	return schema.CreateSignInLinkResponseV1{SignInLink: out, Code: code}, nil
 }
 
-// usableLink is a link that still works: its id and purpose, and the person
-// it is for.
+// usableLink is a link that still works: its id, purpose and label, and the
+// person it is for.
 type usableLink struct {
 	id        int64
 	purpose   schema.SignInLinkPurpose
+	label     string
 	principal Principal
 }
 
@@ -216,21 +247,24 @@ type usableLink struct {
 // it if it still works, whatever its purpose (usableLinkOfTx checks that).
 // Otherwise it is ErrSignInLinkInvalid: for a code that is unknown, used,
 // closed or expired, a link made under an authentication generation that is
-// no longer its person's, a maker who is no longer an enabled human operator,
-// or a person who may no longer be given a link. The stored hash is compared
-// in constant time even though the row was found by it, as for invites.
+// no longer its person's, a maker who can no longer stand behind it, or a
+// person who may no longer be given a link. The maker of a device link must
+// be the member it is for (and so, by the person's check, still a member);
+// of any other, an enabled human operator. The stored hash is compared in
+// constant time even though the row was found by it, as for invites.
 func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.Time) (usableLink, error) {
 	var (
 		id, principalID, createdBy, expiresAt int64
 		storedHash, purpose                   string
+		label                                 sql.NullString
 		usedAt, closedAt                      sql.NullInt64
 		current                               bool
 	)
 	switch err := tx.QueryRowContext(ctx,
-		`SELECT l.id, l.code_hash, l.principal_id, l.created_by, l.expires_at, l.used_at, l.closed_at, l.purpose,
+		`SELECT l.id, l.code_hash, l.principal_id, l.created_by, l.expires_at, l.used_at, l.closed_at, l.purpose, l.label,
 		        l.auth_generation = p.auth_generation
 		 FROM sign_in_links l JOIN principals p ON p.id = l.principal_id WHERE l.code_hash = ?`, codeHash,
-	).Scan(&id, &storedHash, &principalID, &createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &current); {
+	).Scan(&id, &storedHash, &principalID, &createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &label, &current); {
 	case errors.Is(err, sql.ErrNoRows):
 		return usableLink{}, ErrSignInLinkInvalid
 	case err != nil:
@@ -242,13 +276,22 @@ func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now tim
 	if usedAt.Valid || closedAt.Valid || expiresAt <= now.UnixMilli() || !current {
 		return usableLink{}, ErrSignInLinkInvalid
 	}
-	creator, err := principalByIDTx(ctx, tx, createdBy)
-	if err != nil {
-		return usableLink{}, fmt.Errorf("store: sign-in link maker: %w", err)
-	}
-	// The maker must still be able to stand behind it, as for an invite.
-	if creator.DisabledAt != nil || creator.Kind != PrincipalHuman || creator.Role != RoleOperator {
-		return usableLink{}, ErrSignInLinkInvalid
+	if schema.SignInLinkPurpose(purpose) == schema.SignInLinkPurposeDevice {
+		// A member makes a device link for themselves only; signInLinkTargetTx
+		// below holds the maker, who is the person, to being a member still,
+		// so one promoted to operator since cannot use it.
+		if createdBy != principalID {
+			return usableLink{}, ErrSignInLinkInvalid
+		}
+	} else {
+		creator, err := principalByIDTx(ctx, tx, createdBy)
+		if err != nil {
+			return usableLink{}, fmt.Errorf("store: sign-in link maker: %w", err)
+		}
+		// The maker must still be able to stand behind it, as for an invite.
+		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman || creator.Role != RoleOperator {
+			return usableLink{}, ErrSignInLinkInvalid
+		}
 	}
 	p, err := signInLinkTargetTx(ctx, tx, principalID)
 	switch {
@@ -257,7 +300,7 @@ func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now tim
 	case err != nil:
 		return usableLink{}, fmt.Errorf("store: sign-in link principal: %w", err)
 	}
-	return usableLink{id: id, purpose: schema.SignInLinkPurpose(purpose), principal: p}, nil
+	return usableLink{id: id, purpose: schema.SignInLinkPurpose(purpose), label: label.String, principal: p}, nil
 }
 
 // usableLinkOfTx is usableSignInLinkTx for a route that takes only the
@@ -313,10 +356,11 @@ func signInLinkCredentialLifetimeTx(ctx context.Context, tx execer, principalID 
 // RedeemSignInLink uses the link with this code hash, in one IMMEDIATE
 // transaction: it checks the link (as PreviewSignInLink does, but only a
 // sign_in or a device link signs anyone in: any other purpose is
-// ErrSignInLinkInvalid), issues the
-// person a new credential (label "sign-in link <id>", renewable with the
-// lifetime signInLinkCredentialLifetimeTx gives), marks the link used with
-// that credential, and audits sign_in_link_redeemed and credential_created.
+// ErrSignInLinkInvalid), issues the person a new credential (label
+// "sign-in link <id>", or for a device link the label its maker gave it,
+// "device link <id>" when they gave none; renewable with the lifetime
+// signInLinkCredentialLifetimeTx gives), marks the link used with that
+// credential, and audits sign_in_link_redeemed and credential_created.
 // If anything fails nothing is written. Two concurrent uses of one link
 // serialize on the write lock: one wins, and the other is
 // ErrSignInLinkInvalid. The person's other credentials are left as they are.
@@ -342,7 +386,16 @@ func (s *Store) RedeemSignInLink(ctx context.Context, codeHash string, now time.
 			return err
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, p.ID, fmt.Sprintf("sign-in link %d", id), token, now, &exp, lifetime)
+		label := fmt.Sprintf("sign-in link %d", id)
+		if l.purpose == schema.SignInLinkPurposeDevice {
+			// The member named the device, so the sign-in it makes is theirs
+			// to tell apart from the others (design §6.2).
+			label = l.label
+			if label == "" {
+				label = fmt.Sprintf("device link %d", id)
+			}
+		}
+		cred, err := insertCredentialTx(ctx, tx, p.ID, label, token, now, &exp, lifetime)
 		if err != nil {
 			return err
 		}
@@ -463,6 +516,217 @@ func closeOpenSignInLinksTx(ctx context.Context, tx execer, actor string, princi
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditSignInLinkClosed, principalActor(o.principalID),
 			fmt.Sprintf("sign_in_link=%d reason=%s", o.id, why), now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// openDeviceLinkSQL is the condition, over sign_in_links l, that l is a
+// device link that can still be used: unused, unclosed, unexpired at the
+// first parameter, and of its person's present authentication generation.
+// A link of an older generation is dead even before anything closes it (a
+// restore moves every generation on at once), so it neither counts towards
+// the cap nor is listed.
+const openDeviceLinkSQL = `l.purpose = 'device' AND l.used_at IS NULL AND l.closed_at IS NULL AND l.expires_at > ?
+	AND l.auth_generation = (SELECT auth_generation FROM principals WHERE id = l.principal_id)`
+
+// CreateDeviceLink makes a device link for principalID, asked for on
+// credentialID, and returns it with its code, which is shown only here. In
+// one IMMEDIATE transaction with the insert it checks that the principal is
+// still a member who may be given a link (else ErrDeviceLinkNotAllowed),
+// that credentialID is theirs and holds a recent-password proof that still
+// stands (else ErrReauthRequired), and that they hold fewer than
+// schema.MaxOpenDeviceLinks open device links (else ErrTooManyDeviceLinks):
+// two concurrent asks serialize on the write lock, so the cap holds. The row
+// records the member as both its maker and its person, the label asked
+// for, and the member's authentication generation. device_link_issued is
+// audited in the same transaction, attributed to actor; the code and the
+// label are not.
+func (s *Store) CreateDeviceLink(ctx context.Context, actor string, principalID, credentialID int64, req schema.CreateDeviceLinkRequestV1, now time.Time) (schema.CreateSignInLinkResponseV1, error) {
+	now = now.Truncate(time.Millisecond)
+	if err := req.Validate(now); err != nil {
+		return schema.CreateSignInLinkResponseV1{}, fmt.Errorf("%w: %w", ErrSignInLinkRequestInvalid, err)
+	}
+	expires := req.EffectiveExpiry(now).Truncate(time.Millisecond)
+	code, err := NewSignInLinkCode()
+	if err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	var out schema.SignInLinkV1
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		switch _, err := signInLinkTargetTx(ctx, tx, principalID); {
+		case errors.Is(err, ErrPrincipalNotFound), errors.Is(err, ErrSignInLinkTarget),
+			errors.Is(err, ErrPrincipalHidden), errors.Is(err, ErrPrincipalDisabled):
+			return ErrDeviceLinkNotAllowed
+		case err != nil:
+			return err
+		}
+		owner, stands, err := recentAuthTx(ctx, tx, credentialID, now)
+		if err != nil {
+			return err
+		}
+		if owner != principalID || !stands {
+			return ErrReauthRequired
+		}
+		var open int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sign_in_links l WHERE l.principal_id = ? AND `+openDeviceLinkSQL,
+			principalID, now.UnixMilli()).Scan(&open); err != nil {
+			return fmt.Errorf("store: create device link: count: %w", err)
+		}
+		if open >= schema.MaxOpenDeviceLinks {
+			return ErrTooManyDeviceLinks
+		}
+		var label any
+		if req.Label != "" {
+			label = req.Label
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO sign_in_links (code_hash, principal_id, created_by, created_at, expires_at, purpose, label, auth_generation)
+			 SELECT ?, ?, ?, ?, ?, 'device', ?, auth_generation FROM principals WHERE id = ?`,
+			HashSignInLinkCode(code), principalID, principalID, now.UnixMilli(), expires.UnixMilli(), label, principalID)
+		if err != nil {
+			return fmt.Errorf("store: create device link: insert: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store: create device link: id: %w", err)
+		}
+		out = schema.SignInLinkV1{
+			ID:          id,
+			PrincipalID: principalID,
+			CreatedBy:   principalID,
+			CreatedAt:   schema.NewTimestamp(now),
+			ExpiresAt:   schema.NewTimestamp(expires),
+			Purpose:     schema.SignInLinkPurposeDevice,
+			Label:       req.Label,
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditDeviceLinkIssued, principalActor(principalID),
+			fmt.Sprintf("sign_in_link=%d credential=%d expires=%s", id, credentialID, out.ExpiresAt.Time().Format(time.RFC3339)), now)
+	})
+	if err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	return schema.CreateSignInLinkResponseV1{SignInLink: out, Code: code}, nil
+}
+
+// ListOwnDeviceLinks returns principalID's open device links at now, newest
+// first (ties by id descending): the ones that could still be used. It never
+// returns a code or a hash. The result is never nil.
+func (s *Store) ListOwnDeviceLinks(ctx context.Context, principalID int64, now time.Time) ([]schema.SignInLinkV1, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT l.id, l.created_at, l.expires_at, l.label FROM sign_in_links l
+		 WHERE l.principal_id = ? AND l.created_by = l.principal_id AND `+openDeviceLinkSQL+`
+		 ORDER BY l.created_at DESC, l.id DESC`, principalID, now.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("store: list device links: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []schema.SignInLinkV1{}
+	for rows.Next() {
+		var (
+			id, created, expires int64
+			label                sql.NullString
+		)
+		if err := rows.Scan(&id, &created, &expires, &label); err != nil {
+			return nil, fmt.Errorf("store: list device links: scan: %w", err)
+		}
+		out = append(out, schema.SignInLinkV1{
+			ID:          id,
+			PrincipalID: principalID,
+			CreatedBy:   principalID,
+			CreatedAt:   schema.NewTimestamp(time.UnixMilli(created)),
+			ExpiresAt:   schema.NewTimestamp(time.UnixMilli(expires)),
+			Purpose:     schema.SignInLinkPurposeDevice,
+			Label:       label.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list device links: %w", err)
+	}
+	return out, nil
+}
+
+// CloseOwnDeviceLink closes device link id for principalID, the member who
+// made it, so it can no longer be used. A link that is not one of their
+// device links (another's, a link of another purpose, an id never issued)
+// is ErrNotFound and nothing is written, so the answer says nothing of
+// whether it exists. One already closed, used or expired changes nothing
+// and writes no audit row (changed is false). sign_in_link_closed
+// (reason=self) is audited in the same transaction.
+func (s *Store) CloseOwnDeviceLink(ctx context.Context, actor string, principalID, id int64, now time.Time) (changed bool, err error) {
+	now = now.Truncate(time.Millisecond)
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		changed = false
+		var one int
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM sign_in_links WHERE id = ? AND principal_id = ? AND created_by = ? AND purpose = 'device'`,
+			id, principalID, principalID).Scan(&one); {
+		case errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("store: close device link %d: %w", id, ErrNotFound)
+		case err != nil:
+			return fmt.Errorf("store: close device link: find: %w", err)
+		}
+		// The guard, not the read, decides, as CloseSignInLink's does. An
+		// expired link is left as it is: it can no longer be used anyway.
+		res, err := tx.ExecContext(ctx,
+			"UPDATE sign_in_links SET closed_at = ? WHERE id = ? AND used_at IS NULL AND closed_at IS NULL AND expires_at > ?",
+			now.UnixMilli(), id, now.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("store: close device link: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("store: close device link: %w", err)
+		} else if n != 1 {
+			return nil
+		}
+		changed = true
+		return appendAuditEventTx(ctx, tx, actor, AuditSignInLinkClosed, principalActor(principalID),
+			fmt.Sprintf("sign_in_link=%d reason=%s", id, SignInLinkCloseSelf), now)
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
+// closeDeviceLinksTx closes every device link of principalID's that could
+// still be used, writing one sign_in_link_closed row each with reason. It
+// is what a member's single sign-out, and any revocation of one of their
+// credentials, does to the device links they made (design §6.2, §7.2), so
+// ending a session leaves no way back in that was opened before it. The
+// caller holds the write lock.
+func closeDeviceLinksTx(ctx context.Context, tx execer, actor string, principalID int64, reason string, now time.Time) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM sign_in_links
+		 WHERE principal_id = ? AND purpose = 'device' AND used_at IS NULL AND closed_at IS NULL AND expires_at > ?
+		 ORDER BY id`, principalID, now.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("store: list device links: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: list device links: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: list device links: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: list device links: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE sign_in_links SET closed_at = ? WHERE id = ? AND closed_at IS NULL", now.UnixMilli(), id); err != nil {
+			return fmt.Errorf("store: close device link %d: %w", id, err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditSignInLinkClosed, principalActor(principalID),
+			fmt.Sprintf("sign_in_link=%d reason=%s", id, reason), now); err != nil {
 			return err
 		}
 	}

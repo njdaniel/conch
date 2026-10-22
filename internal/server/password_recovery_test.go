@@ -419,8 +419,9 @@ func TestChangePasswordRefusals(t *testing.T) {
 		{"no password yet", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.change(t, f.wrenTok, wrenPassword, newAlicePassword)
 		}, http.StatusConflict, schema.ErrorCodePasswordNotSet},
-		// The second factor cannot be checked in this build (#709): an
-		// operator's change fails closed, the right password included.
+		// This fixture has no TOTP key (#709), so the code cannot be
+		// checked: an operator's change fails closed, the right password
+		// included. The tests with a key are in operator_auth_test.go.
 		{"an operator", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			f.enrollTOTP(t, f.root.ID)
 			return f.send(t, "PUT", "/v1/password/mine", f.rootTok,
@@ -900,9 +901,13 @@ func TestReauthRefusals(t *testing.T) {
 		{"no password yet", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.reauth(t, f.wrenTok, wrenPassword)
 		}, http.StatusConflict, schema.ErrorCodePasswordNotSet},
+		// On a browser session, with no TOTP key in this fixture (#709):
+		// the code cannot be checked, so it fails closed. On the operator's
+		// script credential it is the 403 of the first case.
 		{"an operator", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			f.enrollTOTP(t, f.root.ID)
-			return f.send(t, "POST", "/v1/reauth", f.rootTok, inviteJSON(t, schema.ReauthRequestV1{Password: rootPassword, Code: "123456"}), "")
+			_, tok := f.session(t, f.root.ID)
+			return f.send(t, "POST", "/v1/reauth", tok, inviteJSON(t, schema.ReauthRequestV1{Password: rootPassword, Code: "123456"}), "")
 		}, http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 		{"an agent", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.reauth(t, f.botTok, alicePassword)
