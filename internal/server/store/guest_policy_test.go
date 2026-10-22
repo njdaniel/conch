@@ -124,14 +124,25 @@ func TestGuestEntryPredicates(t *testing.T) {
 		channels, live, fromAddr int
 		want                     schema.JoinOptionsV1
 	}{
-		{"open", on, 1, 0, 0, schema.JoinOptionsV1{Guest: true}},
+		// An account is offered wherever the mode offers one, the address
+		// has a channel and joining is not paused (issue #711); the guest
+		// caps and the guest switch do not touch it.
+		{"open", on, 1, 0, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
 		{"no channel", on, 0, 0, 0, schema.JoinOptionsV1{}},
-		{"server cap", on, 1, 2, 0, schema.JoinOptionsV1{GuestsFull: true}},
-		{"address cap", on, 1, 1, 1, schema.JoinOptionsV1{GuestsFull: true}},
-		{"uncapped", func() schema.JoinSettingsV1 { s := on; s.MaxGuests = 0; return s }(), 1, 9000, 0, schema.JoinOptionsV1{Guest: true}},
+		{"server cap", on, 1, 2, 0, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
+		{"address cap", on, 1, 1, 1, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
+		{"uncapped", func() schema.JoinSettingsV1 { s := on; s.MaxGuests = 0; return s }(), 1, 9000, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
 		{"paused", func() schema.JoinSettingsV1 { s := on; s.JoiningPaused = true; return s }(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
-		{"accounts only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 1, 0, 0, schema.JoinOptionsV1{}},
-		{"guests off", func() schema.JoinSettingsV1 { s := on; s.GuestsEnabled = false; return s }(), 1, 0, 0, schema.JoinOptionsV1{}},
+		{"accounts only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
+		{"accounts only, no channel", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 0, 0, 0, schema.JoinOptionsV1{}},
+		{"accounts only, paused", func() schema.JoinSettingsV1 {
+			s := on
+			s.OpenJoining, s.JoiningPaused = schema.OpenJoiningAccount, true
+			return s
+		}(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
+		{"guests only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningGuest; return s }(), 1, 0, 0, schema.JoinOptionsV1{Guest: true}},
+		{"guests off", func() schema.JoinSettingsV1 { s := on; s.GuestsEnabled = false; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
+		{"off", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningOff; return s }(), 1, 0, 0, schema.JoinOptionsV1{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

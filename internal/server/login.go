@@ -80,6 +80,23 @@ const (
 	// not enough to list who is here.
 	defaultNameProbesPerAddress = 5
 	defaultNameProbeWindow      = time.Hour
+	// defaultNameProbesPerPrincipal is the same allowance for a guest's
+	// conversion (issue #711), kept by the guest's principal, and
+	// defaultConversionNameProbesPerAddress the one every guest's conversion
+	// from one address shares: a conversion's probe needs room in both and
+	// spends both. The address's is its own, not the one POST
+	// /v1/join/account and the invite redemption share, so an anonymous
+	// caller who spends a shared address's probes holds no guest's
+	// conversion up; and since it is by address, cycling guests (each a new
+	// principal) gets an address no more than the design's five an hour.
+	defaultNameProbesPerPrincipal         = 5
+	defaultConversionNameProbesPerAddress = 5
+	// defaultConversionsPerPrincipal is how many conversions one guest may
+	// have hashed in defaultConversionWindow (issue #711, design §5.1:
+	// rate-limit before expensive work): enough for a person who mistypes,
+	// not enough to keep the authenticated pool busy.
+	defaultConversionsPerPrincipal = 5
+	defaultConversionWindow        = 10 * time.Minute
 )
 
 // loginLimits are the sign-in limits. Tests replace them with
@@ -89,14 +106,23 @@ type loginLimits struct {
 	failuresPerName      inviteLimit
 	successesPerName     inviteLimit
 	nameProbesPerAddress inviteLimit
+	// The guest conversion's own (issue #711), kept by principal, and its
+	// name probes by address as well.
+	nameProbesPerPrincipal         inviteLimit
+	conversionNameProbesPerAddress inviteLimit
+	conversionsPerPrincipal        inviteLimit
 }
 
 func defaultLoginLimits() loginLimits {
 	return loginLimits{
-		failuresPerAddress:   inviteLimit{"login_failures_per_address", defaultLoginFailuresPerAddress, defaultLoginFailureWindow},
-		failuresPerName:      inviteLimit{"login_failures_per_name", defaultLoginFailuresPerName, defaultLoginFailureWindow},
-		successesPerName:     inviteLimit{"login_successes_per_name", defaultLoginSuccessesPerName, defaultLoginSuccessWindow},
-		nameProbesPerAddress: inviteLimit{"name_probes_per_address", defaultNameProbesPerAddress, defaultNameProbeWindow},
+		failuresPerAddress:     inviteLimit{"login_failures_per_address", defaultLoginFailuresPerAddress, defaultLoginFailureWindow},
+		failuresPerName:        inviteLimit{"login_failures_per_name", defaultLoginFailuresPerName, defaultLoginFailureWindow},
+		successesPerName:       inviteLimit{"login_successes_per_name", defaultLoginSuccessesPerName, defaultLoginSuccessWindow},
+		nameProbesPerAddress:   inviteLimit{"name_probes_per_address", defaultNameProbesPerAddress, defaultNameProbeWindow},
+		nameProbesPerPrincipal: inviteLimit{"name_probes_per_principal", defaultNameProbesPerPrincipal, defaultNameProbeWindow},
+		conversionNameProbesPerAddress: inviteLimit{"conversion_name_probes_per_address",
+			defaultConversionNameProbesPerAddress, defaultNameProbeWindow},
+		conversionsPerPrincipal: inviteLimit{"conversions_per_principal", defaultConversionsPerPrincipal, defaultConversionWindow},
 	}
 }
 
@@ -120,6 +146,10 @@ type loginLimiter struct {
 	limits                                  loginLimits
 	addrFailures, nameFailures, nameSuccess bucketSet
 	nameProbes                              bucketSet
+	// principalProbes and conversions are kept by principal id (issue #711).
+	principalProbes, conversions bucketSet
+	// conversionProbes is the conversion's name probes by address.
+	conversionProbes bucketSet
 	// audits thins login_failed rows, by the rule of denialCoalescer, under
 	// principal 0. Its own, so a flood of sign-ins cannot crowd the invite
 	// refusals out of theirs.
@@ -236,6 +266,59 @@ func (l *loginLimiter) spendNameProbe(addr netip.Addr, now time.Time) {
 	defer l.mu.Unlock()
 	limit := l.limits.nameProbesPerAddress
 	l.nameProbes.bucket(limit, limitKey(addr), overflowKey(addr), now).take(limit, now)
+}
+
+// peekConversionNameProbe and spendConversionNameProbe are peekNameProbe
+// and spendNameProbe for a guest's conversion (issue #711): a probe needs
+// room in both the guest's own allowance (by principal) and the one every
+// conversion from addr shares, and spends both. The peek reports the limit
+// that has no room. Principals are made by limited routes only, so one
+// shared overflow bucket is enough for them, as for the invite makers'
+// (takeCreate).
+func (l *loginLimiter) peekConversionNameProbe(principalID int64, addr netip.Addr, now time.Time) (inviteLimit, bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	pl, al := l.limits.nameProbesPerPrincipal, l.limits.conversionNameProbesPerAddress
+	for _, c := range []struct {
+		limit inviteLimit
+		b     *tokenBucket
+	}{
+		{pl, l.principalProbes.bucket(pl, strconv.FormatInt(principalID, 10), inviteOverflowKey, now)},
+		{al, l.conversionProbes.bucket(al, limitKey(addr), overflowKey(addr), now)},
+	} {
+		ok, retry := c.b.take(c.limit, now)
+		if !ok {
+			return c.limit, false, retry
+		}
+		c.b.refund(c.limit, now)
+	}
+	return inviteLimit{}, true, 0
+}
+
+func (l *loginLimiter) spendConversionNameProbe(principalID int64, addr netip.Addr, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	pl, al := l.limits.nameProbesPerPrincipal, l.limits.conversionNameProbesPerAddress
+	l.principalProbes.bucket(pl, strconv.FormatInt(principalID, 10), inviteOverflowKey, now).take(pl, now)
+	l.conversionProbes.bucket(al, limitKey(addr), overflowKey(addr), now).take(al, now)
+}
+
+// takeConversion spends one of the guest's conversion attempts, before its
+// password is hashed; refundConversion gives it back when no hash ran (the
+// pool was full, or the caller left while it waited).
+func (l *loginLimiter) takeConversion(principalID int64, now time.Time) (inviteLimit, bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	limit := l.limits.conversionsPerPrincipal
+	ok, retry := l.conversions.bucket(limit, strconv.FormatInt(principalID, 10), inviteOverflowKey, now).take(limit, now)
+	return limit, ok, retry
+}
+
+func (l *loginLimiter) refundConversion(principalID int64, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	limit := l.limits.conversionsPerPrincipal
+	l.conversions.bucket(limit, strconv.FormatInt(principalID, 10), inviteOverflowKey, now).refund(limit, now)
 }
 
 // newAddressMACKey returns the key pendingAddressKey uses: random, made once

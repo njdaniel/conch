@@ -90,6 +90,17 @@ type RenameLimits struct {
 	Attempts int
 }
 
+// CheckNameFree says, without writing anything, whether name could be
+// claimed now by self (0 for a new principal), by claimNameTx's rule, and
+// returns its error when not. It is the check the routes that make an
+// account with a password (issue #711) make before they hash, so a name
+// that is taken costs no Argon2 work; the writing transaction claims it
+// again.
+func (s *Store) CheckNameFree(ctx context.Context, name string, self int64) error {
+	_, err := claimNameTx(ctx, s.db, name, self)
+	return err
+}
+
 // claimNameTx is the one clash check, used by every path that creates or
 // renames a principal: it returns name's keys, ErrNameInvalid when they are
 // empty, or ErrDuplicate when a principal other than self holds either of

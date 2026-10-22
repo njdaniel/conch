@@ -19,7 +19,8 @@ import (
 
 func looseLoginLimits() loginLimits {
 	loose := inviteLimit{"loose", 1_000_000, time.Minute}
-	return loginLimits{failuresPerAddress: loose, failuresPerName: loose, successesPerName: loose, nameProbesPerAddress: loose}
+	return loginLimits{failuresPerAddress: loose, failuresPerName: loose, successesPerName: loose, nameProbesPerAddress: loose,
+		nameProbesPerPrincipal: loose, conversionNameProbesPerAddress: loose, conversionsPerPrincipal: loose}
 }
 
 // The passwords of the login fixture's people. Each passes the policy.

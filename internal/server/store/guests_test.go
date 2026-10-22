@@ -29,6 +29,17 @@ type guestFixture struct {
 	mu      sync.Mutex
 }
 
+// allowAddressAccounts opens the bare address to accounts, underneath the
+// settings route: the policy a bare-address visit converts under (issue
+// #711), for the tests whose subject is not the policy itself.
+func allowAddressAccounts(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO server_settings (key, value, updated_at) VALUES ('open_joining', 'account', 0)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newGuestFixture(t *testing.T) *guestFixture {
 	t.Helper()
 	s := openTestStore(t)
@@ -459,6 +470,7 @@ func TestGuestMigrationFromSchema30(t *testing.T) {
 // none; and the attribution cannot be changed or removed.
 func TestGuestAttributionIsImmutable(t *testing.T) {
 	f := newGuestFixture(t)
+	allowAddressAccounts(t, f.s)
 	g := f.guest("Pat")
 	want := schema.GuestAttributionV1{Handle: g.Visit.Handle, Label: "Pat", Tag: schema.GuestTag(g.Visit.Handle)}
 	posted, err := f.s.InsertMessage(f.ctx, f.general.ID, g.Principal.ID, "hello as a guest")
@@ -504,7 +516,7 @@ func TestGuestAttributionIsImmutable(t *testing.T) {
 	}
 	read("live")
 
-	conv, err := f.s.ConvertGuest(f.ctx, principalActor(g.Principal.ID), GuestConversion{PrincipalID: g.Principal.ID, Name: "pat",
+	conv, err := f.s.ConvertGuest(f.ctx, principalActor(g.Principal.ID), GuestConversion{Record: testRecord("conv"), PrincipalID: g.Principal.ID, Name: "pat",
 		CredentialLabel: "member", CredentialLifetime: 30 * 24 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -826,7 +838,7 @@ func TestGuestEndPaths(t *testing.T) {
 			if _, err := f.s.EndGuestVisit(f.ctx, "system", g.Principal.ID, schema.GuestEndOperator); !errors.Is(err, ErrGuestEnded) {
 				t.Errorf("second end: %v, want ErrGuestEnded", err)
 			}
-			if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{PrincipalID: g.Principal.ID, Name: "late",
+			if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: g.Principal.ID, Name: "late",
 				CredentialLabel: "m", CredentialLifetime: time.Hour}); !errors.Is(err, ErrGuestEnded) {
 				t.Errorf("convert after the end: %v, want ErrGuestEnded", err)
 			}
@@ -847,6 +859,7 @@ func TestGuestEndPaths(t *testing.T) {
 // loser writes nothing.
 func TestGuestTerminalTransitionRace(t *testing.T) {
 	f := newGuestFixture(t)
+	allowAddressAccounts(t, f.s)
 	for i := range 20 {
 		g := f.guest("")
 		var wg sync.WaitGroup
@@ -861,7 +874,7 @@ func TestGuestTerminalTransitionRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, convErr = f.s.ConvertGuest(f.ctx, "system", GuestConversion{PrincipalID: g.Principal.ID, Name: fmt.Sprintf("member%d", i),
+			_, convErr = f.s.ConvertGuest(f.ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: g.Principal.ID, Name: fmt.Sprintf("member%d", i),
 				CredentialLabel: "m", CredentialLifetime: time.Hour})
 		}()
 		close(start)
@@ -900,11 +913,12 @@ func TestGuestTerminalTransitionRace(t *testing.T) {
 // rolls back whole when the work inside it fails.
 func TestConvertGuest(t *testing.T) {
 	f := newGuestFixture(t)
+	allowAddressAccounts(t, f.s)
 	if _, err := f.s.InsertMessage(f.ctx, f.general.ID, f.alice.ID, "old"); err != nil {
 		t.Fatal(err)
 	}
 	g := f.guest("Pat")
-	conv := GuestConversion{PrincipalID: g.Principal.ID, CredentialLabel: "member", CredentialLifetime: time.Hour}
+	conv := GuestConversion{Record: testRecord("conv"), PrincipalID: g.Principal.ID, CredentialLabel: "member", CredentialLifetime: time.Hour}
 	for _, name := range []string{"Guest-pat", "alice", "hidden-9"} {
 		c := conv
 		c.Name = name

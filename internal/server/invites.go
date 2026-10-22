@@ -431,6 +431,9 @@ func (s *Server) handleRedeemInviteV2(w http.ResponseWriter, r *http.Request) {
 		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
 		return
 	}
+	if s.beforePasswordWrite != nil {
+		s.beforePasswordWrite()
+	}
 	res, err := s.store.RedeemInviteWithPassword(ctx, codeHash, req.Name, record, s.now())
 	if err != nil {
 		s.inviteLimits.refundGlobal(s.now())

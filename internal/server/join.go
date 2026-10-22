@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -29,9 +31,12 @@ import (
 // invite redemptions. Nothing here logs, audits or echoes a code, a label or
 // a token, and the client address stays in memory (clientaddr.go).
 //
-// No route here makes an account: open_joining account and both, and invite
-// join_as account and both, admit no new account route until passwords
-// exist (#707, #711). The front door says so by never offering one.
+// Create an account from the bare address (POST /v1/join/account, issue
+// #711) is here too. It takes a password, so it answers only over HTTPS or
+// loopback (passwordRoute); it spends the same buckets, and the name-probe
+// allowance when the name turns out taken; and it hashes, in the anonymous
+// pool, only after every check that costs nothing. The front door offers
+// what these routes allow, by the store's predicates (AddressJoinOptions).
 
 // DefaultServerName is the server's label when the operator names none
 // (--server-name): what the front door shows, and a name no guest label may
@@ -178,9 +183,9 @@ func (s *Server) handleJoinInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info := schema.JoinInfoV1{
 		ServerName: s.serverName(),
-		// Password sign-in is #707's; until it is here, nobody signs in by
-		// password on this server.
-		PasswordLogin:        false,
+		// POST /v1/login answers whenever authentication is on (#707); with
+		// it off there is no account to sign in to (design §7.4).
+		PasswordLogin:        s.cfg.authRequired(),
 		GuestIdleSeconds:     set.GuestIdleSeconds,
 		GuestAbsoluteSeconds: set.GuestAbsoluteSeconds,
 	}
@@ -322,6 +327,151 @@ func (s *Server) handleRedeemInviteGuest(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// handleJoinAccount serves POST /v1/join/account, exempt from
+// authentication: Create an account from the bare address, name and
+// password together (issue #711, design §3.1). The order is part of the
+// contract, and every check that costs nothing comes before the hash: the
+// transport (passwordRoute); the per-address limit before the body is read;
+// a bad name or password a 400; the policy (403 joining_closed or
+// joining_paused); the name-probe allowance and the name (409
+// principal_exists, which spends a probe); then the hash, in the anonymous
+// pool and outside any transaction; the server-wide limit last, given back
+// when the store refuses. The store reads the policy, the open channels and
+// the name again in the transaction that makes the account, and makes it
+// with its password, or nothing.
+func (s *Server) handleJoinAccount(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if !s.passwordRoute(w, r) {
+		return
+	}
+	addr := clientAddr(r, s.cfg.TrustedProxies)
+	if limit, ok, retry := s.inviteLimits.takeAddress(true, addr, s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+		return
+	}
+	var req schema.JoinAccountRequestV1
+	if !decodeInviteBody(w, r, &req) {
+		return
+	}
+	// The schema's messages name the rule broken, never the name or the
+	// password sent.
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	password, ok := s.accountPassword(w, req.Password, req.Name)
+	if !ok {
+		return
+	}
+	switch err := s.store.CheckJoinAccount(ctx); {
+	case err != nil && s.writeJoinAccountRefused(w, err):
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "join: account policy check failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	if !s.nameIsFree(w, r, addr, 0, req.Name) {
+		return
+	}
+	record, err := s.passwords.hashIn(ctx, s.passwords.anonymous, password)
+	if err != nil {
+		writeHashFailed(w, r, err)
+		return
+	}
+	// The hash has run: the write and what follows finish even if the
+	// caller has gone, so the work is never done for nothing.
+	ctx = context.WithoutCancel(ctx)
+	if limit, ok, retry := s.inviteLimits.takeGlobal(s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+		return
+	}
+	if s.beforePasswordWrite != nil {
+		s.beforePasswordWrite()
+	}
+	acct, err := s.store.JoinAsAccount(ctx, req.Name, record, s.now())
+	if err != nil {
+		s.inviteLimits.refundGlobal(s.now())
+		if errors.Is(err, store.ErrDuplicate) {
+			s.logins.spendNameProbe(addr, s.now())
+		}
+		if !s.writeJoinAccountRefused(w, err) {
+			slog.ErrorContext(ctx, "join: account failed", "error", err)
+			writeInternalError(w)
+		}
+		return
+	}
+	for _, ch := range acct.Channels {
+		s.events.notifyChannelRoster(ch.ID)
+	}
+	slog.InfoContext(ctx, "join: account created", "principal", acct.Principal.ID)
+	writeSecretJSON(w, http.StatusCreated, schema.JoinAccountResponseV1{
+		Principal:  principalFromStore(acct.Principal),
+		Credential: acct.Credential,
+		Token:      acct.Token,
+		Channels:   acct.Channels,
+	})
+}
+
+// writeJoinAccountRefused answers a refusal of an account from the bare
+// address, or of a conversion, that the store gave for the policy or the
+// name, and reports whether err was one.
+func (s *Server) writeJoinAccountRefused(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, store.ErrJoiningClosed):
+		writeError(w, http.StatusForbidden, schema.ErrorCodeJoiningClosed, "accounts cannot be made here now")
+	case errors.Is(err, store.ErrJoiningPaused):
+		writeError(w, http.StatusForbidden, schema.ErrorCodeJoiningPaused, "joining is paused on this server")
+	case errors.Is(err, store.ErrNameReserved):
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessageFor(err))
+	case errors.Is(err, store.ErrDuplicate):
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, "that name is taken; choose another")
+	case errors.Is(err, store.ErrNameInvalid):
+		// A name of nothing a reader can see (issue #441).
+		writeError(w, http.StatusBadRequest, "invalid_request", "the name is not acceptable")
+	default:
+		return false
+	}
+	return true
+}
+
+// nameIsFree is the name check the routes that make an account with a
+// password make before they hash (issue #711): the name-probe allowance
+// (design §8: five answers of principal_exists an hour), then whether name
+// could be claimed by self now. A taken or reserved name spends a probe and
+// is answered 409 principal_exists. The allowance is addr's for an anonymous
+// caller (self 0), shared with the invite redemption; a guest converting
+// (self its principal) spends its own and the one the conversions from its
+// address share (peekConversionNameProbe), so that an anonymous caller
+// behind the same address cannot spend it and cycling guests gains nothing. It writes the answer and reports false when
+// the request stops here.
+func (s *Server) nameIsFree(w http.ResponseWriter, r *http.Request, addr netip.Addr, self int64, name string) bool {
+	peek := func() (inviteLimit, bool, time.Duration) { return s.logins.peekNameProbe(addr, s.now()) }
+	spend := func() { s.logins.spendNameProbe(addr, s.now()) }
+	if self != 0 {
+		peek = func() (inviteLimit, bool, time.Duration) {
+			return s.logins.peekConversionNameProbe(self, addr, s.now())
+		}
+		spend = func() { s.logins.spendConversionNameProbe(self, addr, s.now()) }
+	}
+	if limit, ok, retry := peek(); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, self, addr)
+		return false
+	}
+	err := s.store.CheckNameFree(r.Context(), name, self)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, store.ErrDuplicate) {
+		spend()
+	}
+	if !s.writeJoinAccountRefused(w, err) {
+		slog.ErrorContext(r.Context(), "join: name check failed", "error", err)
+		writeInternalError(w)
+	}
+	return false
+}
+
 func writeGuestHTTPSRequired(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, schema.ErrorCodeHTTPSRequired,
 		"a guest visit starts only over HTTPS; behind a reverse proxy, name it with --trusted-proxies")
@@ -342,7 +492,7 @@ func (s *Server) writeGuestJoined(ctx context.Context, w http.ResponseWriter, g 
 	slog.InfoContext(ctx, "join: guest visit started", "principal", g.Principal.ID, "origin", string(g.Visit.Origin))
 	writeSecretJSON(w, http.StatusCreated, schema.JoinGuestResponseV1{
 		Principal:  principalFromStore(g.Principal),
-		Guest:      g.Visit.V1(),
+		Guest:      s.guestV1(ctx, g.Visit),
 		Credential: g.Credential,
 		Token:      g.Token,
 		Channels:   g.Channels,

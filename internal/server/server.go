@@ -220,6 +220,9 @@ type Server struct {
 	// guestAddrs is which address each guest visit came from, for the
 	// per-address cap (join.go), in memory only.
 	guestAddrs guestAddressBook
+	// converting is the guests with a conversion in flight (conversion.go):
+	// one at a time each, so duplicates cost no hashing.
+	converting principalSet
 	// passwords is password hashing and its two bounded pools (password.go);
 	// logins is the sign-in limits (login.go), in memory only, with now as
 	// their clock. Tests replace logins with setLoginLimits before serving.
@@ -237,7 +240,8 @@ type Server struct {
 	// conchd.
 	beforeLoginIssue func()
 	// beforePasswordWrite is the same seam for the password routes
-	// (password_recovery.go): it runs after a password was verified or
+	// (password_recovery.go) and the routes that make an account with one
+	// (join.go, conversion.go): it runs after a password was verified or
 	// hashed and before the transaction that writes. Nil in conchd.
 	beforePasswordWrite func()
 }

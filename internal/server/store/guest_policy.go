@@ -26,8 +26,9 @@ import (
 // PreviewInvite's join), so what a preview offers and what a write allows
 // agree.
 //
-// No account is made here: the routes that make one with a password are
-// #707's and #711's.
+// An account from the bare address (JoinAsAccount, issue #711) is held to
+// the same settings, in the same way: its mode is checked in the creating
+// transaction, and the account exists only with its password.
 
 // The server_settings keys of the joining settings.
 const (
@@ -126,10 +127,17 @@ func GuestCapReached(s schema.JoinSettingsV1, live, addressLive int) bool {
 	return s.MaxGuestsPerAddress > 0 && int64(addressLive) >= s.MaxGuestsPerAddress
 }
 
-// AddressJoinOptions is what the bare address offers now for guests: Guest
-// when a visit may start, GuestsFull when only a cap stops one, Paused when
-// joining is paused. Account is never set: no route makes an account from
-// the bare address yet (#711).
+// AddressAdmitsAccounts reports whether the bare address's mode offers
+// accounts under s, before the pause and the channels (issue #711). The
+// guests_enabled switch plays no part: it is about guests only.
+func AddressAdmitsAccounts(s schema.JoinSettingsV1) bool {
+	return s.OpenJoining == schema.OpenJoiningAccount || s.OpenJoining == schema.OpenJoiningBoth
+}
+
+// AddressJoinOptions is what the bare address offers now: Guest when a visit
+// may start, GuestsFull when only a cap stops one, Account when an account
+// may be made (addressAccountPolicy), and Paused, with neither, when joining
+// is paused. They are the predicates JoinAsGuest and JoinAsAccount apply.
 func AddressJoinOptions(s schema.JoinSettingsV1, openChannels, live, addressLive int) schema.JoinOptionsV1 {
 	var out schema.JoinOptionsV1
 	if s.OpenJoining == schema.OpenJoiningOff {
@@ -139,7 +147,11 @@ func AddressJoinOptions(s schema.JoinSettingsV1, openChannels, live, addressLive
 		out.Paused = true
 		return out
 	}
-	if !AddressAdmitsGuests(s) || openChannels == 0 {
+	if openChannels == 0 {
+		return out
+	}
+	out.Account = AddressAdmitsAccounts(s)
+	if !AddressAdmitsGuests(s) {
 		return out
 	}
 	if GuestCapReached(s, live, addressLive) {
@@ -148,6 +160,23 @@ func AddressJoinOptions(s schema.JoinSettingsV1, openChannels, live, addressLive
 		out.Guest = true
 	}
 	return out
+}
+
+// addressAccountPolicy is the rule an account from the bare address is held
+// to (design §2, §3.1): the address's mode offers accounts and it has a
+// channel to admit to (else ErrJoiningClosed), and joining is not paused
+// (ErrJoiningPaused).
+func addressAccountPolicy(s schema.JoinSettingsV1) error {
+	if !AddressAdmitsAccounts(s) {
+		return ErrJoiningClosed
+	}
+	if s.JoiningPaused {
+		return ErrJoiningPaused
+	}
+	if len(s.OpenChannels) == 0 {
+		return ErrJoiningClosed
+	}
+	return nil
 }
 
 // AddressCapReached reports whether the per-address cap stops one more
@@ -526,6 +555,148 @@ func (s *Store) JoinAsGuest(ctx context.Context, e GuestEntry) (AdmittedGuest, e
 		return AdmittedGuest{}, err
 	}
 	out.Token = p.token
+	return out, nil
+}
+
+// CheckJoinAccount is what POST /v1/join/account asks before it hashes
+// anything: whether the bare address could make an account now
+// (addressAccountPolicy: ErrJoiningClosed, ErrJoiningPaused). JoinAsAccount
+// checks it again in the creating transaction.
+func (s *Store) CheckJoinAccount(ctx context.Context) error {
+	set, err := joinSettingsTx(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	return addressAccountPolicy(set)
+}
+
+// AdmittedAccount is an account the bare address made: its principal, its
+// first credential and that credential's token, shown only here, and the
+// channels it joined.
+type AdmittedAccount struct {
+	Principal  Principal
+	Credential schema.CredentialV1
+	Token      string
+	Channels   []schema.InviteChannelV1
+}
+
+// AccountCredentialLabel is the label of the first credential of an
+// account made from the bare address.
+const AccountCredentialLabel = "account created"
+
+// JoinAsAccount makes a member called name from the bare address (POST
+// /v1/join/account, issue #711, design §3.1), with record, the encoded
+// Argon2id record of the password it chose, made by the server outside this
+// transaction. In one IMMEDIATE transaction it reads the policy again
+// (addressAccountPolicy: ErrJoiningClosed, ErrJoiningPaused) and the open
+// channels, claims the name (claimNameTx: ErrDuplicate, ErrNameReserved for
+// the hidden and guest namespaces, ErrNameInvalid), and makes the
+// principal, its password, its memberships of every open channel and its
+// first credential together, so a refusal or a failure leaves nothing
+// behind. The account gets what a bare-address joiner gets and nothing
+// more: join_voice, no right to invite, can_decide 0 in every channel, and,
+// as a guest's, a history bound at each channel's last message, since the
+// bare address is open to anyone and designating a channel for it does not
+// publish its earlier history (design §2). The credential renews as an
+// invited member's does, with an invite's default lifetime. Every row is
+// attributed to "system": principal_created, password_set (via=join),
+// member_added for each channel and credential_created. now is the invite
+// clock, as for RedeemInvite.
+func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time.Time) (AdmittedAccount, error) {
+	now = now.Truncate(time.Millisecond)
+	if !strings.HasPrefix(record, passwordRecordPrefix) {
+		return AdmittedAccount{}, ErrPasswordRecordInvalid
+	}
+	if err := (schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: name}).Validate(); err != nil {
+		return AdmittedAccount{}, fmt.Errorf("%w: %w", ErrNameInvalid, err)
+	}
+	token, err := newCredentialToken()
+	if err != nil {
+		return AdmittedAccount{}, err
+	}
+	const actor = "system"
+	var out AdmittedAccount
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		out = AdmittedAccount{}
+		set, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if err := addressAccountPolicy(set); err != nil {
+			return err
+		}
+		channels, err := openChannelsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(channels) == 0 {
+			return ErrJoiningClosed
+		}
+		keys, err := claimNameTx(ctx, tx, name, 0)
+		if err != nil {
+			return fmt.Errorf("store: join as an account: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed)
+			 VALUES ('human', ?, ?, ?, 'member', ?, ?)`,
+			name, keys.Folded, keys.Skeletal, now.UnixMilli(), boolInt(set.JoinVoice))
+		if isUniqueConstraintErr(err) {
+			return fmt.Errorf("store: join as an account: create principal %q: %w", name, ErrDuplicate)
+		}
+		if err != nil {
+			return fmt.Errorf("store: join as an account: create principal: %w", err)
+		}
+		pid, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store: join as an account: principal id: %w", err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalCreated, principalActor(pid), "kind=human origin=address", now); err != nil {
+			return err
+		}
+		if _, err := setPasswordTx(ctx, tx, pid, record, now); err != nil {
+			return err
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditPasswordSet, principalActor(pid), "via=join", now); err != nil {
+			return err
+		}
+		for _, c := range channels {
+			watermark, err := historyWatermarkTx(ctx, tx, c.ID)
+			if err != nil {
+				return err
+			}
+			// A joiner from the bare address never gets the right to decide
+			// the channel's approvals, as a joiner through an invite does
+			// not (issue #450): the column's default of 1 is for members an
+			// operator adds.
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO channel_members (channel_id, principal_id, created_at, can_decide, history_after) VALUES (?, ?, ?, 0, ?)`,
+				c.ID, pid, now.UnixMilli(), watermark); err != nil {
+				return fmt.Errorf("store: join as an account: add member: %w", err)
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(c.ID), memberDetail(pid), now); err != nil {
+				return err
+			}
+		}
+		lifetime := schema.DefaultInviteCredentialLifetimeSeconds * time.Second
+		exp := now.Add(lifetime)
+		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime)
+		if err != nil {
+			return err
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, "credential_created", principalActor(pid), credentialDetail(cred.ID, cred.Label), now); err != nil {
+			return err
+		}
+		out = AdmittedAccount{
+			Principal:  Principal{ID: pid, Kind: PrincipalHuman, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: set.JoinVoice},
+			Credential: cred,
+			Channels:   channels,
+		}
+		return nil
+	})
+	if err != nil {
+		return AdmittedAccount{}, err
+	}
+	out.Token = token
 	return out, nil
 }
 

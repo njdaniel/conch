@@ -130,6 +130,10 @@ func (s *Server) routeTable() []route {
 		// End visit (issue #705): a guest ends its own visit; anyone else is
 		// not a guest (checked in the handler). The entry routes are #710's.
 		rt("POST /v1/guest/end", accessAuthenticated, hf(s.handleEndVisit)),
+		// Create an account during a visit (issue #711): the guest itself,
+		// with a name and a password, over HTTPS or loopback; anyone else is
+		// not a guest (checked in the handler). See conversion.go.
+		rt("POST /v1/guest/convert", accessAuthenticated, hf(s.handleConvertGuest)),
 		rt("DELETE /v1/credentials/mine/{id}", accessAuthenticated, hf(s.handleRevokeOwnCredential)),
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
@@ -166,10 +170,13 @@ func (s *Server) routeTable() []route {
 		// Guest entry (issue #710): the front door, Join as guest from the
 		// bare address and through an invite. Exempt, limited and bounded as
 		// redeem is; the store checks the policy again in the transaction
-		// that starts the visit. See join.go. No route makes an account yet:
-		// POST /v1/join/account and POST /v1/guest/convert are #711's.
+		// that starts the visit. See join.go. Create an account from the
+		// bare address (issue #711) is exempt too, takes a password with the
+		// name, over HTTPS or loopback only, and is limited before any
+		// hashing.
 		rt("GET /v1/join", accessExempt, hf(s.handleJoinInfo)),
 		rt("POST /v1/join/guest", accessExempt, hf(s.handleJoinGuest)),
+		rt("POST /v1/join/account", accessExempt, hf(s.handleJoinAccount)),
 		rt("POST /v1/invites/redeem-guest", accessExempt, hf(s.handleRedeemInviteGuest)),
 		// The joining settings, the guest list and ending visits: operators.
 		// The bulk end has one segment fewer than the per-id one, so the two
@@ -179,6 +186,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/guests", accessOperator, hf(s.handleListGuests)),
 		rt("POST /v1/guests/{id}/end", accessOperator, hf(s.handleEndGuest)),
 		rt("POST /v1/guests/end", accessOperator, hf(s.handleEndGuests)),
+		// A conversion permit (issue #711): an operator lets one live guest
+		// create an account although its origin's policy is closed. See
+		// conversion.go.
+		rt("POST /v1/guests/{id}/conversion-permit", accessOperator, hf(s.handleCreateConversionPermit)),
 		rt("POST /v2/invites/redeem", accessExempt, hf(s.handleRedeemInviteV2)),
 		// Password sign-in (issue #707): exempt, as the invite routes are,
 		// and limited before any hashing; over HTTPS or loopback only. A
@@ -297,6 +308,8 @@ var recentAuthRoutes = map[string]reauthRule{
 	"PUT /v1/join/settings":    reauthAlways,
 	"POST /v1/guests/{id}/end": reauthAlways,
 	"POST /v1/guests/end":      reauthAlways,
+	// A conversion permit (issue #711) creates a permit.
+	"POST /v1/guests/{id}/conversion-permit": reauthAlways,
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,

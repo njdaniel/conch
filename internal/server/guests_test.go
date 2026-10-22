@@ -36,39 +36,40 @@ func newGuest(t *testing.T, srv *Server, label string, idle, absolute time.Durat
 	return g
 }
 
-// No route makes a passwordless member (design §7.3 "Ordering"): the account
-// routes do not exist yet, and asking for one is answered as for any route
-// that does not exist. The guest entry routes exist (#710), and a server
-// nobody has configured admits no guest through them.
-func TestNoGuestEntryRouteIsReachable(t *testing.T) {
+// No route makes a passwordless member (design §7.3 "Ordering"), and a
+// server nobody has configured makes nobody through the entry routes. The
+// two account routes exist now (#711): each takes a password with the name,
+// refuses a body without one before anything else is looked at, and, on an
+// unconfigured server, refuses even a good one: the bare address offers no
+// account, and nobody is a guest to convert. The guest entry routes (#710)
+// admit no guest.
+func TestUnconfiguredServerAdmitsNobody(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
-	// #710 registers the guest entry routes (GET /v1/join, POST
-	// /v1/join/guest, POST /v1/invites/redeem-guest) and the operator's
-	// (GET and PUT /v1/join/settings, GET /v1/guests, POST
-	// /v1/guests/{id}/end, POST /v1/guests/end). The routes that make an
-	// account from the bare address or a visit stay closed until #711.
-	closed := []struct{ method, path string }{
-		{"POST", "/v1/join/account"},
-		// POST /v2/invites/redeem is registered with passwords (#707, design
-		// §7.3 "Ordering"): it makes a member with a password, never a guest
-		// or a passwordless member, so it is not in this list.
-		{"POST", "/v1/guest/convert"},
+	good := inviteJSON(t, schema.JoinAccountRequestV1{Name: "newcomer", Password: testJoinPassword})
+	for _, c := range []struct {
+		method, path, token string
+		status              int
+		code                string
+	}{
+		// A name with no password is a 400 on both routes: neither can make
+		// an account without one.
+		{"POST", "/v1/join/account", "", http.StatusBadRequest, "invalid_request"},
+		{"POST", "/v1/guest/convert", f.rootTok, http.StatusForbidden, schema.ErrorCodeNotAGuest},
+	} {
+		assertErrorBody(t, secureDo(t, f, c.method, c.path, c.token, `{"name":"newcomer"}`), c.status, c.code)
 	}
-	patterns := map[string]bool{}
-	for _, rt := range f.srv.routes {
-		patterns[rt.pattern] = true
+	assertErrorBody(t, secureDo(t, f, "POST", "/v1/join/account", "", good), http.StatusForbidden, schema.ErrorCodeJoiningClosed)
+	for _, tok := range []string{f.rootTok, f.aliceTok, f.botTok} {
+		assertErrorBody(t, secureDo(t, f, "POST", "/v1/guest/convert", tok, good), http.StatusForbidden, schema.ErrorCodeNotAGuest)
 	}
-	for _, c := range closed {
-		if patterns[c.method+" "+c.path] {
-			t.Errorf("%s %s is registered; account creation stays closed until #707 and #711", c.method, c.path)
-		}
-		assertErrorBody(t, f.do(t, c.method, c.path, "", `{}`), http.StatusUnauthorized, "unauthenticated")
-		if rec := f.do(t, c.method, c.path, f.rootTok, `{}`); rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s %s as the operator = %d, want no such route", c.method, c.path, rec.Code)
-		}
+	assertErrorBody(t, secureDo(t, f, "POST", "/v1/guest/convert", "", good), http.StatusUnauthorized, "unauthenticated")
+	if _, found, err := f.srv.store.LoginCandidate(context.Background(), "newcomer"); err != nil || found {
+		t.Errorf("an account was made: found %v, %v", found, err)
 	}
+	// Password sign-in exists whenever authentication is on (#707); the
+	// address offers nothing else.
 	info := decodeBody[schema.JoinInfoV1](t, f.do(t, "GET", "/v1/join", "", ""))
-	if info.Join != (schema.JoinOptionsV1{}) || info.PasswordLogin {
+	if info.Join != (schema.JoinOptionsV1{}) || !info.PasswordLogin {
 		t.Errorf("the front door of an unconfigured server offers %+v", info)
 	}
 	assertErrorBody(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
@@ -95,7 +96,7 @@ func TestGuestVisitOverREST(t *testing.T) {
 		t.Errorf("whoami's visit does not validate: %v", err)
 	}
 	if who.Guest.CanConvert {
-		t.Error("can_convert is true, but no route converts a guest yet")
+		t.Error("can_convert is true, but the bare address of an unconfigured server offers no account")
 	}
 
 	rec = f.do(t, "GET", "/v1/channels/ops/members", f.tokens["ann"], "")
