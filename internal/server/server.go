@@ -153,6 +153,9 @@ type Server struct {
 	// sessionSweepInterval is how often the session sweeper runs. Unexported
 	// so tests can shorten it before serving.
 	sessionSweepInterval time.Duration
+	// guestSweepInterval is the guest deadline sweeper's fallback poll
+	// (guests.go); zero means defaultGuestSweepInterval.
+	guestSweepInterval time.Duration
 	// keepAliveTicks starts the ticker that refreshes the session an events
 	// socket was opened for, and returns its channel and its stop function.
 	// Nil means every eventsKeepAliveInterval; tests replace it to drive the
@@ -239,6 +242,10 @@ func New(cfg Config, st *store.Store) *Server {
 			s.events.notifyRun(r.ChannelID, r.ID)
 		}
 	})
+	// A guest visit can end through many calls (End visit, a sweep, a
+	// revoke, a disable); the store reports each after its commit (issue
+	// #705), and what follows is the same whichever it was.
+	st.OnGuestsEnded(s.guestsEnded)
 	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
@@ -414,6 +421,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Sessions: the sweeper marks silent sessions stale and then offline. It
 	// stops with ctx and Serve waits for it, so no goroutine outlives Serve.
 	defer s.startSessionSweeper(ctx)()
+
+	// Guest visits: the sweeper ends each at its deadline (access is refused
+	// at the deadline already) and stops with ctx, waited for like the rest.
+	defer s.startGuestSweeper(ctx)()
 
 	// Metrics, when configured, on their own listener; stopped with the rest.
 	defer s.serveMetrics(ctx)()

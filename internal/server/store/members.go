@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // Channel membership (issue #90, ADR-003). A channel's member list is the
@@ -41,6 +43,12 @@ type ChannelMember struct {
 	Name        string
 	Kind        PrincipalKind
 	CanDecide   bool
+	// HistoryAfter is the membership's history bound (issue #705): the
+	// channel's last message id when a guest was admitted, 0 for none.
+	HistoryAfter int64
+	// Guest is how the member is rendered while it is a guest; nil for
+	// everyone else.
+	Guest *schema.GuestAttributionV1
 }
 
 func channelSubject(id int64) string { return fmt.Sprintf("channel:%d", id) }
@@ -142,6 +150,17 @@ func (s *Store) PutChannelMember(ctx context.Context, actor string, channelID, p
 		if err := checkMemberTargetTx(ctx, tx, channelID, principalID); err != nil {
 			return err
 		}
+		// A guest never decides approvals and every membership it gets has
+		// a fresh history bound (issue #705, review F1): the store holds to
+		// it whatever the caller asked, and refuses to grant the right.
+		guest, err := guestMemberTx(ctx, tx, principalID, canDecide)
+		if err != nil {
+			return err
+		}
+		if guest {
+			added, err = addGuestMemberTx(ctx, tx, actor, channelID, principalID, addedBy, now)
+			return err
+		}
 		decide := canDecide == nil || *canDecide
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, ?)
@@ -196,8 +215,13 @@ func (s *Store) SetChannelMemberCanDecide(ctx context.Context, actor string, cha
 }
 
 // setCanDecideTx sets an existing member's decide right and audits a change,
-// inside the caller's transaction.
+// inside the caller's transaction. A guest is never given it.
 func setCanDecideTx(ctx context.Context, tx execer, actor string, channelID, principalID int64, canDecide bool, now time.Time) (bool, error) {
+	if canDecide {
+		if _, err := guestMemberTx(ctx, tx, principalID, &canDecide); err != nil {
+			return false, err
+		}
+	}
 	var current int
 	switch err := tx.QueryRowContext(ctx,
 		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&current); {
@@ -319,14 +343,54 @@ func (s *Store) IsChannelMember(ctx context.Context, channelID, principalID int6
 	return true, nil
 }
 
+// guestMemberTx reports whether principalID is a guest, for a membership
+// write asking for canDecide (nil: the default). A guest asked to be given
+// the right is ErrGuestNotAllowed, and one whose visit has ended is
+// ErrGuestEnded: it gets no membership at all.
+func guestMemberTx(ctx context.Context, tx execer, principalID int64, canDecide *bool) (bool, error) {
+	var state string
+	switch err := tx.QueryRowContext(ctx, "SELECT state FROM guest_visits WHERE principal_id = ?", principalID).Scan(&state); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: read guest state of %d: %w", principalID, err)
+	}
+	switch schema.GuestState(state) {
+	case schema.GuestStateActive:
+		if canDecide != nil && *canDecide {
+			return true, ErrGuestNotAllowed
+		}
+		return true, nil
+	case schema.GuestStateEnded:
+		return true, ErrGuestEnded
+	}
+	return false, nil
+}
+
+// addGuestMemberTx admits guest principalID to channelID unless it is already
+// a member, reporting whether it was added.
+func addGuestMemberTx(ctx context.Context, tx execer, actor string, channelID, principalID, addedBy int64, now time.Time) (bool, error) {
+	var one int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
+	case err == nil:
+		return false, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("store: check member %d of channel %d: %w", principalID, channelID, err)
+	}
+	return true, admitGuestTx(ctx, tx, actor, channelID, principalID, addedBy, now)
+}
+
 // ListChannelMembers returns channelID's members, with each principal's name
 // and kind, ordered by principal id. It returns an empty, non-nil slice when
 // there are none. The join cannot drop a member: principal_id is a foreign
 // key, and principals are never deleted.
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, m.can_decide FROM channel_members m
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, m.can_decide, m.history_after, v.handle, v.label
+		 FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
+		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
 		 WHERE m.channel_id = ? ORDER BY m.principal_id ASC`, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list members of channel %d: %w", channelID, err)
@@ -335,13 +399,19 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 	members := []ChannelMember{}
 	for rows.Next() {
 		var m ChannelMember
-		var addedBy sql.NullInt64
+		var addedBy, historyAfter sql.NullInt64
+		var handle, label sql.NullString
 		var createdAt int64
 		var canDecide int
-		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt, &m.Name, &m.Kind, &canDecide); err != nil {
+		if err := rows.Scan(&m.PrincipalID, &addedBy, &createdAt, &m.Name, &m.Kind, &canDecide, &historyAfter, &handle, &label); err != nil {
 			return nil, fmt.Errorf("store: list members of channel %d: %w", channelID, err)
 		}
 		m.AddedBy = addedBy.Int64
+		m.HistoryAfter = historyAfter.Int64
+		if handle.Valid {
+			a := guestAttribution(handle.String, label.String)
+			m.Guest = &a
+		}
 		m.CreatedAt = time.UnixMilli(createdAt)
 		m.CanDecide = canDecide == 1
 		members = append(members, m)

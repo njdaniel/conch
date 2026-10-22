@@ -656,6 +656,82 @@ END`,
 		`CREATE INDEX sign_in_links_by_principal ON sign_in_links (principal_id)`,
 		`CREATE INDEX sign_in_links_by_creator ON sign_in_links (created_by)`,
 	},
+	// 31 (guestMigration): Temporary guests (issue #705, ADR-009,
+	// docs/design/guests-and-accounts.md §7.3). A guest is a human member
+	// principal with a guest_visits row: it is a guest exactly while that row
+	// is active. The row is never deleted and its handle is UNIQUE, so no
+	// handle is ever given out twice; the triggers keep a visit from leaving
+	// a terminal state or being removed. message_guest_attribution is written
+	// by the insert trigger in the posting transaction, for an author with an
+	// active visit, and never changes: a guest post keeps its handle and
+	// label through End visit, hide and conversion. history_after is the
+	// membership's history bound (NULL for every existing membership, which
+	// is no bound). idle_ms and last_used_at give a credential an idle bound
+	// (NULL for every existing credential, which has none). open_channels,
+	// the joining settings (absent rows are schema.DefaultJoinSettings) and
+	// invites.join_as (every existing invite stays account-only) are the
+	// policy columns the entry routes use. The Go step logs the principals
+	// whose names are now in the reserved guest namespace; none is renamed.
+	{
+		`CREATE TABLE guest_visits (
+	principal_id INTEGER PRIMARY KEY REFERENCES principals (id),
+	handle       TEXT    NOT NULL UNIQUE,
+	label        TEXT,
+	origin       TEXT    NOT NULL CHECK (origin IN ('address', 'invite')),
+	invite_id    INTEGER REFERENCES invites (id),
+	state        TEXT    NOT NULL CHECK (state IN ('active', 'ended', 'converted')),
+	started_at   INTEGER NOT NULL,
+	expires_at   INTEGER NOT NULL,
+	idle_ms      INTEGER NOT NULL CHECK (idle_ms > 0),
+	ended_at     INTEGER,
+	end_reason   TEXT    CHECK (end_reason IS NULL OR end_reason IN ('end_visit', 'idle', 'expired', 'operator', 'restore')),
+	converted_at INTEGER,
+	CHECK ((state = 'ended') = (ended_at IS NOT NULL AND end_reason IS NOT NULL)),
+	CHECK ((state = 'converted') = (converted_at IS NOT NULL)),
+	CHECK ((origin = 'invite') = (invite_id IS NOT NULL))
+)`,
+		`CREATE INDEX guest_visits_active ON guest_visits (expires_at) WHERE state = 'active'`,
+		`CREATE INDEX guest_visits_by_invite ON guest_visits (invite_id) WHERE invite_id IS NOT NULL`,
+		`CREATE TRIGGER guest_visits_terminal BEFORE UPDATE ON guest_visits
+WHEN OLD.state <> 'active' OR NEW.handle IS NOT OLD.handle OR NEW.label IS NOT OLD.label
+  OR NEW.origin IS NOT OLD.origin OR NEW.invite_id IS NOT OLD.invite_id OR NEW.principal_id IS NOT OLD.principal_id
+  OR NEW.started_at IS NOT OLD.started_at OR NEW.expires_at IS NOT OLD.expires_at OR NEW.idle_ms IS NOT OLD.idle_ms
+BEGIN
+	SELECT RAISE(ABORT, 'a guest visit only ever moves from active to ended or converted');
+END`,
+		`CREATE TRIGGER guest_visits_no_delete BEFORE DELETE ON guest_visits
+BEGIN
+	SELECT RAISE(ABORT, 'guest visits are never deleted');
+END`,
+		`ALTER TABLE channel_members ADD COLUMN history_after INTEGER CHECK (history_after IS NULL OR history_after >= 0)`,
+		`CREATE TABLE message_guest_attribution (
+	message_id INTEGER PRIMARY KEY REFERENCES messages (id),
+	handle     TEXT    NOT NULL,
+	label      TEXT
+)`,
+		`CREATE TRIGGER messages_guest_attribution AFTER INSERT ON messages
+BEGIN
+	INSERT INTO message_guest_attribution (message_id, handle, label)
+	SELECT NEW.id, v.handle, v.label FROM guest_visits v
+	WHERE v.principal_id = NEW.author_id AND v.state = 'active';
+END`,
+		`CREATE TRIGGER message_guest_attribution_no_update BEFORE UPDATE ON message_guest_attribution
+BEGIN
+	SELECT RAISE(ABORT, 'message guest attribution is immutable');
+END`,
+		`CREATE TRIGGER message_guest_attribution_no_delete BEFORE DELETE ON message_guest_attribution
+BEGIN
+	SELECT RAISE(ABORT, 'message guest attribution is immutable');
+END`,
+		`ALTER TABLE credentials ADD COLUMN idle_ms INTEGER CHECK (idle_ms IS NULL OR idle_ms > 0)`,
+		`ALTER TABLE credentials ADD COLUMN last_used_at INTEGER`,
+		`CREATE TABLE open_channels (
+	channel_id INTEGER PRIMARY KEY REFERENCES channels (id),
+	added_by   INTEGER REFERENCES principals (id),
+	added_at   INTEGER NOT NULL
+)`,
+		`ALTER TABLE invites ADD COLUMN join_as TEXT NOT NULL DEFAULT 'account' CHECK (join_as IN ('account', 'guest', 'both'))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -665,6 +741,7 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 	10:                hashPlaintextHooks,
 	nameKeyMigration:  fillNameKeys,
 	hiddenAtMigration: reportReservedNames,
+	guestMigration:    reportReservedGuestNames,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
@@ -677,6 +754,9 @@ type Store struct {
 	// runsEnded, when set, is told which runs a committed transaction failed
 	// because their session ended (issue #405).
 	runsEnded func([]EndedRun)
+	// guestsEnded, when set, is told which guest visits a committed
+	// transaction ended (issue #705).
+	guestsEnded func([]EndedGuest)
 	// voiceRoomPrefix starts the name of each new voice room; empty means
 	// the default. See SetVoiceRoomPrefix.
 	voiceRoomPrefix string

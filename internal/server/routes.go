@@ -123,6 +123,9 @@ func (s *Server) routeTable() []route {
 		// credential, and ending one has a segment more than the operator's
 		// revoke above, so neither route meets another in the mux.
 		rt("GET /v1/credentials/mine", accessAuthenticated, hf(s.handleListOwnCredentials)),
+		// End visit (issue #705): a guest ends its own visit; anyone else is
+		// not a guest (checked in the handler). The entry routes are #710's.
+		rt("POST /v1/guest/end", accessAuthenticated, hf(s.handleEndVisit)),
 		rt("DELETE /v1/credentials/mine/{id}", accessAuthenticated, hf(s.handleRevokeOwnCredential)),
 		// Disabling a principal and mass revocation (issue #101).
 		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),

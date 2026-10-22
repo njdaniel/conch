@@ -187,9 +187,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
+		// A guest's REST request moves its idle expiry; opening a socket
+		// does not, and nothing on an open socket does (issue #705, review
+		// F5), so a stolen token kept alive by a ping loop still runs out.
+		if principal.IsGuest() && !isSocketRoute(pattern) {
+			s.store.NoteGuestUse(r.Context(), credentialID)
+		}
 		next.ServeHTTP(w, r.WithContext(withCredentialID(withCaller(r.Context(), principal), credentialID)))
 	})
 }
+
+// isSocketRoute reports whether pattern is a WebSocket route: every one of
+// them ends in /ws (routes.go).
+func isSocketRoute(pattern string) bool { return strings.HasSuffix(pattern, "/ws") }
 
 // guard returns the handler to register for rt. Under AuthOff it is the bare
 // handler, so behaviour is unchanged. Under AuthRequired operator routes are
@@ -290,6 +300,13 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		ServerVersion: s.cfg.Version,
 		MayInvite:     mayInvite(caller),
 		VoiceAllowed:  &voice,
+	}
+	// What the caller is, and a guest's visit (issue #705). Only with
+	// authentication on, where there is a caller to classify.
+	if err := s.guestWhoAmI(r.Context(), caller, &resp); err != nil {
+		slog.ErrorContext(r.Context(), "whoami: read guest visit failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
 	}
 	// Only a person with an allowance is told what is left of it (issue
 	// #468): operators have none, and nobody else may invite.

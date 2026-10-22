@@ -174,7 +174,10 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		// with DisablePrincipal's revoke, so a credential can never be
 		// issued after (or concurrently with) a disable and survive it.
 		var disabledAt sql.NullInt64
-		switch err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); {
+		var guest sql.NullString
+		switch err := tx.QueryRowContext(ctx,
+			"SELECT disabled_at, (SELECT state FROM guest_visits WHERE principal_id = principals.id) FROM principals WHERE id = ?",
+			principalID).Scan(&disabledAt, &guest); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrPrincipalNotFound
 		case err != nil:
@@ -182,6 +185,11 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		}
 		if disabledAt.Valid {
 			return ErrPrincipalDisabled
+		}
+		// A guest has exactly one credential, made with its visit (issue
+		// #705); an ended one never gets another.
+		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
+			return ErrGuestNotAllowed
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew)
 		if err != nil {
@@ -209,7 +217,7 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 		return nil, fmt.Errorf("store: list credentials: find principal: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL, `+idleExpirySQL+`
 		 FROM credentials WHERE principal_id = ? ORDER BY created_at DESC, id DESC`, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list credentials: %w", err)
@@ -224,10 +232,11 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 func (s *Store) ListLiveCredentials(ctx context.Context, principalID int64) ([]schema.CredentialV1, error) {
 	now := credentialNow()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL, `+idleExpirySQL+`
 		 FROM credentials
 		 WHERE principal_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
-		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli())
+		   AND (idle_ms IS NULL OR COALESCE(last_used_at, created_at) + idle_ms > ?)
+		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("store: list live credentials: %w", err)
 	}
@@ -241,16 +250,17 @@ func scanCredentials(rows *sql.Rows) ([]schema.CredentialV1, error) {
 	out := []schema.CredentialV1{}
 	for rows.Next() {
 		var (
-			c                    schema.CredentialV1
-			createdAt            int64
-			expiresAt, revokedAt sql.NullInt64
+			c                          schema.CredentialV1
+			createdAt                  int64
+			expiresAt, revokedAt, idle sql.NullInt64
 		)
-		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt, &c.Renews); err != nil {
+		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt, &c.Renews, &idle); err != nil {
 			return nil, fmt.Errorf("store: list credentials: scan: %w", err)
 		}
 		c.CreatedAt = schema.NewTimestamp(time.UnixMilli(createdAt))
 		c.ExpiresAt = msToTimestampPtr(expiresAt)
 		c.RevokedAt = msToTimestampPtr(revokedAt)
+		c.IdleExpiresAt = msToTimestampPtr(idle)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -291,11 +301,19 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			return fmt.Errorf("store: rotate credential: read: %w", err)
 		}
 		var disabledAt sql.NullInt64
-		if err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); err != nil {
+		var guest sql.NullString
+		if err := tx.QueryRowContext(ctx,
+			"SELECT disabled_at, (SELECT state FROM guest_visits WHERE principal_id = principals.id) FROM principals WHERE id = ?",
+			principalID).Scan(&disabledAt, &guest); err != nil {
 			return fmt.Errorf("store: rotate credential: find principal: %w", err)
 		}
 		if disabledAt.Valid {
 			return ErrPrincipalDisabled
+		}
+		// Rotation would hand a guest a second credential without its idle
+		// bound (issue #705).
+		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
+			return ErrGuestNotAllowed
 		}
 		if revokedAt.Valid {
 			return ErrCredentialRevoked
@@ -379,8 +397,9 @@ func (s *Store) RevokeCredentialOf(ctx context.Context, actor string, principalI
 // credentials: another's is ErrCredentialNotFound.
 func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason string) error {
 	var runs []EndedRun
+	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		var (
 			principalID int64
 			label       string
@@ -436,11 +455,21 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		// Its sessions end with it, in this transaction (issue #265).
-		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs)
+		if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs); err != nil {
+			return err
+		}
+		// A guest's one credential is its visit (issue #705, design B4):
+		// signing out is End visit, and an operator's revoke ends it too.
+		end := schema.GuestEndOperator
+		if reason == "self" {
+			end = schema.GuestEndVisit
+		}
+		return endIfGuestTx(ctx, tx, actor, principalID, end, now, &runs, &guests)
 	})
 	if err != nil {
 		return err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return nil
 }

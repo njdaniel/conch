@@ -175,8 +175,24 @@ func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, rea
 	return id, nil
 }
 
+// historyWatermarkTx is the history bound a guest admitted to channelID now
+// gets (issue #705): the id of the channel's last message, or 0 when it has
+// none. Message ids only grow, so every later message of the channel has a
+// greater one. It reads no message, only the largest id, and lives here
+// because this file is the one that reads the messages table.
+func historyWatermarkTx(ctx context.Context, tx execer, channelID int64) (int64, error) {
+	var id int64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel_id = ?", channelID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: history watermark of channel %d: %w", channelID, err)
+	}
+	return id, nil
+}
+
 // messageColumns is the column list scanMessages reads.
-const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id`
+const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
+	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
+	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id)`
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -272,12 +288,17 @@ func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, er
 	var whispers []int // indexes into msgs of principals-audience messages
 	for rows.Next() {
 		var m Message
-		var payloadSchema, kind sql.NullString
+		var payloadSchema, kind, guestHandle, guestLabel sql.NullString
 		var payloadJSON []byte
 		var netID, threadRoot sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
+			&guestHandle, &guestLabel); err != nil {
 			return nil, err
+		}
+		if guestHandle.Valid {
+			a := guestAttribution(guestHandle.String, guestLabel.String)
+			m.GuestAuthor = &a
 		}
 		m.ThreadRootID = threadRoot.Int64 // zero when NULL
 		m.CreatedAt = time.UnixMilli(createdAt)
@@ -689,7 +710,8 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 			}
 			msg = Message{ID: id, ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload,
 				CreatedAt: now, ThreadRootID: post.RootID}
-			return nil
+			msg.GuestAuthor, err = guestAuthorTx(ctx, tx, id)
+			return err
 		}
 		// The candidates are the people who can see the root now: its
 		// recipients, less any who have since left the channel. Not the net's
@@ -904,8 +926,12 @@ func insertScopedTx(
 	if err := attachFilesTx(ctx, tx, p.ChannelID, p.AuthorID, id, p.Payload, now); err != nil {
 		return Message{}, err
 	}
+	guest, err := guestAuthorTx(ctx, tx, id)
+	if err != nil {
+		return Message{}, err
+	}
 	return Message{ID: id, ChannelID: p.ChannelID, AuthorID: p.AuthorID, Body: p.Body, Payload: p.Payload,
-		CreatedAt: now, Audience: &audience, ThreadRootID: rootID}, nil
+		CreatedAt: now, Audience: &audience, ThreadRootID: rootID, GuestAuthor: guest}, nil
 }
 
 // scopedDetail is the message_scoped audit detail. It names who was addressed,

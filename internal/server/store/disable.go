@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // ErrLastOperator is returned when an action would leave the instance with no
@@ -123,16 +125,22 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // disables of the last two operators serialize and exactly one succeeds.
 func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
 	var runs []EndedRun
+	var guests []EndedGuest
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		now := credentialNow().Truncate(time.Millisecond)
-		changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs)
-		return err
+		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs); err != nil {
+			return err
+		}
+		// Disabling a guest ends its visit for good (issue #705): enabling
+		// it later revives nothing.
+		return endIfGuestTx(ctx, tx, actor, principalID, schema.GuestEndOperator, now, &runs, &guests)
 	})
 	if err != nil {
 		return false, err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return changed, nil
 }
 
@@ -247,8 +255,9 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
 	var n int
 	var runs []EndedRun
+	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		role, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
 			return err
@@ -266,11 +275,21 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now, &runs); err != nil {
 			return err
 		}
-		return appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now)
+		if err := appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now); err != nil {
+			return err
+		}
+		// For a guest, signing out everywhere is End visit (design B4); an
+		// operator's revoke-all ends it too.
+		end := schema.GuestEndOperator
+		if actor == principalActor(principalID) {
+			end = schema.GuestEndVisit
+		}
+		return endIfGuestTx(ctx, tx, actor, principalID, end, now, &runs, &guests)
 	})
 	if err != nil {
 		return 0, err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return n, nil
 }

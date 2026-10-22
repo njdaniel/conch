@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // credentialRenewStep is how far a renewable credential's expiry must have
@@ -18,9 +20,10 @@ const credentialRenewStep = 24 * time.Hour
 // ResolveCredential returns the principal bound to a live bearer token.
 //
 // Every token problem -- wrong shape, unknown, expired (expires_at <= now),
-// revoked, or belonging to a disabled principal -- yields the same
-// ErrCredentialInvalid. A malformed token is rejected before any database
-// work. A genuine database failure is returned as a different, wrapped error
+// idle past its idle bound, revoked, belonging to a disabled principal, or to
+// a guest whose visit has ended or passed its deadline (issue #705) -- yields
+// the same ErrCredentialInvalid. A malformed token is rejected before any
+// database work. A genuine database failure is returned as a different, wrapped error
 // so callers can tell "bad token" from "store is broken"; callers must fail
 // closed on both. The token is never logged or included in any error.
 func (s *Store) ResolveCredential(ctx context.Context, token string) (Principal, error) {
@@ -49,14 +52,16 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 		p                              Principal
 		kind, role                     string
 		createdAt                      int64
+		idle                           credentialIdle
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at,
-		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed
+		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
 	).Scan(&credID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
-		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
+		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
+		&idle.guestState, &idle.guestExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
@@ -73,6 +78,9 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	if expiresAt.Valid && expiresAt.Int64 <= now.UnixMilli() {
 		return Principal{}, 0, ErrCredentialInvalid
 	}
+	if !idle.live(now) {
+		return Principal{}, 0, ErrCredentialInvalid
+	}
 	// Every refusal has returned above: only a credential that resolved is
 	// ever renewed.
 	if renewMs.Valid && expiresAt.Valid {
@@ -83,6 +91,7 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	p.CreatedAt = time.UnixMilli(createdAt)
 	p.InvitedBy = invitedBy.Int64
 	p.InviteID = inviteID.Int64
+	p.GuestState = schema.GuestState(idle.guestState.String)
 	return p, credID, nil
 }
 
@@ -113,17 +122,21 @@ func (s *Store) renewCredential(ctx context.Context, credID, expiresAt, renewMs 
 }
 
 // CredentialLive reports whether credential id is still usable: it exists, is
-// not revoked, has not expired, and its principal is not disabled. It is one
-// primary-key read joined to the principal's primary key and is how an open
-// connection re-checks the credential it authenticated with. A database
+// not revoked, has not expired, has not been idle past its idle bound, its
+// principal is not disabled, and, for a guest, the visit is active and
+// before its deadline (credentialIdle.live). It is one primary-key read
+// joined to the principal's primary key and is how an open connection
+// re-checks the credential it authenticated with. A database
 // failure is returned as an error; callers must treat it as "not live".
 func (s *Store) CredentialLive(ctx context.Context, id int64) (bool, error) {
 	var expiresAt, revokedAt, disabledAt sql.NullInt64
+	var idle credentialIdle
 	err := s.db.QueryRowContext(ctx,
-		`SELECT c.expires_at, c.revoked_at, p.disabled_at
+		`SELECT c.expires_at, c.revoked_at, p.disabled_at, `+idleBoundColumns+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.id = ?`, id,
-	).Scan(&expiresAt, &revokedAt, &disabledAt)
+	).Scan(&expiresAt, &revokedAt, &disabledAt, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
+		&idle.guestState, &idle.guestExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -133,8 +146,9 @@ func (s *Store) CredentialLive(ctx context.Context, id int64) (bool, error) {
 	if revokedAt.Valid || disabledAt.Valid {
 		return false, nil
 	}
-	if expiresAt.Valid && expiresAt.Int64 <= credentialNow().UnixMilli() {
+	now := credentialNow()
+	if expiresAt.Valid && expiresAt.Int64 <= now.UnixMilli() {
 		return false, nil
 	}
-	return true, nil
+	return idle.live(now), nil
 }

@@ -128,15 +128,22 @@ func (s *Server) postMessage(
 	}
 	s.metrics.messagePosted(author.Kind)
 	messageV1 := messageV1FromStore(stored)
+	messageV2 := messageV2FromStore(stored)
 	// Persist-then-broadcast: the message is durable before anyone hears
-	// about it, so a crash here loses delivery, never data.
-	s.hub.BroadcastMessageV1(ctx, messageV1)
+	// about it, so a crash here loses delivery, never data. A guest's post
+	// carries its attribution (issue #705), which v1 cannot: v2 sockets get
+	// the v2 envelope itself, as for a reply.
+	if stored.GuestAuthor != nil {
+		s.hub.BroadcastReply(ctx, messageV1, messageV2)
+	} else {
+		s.hub.BroadcastMessageV1(ctx, messageV1)
+	}
 	messageV0 := messageV0FromStore(stored)
 	s.hub.BroadcastMessage(ctx, messageV0)
 	s.broadcaster.BroadcastMessage(ctx, messageV0)
 	switch version {
 	case apiV2:
-		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2FromV1(messageV1)})
+		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: messageV2})
 	case apiV1:
 		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV1{Message: messageV1})
 	default:
@@ -393,6 +400,10 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		m.Audience = &a
 	}
 	m.ThreadRootID = message.ThreadRootID
+	if message.GuestAuthor != nil {
+		a := *message.GuestAuthor
+		m.GuestAuthor = &a
+	}
 	return m
 }
 

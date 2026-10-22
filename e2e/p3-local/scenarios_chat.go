@@ -49,7 +49,7 @@ func (s *suite) p301Roster() error {
 	}
 	want := map[string]who{
 		"nick-test":     {schema.PrincipalHuman, "tui"},
-		"guest-test":    {schema.PrincipalHuman, "tui"},
+		"jamie-test":    {schema.PrincipalHuman, "tui"},
 		"browser-test":  {schema.PrincipalHuman, "web"},
 		"worker-test":   {schema.PrincipalAgent, "conch-adapter"},
 		"observer-test": {schema.PrincipalAgent, "conch-adapter"},
@@ -105,7 +105,7 @@ func (s *suite) p301Roster() error {
 		return err
 	}
 	if showing(s.tuiB.rows(), chPrivate) {
-		return fmt.Errorf("the TUI of guest-test lists %s, which it is not in", chPrivate)
+		return fmt.Errorf("the TUI of jamie-test lists %s, which it is not in", chPrivate)
 	}
 	return nil
 }
@@ -162,7 +162,7 @@ func (s *suite) p302Send() error {
 		return err
 	}
 
-	authors := []int64{s.pid("nick-test"), s.pid("worker-test"), s.pid("guest-test"), s.pid("worker-test")}
+	authors := []int64{s.pid("nick-test"), s.pid("worker-test"), s.pid("jamie-test"), s.pid("worker-test")}
 	var ids []int64
 	for i, m := range want {
 		if m.AuthorID != authors[i] {
@@ -198,7 +198,7 @@ func (s *suite) p302Send() error {
 
 	for _, t := range []*tui{s.tuiA, s.tuiB} {
 		if err := t.waitFor("all four messages", 20*time.Second, func(rows []string) bool {
-			return countRows(rows, "worker-test [agent]", "p302") >= 2 && showing(rows, "guest-test", "p302guest")
+			return countRows(rows, "worker-test [agent]", "p302") >= 2 && showing(rows, "jamie-test", "p302guest")
 		}); err != nil {
 			return err
 		}
@@ -208,7 +208,7 @@ func (s *suite) p302Send() error {
 			want  int
 		}{
 			{[]string{"nick-test", "p302nick"}, 1},
-			{[]string{"guest-test", "p302guest"}, 1},
+			{[]string{"jamie-test", "p302guest"}, 1},
 			{[]string{"worker-test [agent]", "p302"}, 2},
 		} {
 			if got := countRows(rows, c.parts...); got != c.want {
@@ -264,17 +264,17 @@ func (s *suite) p303Drafts() error {
 	}
 	rows := b.rows()
 	if got := selectedChannel(rows); got != chGeneral {
-		return fmt.Errorf("the TUI of guest-test moved to %q while the other terminal was used", got)
+		return fmt.Errorf("the TUI of jamie-test moved to %q while the other terminal was used", got)
 	}
 	if !showing(rows, chGeneral+" > drafttwo") || showing(rows, "draftone") {
-		return fmt.Errorf("the draft of guest-test changed while the other terminal was used:\n%s", dump(rows))
+		return fmt.Errorf("the draft of jamie-test changed while the other terminal was used:\n%s", dump(rows))
 	}
 	rows = a.rows()
 	if got := selectedChannel(rows); got != chNets {
 		return fmt.Errorf("the TUI of nick-test is in %q, want %s", got, chNets)
 	}
 	if showing(rows, "drafttwo") {
-		return fmt.Errorf("the draft of guest-test appears in the other terminal:\n%s", dump(rows))
+		return fmt.Errorf("the draft of jamie-test appears in the other terminal:\n%s", dump(rows))
 	}
 
 	// Leave both as they were: empty prompts, both in general.
@@ -352,7 +352,7 @@ func (s *suite) p304TwoSessions() error {
 	}
 
 	// A credential acts on its own sessions and no others: the second
-	// terminal's credential, which is nick-test's too, and guest-test's.
+	// terminal's credential, which is nick-test's too, and jamie-test's.
 	for _, c := range []struct{ by, what string }{{partNick2, "the other terminal's"}, {partGuest, "another person's"}} {
 		for _, call := range []struct{ method, path string }{
 			{http.MethodPost, "/v1/sessions/" + strconv.FormatInt(first.ID, 10) + "/heartbeat"},
@@ -746,14 +746,14 @@ func doublings(d time.Duration) int {
 
 // ---------------------------------------------------------------- P3-10
 
-// p310Access removes guest-test from general and revokes browser-test's
+// p310Access removes jamie-test from general and revokes browser-test's
 // credential while both have sockets open. The sockets must close with 1008, the
 // next read, write and reconnect must be refused, and nobody else is affected.
 // A socket outlives a revoked credential by up to the server's recheck
 // interval (30 s), so the browser's part is finished at the end of the suite;
 // the rest of this row does not wait for it.
 func (s *suite) p310Access() error {
-	// guest-test's sockets: messages and events, opened as the clients open
+	// jamie-test's sockets: messages and events, opened as the clients open
 	// them.
 	guestMsgs, err := s.followMessages(partGuest, chGeneral, 0)
 	if err != nil {
@@ -791,7 +791,7 @@ func (s *suite) p310Access() error {
 	}
 
 	// The two changes.
-	if err := s.admin("member", "remove", chGeneral, id(s.pid("guest-test"))); err != nil {
+	if err := s.admin("member", "remove", chGeneral, id(s.pid("jamie-test"))); err != nil {
 		return err
 	}
 	if err := s.admin("credential", "revoke", id(s.r.fx.creds[partBrowser].id)); err != nil {
@@ -799,15 +799,15 @@ func (s *suite) p310Access() error {
 	}
 	revoked := time.Now()
 
-	// guest-test: both sockets close with 1008 at once.
-	if err := s.until("guest-test's sockets to close", 15*time.Second, func() (bool, error) {
+	// jamie-test: both sockets close with 1008 at once.
+	if err := s.until("jamie-test's sockets to close", 15*time.Second, func() (bool, error) {
 		return guestMsgs.closed() != nil && guestEvents.closed() != nil, nil
 	}); err != nil {
 		return err
 	}
 	for what, err := range map[string]error{"message socket": guestMsgs.closed(), "events socket": guestEvents.closed()} {
 		if code := closeCode(err); code != websocket.StatusPolicyViolation {
-			return fmt.Errorf("guest-test's %s closed with %d (%s), want 1008", what, code, describe(err))
+			return fmt.Errorf("jamie-test's %s closed with %d (%s), want 1008", what, code, describe(err))
 		}
 	}
 	// ... and read, write and reconnect are refused, as a stranger's would be.
@@ -821,15 +821,15 @@ func (s *suite) p310Access() error {
 		{"a write", http.MethodPost, path + "/messages", schema.PostMessageRequestV2{Body: "p310gone"}},
 		{"the roster", http.MethodGet, "/v1/sessions?channel=" + chGeneral, nil},
 	} {
-		if err := guest.refused("guest-test's "+c.what+" after its removal", c.method, c.path, c.body, http.StatusNotFound, "channel_not_found"); err != nil {
+		if err := guest.refused("jamie-test's "+c.what+" after its removal", c.method, c.path, c.body, http.StatusNotFound, "channel_not_found"); err != nil {
 			return err
 		}
 	}
 	if _, err := s.followMessages(partGuest, chGeneral, 0); !channelNotFound(err) {
-		return fmt.Errorf("guest-test's reconnect of the message socket: %s, want 404 channel_not_found", describe(err))
+		return fmt.Errorf("jamie-test's reconnect of the message socket: %s, want 404 channel_not_found", describe(err))
 	}
 	if _, err := s.followEvents(partGuest, chGeneral); !channelNotFound(err) {
-		return fmt.Errorf("guest-test's reconnect of the events socket: %s, want 404 channel_not_found", describe(err))
+		return fmt.Errorf("jamie-test's reconnect of the events socket: %s, want 404 channel_not_found", describe(err))
 	}
 
 	// browser-test: nothing it holds works. A new request, a new ticket, and

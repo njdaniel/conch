@@ -316,7 +316,7 @@ func (s *Server) handleRedeemInvite(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrInvitesPaused):
 		writeInvitesPaused(w)
 	case errors.Is(err, store.ErrNameReserved):
-		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessage)
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessageFor(err))
 	case errors.Is(err, store.ErrDuplicate):
 		// The store found the name taken only after the code proved good, and
 		// rolled back: the invite is not used up.
