@@ -327,6 +327,14 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
 	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
 	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+	// Operator sign-in and setup (issue #709) take a code or a token, so
+	// every caller gets the 403 of the password routes before anything is
+	// read: https_required to this fixture's plain HTTP, and
+	// accounts_require_auth under AuthOff.
+	"POST /v1/login/totp":   {classExempt, "/v1/login/totp", `{}`, 403},
+	"POST /v1/setup/redeem": {classExempt, "/v1/setup/redeem", `{}`, 403},
+	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
+	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
 
 	// Renaming a channel (issue #727): an empty body is a 400 before the
 	// channel is looked up, so it changes and audits nothing.
@@ -410,7 +418,8 @@ func TestRoutesRequireAuth(t *testing.T) {
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
 		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
 		"POST /v1/login": true, "POST /v1/password/reset": true,
-		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
+		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true,
+		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
 
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]

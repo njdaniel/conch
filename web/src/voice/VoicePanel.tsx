@@ -34,7 +34,7 @@ import type { Person } from '../useLiveChannel';
 import type { Phase, Processing } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
-import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
+import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
 import { ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
@@ -250,7 +250,11 @@ export function VoicePanel({
     );
   }
 
-  const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
+  // Joined while the server reports voice down (the signalling cut while
+  // media runs on, issue #644): presence has nothing true to list, so the
+  // roster goes and the strip says so.
+  const cutOff = inVoice && presence !== null && !presence.available;
+  const roster = cutOff ? [] : occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
@@ -258,6 +262,7 @@ export function VoicePanel({
   // The microphone is captured while connected with it, whether or not
   // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
   // the capture it had. A microphone that went is not captured.
+  const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
@@ -335,6 +340,11 @@ export function VoicePanel({
                     className="talk"
                     aria-pressed={state.transmitting}
                     disabled={state.listenOnly || state.watchOnly}
+                    // Muted or deafened it stays pressable (a press reaches the
+                    // gate, which is shut and sends nothing), but it looks off
+                    // and says why in the note below (UX-07).
+                    aria-disabled={silenced ? true : undefined}
+                    aria-describedby={silenced ? 'voice-talk-why' : undefined}
                     onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
                     onPointerUp={() => { client.release(); }}
                     onPointerCancel={() => { client.release(); }}
@@ -382,7 +392,7 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
-                <ShareButton voice={voice} othersShare={theirs !== null} />
+                <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />
                 {theirs !== null && !state.watching ? (
                   <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
                     <Glyph name="screen" />
@@ -411,7 +421,7 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   Join voice {dest}
                 </button>
-                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
+                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
                   Watch only {dest}
                 </button>
               </>
@@ -426,6 +436,7 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
             {state.outputNote === null ? null : (
               <p role="status" className="hint">
                 {state.outputNote}
@@ -437,6 +448,11 @@ export function VoicePanel({
                 {missingNote}
               </p>
             ) : null}
+            {state.mode === 'ptt' && silenced && !state.listenOnly && !state.watchOnly ? (
+              <p id="voice-talk-why" className="hint">
+                {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
+              </p>
+            ) : null}
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
               <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
@@ -444,6 +460,7 @@ export function VoicePanel({
               voice={voice}
               holderName={holder === null ? null : nameOf(people, holder.principal, viewer)}
               others={theirs === null ? null : { name: theirName, audio: theirs.sharingAudio }}
+              watching={state.watching}
               onMore={more}
             />
             {stopped === null ? null : (
@@ -455,7 +472,13 @@ export function VoicePanel({
           </>
         ) : (
           <>
-            <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            {/* The hint is a promise Watch only cannot keep while joins are
+                off, so the reason stands in its place. */}
+            {canJoin ? (
+              <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            ) : voice.secure && snapshot.kind === 'loading' ? (
+              <p className="hint">Checking whether voice is available.</p>
+            ) : null}
             {elsewhere ? <p className="hint">You are in voice on another device. Joining here moves your voice to this device.</p> : null}
             {theirs === null ? null : <p className="hint">{theirName} is sharing a screen. Join, or watch only, to see it.</p>}
             {!voice.secure ? (
@@ -502,13 +525,25 @@ function Elsewhere({ where, onOpen }: { readonly where: Busiest; readonly onOpen
   );
 }
 
-// How many chips a phone shows before "+N more" (issue #587). The cap itself
-// is a CSS rule, so the strip measures nothing.
+// How many chips a phone shows before "+N more" (issue #587). Which ones
+// are hidden is a class each chip carries and a CSS rule hides, so the strip
+// measures nothing.
 const phoneChips = 3;
+
+// shownOnPhone is who a capped roster keeps: the viewer's own chip first
+// (issue #641: otherwise a high principal id is among the "+N more" and the
+// viewer cannot see themselves in the room), then the others in the order
+// the roster has them. The list itself stays in that order.
+function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<number> {
+  const mine = roster.filter((o) => o.principal === viewer);
+  const others = roster.filter((o) => o.principal !== viewer);
+  return new Set([...mine, ...others].slice(0, phoneChips).map((o) => o.principal));
+}
 
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
-// on a phone the first three show, and "+N more" shows the rest.
+// on a phone three show, the viewer's own among them, and "+N more" shows
+// the rest.
 function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
@@ -522,6 +557,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   const [all, setAll] = useState(false);
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
+  const kept = shownOnPhone(roster, viewer);
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
@@ -529,7 +565,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
         {roster.map((o) => (
-          <li key={o.principal} className={speaking.has(o.principal) ? 'speaking' : undefined}>
+          <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere)}</span>
             {o.transmitting ? <Tag text="transmitting" /> : null}
@@ -598,6 +634,7 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 }
 
 // What the notes say while the microphone is missing.
+export const cutOffNote = 'Voice server unreachable. You may be cut off.';
 export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
 
 // The values of the microphone list: System default, a device by id, and
@@ -834,7 +871,7 @@ function Options({ voice, open, sharable, about, others }: {
 // Stop sharing while a share is starting, live or resuming. One person shares
 // at a time: while someone else does, Share screen is off, and its
 // description, in the notes, says who shares (issue #591, F14).
-function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; readonly othersShare: boolean }) {
+function ShareButton({ voice, othersShare, watching }: { readonly voice: VoiceControl; readonly othersShare: boolean; readonly watching: boolean }) {
   const { state, client, features } = voice;
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
@@ -844,7 +881,7 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
         type="button"
         onClick={() => { client.startShare(); }}
         disabled={state.phase !== 'connected' || othersShare}
-        aria-describedby={othersShare ? 'voice-share-busy' : undefined}
+        aria-describedby={othersShare ? (watching ? 'voice-share-busy' : 'voice-share-busy voice-share-rule') : undefined}
       >
         <Glyph name="screen" />
         <span className="label">Share screen</span>
@@ -859,6 +896,27 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
   );
 }
 
+// StoppedNote is "You stopped sharing.", which the sharer knows already: it
+// goes after stoppedFor, and at once when anyone's share starts, and then
+// stays gone however long the other share lasts (issue #642, N03).
+function StoppedNote({ text, othersShare }: { readonly text: string; readonly othersShare: boolean }) {
+  const [gone, setGone] = useState(false);
+  if (othersShare && !gone) setGone(true);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setGone(true);
+    }, stoppedFor);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, []);
+  return gone ? null : (
+    <p role="status" className="hint">
+      {text}
+    </p>
+  );
+}
+
 // ShareNotes is what the sharer's side says: what sound a share will carry
 // and what it shows, before the picker opens; what is happening; and why the
 // last share ended. Before a share that is one line (issue #600), and More
@@ -870,11 +928,15 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
 // A claim refused because someone else shares (busy) says the same words, so
 // it is that line, read out when it comes, and it goes with the other share
 // (issue #591, F14): once nobody else shares it is no longer true.
-function ShareNotes({ voice, holderName, others, onMore }: {
+function ShareNotes({ voice, holderName, others, watching, onMore }: {
   readonly voice: VoiceControl;
   readonly holderName: string | null;
   // Who else shares, and whether with sound, or null while nobody else does.
   readonly others: { readonly name: string; readonly audio: boolean } | null;
+  // This page watches that share. The stage's title says who shares, so on a
+  // phone the line is only read out, as Share screen's description (issue
+  // #641).
+  readonly watching: boolean;
   readonly onMore: () => void;
 }) {
   const { state, features } = voice;
@@ -916,12 +978,22 @@ function ShareNotes({ voice, holderName, others, onMore }: {
             <p key="refused" id="voice-share-busy" role="status" className="hint">
               {busyNote(others.name, others.audio)}
             </p>
-          ) : (
-            <p key="busy" id="voice-share-busy" className="hint">
+          ) : watching ? (
+            <p key="busy" id="voice-share-busy" className="hint watched">
               {busyNote(others.name, others.audio)}
             </p>
+          ) : (
+            <>
+              <p key="watch" id="voice-share-busy" className="hint">
+                {watchNote(others.name, others.audio)}
+              </p>
+              {/* The rule is Share screen's description, not a second visible line. */}
+              <span id="voice-share-rule" className="vh">{oneSharerNote}</span>
+            </>
           )}
-          {share.ended === null || share.ended === 'busy' ? null : (
+          {share.ended === null || share.ended === 'busy' ? null : share.ended === 'self' ? (
+            <StoppedNote key="self" text={endedNote(share.ended, holderName)} othersShare={others !== null} />
+          ) : (
             <p role="status" className="hint">
               {endedNote(share.ended, holderName)}
             </p>

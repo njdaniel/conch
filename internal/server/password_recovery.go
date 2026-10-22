@@ -31,10 +31,12 @@ import (
 //     session they did it from holds a proof for ten minutes, which the
 //     routes of the re-authentication class ask for (#712).
 //
-// An operator's password change and re-authentication need a TOTP code as
-// well (design §5.3). This build cannot check one (the second factor is
-// #709's), so both fail closed: they answer auth_failed, the answer for a
-// missing or wrong code, before anything is verified, whatever was sent.
+// An operator's password change and re-authentication need a current TOTP
+// code as well (design §5.3, issue #709): a missing one is a failure before
+// any password work, and the code is checked in the transaction that writes,
+// which records its step, so it cannot be used twice. Every missing, wrong
+// or replayed code answers auth_failed and counts in the name's window, as a
+// wrong password does (review F2).
 //
 // Every route here takes a password, so each checks what passwordRoute
 // checks first: authentication on and HTTPS (or loopback). Hashes and
@@ -139,14 +141,6 @@ func writeHashFailed(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	writePasswordBusy(w)
-}
-
-// writeSecondFactorUnavailable is the fail-closed answer to an operator's
-// change or re-authentication: the TOTP code it needs cannot be checked in
-// this build (#709), so it is the answer for a missing or wrong code.
-func writeSecondFactorUnavailable(w http.ResponseWriter) {
-	writeError(w, http.StatusUnauthorized, schema.ErrorCodeAuthFailed,
-		"an operator proves a password with a TOTP code as well, which this server cannot check yet")
 }
 
 // writeSetupScopeRefused answers a setup-scoped credential on a route that
@@ -270,6 +264,11 @@ func writeEnrollmentProofRequired(w http.ResponseWriter) {
 // revoked one's do, and a bump closes everything of the principal's that is
 // live.
 func (s *Server) passwordUpdated(ctx context.Context, res store.PasswordUpdate) {
+	// A setup credential that completed its setup ends like any revoked one
+	// (issue #709).
+	if res.SetupEnded != 0 {
+		s.credentialRevoked(ctx, res.SetupEnded)
+	}
 	if res.Bumped {
 		s.authChanged(ctx, res.PrincipalID)
 		return
@@ -335,15 +334,16 @@ func (s *Server) presentedPassword(w http.ResponseWriter, r *http.Request, calle
 }
 
 // handleChangePassword serves PUT /v1/password/mine: a member replaces their
-// password with the current one. The order: the body; the caller; an
-// operator fails closed (writeSecondFactorUnavailable); a setup-scoped
-// credential is refused; no password yet is 409 password_not_set; the new
-// password's policy; then the current password (presentedPassword); the
-// new hash; and the store, which re-checks the verification and the
-// credential and, in one transaction, stores the password, moves the
-// generation on, revokes every other credential and rotates this one. A
-// change that loses a race with another change, a reset or a disable
-// answers auth_failed and changes nothing.
+// password with the current one, an operator with a TOTP code as well. The
+// order: the body; the caller; an operator with no code is a failure at
+// once (secondFactorMissing); a setup-scoped credential is refused; no
+// password yet is 409 password_not_set; the new password's policy; then the
+// current password (presentedPassword); the new hash; and the store, which
+// re-checks the verification and the credential, checks an operator's code,
+// and, in one transaction, stores the password, moves the generation on,
+// revokes every other credential and rotates this one. A change that loses a
+// race with another change, a reset or a disable answers auth_failed and
+// changes nothing.
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, credID, ok := s.passwordCaller(w, r)
@@ -359,8 +359,8 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if isOperator(caller) {
-		writeSecondFactorUnavailable(w)
+	if isOperator(caller) && req.Code == "" {
+		s.secondFactorMissing(w, r, caller, passwordFailureViaChange)
 		return
 	}
 	subj, ok := s.passwordSubject(w, r, caller, credID)
@@ -393,14 +393,25 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	if s.beforePasswordWrite != nil {
 		s.beforePasswordWrite()
 	}
-	res, err := s.store.ChangePassword(ctx, auditActor(ctx), store.PasswordChange{
+	change := store.PasswordChange{
 		PrincipalID: caller.ID, CredentialID: credID, AuthGeneration: subj.AuthGeneration,
 		Record: subj.Record, NewRecord: record,
-	}, s.now())
+	}
+	if isOperator(caller) {
+		change.SecondFactor = s.totpCheck(caller.ID, req.Code)
+	}
+	res, err := s.store.ChangePassword(ctx, auditActor(ctx), change, s.now())
 	switch {
+	case errors.Is(err, store.ErrSecondFactorWrong):
+		s.secondFactorFailed(w, r, key, loginReasonWrongCode, passwordFailureViaChange)
 	case errors.Is(err, store.ErrSecondFactorRequired):
 		s.logins.nameCancelled(key, s.now())
-		writeSecondFactorUnavailable(w)
+		writeSecondFactorRequired(w)
+	case totpUnavailable(err):
+		// No code was looked at: nothing counts, and nothing changes.
+		s.logins.nameCancelled(key, s.now())
+		logTOTPUnavailable(ctx, caller.ID, err)
+		writeSecondFactorRequired(w)
 	case errors.Is(err, store.ErrLoginStale), errors.Is(err, store.ErrPrincipalDisabled), errors.Is(err, store.ErrPrincipalHidden),
 		errors.Is(err, store.ErrPrincipalNotFound):
 		// Something changed while the password was verified: another
@@ -506,16 +517,19 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleReauth serves POST /v1/reauth: the caller proves their password
-// again, and the credential the request came with, and no other, holds a
-// recent-password proof for schema.RecentAuthLifetimeSeconds. The order: the
-// body; the caller; an operator fails closed (writeSecondFactorUnavailable);
-// a setup-scoped credential is refused; no password is 409
-// password_not_set; a script credential, which is outside the
-// re-authentication class (design §7.2, the S15 boundary), gets no proof
-// (403 forbidden); then the password (presentedPassword) and the store,
-// which re-checks the verification and the credential. A successful proof
-// spends nothing of the name's windows and resets neither: it issues no
-// credential.
+// again, an operator a current TOTP code too, and the credential the request
+// came with, and no other, holds a recent-auth proof for
+// schema.RecentAuthLifetimeSeconds. The order: the body; the caller; an
+// operator with no code is a failure at once (secondFactorMissing); a
+// setup-scoped credential is refused; no password is 409 password_not_set; a
+// script credential, which is outside the re-authentication class (design
+// §7.2, the S15 boundary), gets no proof (403 forbidden), so it can never
+// make a browser session look recently authenticated; then the password
+// (presentedPassword) and the store, which re-checks the verification and
+// the credential and checks an operator's code in the transaction that
+// records the proof. A wrong code counts in the name's window. A successful
+// proof spends nothing of the name's windows and resets neither: it issues
+// no credential.
 func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, credID, ok := s.passwordCaller(w, r)
@@ -530,8 +544,8 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "the password or code is malformed")
 		return
 	}
-	if isOperator(caller) {
-		writeSecondFactorUnavailable(w)
+	if isOperator(caller) && req.Code == "" {
+		s.secondFactorMissing(w, r, caller, passwordFailureViaReauth)
 		return
 	}
 	subj, ok := s.passwordSubject(w, r, caller, credID)
@@ -556,11 +570,27 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 	if s.beforePasswordWrite != nil {
 		s.beforePasswordWrite()
 	}
-	until, err := s.store.RecordRecentAuth(ctx, store.LoginIssue{
+	issue := store.LoginIssue{
 		PrincipalID: caller.ID, AuthGeneration: subj.AuthGeneration, Record: subj.Record, Rehash: verified.rehash,
-	}, credID, s.now())
+	}
+	var (
+		until time.Time
+		err   error
+	)
+	if isOperator(caller) {
+		until, err = s.store.RecordOperatorRecentAuth(ctx, issue, credID, s.totpCheck(caller.ID, req.Code), s.now())
+	} else {
+		until, err = s.store.RecordRecentAuth(ctx, issue, credID, s.now())
+	}
+	if errors.Is(err, store.ErrSecondFactorWrong) {
+		s.secondFactorFailed(w, r, key, loginReasonWrongCode, passwordFailureViaReauth)
+		return
+	}
 	s.logins.nameCancelled(key, s.now())
 	switch {
+	case totpUnavailable(err):
+		logTOTPUnavailable(ctx, caller.ID, err)
+		writeSecondFactorRequired(w)
 	case errors.Is(err, store.ErrNotASession):
 		writeNotASession(w)
 	case errors.Is(err, store.ErrLoginStale):

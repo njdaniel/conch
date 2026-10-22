@@ -17,20 +17,32 @@ import (
 // authentication off or by editing the database.
 var ErrLastOperator = errors.New("store: this would leave no operator able to sign in")
 
-// liveOperatorCredentialsTx counts the live credentials held by enabled
-// operators, leaving out one principal and one credential (pass 0 to leave
-// nothing out). Live includes current (currentAuthSQL, issue #707): a
-// credential from an old authentication generation signs nobody in. It is what the lock-out guards ask: "if this principal, or
-// this credential, went away, could an operator still sign in?"
-func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID int64, now time.Time) (int, error) {
+// liveOperatorCredentialsTx counts the ways an operator could still sign
+// in: the live credentials held by enabled operators, leaving out one
+// principal's and one credential (pass 0 to leave nothing out), and the
+// enabled, unhidden human operators who hold both factors, a password and a
+// confirmed TOTP, and so can sign in with them (issue #709), leaving out
+// factorsExceptPrincipalID's. Live includes current (currentAuthSQL, issue
+// #707): a credential from an old authentication generation signs nobody
+// in. It is what the lock-out guards ask: "if this principal, or this
+// credential, went away, could an operator still sign in?" A caller that
+// ends a principal (a disable) leaves its factors out; one that ends only
+// credentials (a revoke, a sign-out everywhere) keeps them, since a
+// password and a code still sign that operator in afterwards.
+func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID int64, now time.Time) (int, error) {
 	var n int
 	err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
-		 WHERE p.role = 'operator' AND p.disabled_at IS NULL
-		   AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
-		   AND `+currentAuthSQL+`
-		   AND p.id <> ? AND c.id <> ?`,
-		now.UnixMilli(), exceptPrincipalID, exceptCredentialID,
+		`SELECT (SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
+		         WHERE p.role = 'operator' AND p.disabled_at IS NULL
+		           AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
+		           AND `+currentAuthSQL+`
+		           AND p.id <> ? AND c.id <> ?)
+		      + (SELECT COUNT(*) FROM principals p
+		         WHERE p.role = 'operator' AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+		           AND p.id <> ?
+		           AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
+		           AND EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL))`,
+		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count live operator credentials: %w", err)
@@ -171,7 +183,7 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if role == RoleOperator {
 		// Another enabled operator is not enough: it must also hold a live
 		// credential, or nobody could sign in to undo this.
-		others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+		others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, principalID, now)
 		if err != nil {
 			return false, err
 		}
@@ -272,7 +284,8 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // proofs, audited auth_generation_bumped and sign_in_link_closed. It
 // returns ErrPrincipalNotFound for an unknown id, and ErrLastOperator, writing
 // nothing, when the target is an enabled operator and no other enabled
-// operator holds a live credential.
+// operator holds a live credential, and no operator, the target included,
+// holds a password and a confirmed TOTP.
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
 	var n int
 	var runs []EndedRun
@@ -285,7 +298,9 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 		}
 		now := credentialNow().Truncate(time.Millisecond)
 		if role == RoleOperator && !disabled {
-			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+			// The operator's own password and code survive a sign-out
+			// everywhere, so they count (issue #709).
+			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, 0, now)
 			if err != nil {
 				return err
 			}

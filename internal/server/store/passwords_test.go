@@ -223,8 +223,10 @@ func TestSetPassword(t *testing.T) {
 	}
 }
 
-// A setup-scoped credential resolves nowhere in this build, which fails
-// closed until the middleware's scope check exists.
+// A setup-scoped credential resolves nowhere but ResolveRequestCredential,
+// which only the authentication middleware calls, with its scope check
+// (issue #709): every other resolution, the liveness re-check and rotation
+// refuse it, which fails closed.
 func TestSetupScopeDoesNotResolve(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
