@@ -466,6 +466,24 @@ func matrixRows() []row {
 		{route: "POST /v1/guest/end", what: "ends a guest visit she does not have",
 			want:  answer{http.StatusForbidden, schema.ErrorCodeNotAGuest},
 			probe: func(*world, subject) probe { return post("/v1/guest/end", nil) }},
+		// Guest entry (issue #710). The front door answers anyone with the
+		// server's label and what it offers, nothing of A's (the two entry
+		// routes are exempt, below). The operator's guest routes are
+		// operators'.
+		own("GET /v1/join", "reads the front door", func(*world, subject) probe { return get("/v1/join") }),
+		operator("GET /v1/join/settings", "reads the joining settings", nil, func(*world, subject) probe { return get("/v1/join/settings") }),
+		operator("PUT /v1/join/settings", "opens the bare address to guests in A's channel", aChannel, func(_ *world, s subject) probe {
+			on, mode := true, schema.OpenJoiningGuest
+			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &mode, OpenChannels: &[]string{s.name}})
+		}),
+		operator("GET /v1/guests", "lists the guest visits", nil, func(*world, subject) probe { return get("/v1/guests") }),
+		operator("POST /v1/guests/{id}/end", "ends an A member's visit", aMember, func(_ *world, s subject) probe {
+			return post("/v1/guests/"+id(s.id)+"/end", nil)
+		}),
+		operator("POST /v1/guests/end", "ends every guest visit from A's open link", aOpenLink, func(_ *world, s subject) probe {
+			dry := false
+			return post("/v1/guests/end", schema.EndGuestsRequestV1{DryRun: &dry, InviteID: s.id})
+		}),
 		operator("POST /v1/principals/{id}/disable", "disables an A member", aMember, func(_ *world, s subject) probe {
 			return post("/v1/principals/"+id(s.id)+"/disable", nil)
 		}),
@@ -588,6 +606,8 @@ var exempt = map[string]string{
 	"POST /v1/hooks/{token}":         "authenticated by the hook's own URL token, which only an operator is shown",
 	"POST /v1/invites/preview":       "takes an invite code and answers only with what that code grants; B does not hold A's codes, and every other code answers the one invite_invalid (the revocation step checks a closed one)",
 	"POST /v1/invites/redeem":        "as preview: the code is the credential; a closed or unknown one answers invite_invalid (the revocation step checks it)",
+	"POST /v1/join/guest":            "takes no credential and names nothing of any group's: it starts a visit in the bare address's open channels, which this world never opens (guests_disabled); and it spends the per-address redemption allowance the world's own invite redemptions need, so a row per prober would run that allowance out",
+	"POST /v1/invites/redeem-guest":  "as redeem: the code is the credential, and B holds none of A's. A malformed code is refused with invite_invalid by the handler's format check, before the store is reached; a well-formed one, with guests off as in this world, answers guests_disabled before it is looked up, and with guests on an unknown or closed one answers invite_invalid",
 	"POST /v2/invites/redeem":        "as the v1 redeem, with a password beside the name: the code is the credential, and a closed or unknown one answers invite_invalid before anything is hashed",
 	"POST /v1/sign-in-links/preview": "takes a sign-in link's code and answers only with the name it signs in as; only an operator is shown a code, and A's are never given to B",
 	"POST /v1/sign-in-links/redeem":  "as preview: the code is the credential, made by an operator for one principal; B holds no code of A's",

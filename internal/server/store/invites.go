@@ -164,6 +164,7 @@ type inviteRow struct {
 	voice        bool
 	mayInvite    bool
 	lifetimeMs   int64
+	joinAs       schema.InviteJoinMode
 	creatorName  string
 	creatorRole  Role
 	creatorOff   bool
@@ -173,16 +174,17 @@ type inviteRow struct {
 }
 
 const inviteColumns = `i.id, i.kind, i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses,
-	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms,
+	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as,
 	p.name, p.role, p.disabled_at IS NOT NULL, p.kind = 'human', p.may_invite, p.voice_allowed`
 
 func scanInvite(row interface{ Scan(...any) error }) (inviteRow, error) {
 	var r inviteRow
-	var kind, role string
+	var kind, role, joinAs string
 	err := row.Scan(&r.id, &kind, &r.codeHash, &r.createdBy, &r.createdAt, &r.expiresAt, &r.maxUses, &r.uses,
-		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs,
+		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs,
 		&r.creatorName, &role, &r.creatorOff, &r.creatorHuman, &r.creatorMay, &r.creatorVoice)
 	r.kind = schema.InviteKind(kind)
+	r.joinAs = schema.InviteJoinMode(joinAs)
 	r.creatorRole = Role(role)
 	return r, err
 }
@@ -228,6 +230,7 @@ func (r inviteRow) wire(channels []schema.InviteChannelV1) schema.InviteV1 {
 		Voice:                     r.voice,
 		MayInvite:                 r.mayInvite,
 		CredentialLifetimeSeconds: r.lifetimeMs / 1000,
+		JoinAs:                    r.joinAs,
 	}
 	if r.maxUses.Valid {
 		n := r.maxUses.Int64
@@ -397,6 +400,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 	expires := req.EffectiveExpiry(now).Truncate(time.Millisecond)
 	mayInvite := req.EffectiveMayInvite()
 	lifetimeMs := req.EffectiveCredentialLifetime().Milliseconds()
+	joinAs := req.EffectiveJoinAs()
 	code, err := NewInviteCode()
 	if err != nil {
 		return schema.CreateInviteResponseV1{}, err
@@ -491,10 +495,10 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			maxUses = *req.MaxUses
 		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO invites (kind, code_hash, created_by, created_at, expires_at, max_uses, voice, may_invite, credential_lifetime_ms)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO invites (kind, code_hash, created_by, created_at, expires_at, max_uses, voice, may_invite, credential_lifetime_ms, join_as)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			string(req.Kind), HashInviteCode(code), creatorID, now.UnixMilli(), expires.UnixMilli(), maxUses,
-			boolInt(req.Voice), boolInt(mayInvite), lifetimeMs)
+			boolInt(req.Voice), boolInt(mayInvite), lifetimeMs, string(joinAs))
 		if err != nil {
 			return fmt.Errorf("store: create invite: insert: %w", err)
 		}
@@ -530,6 +534,11 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		}
 		detail := fmt.Sprintf("invite=%d kind=%s channels=%s voice=%t may_invite=%t expires=%s max_uses=%s",
 			id, req.Kind, strings.Join(ids, ","), req.Voice, mayInvite, out.ExpiresAt.Time().Format(time.RFC3339), uses)
+		// Said only when it is not the default, so an account invite's row
+		// reads exactly as it did before invites had modes.
+		if joinAs != schema.InviteJoinAccount {
+			detail += " join_as=" + string(joinAs)
+		}
 		return appendAuditEventTx(ctx, tx, actor, AuditInviteCreated, inviteSubject(id), detail, now)
 	})
 	if err != nil {
@@ -543,7 +552,10 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 // returns ErrInvitesPaused while invites are paused (checked before the code,
 // so a pause says nothing about any code) and ErrInviteInvalid for a code that
 // is unknown, expired, used up, closed, or whose maker may no longer stand
-// behind it. It writes nothing.
+// behind it. Join is what the invite offers now, by the rule redemption
+// applies (inviteJoinOptions): its join_as under the server's guest switch
+// and the cap on live visits; the per-address cap is the server's to apply.
+// It writes nothing.
 func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Time) (schema.InvitePreviewV1, error) {
 	if paused, err := s.InvitesPaused(ctx); err != nil {
 		return schema.InvitePreviewV1{}, err
@@ -556,6 +568,15 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 	if err != nil {
 		return schema.InvitePreviewV1{}, err
 	}
+	settings, err := joinSettingsTx(ctx, s.db)
+	if err != nil {
+		return schema.InvitePreviewV1{}, err
+	}
+	live, err := liveGuestsTx(ctx, s.db, credentialNow())
+	if err != nil {
+		return schema.InvitePreviewV1{}, err
+	}
+	join := inviteJoinOptions(r.joinAs, settings, live)
 	names := make([]string, len(kept))
 	for i, c := range kept {
 		names[i] = c.Name
@@ -566,6 +587,7 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 		Channels:  names,
 		Voice:     r.voice && r.creatorVoice,
 		ExpiresAt: schema.NewTimestamp(time.UnixMilli(r.expiresAt)),
+		Join:      &join,
 	}, nil
 }
 
@@ -668,12 +690,12 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		if err != nil {
 			return err
 		}
-		// Only the account route with a password honours join_as here: the
-		// v1 route stays as it was until it is retired (#713).
-		if record != "" {
-			if err := inviteAdmitsAccountTx(ctx, tx, r.id); err != nil {
-				return err
-			}
+		// An invite for guests only makes no account, by either route: v1
+		// makes one with no password, and a guest invite must not mint a
+		// member through it (#710; v1 itself is retired by #713). Said only
+		// once the code proved good, so the mode is told only to its holder.
+		if !admitsAccount(r.joinAs) {
+			return ErrJoiningClosed
 		}
 		actor := inviteSubject(r.id)
 
