@@ -43,7 +43,8 @@ const (
 	// restore): detail what it did, as counts and the TOTP floor.
 	AuditRestoreInvalidated = "restore_invalidated"
 	// AuditRestoreStarted is the first start of a server on a restored
-	// database: detail the TOTP floor it set.
+	// database: detail the TOTP floor it set and how many voice rooms it
+	// retired, never their names.
 	AuditRestoreStarted = "restore_started"
 )
 
@@ -234,9 +235,18 @@ func (s *Store) InvalidateRestored(ctx context.Context, now time.Time) (RestoreR
 // after it as used, again, from this start's clock: a code an operator gave
 // the old server between the invalidation and this start is refused too, and
 // for the first 2 × 30 seconds after the start every code is (design §7.3).
-// Then it removes the mark and audits restore_started, all in one IMMEDIATE
-// transaction, and reports true with the floor. On any other database it
-// writes nothing and reports false, so an ordinary restart never does this.
+// It also retires every live voice room and drops its holders (issue #782).
+// The backup cannot say who joined a room after it was taken, so a room with
+// no holders recorded may still have people in it, and LiveKit keeps
+// renewing their tokens; a room whose name has an earlier prefix is not
+// found by the start's clear (Server.ClearVoiceRooms) either. Retired, every
+// such room is deleted in LiveKit by the voice sweep, whatever its prefix,
+// and retried from its row until it is gone. The next session for a channel
+// creates its room afresh (ChannelVoiceRoom). Then it removes the mark and
+// audits restore_started, with the floor and how many rooms it retired, all
+// in one IMMEDIATE transaction, and reports true with the floor. On any
+// other database it writes nothing and reports false, so an ordinary restart
+// never does this.
 func (s *Store) StartRestored(ctx context.Context, now time.Time) (floor int64, restored bool, err error) {
 	now = now.Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
@@ -252,10 +262,24 @@ func (s *Store) StartRestored(ctx context.Context, now time.Time) (floor int64, 
 		if err := raiseTOTPFloorTx(ctx, tx, floor); err != nil {
 			return err
 		}
+		// Holders go first: they are found through rooms that are still live.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM voice_room_holders WHERE room_id IN (SELECT id FROM voice_rooms WHERE retired_at IS NULL)`); err != nil {
+			return fmt.Errorf("store: start restored: drop voice holders: %w", err)
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE voice_rooms SET retired_at = ? WHERE retired_at IS NULL`, now.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("store: start restored: retire voice rooms: %w", err)
+		}
+		retired, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: start restored: retire voice rooms: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM server_settings WHERE key = ?", settingRestorePending); err != nil {
 			return fmt.Errorf("store: start restored: %w", err)
 		}
-		return appendAuditEventTx(ctx, tx, hostActor, AuditRestoreStarted, "", fmt.Sprintf("totp_floor_step=%d", floor), now)
+		return appendAuditEventTx(ctx, tx, hostActor, AuditRestoreStarted, "",
+			fmt.Sprintf("totp_floor_step=%d voice_rooms_retired=%d", floor, retired), now)
 	})
 	if err != nil {
 		return 0, false, err
