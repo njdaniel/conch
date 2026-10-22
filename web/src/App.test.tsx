@@ -522,6 +522,76 @@ describe('lobby', () => {
     expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
   });
 
+  // Issue #645: revoking the credential ends its sessions, so a session end
+  // sent alongside it can arrive second and be answered 404. Sign out waits
+  // for the session's end to be answered before it revokes.
+  it('ends its own session, and waits for the answer, before it revokes the credential', async () => {
+    const order: string[] = [];
+    let answerEnd: () => void = () => undefined;
+    const endAnswered = new Promise<void>((resolve) => {
+      answerEnd = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      const method = init?.method ?? 'GET';
+      if (path === '/v1/sessions' && method === 'POST') {
+        return Promise.resolve(
+          json(
+            {
+              schema: 'conch.session.v1',
+              id: 9,
+              principal_id: 2,
+              kind: 'human',
+              name: 'ada',
+              client: 'browser',
+              state: 'online',
+              status: 'online',
+              started_at: created_at,
+              last_seen_at: created_at,
+              interventions: [],
+              outcome_unknown: false,
+            },
+            201,
+          ),
+        );
+      }
+      if (path === '/v1/sessions/9' && method === 'DELETE') {
+        order.push('end session');
+        return endAnswered.then(() => {
+          order.push('session end answered');
+          return new Response(null, { status: 204 });
+        });
+      }
+      if (path === '/v1/credentials/current' && method === 'DELETE') {
+        order.push('revoke');
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      const handler = asMember[path];
+      return Promise.resolve(handler ? handler(new Headers(init?.headers).get('Authorization')) : json({}, 404));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input, init]) => input === '/v1/sessions' && init?.method === 'POST')).toBe(true);
+    });
+    await act(async () => {});
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
+    await waitFor(() => {
+      expect(order).toEqual(['end session']);
+    });
+    // Held: the revoke must not have gone out while the end is unanswered.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(order).toEqual(['end session']);
+    answerEnd();
+    await screen.findByLabelText('Credential');
+    expect(order).toEqual(['end session', 'session end answered', 'revoke']);
+  });
+
   it('signs out here even when the server cannot be told, and says so', async () => {
     serve({
       ...asMember,
