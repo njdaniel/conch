@@ -92,6 +92,12 @@ type Config struct {
 	// unless every address the server binds is loopback and no trusted proxy
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
+	// TOTPKey is the host key operators' TOTP secrets are sealed under
+	// (issue #709, totp.go): kept outside the database and its backups,
+	// and backed up on its own. Nil, operators cannot enrol a second factor
+	// or sign in with a password, and every TOTP check fails closed;
+	// everything else works. conchd reads it from CONCHD_TOTP_KEY only.
+	TOTPKey *TOTPKey
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -111,6 +117,12 @@ const shutdownTimeout = 10 * time.Second
 // Server is conchd's HTTP server wrapped around the store. It owns the HTTP
 // listener and mux; the store's lifecycle belongs to the caller.
 type Server struct {
+	// awaitPolled, when set, is called after each authorized poll of
+	// await_decision, before it waits for the next. Tests only (#740): it
+	// lets a test withdraw the authorization once the wait is polling, not
+	// after a guess at how long that takes. Nil in production, where it does
+	// nothing.
+	awaitPolled func()
 	cfg         Config
 	store       *store.Store
 	hub         *hub.Hub
@@ -153,6 +165,9 @@ type Server struct {
 	// sessionSweepInterval is how often the session sweeper runs. Unexported
 	// so tests can shorten it before serving.
 	sessionSweepInterval time.Duration
+	// guestSweepInterval is the guest deadline sweeper's fallback poll
+	// (guests.go); zero means defaultGuestSweepInterval.
+	guestSweepInterval time.Duration
 	// keepAliveTicks starts the ticker that refreshes the session an events
 	// socket was opened for, and returns its channel and its stop function.
 	// Nil means every eventsKeepAliveInterval; tests replace it to drive the
@@ -198,6 +213,26 @@ type Server struct {
 	// reportLimits is the problem-report rate limit (reports.go), in memory
 	// only; its clock is now. Tests replace it before serving.
 	reportLimits *reportLimiter
+	// passwords is password hashing and its two bounded pools (password.go);
+	// logins is the sign-in limits (login.go), in memory only, with now as
+	// their clock. Tests replace logins with setLoginLimits before serving.
+	passwords *passwords
+	logins    *loginLimiter
+	// setupLimits is the setup-token redemption's per-address limit
+	// (operator_auth.go), in memory only, with now as its clock.
+	setupLimits *setupLimiter
+	// addressMAC keys the HMAC a pending login keeps of its client address
+	// (pendingAddressKey): random per process, never stored or logged.
+	addressMAC []byte
+	// beforeLoginIssue, when a test sets it, runs between a sign-in's
+	// password verification and the transaction that issues what it earned,
+	// so a test can land a disable or a password change in that gap. Nil in
+	// conchd.
+	beforeLoginIssue func()
+	// beforePasswordWrite is the same seam for the password routes
+	// (password_recovery.go): it runs after a password was verified or
+	// hashed and before the transaction that writes. Nil in conchd.
+	beforePasswordWrite func()
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -227,7 +262,9 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit())}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
+		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
+		setupLimits: newSetupLimiter(cfg)}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
@@ -239,6 +276,10 @@ func New(cfg Config, st *store.Store) *Server {
 			s.events.notifyRun(r.ChannelID, r.ID)
 		}
 	})
+	// A guest visit can end through many calls (End visit, a sweep, a
+	// revoke, a disable); the store reports each after its commit (issue
+	// #705), and what follows is the same whichever it was.
+	st.OnGuestsEnded(s.guestsEnded)
 	s.eventsRosterFloor = defaultEventsRosterFloor
 	s.routes = append(s.routeTable(), s.webRoutes()...)
 	s.routeByPattern = make(map[string]route, len(s.routes))
@@ -248,6 +289,7 @@ func New(cfg Config, st *store.Store) *Server {
 		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
+	s.checkTOTPKey(context.Background())
 	if s.VoiceConfigured() {
 		if s.lk, err = livekit.New(cfg.LiveKit); err != nil {
 			// Unreachable: Configured() was just checked. Fail closed anyway:
@@ -415,8 +457,15 @@ func (s *Server) Serve(ctx context.Context) error {
 	// stops with ctx and Serve waits for it, so no goroutine outlives Serve.
 	defer s.startSessionSweeper(ctx)()
 
+	// Guest visits: the sweeper ends each at its deadline (access is refused
+	// at the deadline already) and stops with ctx, waited for like the rest.
+	defer s.startGuestSweeper(ctx)()
+
 	// Metrics, when configured, on their own listener; stopped with the rest.
 	defer s.serveMetrics(ctx)()
+
+	// Pending logins: spent and expired challenges are deleted (issue #709).
+	defer s.startPendingLoginSweeper(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

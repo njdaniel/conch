@@ -291,8 +291,10 @@ messages to `hidden-<id>` or attach them to a later user.
 **Guests are not hideable** *(security review F10)*. `HidePrincipal` is a rename
 (`store/hide.go`) and clients render the new name on old messages, which would break the
 immutable attribution above. Hide refuses a principal in guest state with
-`guest_not_hideable`; End visit, the entry invite's revocation and End all guest visits are
-the levers. Hiding a converted member renames the member identity as today, while posts
+`guest_not_hideable`, and so does any rename of one (`PUT /v1/principals/{id}/name`, by an
+operator or by the guest itself; the store refuses it beside the hide check, in G2): a
+guest's name is its handle. End visit, the entry invite's revocation and End all guest
+visits are the levers. Hiding a converted member renames the member identity as today, while posts
 made during the guest visit keep their stored guest attribution.
 
 Remove live credentials, memberships, presence and transient state at termination.
@@ -490,31 +492,283 @@ an old passwordless member-redeem route bypass account setup.
 | Guest policy | Global gate, bounds, per-entry modes, live guest list, dry-run/confirmed termination. |
 | History | Server-owned membership watermark and filtered message attribution; bounded object provenance. |
 
-Proposed route families (final names owned by G1):
-- Anonymous: join information, address guest/account creation, invite preview/redemption,
-  password login, TOTP login completion, restricted reset/enrollment preview/completion.
-- Self: guest conversion, password change, own sessions, reauthentication, device links,
-  explicit end-visit; each requires the correct live identity class.
-- Operator: joining settings, invite modes, guest termination/list, permitted membership
-  changes, member enrollment/reset links and conversion permits; sensitive routes require
-  recent authentication as specified in §5.3.
-- Offline only: operator bootstrap/authentication recovery.
-- Existing routes: guest restrictions for credentials, invitations, file upload, channel
-  creation, approvals and interventions; history enforcement on every read/replay route.
+**G1 (#704) defined these contracts in `pkg/schema` (`guest.go`, `auth.go`, and additive
+fields in `invite.go`, `sign_in_link.go`, `whoami.go`, `credential.go`, `channel_member.go`,
+`message_v2.go`, `principal_admin.go`), with golden fixtures in `pkg/schema/testdata/` and
+the generated `web/src/schema/generated.ts`.** §7.1–§7.6 below are the contract that
+#705–#716 build against. Every change is additive: no published fixture changed and no
+schema version was bumped; §7.6 lists the behaviour changes that still need the owner's
+sign-off. Bind all ceremony/link types to their purpose, target, expiry and authentication
+generation. A reset token is not a device link, an enrollment proof is not an operator
+session, and no principal ID in a request replaces the authenticated caller.
 
-Every authenticated route rejects AuthOff (401); anonymous account flows are unavailable
-when the server cannot enforce identity/ACLs. Bind all ceremony/link types to their purpose,
-target, expiry and authentication generation. A reset token is not a device link, an
-enrollment proof is not an operator session, and no principal ID in a request replaces
-the authenticated caller.
+### 7.1 Wire shapes
+
+| Area | Types (`pkg/schema`) | Notes |
+| --- | --- | --- |
+| Front door | `JoinInfoV1`, `JoinOptionsV1` | Effective guest/account availability, cap and pause state, server label, whether password sign-in exists, visit bounds. No channel or person. |
+| Settings | `JoinSettingsV1`, `PutJoinSettingsRequestV1` (partial, `Apply`), `JoinSettingsResponseV1`, `OpenJoiningMode`, `JoinWarning` | `max_guests_per_address` (F13), live count and warnings (F12, F13), `reserved_names_in_use` (preflight). `Apply` turns a guest-only address off when guests are disabled (§2). |
+| Invites | `InviteJoinMode` (`account` default, `guest`, `both`) on `CreateInviteRequestV1`/`InviteV1`; `InvitePreviewV1.join` (effective); `RedeemInviteRequestV2` (code, name, password); `RedeemInviteGuestRequestV1` (code, label) | Absent `join_as` is `account`, so every existing invite stays account-only. |
+| Guests | `GuestState`, `GuestOrigin`, `GuestEndReason`; `GuestV1` (self view), `GuestAdminV1` (operator view), `GuestAttributionV1` (handle, label, tag); `ValidateGuestHandle`, `GuestTag`, `GuestDisplayName`, `ValidateGuestLabel`, `IsReservedGuestName` | Handle `guest-` + 16 characters of Crockford base32 (80 bits). Tag = first four of the suffix. Label rules of §4.1 in `ValidateGuestLabel`; the confusable checks stay in the server's `names` package. |
+| Joining | `JoinGuestRequestV1`/`JoinGuestResponseV1`, `JoinAccountRequestV1`/`JoinAccountResponseV1` | Responses carry the admitted channels; the guest response carries the visit and its one credential. |
+| Conversion | `ConvertGuestRequestV1` (name, password, optional permit), `ConvertGuestResponseV1`, `CreateConversionPermitRequestV1` (permit = sign-in link of purpose `conversion`) | Same principal id, fresh member credential, guest credential revoked. |
+| Ending | `EndVisitResponseV1` (self), `EndGuestResponseV1`, `EndGuestsRequestV1` (dry run required; by origin or invite), `EndGuestsResponseV1`, `ListGuestsResponseV1` | Converted members are never selected. |
+| Identity | `WhoAmIResponseV1.identity_class` (`IdentityClass`), `.guest`, `.auth` (`AuthStateV1`); `PrincipalAdminV1.guest_state` | A server that predates guests omits all three; a client falls back to kind and role. |
+| History | `ChannelMemberV1.history_after` (message id watermark), `.guest`; `MessageV2.guest_author` | Immutable attribution on the message; the bound on the membership. |
+| Credentials | `CredentialV1.idle_expires_at`, `.scope` (`CredentialScope`: `full` default, `setup`); `OwnCredentialV1.idle_expires_at` | Idle bound only on guest and operator browser credentials (F5). |
+| Passwords | `ValidatePassword` (15–128 code points, ≤512 bytes), `LoginRequestV1`, `LoginResponseV1` (union by `next`: `signed_in` or `totp`), `TOTPLoginRequestV1`, `SetPasswordRequestV1` (optional enrolment proof), `ChangePasswordRequestV1` (current, new, optional TOTP), `ResetPasswordRequestV1`, `PasswordUpdatedResponseV1` | One failure code, `auth_failed`. |
+| Operator auth | `ReauthRequestV1`/`ReauthResponseV1`, `TOTPEnrollmentV1`, `ConfirmTOTPRequestV1`, `RedeemSetupTokenRequestV1`/`RedeemSetupTokenResponseV1`; constants for the challenge (5 min, 5 tries), session (12 h / 1 h idle), re-auth (10 min), setup token (10 min) and setup credential (15 min), RFC 6238 parameters | Challenge prefix `conch_chal_`, setup token prefix `conch_setup_`: every secret has its own prefix and every check refuses the others'. |
+| Links | `SignInLinkPurpose` (`sign_in` default, `device`, `reset`, `enrollment`, `conversion`) on `SignInLinkV1`, `CreateSignInLinkRequestV1`, `SignInLinkPreviewV1`; `CreateDeviceLinkRequestV1`, `ListOwnSignInLinksResponseV1` | Lifetimes per purpose: sign-in 24 h / 7 d as today; every other purpose 10 min / 1 h. Cross-purpose use is `sign_in_link_invalid`. |
+| Errors | `guests_disabled`, `joining_closed`, `joining_paused`, `guests_full`, `guest_not_allowed`, `guest_not_hideable`, `guest_ended`, `not_a_guest`, `conversion_not_allowed`, `conversion_permit_invalid`, `join_policy_conflict`; `auth_failed`, `reauth_required`, `setup_on_host`, `setup_incomplete`, `password_required`, `password_unacceptable`, `password_not_set`, `password_already_set`, `totp_already_enrolled`, `totp_not_enrolled`, `setup_token_invalid`, `too_many_device_links`, `https_required`, `accounts_require_auth` | HTTP statuses in the constants' comments. `decision_not_permitted` (§4.3) is defined by G2's approval-path PR in `approval_api.go`, which G1 does not touch. |
+
+Compatibility rules the types state in their comments: a field a server predates is
+omitted, never sent as a zero value that means something; `history_after` 0 is no bound;
+`join_as`, `purpose` and `scope` absent mean `account`, `sign_in` and `full`. The
+`password` on a presented credential (login, re-auth, current password) is bound-checked
+only; a short one fails as a wrong password, so the schema answers nothing the server
+would not.
+
+### 7.2 Route table
+
+Access classes are the route table's (`routes.go`): `exempt` (anyone), `authenticated`
+(any live credential; the identity class is checked in the handler), `operator`,
+`operator-or-self`. **R** marks the re-authentication class of §5.3 (F8): the route needs
+`auth.recent_auth_until` on the calling credential, or answers 403 `reauth_required`.
+The route-table test (G2/G4) classifies every operator route **R** or not; the rule is:
+creates a principal, credential, link, permit or hook; grants a right or access; or
+removes or ends a person. Operator routes outside the class by that rule, and so pinned
+"not R": channel, net, manifest reads, lists, reports, audit export, invite close and
+settings reads. Every anonymous route that takes a password, code or token requires
+HTTPS beyond loopback (403 `https_required`) and is rate-limited like invite redemption.
+
+| Route | Access | Body → answer | Refusals beyond the common ones |
+| --- | --- | --- | --- |
+| `GET /v1/join` | exempt | → `JoinInfoV1` | — |
+| `POST /v1/join/guest` | exempt | `JoinGuestRequestV1` → 201 `JoinGuestResponseV1` | `guests_disabled`, `joining_paused`, `guests_full` (429) |
+| `POST /v1/join/account` | exempt | `JoinAccountRequestV1` → 201 `JoinAccountResponseV1` | `joining_closed`, `joining_paused`, `principal_exists` (taken or reserved), `password_unacceptable` |
+| `POST /v1/invites/preview` (existing) | exempt | → `InvitePreviewV1` with `join` | — |
+| `POST /v1/invites/redeem` (existing, v1) | exempt | `RedeemInviteRequestV1` | once migration 32 has run: 409 `password_required`, nothing made (§7.6 B1) |
+| `POST /v2/invites/redeem` | exempt | `RedeemInviteRequestV2` → 201 `RedeemInviteResponseV1` | `invite_invalid`, `invites_paused`, `joining_closed` (guest-only invite), `principal_exists`, `password_unacceptable` |
+| `POST /v1/invites/redeem-guest` | exempt | `RedeemInviteGuestRequestV1` → 201 `JoinGuestResponseV1` | `invite_invalid`, `invites_paused`, `guests_disabled`, `guests_full` |
+| `POST /v1/login` | exempt | `LoginRequestV1` → 200 `LoginResponseV1` | 401 `auth_failed`, also for an operator whose setup is incomplete (no password, or a password but no confirmed TOTP): never `signed_in` and never a challenge; 429 `rate_limited` with Retry-After from the per-name window, before any hashing (F4) |
+| `POST /v1/login/totp` | exempt | `TOTPLoginRequestV1` → 200 `LoginResponseV1` (`signed_in`) | 401 `auth_failed` (wrong code counts in the name's window, F2) |
+| `POST /v1/password/reset` | exempt | `ResetPasswordRequestV1` → 200 `PasswordUpdatedResponseV1` (no credential) | 404 `sign_in_link_invalid`, `password_unacceptable` |
+| `POST /v1/sign-in-links/preview` (existing) | exempt | → `SignInLinkPreviewV1` with `purpose` | `sign_in_link_invalid` for `enrollment` and `conversion` links, which have no landing page |
+| `POST /v1/sign-in-links/redeem` (existing) | exempt | purposes `sign_in` and `device` only | `sign_in_link_invalid` for any other purpose |
+| `POST /v1/setup/redeem` | exempt | `RedeemSetupTokenRequestV1` → 201 `RedeemSetupTokenResponseV1` | 404 `setup_token_invalid` |
+| `GET /v1/whoami` (existing) | authenticated | + `identity_class`, `guest`, `auth` | the one route beside its own a `setup` credential may call |
+| `POST /v1/guest/convert` | authenticated, guest | `ConvertGuestRequestV1` → 200 `ConvertGuestResponseV1` | 403 `not_a_guest`, 409 `guest_ended`, 403 `conversion_not_allowed`, 404 `conversion_permit_invalid`, `joining_paused`/`invites_paused` by origin, `principal_exists`, `password_unacceptable` |
+| `POST /v1/guest/end` | authenticated, guest | → 200 `EndVisitResponseV1` | `not_a_guest`, `guest_ended` |
+| `DELETE /v1/credentials/current`, `…/credentials/revoke-all` (existing) | authenticated | for a guest: End visit in the same transaction; for a member: also revoke links, pending logins and the recent-auth proof | — |
+| `POST /v1/password/mine` | authenticated | `SetPasswordRequestV1` → 200 `PasswordUpdatedResponseV1` | operator on an ordinary bearer: 403 `setup_on_host` (F7); on a `setup` credential it **replaces** any existing password (the host-made token is the proof; this is operator recovery); member without a proof: 403 `reauth_required`; a proof whose target is not the caller, or whose purpose is not `enrollment`: 404 `sign_in_link_invalid`; 409 `password_already_set` on a full-scope credential only; guest: `guest_not_allowed` |
+| `PUT /v1/password/mine` | authenticated | `ChangePasswordRequestV1` → 200 `PasswordUpdatedResponseV1` (rotated token) | 401 `auth_failed` (wrong current, or an operator's missing/wrong code), 409 `password_not_set`, `guest_not_allowed` |
+| `POST /v1/reauth` | authenticated | `ReauthRequestV1` → 200 `ReauthResponseV1` | 401 `auth_failed` (an operator's missing or wrong `code` included; every failure counts in the name's window, F2), 409 `password_not_set`, `guest_not_allowed` |
+| `POST /v1/totp/enroll` | authenticated, `setup` scope | → 200 `TOTPEnrollmentV1` | 403 `setup_on_host` on a full-scope credential, 409 `totp_already_enrolled` |
+| `POST /v1/totp/confirm` | authenticated, `setup` scope | `ConfirmTOTPRequestV1` → 204 | 401 `auth_failed`, 409 `totp_not_enrolled` |
+| `POST /v1/sign-in-links/mine` | authenticated, member | `CreateDeviceLinkRequestV1` → 201 `CreateSignInLinkResponseV1` (purpose `device`) | 403 `reauth_required`, 409 `too_many_device_links`, `guest_not_allowed`; operators and agents 403 |
+| `GET /v1/sign-in-links/mine` | authenticated, member | → `ListOwnSignInLinksResponseV1` | — |
+| `DELETE /v1/sign-in-links/mine/{id}` | authenticated, member | → 204 | 404 `sign_in_link_not_found` |
+| `GET /v1/join/settings` | operator | → `JoinSettingsResponseV1` | — |
+| `PUT /v1/join/settings` | operator, **R** | `PutJoinSettingsRequestV1` → 200 `JoinSettingsResponseV1` | 409 `join_policy_conflict` (guest-only with guests off, open joining with no channel, last open channel removed while on, enabling guests with `reserved_names_in_use`), 400 `invalid_request` for an unknown channel |
+| `GET /v1/guests` | operator | `?state=`(default `active`)`&origin=&before=&limit=` → `ListGuestsResponseV1` | — |
+| `POST /v1/guests/{id}/end` | operator, **R** | → 200 `EndGuestResponseV1` | 404 `not_a_guest`, 409 `guest_ended` |
+| `POST /v1/guests/end` | operator, **R** | `EndGuestsRequestV1` → 200 `EndGuestsResponseV1` | — |
+| `POST /v1/guests/{id}/conversion-permit` | operator, **R** | `CreateConversionPermitRequestV1` → 201 `CreateSignInLinkResponseV1` (purpose `conversion`) | 404 `not_a_guest`, 409 `guest_ended` |
+| `POST /v1/principals/{id}/sign-in-links` (existing) | operator, **R** | + `purpose` `reset` or `enrollment` | guest, operator, disabled or hidden target: as today for sign-in links |
+| `PUT /v1/channels/{channel}/members/{id}` (existing, approval-path) | operator, **R** | a guest target: `can_decide` omitted stays false, `true` is 403 `guest_not_allowed`; admission sets `history_after` | — |
+| `POST /v1/principals/{id}/hide` (existing) | operator | guest target: 409 `guest_not_hideable` | — |
+| `POST /v1/principals/{id}/credentials` (existing) | operator, **R** | guest target: 403 `guest_not_allowed` | — |
+| `GET /v1/principals` (existing) | operator | + `guest_state`; `?guest=active|ended|converted` filter | — |
+| `PUT /v1/principals/{id}/name` (existing) | operator-or-self | a principal with an active guest visit: 409 `guest_not_hideable`, whether an operator or the guest asks; its name is its handle | — |
+| Guest refusals on existing routes | authenticated | `POST /v1/invites`, `POST /v2/channels/{channel}/files`, `POST /v1/approvals`, `POST /v1/approvals/{id}/decisions` (G2, approval-path), `POST /v1/runs/{id}/interventions`, `POST /v1/sign-in-links/mine`: 403 `guest_not_allowed` | — |
+| Every read and replay route | authenticated | intersects `history_after` with the existing audience rules (§4.3) | — |
+| Host commands (not routes) | offline | `conchd operator bootstrap <name>` and `conchd operator recover <id>` print a setup token (10 min); recover first revokes the operator's credentials, links, pending logins and TOTP, bumps its auth generation and audits; the setup-scoped credential the token answers then **replaces** the password through `POST /v1/password/mine` and enrols TOTP afresh | names are #710's to settle |
+
+Rate limits: §8. The approval routes' guest refusal and the `can_decide` rule are
+approval-path work (G2). Bearer token credentials (CLI and scripts, not browser
+sessions) are outside the R class by the S15 boundary of §5.3: the route-table test
+encodes R for browser-session credentials only, and the exposure of a stolen full-power
+script credential is the residual risk already recorded in the review record (§11).
+
+### 7.3 Migrations
+
+Both migrations are additive (`ADD COLUMN`, new tables, new rows): old rows stay readable,
+no name is changed, hidden or reclassified, and a database from before either migration
+opens as today. Numbers follow `store.go`'s list, whose last entry is 30 (sign-in links).
+
+**31 — guest identities (#705).**
+- `guest_visits (principal_id INTEGER PRIMARY KEY REFERENCES principals, handle TEXT NOT
+  NULL UNIQUE, label TEXT, origin TEXT NOT NULL CHECK (origin IN ('address','invite')),
+  invite_id INTEGER REFERENCES invites, state TEXT NOT NULL CHECK (state IN
+  ('active','ended','converted')), started_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  idle_ms INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT CHECK (end_reason IS NULL OR
+  end_reason IN ('end_visit','idle','expired','operator','restore')), converted_at INTEGER,
+  CHECK ((state = 'ended') = (ended_at IS NOT NULL AND end_reason IS NOT NULL)), CHECK
+  ((state = 'converted') = (converted_at IS NOT NULL)))`, with a partial index on
+  `state = 'active'` and one on `invite_id`. Rows are never deleted, so a handle is never
+  reused. A principal is a guest exactly when its row is `active`; every store check of the
+  guest flag reads this row inside its transaction (F1).
+- `channel_members ADD COLUMN history_after INTEGER` (NULL = no bound). Set at every
+  guest admission to the channel's last message id; kept through conversion.
+- `message_guest_attribution (message_id INTEGER PRIMARY KEY REFERENCES messages, handle
+  TEXT NOT NULL, label TEXT)`, written in the posting transaction for a guest author and
+  never updated; `MessageV2.guest_author` is read from it by a left join.
+- `credentials ADD COLUMN idle_ms INTEGER` (NULL = no idle bound) and `ADD COLUMN
+  last_used_at INTEGER` (NULL = never; updated by REST requests at most once a minute).
+  `CredentialLive` becomes: not revoked, principal enabled, `now < expires_at` when set,
+  and `idle_ms IS NULL OR now < COALESCE(last_used_at, created_at) + idle_ms` (F5).
+- `open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels, added_by INTEGER
+  REFERENCES principals, added_at INTEGER NOT NULL)`.
+- `server_settings` rows `open_joining`, `guests_enabled`, `joining_paused`, `join_voice`,
+  `max_guests`, `max_guests_per_address`, `guest_idle_seconds`, `guest_absolute_seconds`;
+  an absent row is the default of `schema.DefaultJoinSettings`.
+- `invites ADD COLUMN join_as TEXT NOT NULL DEFAULT 'account' CHECK (join_as IN
+  ('account','guest','both'))`: every existing invite stays account-only.
+- Go step, like migration 28's `reportReservedNames`: log every principal whose folded key
+  or skeleton (`principals.name_key`, `name_skel`) begins with `guest`. Nothing is renamed.
+  While any such principal exists, `PUT /v1/join/settings` refuses `guests_enabled: true`
+  with `join_policy_conflict` and the settings answer carries `reserved_names_in_use`.
+- Audit actions, written in the committing transaction: `guest_started` (entry point:
+  `address` or `invite <id>`; never the client address, F13), `guest_ended` (reason),
+  `guest_converted`, `guests_ended` (count, selection), `join_settings_changed` (each field,
+  old and new, plus the live-guest count when guests are turned off, F12),
+  `open_channel_added` / `open_channel_removed`, `conversion_permit_issued`.
+
+**32 — passwords and operator authentication (#707).**
+- `passwords (principal_id INTEGER PRIMARY KEY REFERENCES principals, hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`; `hash` is the encoded
+  `$argon2id$v=19$m=…,t=…,p=…$<salt>$<hash>` record of §5.1, parameters bounded before
+  verification. A principal with no row has no password: a legacy member, a guest, an
+  agent or an operator not yet set up.
+- `principals ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0`. Every credential,
+  link, permit, pending login and setup token records the principal's generation at
+  issue (`auth_generation INTEGER NOT NULL DEFAULT 0` on `credentials`, `sign_in_links`,
+  `pending_logins`, `setup_tokens`) and is live only while it equals the principal's. A
+  password change or reset, sign-out everywhere, disable, operator recovery and a restore
+  bump it; existing rows carry 0 and the existing principals start at 0, so nothing is
+  invalidated by the migration itself.
+- `credentials ADD COLUMN scope TEXT NOT NULL DEFAULT 'full' CHECK (scope IN
+  ('full','setup'))`, `ADD COLUMN recent_auth_until INTEGER` (the §5.3/§6.2 proof, bound
+  to this row; cleared by any generation bump).
+- `sign_in_links ADD COLUMN purpose TEXT NOT NULL DEFAULT 'sign_in' CHECK (purpose IN
+  ('sign_in','device','reset','enrollment','conversion'))`, `ADD COLUMN label TEXT`.
+- `pending_logins (id INTEGER PRIMARY KEY, challenge_hash TEXT NOT NULL UNIQUE,
+  principal_id INTEGER NOT NULL REFERENCES principals, address_key TEXT NOT NULL,
+  auth_generation INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT
+  NULL, attempts INTEGER NOT NULL DEFAULT 0, spent_at INTEGER)` (F14; `address_key` is
+  `limitKey`'s form).
+- `totp (principal_id INTEGER PRIMARY KEY REFERENCES principals, secret BLOB, enrolled_at
+  INTEGER, pending_secret BLOB, pending_at INTEGER, last_step INTEGER NOT NULL DEFAULT 0)`:
+  both secrets encrypted under the host key of §5.3; `last_step` is the highest accepted
+  time step, for replay refusal.
+- `setup_tokens (id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, principal_id
+  INTEGER NOT NULL REFERENCES principals, auth_generation INTEGER NOT NULL, created_at
+  INTEGER NOT NULL, expires_at INTEGER NOT NULL, spent_at INTEGER)`.
+- Backfill: none. Existing members keep signing in with their credentials and sign-in
+  links; `POST /v1/login` answers `auth_failed` for them until an operator issues an
+  enrollment proof; `whoami.auth.setup_complete` is false. Existing operators keep their
+  script credentials (full scope, no MFA, §5.3); their browser sign-in needs a host-made
+  setup token. From this migration on, `POST /v1/invites/redeem` (v1) answers
+  `password_required` (§7.6 B1).
+- **Ordering.** The routes that create a member with a password, `POST /v1/join/account`,
+  `POST /v2/invites/redeem` and `POST /v1/guest/convert`, are registered by #707 with this
+  migration, not by #705, so no build between the two can mint a passwordless member. #705
+  lands the store's reserved-`guest` refusal (§7.6 B2) in the same PR as migration 31.
+- **Restore invalidation** (§4.2; the trigger is #716's): one statement, `UPDATE principals
+  SET auth_generation = auth_generation + 1`, plus ending every `active` guest visit with
+  reason `restore`, before the server accepts traffic. Sweeping expired rows is not
+  enough and is not what this does. A restore also rolls `totp.last_step` back, so a code
+  accepted before the backup could be accepted again: #716 refuses every TOTP code for the
+  current step and one either side (`TOTPWindowSteps`) for the first `2 × 30 s` after the
+  restored server starts, which is the whole window a replayed code can fall in.
+- Audit actions: `password_set`, `password_changed`, `password_reset_issued`,
+  `password_reset`, `enrollment_issued`, `login_failed` (the name key when it resolves to a
+  principal, else the constant `unknown`, and the reason code; nothing else),
+  `login` (credential id), `reauth`, `totp_enrolled`, `setup_token_issued` (host),
+  `setup_token_redeemed`, `operator_recovered` (host), `device_link_issued`,
+  `auth_generation_bumped` (cause). No password, hash, code, token or full address in any
+  of them.
+
+### 7.4 Authentication off
+
+With `conchd` running with authentication off (`AuthMode` `off`), there is no identity to
+join, sign in or prove, so:
+- `GET /v1/join` answers `password_login: false` and `join: {guest: false, account:
+  false}` (fixture `join-info-v1-auth-off.json`);
+- every other route of §7.2 that this design adds, and the new purposes on the existing
+  sign-in link routes, answer 403 `accounts_require_auth`, as the ticket, session and
+  read-state routes answer their own `*_require_auth` codes today;
+- `GET /v1/whoami` omits `identity_class`, `guest` and `auth`;
+- existing routes behave as today; the guest refusals are moot because no guest can exist;
+- migrations 31 and 32 still run, so switching authentication on later needs no further
+  migration.
+
+### 7.5 REST, CLI/TUI and browser
+
+Rule 4: the API first; `conch` and the browser are its clients. CLI names are proposals
+for G7 (#713); the browser pages for G6 (#711–#712). Secrets reach the CLI on
+non-echoing stdin (`conch login < tokenfile` is the precedent), never in `argv`.
+
+| REST | CLI/TUI | Browser |
+| --- | --- | --- |
+| `GET /v1/join` | `conch join info --server` | front door `/app/` when signed out: the two buttons and Sign in, from `join` |
+| `POST /v1/join/guest`, `POST /v1/invites/redeem-guest` | `conch join guest [--label] [--invite <code>]` | **Join as guest** with the optional label; the token in `sessionStorage` for the tab, the visit's end time shown |
+| `POST /v1/join/account`, `POST /v2/invites/redeem` | `conch join account <name> [--invite <code>]` (password prompted) | **Create an account**: name and password together |
+| `POST /v1/login`, `POST /v1/login/totp` | `conch login --password` (name, password, then code prompted; today's token login stays for scripts) | Sign in page; the TOTP step when `next` is `totp`; the browser refuses a script token where a person signs in |
+| `GET /v1/whoami` | `conch whoami` shows class, visit bounds, setup state | header and settings read `identity_class`, `guest`, `auth` |
+| `POST /v1/guest/convert` | `conch account create <name>` | guest banner → **Create an account** |
+| `POST /v1/guest/end` | `conch end-visit` | guest banner → **End visit** |
+| `POST /v1/password/mine`, `PUT /v1/password/mine` | `conch password set [--proof]`, `conch password change` | Settings → Password; setup page on a `setup` credential |
+| `POST /v1/password/reset` | `conch password reset <code via stdin>` | reset landing page from the link's fragment (`purpose: reset`) |
+| `POST /v1/reauth` | prompted when a command answers `reauth_required`, then retried | a modal when a call answers `reauth_required`, then retried |
+| `POST /v1/totp/enroll`, `POST /v1/totp/confirm` | `conch totp enroll` (prints the manual setup; no QR dependency) | setup page: secret and manual parameters, hidden while the tab shares |
+| `POST /v1/setup/redeem` | `conch setup <token via stdin>` | setup landing page |
+| `POST/GET/DELETE /v1/sign-in-links/mine[/{id}]` | `conch device-link create|list|close` | Settings → Your sign-ins → Add a device (Reveal, refused while sharing) |
+| `GET/PUT /v1/join/settings` | `conch admin join status|set --open-joining … --guests on|off …` | Operator settings → Joining |
+| `GET /v1/guests`, `POST /v1/guests/{id}/end`, `POST /v1/guests/end`, `POST /v1/guests/{id}/conversion-permit` | `conch admin guest list|end|end-all [--dry-run] [--origin] [--invite]|permit` | Operator → Guests: list, End visit, End all guest visits (dry run then confirm), Allow account |
+| `POST /v1/principals/{id}/sign-in-links` with `purpose` | `conch admin principal sign-in-link --purpose reset|enrollment <id>` | Operator → principal → Reset password / Set up password |
+| `POST /v1/invites` with `join_as` | `conch admin invite create --join-as account|guest|both` | invite creation: the mode selector, shown only when guests are enabled |
+| host commands | `conchd operator bootstrap <name>`, `conchd operator recover <id>` | — |
+
+### 7.6 Changes that need the owner's sign-off
+
+No published fixture changed and no schema version was bumped (`scripts/schema-compat.sh`
+passes). The following are behaviour changes on published routes or shapes, listed for
+Nick's decision (ADR-000 D8); each is additive on the wire.
+
+- **B1. `POST /v1/invites/redeem` (v1) stops creating accounts.** Once migration 32 has
+  run it answers 409 `password_required` and makes nothing, so an old client cannot make
+  a passwordless account. `RedeemInviteRequestV1` and its fixture are unchanged; the v2
+  route takes the password. Alternative considered: an optional `password` on the v1
+  shape, refused when absent, which would leave one route with two meanings. Recommended:
+  B1 as written. Needs sign-off.
+- **B2. The reserved guest namespace on existing routes.** After migration 31, `POST
+  /v0/principals`, `PUT /v1/principals/{id}/name` and the v1 invite redemption refuse a
+  name whose folded key or skeleton begins with `guest` (409 `principal_exists`, as for
+  `hidden-`), enforced by the store as the hidden prefix is; the published `Validate`
+  methods are unchanged. New names only; existing ones are reported, never changed.
+  Needs sign-off as a tightening of published routes.
+- **B3. `MessageV2` keeps version 2** with the optional `guest_author`; a client that
+  predates it shows the author's current name on an old guest post, which is a rendering
+  degradation and not an exposure. The alternative, `conch.message.v3`, would touch every
+  message route, socket and fixture for one optional field. Recommended: stay on v2. Nick
+  may overrule.
+- **B4. Sign-out routes end a guest visit.** `DELETE /v1/credentials/current` and
+  `revoke-all` for a guest end the visit (terminal, memberships removed), beyond what they
+  did for a member. Compatible; recorded.
+- **B5. `ChannelMembersV1.Validate` and `MessageV2.Validate` now refuse** a malformed
+  `guest`/`guest_author` and a guest member with `can_decide: true`. Documents without
+  those fields validate exactly as before.
+- Not a break, for the record: the existing fixtures `channel-member-v1-can-decide.json`
+  and `channel-members-v1.json` name a member `guest-a`. They are published and stay; on a
+  real server such a name is a migration 31 preflight conflict, not a guest.
 
 Store password hashes/parameters, auth generation, restricted hashed link tokens and
-operator encrypted TOTP state separately from public principal shapes. Guest memberships
-carry watermarks; immutable attribution survives membership removal. Foreign keys and
-migration/backfill behavior must be specified before implementation. Audit changes in the
-committing transaction, including guest start/end reason, conversion, password events,
-policy changes and grants. Public reports contain no credentials, conversation content,
-TOTP secrets or names from unauthorized groups.
+operator encrypted TOTP state separately from public principal shapes (§7.3 does). Guest
+memberships carry watermarks; immutable attribution survives membership removal. Audit
+changes in the committing transaction, including guest start/end reason, conversion,
+password events, policy changes and grants. Public reports contain no credentials,
+conversation content, TOTP secrets or names from unauthorized groups.
 
 ## 8. Abuse limits and security cases
 
@@ -531,7 +785,9 @@ TOTP secrets or names from unauthorized groups.
   point, never the address, following the invite audit rule (`invite_limits.go`) (F13).
 - Join defaults retain existing invite limiter behavior: per-address 10 per ten minutes,
   shared server-wide creation limit 20/minute. Name-conflict probes get a separate five/hour
-  allowance. Guest names are generated, so guests cannot probe/reserve permanent names.
+  allowance, one bucket shared by `POST /v1/join/account`, `POST /v2/invites/redeem` and
+  `POST /v1/guest/convert`. Guest names are generated, so guests cannot probe/reserve
+  permanent names.
 - Login defaults: ten **failures** per address per ten minutes (successes spend nothing),
   and the per-name window of §5.2: five failures per name key per ten minutes, then an
   immediate 429 with a not-before time, never a server-side delay; the same policy for
@@ -585,7 +841,10 @@ Required real-server isolation and browser tests:
    login. Verify same principal/history bounds and no new permissions.
 8. Member create → logout → password login on a new browser works. All failure classes
    share response shape. Reset/change invalidate old sessions, pending auth and all links;
-   wrong/expired/replayed/cross-purpose reset proofs fail.
+   wrong/expired/replayed/cross-purpose reset proofs fail. An enrollment proof made for
+   another principal, or a link of any other purpose presented as one, is refused with
+   `sign_in_link_invalid` and sets no password (G4). An operator with a password but no
+   confirmed TOTP, and one with neither, gets `auth_failed` from `POST /v1/login`.
 9. Operator password alone yields no API access. TOTP enrollment, replay prevention, idle/
    absolute expiry, recent-auth coverage and offline recovery tested. Script tokens cannot
    mint MFA sessions. Test official RFC vectors and clock-window boundaries.
@@ -628,7 +887,10 @@ a private scratchpad. Track larger slices as parents with bounded child PRs.
 | G10 | Browser/session end-to-end acceptance and documentation | web/e2e, tester/deploy guides, schema fixtures | G6, G7, G8, G9 |
 
 G2 and G4 can start after G1, with ownership agreed for overlapping principal/store files.
-G3 follows their contracts; no placeholder passwordless signup ships while G4 is missing.
+G3 follows their contracts; no placeholder passwordless signup ships while G4 is missing:
+`POST /v1/join/account`, `POST /v2/invites/redeem` and `POST /v1/guest/convert` are
+registered by #707 together with migration 32 (§7.3), never by #705, and #705 lands the
+store's reserved-`guest` refusal with migration 31.
 Stage coherent slices behind disabled feature policy until their isolation tests pass.
 
 G2 and any other child changing approval request/decision authorization are **approval-path**:

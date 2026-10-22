@@ -38,8 +38,9 @@ export type OwnSession =
 export interface OwnSessionControl {
   readonly session: OwnSession;
   // release ends the session now, while the credential is still held. Sign-out
-  // calls it before the credential goes.
-  readonly release: () => void;
+  // calls it before the credential goes, and waits for the answer: the revoke
+  // would otherwise race it and leave the session's own end answered 404.
+  readonly release: () => Promise<void>;
   // replace is for a session the server ended: it is forgotten, not ended
   // again, and one new one is made, once until the socket has been healthy.
   readonly replace: () => void;
@@ -57,6 +58,9 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // Counts the sessions asked for; an answer for an older one is ended at once.
   const generation = useRef(0);
   const replaced = useRef(false);
+  // Set by release: the session was ended on purpose (sign-out), so the
+  // server's closing of its socket is not a reason to make another.
+  const released = useRef(false);
   // The wait before the next replacement, doubling from 1 s to 30 s, so a
   // server that keeps ending sessions after a roster cannot drive the page at
   // network speed. A session that lived 30 s starts it over.
@@ -64,14 +68,24 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   const born = useRef(0);
   const timer = useRef<number | null>(null);
 
-  const release = useCallback(() => {
+  // end ends the held session now. pagehide and the effect's cleanup call it
+  // alone: a page restored from the back-forward cache makes a new session
+  // when the server closes the old one's socket, as before.
+  const end = useCallback((): Promise<void> => {
     generation.current++;
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = null;
     const id = held.current;
     held.current = null;
-    if (id !== null) api.endSession(id);
+    return id === null ? Promise.resolve() : api.endSession(id);
   }, []);
+
+  // release is sign-out's: it ends the session and marks it ended on purpose,
+  // so no replacement follows (issue #645).
+  const release = useCallback((): Promise<void> => {
+    released.current = true;
+    return end();
+  }, [end]);
 
   const start = useCallback(
     (why: 'ended' | 'unavailable') => {
@@ -80,7 +94,7 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
       void api.createSession(sessionClient).then((result) => {
         if (mine !== generation.current) {
           // Signed out, or replaced, while it was being made.
-          if (result.ok) api.endSession(result.value.id);
+          if (result.ok) void api.endSession(result.value.id);
           return;
         }
         if (result.ok) {
@@ -103,19 +117,21 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
       return;
     }
     replaced.current = false;
+    released.current = false;
     gap.current = 0;
     start('unavailable');
     const onHide = () => {
-      release();
+      void end();
     };
     window.addEventListener('pagehide', onHide);
     return () => {
       window.removeEventListener('pagehide', onHide);
-      release();
+      void end();
     };
-  }, [active, start, release]);
+  }, [active, start, end]);
 
   const replace = useCallback(() => {
+    if (released.current) return;
     if (replaced.current) {
       // One new session per healthy stretch: a server that keeps ending them
       // cannot make the page create sessions in a loop.
@@ -152,7 +168,7 @@ export interface Agents {
   readonly state: AgentsState;
   readonly session: OwnSession;
   readonly members: readonly ChannelMemberV1[];
-  readonly release: () => void;
+  readonly release: () => Promise<void>;
   readonly loadRuns: (session: number) => void;
   readonly openRun: (runId: number, sessionId: number, known: RunV1 | null) => void;
   // closeRun leaves run detail; a notice, if given, is the line the panel

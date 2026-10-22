@@ -1,0 +1,11 @@
+{
+  "server_name": "conch.example",
+  "join": {
+    "guest": true,
+    "account": true
+  },
+  "password_login": true,
+  "voice": true,
+  "guest_idle_seconds": 7200,
+  "guest_absolute_seconds": 86400
+}

@@ -22,7 +22,7 @@ import (
 // principal they sign in as, and what they are for.
 var participants = []struct{ name, principal, what string }{
 	{"tui-a", "nick-test", "terminal 1: nick-test"},
-	{"tui-b", "guest-test", "terminal 2: guest-test"},
+	{"tui-b", "jamie-test", "terminal 2: jamie-test"},
 	{"tui-a2", "nick-test", "terminal 3: nick-test again, with a second credential"},
 	{"agent-a", "worker-test", "worker-test, the scripted agent that can post"},
 	{"agent-b", "observer-test", "observer-test, the scripted agent that can only read"},
@@ -281,10 +281,10 @@ func (r *runner) printCommands() error {
 	say("")
 	cmd("nick-test posts to the red net of nets-demo", r.asConch("tui-a", "send", "--net", "red", chNets, "'hello red'"))
 	cmd("nick-test whispers to worker-test", r.asConch("tui-a", "send", "--to", pid("worker-test"), chGeneral, "'hello, a whisper'"))
-	cmd("guest-test follows nets-demo (it monitors the red net; ctrl-c ends it)", r.asConch("tui-b", "tail", chNets))
-	cmd("guest-test looks for a word in general", r.asConch("tui-b", "search", chGeneral, "hello"))
-	cmd("guest-test is not in test-private: the CLI is refused", r.asConch("tui-b", "tail", chPrivate))
-	cmd("guest-test is refused by the API itself (prints the status code)",
+	cmd("jamie-test follows nets-demo (it monitors the red net; ctrl-c ends it)", r.asConch("tui-b", "tail", chNets))
+	cmd("jamie-test looks for a word in general", r.asConch("tui-b", "search", chGeneral, "hello"))
+	cmd("jamie-test is not in test-private: the CLI is refused", r.asConch("tui-b", "tail", chPrivate))
+	cmd("jamie-test is refused by the API itself (prints the status code)",
 		r.source("tui-b.env")+`curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $CONCH_TOKEN" `+shq(r.baseURL()+"/v2/channels/"+chPrivate+"/messages"))
 	cmd("who is this credential", r.asConch("tui-a", "whoami"))
 	cmd("voice is not configured here: no LiveKit", r.asConch("tui-a", "voice", "status", chGeneral))
@@ -340,7 +340,7 @@ func (r *runner) guestCommands(say func(string, ...any), cmd func(comment, comma
 	say("# On the guest, in a checkout of this repository: go build -o ~/conch-p3/bin/ ./cmd/conch ./cmd/conch-adapter")
 	say("# On the guest, the address in these commands is the host; a name for the guest itself would be the guest.")
 	say("# Stop tui-b and agent-a on this machine (ctrl-c) before starting them on the guest: two clients on one credential would be one person twice.")
-	cmd("guest: conch as guest-test (tui-b)",
+	cmd("guest: conch as jamie-test (tui-b)",
 		"set -a; . "+home+"/tui-b.env; CONCH_CONFIG_DIR="+home+"/config/tui-b; set +a; "+home+"/bin/conch")
 	say("# guest: the browser. Open %s/app/ in it and paste the credential from this file", r.baseURL())
 	say("cat %s/browser.txt", home)
@@ -430,10 +430,10 @@ func (r *runner) checkParticipants() error {
 			}
 		}
 		if n != 1 {
-			return fmt.Errorf("guest-test sees %q %d times, want once", body, n)
+			return fmt.Errorf("jamie-test sees %q %d times, want once", body, n)
 		}
 	}
-	step("guest-test reads each of those messages once, with the right author")
+	step("jamie-test reads each of those messages once, with the right author")
 
 	if err := r.checkAgentA(); err != nil {
 		return err

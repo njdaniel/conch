@@ -67,6 +67,22 @@ type Principal struct {
 	// account unless an invite made without it. Every voice route refuses a
 	// person without it (voicePresenceChannel, internal/server/voice.go).
 	VoiceAllowed bool
+	// GuestState is the state of the principal's guest visit (issue #705):
+	// active while it is a guest, ended or converted after, and empty for a
+	// principal that never was one. It is read from guest_visits, never
+	// from the name.
+	GuestState schema.GuestState
+}
+
+// IsGuest reports whether p is a guest now: its visit is active. A converted
+// guest is a member; an ended one can no longer authenticate.
+func (p Principal) IsGuest() bool { return p.GuestState == schema.GuestStateActive }
+
+// guestTarget reports whether p is, or was and never stopped being, a guest:
+// its visit is active or ended. Such a principal may be given no credential,
+// link, name or hide; a converted one is a member like any other.
+func (p Principal) guestTarget() bool {
+	return p.GuestState == schema.GuestStateActive || p.GuestState == schema.GuestStateEnded
 }
 
 // Channel is a named message stream.
@@ -93,6 +109,10 @@ type Message struct {
 	Audience *schema.Audience
 	// ThreadRootID is the message this one replies to; zero when it is not a reply.
 	ThreadRootID int64
+	// GuestAuthor is the attribution stored with a message its author posted
+	// as a guest (issue #705), nil for every other message. It never
+	// changes, whatever the author does or is called later.
+	GuestAuthor *schema.GuestAttributionV1
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text
@@ -269,10 +289,12 @@ func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found
 	var kind, role string
 	var createdAt int64
 	var disabledAt, hiddenAt, invitedBy, inviteID sql.NullInt64
+	var guest sql.NullString
 	err = q.QueryRowContext(ctx,
-		`SELECT id, kind, name, role, created_at, disabled_at, hidden_at, invited_by, invite_id, may_invite, voice_allowed
+		`SELECT id, kind, name, role, created_at, disabled_at, hidden_at, invited_by, invite_id, may_invite, voice_allowed,
+		        (SELECT state FROM guest_visits WHERE principal_id = principals.id)
 		 FROM principals WHERE id = ?`, id,
-	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed)
+	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &guest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, false, nil
 	}
@@ -284,6 +306,7 @@ func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found
 	p.CreatedAt = time.UnixMilli(createdAt)
 	p.InvitedBy = invitedBy.Int64
 	p.InviteID = inviteID.Int64
+	p.GuestState = schema.GuestState(guest.String)
 	if disabledAt.Valid {
 		t := time.UnixMilli(disabledAt.Int64)
 		p.DisabledAt = &t
@@ -311,19 +334,23 @@ func (s *Store) InsertMessageV1(
 	// what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
 	var id int64
+	var guest *schema.GuestAttributionV1
 	// BEGIN IMMEDIATE, like the scoped insert: the message insert fires the
 	// full-text index trigger (migration 15), and with a deferred transaction
 	// concurrent posts failed with SQLITE_BUSY that the busy timeout does not
 	// retry. Taking the write lock first makes them queue instead.
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		var err error
-		id, err = insertChannelWideTx(ctx, tx, channelID, authorID, body, payload, 0, now)
+		if id, err = insertChannelWideTx(ctx, tx, channelID, authorID, body, payload, 0, now); err != nil {
+			return err
+		}
+		guest, err = guestAuthorTx(ctx, tx, id)
 		return err
 	})
 	if err != nil {
 		return Message{}, err
 	}
-	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now}, nil
+	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now, GuestAuthor: guest}, nil
 }
 
 // insertChannelWideTx stores a channel-wide message (a reply to a channel-wide

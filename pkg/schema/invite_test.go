@@ -36,6 +36,11 @@ func TestInviteGoldenFixtures(t *testing.T) {
 		{"disable-invitees-request-v1-direct.json", func() any { return new(DisableInviteesRequestV1) }},
 		{"invite-permission-request-v1.json", func() any { return new(InvitePermissionRequestV1) }},
 		{"invite-settings-v1.json", func() any { return new(InviteSettingsV1) }},
+		// Join modes (ADR-009, issue #704).
+		{"invite-v1-guest.json", func() any { return new(InviteV1) }},
+		{"create-invite-request-v1-guest.json", func() any { return new(CreateInviteRequestV1) }},
+		{"invite-preview-v1-guest.json", func() any { return new(InvitePreviewV1) }},
+		{"invite-preview-v1-guests-off.json", func() any { return new(InvitePreviewV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -285,6 +290,45 @@ func TestDisableInviteesRequestV1(t *testing.T) {
 			}
 			if got := tt.req.EffectiveDepth(); got != tt.wantDepth {
 				t.Errorf("EffectiveDepth = %q, want %q", got, tt.wantDepth)
+			}
+		})
+	}
+}
+
+// An invite admits accounts unless it says otherwise, and an unknown mode
+// is refused rather than read as one of the known ones.
+func TestCreateInviteRequestV1JoinAs(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	base := CreateInviteRequestV1{Kind: InviteKindOpen, Channels: []string{"lobby"}}
+	tests := []struct {
+		name    string
+		joinAs  InviteJoinMode
+		wantErr string
+		want    InviteJoinMode
+	}{
+		{"absent", "", "", InviteJoinAccount},
+		{"account", InviteJoinAccount, "", InviteJoinAccount},
+		{"guest", InviteJoinGuest, "", InviteJoinGuest},
+		{"both", InviteJoinBoth, "", InviteJoinBoth},
+		{"off is not a mode an invite has", "off", "join_as", ""},
+		{"unknown", "anyone", "join_as", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := base
+			req.JoinAs = tt.joinAs
+			err := req.Validate(now)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Validate = %v, want an error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate = %v", err)
+			}
+			if got := req.EffectiveJoinAs(); got != tt.want {
+				t.Errorf("EffectiveJoinAs = %s, want %s", got, tt.want)
 			}
 		})
 	}

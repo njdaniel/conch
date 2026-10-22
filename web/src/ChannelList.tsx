@@ -42,6 +42,7 @@ export function ChannelList({
   selected,
   unread,
   occupancy = nobody,
+  empty = 'No channels yet: an operator needs to add you to one',
   onOpen,
 }: {
   readonly channels: readonly ChannelV0[];
@@ -50,6 +51,9 @@ export function ChannelList({
   readonly unread: ReadonlyMap<string, number>;
   // How many are in each channel's voice, by id; nobody, no entry.
   readonly occupancy?: InVoice;
+  // What an empty list says: by default, who can change that. Someone who can
+  // make a channel is told less, with the control to do it beside the list.
+  readonly empty?: string;
   readonly onOpen: (name: string) => void;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
@@ -104,7 +108,7 @@ export function ChannelList({
   }
 
   if (channels.length === 0) {
-    return <p className="empty">No channels yet: an operator needs to add you to one</p>;
+    return <p className="empty">{empty}</p>;
   }
   return (
     <ul className={`channel-list${more}`} ref={list}>

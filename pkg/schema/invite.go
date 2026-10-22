@@ -38,6 +38,32 @@ func (k InviteKind) Valid() bool {
 	}
 }
 
+// InviteJoinMode says what an invite admits (ADR-009 D1, design §2): an
+// account, a temporary guest visit, or either. An invite with no mode on
+// the wire predates modes and admits accounts only. A guest mode takes
+// effect only while the server's guests_enabled switch is on; the invite
+// cannot override server policy. The vocabulary is closed.
+type InviteJoinMode string
+
+const (
+	// InviteJoinAccount: Create an account only. The default.
+	InviteJoinAccount InviteJoinMode = "account"
+	// InviteJoinGuest: Join as guest only.
+	InviteJoinGuest InviteJoinMode = "guest"
+	// InviteJoinBoth: either.
+	InviteJoinBoth InviteJoinMode = "both"
+)
+
+// Valid reports whether m is a recognized join mode.
+func (m InviteJoinMode) Valid() bool {
+	switch m {
+	case InviteJoinAccount, InviteJoinGuest, InviteJoinBoth:
+		return true
+	default:
+		return false
+	}
+}
+
 const (
 	// InviteCodePrefix starts every invite code.
 	InviteCodePrefix = "conch_inv_"
@@ -104,7 +130,9 @@ type InviteChannelV1 struct {
 
 // InviteV1 describes one invite. It never carries the code or its hash.
 // MaxUses is omitted when uncapped and is always 1 for a personal invite;
-// ClosedAt is omitted while the invite is open.
+// ClosedAt is omitted while the invite is open. JoinAs is what the invite
+// admits (issue #704); a server that predates it omits it, which means
+// account, and a server with it always sends it.
 type InviteV1 struct {
 	ID                        int64             `json:"id"`
 	Kind                      InviteKind        `json:"kind"`
@@ -118,21 +146,34 @@ type InviteV1 struct {
 	Voice                     bool              `json:"voice"`
 	MayInvite                 bool              `json:"may_invite"`
 	CredentialLifetimeSeconds int64             `json:"credential_lifetime_seconds"`
+	JoinAs                    InviteJoinMode    `json:"join_as,omitempty"`
 }
 
 // CreateInviteRequestV1 is the body of the route that makes an invite.
-// Channels are names. ExpiresAt, MayInvite and CredentialLifetimeSeconds are
-// optional: the server applies EffectiveExpiry, EffectiveMayInvite and
-// EffectiveCredentialLifetime. MaxUses is for open invites only and is absent
-// by default (no cap).
+// Channels are names. ExpiresAt, MayInvite, CredentialLifetimeSeconds and
+// JoinAs are optional: the server applies EffectiveExpiry,
+// EffectiveMayInvite, EffectiveCredentialLifetime and EffectiveJoinAs.
+// MaxUses is for open invites only and is absent by default (no cap).
 type CreateInviteRequestV1 struct {
-	Kind                      InviteKind `json:"kind"`
-	Channels                  []string   `json:"channels"`
-	ExpiresAt                 *Timestamp `json:"expires_at,omitempty"`
-	MaxUses                   *int64     `json:"max_uses,omitempty"`
-	Voice                     bool       `json:"voice"`
-	MayInvite                 *bool      `json:"may_invite,omitempty"`
-	CredentialLifetimeSeconds *int64     `json:"credential_lifetime_seconds,omitempty"`
+	Kind                      InviteKind     `json:"kind"`
+	Channels                  []string       `json:"channels"`
+	ExpiresAt                 *Timestamp     `json:"expires_at,omitempty"`
+	MaxUses                   *int64         `json:"max_uses,omitempty"`
+	Voice                     bool           `json:"voice"`
+	MayInvite                 *bool          `json:"may_invite,omitempty"`
+	CredentialLifetimeSeconds *int64         `json:"credential_lifetime_seconds,omitempty"`
+	JoinAs                    InviteJoinMode `json:"join_as,omitempty"`
+}
+
+// EffectiveJoinAs is what the invite admits: the requested mode, or
+// account. Existing invites, and new ones that say nothing, admit accounts
+// only (ADR-009 D1). A guest visit through an invite grants no more than
+// the invite's maker holds, as an account does.
+func (r CreateInviteRequestV1) EffectiveJoinAs() InviteJoinMode {
+	if r.JoinAs == "" {
+		return InviteJoinAccount
+	}
+	return r.JoinAs
 }
 
 // EffectiveExpiry is the expiry the invite gets: the requested one, or the
@@ -166,13 +207,17 @@ func (r CreateInviteRequestV1) EffectiveCredentialLifetime() time.Duration {
 // Validate reports whether the request is well-formed at the instant now: the
 // kind is known; the expiry, when present, is in the future and within the
 // maximum for the kind; a personal invite has no max_uses and an open one's is
-// positive; there are 1 to MaxInviteChannels distinct, valid channel names; and
+// positive; there are 1 to MaxInviteChannels distinct, valid channel names;
 // the credential lifetime, when present, is positive and at most
-// MaxInviteCredentialLifetimeSeconds. Whether the maker may grant what is asked
-// is the store's rule, not this one's.
+// MaxInviteCredentialLifetimeSeconds; and join_as, when present, is known.
+// Whether the maker may grant what is asked is the store's rule, not this
+// one's.
 func (r CreateInviteRequestV1) Validate(now time.Time) error {
 	if !r.Kind.Valid() {
 		return fmt.Errorf("schema: invite kind must be one of: %s", strings.Join(Vocabularies["InviteKind"], ", "))
+	}
+	if r.JoinAs != "" && !r.JoinAs.Valid() {
+		return fmt.Errorf("schema: invite join_as must be one of: %s", strings.Join(Vocabularies["InviteJoinMode"], ", "))
 	}
 	maxLifetime := MaxPersonalInviteLifetime
 	if r.Kind == InviteKindOpen {
@@ -253,16 +298,25 @@ func (r InvitePreviewRequestV1) Validate() error { return ValidateInviteCode(r.C
 
 // InvitePreviewV1 is what someone holding a code may learn before joining:
 // who invited them and what they would get. Nothing else: no member counts and
-// no message content.
+// no message content. Join is what the invite offers right now, after the
+// server's switches are applied to its join_as (issue #704); a server that
+// predates guests omits it, which means an account and nothing else.
 type InvitePreviewV1 struct {
-	Kind      InviteKind `json:"kind"`
-	Inviter   string     `json:"inviter"`
-	Channels  []string   `json:"channels"`
-	Voice     bool       `json:"voice"`
-	ExpiresAt Timestamp  `json:"expires_at"`
+	Kind      InviteKind     `json:"kind"`
+	Inviter   string         `json:"inviter"`
+	Channels  []string       `json:"channels"`
+	Voice     bool           `json:"voice"`
+	ExpiresAt Timestamp      `json:"expires_at"`
+	Join      *JoinOptionsV1 `json:"join,omitempty"`
 }
 
 // RedeemInviteRequestV1 uses an invite: Name is the new account's name.
+//
+// It makes an account with no password, which ADR-009 ends: once passwords
+// exist (migration 32) its route answers ErrorCodePasswordRequired and
+// makes nothing, and a client redeems with RedeemInviteRequestV2 instead.
+// The shape is published and unchanged; the route's retirement is listed
+// for the owner's sign-off in docs/design/guests-and-accounts.md §7.
 type RedeemInviteRequestV1 struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
@@ -279,11 +333,59 @@ func (r RedeemInviteRequestV1) Validate() error {
 
 // RedeemInviteResponseV1 is the response to using an invite: the new principal
 // and its first credential. Token is the plaintext bearer token, shown only
-// here.
+// here. POST /v2/invites/redeem answers with it too.
 type RedeemInviteResponseV1 struct {
 	Principal  PrincipalV0  `json:"principal"`
 	Credential CredentialV1 `json:"credential"`
 	Token      string       `json:"token"`
+}
+
+// RedeemInviteRequestV2 is the body of POST /v2/invites/redeem: Create an
+// account through an invite, name and password together (ADR-009 D3,
+// design §3.1). The account exists only once a usable password is stored;
+// a failed setup makes no account and does not use the invite. Refused
+// with ErrorCodeJoiningClosed by an invite that admits guests only. The
+// response is RedeemInviteResponseV1.
+type RedeemInviteRequestV2 struct {
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	Password string `json:"password"`
+}
+
+// Validate reports whether the code is well-formed, the name acceptable as
+// a permanent human principal name outside the reserved guest namespace,
+// and the password passes ValidatePassword.
+func (r RedeemInviteRequestV2) Validate() error {
+	if err := ValidateInviteCode(r.Code); err != nil {
+		return err
+	}
+	if err := validatePermanentName(r.Name); err != nil {
+		return err
+	}
+	return ValidatePassword(r.Password)
+}
+
+// RedeemInviteGuestRequestV1 is the body of POST /v1/invites/redeem-guest:
+// Join as guest through an invite whose join_as admits guests, while the
+// server's guests_enabled switch is on (ErrorCodeGuestsDisabled otherwise).
+// Label is the optional display label (design §4.1). The visit's absolute
+// deadline is the earlier of the server's bound and the invite's credential
+// lifetime; the response is JoinGuestResponseV1.
+type RedeemInviteGuestRequestV1 struct {
+	Code  string `json:"code"`
+	Label string `json:"label,omitempty"`
+}
+
+// Validate reports whether the code is well-formed and the label, when
+// given, passes ValidateGuestLabel.
+func (r RedeemInviteGuestRequestV1) Validate() error {
+	if err := ValidateInviteCode(r.Code); err != nil {
+		return err
+	}
+	if r.Label == "" {
+		return nil
+	}
+	return ValidateGuestLabel(r.Label)
 }
 
 // ListInvitesResponseV1 is the response to listing invites. Producers must

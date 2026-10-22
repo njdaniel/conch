@@ -34,7 +34,7 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	// principal_created is written with the principal (issue #445).
 	principal, err := s.store.CreatePrincipalAs(ctx, auditActor(ctx), store.PrincipalKind(req.Kind), req.Name)
 	if errors.Is(err, store.ErrNameReserved) {
-		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessage)
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessageFor(err))
 		return
 	}
 	if errors.Is(err, store.ErrDuplicate) {
@@ -122,13 +122,17 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
+	case errors.Is(err, store.ErrGuestNotHideable):
+		// Issue #705, review F10: a guest's name is its handle, whoever asks.
+		writeGuestNotHideable(w)
+		return
 	case errors.Is(err, store.ErrNameInvalid):
 		writeError(w, http.StatusBadRequest, "invalid_request", nameInvisibleMessage)
 		return
 	case errors.Is(err, store.ErrNameReserved):
 		// Not counted as a refused attempt: it says nothing of who is on the
 		// server, which is what the attempt limit guards.
-		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessage)
+		writeError(w, http.StatusConflict, schema.ErrorCodePrincipalExists, nameReservedMessageFor(err))
 		return
 	case errors.Is(err, store.ErrDuplicate):
 		if self {
@@ -171,7 +175,25 @@ const (
 	// with the 409 a taken name gets: clients already ask for another.
 	nameReservedMessage  = "names beginning with " + schema.HiddenPrincipalNamePrefix + " are reserved; choose another"
 	nameInvisibleMessage = "schema: principal name must have a character a reader can see"
+	// guestNameReservedMessage answers a permanent name in the guest
+	// namespace (issue #705), which only the server gives, to guests.
+	guestNameReservedMessage = "names beginning with " + schema.ReservedGuestNameKeyPrefix + ", or with a look-alike of it, are reserved for guests; choose another"
 )
+
+// nameReservedMessageFor is the message of a 409 for a reserved name: the
+// guest namespace's or the hidden prefix's.
+func nameReservedMessageFor(err error) string {
+	if errors.Is(err, store.ErrGuestNameReserved) {
+		return guestNameReservedMessage
+	}
+	return nameReservedMessage
+}
+
+// writeGuestNotHideable is the 409 for a rename or hide of a guest.
+func writeGuestNotHideable(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeGuestNotHideable,
+		"a guest keeps its handle: it is not renamed or hidden; end the visit instead")
+}
 
 func principalFromStore(principal store.Principal) schema.PrincipalV0 {
 	return schema.PrincipalV0{

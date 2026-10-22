@@ -21,6 +21,7 @@ func TestMessageV2GoldenFixtures(t *testing.T) {
 		{name: "net", file: "message-v2-net.json", new: func() any { return &MessageV2{} }},
 		{name: "whisper", file: "message-v2-whisper.json", new: func() any { return &MessageV2{} }},
 		{name: "reply", file: "message-v2-reply.json", new: func() any { return &MessageV2{} }},
+		{name: "guest author", file: "message-v2-guest.json", new: func() any { return &MessageV2{} }},
 		{name: "post request reply", file: "post-message-request-v2-reply.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post request", file: "post-message-request-v2.json", new: func() any { return &PostMessageRequestV2{} }},
 		{name: "post request net", file: "post-message-request-v2-net.json", new: func() any { return &PostMessageRequestV2{} }},
@@ -116,6 +117,16 @@ func TestMessageV2Validate(t *testing.T) {
 			m.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 4}}
 		}},
 		{name: "valid reply", mutate: func(m *MessageV2) { m.ID, m.ThreadRootID = 5, 4 }},
+		// A guest's post keeps its attribution (ADR-009 §4.4, issue #704).
+		{name: "valid guest author", mutate: func(m *MessageV2) {
+			m.GuestAuthor = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}},
+		{name: "guest author with a name for a handle", mutate: func(m *MessageV2) {
+			m.GuestAuthor = &GuestAttributionV1{Handle: "river", Tag: "rive"}
+		}, wantErr: "message guest_author: schema: malformed guest handle"},
+		{name: "guest author with a wrong tag", mutate: func(m *MessageV2) {
+			m.GuestAuthor = &GuestAttributionV1{Handle: goodHandle, Tag: "zx9w"}
+		}, wantErr: "guest attribution tag must be the handle's tag"},
 		{name: "negative thread root", mutate: func(m *MessageV2) { m.ThreadRootID = -1 }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
 		{name: "thread root is itself", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
 		{name: "thread root is later", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID + 1 }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},

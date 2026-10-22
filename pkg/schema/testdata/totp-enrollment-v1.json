@@ -1,0 +1,9 @@
+{
+  "secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+  "issuer": "conch.example",
+  "account": "op",
+  "algorithm": "SHA1",
+  "digits": 6,
+  "period_seconds": 30,
+  "uri": "otpauth://totp/conch.example:op?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP\u0026issuer=conch.example\u0026algorithm=SHA1\u0026digits=6\u0026period=30"
+}

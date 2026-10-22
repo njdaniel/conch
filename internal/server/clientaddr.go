@@ -164,3 +164,34 @@ func logAddr(a netip.Addr) string {
 	p, _ := a.Prefix(bits)
 	return p.String()
 }
+
+// secureTransport reports whether r reached conchd in a way a password, code
+// or token may travel (design §5.4, issue #707): over TLS, through a trusted
+// proxy that says the client used HTTPS, or from loopback, the development
+// exception. conchd itself serves plain HTTP behind the deployment's proxy,
+// so in production the answer is the proxy's X-Forwarded-Proto, and only a
+// proxy the operator named is believed.
+//
+// A request that carries a forwarding header (X-Forwarded-For,
+// X-Forwarded-Proto or Forwarded) from a peer that is not a trusted proxy is
+// refused whatever else holds: either a client is asserting what it should
+// not, or a proxy the operator did not configure stands in front, and then
+// the peer being loopback says nothing about the client's own connection.
+// From a trusted proxy the rightmost X-Forwarded-Proto entry, the one that
+// proxy wrote, must be https; anything else, or none, is refused.
+func secureTransport(r *http.Request, trusted []netip.Prefix) bool {
+	peer := remoteAddr(r.RemoteAddr)
+	forwarded := len(r.Header.Values("X-Forwarded-For")) > 0 || len(r.Header.Values("X-Forwarded-Proto")) > 0 ||
+		len(r.Header.Values("Forwarded")) > 0
+	if forwarded {
+		if !peer.IsValid() || !inPrefixes(peer, trusted) {
+			return false
+		}
+		protos := strings.Split(strings.Join(r.Header.Values("X-Forwarded-Proto"), ","), ",")
+		return strings.EqualFold(strings.TrimSpace(protos[len(protos)-1]), "https")
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return peer.IsValid() && peer.IsLoopback()
+}

@@ -1,0 +1,7 @@
+{
+  "open_joining": "both",
+  "guests_enabled": true,
+  "open_channels": [
+    "lobby"
+  ]
+}

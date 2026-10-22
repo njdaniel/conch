@@ -28,7 +28,7 @@ const (
 )
 
 var (
-	humanNames = []string{"nick-test", "guest-test", "browser-test"}
+	humanNames = []string{"nick-test", "jamie-test", "browser-test"}
 	agentNames = []string{"worker-test", "observer-test"}
 	everyone   = append(append([]string(nil), humanNames...), agentNames...)
 )
@@ -95,14 +95,14 @@ var channelSpecs = []channelSpec{
 	{chNets, everyone},
 }
 
-// netSpecs are the nets of nets-demo and their roles. They overlap: guest-test
+// netSpecs are the nets of nets-demo and their roles. They overlap: jamie-test
 // is on both.
 var netSpecs = []struct {
 	name  string
 	roles map[string]schema.NetRole
 }{
-	{"red", map[string]schema.NetRole{"nick-test": schema.NetRoleMember, "guest-test": schema.NetRoleMonitor}},
-	{"blue", map[string]schema.NetRole{"guest-test": schema.NetRoleMember, "browser-test": schema.NetRoleMember}},
+	{"red", map[string]schema.NetRole{"nick-test": schema.NetRoleMember, "jamie-test": schema.NetRoleMonitor}},
+	{"blue", map[string]schema.NetRole{"jamie-test": schema.NetRoleMember, "browser-test": schema.NetRoleMember}},
 }
 
 // credSpecs are the credentials issued, one per participant. nick-test has
@@ -111,7 +111,7 @@ type credSpec struct{ participant, principal string }
 
 var credSpecs = []credSpec{
 	{"tui-a", "nick-test"},
-	{"tui-b", "guest-test"},
+	{"tui-b", "jamie-test"},
 	{"tui-a2", "nick-test"},
 	{"browser", "browser-test"},
 	{"agent-a", "worker-test"},

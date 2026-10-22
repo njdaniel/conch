@@ -141,12 +141,14 @@ func memberDocs(members []store.ChannelMember, viewer *store.Principal) []schema
 			canDecide = canDecideField(m)
 		}
 		docs = append(docs, schema.ChannelMemberV1{
-			PrincipalID: m.PrincipalID,
-			AddedBy:     m.AddedBy,
-			CreatedAt:   schema.NewTimestamp(m.CreatedAt),
-			Name:        m.Name,
-			Kind:        schema.PrincipalKind(m.Kind),
-			CanDecide:   canDecide,
+			PrincipalID:  m.PrincipalID,
+			AddedBy:      m.AddedBy,
+			CreatedAt:    schema.NewTimestamp(m.CreatedAt),
+			Name:         m.Name,
+			Kind:         schema.PrincipalKind(m.Kind),
+			CanDecide:    canDecide,
+			HistoryAfter: m.HistoryAfter,
+			Guest:        m.Guest,
 		})
 	}
 	return docs
@@ -235,6 +237,11 @@ func (s *Server) writeMemberError(w http.ResponseWriter, r *http.Request, err er
 		writeChannelNotFound(w)
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
+	case errors.Is(err, store.ErrGuestNotAllowed):
+		// Issue #705, review F1: a guest is never given the right to decide.
+		writeError(w, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed, "a guest cannot be given the right to decide approvals")
+	case errors.Is(err, store.ErrGuestEnded):
+		writeError(w, http.StatusConflict, schema.ErrorCodeGuestEnded, "the guest visit has ended")
 	default:
 		slog.ErrorContext(r.Context(), "members: write failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

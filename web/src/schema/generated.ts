@@ -17,6 +17,92 @@ export type PrincipalRole = 'operator' | 'member';
 
 export const principalRole = vocab<PrincipalRole>({ operator: true, member: true });
 
+// schema.IdentityClass
+export type IdentityClass = 'guest' | 'member' | 'operator' | 'agent';
+
+export const identityClass = vocab<IdentityClass>({
+  guest: true,
+  member: true,
+  operator: true,
+  agent: true,
+});
+
+// schema.GuestState
+export type GuestState = 'active' | 'ended' | 'converted';
+
+export const guestState = vocab<GuestState>({ active: true, ended: true, converted: true });
+
+// schema.GuestOrigin
+export type GuestOrigin = 'address' | 'invite';
+
+export const guestOrigin = vocab<GuestOrigin>({ address: true, invite: true });
+
+// schema.GuestEndReason
+export type GuestEndReason = 'end_visit' | 'idle' | 'expired' | 'operator' | 'restore';
+
+export const guestEndReason = vocab<GuestEndReason>({
+  end_visit: true,
+  idle: true,
+  expired: true,
+  operator: true,
+  restore: true,
+});
+
+// schema.GuestV1
+export interface GuestV1 {
+  state: GuestState;
+  origin: GuestOrigin;
+  handle: string;
+  label?: string;
+  tag: string;
+  started_at: string;
+  expires_at: string;
+  idle_expires_at: string;
+  ended_at?: string;
+  end_reason?: GuestEndReason;
+  can_convert: boolean;
+}
+
+export const guestV1 = object<GuestV1>({
+  state: guestState,
+  origin: guestOrigin,
+  handle: str,
+  label: optional(str),
+  tag: str,
+  started_at: timestamp,
+  expires_at: timestamp,
+  idle_expires_at: timestamp,
+  ended_at: optional(timestamp),
+  end_reason: optional(guestEndReason),
+  can_convert: bool,
+});
+
+// schema.CredentialScope
+export type CredentialScope = 'full' | 'setup';
+
+export const credentialScope = vocab<CredentialScope>({ full: true, setup: true });
+
+// schema.AuthStateV1
+export interface AuthStateV1 {
+  scope: CredentialScope;
+  password_set: boolean;
+  totp_enrolled?: boolean;
+  setup_complete: boolean;
+  expires_at?: string;
+  idle_expires_at?: string;
+  recent_auth_until?: string;
+}
+
+export const authStateV1 = object<AuthStateV1>({
+  scope: credentialScope,
+  password_set: bool,
+  totp_enrolled: optional(bool),
+  setup_complete: bool,
+  expires_at: optional(timestamp),
+  idle_expires_at: optional(timestamp),
+  recent_auth_until: optional(timestamp),
+});
+
 // schema.WhoAmIResponseV1
 export interface WhoAmIResponseV1 {
   id: number;
@@ -27,6 +113,9 @@ export interface WhoAmIResponseV1 {
   may_invite?: boolean;
   voice_allowed?: boolean;
   invites_remaining?: number;
+  identity_class?: IdentityClass;
+  guest?: GuestV1;
+  auth?: AuthStateV1;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -38,6 +127,9 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   may_invite: optional(bool),
   voice_allowed: optional(bool),
   invites_remaining: optional(int),
+  identity_class: optional(identityClass),
+  guest: optional(guestV1),
+  auth: optional(authStateV1),
 });
 
 // schema.ChannelV0
@@ -62,6 +154,37 @@ export const listChannelsResponse = object<ListChannelsResponse>({
   channels: array(channelV0),
 });
 
+// schema.CreateChannelRequest
+export interface CreateChannelRequest {
+  name: string;
+}
+
+export const createChannelRequest = object<CreateChannelRequest>({
+  name: str,
+});
+
+// schema.CreateChannelResponse
+export interface CreateChannelResponse {
+  channel: ChannelV0;
+}
+
+export const createChannelResponse = object<CreateChannelResponse>({
+  channel: channelV0,
+});
+
+// schema.GuestAttributionV1
+export interface GuestAttributionV1 {
+  handle: string;
+  label?: string;
+  tag: string;
+}
+
+export const guestAttributionV1 = object<GuestAttributionV1>({
+  handle: str,
+  label: optional(str),
+  tag: str,
+});
+
 // schema.ChannelMemberV1
 export interface ChannelMemberV1 {
   principal_id: number;
@@ -70,6 +193,8 @@ export interface ChannelMemberV1 {
   name?: string;
   kind?: PrincipalKind;
   can_decide?: boolean;
+  history_after?: number;
+  guest?: GuestAttributionV1;
 }
 
 export const channelMemberV1 = object<ChannelMemberV1>({
@@ -79,6 +204,8 @@ export const channelMemberV1 = object<ChannelMemberV1>({
   name: optional(str),
   kind: optional(principalKind),
   can_decide: optional(bool),
+  history_after: optional(int),
+  guest: optional(guestAttributionV1),
 });
 
 // schema.ListChannelMembersResponseV1
@@ -158,6 +285,7 @@ export interface MessageV2 {
   payload?: Payload;
   audience?: Audience;
   thread_root_id?: number;
+  guest_author?: GuestAttributionV1;
 }
 
 export const messageV2 = object<MessageV2>({
@@ -170,6 +298,7 @@ export const messageV2 = object<MessageV2>({
   payload: optional(payload),
   audience: optional(audience),
   thread_root_id: optional(int),
+  guest_author: optional(guestAttributionV1),
 });
 
 // schema.PostMessageRequestV2
@@ -890,6 +1019,8 @@ export interface CredentialV1 {
   expires_at?: string;
   revoked_at?: string;
   renews?: boolean;
+  idle_expires_at?: string;
+  scope?: CredentialScope;
 }
 
 export const credentialV1 = object<CredentialV1>({
@@ -900,6 +1031,8 @@ export const credentialV1 = object<CredentialV1>({
   expires_at: optional(timestamp),
   revoked_at: optional(timestamp),
   renews: optional(bool),
+  idle_expires_at: optional(timestamp),
+  scope: optional(credentialScope),
 });
 
 // schema.InviteChannelV1
@@ -918,6 +1051,11 @@ export type InviteKind = 'personal' | 'open';
 
 export const inviteKind = vocab<InviteKind>({ personal: true, open: true });
 
+// schema.InviteJoinMode
+export type InviteJoinMode = 'account' | 'guest' | 'both';
+
+export const inviteJoinMode = vocab<InviteJoinMode>({ account: true, guest: true, both: true });
+
 // schema.InviteV1
 export interface InviteV1 {
   id: number;
@@ -932,6 +1070,7 @@ export interface InviteV1 {
   voice: boolean;
   may_invite: boolean;
   credential_lifetime_seconds: number;
+  join_as?: InviteJoinMode;
 }
 
 export const inviteV1 = object<InviteV1>({
@@ -947,6 +1086,7 @@ export const inviteV1 = object<InviteV1>({
   voice: bool,
   may_invite: bool,
   credential_lifetime_seconds: int,
+  join_as: optional(inviteJoinMode),
 });
 
 // schema.CreateInviteRequestV1
@@ -958,6 +1098,7 @@ export interface CreateInviteRequestV1 {
   voice: boolean;
   may_invite?: boolean;
   credential_lifetime_seconds?: number;
+  join_as?: InviteJoinMode;
 }
 
 export const createInviteRequestV1 = object<CreateInviteRequestV1>({
@@ -968,6 +1109,7 @@ export const createInviteRequestV1 = object<CreateInviteRequestV1>({
   voice: bool,
   may_invite: optional(bool),
   credential_lifetime_seconds: optional(int),
+  join_as: optional(inviteJoinMode),
 });
 
 // schema.CreateInviteResponseV1
@@ -990,6 +1132,21 @@ export const invitePreviewRequestV1 = object<InvitePreviewRequestV1>({
   code: str,
 });
 
+// schema.JoinOptionsV1
+export interface JoinOptionsV1 {
+  guest: boolean;
+  account: boolean;
+  guests_full?: boolean;
+  paused?: boolean;
+}
+
+export const joinOptionsV1 = object<JoinOptionsV1>({
+  guest: bool,
+  account: bool,
+  guests_full: optional(bool),
+  paused: optional(bool),
+});
+
 // schema.InvitePreviewV1
 export interface InvitePreviewV1 {
   kind: InviteKind;
@@ -997,6 +1154,7 @@ export interface InvitePreviewV1 {
   channels: string[];
   voice: boolean;
   expires_at: string;
+  join?: JoinOptionsV1;
 }
 
 export const invitePreviewV1 = object<InvitePreviewV1>({
@@ -1005,6 +1163,7 @@ export const invitePreviewV1 = object<InvitePreviewV1>({
   channels: array(str),
   voice: bool,
   expires_at: timestamp,
+  join: optional(joinOptionsV1),
 });
 
 // schema.RedeemInviteRequestV1
@@ -1131,13 +1290,26 @@ export const signInLinkPreviewRequestV1 = object<SignInLinkPreviewRequestV1>({
   code: str,
 });
 
+// schema.SignInLinkPurpose
+export type SignInLinkPurpose = 'sign_in' | 'device' | 'reset' | 'enrollment' | 'conversion';
+
+export const signInLinkPurpose = vocab<SignInLinkPurpose>({
+  sign_in: true,
+  device: true,
+  reset: true,
+  enrollment: true,
+  conversion: true,
+});
+
 // schema.SignInLinkPreviewV1
 export interface SignInLinkPreviewV1 {
   name: string;
+  purpose?: SignInLinkPurpose;
 }
 
 export const signInLinkPreviewV1 = object<SignInLinkPreviewV1>({
   name: str,
+  purpose: optional(signInLinkPurpose),
 });
 
 // schema.RedeemSignInLinkRequestV1
@@ -1169,6 +1341,8 @@ export interface SignInLinkV1 {
   created_by: number;
   created_at: string;
   expires_at: string;
+  purpose?: SignInLinkPurpose;
+  label?: string;
 }
 
 export const signInLinkV1 = object<SignInLinkV1>({
@@ -1177,15 +1351,19 @@ export const signInLinkV1 = object<SignInLinkV1>({
   created_by: int,
   created_at: timestamp,
   expires_at: timestamp,
+  purpose: optional(signInLinkPurpose),
+  label: optional(str),
 });
 
 // schema.CreateSignInLinkRequestV1
 export interface CreateSignInLinkRequestV1 {
   expires_at?: string;
+  purpose?: SignInLinkPurpose;
 }
 
 export const createSignInLinkRequestV1 = object<CreateSignInLinkRequestV1>({
   expires_at: optional(timestamp),
+  purpose: optional(signInLinkPurpose),
 });
 
 // schema.CreateSignInLinkResponseV1
@@ -1216,6 +1394,7 @@ export interface OwnCredentialV1 {
   expires_at?: string;
   renews?: boolean;
   current?: boolean;
+  idle_expires_at?: string;
 }
 
 export const ownCredentialV1 = object<OwnCredentialV1>({
@@ -1225,6 +1404,7 @@ export const ownCredentialV1 = object<OwnCredentialV1>({
   expires_at: optional(timestamp),
   renews: optional(bool),
   current: optional(bool),
+  idle_expires_at: optional(timestamp),
 });
 
 // schema.ListOwnCredentialsResponseV1
@@ -1310,6 +1490,7 @@ export interface PrincipalAdminV1 {
   invited_by?: number;
   invite_id?: number;
   live_credentials: number;
+  guest_state?: GuestState;
 }
 
 export const principalAdminV1 = object<PrincipalAdminV1>({
@@ -1323,6 +1504,7 @@ export const principalAdminV1 = object<PrincipalAdminV1>({
   invited_by: optional(int),
   invite_id: optional(int),
   live_credentials: int,
+  guest_state: optional(guestState),
 });
 
 // schema.ListPrincipalsResponseV1
@@ -1384,6 +1566,492 @@ export const hidePrincipalsResponseV1 = object<HidePrincipalsResponseV1>({
   count: int,
   principals: array(hiddenPrincipalV1),
   remaining: int,
+});
+
+// schema.GuestAdminV1
+export interface GuestAdminV1 {
+  id: number;
+  handle: string;
+  label?: string;
+  tag: string;
+  state: GuestState;
+  origin: GuestOrigin;
+  invite_id?: number;
+  started_at: string;
+  last_active_at: string;
+  expires_at: string;
+  idle_expires_at: string;
+  ended_at?: string;
+  end_reason?: GuestEndReason;
+  converted_at?: string;
+}
+
+export const guestAdminV1 = object<GuestAdminV1>({
+  id: int,
+  handle: str,
+  label: optional(str),
+  tag: str,
+  state: guestState,
+  origin: guestOrigin,
+  invite_id: optional(int),
+  started_at: timestamp,
+  last_active_at: timestamp,
+  expires_at: timestamp,
+  idle_expires_at: timestamp,
+  ended_at: optional(timestamp),
+  end_reason: optional(guestEndReason),
+  converted_at: optional(timestamp),
+});
+
+// schema.ListGuestsResponseV1
+export interface ListGuestsResponseV1 {
+  guests: GuestAdminV1[];
+  next_before?: number;
+}
+
+export const listGuestsResponseV1 = object<ListGuestsResponseV1>({
+  guests: array(guestAdminV1),
+  next_before: optional(int),
+});
+
+// schema.EndGuestResponseV1
+export interface EndGuestResponseV1 {
+  guest: GuestAdminV1;
+}
+
+export const endGuestResponseV1 = object<EndGuestResponseV1>({
+  guest: guestAdminV1,
+});
+
+// schema.EndVisitResponseV1
+export interface EndVisitResponseV1 {
+  guest: GuestV1;
+}
+
+export const endVisitResponseV1 = object<EndVisitResponseV1>({
+  guest: guestV1,
+});
+
+// schema.EndGuestsRequestV1
+export interface EndGuestsRequestV1 {
+  dry_run?: boolean;
+  origin?: GuestOrigin;
+  invite_id?: number;
+}
+
+export const endGuestsRequestV1 = object<EndGuestsRequestV1>({
+  dry_run: optional(bool),
+  origin: optional(guestOrigin),
+  invite_id: optional(int),
+});
+
+// schema.GuestRefV1
+export interface GuestRefV1 {
+  id: number;
+  handle: string;
+}
+
+export const guestRefV1 = object<GuestRefV1>({
+  id: int,
+  handle: str,
+});
+
+// schema.EndGuestsResponseV1
+export interface EndGuestsResponseV1 {
+  dry_run: boolean;
+  count: number;
+  guests: GuestRefV1[];
+  remaining: number;
+}
+
+export const endGuestsResponseV1 = object<EndGuestsResponseV1>({
+  dry_run: bool,
+  count: int,
+  guests: array(guestRefV1),
+  remaining: int,
+});
+
+// schema.JoinInfoV1
+export interface JoinInfoV1 {
+  server_name: string;
+  join: JoinOptionsV1;
+  password_login: boolean;
+  voice: boolean;
+  guest_idle_seconds: number;
+  guest_absolute_seconds: number;
+}
+
+export const joinInfoV1 = object<JoinInfoV1>({
+  server_name: str,
+  join: joinOptionsV1,
+  password_login: bool,
+  voice: bool,
+  guest_idle_seconds: int,
+  guest_absolute_seconds: int,
+});
+
+// schema.OpenJoiningMode
+export type OpenJoiningMode = 'off' | 'guest' | 'account' | 'both';
+
+export const openJoiningMode = vocab<OpenJoiningMode>({
+  off: true,
+  guest: true,
+  account: true,
+  both: true,
+});
+
+// schema.JoinSettingsV1
+export interface JoinSettingsV1 {
+  open_joining: OpenJoiningMode;
+  guests_enabled: boolean;
+  joining_paused: boolean;
+  join_voice: boolean;
+  max_guests: number;
+  max_guests_per_address: number;
+  guest_idle_seconds: number;
+  guest_absolute_seconds: number;
+  open_channels: string[];
+}
+
+export const joinSettingsV1 = object<JoinSettingsV1>({
+  open_joining: openJoiningMode,
+  guests_enabled: bool,
+  joining_paused: bool,
+  join_voice: bool,
+  max_guests: int,
+  max_guests_per_address: int,
+  guest_idle_seconds: int,
+  guest_absolute_seconds: int,
+  open_channels: array(str),
+});
+
+// schema.PutJoinSettingsRequestV1
+export interface PutJoinSettingsRequestV1 {
+  open_joining?: OpenJoiningMode;
+  guests_enabled?: boolean;
+  joining_paused?: boolean;
+  join_voice?: boolean;
+  max_guests?: number;
+  max_guests_per_address?: number;
+  guest_idle_seconds?: number;
+  guest_absolute_seconds?: number;
+  open_channels?: string[];
+}
+
+export const putJoinSettingsRequestV1 = object<PutJoinSettingsRequestV1>({
+  open_joining: optional(openJoiningMode),
+  guests_enabled: optional(bool),
+  joining_paused: optional(bool),
+  join_voice: optional(bool),
+  max_guests: optional(int),
+  max_guests_per_address: optional(int),
+  guest_idle_seconds: optional(int),
+  guest_absolute_seconds: optional(int),
+  open_channels: optional(array(str)),
+});
+
+// schema.JoinWarning
+export type JoinWarning =
+  | 'live_guests_remain'
+  | 'trusted_proxy_unset'
+  | 'one_address'
+  | 'reserved_names_in_use';
+
+export const joinWarning = vocab<JoinWarning>({
+  live_guests_remain: true,
+  trusted_proxy_unset: true,
+  one_address: true,
+  reserved_names_in_use: true,
+});
+
+// schema.JoinSettingsResponseV1
+export interface JoinSettingsResponseV1 {
+  settings: JoinSettingsV1;
+  server_name: string;
+  live_guests: number;
+  warnings: JoinWarning[];
+}
+
+export const joinSettingsResponseV1 = object<JoinSettingsResponseV1>({
+  settings: joinSettingsV1,
+  server_name: str,
+  live_guests: int,
+  warnings: array(joinWarning),
+});
+
+// schema.JoinGuestRequestV1
+export interface JoinGuestRequestV1 {
+  label?: string;
+}
+
+export const joinGuestRequestV1 = object<JoinGuestRequestV1>({
+  label: optional(str),
+});
+
+// schema.JoinGuestResponseV1
+export interface JoinGuestResponseV1 {
+  principal: PrincipalV0;
+  guest: GuestV1;
+  credential: CredentialV1;
+  token: string;
+  channels: InviteChannelV1[];
+}
+
+export const joinGuestResponseV1 = object<JoinGuestResponseV1>({
+  principal: principalV0,
+  guest: guestV1,
+  credential: credentialV1,
+  token: str,
+  channels: array(inviteChannelV1),
+});
+
+// schema.JoinAccountRequestV1
+export interface JoinAccountRequestV1 {
+  name: string;
+  password: string;
+}
+
+export const joinAccountRequestV1 = object<JoinAccountRequestV1>({
+  name: str,
+  password: str,
+});
+
+// schema.JoinAccountResponseV1
+export interface JoinAccountResponseV1 {
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+  channels: InviteChannelV1[];
+}
+
+export const joinAccountResponseV1 = object<JoinAccountResponseV1>({
+  principal: principalV0,
+  credential: credentialV1,
+  token: str,
+  channels: array(inviteChannelV1),
+});
+
+// schema.ConvertGuestRequestV1
+export interface ConvertGuestRequestV1 {
+  name: string;
+  password: string;
+  permit?: string;
+}
+
+export const convertGuestRequestV1 = object<ConvertGuestRequestV1>({
+  name: str,
+  password: str,
+  permit: optional(str),
+});
+
+// schema.ConvertGuestResponseV1
+export interface ConvertGuestResponseV1 {
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+}
+
+export const convertGuestResponseV1 = object<ConvertGuestResponseV1>({
+  principal: principalV0,
+  credential: credentialV1,
+  token: str,
+});
+
+// schema.CreateConversionPermitRequestV1
+export interface CreateConversionPermitRequestV1 {
+  expires_at?: string;
+}
+
+export const createConversionPermitRequestV1 = object<CreateConversionPermitRequestV1>({
+  expires_at: optional(timestamp),
+});
+
+// schema.RedeemInviteRequestV2
+export interface RedeemInviteRequestV2 {
+  code: string;
+  name: string;
+  password: string;
+}
+
+export const redeemInviteRequestV2 = object<RedeemInviteRequestV2>({
+  code: str,
+  name: str,
+  password: str,
+});
+
+// schema.RedeemInviteGuestRequestV1
+export interface RedeemInviteGuestRequestV1 {
+  code: string;
+  label?: string;
+}
+
+export const redeemInviteGuestRequestV1 = object<RedeemInviteGuestRequestV1>({
+  code: str,
+  label: optional(str),
+});
+
+// schema.LoginRequestV1
+export interface LoginRequestV1 {
+  name: string;
+  password: string;
+}
+
+export const loginRequestV1 = object<LoginRequestV1>({
+  name: str,
+  password: str,
+});
+
+// schema.TOTPLoginRequestV1
+export interface TOTPLoginRequestV1 {
+  challenge: string;
+  code: string;
+}
+
+export const totpLoginRequestV1 = object<TOTPLoginRequestV1>({
+  challenge: str,
+  code: str,
+});
+
+// schema.SetPasswordRequestV1
+export interface SetPasswordRequestV1 {
+  password: string;
+  proof?: string;
+}
+
+export const setPasswordRequestV1 = object<SetPasswordRequestV1>({
+  password: str,
+  proof: optional(str),
+});
+
+// schema.ChangePasswordRequestV1
+export interface ChangePasswordRequestV1 {
+  current: string;
+  password: string;
+  code?: string;
+}
+
+export const changePasswordRequestV1 = object<ChangePasswordRequestV1>({
+  current: str,
+  password: str,
+  code: optional(str),
+});
+
+// schema.ResetPasswordRequestV1
+export interface ResetPasswordRequestV1 {
+  code: string;
+  password: string;
+}
+
+export const resetPasswordRequestV1 = object<ResetPasswordRequestV1>({
+  code: str,
+  password: str,
+});
+
+// schema.PasswordUpdatedResponseV1
+export interface PasswordUpdatedResponseV1 {
+  credential?: CredentialV1;
+  token?: string;
+  revoked: number;
+}
+
+export const passwordUpdatedResponseV1 = object<PasswordUpdatedResponseV1>({
+  credential: optional(credentialV1),
+  token: optional(str),
+  revoked: int,
+});
+
+// schema.ReauthRequestV1
+export interface ReauthRequestV1 {
+  password: string;
+  code?: string;
+}
+
+export const reauthRequestV1 = object<ReauthRequestV1>({
+  password: str,
+  code: optional(str),
+});
+
+// schema.ReauthResponseV1
+export interface ReauthResponseV1 {
+  until: string;
+}
+
+export const reauthResponseV1 = object<ReauthResponseV1>({
+  until: timestamp,
+});
+
+// schema.TOTPEnrollmentV1
+export interface TOTPEnrollmentV1 {
+  secret: string;
+  issuer: string;
+  account: string;
+  algorithm: string;
+  digits: number;
+  period_seconds: number;
+  uri: string;
+}
+
+export const totpEnrollmentV1 = object<TOTPEnrollmentV1>({
+  secret: str,
+  issuer: str,
+  account: str,
+  algorithm: str,
+  digits: int,
+  period_seconds: int,
+  uri: str,
+});
+
+// schema.ConfirmTOTPRequestV1
+export interface ConfirmTOTPRequestV1 {
+  code: string;
+}
+
+export const confirmTOTPRequestV1 = object<ConfirmTOTPRequestV1>({
+  code: str,
+});
+
+// schema.RedeemSetupTokenRequestV1
+export interface RedeemSetupTokenRequestV1 {
+  token: string;
+}
+
+export const redeemSetupTokenRequestV1 = object<RedeemSetupTokenRequestV1>({
+  token: str,
+});
+
+// schema.RedeemSetupTokenResponseV1
+export interface RedeemSetupTokenResponseV1 {
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+  auth: AuthStateV1;
+}
+
+export const redeemSetupTokenResponseV1 = object<RedeemSetupTokenResponseV1>({
+  principal: principalV0,
+  credential: credentialV1,
+  token: str,
+  auth: authStateV1,
+});
+
+// schema.CreateDeviceLinkRequestV1
+export interface CreateDeviceLinkRequestV1 {
+  label?: string;
+  expires_at?: string;
+}
+
+export const createDeviceLinkRequestV1 = object<CreateDeviceLinkRequestV1>({
+  label: optional(str),
+  expires_at: optional(timestamp),
+});
+
+// schema.ListOwnSignInLinksResponseV1
+export interface ListOwnSignInLinksResponseV1 {
+  sign_in_links: SignInLinkV1[];
+}
+
+export const listOwnSignInLinksResponseV1 = object<ListOwnSignInLinksResponseV1>({
+  sign_in_links: array(signInLinkV1),
 });
 
 // schema.HealthVoice
@@ -1551,4 +2219,39 @@ export const errorV0 = object<ErrorV0>({
   code: str,
   message: str,
   retry_after_seconds: optional(int),
+});
+
+// schema.LoginNext
+export type LoginNext = 'signed_in' | 'totp';
+
+export const loginNext = vocab<LoginNext>({ signed_in: true, totp: true });
+
+// schema.LoginResponseV1, by next.
+export type LoginResponseV1 = SignedInLoginResponseV1 | TotpLoginResponseV1;
+
+export interface SignedInLoginResponseV1 {
+  next: 'signed_in';
+  principal: PrincipalV0;
+  credential: CredentialV1;
+  token: string;
+}
+
+export interface TotpLoginResponseV1 {
+  next: 'totp';
+  challenge: string;
+  challenge_expires_at: string;
+}
+
+export const loginResponseV1 = tagged<LoginResponseV1, 'next'>('next', {
+  signed_in: object<SignedInLoginResponseV1>({
+    next: vocab<'signed_in'>({ signed_in: true }),
+    principal: principalV0,
+    credential: credentialV1,
+    token: str,
+  }),
+  totp: object<TotpLoginResponseV1>({
+    next: vocab<'totp'>({ totp: true }),
+    challenge: str,
+    challenge_expires_at: timestamp,
+  }),
 });

@@ -4,7 +4,7 @@ import { post, readState } from './api';
 import { channelButton, expect, signIn, test } from './fixtures';
 
 test('UX-02 a channel read in one client clears its count in the same person\'s other client after its next read', async ({ meet, world }) => {
-  // guest-test says something in nets-demo that nick-test has not read.
+  // jamie-test says something in nets-demo that nick-test has not read.
   const sent = await post(world, world.tokens.guest, 'nets-demo', 'ux-02 something nick-test has not read');
 
   // nick-test in two clients, in two contexts, both on general (03 revokes the second credential).

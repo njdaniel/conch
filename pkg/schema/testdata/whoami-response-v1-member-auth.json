@@ -1,0 +1,15 @@
+{
+  "id": 12,
+  "kind": "human",
+  "name": "pat",
+  "role": "member",
+  "server_version": "v0.9.0",
+  "voice_allowed": true,
+  "identity_class": "member",
+  "auth": {
+    "scope": "full",
+    "password_set": true,
+    "setup_complete": true,
+    "expires_at": "2027-01-19T12:30:00.000Z"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "next": "totp",
+  "challenge": "conch_chal_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "challenge_expires_at": "2026-10-21T12:05:00.000Z"
+}
