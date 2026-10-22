@@ -1098,23 +1098,32 @@ func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 // RecentAuthStands reports whether credentialID holds a recent-password
 // proof at now: the credential is live (unrevoked, unexpired, its principal
 // enabled, of the present generation and full scope) and its proof has not
-// run out. It is what a route of the re-authentication class asks (#712).
+// run out. It is what a route of the re-authentication class asks; making a
+// device link (#712) asks it again inside its transaction (recentAuthTx).
 // An unknown credential is false, with no error.
 func (s *Store) RecentAuthStands(ctx context.Context, credentialID int64, now time.Time) (bool, error) {
-	var stands bool
-	err := s.db.QueryRowContext(ctx,
-		`SELECT c.recent_auth_until IS NOT NULL AND c.recent_auth_until > ?
+	_, stands, err := recentAuthTx(ctx, s.db, credentialID, now)
+	return stands, err
+}
+
+// recentAuthTx is RecentAuthStands on tx, and also says whose the credential
+// is (0 for an unknown one), so a write that needs the proof
+// (CreateDeviceLink) checks it, and that it is the caller's, inside its own
+// transaction.
+func recentAuthTx(ctx context.Context, tx execer, credentialID int64, now time.Time) (owner int64, stands bool, err error) {
+	err = tx.QueryRowContext(ctx,
+		`SELECT c.principal_id, c.recent_auth_until IS NOT NULL AND c.recent_auth_until > ?
 		        AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		        AND p.disabled_at IS NULL AND `+currentAuthSQL+`
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`,
-		now.UnixMilli(), now.UnixMilli(), credentialID).Scan(&stands)
+		now.UnixMilli(), now.UnixMilli(), credentialID).Scan(&owner, &stands)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
+		return 0, false, nil
 	case err != nil:
-		return false, fmt.Errorf("store: recent auth: %w", err)
+		return 0, false, fmt.Errorf("store: recent auth: %w", err)
 	}
-	return stands, nil
+	return owner, stands, nil
 }
 
 // newOpaqueSecret returns prefix followed by n bytes from crypto/rand in

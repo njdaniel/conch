@@ -344,6 +344,13 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
 	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
 	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+	// Device links (issue #712): a member's own. The member gets 403
+	// reauth_required (no proof on the fixture's credential), an empty
+	// list, and 404 for a link that does not exist; agents and operators are
+	// refused, and AuthOff is 403 accounts_require_auth (special-cased below).
+	"POST /v1/sign-in-links/mine":        {classAuth, "/v1/sign-in-links/mine", `{}`, 403},
+	"GET /v1/sign-in-links/mine":         {classAuth, "/v1/sign-in-links/mine", "", 200},
+	"DELETE /v1/sign-in-links/mine/{id}": {classAuth, "/v1/sign-in-links/mine/9999", "", 404},
 	// Operator sign-in and setup (issue #709) take a code or a token, so
 	// every caller gets the 403 of the password routes before anything is
 	// read: https_required to this fixture's plain HTTP, and
@@ -352,6 +359,20 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/setup/redeem": {classExempt, "/v1/setup/redeem", `{}`, 403},
 	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
 	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
+
+	// Renaming a channel (issue #727): an empty body is a 400 before the
+	// channel is looked up, so it changes and audits nothing.
+	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
+}
+
+// isDeviceLinkRoute reports whether pattern is one of a member's own device
+// link routes (issue #712), which refuse agents and operators.
+func isDeviceLinkRoute(pattern string) bool {
+	switch pattern {
+	case "POST /v1/sign-in-links/mine", "GET /v1/sign-in-links/mine", "DELETE /v1/sign-in-links/mine/{id}":
+		return true
+	}
+	return false
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -526,6 +547,12 @@ func TestRoleMatrix(t *testing.T) {
 				memberWant, agentWant = http.StatusNoContent, http.StatusNoContent
 				g = newAuthFixture(t, AuthRequired)
 			}
+			// Device links (issue #712) are a member's own: an agent and an
+			// operator are refused before anything is read.
+			operatorWant := exp.allowed
+			if isDeviceLinkRoute(rt.pattern) {
+				agentWant, operatorWant = http.StatusForbidden, http.StatusForbidden
+			}
 			cases := []struct {
 				who   string
 				token string
@@ -534,7 +561,7 @@ func TestRoleMatrix(t *testing.T) {
 				{"unauthenticated", "", http.StatusUnauthorized},
 				{"member human", g.aliceTok, memberWant},
 				{"member agent", g.botTok, agentWant},
-				{"operator", g.rootTok, exp.allowed},
+				{"operator", g.rootTok, operatorWant},
 			}
 			for _, c := range cases {
 				rec := g.do(t, method, exp.path, c.token, exp.body)
@@ -586,6 +613,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isGuestPolicyRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
+				}
+				if isDeviceLinkRoute(rt.pattern) {
+					want = http.StatusForbidden // accounts_require_auth: no account to add a device to
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {

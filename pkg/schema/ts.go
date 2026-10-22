@@ -53,6 +53,11 @@ var TSTypes = []TSType{
 	// An operator creates a channel from the browser (issue #695).
 	{Value: CreateChannelRequest{}, Family: "create-channel-request-v0"},
 	{Value: CreateChannelResponse{}, Family: "create-channel-response-v0"},
+	// An operator renames one (issue #727); the events socket says so to
+	// every open page of it.
+	{Value: RenameChannelRequestV1{}, Family: "rename-channel-request-v1"},
+	{Value: RenameChannelResponseV1{}, Family: "rename-channel-response-v1"},
+	{Value: ChannelDocV1{}, Family: "channel-v1", Schema: ChannelSchemaV1},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},

@@ -69,9 +69,12 @@ func TestNtfyTopicLeftEmptyFullChain(t *testing.T) {
 			// Request: a deadline close enough to pass during the test. The
 			// REST API has no field for the grace deadline, which defaults to
 			// as long again after the deadline: the decision below has to
-			// land between the two, so the window is two seconds and not a
-			// fraction of one.
-			const window = 2 * time.Second
+			// land between the two. The window is counted from when conchd
+			// receives the request, so a slow request, a slow escalation or a
+			// slow look at the audit log all shorten the time left to decide.
+			// Two seconds was too little on a loaded machine: the approval
+			// expired first and the decision was refused as terminal (#679).
+			const window = 5 * time.Second
 			body, err := json.Marshal(schema.CreateApprovalRequestV1{
 				RequesterID: agent.ID, ChannelID: channel.ID, Title: "Enter BTC long", Body: "Signal fired.",
 				Options: []schema.Option{

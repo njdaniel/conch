@@ -25,6 +25,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// Renaming a channel (issue #727): operators only, and the one channel
+		// route addressed by id, since the name is what it changes. /name is
+		// a literal no {channel} route ends in, so no two patterns meet.
+		rt("PUT /v1/channels/{id}/name", accessOperator, hf(s.handleRenameChannel)),
 		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
@@ -230,6 +234,13 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCastDecision)))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
+		// Device links (issue #712): a member's own links that sign their
+		// account in on another device, made under a recent-password proof.
+		// Members only (the handler refuses agents, guests and operators);
+		// redeemed by POST /v1/sign-in-links/redeem. See sign_in_links.go.
+		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
+		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
+		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
 		// Operator sign-in and setup (issue #709). The second step of an
 		// operator's sign-in and the setup token's redemption are exempt, as
 		// the sign-in is, limited before any work and over HTTPS or loopback

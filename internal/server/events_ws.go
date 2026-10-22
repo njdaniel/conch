@@ -22,7 +22,8 @@ import (
 // GET /v1/events/ws?channel=<name>[&session=<id>] sends, as JSON text frames,
 // the documents a client needs to follow a channel's agents live: the roster
 // of its members' sessions on connect and whenever it changes, the member
-// list whenever it changes (issue #515), and the runs, activity and
+// list whenever it changes (issue #515), the channel itself when it is
+// renamed (issue #727; never on connect), and the runs, activity and
 // interventions of runs in the channel that the reader may see. Each frame is
 // one pkg/schema document, told apart by its schema field.
 //
@@ -67,13 +68,15 @@ const (
 	eventRun eventKind = iota + 1
 	eventActivity
 	eventIntervention
+	// eventChannel is the channel itself (issue #727): today, its name.
+	eventChannel
 )
 
 // eventRef names a document that changed. It carries no content.
 type eventRef struct {
 	kind  eventKind
 	runID int64 // the run an activity entry belongs to
-	id    int64 // the run, activity entry or intervention
+	id    int64 // the run, activity entry, intervention or channel
 }
 
 // eventsHub is the registry of events sockets.
@@ -694,6 +697,25 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			return e.failed(ctx, "read an intervention", err)
 		}
 		return e.sendDoc(ctx, interventionDoc(iv))
+	case eventChannel:
+		// The channel as it is now, read by the id the socket is bound to:
+		// flush has just checked that this reader is still a member. Two
+		// renames in quick succession send the current state twice, which
+		// a reader takes as it takes one.
+		ch, err := s.store.ChannelByID(ctx, e.channel.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read the channel", err)
+		}
+		e.channel = ch
+		return e.sendDoc(ctx, schema.ChannelDocV1{
+			Schema:    schema.ChannelSchemaV1,
+			ChannelID: ch.ID,
+			Name:      ch.Name,
+			CreatedAt: schema.NewTimestamp(ch.CreatedAt),
+		})
 	}
 	return true
 }

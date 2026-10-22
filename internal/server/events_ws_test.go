@@ -32,6 +32,7 @@ type eventFrame struct {
 	activity     schema.AgentActivityV1
 	intervention schema.InterventionV1
 	members      schema.ChannelMembersV1
+	channel      schema.ChannelDocV1
 }
 
 func (fr eventFrame) String() string {
@@ -46,6 +47,8 @@ func (fr eventFrame) String() string {
 		return fmt.Sprintf("activity%+v", fr.activity)
 	case schema.InterventionSchemaV1:
 		return fmt.Sprintf("intervention%+v", fr.intervention)
+	case schema.ChannelSchemaV1:
+		return fmt.Sprintf("channel%+v", fr.channel)
 	}
 	return fr.schema
 }
@@ -119,6 +122,10 @@ func (c *eventsClient) next() eventFrame {
 	case schema.ChannelMembersSchemaV1:
 		if err = json.Unmarshal(raw, &fr.members); err == nil {
 			verr = fr.members.Validate()
+		}
+	case schema.ChannelSchemaV1:
+		if err = json.Unmarshal(raw, &fr.channel); err == nil {
+			verr = fr.channel.Validate()
 		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)
@@ -713,4 +720,97 @@ func TestEventsClosesWhenTheSessionEnds(t *testing.T) {
 		_, ok := rosterSession(r, f.bob.ID)
 		return ok
 	}))
+}
+
+// TestEventsChannelRenamed (issue #727): a rename sends every events socket
+// of the channel exactly one conch.channel.v1, the channel as it now is, and
+// leaves the socket open; an events socket of another channel hears nothing,
+// and the message and voice presence sockets of the channel, which are bound
+// to its id, are sent nothing and stay open. The voice room is the same room.
+func TestEventsChannelRenamed(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ctx := context.Background()
+	base := wsTestServer(t, f.srv)
+	room := f.inUse(t, f.ops)
+
+	// Three events sockets of ops: ann twice (two tabs) and ann2.
+	var renamedSocks []*eventsClient
+	for _, who := range []string{"ann", "ann", "ann2"} {
+		c := dialEvents(t, base, "/v1/events/ws?channel=ops", f.tokens[who])
+		if first := c.next(); first.schema != schema.SessionRosterSchemaV1 {
+			t.Fatalf("%s on ops: first frame = %v, want the roster", who, first)
+		}
+		renamedSocks = append(renamedSocks, c)
+	}
+	other := dialEvents(t, base, "/v1/events/ws?channel=ops2", f.tokens["ann"])
+	if first := other.next(); first.schema != schema.SessionRosterSchemaV1 {
+		t.Fatalf("ops2: first frame = %v, want the roster", first)
+	}
+	live := dialAs(t, ctx, base, "/v2/ws?channel=ops", f.tokens["ann"])
+	voice, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, voice)
+
+	rec := f.do(t, http.MethodPut, channelNamePath(f.ops.ID), f.rootTok, channelRenameBody(t, "ops", "ops-renamed"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d %s", rec.Code, rec.Body)
+	}
+
+	want := schema.ChannelDocV1{Schema: schema.ChannelSchemaV1, ChannelID: f.ops.ID, Name: "ops-renamed", CreatedAt: schema.NewTimestamp(f.ops.CreatedAt)}
+	for i, c := range renamedSocks {
+		if fr := c.next(); fr.schema != schema.ChannelSchemaV1 || fr.channel != want {
+			t.Fatalf("socket %d: frame after the rename = %v, want %+v", i, fr, want)
+		}
+	}
+
+	// Exactly one, and the sockets still work: the next change to ops, made
+	// by its new name, is the next thing each is sent, with no second
+	// channel document before it.
+	if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/ops-renamed/members/%d", f.ids["bob"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("add bob to ops = %d %s", rec.Code, rec.Body)
+	}
+	for i, c := range renamedSocks {
+		seen := c.until("bob added to ops", isMembers(func(d schema.ChannelMembersV1) bool {
+			_, ok := listsMember(d, f.ids["bob"])
+			return ok
+		}))
+		if n := countFrames(seen, schema.ChannelSchemaV1); n != 0 {
+			t.Errorf("socket %d: %d more channel documents: %v", i, n, seen)
+		}
+	}
+
+	// ops2 heard nothing: its next frame is the change made to it.
+	if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/ops2/members/%d", f.ids["bob"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("add bob to ops2 = %d %s", rec.Code, rec.Body)
+	}
+	if fr := other.next(); fr.schema != schema.ChannelMembersSchemaV1 || fr.members.ChannelID != f.ops2.ID {
+		t.Errorf("ops2: next frame = %v, want its member list", fr)
+	}
+
+	// The message socket's next frame is the next message, posted by the
+	// new name.
+	posted := f.postAs(t, f.tokens["ann2"], "ops-renamed", "after the rename")
+	rctx, cancel := context.WithTimeout(ctx, eventsReadTimeout)
+	defer cancel()
+	_, raw, err := live.Read(rctx)
+	if err != nil {
+		t.Fatalf("the message socket after the rename: %v", err)
+	}
+	var m schema.MessageV2
+	if err := json.Unmarshal(raw, &m); err != nil || m.Validate() != nil || m.ID != posted || m.ChannelID != f.ops.ID {
+		t.Errorf("the message socket's next frame = %s, want message %d", raw, posted)
+	}
+
+	// The presence socket's next frame is the next presence, in the same
+	// room: readPresence fails on any other document.
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann2"), joinedMs: 1_000, published: true, muted: true})
+	f.pass(t)
+	if s := readPresence(t, voice); !s.Available || len(s.Rooms) != 1 || len(s.Rooms[0].Participants) != 1 || s.Rooms[0].Participants[0].PrincipalID != f.ids["ann2"] {
+		t.Errorf("the presence socket's next frame = %+v, want ann2 in the room", s)
+	}
+	if after, err := f.srv.store.ChannelVoiceRoom(ctx, f.ops.ID); err != nil || after.RoomName != room {
+		t.Errorf("voice room after the rename = %+v (%v), want %q", after, err, room)
+	}
 }
