@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -223,4 +225,398 @@ func TestListChannelsStoreFailure(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/channels", nil))
 	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error")
+}
+
+// Channel names are unique by how they read (issue #727): a create whose
+// name differs from another channel's only by case or look-alike letters is
+// 409 channel_exists, and one nobody can see is 400.
+func TestCreateChannelRefusesALookAlike(t *testing.T) {
+	srv := newTestServer(t)
+	create := func(name string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v0/channels",
+			bytes.NewBufferString(`{"name":`+jsonString(t, name)+`}`)))
+		return rec
+	}
+	if rec := create("general"); rec.Code != http.StatusCreated {
+		t.Fatalf("create general = %d %s", rec.Code, rec.Body)
+	}
+	tests := []struct {
+		name, input string
+		status      int
+		code        string
+	}{
+		{"by spelling", "general", http.StatusConflict, "channel_exists"},
+		{"by case", "General", http.StatusConflict, "channel_exists"},
+		{"by look-alike", "gener\u0430l", http.StatusConflict, "channel_exists"},
+		{"invisible", "\u3164", http.StatusBadRequest, "invalid_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertAPIError(t, create(tt.input), tt.status, tt.code)
+		})
+	}
+}
+
+// Renaming a channel (issue #727): PUT /v1/channels/{id}/name.
+
+func channelNamePath(id int64) string { return fmt.Sprintf("/v1/channels/%d/name", id) }
+
+func channelRenameBody(t *testing.T, from, name string) string {
+	t.Helper()
+	return `{"name":` + jsonString(t, name) + `,"from":` + jsonString(t, from) + `}`
+}
+
+// renameFixture is the auth fixture with a second channel, "Lobby", that
+// nobody is in, for the clashes.
+func renameFixture(t *testing.T) (*authFixture, store.Channel, store.Channel) {
+	t.Helper()
+	f := newAuthFixture(t, AuthRequired)
+	ctx := context.Background()
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lobby, err := f.srv.store.CreateChannel(ctx, "Lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, general, lobby
+}
+
+// The answers of the design's §3.2, case by case. Each case runs on a fresh
+// server.
+func TestRenameChannelAnswers(t *testing.T) {
+	tests := []struct {
+		name string
+		// caller picks a token from the fixture; target "general", "lobby"
+		// or "nobody" (an id nobody has), or a raw path segment.
+		caller, target string
+		body           func(t *testing.T) string
+		status         int
+		code           string
+		denied         bool   // an access_denied row is written
+		renamed        string // general's name afterwards, when it changed
+	}{
+		{name: "an operator renames", caller: "root", target: "general", status: 200, renamed: "town square",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "town square") }},
+		{name: "an operator changes only the case", caller: "root", target: "general", status: 200, renamed: "General",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "General") }},
+		// The route class refuses a member before the body is read or the
+		// channel looked up: a member of the channel, an agent, and an id
+		// nobody has get the same answer.
+		{name: "a member renames her channel", caller: "alice", target: "general", status: 403, code: "forbidden", denied: true,
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
+		{name: "an agent renames its channel", caller: "bot", target: "general", status: 403, code: "forbidden", denied: true,
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
+		{name: "a member probes an id nobody has", caller: "alice", target: "nobody", status: 403, code: "forbidden", denied: true,
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
+		{name: "a member sends a bad body", caller: "alice", target: "general", status: 403, code: "forbidden", denied: true,
+			body: func(*testing.T) string { return `{` }},
+		{name: "no credential", caller: "", target: "general", status: 401, code: "unauthenticated",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "town square") }},
+		{name: "not JSON", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(*testing.T) string { return `{"name":` }},
+		{name: "an unknown field", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(*testing.T) string { return `{"name":"x","from":"general","to":"y"}` }},
+		{name: "too large", caller: "root", target: "general", status: 413, code: "request_too_large",
+			body: func(t *testing.T) string { return channelRenameBody(t, strings.Repeat("a", 2<<20), "x") }},
+		{name: "a name that breaks the create rule", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "a\u202eb") }},
+		{name: "a blank name", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "  ") }},
+		{name: "a blank from", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(t *testing.T) string { return channelRenameBody(t, " ", "town square") }},
+		{name: "no from", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(*testing.T) string { return `{"name":"town square"}` }},
+		{name: "an id that is not a number", caller: "root", target: "general-id", status: 400, code: "invalid_request",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "town square") }},
+		{name: "an unknown id", caller: "root", target: "nobody", status: 404, code: "channel_not_found",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "town square") }},
+		// The same string is answered before from is compared.
+		{name: "the same name, from anything", caller: "root", target: "general", status: 200,
+			body: func(t *testing.T) string { return channelRenameBody(t, "whatever", "general") }},
+		{name: "a stale from", caller: "root", target: "general", status: 409, code: schema.ErrorCodeChannelNameStale,
+			body: func(t *testing.T) string { return channelRenameBody(t, "town square", "plaza") }},
+		{name: "a name nobody can see", caller: "root", target: "general", status: 400, code: "invalid_request",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "\u3164") }},
+		{name: "another channel's name by spelling", caller: "root", target: "general", status: 409, code: "channel_exists",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "Lobby") }},
+		{name: "another channel's name by case", caller: "root", target: "general", status: 409, code: "channel_exists",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "lobby") }},
+		{name: "another channel's name by look-alike", caller: "root", target: "general", status: 409, code: "channel_exists",
+			body: func(t *testing.T) string { return channelRenameBody(t, "general", "L\u043ebby") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, general, lobby := renameFixture(t)
+			tokens := map[string]string{"root": f.rootTok, "alice": f.aliceTok, "bot": f.botTok, "": ""}
+			paths := map[string]string{
+				"general": channelNamePath(general.ID), "lobby": channelNamePath(lobby.ID),
+				"nobody": channelNamePath(9999), "general-id": "/v1/channels/general/name",
+			}
+			before := countAction(f.audit(t), "access_denied")
+			rec := f.do(t, http.MethodPut, paths[tt.target], tokens[tt.caller], tt.body(t))
+			if tt.status != http.StatusOK {
+				assertErrorBody(t, rec, tt.status, tt.code)
+			} else {
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d %s", rec.Code, rec.Body)
+				}
+				want := general.Name
+				if tt.renamed != "" {
+					want = tt.renamed
+				}
+				got := decodeBody[schema.RenameChannelResponseV1](t, rec).Channel
+				if got.ID != general.ID || got.Name != want || !got.CreatedAt.Equal(general.CreatedAt) {
+					t.Errorf("response channel = %+v, want id %d named %q", got, general.ID, want)
+				}
+			}
+			stored, err := f.srv.store.ChannelByID(context.Background(), general.ID)
+			if want := cmpOr(tt.renamed, "general"); err != nil || stored.Name != want {
+				t.Errorf("stored = %+v (%v), want named %q", stored, err, want)
+			}
+			if after := countAction(f.audit(t), "access_denied"); (after > before) != tt.denied {
+				t.Errorf("access_denied rows %d -> %d; want a new one: %v", before, after, tt.denied)
+			}
+			if n := countAction(f.audit(t), store.AuditChannelRenamed); n != boolCount(tt.renamed != "") {
+				t.Errorf("%d channel_renamed rows, want %d", n, boolCount(tt.renamed != ""))
+			}
+		})
+	}
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+func boolCount(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// The rename is audited with who did it, which channel and both names,
+// quoted; the denial of a member names the route and the reason only.
+func TestRenameChannelAudit(t *testing.T) {
+	f, general, _ := renameFixture(t)
+	if rec := f.do(t, http.MethodPut, channelNamePath(general.ID), f.rootTok, channelRenameBody(t, "general", `town "to=x"`)); rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d %s", rec.Code, rec.Body)
+	}
+	var renames []store.AuditEvent
+	for _, e := range f.audit(t) {
+		if e.Action == store.AuditChannelRenamed {
+			renames = append(renames, e)
+		}
+	}
+	want := store.AuditEvent{Actor: fmt.Sprintf("principal:%d", f.root.ID), Subject: fmt.Sprintf("channel:%d", general.ID), Detail: `from="general" to="town \"to=x\""`}
+	if len(renames) != 1 || renames[0].Actor != want.Actor || renames[0].Subject != want.Subject || renames[0].Detail != want.Detail {
+		t.Errorf("channel_renamed rows = %+v, want one %+v", renames, want)
+	}
+
+	rec := f.do(t, http.MethodPut, channelNamePath(general.ID), f.aliceTok, channelRenameBody(t, `town "to=x"`, "evil"))
+	assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
+	var denial store.AuditEvent
+	for _, e := range f.audit(t) {
+		if e.Action == "access_denied" {
+			denial = e
+		}
+	}
+	if denial.Actor != fmt.Sprintf("principal:%d", f.alice.ID) || denial.Subject != "PUT /v1/channels/{id}/name" || !strings.Contains(denial.Detail, "forbidden") || strings.Contains(denial.Detail, "evil") {
+		t.Errorf("denial row = %+v", denial)
+	}
+}
+
+// With authentication off the route is open like every other, and the rename
+// is audited as auditActor gives it.
+func TestRenameChannelAuthOff(t *testing.T) {
+	f := newAuthFixture(t, AuthOff)
+	general, err := f.srv.store.ChannelByName(context.Background(), "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(t, http.MethodPut, channelNamePath(general.ID), "", channelRenameBody(t, "general", "town square"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+	if got := decodeBody[schema.RenameChannelResponseV1](t, rec).Channel; got.ID != general.ID || got.Name != "town square" {
+		t.Errorf("response channel = %+v", got)
+	}
+	if n := countAction(f.audit(t), store.AuditChannelRenamed); n != 1 {
+		t.Errorf("%d channel_renamed rows, want 1", n)
+	}
+}
+
+// After a rename, everything that was the channel's is still the channel's,
+// under the new name: its messages, members, nets, invites (and their
+// preview), read marks and voice room, all of which refer to it by id. The
+// old name answers 404 channel_not_found on every route family that takes a
+// channel by name, as a name nobody ever had does, and the new name answers
+// where the old one did.
+func TestRenameChannelKeepsEverythingByID(t *testing.T) {
+	f := newInviteFixture(t, Config{})
+	ctx := context.Background()
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := func(rec *httptest.ResponseRecorder, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		if rec.Code != want {
+			t.Fatalf("status = %d, want %d; body %s", rec.Code, want, rec.Body)
+		}
+		return rec
+	}
+
+	// The channel's things, made by name before the rename.
+	msg := f.postAs(t, f.aliceTok, "general", "before the rename")
+	must(f.do(t, http.MethodPost, "/v1/channels/general/nets", f.rootTok, `{"name":"tanks"}`), http.StatusCreated)
+	must(f.do(t, http.MethodPut, "/v1/channels/general/read-state", f.aliceTok, fmt.Sprintf(`{"last_read_id":%d}`, msg)), http.StatusOK)
+	invite := f.createInvite(t, f.rootTok, openLink("general"))
+	room, err := f.srv.store.ChannelVoiceRoom(ctx, general.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	membersBefore := decodeBody[schema.ListChannelMembersResponseV1](t, must(f.do(t, http.MethodGet, "/v1/channels/general/members", f.rootTok, ""), http.StatusOK))
+
+	must(f.do(t, http.MethodPut, channelNamePath(general.ID), f.rootTok, channelRenameBody(t, "general", "town square")), http.StatusOK)
+	const renamed = "town%20square"
+
+	t.Run("messages", func(t *testing.T) {
+		list := decodeBody[schema.ListMessagesResponseV2](t, must(f.do(t, http.MethodGet, "/v2/channels/"+renamed+"/messages", f.aliceTok, ""), http.StatusOK))
+		if len(list.Messages) != 1 || list.Messages[0].ID != msg || list.Messages[0].ChannelID != general.ID {
+			t.Errorf("messages = %+v, want message %d in channel %d", list.Messages, msg, general.ID)
+		}
+	})
+	t.Run("members", func(t *testing.T) {
+		after := decodeBody[schema.ListChannelMembersResponseV1](t, must(f.do(t, http.MethodGet, "/v1/channels/"+renamed+"/members", f.rootTok, ""), http.StatusOK))
+		if !reflect.DeepEqual(after, membersBefore) {
+			t.Errorf("members = %+v, want %+v", after, membersBefore)
+		}
+	})
+	t.Run("nets", func(t *testing.T) {
+		nets := decodeBody[schema.ListNetsResponseV1](t, must(f.do(t, http.MethodGet, "/v1/channels/"+renamed+"/nets", f.rootTok, ""), http.StatusOK))
+		if len(nets.Nets) != 1 || nets.Nets[0].Name != "tanks" || nets.Nets[0].ChannelID != general.ID {
+			t.Errorf("nets = %+v, want tanks in channel %d", nets.Nets, general.ID)
+		}
+	})
+	t.Run("invites", func(t *testing.T) {
+		preview := decodeBody[schema.InvitePreviewV1](t, must(f.preview(t, invite.Code), http.StatusOK))
+		if !reflect.DeepEqual(preview.Channels, []string{"town square"}) {
+			t.Errorf("preview channels = %v, want the new name", preview.Channels)
+		}
+		list := decodeBody[schema.ListInvitesResponseV1](t, must(f.send(t, http.MethodGet, "/v1/invites", f.rootTok, "", ""), http.StatusOK))
+		want := []schema.InviteChannelV1{{ID: general.ID, Name: "town square"}}
+		if len(list.Invites) != 1 || !reflect.DeepEqual(list.Invites[0].Channels, want) {
+			t.Errorf("invites = %+v, want one granting %+v", list.Invites, want)
+		}
+	})
+	t.Run("read marks", func(t *testing.T) {
+		marks := decodeBody[schema.ListReadStateResponseV1](t, must(f.do(t, http.MethodGet, "/v1/read-state", f.aliceTok, ""), http.StatusOK))
+		found := false
+		for _, m := range marks.ReadState {
+			if m.ChannelID == general.ID {
+				found = m.LastReadID == msg
+			}
+		}
+		if !found {
+			t.Errorf("read state = %+v, want channel %d marked at %d", marks.ReadState, general.ID, msg)
+		}
+	})
+	t.Run("voice room", func(t *testing.T) {
+		after, err := f.srv.store.ChannelVoiceRoom(ctx, general.ID)
+		if err != nil || after.ID != room.ID || after.RoomName != room.RoomName {
+			t.Errorf("voice room = %+v (%v), want %+v", after, err, room)
+		}
+	})
+
+	// Every route of the table that takes a channel by name, in the path or
+	// the query, from the route expectations, with a body that gets past
+	// any check made before the channel is looked up.
+	bodies := map[string]string{
+		"POST /v1/channels/{channel}/messages": `{"body":"hi"}`,
+		"POST /v2/channels/{channel}/messages": `{"body":"hi"}`,
+	}
+	type request struct{ pattern, path, body string }
+	var requests []request
+	for pattern, exp := range routeExpectations {
+		if !strings.Contains(exp.path, "/channels/general/") && !strings.Contains(exp.path, "channel=general") {
+			continue
+		}
+		body := exp.body
+		if b, ok := bodies[pattern]; ok {
+			body = b
+		}
+		requests = append(requests, request{pattern, exp.path, body})
+	}
+	// The sockets take the channel in the query; asked without an upgrade
+	// they answer the channel check all the same.
+	for _, path := range []string{"/v0/ws", "/v1/ws", "/v2/ws", "/v1/events/ws", "/v1/voice/ws"} {
+		requests = append(requests, request{"GET " + path, path + "?channel=general", ""})
+	}
+	sort.Slice(requests, func(i, j int) bool { return requests[i].pattern < requests[j].pattern })
+	if len(requests) < 25 {
+		t.Fatalf("only %d routes take a channel by name; the expectations have lost some", len(requests))
+	}
+	for _, rq := range requests {
+		t.Run("old name/"+rq.pattern, func(t *testing.T) {
+			for _, name := range []string{"general", "never-was"} {
+				path := strings.Replace(strings.Replace(rq.path, "/channels/general/", "/channels/"+name+"/", 1), "channel=general", "channel="+name, 1)
+				rec := f.do(t, routeMethod(rq.pattern), path, f.rootTok, rq.body)
+				assertErrorBody(t, rec, http.StatusNotFound, "channel_not_found")
+			}
+		})
+		t.Run("new name/"+rq.pattern, func(t *testing.T) {
+			path := strings.Replace(strings.Replace(rq.path, "/channels/general/", "/channels/"+renamed+"/", 1), "channel=general", "channel="+renamed, 1)
+			rec := f.do(t, routeMethod(rq.pattern), path, f.rootTok, rq.body)
+			if rec.Code == http.StatusNotFound && strings.Contains(rec.Body.String(), "channel_not_found") {
+				t.Errorf("the new name = %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+	// A hook names its channel in the body, and is refused as it always is
+	// for a name nobody has: 400 channel_not_found.
+	t.Run("old name/POST /v1/hooks", func(t *testing.T) {
+		for _, name := range []string{"general", "never-was"} {
+			rec := f.do(t, http.MethodPost, "/v1/hooks", f.rootTok, fmt.Sprintf(`{"channel":%q,"principal":%d}`, name, f.bot.ID))
+			assertErrorBody(t, rec, http.StatusBadRequest, "channel_not_found")
+		}
+		must(f.do(t, http.MethodPost, "/v1/hooks", f.rootTok, fmt.Sprintf(`{"channel":"town square","principal":%d}`, f.bot.ID)), http.StatusCreated)
+	})
+}
+
+// An agent addresses channels by name over MCP too: after a rename the old
+// name is channel_not_found to post_message and read_channel, as for a
+// channel it is not in, and the new name works with the manifest it had,
+// which allows the channel by id.
+func TestRenameChannelOverMCP(t *testing.T) {
+	f := &interventionFixture{runFixture: newRunFixture(t)}
+	if rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.rootTok, channelRenameBody(t, "general", "town square")); rec.Code != http.StatusOK {
+		t.Fatalf("rename = %d %s", rec.Code, rec.Body)
+	}
+	tests := []struct {
+		tool    string
+		channel string
+		want    string
+	}{
+		{"read_channel", "general", "channel_not_found"},
+		{"post_message", "general", "channel_not_found"},
+		{"read_channel", "town square", "ok"},
+		{"post_message", "town square", "ok"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.channel, func(t *testing.T) {
+			args := map[string]any{"channel": tt.channel}
+			if tt.tool == "post_message" {
+				args["body"] = "hello"
+			}
+			if got := f.tool(t, f.botTok, tt.tool, args).code; got != tt.want {
+				t.Errorf("%s(%q) = %s, want %s", tt.tool, tt.channel, got, tt.want)
+			}
+		})
+	}
 }

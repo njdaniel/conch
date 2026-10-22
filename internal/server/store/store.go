@@ -794,6 +794,31 @@ END`,
 )`,
 		`CREATE INDEX setup_tokens_by_principal ON setup_tokens (principal_id)`,
 	},
+	// 33 (channelNameKeyMigration): Channel name keys (issue #727,
+	// docs/design/channel-rename.md §3.5). A channel name is unique by its
+	// two keys, as a principal's is since migration 27: a name that reads
+	// the same as another channel's is taken, on create and on rename
+	// (claimChannelNameTx). As there, the check is in the writing
+	// transaction, not a UNIQUE index, because a database may already hold
+	// two channels with one key; those are kept, and the Go step logs them.
+	// The step fills the keys of every existing channel and writes no audit
+	// row; the triggers refuse a row written without them.
+	{
+		`ALTER TABLE channels ADD COLUMN name_key TEXT`,
+		`ALTER TABLE channels ADD COLUMN name_skel TEXT`,
+		`CREATE INDEX channels_by_name_key ON channels (name_key)`,
+		`CREATE INDEX channels_by_name_skel ON channels (name_skel)`,
+		`CREATE TRIGGER channels_name_key_insert BEFORE INSERT ON channels
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'channels.name_key and name_skel are required');
+END`,
+		`CREATE TRIGGER channels_name_key_update BEFORE UPDATE OF name, name_key, name_skel ON channels
+WHEN NEW.name_key IS NULL OR NEW.name_skel IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'channels.name_key and name_skel are required');
+END`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -804,6 +829,9 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 	nameKeyMigration:  fillNameKeys,
 	hiddenAtMigration: reportReservedNames,
 	guestMigration:    reportReservedGuestNames,
+
+	// Channel names are keyed as principal names are (issue #727).
+	channelNameKeyMigration: fillChannelNameKeys,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

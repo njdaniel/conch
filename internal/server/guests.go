@@ -17,8 +17,7 @@ import (
 // and decides every transition; here are End visit, the deadline sweeper and
 // what follows a visit's end, whichever call ended it: the guest's sockets
 // close in every family, it leaves voice, and the rosters and member lists of
-// its channels are told. No route here lets anyone become a guest: the entry
-// routes are #710's.
+// its channels are told. The entry routes are #710's (join.go).
 
 // defaultGuestSweepInterval is the sweeper's fallback poll (design §4.2: at
 // most a second). It also wakes at the next deadline when that is sooner.
@@ -38,6 +37,7 @@ func (s *Server) guestsEnded(ended []store.EndedGuest) {
 	for _, g := range ended {
 		s.hub.DropPrincipalAll(g.PrincipalID)
 		s.events.dropPrincipalAll(g.PrincipalID)
+		s.guestAddrs.forget(g.PrincipalID)
 	}
 	for _, g := range ended {
 		// Its presence and occupancy sockets close and any room it held a

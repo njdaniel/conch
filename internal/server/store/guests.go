@@ -36,8 +36,8 @@ import (
 // Every time here is the credential clock (credentialNow), the one that
 // resolves credentials, so a deadline and its refusal agree.
 //
-// Nothing here makes a route reachable: the entry routes and their policy
-// are issue #710's, conversion's route #711's.
+// The entry routes and their policy are issue #710's (guest_policy.go);
+// conversion's route is #711's.
 
 // guestMigration is the number of the migration that adds guest visits: its
 // Go step is reportReservedGuestNames.
@@ -226,8 +226,19 @@ type NewGuest struct {
 	// MaxLive, when positive, caps the live visits: the creating
 	// transaction counts them and refuses with ErrGuestsFull. Ended visits,
 	// and active ones past their deadline that no sweep has ended yet, do
-	// not count.
+	// not count. Zero is no cap.
 	MaxLive int
+	// MaxPerAddress, when positive, caps the live visits among AddressPeers:
+	// the visits the server saw start from the caller's address (review
+	// F13), counted the way MaxLive counts. The store never holds an
+	// address: the server names the visits, the store counts the live ones.
+	MaxPerAddress int
+	AddressPeers  []int64
+	// InvitedBy is the entry invite's maker. It is recorded on the principal
+	// with the invite, as for an invited member, so that disabling an
+	// invite's joiners ends its guests' visits too. Zero for an address
+	// visit.
+	InvitedBy int64
 }
 
 // CreatedGuest is a new visit: its principal, the visit, its one credential
@@ -239,30 +250,78 @@ type CreatedGuest struct {
 	Token      string
 }
 
-// CreateGuest starts a visit in one IMMEDIATE transaction: it makes the
-// principal under a fresh handle, its visit, its one credential (expiring at
-// the visit's hard deadline, with the idle bound) and its memberships, each
-// with can_decide 0 and history_after the channel's last message id, and
-// audits guest_started, principal_created, member_added and
-// credential_created. actor is whoever admits the visit ("system", or the
-// invite). Whether this entry point admits guests at all is the caller's
-// policy (#710); the store holds to the cap, the bounds and the label rules.
+// CreateGuest starts a visit in one IMMEDIATE transaction (createGuestTx).
+// Whether an entry point admits guests at all is policy: the entry routes
+// (#710) call JoinAsGuest and RedeemInviteGuest (guest_policy.go), which
+// check it in the creating transaction. CreateGuest checks no policy, only
+// the caps, the bounds and the label rules.
 func (s *Store) CreateGuest(ctx context.Context, actor string, g NewGuest) (CreatedGuest, error) {
 	now := credentialNow().Truncate(time.Millisecond)
-	if !g.Origin.Valid() || (g.Origin == schema.GuestOriginInvite) != (g.InviteID > 0) {
-		return CreatedGuest{}, errors.New("store: create guest: an invite origin, and only one, names its invite")
+	if err := checkNewGuest(g); err != nil {
+		return CreatedGuest{}, err
 	}
-	if g.Idle < time.Millisecond || g.Absolute < time.Millisecond || g.CredentialLifetime < 0 {
-		return CreatedGuest{}, errors.New("store: create guest: the idle and absolute bounds must be positive")
-	}
-	label, err := guestLabel(g.Label, g.ServerName)
+	p, err := prepareGuest(g.Label, g.ServerName)
 	if err != nil {
 		return CreatedGuest{}, err
+	}
+	var out CreatedGuest
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		var err error
+		out, err = createGuestTx(ctx, tx, actor, g, p, now)
+		return err
+	})
+	if err != nil {
+		return CreatedGuest{}, err
+	}
+	out.Token = p.token
+	return out, nil
+}
+
+// preparedGuest is what a visit needs before its transaction: the checked
+// label and a fresh token, made outside the write lock.
+type preparedGuest struct {
+	label, token string
+}
+
+// checkNewGuest checks g's entry point and bounds.
+func checkNewGuest(g NewGuest) error {
+	if !g.Origin.Valid() || (g.Origin == schema.GuestOriginInvite) != (g.InviteID > 0) {
+		return errors.New("store: create guest: an invite origin, and only one, names its invite")
+	}
+	if g.Idle < time.Millisecond || g.Absolute < time.Millisecond || g.CredentialLifetime < 0 {
+		return errors.New("store: create guest: the idle and absolute bounds must be positive")
+	}
+	return nil
+}
+
+// prepareGuest checks the label, as guestLabel does, and draws the visit's
+// token: the work that needs no database, done before the write lock.
+func prepareGuest(label, serverName string) (preparedGuest, error) {
+	label, err := guestLabel(label, serverName)
+	if err != nil {
+		return preparedGuest{}, err
 	}
 	token, err := newCredentialToken()
 	if err != nil {
+		return preparedGuest{}, err
+	}
+	return preparedGuest{label: label, token: token}, nil
+}
+
+// createGuestTx starts a visit in the caller's IMMEDIATE transaction: it
+// makes the principal under a fresh handle, its visit, its one credential
+// (expiring at the visit's hard deadline, with the idle bound) and its
+// memberships, each with can_decide 0 and history_after the channel's last
+// message id, and audits guest_started, principal_created, member_added and
+// credential_created. actor is whoever admits the visit ("system", or the
+// invite). The caps are counted in this transaction, the one that would
+// exceed them, so two racing admissions cannot both take the last place. The
+// result carries no token: the caller adds p.token once the commit is done.
+func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p preparedGuest, now time.Time) (CreatedGuest, error) {
+	if err := checkNewGuest(g); err != nil {
 		return CreatedGuest{}, err
 	}
+	label := p.label
 	deadline := now.Add(g.Absolute)
 	if g.CredentialLifetime > 0 && now.Add(g.CredentialLifetime).Before(deadline) {
 		deadline = now.Add(g.CredentialLifetime)
@@ -270,99 +329,98 @@ func (s *Store) CreateGuest(ctx context.Context, actor string, g NewGuest) (Crea
 	deadline = deadline.Truncate(time.Millisecond)
 	idle := g.Idle.Truncate(time.Millisecond)
 
-	var out CreatedGuest
-	err = s.withImmediateTx(ctx, func(tx execer) error {
-		out = CreatedGuest{}
-		if g.MaxLive > 0 {
-			n, err := liveGuestsTx(ctx, tx, now)
-			if err != nil {
-				return err
-			}
-			if n >= g.MaxLive {
-				return ErrGuestsFull
-			}
-		}
-		handle, keys, err := newGuestHandleTx(ctx, tx)
+	if g.MaxLive > 0 {
+		n, err := liveGuestsTx(ctx, tx, now)
 		if err != nil {
-			return err
+			return CreatedGuest{}, err
 		}
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed)
-			 VALUES ('human', ?, ?, ?, 'member', ?, ?)`,
-			handle, keys.Folded, keys.Skeletal, now.UnixMilli(), boolInt(g.VoiceAllowed))
+		if n >= g.MaxLive {
+			return CreatedGuest{}, ErrGuestsFull
+		}
+	}
+	if g.MaxPerAddress > 0 {
+		n, err := liveGuestsAmongTx(ctx, tx, g.AddressPeers, now)
 		if err != nil {
-			return fmt.Errorf("store: create guest: principal: %w", err)
+			return CreatedGuest{}, err
 		}
-		pid, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("store: create guest: principal id: %w", err)
+		if n >= g.MaxPerAddress {
+			return CreatedGuest{}, ErrGuestsFull
 		}
-		var labelArg any
-		if label != "" {
-			labelArg = label
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO guest_visits (principal_id, handle, label, origin, invite_id, state, started_at, expires_at, idle_ms)
-			 VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-			pid, handle, labelArg, string(g.Origin), nullableID(g.InviteID), now.UnixMilli(), deadline.UnixMilli(),
-			idle.Milliseconds()); err != nil {
-			return fmt.Errorf("store: create guest: visit: %w", err)
-		}
-		cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, token, now, &deadline, 0)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Milliseconds(), cred.ID); err != nil {
-			return fmt.Errorf("store: create guest: credential idle bound: %w", err)
-		}
-		idleAt := minTime(now.Add(idle), deadline)
-		cred.IdleExpiresAt = timestampPtr(&idleAt)
-
-		detail := "origin=" + string(g.Origin)
-		if g.InviteID > 0 {
-			detail += fmt.Sprintf(" invite=%d", g.InviteID)
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, AuditGuestStarted, principalActor(pid), detail, now); err != nil {
-			return err
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalCreated, principalActor(pid), "kind=human guest=1", now); err != nil {
-			return err
-		}
-		seen := map[int64]bool{}
-		for _, ch := range g.Channels {
-			if seen[ch] {
-				continue
-			}
-			seen[ch] = true
-			var one int
-			switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM channels WHERE id = ?", ch).Scan(&one); {
-			case errors.Is(err, sql.ErrNoRows):
-				return fmt.Errorf("store: create guest: channel %d: %w", ch, ErrNotFound)
-			case err != nil:
-				return fmt.Errorf("store: create guest: check channel %d: %w", ch, err)
-			}
-			if err := admitGuestTx(ctx, tx, actor, ch, pid, 0, now); err != nil {
-				return err
-			}
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, "credential_created", principalActor(pid),
-			credentialDetail(cred.ID, cred.Label), now); err != nil {
-			return err
-		}
-		out = CreatedGuest{
-			Principal: Principal{ID: pid, Kind: PrincipalHuman, Name: handle, Role: RoleMember, CreatedAt: now,
-				VoiceAllowed: g.VoiceAllowed, GuestState: schema.GuestStateActive},
-			Visit: GuestVisit{PrincipalID: pid, Handle: handle, Label: label, Origin: g.Origin, InviteID: g.InviteID,
-				State: schema.GuestStateActive, StartedAt: now, ExpiresAt: deadline, IdleExpiresAt: idleAt, LastActiveAt: now},
-			Credential: cred,
-		}
-		return nil
-	})
+	}
+	handle, keys, err := newGuestHandleTx(ctx, tx)
 	if err != nil {
 		return CreatedGuest{}, err
 	}
-	out.Token = token
-	return out, nil
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed, invited_by, invite_id)
+		 VALUES ('human', ?, ?, ?, 'member', ?, ?, ?, ?)`,
+		handle, keys.Folded, keys.Skeletal, now.UnixMilli(), boolInt(g.VoiceAllowed), nullableID(g.InvitedBy), nullableID(g.InviteID))
+	if err != nil {
+		return CreatedGuest{}, fmt.Errorf("store: create guest: principal: %w", err)
+	}
+	pid, err := res.LastInsertId()
+	if err != nil {
+		return CreatedGuest{}, fmt.Errorf("store: create guest: principal id: %w", err)
+	}
+	var labelArg any
+	if label != "" {
+		labelArg = label
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO guest_visits (principal_id, handle, label, origin, invite_id, state, started_at, expires_at, idle_ms)
+		 VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+		pid, handle, labelArg, string(g.Origin), nullableID(g.InviteID), now.UnixMilli(), deadline.UnixMilli(),
+		idle.Milliseconds()); err != nil {
+		return CreatedGuest{}, fmt.Errorf("store: create guest: visit: %w", err)
+	}
+	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0)
+	if err != nil {
+		return CreatedGuest{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Milliseconds(), cred.ID); err != nil {
+		return CreatedGuest{}, fmt.Errorf("store: create guest: credential idle bound: %w", err)
+	}
+	idleAt := minTime(now.Add(idle), deadline)
+	cred.IdleExpiresAt = timestampPtr(&idleAt)
+
+	detail := "origin=" + string(g.Origin)
+	if g.InviteID > 0 {
+		detail += fmt.Sprintf(" invite=%d", g.InviteID)
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditGuestStarted, principalActor(pid), detail, now); err != nil {
+		return CreatedGuest{}, err
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalCreated, principalActor(pid), "kind=human guest=1", now); err != nil {
+		return CreatedGuest{}, err
+	}
+	seen := map[int64]bool{}
+	for _, ch := range g.Channels {
+		if seen[ch] {
+			continue
+		}
+		seen[ch] = true
+		var one int
+		switch err := tx.QueryRowContext(ctx, "SELECT 1 FROM channels WHERE id = ?", ch).Scan(&one); {
+		case errors.Is(err, sql.ErrNoRows):
+			return CreatedGuest{}, fmt.Errorf("store: create guest: channel %d: %w", ch, ErrNotFound)
+		case err != nil:
+			return CreatedGuest{}, fmt.Errorf("store: create guest: check channel %d: %w", ch, err)
+		}
+		if err := admitGuestTx(ctx, tx, actor, ch, pid, 0, now); err != nil {
+			return CreatedGuest{}, err
+		}
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, "credential_created", principalActor(pid),
+		credentialDetail(cred.ID, cred.Label), now); err != nil {
+		return CreatedGuest{}, err
+	}
+	return CreatedGuest{
+		Principal: Principal{ID: pid, Kind: PrincipalHuman, Name: handle, Role: RoleMember, CreatedAt: now,
+			VoiceAllowed: g.VoiceAllowed, GuestState: schema.GuestStateActive, InvitedBy: g.InvitedBy, InviteID: g.InviteID},
+		Visit: GuestVisit{PrincipalID: pid, Handle: handle, Label: label, Origin: g.Origin, InviteID: g.InviteID,
+			State: schema.GuestStateActive, StartedAt: now, ExpiresAt: deadline, IdleExpiresAt: idleAt, LastActiveAt: now},
+		Credential: cred,
+	}, nil
 }
 
 // admitGuestTx makes guest pid a member of channelID with no right to decide
@@ -545,6 +603,32 @@ const guestLiveSQL = `v.state = 'active' AND v.expires_at > ? AND EXISTS (
 	SELECT 1 FROM credentials c WHERE c.principal_id = v.principal_id AND c.revoked_at IS NULL
 	  AND (c.expires_at IS NULL OR c.expires_at > ?)
 	  AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?))`
+
+// liveGuestsAmongTx counts the live visits at now among ids.
+func liveGuestsAmongTx(ctx context.Context, tx execer, ids []int64, now time.Time) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	ms := now.UnixMilli()
+	args := []any{ms, ms, ms}
+	marks := make([]string, len(ids))
+	for i, id := range ids {
+		marks[i] = "?"
+		args = append(args, id)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM guest_visits v WHERE `+guestLiveSQL+ // #nosec G202 -- placeholders only; every value is in args
+		` AND v.principal_id IN (`+strings.Join(marks, ",")+`)`, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count live guests of one address: %w", err)
+	}
+	return n, nil
+}
+
+// LiveGuestsAmong counts the visits live now among ids: what the per-address
+// cap counts.
+func (s *Store) LiveGuestsAmong(ctx context.Context, ids []int64) (int, error) {
+	return liveGuestsAmongTx(ctx, s.db, ids, credentialNow())
+}
 
 // liveGuestsTx counts the live visits at now.
 func liveGuestsTx(ctx context.Context, tx execer, now time.Time) (int, error) {

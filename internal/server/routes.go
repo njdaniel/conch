@@ -25,6 +25,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// Renaming a channel (issue #727): operators only, and the one channel
+		// route addressed by id, since the name is what it changes. /name is
+		// a literal no {channel} route ends in, so no two patterns meet.
+		rt("PUT /v1/channels/{id}/name", accessOperator, hf(s.handleRenameChannel)),
 		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
@@ -159,6 +163,22 @@ func (s *Server) routeTable() []route {
 		// name, over HTTPS or loopback only. v1 makes one without, as before,
 		// until the browser has moved to v2 (#713).
 		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
+		// Guest entry (issue #710): the front door, Join as guest from the
+		// bare address and through an invite. Exempt, limited and bounded as
+		// redeem is; the store checks the policy again in the transaction
+		// that starts the visit. See join.go. No route makes an account yet:
+		// POST /v1/join/account and POST /v1/guest/convert are #711's.
+		rt("GET /v1/join", accessExempt, hf(s.handleJoinInfo)),
+		rt("POST /v1/join/guest", accessExempt, hf(s.handleJoinGuest)),
+		rt("POST /v1/invites/redeem-guest", accessExempt, hf(s.handleRedeemInviteGuest)),
+		// The joining settings, the guest list and ending visits: operators.
+		// The bulk end has one segment fewer than the per-id one, so the two
+		// never meet in the mux.
+		rt("GET /v1/join/settings", accessOperator, hf(s.handleGetJoinSettings)),
+		rt("PUT /v1/join/settings", accessOperator, hf(s.handlePutJoinSettings)),
+		rt("GET /v1/guests", accessOperator, hf(s.handleListGuests)),
+		rt("POST /v1/guests/{id}/end", accessOperator, hf(s.handleEndGuest)),
+		rt("POST /v1/guests/end", accessOperator, hf(s.handleEndGuests)),
 		rt("POST /v2/invites/redeem", accessExempt, hf(s.handleRedeemInviteV2)),
 		// Password sign-in (issue #707): exempt, as the invite routes are,
 		// and limited before any hashing; over HTTPS or loopback only. A
@@ -272,6 +292,11 @@ var recentAuthRoutes = map[string]reauthRule{
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
+	// Guest entry (issue #710): opening or closing joining to guests, and
+	// ending visits, one or in bulk.
+	"PUT /v1/join/settings":    reauthAlways,
+	"POST /v1/guests/{id}/end": reauthAlways,
+	"POST /v1/guests/end":      reauthAlways,
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,

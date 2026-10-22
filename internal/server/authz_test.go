@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -446,13 +447,25 @@ func TestAwaitDecisionEndsWhenAuthorizationIsWithdrawn(t *testing.T) {
 				out mcpOutcome
 				err error
 			}
+			// The first authorized poll says so; only then is the
+			// authorization taken away. A guess at the time (it was 50 ms)
+			// lost to a loaded machine: the request was not yet
+			// authenticated, and the middleware answered 401 (#740).
+			polled := make(chan struct{})
+			var once sync.Once
+			f.srv.awaitPolled = func() { once.Do(func() { close(polled) }) }
 			done := make(chan result, 1)
 			go func() {
 				out, err := f.callWithToken(token, "await_decision", map[string]any{"approval_id": f.approvalID, "timeout_ms": 30000})
 				done <- result{out, err}
 			}()
-			// Let the wait start polling, then take the authorization away.
-			time.Sleep(50 * time.Millisecond)
+			select {
+			case <-polled:
+			case got := <-done:
+				t.Fatalf("await ended before it polled: %s, %v", got.out.result(), got.err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("await_decision never polled")
+			}
 			tt.withdraw(t, f, credentialID)
 			select {
 			case got := <-done:

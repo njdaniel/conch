@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -58,7 +59,13 @@ func writeInvitesPaused(w http.ResponseWriter) {
 // dst, rejecting unknown fields. On failure it writes 413 or 400 with a fixed
 // message (the decoder's own could quote the body) and returns false.
 func decodeInviteBody(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, inviteBodyMaxBytes))
+	return decodeBoundedBody(w, r, dst, inviteBodyMaxBytes)
+}
+
+// decodeBoundedBody is decodeInviteBody with a bound of maxBytes, for a body
+// that can be larger than an invite's (the joining settings, join.go).
+func decodeBoundedBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes))
 	dec.DisallowUnknownFields()
 	err := dec.Decode(dst)
 	if err == nil {
@@ -260,6 +267,9 @@ func (s *Server) handlePreviewInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := s.store.PreviewInvite(ctx, store.HashInviteCode(req.Code), s.now())
+	if err == nil && preview.Join != nil {
+		err = s.previewGuestJoin(ctx, preview.Join, addr)
+	}
 	switch {
 	case errors.Is(err, store.ErrInviteInvalid):
 		writeInviteInvalid(w)
@@ -272,6 +282,29 @@ func (s *Server) handlePreviewInvite(w http.ResponseWriter, r *http.Request) {
 		// Not a secret, but it answers a secret: no cache keeps it.
 		writeSecretJSON(w, http.StatusOK, preview)
 	}
+}
+
+// previewGuestJoin applies to an invite preview's join what only the server
+// knows (issue #710): with authentication off no visit can start (design
+// §7.4), and the per-address cap counts the visits this caller's address
+// already holds. The store has applied the switch, the mode and the
+// server-wide cap.
+func (s *Server) previewGuestJoin(ctx context.Context, join *schema.JoinOptionsV1, addr netip.Addr) error {
+	if !s.cfg.authRequired() {
+		join.Guest, join.GuestsFull = false, false
+		return nil
+	}
+	if !join.Guest {
+		return nil
+	}
+	full, err := s.store.AddressCapReached(ctx, s.guestAddrs.peers(limitKey(addr)))
+	if err != nil {
+		return err
+	}
+	if full {
+		join.Guest, join.GuestsFull = false, true
+	}
+	return nil
 }
 
 // handleRedeemInvite serves POST /v1/invites/redeem, exempt from

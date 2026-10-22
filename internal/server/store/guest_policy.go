@@ -1,0 +1,792 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
+)
+
+// The guest entry policy (issue #710, ADR-009 D1,
+// docs/design/guests-and-accounts.md §2). The joining settings are
+// server_settings rows (migration 31; an absent row is
+// schema.DefaultJoinSettings), the bare address's channels are open_channels,
+// and an invite's mode is invites.join_as. Effective guest joining needs
+// both the server's guests_enabled switch and the entry point's guest mode.
+//
+// The policy is checked again inside the IMMEDIATE transaction that starts a
+// visit (JoinAsGuest, RedeemInviteGuest), so a preview read a moment before,
+// or a settings change racing the join, cannot admit anyone the policy at
+// commit refuses. The same predicates answer the previews (AddressJoinOptions,
+// PreviewInvite's join), so what a preview offers and what a write allows
+// agree.
+//
+// No account is made here: the routes that make one with a password are
+// #707's and #711's.
+
+// The server_settings keys of the joining settings.
+const (
+	settingOpenJoining          = "open_joining"
+	settingGuestsEnabled        = "guests_enabled"
+	settingJoiningPaused        = "joining_paused"
+	settingJoinVoice            = "join_voice"
+	settingMaxGuests            = "max_guests"
+	settingMaxGuestsPerAddress  = "max_guests_per_address"
+	settingGuestIdleSeconds     = "guest_idle_seconds"
+	settingGuestAbsoluteSeconds = "guest_absolute_seconds"
+)
+
+var joinSettingKeys = []string{settingOpenJoining, settingGuestsEnabled, settingJoiningPaused, settingJoinVoice,
+	settingMaxGuests, settingMaxGuestsPerAddress, settingGuestIdleSeconds, settingGuestAbsoluteSeconds}
+
+// Audit actions of the entry policy (design §7.3). None carries a client
+// address, a token or a code.
+const (
+	// AuditJoinSettingsChanged records a settings change: actor the
+	// operator, subject "server", detail each field that changed as
+	// field=old->new, and live_guests=<n> when guests were turned off
+	// (review F12).
+	AuditJoinSettingsChanged = "join_settings_changed"
+	// AuditOpenChannelAdded and AuditOpenChannelRemoved record a channel
+	// joining or leaving the bare address's set: subject the channel.
+	AuditOpenChannelAdded   = "open_channel_added"
+	AuditOpenChannelRemoved = "open_channel_removed"
+	// AuditGuestsEnded summarises End all guest visits: subject "server",
+	// detail count=<n> remaining=<n> and the selection. Each visit it ended
+	// has its own guest_ended row as well.
+	AuditGuestsEnded = "guests_ended"
+)
+
+// Errors of the entry policy.
+var (
+	// ErrGuestsDisabled: no visit may start at this entry point now: the
+	// server's guests_enabled switch is off, the entry point's mode admits no
+	// guests, or the bare address has no channel to admit to.
+	ErrGuestsDisabled = errors.New("store: guests cannot join here now")
+	// ErrJoiningPaused: an operator paused joining from the bare address.
+	ErrJoiningPaused = errors.New("store: joining is paused")
+	// ErrJoinPolicyConflict and ErrJoinSettingsInvalid are the two kinds of
+	// JoinSettingsError.
+	ErrJoinPolicyConflict  = errors.New("store: the join settings contradict each other or the server")
+	ErrJoinSettingsInvalid = errors.New("store: the join settings are not valid")
+)
+
+// JoinSettingsError is a refused settings change. Err is
+// ErrJoinPolicyConflict (contradictory settings, the last open channel
+// removed while joining is on, guests enabled while reserved names exist) or
+// ErrJoinSettingsInvalid (a value out of bounds, a channel that does not
+// exist). Reason names the rule broken, never a value sent.
+type JoinSettingsError struct {
+	Err    error
+	Reason string
+}
+
+func (e *JoinSettingsError) Error() string { return e.Err.Error() + ": " + e.Reason }
+func (e *JoinSettingsError) Unwrap() error { return e.Err }
+
+func conflict(reason string) error {
+	return &JoinSettingsError{Err: ErrJoinPolicyConflict, Reason: reason}
+}
+
+func invalidSettings(reason string) error {
+	return &JoinSettingsError{Err: ErrJoinSettingsInvalid, Reason: reason}
+}
+
+// AddressAdmitsGuests reports whether the bare address admits guests under
+// s, before the pause, the channels and the caps: guests are enabled and the
+// address's mode offers them.
+func AddressAdmitsGuests(s schema.JoinSettingsV1) bool {
+	return s.GuestsEnabled && (s.OpenJoining == schema.OpenJoiningGuest || s.OpenJoining == schema.OpenJoiningBoth)
+}
+
+// InviteAdmitsGuests reports whether an invite of mode m admits guests; the
+// server's guests_enabled switch still has to be on.
+func InviteAdmitsGuests(m schema.InviteJoinMode) bool {
+	return m == schema.InviteJoinGuest || m == schema.InviteJoinBoth
+}
+
+// admitsAccount reports whether an invite of mode m admits an account. A
+// mode the store did not write is account, as on the wire.
+func admitsAccount(m schema.InviteJoinMode) bool {
+	return m == "" || m == schema.InviteJoinAccount || m == schema.InviteJoinBoth
+}
+
+// GuestCapReached reports whether one more visit would pass a cap: live
+// visits server-wide against max_guests (0 is no cap), and addressLive, the
+// live visits from the caller's address, against max_guests_per_address.
+func GuestCapReached(s schema.JoinSettingsV1, live, addressLive int) bool {
+	if s.MaxGuests > 0 && int64(live) >= s.MaxGuests {
+		return true
+	}
+	return s.MaxGuestsPerAddress > 0 && int64(addressLive) >= s.MaxGuestsPerAddress
+}
+
+// AddressJoinOptions is what the bare address offers now for guests: Guest
+// when a visit may start, GuestsFull when only a cap stops one, Paused when
+// joining is paused. Account is never set: no route makes an account from
+// the bare address yet (#711).
+func AddressJoinOptions(s schema.JoinSettingsV1, openChannels, live, addressLive int) schema.JoinOptionsV1 {
+	var out schema.JoinOptionsV1
+	if s.OpenJoining == schema.OpenJoiningOff {
+		return out
+	}
+	if s.JoiningPaused {
+		out.Paused = true
+		return out
+	}
+	if !AddressAdmitsGuests(s) || openChannels == 0 {
+		return out
+	}
+	if GuestCapReached(s, live, addressLive) {
+		out.GuestsFull = true
+	} else {
+		out.Guest = true
+	}
+	return out
+}
+
+// AddressCapReached reports whether the per-address cap stops one more
+// visit from an address whose visits are peers: what an invite preview adds
+// to the server-wide cap PreviewInvite applies.
+func (s *Store) AddressCapReached(ctx context.Context, peers []int64) (bool, error) {
+	set, err := joinSettingsTx(ctx, s.db)
+	if err != nil {
+		return false, err
+	}
+	n, err := liveGuestsAmongTx(ctx, s.db, peers, credentialNow())
+	if err != nil {
+		return false, err
+	}
+	return GuestCapReached(schema.JoinSettingsV1{MaxGuestsPerAddress: set.MaxGuestsPerAddress}, 0, n), nil
+}
+
+// inviteJoinOptions is what an invite of mode m offers under s, with live
+// visits: Account as its mode says (the existing redemption route makes the
+// account), Guest while guests are on, its mode admits them and the
+// server-wide cap is not reached.
+func inviteJoinOptions(m schema.InviteJoinMode, s schema.JoinSettingsV1, live int) schema.JoinOptionsV1 {
+	out := schema.JoinOptionsV1{Account: admitsAccount(m)}
+	if s.GuestsEnabled && InviteAdmitsGuests(m) {
+		if GuestCapReached(s, live, 0) {
+			out.GuestsFull = true
+		} else {
+			out.Guest = true
+		}
+	}
+	return out
+}
+
+// joinSettingsTx reads the joining settings. An absent row is the default; a
+// row that cannot be read fails closed: a switch that admits reads as off, a
+// pause as on, a mode as off, a number as its default.
+func joinSettingsTx(ctx context.Context, tx execer) (schema.JoinSettingsV1, error) {
+	out := schema.DefaultJoinSettings()
+	args := make([]any, len(joinSettingKeys))
+	marks := make([]string, len(joinSettingKeys))
+	for i, k := range joinSettingKeys {
+		args[i], marks[i] = k, "?"
+	}
+	rows, err := tx.QueryContext(ctx, // #nosec G202 -- placeholders only; every key is in args
+		"SELECT key, value FROM server_settings WHERE key IN ("+strings.Join(marks, ",")+")", args...)
+	if err != nil {
+		return schema.JoinSettingsV1{}, fmt.Errorf("store: read join settings: %w", err)
+	}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			_ = rows.Close()
+			return schema.JoinSettingsV1{}, fmt.Errorf("store: read join settings: %w", err)
+		}
+		switch k {
+		case settingOpenJoining:
+			if m := schema.OpenJoiningMode(v); m.Valid() {
+				out.OpenJoining = m
+			}
+		case settingGuestsEnabled:
+			b, err := strconv.ParseBool(v)
+			out.GuestsEnabled = err == nil && b
+		case settingJoiningPaused:
+			b, err := strconv.ParseBool(v)
+			out.JoiningPaused = err != nil || b
+		case settingJoinVoice:
+			b, err := strconv.ParseBool(v)
+			out.JoinVoice = err == nil && b
+		case settingMaxGuests:
+			readInt(v, &out.MaxGuests)
+		case settingMaxGuestsPerAddress:
+			readInt(v, &out.MaxGuestsPerAddress)
+		case settingGuestIdleSeconds:
+			readInt(v, &out.GuestIdleSeconds)
+		case settingGuestAbsoluteSeconds:
+			readInt(v, &out.GuestAbsoluteSeconds)
+		}
+	}
+	err = rows.Err()
+	if cerr := rows.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return schema.JoinSettingsV1{}, fmt.Errorf("store: read join settings: %w", err)
+	}
+	channels, err := openChannelsTx(ctx, tx)
+	if err != nil {
+		return schema.JoinSettingsV1{}, err
+	}
+	out.OpenChannels = make([]string, len(channels))
+	for i, c := range channels {
+		out.OpenChannels[i] = c.Name
+	}
+	return out, nil
+}
+
+func readInt(v string, dst *int64) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		*dst = n
+	}
+}
+
+// openChannelsTx returns the bare address's channels, by id.
+func openChannelsTx(ctx context.Context, tx execer) ([]schema.InviteChannelV1, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT c.id, c.name FROM open_channels o JOIN channels c ON c.id = o.channel_id ORDER BY c.id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: read open channels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []schema.InviteChannelV1{}
+	for rows.Next() {
+		var c schema.InviteChannelV1
+		if err := rows.Scan(&c.ID, &c.Name); err != nil {
+			return nil, fmt.Errorf("store: read open channels: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read open channels: %w", err)
+	}
+	return out, nil
+}
+
+// JoinState is the joining policy as it stands, with what an answer about
+// it needs beside the settings.
+type JoinState struct {
+	Settings schema.JoinSettingsV1
+	// LiveGuests is how many visits are live now: what max_guests counts.
+	LiveGuests int
+	// ReservedNames is how many permanent principals hold a name in the
+	// reserved guest namespace (migration 31's preflight); while any do,
+	// guests cannot be enabled.
+	ReservedNames int
+}
+
+// JoinState reads the joining policy, the live visits and the reserved
+// names, in one read transaction so they agree.
+func (s *Store) JoinState(ctx context.Context) (JoinState, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return JoinState{}, fmt.Errorf("store: join state: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return joinStateTx(ctx, tx, credentialNow())
+}
+
+// JoinSettings reads the joining policy and the live visits, without the
+// reserved-name scan JoinState makes: what the front door needs.
+func (s *Store) JoinSettings(ctx context.Context) (schema.JoinSettingsV1, int, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return schema.JoinSettingsV1{}, 0, fmt.Errorf("store: join settings: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	set, err := joinSettingsTx(ctx, tx)
+	if err != nil {
+		return schema.JoinSettingsV1{}, 0, err
+	}
+	live, err := liveGuestsTx(ctx, tx, credentialNow())
+	if err != nil {
+		return schema.JoinSettingsV1{}, 0, err
+	}
+	return set, live, nil
+}
+
+func joinStateTx(ctx context.Context, tx execer, now time.Time) (JoinState, error) {
+	set, err := joinSettingsTx(ctx, tx)
+	if err != nil {
+		return JoinState{}, err
+	}
+	live, err := liveGuestsTx(ctx, tx, now)
+	if err != nil {
+		return JoinState{}, err
+	}
+	reserved, err := reservedGuestNamesTx(ctx, tx)
+	if err != nil {
+		return JoinState{}, fmt.Errorf("store: join state: %w", err)
+	}
+	return JoinState{Settings: set, LiveGuests: live, ReservedNames: len(reserved)}, nil
+}
+
+// PutJoinSettings applies req to the joining settings in one IMMEDIATE
+// transaction (schema.PutJoinSettingsRequestV1.Apply, so turning guests off
+// turns a guest-only address off too) and returns the state after it. It
+// refuses, writing nothing, with a JoinSettingsError: ErrJoinPolicyConflict
+// for guest-only joining with guests off, open joining with no open channel
+// (removing the last one while joining is on included), or enabling guests
+// while a permanent name is in the reserved namespace; ErrJoinSettingsInvalid
+// for a value out of bounds or a channel that does not exist. Each field
+// that changed is audited in one join_settings_changed row, with the live
+// visits when guests are turned off, and each channel added or removed in
+// its own row. A request that changes nothing writes nothing. Turning guests
+// off ends no visit: End all guest visits does (EndGuests).
+func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64, req schema.PutJoinSettingsRequestV1) (JoinState, error) {
+	if err := req.Validate(); err != nil {
+		return JoinState{}, invalidSettings(strings.TrimPrefix(err.Error(), "schema: "))
+	}
+	var out JoinState
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		now := credentialNow().Truncate(time.Millisecond)
+		cur, err := joinStateTx(ctx, tx, now)
+		if err != nil {
+			return err
+		}
+		next := req.Apply(cur.Settings)
+		if next.OpenJoining == schema.OpenJoiningGuest && !next.GuestsEnabled {
+			return conflict("the bare address cannot be guest-only while guests are disabled")
+		}
+		if next.OpenJoining != schema.OpenJoiningOff && len(next.OpenChannels) == 0 {
+			return conflict("open joining needs at least one open channel; turn open joining off first")
+		}
+		if err := next.Validate(); err != nil {
+			return invalidSettings(strings.TrimPrefix(err.Error(), "schema: "))
+		}
+		if next.GuestsEnabled && !cur.Settings.GuestsEnabled && cur.ReservedNames > 0 {
+			return conflict("guests cannot be enabled while a permanent principal has a name in the reserved guest namespace; rename it first")
+		}
+		nextIDs := map[int64]bool{}
+		for _, name := range next.OpenChannels {
+			var id int64
+			switch err := tx.QueryRowContext(ctx, "SELECT id FROM channels WHERE name = ?", name).Scan(&id); {
+			case errors.Is(err, sql.ErrNoRows):
+				return invalidSettings("an open channel names no channel on this server")
+			case err != nil:
+				return fmt.Errorf("store: put join settings: find channel: %w", err)
+			}
+			nextIDs[id] = true
+		}
+		curChannels, err := openChannelsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		var changes []string
+		write := func(key, old, val string) error {
+			if old == val {
+				return nil
+			}
+			changes = append(changes, key+"="+old+"->"+val)
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				key, val, now.UnixMilli()); err != nil {
+				return fmt.Errorf("store: put join settings: %s: %w", key, err)
+			}
+			return nil
+		}
+		c, n := cur.Settings, next
+		for _, f := range []struct{ key, old, val string }{
+			{settingOpenJoining, string(c.OpenJoining), string(n.OpenJoining)},
+			{settingGuestsEnabled, strconv.FormatBool(c.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled)},
+			{settingJoiningPaused, strconv.FormatBool(c.JoiningPaused), strconv.FormatBool(n.JoiningPaused)},
+			{settingJoinVoice, strconv.FormatBool(c.JoinVoice), strconv.FormatBool(n.JoinVoice)},
+			{settingMaxGuests, strconv.FormatInt(c.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10)},
+			{settingMaxGuestsPerAddress, strconv.FormatInt(c.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10)},
+			{settingGuestIdleSeconds, strconv.FormatInt(c.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10)},
+			{settingGuestAbsoluteSeconds, strconv.FormatInt(c.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10)},
+		} {
+			if err := write(f.key, f.old, f.val); err != nil {
+				return err
+			}
+		}
+		if len(changes) > 0 {
+			detail := strings.Join(changes, " ")
+			if c.GuestsEnabled && !n.GuestsEnabled {
+				// Turning guests off leaves the live visits to their bounds;
+				// the row says how many, so the operator knows End all guest
+				// visits is there (review F12).
+				detail += fmt.Sprintf(" live_guests=%d", cur.LiveGuests)
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditJoinSettingsChanged, "server", detail, now); err != nil {
+				return err
+			}
+		}
+		curIDs := map[int64]bool{}
+		for _, ch := range curChannels {
+			curIDs[ch.ID] = true
+			if nextIDs[ch.ID] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM open_channels WHERE channel_id = ?", ch.ID); err != nil {
+				return fmt.Errorf("store: put join settings: remove open channel: %w", err)
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelRemoved, channelSubject(ch.ID), "", now); err != nil {
+				return err
+			}
+		}
+		for _, name := range next.OpenChannels {
+			var id int64
+			if err := tx.QueryRowContext(ctx, "SELECT id FROM channels WHERE name = ?", name).Scan(&id); err != nil {
+				return fmt.Errorf("store: put join settings: find channel: %w", err)
+			}
+			if curIDs[id] {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, "INSERT INTO open_channels (channel_id, added_by, added_at) VALUES (?, ?, ?)",
+				id, nullableID(actorID), now.UnixMilli()); err != nil {
+				return fmt.Errorf("store: put join settings: add open channel: %w", err)
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), "", now); err != nil {
+				return err
+			}
+		}
+		out, err = joinStateTx(ctx, tx, now)
+		return err
+	})
+	if err != nil {
+		return JoinState{}, err
+	}
+	return out, nil
+}
+
+// GuestEntry is who asks to start a visit: the optional display label and
+// the server's name, which no label may take, and AddressPeers, the visits
+// the server saw start from the caller's address, for the per-address cap.
+type GuestEntry struct {
+	Label        string
+	ServerName   string
+	AddressPeers []int64
+}
+
+// AdmittedGuest is a visit an entry point started, with the channels it was
+// admitted to.
+type AdmittedGuest struct {
+	CreatedGuest
+	Channels []schema.InviteChannelV1
+}
+
+// JoinAsGuest starts a visit from the bare address (POST /v1/join/guest),
+// in one IMMEDIATE transaction that reads the policy again: guests enabled
+// and the address's mode offering them (else ErrGuestsDisabled), not paused
+// (ErrJoiningPaused), at least one open channel (ErrGuestsDisabled), and the
+// caps (ErrGuestsFull). The visit is admitted to every open channel with the
+// settings' bounds and join_voice, as actor "system". A label the rules
+// refuse is ErrGuestLabelInvalid, before anything is read.
+func (s *Store) JoinAsGuest(ctx context.Context, e GuestEntry) (AdmittedGuest, error) {
+	p, err := prepareGuest(e.Label, e.ServerName)
+	if err != nil {
+		return AdmittedGuest{}, err
+	}
+	var out AdmittedGuest
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		now := credentialNow().Truncate(time.Millisecond)
+		set, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !AddressAdmitsGuests(set) {
+			return ErrGuestsDisabled
+		}
+		if set.JoiningPaused {
+			return ErrJoiningPaused
+		}
+		channels, err := openChannelsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(channels) == 0 {
+			return ErrGuestsDisabled
+		}
+		ids := make([]int64, len(channels))
+		for i, c := range channels {
+			ids[i] = c.ID
+		}
+		g := guestUnder(set, e)
+		g.Origin, g.Channels, g.VoiceAllowed = schema.GuestOriginAddress, ids, set.JoinVoice
+		created, err := createGuestTx(ctx, tx, "system", g, p, now)
+		if err != nil {
+			return err
+		}
+		out = AdmittedGuest{CreatedGuest: created, Channels: channels}
+		return nil
+	})
+	if err != nil {
+		return AdmittedGuest{}, err
+	}
+	out.Token = p.token
+	return out, nil
+}
+
+// guestUnder is a visit under the settings' bounds and caps, for e.
+func guestUnder(set schema.JoinSettingsV1, e GuestEntry) NewGuest {
+	return NewGuest{
+		Label: e.Label, ServerName: e.ServerName,
+		Idle:          time.Duration(set.GuestIdleSeconds) * time.Second,
+		Absolute:      time.Duration(set.GuestAbsoluteSeconds) * time.Second,
+		MaxLive:       int(set.MaxGuests),
+		MaxPerAddress: int(set.MaxGuestsPerAddress),
+		AddressPeers:  e.AddressPeers,
+	}
+}
+
+// RedeemInviteGuest starts a visit through the invite whose code hashes to
+// codeHash (POST /v1/invites/redeem-guest), in one IMMEDIATE transaction
+// that checks, in this order: invites not paused (ErrInvitesPaused) and
+// guests enabled (ErrGuestsDisabled), both before the code so neither says
+// anything about it; the invite usable as for RedeemInvite
+// (ErrInviteInvalid); its join_as admitting guests (ErrGuestsDisabled, told
+// only to a holder of a good code); then it spends one use and starts the
+// visit under the caps (ErrGuestsFull, which spends nothing). The visit gets
+// what an account would: the channels the invite still grants and its voice,
+// never more than its maker holds, and its hard deadline is the earlier of
+// the absolute bound and the invite's credential lifetime. Every row is
+// attributed to "invite:<id>", invite_redeemed with guest=1 among them.
+// now is the invite clock, as for RedeemInvite.
+func (s *Store) RedeemInviteGuest(ctx context.Context, codeHash string, e GuestEntry, now time.Time) (AdmittedGuest, error) {
+	now = now.Truncate(time.Millisecond)
+	p, err := prepareGuest(e.Label, e.ServerName)
+	if err != nil {
+		return AdmittedGuest{}, err
+	}
+	var out AdmittedGuest
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		vnow := credentialNow().Truncate(time.Millisecond)
+		if paused, err := invitesPausedTx(ctx, tx); err != nil {
+			return err
+		} else if paused {
+			return ErrInvitesPaused
+		}
+		set, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !set.GuestsEnabled {
+			return ErrGuestsDisabled
+		}
+		r, kept, dropped, err := usableInviteTx(ctx, tx, codeHash, now)
+		if err != nil {
+			return err
+		}
+		if !InviteAdmitsGuests(r.joinAs) {
+			return ErrGuestsDisabled
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE invites SET uses = uses + 1
+			 WHERE id = ? AND closed_at IS NULL AND (max_uses IS NULL OR uses < max_uses)`, r.id)
+		if err != nil {
+			return fmt.Errorf("store: redeem invite as a guest: spend use: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("store: redeem invite as a guest: spend use: %w", err)
+		} else if n != 1 {
+			return ErrInviteInvalid
+		}
+		ids := make([]int64, len(kept))
+		for i, c := range kept {
+			ids[i] = c.ID
+		}
+		g := guestUnder(set, e)
+		g.Origin, g.InviteID, g.InvitedBy, g.Channels = schema.GuestOriginInvite, r.id, r.createdBy, ids
+		g.CredentialLifetime = time.Duration(r.lifetimeMs) * time.Millisecond
+		g.VoiceAllowed = r.voice && r.creatorVoice
+		actor := inviteSubject(r.id)
+		created, err := createGuestTx(ctx, tx, actor, g, p, vnow)
+		if err != nil {
+			return err
+		}
+		droppedIDs := make([]string, len(dropped))
+		for i, c := range dropped {
+			droppedIDs[i] = strconv.FormatInt(c.ID, 10)
+		}
+		droppedText := "none"
+		if len(droppedIDs) > 0 {
+			droppedText = strings.Join(droppedIDs, ",")
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditInviteRedeemed, inviteSubject(r.id),
+			fmt.Sprintf("invite=%d principal=%d uses=%d dropped_channels=%s guest=1", r.id, created.Principal.ID, r.uses+1, droppedText), vnow); err != nil {
+			return err
+		}
+		out = AdmittedGuest{CreatedGuest: created, Channels: kept}
+		return nil
+	})
+	if err != nil {
+		return AdmittedGuest{}, err
+	}
+	out.Token = p.token
+	return out, nil
+}
+
+// GuestFilter selects visits for ListGuests. State is required; Origin
+// narrows it when set; Before, when positive, lists only visits whose
+// principal id is below it; Limit is the page size.
+type GuestFilter struct {
+	State  schema.GuestState
+	Origin schema.GuestOrigin
+	Before int64
+	Limit  int
+}
+
+// ListGuests returns one page of visits matching f, newest first (by
+// principal id, which grows with each visit), and whether more may follow.
+func (s *Store) ListGuests(ctx context.Context, f GuestFilter) ([]GuestVisit, bool, error) {
+	if !f.State.Valid() || (f.Origin != "" && !f.Origin.Valid()) || f.Limit < 1 {
+		return nil, false, errors.New("store: list guests: a known state, a known origin and a positive limit")
+	}
+	q := `SELECT ` + guestVisitColumns + guestVisitFrom + ` WHERE v.state = ?`
+	args := []any{string(f.State)}
+	if f.Origin != "" {
+		q += " AND v.origin = ?"
+		args = append(args, string(f.Origin))
+	}
+	if f.Before > 0 {
+		q += " AND v.principal_id < ?"
+		args = append(args, f.Before)
+	}
+	q += " ORDER BY v.principal_id DESC LIMIT ?"
+	args = append(args, f.Limit+1)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: list guests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []GuestVisit{}
+	for rows.Next() {
+		v, err := scanGuestVisit(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("store: list guests: %w", err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: list guests: %w", err)
+	}
+	more := len(out) > f.Limit
+	if more {
+		out = out[:f.Limit]
+	}
+	return out, more, nil
+}
+
+// GuestSelector is whom End all guest visits selects: every active visit, or
+// those of one origin, or those that came through one invite. Converted and
+// ended visits are never selected.
+type GuestSelector struct {
+	Origin   schema.GuestOrigin
+	InviteID int64
+}
+
+func (sel GuestSelector) where() (string, []any) {
+	q := "v.state = 'active'"
+	var args []any
+	if sel.Origin != "" {
+		q += " AND v.origin = ?"
+		args = append(args, string(sel.Origin))
+	}
+	if sel.InviteID > 0 {
+		q += " AND v.invite_id = ?"
+		args = append(args, sel.InviteID)
+	}
+	return q, args
+}
+
+func (sel GuestSelector) detail() string {
+	out := "origin=any"
+	if sel.Origin != "" {
+		out = "origin=" + string(sel.Origin)
+	}
+	if sel.InviteID > 0 {
+		out += fmt.Sprintf(" invite=%d", sel.InviteID)
+	}
+	return out
+}
+
+// GuestRef names one visit End all guest visits selected.
+type GuestRef struct {
+	ID     int64
+	Handle string
+}
+
+// guestTargetsTx returns the first limit active visits sel selects, oldest
+// first, and how many more it selects.
+func guestTargetsTx(ctx context.Context, tx execer, sel GuestSelector, limit int) ([]GuestRef, int, error) {
+	where, args := sel.where()
+	var total int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM guest_visits v WHERE "+where, args...).Scan(&total); err != nil { // #nosec G202 -- where joins constants; every value is in args
+		return nil, 0, fmt.Errorf("store: guest targets: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT v.principal_id, v.handle FROM guest_visits v WHERE "+where+ // #nosec G202 -- as above
+		" ORDER BY v.principal_id LIMIT ?", append(args, limit)...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store: guest targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []GuestRef{}
+	for rows.Next() {
+		var g GuestRef
+		if err := rows.Scan(&g.ID, &g.Handle); err != nil {
+			return nil, 0, fmt.Errorf("store: guest targets: %w", err)
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("store: guest targets: %w", err)
+	}
+	return out, max(0, total-len(out)), nil
+}
+
+// EndGuests is End all guest visits: it ends, with reason operator, the first
+// limit active visits sel selects, and returns them with how many more it
+// selects. With dryRun it only lists them and writes nothing. Otherwise every
+// visit ends in one IMMEDIATE transaction, each as EndGuestVisit ends one
+// (guest_ended, its memberships and its credential), and guests_ended
+// summarises them; OnGuestsEnded is told after the commit, which closes
+// their sockets and takes them out of voice.
+func (s *Store) EndGuests(ctx context.Context, actor string, sel GuestSelector, limit int, dryRun bool) ([]GuestRef, int, error) {
+	if (sel.Origin != "" && !sel.Origin.Valid()) || sel.InviteID < 0 || limit < 1 {
+		return nil, 0, errors.New("store: end guests: a known origin, an invite id and a positive limit")
+	}
+	if dryRun {
+		return guestTargetsTx(ctx, s.db, sel, limit)
+	}
+	var (
+		refs      []GuestRef
+		remaining int
+		ended     []EndedGuest
+		runs      []EndedRun
+	)
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		ended, runs = nil, nil
+		now := credentialNow().Truncate(time.Millisecond)
+		var err error
+		if refs, remaining, err = guestTargetsTx(ctx, tx, sel, limit); err != nil {
+			return err
+		}
+		for _, g := range refs {
+			e, err := endGuestVisitTx(ctx, tx, actor, g.ID, schema.GuestEndOperator, now, &runs)
+			if err != nil {
+				return err
+			}
+			ended = append(ended, e)
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditGuestsEnded, "server",
+			fmt.Sprintf("count=%d remaining=%d %s", len(refs), remaining, sel.detail()), now)
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(ended)
+	return refs, remaining, nil
+}

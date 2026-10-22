@@ -1,5 +1,7 @@
 // The wire types of pkg/schema/channel.go and channel_member.go, generated into generated.ts.
 export {
+  channelDocV1,
+  channelDocV1Schema as channelDocSchema,
   channelMembersV1,
   channelMembersV1Schema as channelMembersSchema,
   channelMemberV1,
@@ -7,6 +9,8 @@ export {
   createChannelResponse,
   listChannelMembersResponseV1,
   listChannelsResponse,
+  renameChannelResponseV1,
+  type ChannelDocV1,
   type ChannelMembersV1,
   type ChannelMemberV1,
   type ChannelV0,
@@ -14,4 +18,6 @@ export {
   type CreateChannelResponse,
   type ListChannelMembersResponseV1,
   type ListChannelsResponse,
+  type RenameChannelRequestV1,
+  type RenameChannelResponseV1,
 } from './generated';

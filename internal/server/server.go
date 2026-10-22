@@ -92,6 +92,10 @@ type Config struct {
 	// unless every address the server binds is loopback and no trusted proxy
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
+	// ServerName is the label the front door shows (GET /v1/join) and a name
+	// no guest label may take (issue #710). Empty means DefaultServerName.
+	// conchd checks it with ValidateServerName.
+	ServerName string
 	// TOTPKey is the host key operators' TOTP secrets are sealed under
 	// (issue #709, totp.go): kept outside the database and its backups,
 	// and backed up on its own. Nil, operators cannot enrol a second factor
@@ -117,6 +121,12 @@ const shutdownTimeout = 10 * time.Second
 // Server is conchd's HTTP server wrapped around the store. It owns the HTTP
 // listener and mux; the store's lifecycle belongs to the caller.
 type Server struct {
+	// awaitPolled, when set, is called after each authorized poll of
+	// await_decision, before it waits for the next. Tests only (#740): it
+	// lets a test withdraw the authorization once the wait is polling, not
+	// after a guess at how long that takes. Nil in production, where it does
+	// nothing.
+	awaitPolled func()
 	cfg         Config
 	store       *store.Store
 	hub         *hub.Hub
@@ -207,6 +217,9 @@ type Server struct {
 	// reportLimits is the problem-report rate limit (reports.go), in memory
 	// only; its clock is now. Tests replace it before serving.
 	reportLimits *reportLimiter
+	// guestAddrs is which address each guest visit came from, for the
+	// per-address cap (join.go), in memory only.
+	guestAddrs guestAddressBook
 	// passwords is password hashing and its two bounded pools (password.go);
 	// logins is the sign-in limits (login.go), in memory only, with now as
 	// their clock. Tests replace logins with setLoginLimits before serving.

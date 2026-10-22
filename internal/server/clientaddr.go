@@ -10,7 +10,9 @@ import (
 
 // The client's address (issue #437, ADR-008 Consequences). conchd reads it for
 // one purpose only: the rate limits of the invite routes, which are the first
-// routes anyone may call without a credential that create something. Behind a
+// routes anyone may call without a credential that create something, and of
+// the guest entry routes beside them, with their per-address cap on live
+// visits (issue #710, join.go). Behind a
 // reverse proxy every connection comes from the proxy, so the address is taken
 // from X-Forwarded-For, but only from a proxy the operator said to trust.
 //
@@ -19,7 +21,7 @@ import (
 // carries at most the truncated form of logAddr (an IPv4 /24, an IPv6 /48),
 // which is enough to see that one network is hammering the server and not
 // enough to name a household. The full address lives only in the memory of
-// the rate limiter, and a restart forgets it.
+// the rate limiter and the guest address book, and a restart forgets it.
 
 // ParseTrustedProxies reads the --trusted-proxies / CONCHD_TRUSTED_PROXIES
 // value: comma-separated CIDRs such as 127.0.0.1/32,::1/128. Empty means no
