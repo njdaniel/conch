@@ -5,7 +5,7 @@
 // at every attempt, the same backoff.
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as api from '../api';
-import type { ChannelMemberV1 } from '../schema/channel';
+import type { ChannelDocV1, ChannelMemberV1 } from '../schema/channel';
 import type { CreateInterventionRequestV1 } from '../schema/intervention';
 import type { RunV1 } from '../schema/run';
 import { Feed, firstDelay, maxDelay, type FeedStatus } from '../state/feed';
@@ -189,18 +189,33 @@ export function useAgents({
   signedIn,
   channel,
   channelId,
+  nameOf,
   onUnauthorized,
+  onChannel,
+  onMissing,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly channelId: number | null;
+  // The channel's name now, by id: what a reconnect and a read name, so a
+  // channel renamed while open (issue #728) keeps its socket.
+  readonly nameOf: (channelId: number) => string | null;
   readonly onUnauthorized: () => void;
+  // The channel as it now is, from the events socket (conch.channel.v1): it
+  // was renamed.
+  readonly onChannel: (channel: ChannelDocV1) => void;
+  // A read for the channel answered channel_not_found: it may have been
+  // renamed under this page.
+  readonly onMissing: (channelId: number) => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
   const own = useOwnSession(signedIn, onUnauthorized);
   const sessionId = own.session.phase === 'ready' ? own.session.id : null;
   const { replace, healthy, release } = own;
+  // The effects below are keyed on the channel's id, and read its name
+  // (nameOf) when they ask.
+  const open = channel !== null;
 
   // The newest state, for code that outlives a render (the stamp a read is
   // asked at, the activity id a re-read starts after).
@@ -222,21 +237,25 @@ export function useAgents({
   const membersSent = useRef(0);
   useEffect(() => {
     setMembers([]);
-  }, [channel]);
+  }, [channelId]);
   useEffect(() => {
-    if (channel === null) return;
+    if (!open || channelId === null) return;
+    const id = channelId;
+    const name = nameOf(id);
+    if (name === null) return;
     let live = true;
     const asked = membersSent.current;
-    void api.listMembers(channel).then((result) => {
+    void api.listMembers(name).then((result) => {
       if (!live) return;
       if (result.ok) {
         if (asked === membersSent.current) setMembers(result.value);
       } else if (result.failure === 'unauthorized') onUnauthorized();
+      else if (result.code === api.channelNotFound) onMissing(id);
     });
     return () => {
       live = false;
     };
-  }, [channel, membersAttempt, onUnauthorized]);
+  }, [open, channelId, nameOf, membersAttempt, onUnauthorized, onMissing]);
 
   const heldIds = members.map((m) => m.principal_id).join(',');
   const unknownKey = (() => {
@@ -270,8 +289,10 @@ export function useAgents({
       if (now.current.link === 'live') dispatch({ type: 'down' });
       return;
     }
-    if (channel === null || channelId === null) return;
+    if (!open || channelId === null) return;
     const id = channelId;
+    const name = nameOf(id);
+    if (name === null) return;
     let live = true;
     let reason = '';
     let denials = firstDelay;
@@ -308,11 +329,12 @@ export function useAgents({
     }
 
     const feed = new Feed({
-      channel,
+      channel: name,
       clock: realClock,
       after: () => 0,
-      open: (c, _after, events) =>
-        api.openEventsSocket(c, sessionId, {
+      // Each attempt names the channel as it is called then.
+      open: (_channel, _after, events) =>
+        api.openEventsSocket(nameOf(id) ?? name, sessionId, {
           ...events,
           onClose: (code, why) => {
             reason = why ?? '';
@@ -344,6 +366,11 @@ export function useAgents({
           case 'intervention':
             dispatch({ type: 'intervention', intervention: frame.intervention });
             break;
+          case 'channel':
+            // This channel renamed (issue #728); the socket stays open.
+            if (frame.channel.channel_id !== id) return;
+            onChannel(frame.channel);
+            break;
         }
       },
       onStatus,
@@ -354,7 +381,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [channel, channelId, sessionId, onUnauthorized, replace, healthy]);
+  }, [open, channelId, nameOf, sessionId, onUnauthorized, onChannel, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {
@@ -366,15 +393,17 @@ export function useAgents({
     (session: number) => {
       if (channel === null) return;
       const asked = channel;
+      const id = channelId;
       void api.listSessionRuns(asked, session, recentRuns).then((result) => {
         if (!result.ok) {
           if (result.failure === 'unauthorized') onUnauthorized();
+          else if (result.code === api.channelNotFound && id !== null) onMissing(id);
           return;
         }
         dispatch({ type: 'sessionRuns', session, runs: result.value });
       });
     },
-    [channel, onUnauthorized],
+    [channel, channelId, onUnauthorized, onMissing],
   );
 
   // The Runs view: the first page when the socket is first live and again
@@ -390,6 +419,7 @@ export function useAgents({
         if (now.current.runs.loading || now.current.runs.pages >= maxRunPages) return;
         dispatch({ type: 'runsAsk' });
       }
+      const id = channelId;
       void api.listChannelRuns(asked, runsPageSize, before).then((result) => {
         if (epoch.current !== mine) return;
         if (result.ok) {
@@ -397,11 +427,12 @@ export function useAgents({
         } else if (result.failure === 'unauthorized') {
           onUnauthorized();
         } else {
+          if (result.code === api.channelNotFound && id !== null) onMissing(id);
           dispatch({ type: 'runsFailed', before, line: 'Could not list runs' });
         }
       });
     },
-    [channel, onUnauthorized],
+    [channel, channelId, onUnauthorized, onMissing],
   );
   // Keyed on liveGen alone: a channel switch reads again with the roster of
   // the new socket, not once more before it.

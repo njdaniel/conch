@@ -211,12 +211,15 @@ export class ScreenShare {
     this.seen = false;
     this.renewal = false;
     this.set({ kind: 'claiming' });
+    // The channel as it is called now: renamed (issue #728) while the picker
+    // was open, the next call names the new name.
+    const at = () => this.channel ?? channel;
     const first = await this.api.claim(channel);
     if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
       // and is let go, unless a newer share has begun.
-      if (this.isIdle()) await this.releaseHeld(channel);
+      if (this.isIdle()) await this.releaseHeld(at());
       return;
     }
     if (!first.ok) {
@@ -231,7 +234,7 @@ export class ScreenShare {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
       this.set({ kind: 'stopping' });
-      await this.releaseHeld(channel);
+      await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled' });
       return;
     }
@@ -241,11 +244,11 @@ export class ScreenShare {
     }
     this.set({ kind: 'publishing' });
     this.seen = false;
-    const again = await this.api.claim(channel);
+    const again = await this.api.claim(at());
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
-      if (this.isIdle()) await this.releaseHeld(channel);
+      if (this.isIdle()) await this.releaseHeld(at());
       return;
     }
     if (!again.ok) {
@@ -253,7 +256,7 @@ export class ScreenShare {
       // A share now someone else's is not ours to stop.
       if (end === 'busy') this.held = false;
       await room.stopScreen();
-      await this.releaseHeld(channel);
+      await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: end });
       return;
     }
@@ -268,7 +271,7 @@ export class ScreenShare {
         return;
       }
       await room.stopScreen();
-      await this.releaseHeld(channel);
+      await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: 'failed' });
       return;
     }
@@ -403,6 +406,12 @@ export class ScreenShare {
     void this.resume();
   }
 
+  // renamed is the channel renamed (issue #728): the share and its claim stay
+  // as they are, and what is asked of conchd from now on names the new name.
+  renamed(channel: string): void {
+    if (this.channel !== null) this.channel = channel;
+  }
+
   // abandon is the client stopping (signed out, no longer a member, another
   // device took over): a share being resumed ends.
   abandon(): void {
@@ -463,11 +472,13 @@ export class ScreenShare {
     this.seen = false;
     const answer = await this.api.claim(channel);
     this.reclaiming = false;
+    // Renamed meanwhile (issue #728): what follows names the new name.
+    const at = () => this.channel ?? channel;
     if (answer.ok) this.granted(answer.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is let
       // go, unless a newer share has begun.
-      if (this.isIdle()) await this.releaseHeld(channel);
+      if (this.isIdle()) await this.releaseHeld(at());
       return;
     }
     if (!answer.ok) {
@@ -517,7 +528,7 @@ export class ScreenShare {
       kept.stop();
       this.endInterruption();
       await room.stopScreen();
-      await this.releaseHeld(channel);
+      await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: 'failed' });
       return;
     }

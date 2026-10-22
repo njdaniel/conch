@@ -3,7 +3,7 @@
 // page looks at it; a frame of a schema this client does not know is skipped
 // (a newer server may send more), and so is one that does not validate.
 import { activitySchema, agentActivityV1, type AgentActivityV1 } from '../schema/activity';
-import { channelMembersSchema, channelMembersV1, type ChannelMembersV1 } from '../schema/channel';
+import { channelDocSchema, channelDocV1, channelMembersSchema, channelMembersV1, type ChannelDocV1, type ChannelMembersV1 } from '../schema/channel';
 import { interventionSchema, interventionV1, type InterventionV1 } from '../schema/intervention';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
@@ -13,7 +13,9 @@ export type EventFrame =
   | { readonly kind: 'members'; readonly members: ChannelMembersV1 }
   | { readonly kind: 'run'; readonly run: RunV1 }
   | { readonly kind: 'activity'; readonly entry: AgentActivityV1 }
-  | { readonly kind: 'intervention'; readonly intervention: InterventionV1 };
+  | { readonly kind: 'intervention'; readonly intervention: InterventionV1 }
+  // The channel as it now is, sent when it is renamed (issue #728).
+  | { readonly kind: 'channel'; readonly channel: ChannelDocV1 };
 
 export function parseEventFrame(data: unknown): EventFrame | null {
   if (typeof data !== 'string') return null;
@@ -35,6 +37,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
       return agentActivityV1(doc).length === 0 ? { kind: 'activity', entry: doc as AgentActivityV1 } : null;
     case interventionSchema:
       return interventionV1(doc).length === 0 ? { kind: 'intervention', intervention: doc as InterventionV1 } : null;
+    case channelDocSchema:
+      return channelDocV1(doc).length === 0 ? { kind: 'channel', channel: doc as ChannelDocV1 } : null;
     default:
       return null;
   }

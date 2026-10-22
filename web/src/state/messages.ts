@@ -89,6 +89,9 @@ export type ChatAction =
   | { readonly type: 'olderLoading'; readonly channel: string }
   | { readonly type: 'olderLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   | { readonly type: 'olderFailed'; readonly channel: string }
+  // The channel held under `from` is now called `to` (issue #728): what is
+  // held moves with it, history, pending sends and all.
+  | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   | { readonly type: 'reset' };
 
 // mergeMessages is the TUI's: a map by id, so a message held already is
@@ -206,9 +209,24 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case 'olderFailed':
       return known(state, action.channel, (c) => ({ ...c, older: 'error' }));
+    case 'renamed':
+      return { channels: rekey(state.channels, action.from, action.to) };
     case 'reset':
       return initialChat;
   }
+}
+
+// rekey moves what is held under one channel name to another (issue #728).
+// Names are unique, so nothing else is held under the new one; should
+// anything be, the renamed channel's own replaces it. Nothing held under the
+// old name, nothing changes.
+export function rekey<T>(held: Readonly<Record<string, T>>, from: string, to: string): Readonly<Record<string, T>> {
+  const moved = Object.hasOwn(held, from) ? held[from] : undefined;
+  if (from === to || moved === undefined) return held;
+  const next: Record<string, T> = {};
+  for (const [name, value] of Object.entries(held)) if (name !== from) next[name] = value;
+  next[to] = moved;
+  return next;
 }
 
 export function chatFor(state: ChatState, channel: string | null): ChannelChat {

@@ -695,16 +695,19 @@ label {
   flex-basis: 100%;
 }
 
-/* "New channel" (issue #695), under the channel list: the field takes the
-   list's width and its buttons wrap below it rather than widen the column. */
-.create-channel {
+/* "New channel" (issue #695) and "Rename" (issue #728), under the channel
+   list: the field takes the list's width and its buttons wrap below it rather
+   than widen the column. A long name wraps rather than widens it either. */
+.create-channel,
+.rename-channel {
   display: grid;
   gap: var(--s2);
   margin-top: var(--s3);
   justify-items: start;
 }
 
-.create-channel form:not([hidden]) {
+.create-channel form:not([hidden]),
+.rename-channel form:not([hidden]) {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -712,18 +715,32 @@ label {
   width: 100%;
 }
 
-.create-channel label {
+.create-channel label,
+.rename-channel label {
   flex-basis: 100%;
 }
 
-.create-channel input {
+.create-channel input,
+.rename-channel input {
   flex: 1 1 8rem;
   min-width: 0;
 }
 
-.create-channel p {
+.create-channel p,
+.rename-channel p,
+.rename-channel > button {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.rename-channel {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rename-channel > button {
+  max-width: 100%;
+  text-align: start;
 }
 
 /* "Your sign-ins" (issue #496): a list that wraps a long label rather than

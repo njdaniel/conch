@@ -11,13 +11,15 @@ import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
+import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
+import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { authReducer, initialAuth } from './state/auth';
-import { channelsReducer, initialChannels } from './state/channels';
+import { channelsReducer, initialChannels, type ChannelsAction } from './state/channels';
 import { connectionReducer } from './state/connection';
 import { whisperNotice } from './Composer';
 import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer } from './state/drafts';
@@ -35,7 +37,7 @@ import { useOccupancy } from './voice/useOccupancy';
 export function App({ origin }: { readonly origin: string }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
   const [connection, dispatchConnection] = useReducer(connectionReducer, 'signedOut');
-  const [channels, dispatchChannels] = useReducer(channelsReducer, initialChannels);
+  const [channels, dispatchChannelsRaw] = useReducer(channelsReducer, initialChannels);
   const [chat, dispatchRaw] = useReducer(chatReducer, initialChat);
   const [drafts, dispatchDrafts] = useReducer(draftsReducer, initialDrafts);
   const [targets, dispatchTargets] = useReducer(targetsReducer, initialTargets);
@@ -52,6 +54,16 @@ export function App({ origin }: { readonly origin: string }) {
     chatNow.current = chatReducer(chatNow.current, action);
     dispatchRaw(action);
   }, []);
+  // The newest channel list, kept the same way: a channel renamed (issue #728)
+  // is called by its new name from the moment the rename is applied, so a
+  // socket frame or an answer arriving before the next render goes under it.
+  const channelsNow = useRef(channels);
+  const dispatchChannels = useCallback((action: ChannelsAction) => {
+    channelsNow.current = channelsReducer(channelsNow.current, action);
+    dispatchChannelsRaw(action);
+  }, []);
+  // A channel's name now, by its id.
+  const nameOf = useCallback((id: number) => channelsNow.current.channels.find((c) => c.id === id)?.name ?? null, []);
 
   // A credential left by an earlier load of this tab is checked once.
   const restoring = auth.phase === 'restoring';
@@ -98,7 +110,7 @@ export function App({ origin }: { readonly origin: string }) {
     return () => {
       live = false;
     };
-  }, [signedIn, attempt]);
+  }, [signedIn, attempt, dispatchChannels]);
 
   useEffect(() => {
     if (auth.phase === 'signedOut') {
@@ -110,7 +122,7 @@ export function App({ origin }: { readonly origin: string }) {
       setAttempt(0);
       setEverywhereFailed(null);
     }
-  }, [auth.phase]);
+  }, [auth.phase, dispatchChannels, dispatchChat]);
 
   // The hash names the open channel, so back, forward and a pasted link work.
   useEffect(() => {
@@ -123,8 +135,11 @@ export function App({ origin }: { readonly origin: string }) {
     return () => {
       window.removeEventListener('hashchange', onHash);
     };
-  }, [signedIn]);
+  }, [signedIn, dispatchChannels]);
 
+  // The open channel is remembered and in the address, under its new name
+  // once it is renamed. The hash is set as when another channel is opened:
+  // the one way the page writes the address bar (hygiene.test.ts).
   useEffect(() => {
     if (channels.selected === null) return;
     rememberChannel(channels.selected);
@@ -132,16 +147,81 @@ export function App({ origin }: { readonly origin: string }) {
     if (window.location.hash !== hash) window.location.hash = hash;
   }, [channels.selected]);
 
+  // A channel renamed (issue #728), however the page learned it: the
+  // operator's own answer, the events socket, or the list read again. The
+  // list, the open channel and everything kept by its name move to the new
+  // one; nothing is reloaded and no socket is reopened.
+  const renamed = useCallback(
+    (id: number, name: string) => {
+      const was = channelsNow.current.channels.find((c) => c.id === id);
+      if (was === undefined || was.name === name) return;
+      dispatchChannels({ type: 'renamed', id, name });
+      dispatchChat({ type: 'renamed', from: was.name, to: name });
+      dispatchDrafts({ type: 'renamed', from: was.name, to: name });
+      dispatchTargets({ type: 'renamed', from: was.name, to: name });
+    },
+    [dispatchChannels, dispatchChat],
+  );
+
+  // The slow way (issue #728): a call for a channel answered
+  // channel_not_found. The list is read again and the channel found by its
+  // id: under a new name, the page applies the rename; not there at all, it
+  // is lost, as after a 1008. It resolves to the channel's name now, or null.
+  // One read at a time for a channel: calls that fail together share it.
+  const refinding = useRef(new Map<number, Promise<string | null>>());
+  const refind = useCallback(
+    (id: number): Promise<string | null> => {
+      const asked = refinding.current.get(id);
+      if (asked !== undefined) return asked;
+      const reading = api.listChannels().then((result) => {
+        refinding.current.delete(id);
+        if (!result.ok) {
+          if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+          return null;
+        }
+        const found = result.value.find((c) => c.id === id);
+        const was = channelsNow.current.channels.find((c) => c.id === id);
+        if (found === undefined) {
+          if (was !== undefined) dispatchChannels({ type: 'lost', name: was.name });
+          return null;
+        }
+        renamed(id, found.name);
+        return found.name;
+      });
+      refinding.current.set(id, reading);
+      return reading;
+    },
+    [dispatchChannels, renamed],
+  );
+  const onMissing = useCallback(
+    (id: number) => {
+      void refind(id);
+    },
+    [refind],
+  );
+  const onChannel = useCallback(
+    (doc: ChannelDocV1) => {
+      renamed(doc.channel_id, doc.name);
+    },
+    [renamed],
+  );
+
   const onUnauthorized = useCallback(() => {
     dispatchAuth({ type: 'unauthorized' });
   }, []);
-  const onLost = useCallback((name: string) => {
-    dispatchChannels({ type: 'lost', name });
-  }, []);
+  const onLost = useCallback(
+    (name: string) => {
+      dispatchChannels({ type: 'lost', name });
+    },
+    [dispatchChannels],
+  );
   // The one way a channel is opened: from the list, or from the voice strip.
-  const onOpen = useCallback((name: string) => {
-    dispatchChannels({ type: 'select', name });
-  }, []);
+  const onOpen = useCallback(
+    (name: string) => {
+      dispatchChannels({ type: 'select', name });
+    },
+    [dispatchChannels],
+  );
   const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
   // One older page at a time, and none past maxHeld.
   const getOldest = useCallback((name: string) => {
@@ -159,11 +239,15 @@ export function App({ origin }: { readonly origin: string }) {
     signedIn,
     channel: channelId === null ? null : selected,
     channelId,
+    nameOf,
     onUnauthorized,
+    onChannel,
+    onMissing,
   });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
     channelId,
+    nameOf,
     me: principal ?? { id: 0, name: '', kind: 'human' },
     members: agents.members,
     getAfter,
@@ -172,16 +256,18 @@ export function App({ origin }: { readonly origin: string }) {
     dispatchConnection,
     onUnauthorized,
     onLost,
+    onRenamed: renamed,
+    onMissing,
   });
 
   // Whether the reader is at the newest message of the open channel; a channel
-  // newly opened starts at it.
-  const [bottom, setBottom] = useState<{ readonly channel: string | null; readonly atBottom: boolean }>({ channel: null, atBottom: true });
+  // newly opened starts at it. By id, so a rename is not another channel.
+  const [bottom, setBottom] = useState<{ readonly channel: number | null; readonly atBottom: boolean }>({ channel: null, atBottom: true });
   // A channel opened again starts at the bottom, whatever it was left at.
-  const [bottomFor, setBottomFor] = useState(selected);
-  if (bottomFor !== selected) {
-    setBottomFor(selected);
-    setBottom({ channel: selected, atBottom: true });
+  const [bottomFor, setBottomFor] = useState(channelId);
+  if (bottomFor !== channelId) {
+    setBottomFor(channelId);
+    setBottom({ channel: channelId, atBottom: true });
   }
   const held = selected === null ? null : chatFor(chat, selected);
   const headId = held === null ? 0 : lastId(held);
@@ -193,10 +279,11 @@ export function App({ origin }: { readonly origin: string }) {
     open: channelId === null ? null : selected,
     ready: held?.history === 'ready',
     newest: head === undefined ? null : { id: head.id, author: head.author_id },
-    atBottom: bottom.channel === selected ? bottom.atBottom : true,
+    atBottom: bottom.channel === channelId ? bottom.atBottom : true,
     status: live.status,
     me: principal?.id ?? 0,
     onUnauthorized,
+    onMissing,
   });
 
   const now = useNow(signedIn);
@@ -236,9 +323,12 @@ export function App({ origin }: { readonly origin: string }) {
   }, [scrollTo, detailOpen]);
 
   // One POST per click. Nothing here sends a message a second time on its own.
+  // The answer goes under the channel's name when it comes: renamed meanwhile
+  // (issue #728), the new one.
   const post = useCallback(
-    (name: string, localId: number, body: string, audience?: Audience) => {
-      void api.postMessage(name, body, audience).then((result) => {
+    (id: number, sent: string, localId: number, body: string, audience?: Audience) => {
+      void api.postMessage(sent, body, audience).then((result) => {
+        const name = nameOf(id) ?? sent;
         if (result.ok) {
           dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
           if (audience?.kind === 'principals') {
@@ -251,11 +341,12 @@ export function App({ origin }: { readonly origin: string }) {
           // A refusal stays as a Failed line with Retry and Dismiss, so the text
           // is never lost; the server's own line is shown beside the composer.
           if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+          if (result.outcome === 'refused' && result.code === api.channelNotFound) onMissing(id);
           dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
         }
       });
     },
-    [],
+    [nameOf, dispatchChat, onMissing],
   );
 
   const releaseSession = agents.release;
@@ -488,6 +579,22 @@ export function App({ origin }: { readonly origin: string }) {
               onOpen={onOpen}
             />
           }
+          renameChannel={
+            // Operators alone may rename (the server's rule); anyone else is
+            // not offered it. Keyed by id: opening another channel starts the
+            // form over, and a rename of this one keeps it.
+            auth.principal.role === 'operator' && channelId !== null && selected !== null ? (
+              <RenameChannel
+                key={channelId}
+                channel={{ id: channelId, name: selected }}
+                onRenamed={(channel) => {
+                  renamed(channel.id, channel.name);
+                }}
+                onStale={refind}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : null
+          }
           newChannel={
             // The server allows operators alone; anyone else is not offered it.
             auth.principal.role === 'operator' ? (
@@ -510,7 +617,7 @@ export function App({ origin }: { readonly origin: string }) {
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 <div className="conversation-body" hidden={agents.state.detail !== null}>
               <Conversation
-                key={selected}
+                key={channelId}
                 channel={selected}
                 chat={chatFor(chat, selected)}
                 live={live.status}
@@ -529,14 +636,14 @@ export function App({ origin }: { readonly origin: string }) {
                   dispatchTargets({ type: 'posting', channel: selected });
                   dispatchChat({ type: 'sending', channel: selected, body, at: Date.now(), ...(audience === undefined ? {} : { audience }) });
                   dispatchDrafts({ type: 'edit', channel: selected, text: '' });
-                  post(selected, localId, body, audience);
+                  post(channelId, selected, localId, body, audience);
                 }}
                 onRetrySend={(localId) => {
                   const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
                   if (send === undefined || send.status === 'sending') return;
                   dispatchTargets({ type: 'posting', channel: selected });
                   dispatchChat({ type: 'retrying', channel: selected, localId });
-                  post(selected, localId, send.body, send.audience);
+                  post(channelId, selected, localId, send.body, send.audience);
                 }}
                 onDismissSend={(localId) => {
                   dispatchChat({ type: 'discard', channel: selected, localId });
@@ -544,7 +651,7 @@ export function App({ origin }: { readonly origin: string }) {
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
                 onBottom={(atBottom) => {
-                  setBottom((prev) => (prev.channel === selected && prev.atBottom === atBottom ? prev : { channel: selected, atBottom }));
+                  setBottom((prev) => (prev.channel === channelId && prev.atBottom === atBottom ? prev : { channel: channelId, atBottom }));
                 }}
               />
                 </div>
