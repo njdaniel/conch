@@ -41,6 +41,7 @@ const realClock = {
 export function useLiveChannel({
   channel,
   channelId,
+  nameOf,
   me,
   members,
   getAfter,
@@ -49,9 +50,15 @@ export function useLiveChannel({
   dispatchConnection,
   onUnauthorized,
   onLost,
+  onRenamed,
+  onMissing,
 }: {
   readonly channel: string | null;
   readonly channelId: number | null;
+  // The channel's name now, by id, as the page holds it: what each request,
+  // reconnect and dispatch names, so a channel renamed while open (issue #728)
+  // keeps its socket and its history and the next call uses the new name.
+  readonly nameOf: (channelId: number) => string | null;
   readonly me: { readonly id: number; readonly name: string; readonly kind: PrincipalKind };
   // The channel's members, as the people panel holds them (useAgents): read
   // when the channel opens and kept current by the events socket, so a name
@@ -64,6 +71,11 @@ export function useLiveChannel({
   readonly dispatchConnection: Dispatch<ConnectionAction>;
   readonly onUnauthorized: () => void;
   readonly onLost: (channel: string) => void;
+  // The list read after a 1008 holds the channel under another name.
+  readonly onRenamed: (channelId: number, name: string) => void;
+  // A call for the channel answered channel_not_found: it may have been
+  // renamed under this page, which the page finds out by reading the list.
+  readonly onMissing: (channelId: number) => void;
 }): Live {
   const [status, setStatus] = useState<LiveStatus>('loading');
   const [nets, setNets] = useState<ReadonlyMap<number, string>>(new Map());
@@ -76,19 +88,30 @@ export function useLiveChannel({
   const meName = me.name;
   const meKind = me.kind;
 
+  // Keyed on the channel's id, not its name: a rename of the open channel
+  // neither reloads its history nor reopens its socket.
+  const open = channel !== null;
   useEffect(() => {
-    if (channel === null || channelId === null) return;
+    if (!open || channelId === null) return;
     const id = channelId;
-    const name = channel;
+    // The name as it was when the channel was opened, for a page whose list
+    // no longer holds the id (it is lost, and this effect about to end).
+    const opened = nameOf(id);
+    if (opened === null) return;
+    const name = () => nameOf(id) ?? opened;
     let live = true;
     let feed: Feed | null = null;
-    let opened = false;
+    let reached = false;
     setStatus('loading');
     setNets(new Map());
     setMonitored(new Set());
 
-    void api.listNets(channel).then((result) => {
-      if (!live || !result.ok) return;
+    void api.listNets(name()).then((result) => {
+      if (!live) return;
+      if (!result.ok) {
+        if (result.code === api.channelNotFound) onMissing(id);
+        return;
+      }
       setNets(new Map(result.value.map((n) => [n.id, n.name])));
       setMonitored(new Set(result.value.filter((n) => n.members.some((m) => m.principal_id === meId && m.role === 'monitor')).map((n) => n.id)));
     });
@@ -97,12 +120,12 @@ export function useLiveChannel({
       if (!live) return;
       switch (next) {
         case 'open':
-          opened = true;
+          reached = true;
           setStatus('open');
           dispatchConnection({ type: 'reached' });
           break;
         case 'connecting':
-          if (opened) setStatus('reconnecting');
+          if (reached) setStatus('reconnecting');
           break;
         case 'waiting':
           setStatus('reconnecting');
@@ -125,19 +148,23 @@ export function useLiveChannel({
             }
             void api.listChannels().then((list) => {
               if (!live) return;
+              const found = list.ok ? list.value.find((c) => c.id === id) : undefined;
               if (!list.ok) {
                 if (list.failure === 'unauthorized') onUnauthorized();
                 else feed?.retryLater();
-              } else if (list.value.some((c) => c.name === name)) feed?.retryLater();
-              else onLost(name);
+              } else if (found !== undefined) {
+                // Still ours, by id: under a new name, if it was renamed.
+                if (found.name !== name()) onRenamed(id, found.name);
+                feed?.retryLater();
+              } else onLost(name());
             });
           });
           break;
       }
     }
 
-    dispatchChat({ type: 'historyLoading', channel });
-    void api.loadMessages(channel).then((result) => {
+    dispatchChat({ type: 'historyLoading', channel: name() });
+    void api.loadMessages(name()).then((result) => {
       if (!live) return;
       if (!result.ok) {
         if (result.failure === 'unauthorized') {
@@ -145,20 +172,22 @@ export function useLiveChannel({
           return;
         }
         if (result.failure === 'network') dispatchConnection({ type: 'lost' });
-        dispatchChat({ type: 'historyFailed', channel });
+        if (result.code === api.channelNotFound) onMissing(id);
+        dispatchChat({ type: 'historyFailed', channel: name() });
         setStatus('failed');
         return;
       }
-      dispatchChat({ type: 'historyLoaded', channel, messages: result.value, more: result.value.length >= api.historyLimit });
+      dispatchChat({ type: 'historyLoaded', channel: name(), messages: result.value, more: result.value.length >= api.historyLimit });
       feed = new Feed({
-        channel,
-        open: api.openSocket,
+        channel: opened,
+        // Each attempt names the channel as it is called then.
+        open: (_channel, after, events) => api.openSocket(name(), after, events),
         clock: realClock,
-        after: () => getAfter(channel),
+        after: () => getAfter(name()),
         onFrame: (data) => {
           const message = parseFrame(data, id);
-          if (message === null) dispatchChat({ type: 'dropped', channel });
-          else dispatchChat({ type: 'received', channel, message, own: message.author_id === me.id });
+          if (message === null) dispatchChat({ type: 'dropped', channel: name() });
+          else dispatchChat({ type: 'received', channel: name(), message, own: message.author_id === meId });
         },
         onStatus,
       });
@@ -170,7 +199,7 @@ export function useLiveChannel({
       live = false;
       feed?.stop();
     };
-  }, [channel, channelId, attempt, meId, getAfter, dispatchChat, dispatchConnection, onUnauthorized, onLost]);
+  }, [open, channelId, nameOf, attempt, meId, getAfter, dispatchChat, dispatchConnection, onUnauthorized, onLost, onRenamed, onMissing]);
 
   // Names are a convenience: without them an author reads as #<id>. The
   // viewer's own name is the one they are signed in with, which a rename of
@@ -189,25 +218,32 @@ export function useLiveChannel({
   }, []);
 
   const loadOlder = useCallback(() => {
-    if (channel === null) return;
-    const before = getOldest(channel);
+    if (channelId === null) return;
+    const id = channelId;
+    const name = () => nameOf(id);
+    const asking = name();
+    if (asking === null) return;
+    const before = getOldest(asking);
     if (before === null) return;
     const asked = generation.current;
-    dispatchChat({ type: 'olderLoading', channel });
-    void api.loadMessages(channel, before).then((result) => {
-      if (generation.current !== asked) return;
+    dispatchChat({ type: 'olderLoading', channel: asking });
+    void api.loadMessages(asking, before).then((result) => {
+      // Answered after a rename: what it holds goes under the name now.
+      const now = name();
+      if (generation.current !== asked || now === null) return;
       if (!result.ok) {
         if (result.failure === 'unauthorized') {
           onUnauthorized();
           return;
         }
         if (result.failure === 'network') dispatchConnection({ type: 'lost' });
-        dispatchChat({ type: 'olderFailed', channel });
+        if (result.code === api.channelNotFound) onMissing(id);
+        dispatchChat({ type: 'olderFailed', channel: now });
         return;
       }
-      dispatchChat({ type: 'olderLoaded', channel, messages: result.value, more: result.value.length >= api.historyLimit });
+      dispatchChat({ type: 'olderLoaded', channel: now, messages: result.value, more: result.value.length >= api.historyLimit });
     });
-  }, [channel, getOldest, dispatchChat, dispatchConnection, onUnauthorized]);
+  }, [channelId, nameOf, getOldest, dispatchChat, dispatchConnection, onUnauthorized, onMissing]);
 
   return { status, people, nets, monitored, retry, loadOlder };
 }

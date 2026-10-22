@@ -3,7 +3,7 @@
 // person, shared by all their clients; the counts here are its last answer plus
 // a local +1 for each message that arrives unseen in the open channel. The rules
 // are the terminal client's.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
 import type { ChannelV0 } from './schema/channel';
 import type { LiveStatus } from './useLiveChannel';
@@ -28,16 +28,19 @@ export interface Newest {
   readonly author: number;
 }
 
+// Everything here is kept by channel id, not name, so a channel renamed while
+// open (issue #728) keeps its mark, its count and the timer of a mark on its
+// way. The name is looked up only to ask the server, at the moment of asking.
 interface Marks {
   // The newest id a mark was asked for, per channel. A request that fails is
   // not repeated until a newer message is shown.
-  marked: Map<string, number>;
+  marked: Map<number, number>;
   // The mark the server last confirmed. A read it served before that is older
   // than the person's own reading and must not bring a count back.
-  acked: Map<string, number>;
-  markedAt: Map<string, number>;
-  pending: Map<string, number>;
-  timers: Map<string, number>;
+  acked: Map<number, number>;
+  markedAt: Map<number, number>;
+  pending: Map<number, number>;
+  timers: Map<number, number>;
   // When counts were last read, and the timer that reads once the interval
   // is over, for opening channels quickly one after another.
   readAt: number;
@@ -47,6 +50,9 @@ interface Marks {
 const newMarks = (): Marks => ({ marked: new Map(), acked: new Map(), markedAt: new Map(), pending: new Map(), timers: new Map(), readAt: 0, readTimer: null });
 
 const none: ReadonlyMap<string, number> = new Map();
+
+const idOf = (channels: readonly ChannelV0[], name: string | null): number | null =>
+  name === null ? null : (channels.find((c) => c.name === name)?.id ?? null);
 
 export function useReadState({
   signedIn,
@@ -59,6 +65,7 @@ export function useReadState({
   status,
   me,
   onUnauthorized,
+  onMissing,
 }: {
   readonly signedIn: boolean;
   readonly channels: readonly ChannelV0[];
@@ -73,8 +80,12 @@ export function useReadState({
   readonly status: LiveStatus;
   readonly me: number;
   readonly onUnauthorized: () => void;
+  // A mark refused with channel_not_found (issue #728): the channel, by id,
+  // may have been renamed since the list was read.
+  readonly onMissing?: (channel: number) => void;
 }): ReadonlyMap<string, number> {
-  const [counts, setCounts] = useState<ReadonlyMap<string, number>>(new Map());
+  const [counts, setCounts] = useState<ReadonlyMap<number, number>>(new Map());
+  const openId = idOf(channels, open);
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   // Reading means the newest message is on screen: at the bottom, in a tab that
   // can be seen.
@@ -87,15 +98,15 @@ export function useReadState({
   // Moved on at sign-out: an answer to a question asked before is dropped.
   const epoch = useRef(0);
   // What the callbacks below read, as of the last render.
-  const latest = useRef({ channels, open, ready, reading, newest, connected: status === 'open', onUnauthorized });
-  latest.current = { channels, open, ready, reading, newest, connected: status === 'open', onUnauthorized };
+  const latest = useRef({ channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing });
+  latest.current = { channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing };
 
-  const setCount = useCallback((name: string, count: number) => {
+  const setCount = useCallback((channel: number, count: number) => {
     setCounts((prev) => {
-      if ((prev.get(name) ?? 0) === count) return prev;
+      if ((prev.get(channel) ?? 0) === count) return prev;
       const next = new Map(prev);
-      if (count > 0) next.set(name, Math.min(count, cap));
-      else next.delete(name);
+      if (count > 0) next.set(channel, Math.min(count, cap));
+      else next.delete(channel);
       return next;
     });
   }, []);
@@ -121,12 +132,12 @@ export function useReadState({
         return;
       }
       const { channels: known, open: current, ready: held, reading: now } = latest.current;
-      const names = new Map(known.map((c) => [c.id, c.name]));
-      const next = new Map<string, number>();
+      const ids = new Set(known.map((c) => c.id));
+      const next = new Map<number, number>();
       for (const state of result.value) {
-        const name = names.get(state.channel_id);
-        if (name !== undefined && state.unread > 0 && state.last_read_id >= (marks.current.acked.get(name) ?? 0)) {
-          next.set(name, Math.min(state.unread, cap));
+        const id = state.channel_id;
+        if (ids.has(id) && state.unread > 0 && state.last_read_id >= (marks.current.acked.get(id) ?? 0)) {
+          next.set(id, Math.min(state.unread, cap));
         }
       }
       // The server counted before it had our mark: what is on screen and
@@ -159,30 +170,36 @@ export function useReadState({
   }, [read]);
 
   const send = useCallback(
-    (name: string, id: number) => {
+    (channel: number, id: number) => {
+      // The channel's name as the list holds it now: a mark asked for after a
+      // rename goes to the new one.
+      const name = latest.current.channels.find((c) => c.id === channel)?.name;
+      if (name === undefined) return;
       const m = marks.current;
-      m.marked.set(name, id);
-      m.markedAt.set(name, Date.now());
-      m.pending.delete(name);
+      m.marked.set(channel, id);
+      m.markedAt.set(channel, Date.now());
+      m.pending.delete(channel);
       const asked = epoch.current;
       void api.markRead(name, id).then((result) => {
         if (epoch.current !== asked || off.current) return;
         if (!result.ok) {
-          // No answer: the mark is not made. Taken back, and kept to be sent
-          // when the socket is.
-          if (result.failure === 'network') {
-            m.marked.set(name, m.acked.get(name) ?? 0);
-            m.pending.set(name, Math.max(m.pending.get(name) ?? 0, id));
+          // No answer, or the channel's name gone (renamed): the mark is not
+          // made. Taken back, and kept to be sent when the socket is.
+          const missing = result.code === api.channelNotFound;
+          if (result.failure === 'network' || missing) {
+            m.marked.set(channel, m.acked.get(channel) ?? 0);
+            m.pending.set(channel, Math.max(m.pending.get(channel) ?? 0, id));
           }
+          if (missing) latest.current.onMissing?.(channel);
           failed(result);
           return;
         }
-        m.acked.set(name, Math.max(m.acked.get(name) ?? 0, result.value.last_read_id));
+        m.acked.set(channel, Math.max(m.acked.get(channel) ?? 0, result.value.last_read_id));
         const { open: current, reading: now, newest: head } = latest.current;
         // A newer message is on screen and its mark is on the way: this count is
         // already out of date.
-        if (name === current && now && (head?.id ?? 0) > result.value.last_read_id) return;
-        setCount(name, result.value.unread);
+        if (channel === current && now && (head?.id ?? 0) > result.value.last_read_id) return;
+        setCount(channel, result.value.unread);
       });
     },
     [failed, setCount],
@@ -218,62 +235,73 @@ export function useReadState({
   useEffect(() => {
     if (signedIn && loaded) read();
   }, [signedIn, loaded, read]);
-  const was = useRef<{ status: LiveStatus; open: string | null }>({ status, open });
+  // By id: the open channel renamed is not another channel opened.
+  const was = useRef<{ status: LiveStatus; open: number | null }>({ status, open: openId });
   useEffect(() => {
     const before = was.current;
-    was.current = { status, open };
+    was.current = { status, open: openId };
     if (!signedIn || !loaded) return;
     if (status === 'open' && before.status === 'reconnecting') {
       read();
-    } else if (open !== null && before.open !== null && open !== before.open) readSoon();
-  }, [signedIn, loaded, status, open, read, readSoon]);
+    } else if (openId !== null && before.open !== null && openId !== before.open) readSoon();
+  }, [signedIn, loaded, status, openId, read, readSoon]);
 
   // A message that arrives while it is not being read is a local +1. Your own
   // messages are not unread.
-  const seen = useRef<{ readonly name: string; readonly id: number } | null>(null);
+  const seen = useRef<{ readonly channel: number; readonly id: number } | null>(null);
   const newestId = newest?.id ?? 0;
   const newestAuthor = newest?.author ?? 0;
   useEffect(() => {
-    if (!signedIn || open === null || !ready) return;
+    if (!signedIn || openId === null || !ready) return;
     const before = seen.current;
-    seen.current = { name: open, id: newestId };
-    if (before === null || before.name !== open || newestId <= before.id) return;
+    seen.current = { channel: openId, id: newestId };
+    if (before === null || before.channel !== openId || newestId <= before.id) return;
     if (reading || newestAuthor === me || off.current) return;
-    setCounts((prev) => new Map(prev).set(open, Math.min((prev.get(open) ?? 0) + 1, cap)));
-  }, [signedIn, open, ready, newestId, newestAuthor, reading, me]);
+    setCounts((prev) => new Map(prev).set(openId, Math.min((prev.get(openId) ?? 0) + 1, cap)));
+  }, [signedIn, openId, ready, newestId, newestAuthor, reading, me]);
 
   // The mark moves to the newest message shown: when a channel is opened, when
   // a message arrives at the bottom, and when the newest comes back into view.
   useEffect(() => {
-    if (!signedIn || open === null || !ready || !reading || off.current) return;
-    setCount(open, 0);
+    if (!signedIn || openId === null || !ready || !reading || off.current) return;
+    setCount(openId, 0);
     const m = marks.current;
-    if (newestId <= (m.marked.get(open) ?? 0)) return;
+    if (newestId <= (m.marked.get(openId) ?? 0)) return;
     // Not while the socket is down: the server may be out of reach, and a mark
     // lost then would be taken for made. It is held, and sent on reconnect.
     if (status !== 'open') {
-      m.pending.set(open, newestId);
+      m.pending.set(openId, newestId);
       return;
     }
     const now = Date.now();
-    const last = m.markedAt.get(open);
+    const last = m.markedAt.get(openId);
     if (last === undefined || now - last >= markInterval) {
-      send(open, newestId);
+      send(openId, newestId);
       return;
     }
     // Too soon: the newest id wins when the interval is over.
-    m.pending.set(open, newestId);
-    if (m.timers.has(open)) return;
-    const name = open;
+    m.pending.set(openId, newestId);
+    if (m.timers.has(openId)) return;
+    const channel = openId;
     m.timers.set(
-      name,
+      channel,
       window.setTimeout(() => {
-        m.timers.delete(name);
-        const id = m.pending.get(name) ?? 0;
-        if (!off.current && latest.current.connected && id > (m.marked.get(name) ?? 0)) send(name, id);
+        m.timers.delete(channel);
+        const id = m.pending.get(channel) ?? 0;
+        if (!off.current && latest.current.connected && id > (m.marked.get(channel) ?? 0)) send(channel, id);
       }, last + markInterval - now),
     );
-  }, [signedIn, open, ready, reading, newestId, status, send, setCount]);
+  }, [signedIn, openId, ready, reading, newestId, status, send, setCount]);
 
-  return off.current ? none : counts;
+  // The counts by name, as the list shows them, from the names it holds now.
+  const byName = useMemo(() => {
+    const named = new Map<string, number>();
+    for (const c of channels) {
+      const count = counts.get(c.id);
+      if (count !== undefined) named.set(c.name, count);
+    }
+    return named;
+  }, [channels, counts]);
+
+  return off.current ? none : byName;
 }

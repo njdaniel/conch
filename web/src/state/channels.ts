@@ -23,6 +23,11 @@ export type ChannelsAction =
   | { readonly type: 'select'; readonly name: string }
   // A channel the person has just made (issue #695): the server's answer.
   | { readonly type: 'created'; readonly channel: ChannelV0 }
+  // A channel renamed (issue #728), by its id: the operator's own answer, the
+  // events socket's conch.channel.v1, or the list read again after a
+  // channel_not_found. It stays where it is in the list, and stays open if it
+  // was.
+  | { readonly type: 'renamed'; readonly id: number; readonly name: string }
   | { readonly type: 'lost'; readonly name: string }
   | { readonly type: 'reset' };
 
@@ -68,6 +73,13 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
         ? state.channels
         : [...state.channels, channel].sort((a, b) => a.id - b.id);
       return { ...state, channels, selected: channel.name };
+    }
+    case 'renamed': {
+      const was = state.channels.find((c) => c.id === action.id);
+      if (was === undefined || was.name === action.name) return state;
+      const channels = state.channels.map((c) => (c.id === action.id ? { ...c, name: action.name } : c));
+      const selected = state.selected === was.name ? action.name : state.selected;
+      return { ...state, channels, selected };
     }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);

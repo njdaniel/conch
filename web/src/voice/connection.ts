@@ -465,6 +465,17 @@ export class VoiceClient {
     void this.connect();
   }
 
+  // renamed is the channel voice is in renamed (issue #728), from the name
+  // it was joined by. Nothing is left or reconnected: the room and the
+  // presence socket are the channel's by id. What is asked of conchd from now
+  // on (the next session, a transmit report, the share) names the new name.
+  renamed(from: string, to: string): void {
+    if (this.channel !== from || from === to) return;
+    this.channel = to;
+    this.share.renamed(to);
+    if (this.state.channel === from) this.set({ channel: to });
+  }
+
   // useMicrophone ends watch only: the microphone is captured, published and
   // muted, as on a full join, and the talk controls work from then on.
   async useMicrophone(): Promise<void> {

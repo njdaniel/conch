@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Glyph } from './Icons';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
@@ -36,13 +36,15 @@ function VoiceMark({ id, count }: { readonly id: number; readonly count: number 
 
 // The channels as a list of buttons. Tab reaches the list once; the arrow keys
 // move between channels (Home and End jump), Enter or Space opens the one
-// focused.
+// focused. Under it, for an operator, the control that renames the open
+// channel (issue #728).
 export function ChannelList({
   channels,
   selected,
   unread,
   occupancy = nobody,
   empty = 'No channels yet: an operator needs to add you to one',
+  rename,
   onOpen,
 }: {
   readonly channels: readonly ChannelV0[];
@@ -54,6 +56,9 @@ export function ChannelList({
   // What an empty list says: by default, who can change that. Someone who can
   // make a channel is told less, with the control to do it beside the list.
   readonly empty?: string;
+  // Rename the open channel (issue #728), or nothing for a person who may
+  // not: shown under the list while a channel is open.
+  readonly rename?: ReactNode;
   readonly onOpen: (name: string) => void;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
@@ -111,38 +116,41 @@ export function ChannelList({
     return <p className="empty">{empty}</p>;
   }
   return (
-    <ul className={`channel-list${more}`} ref={list}>
-      {channels.map((channel, i) => {
-        // What describes the button: who is in its voice, then its unread.
-        const described = [
-          (occupancy.get(channel.id) ?? 0) > 0 ? voiceId(channel.id) : null,
-          (unread.get(channel.name) ?? 0) > 0 ? badgeId(channel.id) : null,
-        ].filter((x) => x !== null);
-        return (
-          <li key={channel.id}>
-            <button
-              type="button"
-              ref={(el) => {
-                if (el === null) buttons.current.delete(channel.name);
-                else buttons.current.set(channel.name, el);
-              }}
-              tabIndex={channel.name === stop ? 0 : -1}
-              aria-describedby={described.length === 0 ? undefined : described.join(' ')}
-              aria-current={channel.name === selected ? 'true' : undefined}
-              onClick={() => {
-                onOpen(channel.name);
-              }}
-              onKeyDown={(event) => {
-                move(event, i);
-              }}
-            >
-              {channel.name}
-            </button>
-            <VoiceMark id={channel.id} count={occupancy.get(channel.id) ?? 0} />
-            <UnreadBadge id={channel.id} count={unread.get(channel.name) ?? 0} />
-          </li>
-        );
-      })}
-    </ul>
+    <>
+      <ul className={`channel-list${more}`} ref={list}>
+        {channels.map((channel, i) => {
+          // What describes the button: who is in its voice, then its unread.
+          const described = [
+            (occupancy.get(channel.id) ?? 0) > 0 ? voiceId(channel.id) : null,
+            (unread.get(channel.name) ?? 0) > 0 ? badgeId(channel.id) : null,
+          ].filter((x) => x !== null);
+          return (
+            <li key={channel.id}>
+              <button
+                type="button"
+                ref={(el) => {
+                  if (el === null) buttons.current.delete(channel.name);
+                  else buttons.current.set(channel.name, el);
+                }}
+                tabIndex={channel.name === stop ? 0 : -1}
+                aria-describedby={described.length === 0 ? undefined : described.join(' ')}
+                aria-current={channel.name === selected ? 'true' : undefined}
+                onClick={() => {
+                  onOpen(channel.name);
+                }}
+                onKeyDown={(event) => {
+                  move(event, i);
+                }}
+              >
+                {channel.name}
+              </button>
+              <VoiceMark id={channel.id} count={occupancy.get(channel.id) ?? 0} />
+              <UnreadBadge id={channel.id} count={unread.get(channel.name) ?? 0} />
+            </li>
+          );
+        })}
+      </ul>
+      {selected === null ? null : rename}
+    </>
   );
 }

@@ -213,6 +213,8 @@ function setup(
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
   const reports: string[] = [];
+  // The channel each report named (issue #728).
+  const reportedIn: string[] = [];
   const log: string[] = [];
   const waiting: ((a: TransmitAnswer) => void)[] = [];
   // answer answers the oldest report still waiting.
@@ -233,8 +235,9 @@ function setup(
         asked.push(channel);
         return Promise.resolve(sessions.shift() ?? okSession());
       },
-      report: (_channel, state) => {
+      report: (channel, state) => {
         reports.push(state);
+        reportedIn.push(channel);
         log.push(`report ${state}`);
         if (held) {
           return new Promise((resolve) => {
@@ -265,7 +268,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, shares, log, answer };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer };
 }
 
 async function joined(t = setup()) {
@@ -1733,6 +1736,64 @@ describe('the volume of each person', () => {
     t.client.setDeafened(false);
     expect(t.rooms[0]?.volumes).toHaveLength(1);
     expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0.4]]));
+  });
+});
+
+// Issue #728: the channel voice is in is renamed. The room and the presence
+// socket are the channel's by id, so nothing is left or reconnected; what is
+// asked of conchd afterwards names the new name.
+describe('a rename of the channel joined', () => {
+  it('keeps the room and the connection, and names the new name in the next report, session request and share', async () => {
+    const t = await joined();
+    t.client.renamed('general', 'lounge');
+    expect(t.client.snapshot().phase).toBe('connected');
+    expect(t.client.snapshot().channel).toBe('lounge');
+    expect(t.rooms).toHaveLength(1);
+    expect(t.rooms[0]?.closed).toBe(false);
+    expect(t.asked).toEqual(['general']);
+
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(100);
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped']);
+    expect(t.reportedIn).toEqual(['lounge', 'lounge']);
+
+    t.client.startShare();
+    await settle();
+    expect(t.shares[0]).toBe('claim lounge');
+    t.client.stopShare();
+    await settle();
+    expect(t.shares).toContain('stop lounge');
+    expect(t.shares.filter((s) => s.endsWith('general'))).toEqual([]);
+
+    // The room renewed: the client goes back to conchd, by the new name.
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.asked).toEqual(['general', 'lounge']);
+    expect(t.client.snapshot().phase).toBe('connected');
+    expect(t.client.snapshot().channel).toBe('lounge');
+  });
+
+  it('is told by the name joined: another channel renamed, or the same name again, changes nothing', async () => {
+    const t = await joined();
+    const before = t.client.snapshot();
+    t.client.renamed('ops', 'ops-old');
+    t.client.renamed('general', 'general');
+    expect(t.client.snapshot()).toBe(before);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.asked).toEqual(['general', 'general']);
+  });
+
+  it('while not in voice changes nothing, and the next join names what it is given', async () => {
+    const t = setup();
+    t.client.renamed('general', 'lounge');
+    expect(t.client.snapshot().channel).toBeNull();
+    t.client.join('lounge');
+    await settle();
+    expect(t.asked).toEqual(['lounge']);
   });
 });
 

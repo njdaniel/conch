@@ -32,14 +32,15 @@ export function VoiceStatus({
   // Whether conchd is reached: the status line's Connected.
   readonly reachable: boolean;
   // The viewer's channels and how many are in each one's voice (issue #596),
-  // for the line that says where else people are talking.
+  // for the line that says where else people are talking; and by id, how voice
+  // knows a channel renamed under it (issue #728).
   readonly channels: readonly ChannelV0[];
   readonly occupancy: InVoice;
   readonly onUnauthorized: () => void;
   // Opens a channel: the strip's way back to the channel voice is in.
   readonly onOpen: (name: string) => void;
 }) {
-  const voice = useVoice({ signedIn, channel, voiceAllowed, reachable, onUnauthorized });
+  const voice = useVoice({ signedIn, channel, channels, voiceAllowed, reachable, onUnauthorized });
   const { state, snapshot } = voice;
   const joined = state.phase !== 'idle' && state.phase !== 'stopped' ? state.channel : null;
   const named = useVoiceNames({
