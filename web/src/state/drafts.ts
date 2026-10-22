@@ -1,9 +1,13 @@
 // What has been typed and not sent, per channel. In memory for the tab: it
 // survives switching channels, not a reload (decision D2 keeps nothing on disk).
+import { rekey } from './messages';
+
 export type Drafts = Readonly<Record<string, string>>;
 
 export type DraftAction =
   | { readonly type: 'edit'; readonly channel: string; readonly text: string }
+  // The channel `from` is now called `to` (issue #728): its draft goes with it.
+  | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   | { readonly type: 'reset' };
 
 export const initialDrafts: Drafts = {};
@@ -14,6 +18,8 @@ export function draftsReducer(state: Drafts, action: DraftAction): Drafts {
       if (action.text === '') return Object.fromEntries(Object.entries(state).filter(([name]) => name !== action.channel));
       return { ...state, [action.channel]: action.text };
     }
+    case 'renamed':
+      return rekey(state, action.from, action.to);
     case 'reset':
       return initialDrafts;
   }
@@ -53,6 +59,8 @@ export type TargetAction =
   // A whisper to `sent` was accepted: back to the whole channel, with the
   // notice if one is due. Only if that is still the whisper being composed.
   | { readonly type: 'whispered'; readonly channel: string; readonly sent: readonly number[]; readonly note: string | null }
+  // The channel `from` is now called `to` (issue #728): its choice goes with it.
+  | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -65,6 +73,7 @@ export function targetFor(state: Targets, channel: string): Target {
 
 export function targetsReducer(state: Targets, action: TargetAction): Targets {
   if (action.type === 'reset') return initialTargets;
+  if (action.type === 'renamed') return rekey(state, action.from, action.to);
   const current = targetFor(state, action.channel);
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {

@@ -62,6 +62,7 @@ export function Lobby({
   voice,
   invites,
   newChannel,
+  renameChannel,
   account,
   signIns,
   report,
@@ -90,6 +91,9 @@ export function Lobby({
   // "New channel" (issue #695), under the channel list, or null for a person
   // who may not make one.
   readonly newChannel?: ReactNode;
+  // Rename the open channel (issue #728), under the channel list, or null for
+  // a person who may not.
+  readonly renameChannel?: ReactNode;
   // The caller's own account: changing their name (issue #441), in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
@@ -242,6 +246,7 @@ export function Lobby({
                 unread={unread}
                 occupancy={occupancy}
                 empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
+                rename={renameChannel}
                 onOpen={onOpen}
               />
               {newChannel}

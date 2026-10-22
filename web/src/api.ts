@@ -31,9 +31,11 @@ import {
   createChannelResponse,
   listChannelMembersResponseV1,
   listChannelsResponse,
+  renameChannelResponseV1,
   type ChannelMemberV1,
   type ChannelV0,
   type CreateChannelRequest,
+  type RenameChannelRequestV1,
 } from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
@@ -790,6 +792,29 @@ export async function createChannel(name: string): Promise<InviteResult<ChannelV
   return created.ok ? { ok: true, value: created.value.channel } : created;
 }
 
+// renameChannel renames a channel by its id (issue #728): operators alone
+// (403 forbidden for anyone else). from is the name the caller's list shows
+// now; the server refuses the rename when that is no longer the channel's name
+// (channel_name_stale), so two operators cannot rename past each other. Other
+// refusals carry their code and line as createChannel's do: channel_exists for
+// a name taken (or one that reads the same), invalid_request with the rule a
+// name broke. The answer is the channel as it now is. It is never repeated
+// here.
+export async function renameChannel(id: number, from: string, name: string): Promise<InviteResult<ChannelV0>> {
+  const request: RenameChannelRequestV1 = { name, from };
+  const reply = await authedSend('PUT', `/v1/channels/${String(id)}/name`, request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  const renamed = await readBody(reply.res, renameChannelResponseV1);
+  return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// How every channel-addressed route answers a name that is not a channel of
+// the caller's: unknown, not theirs, or renamed since the page read the list
+// (issue #728). The page then reads the list again to tell which.
+export const channelNotFound = 'channel_not_found';
+
 // A channel name goes in the path as one segment.
 const channelPath = (channel: string) => `/v1/channels/${encodeURIComponent(channel)}`;
 
@@ -826,22 +851,25 @@ export type PostResult =
   | { readonly ok: true; readonly message: MessageV2 }
   | { readonly ok: false; readonly outcome: 'unauthorized' | 'unconfirmed' }
   // reason is the server's own line for the refusal, one line, or a plain
-  // one of ours when the answer carried none.
-  | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string };
+  // one of ours when the answer carried none; code is its code, when it had
+  // one.
+  | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string; readonly code?: string };
 
-// refusalLine is the message of the error document a refusal carries, on one
-// line, or a fallback.
-async function refusalLine(res: Response): Promise<string> {
+// postRefusal is the line and the code of the error document a refusal
+// carries, the line on one line, or a fallback.
+async function postRefusal(res: Response): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
     if (errorV0(body).length === 0) {
-      const line = (body as { message: string }).message.replace(/\s+/g, ' ').trim();
-      if (line !== '') return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+      const doc = body as ErrorV0;
+      const line = doc.message.replace(/\s+/g, ' ').trim();
+      const reason = line === '' ? 'The server refused the message' : line.length > 300 ? `${line.slice(0, 299)}…` : line;
+      return { reason, code: doc.code };
     }
   } catch {
     // No document, or not one.
   }
-  return 'The server refused the message';
+  return { reason: 'The server refused the message' };
 }
 
 // postMessage sends one message, to the whole channel or, with an audience, to
@@ -855,7 +883,7 @@ export async function postMessage(channel: string, body: string, audience?: Audi
   const res = reply.res;
   // A 5xx may come from something in front of conchd after it stored the message.
   if (res.status >= 500) return { ok: false, outcome: 'unconfirmed' };
-  if (!res.ok) return { ok: false, outcome: 'refused', reason: await refusalLine(res) };
+  if (!res.ok) return { ok: false, outcome: 'refused', ...(await postRefusal(res)) };
   try {
     const parsed: unknown = await res.json();
     if (postMessageResponseV2(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };

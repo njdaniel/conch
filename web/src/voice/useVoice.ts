@@ -2,8 +2,9 @@
 // presence of the channel on screen (its socket, joined or not, which the
 // client also reads for the screen share while joined), and the page-level
 // releases (blur, hidden, pagehide).
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
@@ -168,15 +169,22 @@ export interface VoiceControl {
   readonly leave: () => void;
 }
 
+const noChannels: readonly ChannelV0[] = [];
+
 export function useVoice({
   signedIn,
   channel,
+  channels = noChannels,
   voiceAllowed,
   reachable,
   onUnauthorized,
 }: {
   signedIn: boolean;
   channel: string | null;
+  // The person's channels, by id and name as the page holds them now: how a
+  // channel renamed while shown or joined (issue #728) is known to be the same
+  // channel, so its presence socket stays open and voice stays joined.
+  channels?: readonly ChannelV0[];
   // Whether this person may use voice at all: a human whose access includes
   // it. Without it no presence is asked for.
   voiceAllowed: boolean;
@@ -217,6 +225,28 @@ export function useVoice({
 
   const joined = state.phase !== 'idle' && state.phase !== 'stopped' ? state.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
+  // The id of the channel joined, taken at the join, and of the one shown.
+  // The presence socket follows the shown channel by id where the list names
+  // it, so a rename does not reopen it; by name where it does not.
+  const joinedAt = useRef<number | null>(null);
+  const idOf = (name: string | null) => (name === null ? null : (channels.find((c) => c.name === name)?.id ?? null));
+  const shownId = joined !== null ? joinedAt.current : idOf(shown);
+  const shownKey = shownId === null ? shown : `#${String(shownId)}`;
+  // The shown channel's name as of this render, for the socket's next attempt.
+  const shownName = useRef(shown);
+  shownName.current = shown;
+
+  // The channel joined renamed: the client is told, before the page is
+  // painted with the old name, and asks conchd by the new one from then on.
+  useLayoutEffect(() => {
+    if (joined === null) {
+      joinedAt.current = null;
+      return;
+    }
+    const id = joinedAt.current;
+    const now = id === null ? undefined : channels.find((c) => c.id === id)?.name;
+    if (now !== undefined && now !== joined) client.renamed(joined, now);
+  }, [joined, channels, client]);
 
   // The microphone chosen is kept for the tab: the person's choice, the same
   // device found again under a new id, and the client letting go of one that
@@ -248,7 +278,8 @@ export function useVoice({
   // joined. The effect follows the shown channel, not the joining, so joining
   // or leaving in the channel on screen keeps the socket it has.
   useEffect(() => {
-    if (shown === null) return;
+    if (shownKey === null) return;
+    const named = () => shownName.current ?? shownKey;
     latest.current = null;
     if (!voiceAllowed) {
       // conchd refuses this person's socket before the upgrade, which reaches
@@ -284,13 +315,14 @@ export function useVoice({
       }
     };
     const feed = new Feed({
-      channel: shown,
+      channel: named(),
       clock: realClock,
       after: () => 0,
       // The voice socket sends a frame only when presence changes, so the
       // silence watchdog is long: a reconnect is a fresh snapshot.
       silence: 300_000,
-      open: (c, _after, events) => api.openVoiceSocket(c, events),
+      // Each attempt names the channel as it is called then.
+      open: (_channel, _after, events) => api.openVoiceSocket(named(), events),
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
@@ -311,7 +343,7 @@ export function useVoice({
     // voice withdrawn, the channel lost, or neither (it answers), when the
     // feed goes back through its backoff rather than retrying at once.
     const settle = () => {
-      void api.getVoicePresence(shown).then((result) => {
+      void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
           show(result.value);
@@ -329,7 +361,7 @@ export function useVoice({
       feedRef.current = null;
       feedStatus.current = null;
     };
-  }, [shown, voiceAllowed, onUnauthorized, client]);
+  }, [shownKey, voiceAllowed, onUnauthorized, client]);
 
   // While in voice the client reads presence too, for the screen share. On
   // joining it is given what the socket last said: the socket is not opened
@@ -388,12 +420,24 @@ export function useVoice({
     setKey(code);
     setCapturing(false);
   }, []);
+  // The id of the channel joined is noted first, so the render the join
+  // causes already follows it by id.
+  const channelsNow = useRef(channels);
+  channelsNow.current = channels;
+  const note = useCallback((name: string) => {
+    if (client.snapshot().phase !== 'idle' && client.snapshot().phase !== 'stopped') return;
+    joinedAt.current = channelsNow.current.find((c) => c.name === name)?.id ?? null;
+  }, [client]);
   const join = useCallback(() => {
-    if (channel !== null) client.join(channel);
-  }, [channel, client]);
+    if (channel === null) return;
+    note(channel);
+    client.join(channel);
+  }, [channel, client, note]);
   const watchOnly = useCallback(() => {
-    if (channel !== null) client.join(channel, { watchOnly: true });
-  }, [channel, client]);
+    if (channel === null) return;
+    note(channel);
+    client.join(channel, { watchOnly: true });
+  }, [channel, client, note]);
   const leave = useCallback(() => {
     void client.leave();
   }, [client]);

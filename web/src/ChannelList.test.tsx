@@ -209,3 +209,46 @@ describe('an empty list', () => {
     expect(screen.queryByText(/an operator needs to add you/)).toBeNull();
   });
 });
+
+// The rename control (issue #728) is the caller's to give, for an operator
+// alone; the list shows it under itself while a channel is open, and keeps
+// each channel's place, count and focus stop by id across a rename.
+describe('the rename control', () => {
+  const control = <button type="button">Rename the open channel</button>;
+
+  it('is shown under the list while a channel is open, when given', () => {
+    render(<ChannelList channels={channels} selected="book-club" unread={new Map()} rename={control} onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Rename the open channel' });
+    expect(screen.getByRole('list').contains(button)).toBe(false);
+  });
+
+  it('is not shown when not given (anyone but an operator), nor while no channel is open', () => {
+    const view = render(<ChannelList channels={channels} selected="book-club" unread={new Map()} onOpen={() => undefined} />);
+    expect(screen.queryByRole('button', { name: 'Rename the open channel' })).toBeNull();
+    view.rerender(<ChannelList channels={channels} selected={null} unread={new Map()} rename={control} onOpen={() => undefined} />);
+    expect(screen.queryByRole('button', { name: 'Rename the open channel' })).toBeNull();
+  });
+
+  it('a channel renamed keeps its place, stays the open one and is opened by its new name', () => {
+    const opened: string[] = [];
+    const renamed = channels.map((c) => (c.id === 2 ? { ...c, name: 'readers' } : c));
+    const props = {
+      unread: new Map([['readers', 2]]),
+      onOpen: (name: string) => {
+        opened.push(name);
+      },
+    };
+    const view = render(<ChannelList channels={channels} selected="book-club" {...props} />);
+    const before = screen.getByRole('button', { name: 'book-club' });
+    view.rerender(<ChannelList channels={renamed} selected="readers" {...props} />);
+    const after = screen.getByRole('button', { name: 'readers' });
+    // The same element, in the same place: the list follows the channel by id.
+    expect(after).toBe(before);
+    expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(['general', 'readers2', 'game-night']);
+    expect(after.getAttribute('aria-current')).toBe('true');
+    expect(after.tabIndex).toBe(0);
+    expect(screen.getByRole('img', { name: '2 unread' })).toBeTruthy();
+    fireEvent.click(after);
+    expect(opened).toEqual(['readers']);
+  });
+});

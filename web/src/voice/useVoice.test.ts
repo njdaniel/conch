@@ -5,6 +5,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
+import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { FeedSocket, SocketEvents } from '../state/feed';
 
@@ -65,6 +66,7 @@ interface Props {
   readonly channel: string | null;
   readonly voiceAllowed: boolean;
   readonly reachable: boolean;
+  readonly channels?: readonly ChannelV0[];
 }
 
 function hook(initial: Partial<Props> = {}) {
@@ -555,5 +557,64 @@ describe('presence of the channel on screen', () => {
       ['c', true],
       ['d', false],
     ]);
+  });
+});
+
+// Issue #728: the channel shown, or joined, renamed. It is the same channel by
+// id: its presence socket stays open, voice stays joined, and what is asked
+// next names the new name.
+describe('a rename', () => {
+  const named = (name: string): ChannelV0[] => [
+    { id: 1, name, created_at: '2026-10-21T00:00:00Z' },
+    { id: 2, name: 'd', created_at: '2026-10-21T00:00:00Z' },
+  ];
+
+  it('of the channel on screen keeps its presence socket, and the next attempt names the new name', async () => {
+    const { result, rerender } = hook({ channels: named('c') });
+    await flush();
+    open([3]);
+    rerender({ channel: 'c2', channels: named('c2'), voiceAllowed: true, reachable: true });
+    await flush();
+    expect(fake.opened.map((o) => [o.channel, o.closed])).toEqual([['c', false]]);
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([3]) });
+    expect(result.current.shown).toBe('c2');
+    drop(1006);
+    await pass(1000);
+    expect(fake.opened.map((o) => o.channel)).toEqual(['c', 'c2']);
+  });
+
+  it('of the channel joined keeps voice joined and its socket, and the client takes the new name', async () => {
+    const { result, rerender } = hook({ channels: named('c') });
+    await flush();
+    open([3]);
+    act(() => {
+      result.current.join();
+    });
+    await flush();
+    expect(result.current.state.channel).toBe('c');
+    const renamed = vi.spyOn(result.current.client, 'renamed');
+    rerender({ channel: 'c2', channels: named('c2'), voiceAllowed: true, reachable: true });
+    await flush();
+    expect(renamed).toHaveBeenCalledExactlyOnceWith('c', 'c2');
+    expect(result.current.state.phase).toBe('connecting');
+    expect(result.current.state.channel).toBe('c2');
+    expect(result.current.shown).toBe('c2');
+    expect(fake.opened.map((o) => [o.channel, o.closed])).toEqual([['c', false]]);
+  });
+
+  it('of the channel joined while another is on screen still reaches the client', async () => {
+    const { result, rerender } = hook({ channels: named('c') });
+    await flush();
+    open([3]);
+    act(() => {
+      result.current.join();
+    });
+    await flush();
+    rerender({ channel: 'd', channels: named('c'), voiceAllowed: true, reachable: true });
+    await flush();
+    rerender({ channel: 'd', channels: named('c2'), voiceAllowed: true, reachable: true });
+    await flush();
+    expect(result.current.state.channel).toBe('c2');
+    expect(live().map((o) => o.channel)).toEqual(['c']);
   });
 });
