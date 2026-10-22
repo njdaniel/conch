@@ -27,7 +27,14 @@ import {
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
-import { listChannelMembersResponseV1, listChannelsResponse, type ChannelMemberV1, type ChannelV0 } from './schema/channel';
+import {
+  createChannelResponse,
+  listChannelMembersResponseV1,
+  listChannelsResponse,
+  type ChannelMemberV1,
+  type ChannelV0,
+  type CreateChannelRequest,
+} from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import { redeemSignInLinkResponseV1, signInLinkPreviewV1, type RedeemSignInLinkRequestV1, type SignInLinkPreviewRequestV1, type SignInLinkPreviewV1 } from './schema/signin';
@@ -766,6 +773,21 @@ export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
   const result = await authed('/v1/channels', listChannelsResponse);
   if (!result.ok) return result;
   return { ok: true, value: result.value.channels };
+}
+
+// createChannel makes a channel (issue #695). The server allows operators
+// alone (403 forbidden for anyone else) and makes the caller its only member,
+// so it is one of theirs from then on. A refusal carries the server's code and
+// line as an invite call's does: channel_exists for a name already used,
+// invalid_request with the rule a name broke. It is never repeated here.
+export async function createChannel(name: string): Promise<InviteResult<ChannelV0>> {
+  const request: CreateChannelRequest = { name };
+  const reply = await authedPost('/v0/channels', request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  const created = await readBody(reply.res, createChannelResponse);
+  return created.ok ? { ok: true, value: created.value.channel } : created;
 }
 
 // A channel name goes in the path as one segment.

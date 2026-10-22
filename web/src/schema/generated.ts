@@ -62,6 +62,24 @@ export const listChannelsResponse = object<ListChannelsResponse>({
   channels: array(channelV0),
 });
 
+// schema.CreateChannelRequest
+export interface CreateChannelRequest {
+  name: string;
+}
+
+export const createChannelRequest = object<CreateChannelRequest>({
+  name: str,
+});
+
+// schema.CreateChannelResponse
+export interface CreateChannelResponse {
+  channel: ChannelV0;
+}
+
+export const createChannelResponse = object<CreateChannelResponse>({
+  channel: channelV0,
+});
+
 // schema.ChannelMemberV1
 export interface ChannelMemberV1 {
   principal_id: number;
