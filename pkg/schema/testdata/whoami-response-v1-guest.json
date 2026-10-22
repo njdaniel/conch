@@ -1,0 +1,27 @@
+{
+  "id": 12,
+  "kind": "human",
+  "name": "guest-a7k4m2q9x3h5t8wz",
+  "role": "member",
+  "server_version": "v0.9.0",
+  "voice_allowed": true,
+  "identity_class": "guest",
+  "guest": {
+    "state": "active",
+    "origin": "address",
+    "handle": "guest-a7k4m2q9x3h5t8wz",
+    "label": "Pat",
+    "tag": "a7k4",
+    "started_at": "2026-10-21T12:00:00.000Z",
+    "expires_at": "2026-10-22T12:00:00.000Z",
+    "idle_expires_at": "2026-10-21T14:00:00.000Z",
+    "can_convert": true
+  },
+  "auth": {
+    "scope": "full",
+    "password_set": false,
+    "setup_complete": false,
+    "expires_at": "2026-10-22T12:00:00.000Z",
+    "idle_expires_at": "2026-10-21T14:00:00.000Z"
+  }
+}

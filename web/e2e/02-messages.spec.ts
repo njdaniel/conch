@@ -17,7 +17,7 @@ test('P3-02 a message sent in the browser appears once in both contexts and once
   const browser = (await meet()).page;
   const guest = (await meet()).page;
   await signIn(browser, world, world.tokens.browser, 'browser-test');
-  await signIn(guest, world, world.tokens.guest, 'guest-test');
+  await signIn(guest, world, world.tokens.guest, 'jamie-test');
   await expect(channelButton(guest, 'general')).toBeVisible();
 
   const body = 'p3-02 from the browser, sent by a person';

@@ -131,6 +131,39 @@ func TestCreateChannelNameRule(t *testing.T) {
 	}
 }
 
+// TestCreateChannelRefusesMembers is the server half of the browser's
+// operator-only control (issue #695): a member's well-formed create is
+// refused with 403 forbidden and makes nothing, whatever a client shows, so
+// the same name is still free for an operator afterwards.
+func TestCreateChannelRefusesMembers(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"member human", f.aliceTok},
+		{"member agent", f.botTok},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := f.do(t, http.MethodPost, "/v0/channels", tt.token, `{"name":"book-club"}`)
+			assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
+			channels, err := f.srv.store.ListChannels(context.Background())
+			if err != nil {
+				t.Fatalf("ListChannels: %v", err)
+			}
+			for _, ch := range channels {
+				if ch.Name == "book-club" {
+					t.Fatalf("a refused create made channel %+v", ch)
+				}
+			}
+		})
+	}
+	if rec := f.do(t, http.MethodPost, "/v0/channels", f.rootTok, `{"name":"book-club"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("operator create status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestListChannels(t *testing.T) {
 	tests := []struct {
 		name   string

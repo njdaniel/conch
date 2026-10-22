@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { ChangeName } from './ChangeName';
+import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
 import { Invite } from './Invite';
 import { InvitePanel } from './InvitePanel';
@@ -264,14 +265,15 @@ export function App({ origin }: { readonly origin: string }) {
   const signOut = useCallback(() => {
     if (signingOut.current) return;
     signingOut.current = true;
-    // The session is ended first: the request needs the credential that
-    // signing out revokes.
-    releaseSession();
-    void api.signOut().then((told) => {
-      signingOut.current = false;
-      forgetChannel();
-      dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
-    });
+    // The session is ended first, and waited for: the request needs the
+    // credential that signing out revokes, and the revoke ends the session.
+    void releaseSession()
+      .then(() => api.signOut())
+      .then((told) => {
+        signingOut.current = false;
+        forgetChannel();
+        dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
+      });
   }, [releaseSession]);
 
   // Sign out everywhere revokes every credential of the person. If the server
@@ -335,7 +337,7 @@ export function App({ origin }: { readonly origin: string }) {
   // whoever is signed in is signed out properly first, their credential
   // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
-    releaseSession();
+    await releaseSession();
     const told = await api.signOut();
     forgetChannel();
     dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
@@ -486,6 +488,17 @@ export function App({ origin }: { readonly origin: string }) {
               onUnauthorized={onUnauthorized}
               onOpen={onOpen}
             />
+          }
+          newChannel={
+            // The server allows operators alone; anyone else is not offered it.
+            auth.principal.role === 'operator' ? (
+              <CreateChannel
+                onCreated={(channel) => {
+                  dispatchChannels({ type: 'created', channel });
+                }}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : null
           }
           invites={
             auth.principal.may_invite === true ? (

@@ -232,9 +232,7 @@ async fn a_conchd_that_cannot_reach_livekit_or_cannot_be_reached_is_tried_again(
     assert_eq!(waits[1]["retry_in_ms"], 9);
 
     // Nothing listening at all.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nowhere = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let (nowhere, _held) = support::refused_address();
     let setup = Setup {
         server: Some(nowhere),
         ..Setup::default()
@@ -266,9 +264,7 @@ async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_els
     const NOTE: &str = "nothing answered at http://127.0.0.1:8080; logins are stored for \
                         http://a.test:1, http://b.test:2: choose one with --server <url>, \
                         `server` in voice.toml, or CONCH_SERVER=<url>";
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nowhere = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let (nowhere, _held) = support::refused_address();
     let setup = Setup {
         server: Some(nowhere),
         unreachable_note: Some(NOTE.to_owned()),

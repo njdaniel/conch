@@ -85,6 +85,15 @@ var ChannelWideOnly = Reader{}
 //     this predicate also requires the principal to be enabled.
 //   - Operators get no exemption. Oversight of scoped traffic is the audit
 //     log, not a read bypass.
+//   - Every reader with a verified PrincipalID, whatever its protocol, is
+//     also held to its history bound in the channel (issue #719, ADR-009,
+//     docs/design/guests-and-accounts.md §4.3): when its membership carries
+//     one (history_after, set at a guest's admission and kept through
+//     conversion), only messages after it are visible, and a reply only when
+//     its thread's root is after it too, so an old thread is not read through
+//     its new replies. A guest whose membership has no bound sees nothing of
+//     the channel: an object whose permitted provenance cannot be shown is
+//     refused, never assumed. A member with no bound is not affected.
 func (s *Store) ListVisibleMessages(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) ([]Message, error) {
 	return s.ListVisibleMessagesPage(ctx, channelID, reader, MessagePage{After: afterID}, limit)
 }
@@ -175,13 +184,29 @@ func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, rea
 	return id, nil
 }
 
+// historyWatermarkTx is the history bound a guest admitted to channelID now
+// gets (issue #705): the id of the channel's last message, or 0 when it has
+// none. Message ids only grow, so every later message of the channel has a
+// greater one. It reads no message, only the largest id, and lives here
+// because this file is the one that reads the messages table.
+func historyWatermarkTx(ctx context.Context, tx execer, channelID int64) (int64, error) {
+	var id int64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel_id = ?", channelID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: history watermark of channel %d: %w", channelID, err)
+	}
+	return id, nil
+}
+
 // messageColumns is the column list scanMessages reads.
-const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id`
+const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
+	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
+	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id)`
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
-// same two constants in their own statement, so a message is filtered in the
-// statement that selects it and the two cannot disagree. See
+// same condition (messageVisible) in their own statement, so a message is
+// filtered in the statement that selects it and the two cannot disagree. See
 // ListVisibleMessages for the rule in words. The statements are built from
 // constants only (never from a caller's text), so every value is a bound
 // parameter.
@@ -195,6 +220,23 @@ const (
 			    AND EXISTS (SELECT 1 FROM principals p
 			                WHERE p.id = ? AND p.disabled_at IS NULL)))`
 	visibleToAnyReader = `m.audience_kind IS NULL`
+	// withinHistoryBound is the reader's history bound (issue #719), and
+	// takes the reader's principal id three times (0 for no reader, who has
+	// no bound). A message is within it when the reader is not a guest now
+	// and no membership bound of theirs in the message's channel is at or
+	// after it, or when such a bound exists and is before it. "It" is the
+	// thread's root for a reply (a root's id is always below its replies'),
+	// so a new reply does not carry an old thread past the bound. A NULL
+	// bound compares as neither, so a guest without one sees nothing. The
+	// aliases (hg, hb, ha) are this condition's own.
+	withinHistoryBound = `((NOT EXISTS (SELECT 1 FROM guest_visits hg
+			                    WHERE hg.principal_id = ? AND hg.state = 'active')
+			    AND NOT EXISTS (SELECT 1 FROM channel_members hb
+			                    WHERE hb.channel_id = m.channel_id AND hb.principal_id = ?
+			                      AND COALESCE(m.thread_root_id, m.id) <= hb.history_after))
+			 OR EXISTS (SELECT 1 FROM channel_members ha
+			            WHERE ha.channel_id = m.channel_id AND ha.principal_id = ?
+			              AND COALESCE(m.thread_root_id, m.id) > ha.history_after))`
 
 	listHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.channel_id = ? AND m.id > ? AND m.id < ? AND `
@@ -225,12 +267,32 @@ const (
 )
 
 // visibilityArgs reports whether reader is a scoped reader with an identity
-// (which selects visibleToScopedReader) and the predicate's arguments.
+// (which selects visibleToScopedReader) and the arguments of messageVisible:
+// the audience condition's, then the history bound's, which every reader is
+// held to.
 func visibilityArgs(reader Reader) (scoped bool, args []any) {
+	bound := boundReader(reader)
 	if reader.Scoped && reader.PrincipalID > 0 {
-		return true, []any{reader.PrincipalID, reader.PrincipalID, reader.PrincipalID}
+		return true, []any{reader.PrincipalID, reader.PrincipalID, reader.PrincipalID, bound, bound, bound}
 	}
-	return false, nil
+	return false, []any{bound, bound, bound}
+}
+
+// boundReader is the principal id the history bound is asked for: the
+// verified reader, or 0 when there is none (no guest and no membership has
+// that id, so the bound is then no restriction).
+func boundReader(reader Reader) int64 {
+	return max(reader.PrincipalID, 0)
+}
+
+// messageVisible is the whole message condition: the audience rule for the
+// reader's protocol, and the history bound. It is the one condition every
+// statement here embeds, for messages and for what is read through them.
+func messageVisible(scoped bool) string {
+	if scoped {
+		return visibleToScopedReader + ` AND ` + withinHistoryBound
+	}
+	return visibleToAnyReader + ` AND ` + withinHistoryBound
 }
 
 func listSQL(scoped, newestFirst bool) string {
@@ -238,31 +300,19 @@ func listSQL(scoped, newestFirst bool) string {
 	if newestFirst {
 		tail = listDescTail
 	}
-	if scoped {
-		return listHead + visibleToScopedReader + tail
-	}
-	return listHead + visibleToAnyReader + tail
+	return listHead + messageVisible(scoped) + tail
 }
 
 func countSQL(scoped bool) string {
-	if scoped {
-		return countHead + visibleToScopedReader + countTail
-	}
-	return countHead + visibleToAnyReader + countTail
+	return countHead + messageVisible(scoped) + countTail
 }
 
 func newestSQL(scoped bool) string {
-	if scoped {
-		return newestHead + visibleToScopedReader + newestTail
-	}
-	return newestHead + visibleToAnyReader + newestTail
+	return newestHead + messageVisible(scoped) + newestTail
 }
 
 func searchSQL(scoped bool) string {
-	if scoped {
-		return searchHead + visibleToScopedReader + searchTail
-	}
-	return searchHead + visibleToAnyReader + searchTail
+	return searchHead + messageVisible(scoped) + searchTail
 }
 
 // scanMessages reads the rows of a statement selecting messageColumns, and
@@ -272,12 +322,17 @@ func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, er
 	var whispers []int // indexes into msgs of principals-audience messages
 	for rows.Next() {
 		var m Message
-		var payloadSchema, kind sql.NullString
+		var payloadSchema, kind, guestHandle, guestLabel sql.NullString
 		var payloadJSON []byte
 		var netID, threadRoot sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
+			&guestHandle, &guestLabel); err != nil {
 			return nil, err
+		}
+		if guestHandle.Valid {
+			a := guestAttribution(guestHandle.String, guestLabel.String)
+			m.GuestAuthor = &a
 		}
 		m.ThreadRootID = threadRoot.Int64 // zero when NULL
 		m.CreatedAt = time.UnixMilli(createdAt)
@@ -431,9 +486,9 @@ func (s *Store) fillWhisperAudiences(ctx context.Context, msgs []Message, idx []
 // message's, not a copy of it. The reader may fetch the file when they are,
 // now, a member of the file's channel and an enabled principal, and either
 //
-//   - they uploaded it (attached or not), or
+//   - they uploaded it (attached or not) and have no history bound there, or
 //   - the message it is attached to is visible to them by the same
-//     visibleToScopedReader / visibleToAnyReader constants ListVisibleMessages
+//     condition (messageVisible) ListVisibleMessages
 //     and SearchVisibleMessages embed: a whisper's file is readable by the
 //     whisper's readers and nobody else, a net message's file by the net's
 //     recipients, and a removed member loses every file they could reach
@@ -442,12 +497,19 @@ func (s *Store) fillWhisperAudiences(ctx context.Context, msgs []Message, idx []
 // Channel membership and an enabled principal are required for the uploader as
 // well: leaving the channel closes it to you, your uploads included. Operators
 // get no exemption. A reader with no verified identity is never given a file.
+//
+// A reader held to a history bound in the file's channel (issue #719: a guest,
+// or a membership with history_after) reaches a file only through its message,
+// which the bound applies to like any other. The uploader's own way in is not
+// theirs: a file nobody has attached has no message to place it after the
+// bound, so its provenance cannot be shown and it is refused.
 func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) (File, error) {
 	if reader.PrincipalID <= 0 {
 		return File{}, ErrNotFound
 	}
 	scoped, predArgs := visibilityArgs(reader)
-	args := append([]any{fileID, reader.PrincipalID, reader.PrincipalID, reader.PrincipalID}, predArgs...)
+	p := reader.PrincipalID
+	args := append([]any{fileID, p, p, p}, predArgs...)
 	f, err := scanFile(s.db.QueryRowContext(ctx, fileSQL(scoped), args...))
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -458,11 +520,29 @@ func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) 
 	return f, nil
 }
 
+// noHistoryBound is true when the reader is not a guest now and has no
+// history bound in the channel of the row the statement selects (issue #719).
+// It guards the ways to an object that do not go through a message, which
+// the message condition's bound cannot place: a file's uploader and a run
+// that answers no message. It takes the reader's principal id twice; the
+// channel is the column the embedding statement names, never a caller's text.
+func noHistoryBound(channelColumn string) string {
+	return `(NOT EXISTS (SELECT 1 FROM guest_visits ng WHERE ng.principal_id = ? AND ng.state = 'active')
+		     AND NOT EXISTS (SELECT 1 FROM channel_members nb
+		                     WHERE nb.channel_id = ` + channelColumn + ` AND nb.principal_id = ?
+		                       AND nb.history_after IS NOT NULL))`
+}
+
 // fileHead and fileTail wrap the message visibility condition for a file. The
-// condition is spliced in as a constant (never a caller's text); every value is
-// a bound parameter, in this order: file id, reader (member), reader (enabled),
-// reader (uploader), then the predicate's own.
-const (
+// condition is spliced in from constants (never a caller's text); every value
+// is a bound parameter, in this order: file id, reader (member), reader
+// (enabled), reader (uploader), then the predicate's own. The uploader reads
+// their own file without the history bound: a file someone uploaded is never
+// from before a bound they hold (a bound is set when they are admitted, and
+// conversion keeps the same principal), so the bound has nothing to hide
+// there, and a converted member can read their own upload before attaching
+// it (#719 review).
+var (
 	fileHead = `SELECT ` + fileColumns + ` FROM files f
 		 WHERE f.id = ?
 		   AND EXISTS (SELECT 1 FROM channel_members cm
@@ -476,10 +556,7 @@ const (
 )
 
 func fileSQL(scoped bool) string {
-	if scoped {
-		return fileHead + visibleToScopedReader + fileTail
-	}
-	return fileHead + visibleToAnyReader + fileTail
+	return fileHead + messageVisible(scoped) + fileTail
 }
 
 // attachFilesTx honours a message's conch.file_attachment.v1 payload inside the
@@ -545,10 +622,7 @@ const rootFrom = ` FROM messages m
 		 WHERE m.id = ? AND m.channel_id = ? AND m.thread_root_id IS NULL AND `
 
 func rootSQL(columns string, scoped bool) string {
-	if scoped {
-		return `SELECT ` + columns + rootFrom + visibleToScopedReader
-	}
-	return `SELECT ` + columns + rootFrom + visibleToAnyReader
+	return `SELECT ` + columns + rootFrom + messageVisible(scoped)
 }
 
 // ReplyRootMessage returns the message rootID of channelID if reader may reply
@@ -607,10 +681,7 @@ const (
 )
 
 func threadSQL(scoped bool) string {
-	if scoped {
-		return threadHead + visibleToScopedReader + listTail
-	}
-	return threadHead + visibleToAnyReader + listTail
+	return threadHead + messageVisible(scoped) + listTail
 }
 
 // ReplyPost is a reply to store. It carries no audience: the reply's is its
@@ -689,7 +760,8 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 			}
 			msg = Message{ID: id, ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload,
 				CreatedAt: now, ThreadRootID: post.RootID}
-			return nil
+			msg.GuestAuthor, err = guestAuthorTx(ctx, tx, id)
+			return err
 		}
 		// The candidates are the people who can see the root now: its
 		// recipients, less any who have since left the channel. Not the net's
@@ -904,8 +976,12 @@ func insertScopedTx(
 	if err := attachFilesTx(ctx, tx, p.ChannelID, p.AuthorID, id, p.Payload, now); err != nil {
 		return Message{}, err
 	}
+	guest, err := guestAuthorTx(ctx, tx, id)
+	if err != nil {
+		return Message{}, err
+	}
 	return Message{ID: id, ChannelID: p.ChannelID, AuthorID: p.AuthorID, Body: p.Body, Payload: p.Payload,
-		CreatedAt: now, Audience: &audience, ThreadRootID: rootID}, nil
+		CreatedAt: now, Audience: &audience, ThreadRootID: rootID, GuestAuthor: guest}, nil
 }
 
 // scopedDetail is the message_scoped audit detail. It names who was addressed,
@@ -1027,20 +1103,25 @@ func withAuthor(ids []int64, authorID int64) []int64 {
 // from the channel hides every run there from them, those they saw before
 // included. Operators get no exemption. A run the reader cannot see and a run
 // that does not exist are the same answer, ErrRunNotFound, everywhere.
+//
+// A reader held to a history bound in the run's channel (issue #719) sees a
+// run only through its message, which the bound applies to: a run that
+// answers no message has nothing to place it after the bound, so it is
+// refused to them (default-deny), and so are its activity and interventions.
 
 // runColumns is the column list scanRun reads, over runs aliased ru.
 const runColumns = `ru.id, ru.session_id, ru.principal_id, ru.channel_id, ru.message_id, ru.state, ru.task, ru.link, ru.started_at, ru.ended_at, ru.outcome`
 
 // runVisibleHead and runVisibleTail wrap the message condition into the run
 // condition, over runs aliased ru. Every value is a bound parameter, in this
-// order: reader (member), reader (enabled), then the message predicate's own.
-// The aliases differ from the message predicate's (r, c, p) so nothing in it
-// can bind to the run by accident.
-const (
+// order: reader (member), reader (enabled), reader twice (no history bound),
+// then the message predicate's own. The aliases differ from the message
+// predicate's (r, c, p) so nothing in it can bind to the run by accident.
+var (
 	runVisibleHead = `(EXISTS (SELECT 1 FROM channel_members rc
 	                   WHERE rc.channel_id = ru.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)
-	     AND (ru.message_id IS NULL OR EXISTS (
+	     AND ((ru.message_id IS NULL AND ` + noHistoryBound("ru.channel_id") + `) OR EXISTS (
 	           SELECT 1 FROM messages m
 	            WHERE m.id = ru.message_id AND m.channel_id = ru.channel_id AND `
 	runVisibleTail = `)))`
@@ -1054,16 +1135,14 @@ func runVisibility(reader Reader) (scoped bool, args []any, ok bool) {
 		return false, nil, false
 	}
 	scoped, predArgs := visibilityArgs(reader)
-	return scoped, append([]any{reader.PrincipalID, reader.PrincipalID}, predArgs...), true
+	p := reader.PrincipalID
+	return scoped, append([]any{p, p, p, p}, predArgs...), true
 }
 
 // runCond is the run condition over runs aliased ru. Like listSQL it is
 // built from constants only; scoped picks the message predicate.
 func runCond(scoped bool) string {
-	if scoped {
-		return runVisibleHead + visibleToScopedReader + runVisibleTail
-	}
-	return runVisibleHead + visibleToAnyReader + runVisibleTail
+	return runVisibleHead + messageVisible(scoped) + runVisibleTail
 }
 
 // The statements that read runs and activity, each with the run condition
@@ -1439,10 +1518,7 @@ const anchorFrom = ` FROM messages m
 		 WHERE m.id = ? AND m.channel_id = ? AND `
 
 func anchorSQL(columns string, scoped bool) string {
-	if scoped {
-		return `SELECT ` + columns + anchorFrom + visibleToScopedReader
-	}
-	return `SELECT ` + columns + anchorFrom + visibleToAnyReader
+	return `SELECT ` + columns + anchorFrom + messageVisible(scoped)
 }
 
 // runAnchorVisibleTx is CreateRun's check of the message a run answers, inside

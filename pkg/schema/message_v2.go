@@ -194,6 +194,15 @@ type MessageV2 struct {
 	// for a message that is not a reply. A reply has its root's audience and the
 	// root is never itself a reply: threads are one level deep (issue #25).
 	ThreadRootID int64 `json:"thread_root_id,omitempty"`
+	// GuestAuthor is the guest attribution of a message posted during a
+	// guest visit (issue #704, ADR-009 §4.4): the handle, label and tag the
+	// author had when it posted, stored with the message and never changed.
+	// It stays after the visit ends and after the author creates an
+	// account, when AuthorID resolves to the member's permanent name; a
+	// client renders the message as a guest's from this field, never from
+	// the author's current name. Omitted on every other message. Additive:
+	// a client that predates it shows the author's current name.
+	GuestAuthor *GuestAttributionV1 `json:"guest_author,omitempty"`
 }
 
 // Validate reports whether the envelope is structurally well-formed. It
@@ -229,6 +238,11 @@ func (m MessageV2) Validate() error {
 	if m.Audience != nil {
 		if err := m.Audience.validateNormalized(m.AuthorID); err != nil {
 			return err
+		}
+	}
+	if m.GuestAuthor != nil {
+		if err := m.GuestAuthor.Validate(); err != nil {
+			return fmt.Errorf("schema: message guest_author: %w", err)
 		}
 	}
 	// A root is posted before its replies, so it has a smaller id.
