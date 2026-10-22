@@ -201,6 +201,19 @@ type Server struct {
 	// reportLimits is the problem-report rate limit (reports.go), in memory
 	// only; its clock is now. Tests replace it before serving.
 	reportLimits *reportLimiter
+	// passwords is password hashing and its two bounded pools (password.go);
+	// logins is the sign-in limits (login.go), in memory only, with now as
+	// their clock. Tests replace logins with setLoginLimits before serving.
+	passwords *passwords
+	logins    *loginLimiter
+	// addressMAC keys the HMAC a pending login keeps of its client address
+	// (pendingAddressKey): random per process, never stored or logged.
+	addressMAC []byte
+	// beforeLoginIssue, when a test sets it, runs between a sign-in's
+	// password verification and the transaction that issues what it earned,
+	// so a test can land a disable or a password change in that gap. Nil in
+	// conchd.
+	beforeLoginIssue func()
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call
@@ -230,7 +243,8 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit())}
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
+		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey()}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()

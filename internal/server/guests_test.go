@@ -46,7 +46,9 @@ func TestNoGuestEntryRouteIsReachable(t *testing.T) {
 		{"POST", "/v1/join/guest"},
 		{"POST", "/v1/join/account"},
 		{"POST", "/v1/invites/redeem-guest"},
-		{"POST", "/v2/invites/redeem"},
+		// POST /v2/invites/redeem is registered with passwords (#707, design
+		// §7.3 "Ordering"): it makes a member with a password, never a guest
+		// or a passwordless member, so it is not in this list.
 		{"POST", "/v1/guest/convert"},
 		{"GET", "/v1/guests"},
 		{"POST", "/v1/guests/end"},

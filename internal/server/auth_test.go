@@ -281,6 +281,11 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
 	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	// The v2 redeem and the sign-in take a password (issue #707), so they
+	// answer 403 before reading anything: https_required to this fixture's
+	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
+	"POST /v2/invites/redeem": {classExempt, "/v2/invites/redeem", `{}`, 403},
+	"POST /v1/login":          {classExempt, "/v1/login", `{}`, 403},
 	// Operator administration of invites (issue #438). Each names an invite
 	// or a principal that does not exist, or sets the pause switch to the
 	// value it has, so it changes and audits nothing. Like the routes above,
@@ -393,7 +398,8 @@ func TestRouteTable(t *testing.T) {
 func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
-		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true,
+		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
+		"POST /v1/login":                 true,
 		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
 
 	for _, rt := range f.srv.routes {

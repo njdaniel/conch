@@ -281,6 +281,10 @@ func (s *Server) handlePreviewInvite(w http.ResponseWriter, r *http.Request) {
 // one; a bad name a 400 that says nothing about the code; the server-wide
 // limit last, so only a redemption that reaches the store can spend it, and
 // one that fails there gives it back.
+//
+// The account has no password. ADR-009 ends that (design §7.6 B1): the route
+// is to answer password_required once the browser redeems through POST
+// /v2/invites/redeem (#713). Until then it is unchanged.
 func (s *Server) handleRedeemInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	addr := clientAddr(r, s.cfg.TrustedProxies)
@@ -309,7 +313,115 @@ func (s *Server) handleRedeemInvite(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.inviteLimits.refundGlobal(s.now())
 	}
+	s.writeRedeemed(w, r, res, err)
+}
+
+// handleRedeemInviteV2 serves POST /v2/invites/redeem, exempt from
+// authentication: it uses the invite to make a new human member with the
+// password it chose, and returns its first credential (issue #707, design
+// §3.1). The order is part of the contract: the transport check
+// (passwordRoute); the per-address limit before the body is read; a
+// malformed code the same 404 as any invalid one; a bad name or password a
+// 400 that says nothing about the code; the code checked before any hashing,
+// so an invalid one costs no Argon2 work, and a valid one that admits guests
+// only answered 403 joining_closed then too; the name-probe allowance; the hash,
+// in the anonymous pool and outside any transaction; the server-wide limit
+// last, so only a redemption that reaches the store can spend it, and one
+// that fails there gives it back. The store re-checks the invite and the
+// name and stores the password with the account, or nothing.
+func (s *Server) handleRedeemInviteV2(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if !s.passwordRoute(w, r) {
+		return
+	}
+	addr := clientAddr(r, s.cfg.TrustedProxies)
+	if limit, ok, retry := s.inviteLimits.takeAddress(true, addr, s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+		return
+	}
+	var req schema.RedeemInviteRequestV2
+	if !decodeInviteBody(w, r, &req) {
+		return
+	}
+	if schema.ValidateInviteCode(req.Code) != nil {
+		writeInviteInvalid(w)
+		return
+	}
+	// The schema's messages name the rule broken, never the name or the
+	// password sent.
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	password, err := normalizePassword(req.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if checkPasswordPolicy(password, req.Name) != nil {
+		writeError(w, http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable,
+			"that password is too common or contains your name; choose another")
+		return
+	}
+	codeHash := store.HashInviteCode(req.Code)
+	switch err := s.store.CheckInviteForAccount(ctx, codeHash, s.now()); {
+	case errors.Is(err, store.ErrInviteInvalid):
+		s.auditRedeemRefused(r, schema.ErrorCodeInviteInvalid)
+		writeInviteInvalid(w)
+		return
+	case errors.Is(err, store.ErrInvitesPaused):
+		writeInvitesPaused(w)
+		return
+	case errors.Is(err, store.ErrJoiningClosed):
+		writeJoiningClosed(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "invites: redeem check failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	if limit, ok, retry := s.logins.peekNameProbe(addr, s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+		return
+	}
+	record, err := s.passwords.hashIn(ctx, s.passwords.anonymous, password)
+	if err != nil {
+		if !errors.Is(err, errHashPoolBusy) && ctx.Err() == nil {
+			slog.ErrorContext(ctx, "invites: hash the password failed", "error", err)
+			writeInternalError(w)
+			return
+		}
+		writePasswordBusy(w)
+		return
+	}
+	if limit, ok, retry := s.inviteLimits.takeGlobal(s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+		return
+	}
+	res, err := s.store.RedeemInviteWithPassword(ctx, codeHash, req.Name, record, s.now())
+	if err != nil {
+		s.inviteLimits.refundGlobal(s.now())
+	}
+	if errors.Is(err, store.ErrDuplicate) {
+		// ErrNameReserved is a duplicate as well: a name probe either way.
+		s.logins.spendNameProbe(addr, s.now())
+	}
+	s.writeRedeemed(w, r, res, err)
+}
+
+// writeJoiningClosed answers an account asked of an invite that admits guests
+// only. Only a valid code gets it: an invalid one is invite_invalid first.
+func writeJoiningClosed(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeJoiningClosed, "this invite admits guests only; it cannot make an account")
+}
+
+// writeRedeemed answers a redemption, v1 or v2, with what the store made of
+// it.
+func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store.RedeemedInvite, err error) {
+	ctx := r.Context()
 	switch {
+	case errors.Is(err, store.ErrJoiningClosed):
+		writeJoiningClosed(w)
 	case errors.Is(err, store.ErrInviteInvalid):
 		s.auditRedeemRefused(r, schema.ErrorCodeInviteInvalid)
 		writeInviteInvalid(w)

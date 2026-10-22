@@ -423,7 +423,8 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 	query := `SELECT p.id, p.kind, p.name, p.role, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
 		(SELECT COUNT(*) FROM credentials c
 		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
-		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)),
+		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
+		   AND ` + currentAuthSQL + `),
 		(SELECT v.state FROM guest_visits v WHERE v.principal_id = p.id)
 		FROM principals p WHERE ` + cond + ` ORDER BY p.id DESC LIMIT ?` // #nosec G202 -- cond joins constants of the callers; every value is in args
 	all := append([]any{now.UnixMilli(), now.UnixMilli()}, args...)
