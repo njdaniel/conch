@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -300,49 +301,62 @@ func TestWithImmediateTxRandomCancellation(t *testing.T) {
 		t.Run(fmt.Sprintf("max conns %d", conns), func(t *testing.T) {
 			s := openTxStore(t, conns)
 			const workers, perWorker = 10, 50
-			var wg sync.WaitGroup
-			results := make([][]error, workers)
-			for w := 0; w < workers; w++ {
-				results[w] = make([]error, perWorker)
-				wg.Add(1)
-				go func(w int) {
-					defer wg.Done()
-					rng := rand.New(rand.NewSource(int64(w)*7919 + 1)) // #nosec G404 -- test timing only
-					for i := 0; i < perWorker; i++ {
-						ctx, cancel := context.WithTimeout(context.Background(), time.Duration(rng.Intn(3000))*time.Microsecond)
-						marker := fmt.Sprintf("rand-%d-%d", w, i)
-						results[w][i] = s.withImmediateTx(ctx, func(tx execer) error {
-							// Two rows: a transaction is whole or absent.
-							if err := insertMarker(ctx, tx, marker); err != nil {
-								return err
-							}
-							time.Sleep(time.Duration(rng.Intn(300)) * time.Microsecond)
-							return insertMarker(ctx, tx, marker)
-						})
-						cancel()
+			body := func(ctx context.Context, rng *rand.Rand, marker string) error {
+				return s.withImmediateTx(ctx, func(tx execer) error {
+					// Two rows: a transaction is whole or absent.
+					if err := insertMarker(ctx, tx, marker); err != nil {
+						return err
 					}
-				}(w)
+					time.Sleep(time.Duration(rng.Intn(300)) * time.Microsecond)
+					return insertMarker(ctx, tx, marker)
+				})
 			}
-			wg.Wait()
+			// Deadlines are spread over twice the median time one transaction
+			// takes here, measured afresh each round, so that on any machine
+			// (and under any load) some land before, some during and some
+			// after it. A round that still shows one outcome is repeated, a
+			// bounded number of times; the counts are kept across rounds.
+			calRng := rand.New(rand.NewSource(3)) // #nosec G404 -- test timing only
 			committed, abandoned := 0, 0
-			for w := range results {
-				for i, err := range results[w] {
-					var n int
-					if qerr := s.db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE action = ?", fmt.Sprintf("rand-%d-%d", w, i)).Scan(&n); qerr != nil {
-						t.Fatal(qerr)
-					}
-					want := 0
-					if err == nil {
-						want = 2
-						committed++
-					} else {
-						abandoned++
-						if strings.Contains(err.Error(), "within a transaction") {
-							t.Fatalf("transaction %d-%d ran on a connection that already held one: %v", w, i, err)
+			for round := 0; round < maxTimingRounds && (committed == 0 || abandoned == 0); round++ {
+				span := 2 * medianDuration(t, 9, func(i int) error {
+					return body(context.Background(), calRng, fmt.Sprintf("cal-%d-%d", round, i))
+				})
+				var wg sync.WaitGroup
+				results := make([][]error, workers)
+				for w := 0; w < workers; w++ {
+					results[w] = make([]error, perWorker)
+					wg.Add(1)
+					go func(w int) {
+						defer wg.Done()
+						rng := rand.New(rand.NewSource(int64(round)*104729 + int64(w)*7919 + 1)) // #nosec G404 -- test timing only
+						for i := 0; i < perWorker; i++ {
+							ctx, cancel := context.WithTimeout(context.Background(), time.Duration(rng.Int63n(int64(span)+1)))
+							results[w][i] = body(ctx, rng, fmt.Sprintf("rand-%d-%d-%d", round, w, i))
+							cancel()
 						}
-					}
-					if n != want {
-						t.Errorf("transaction %d-%d: err = %v, %d rows stored, want %d", w, i, err, n, want)
+					}(w)
+				}
+				wg.Wait()
+				for w := range results {
+					for i, err := range results[w] {
+						var n int
+						if qerr := s.db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE action = ?", fmt.Sprintf("rand-%d-%d-%d", round, w, i)).Scan(&n); qerr != nil {
+							t.Fatal(qerr)
+						}
+						want := 0
+						if err == nil {
+							want = 2
+							committed++
+						} else {
+							abandoned++
+							if strings.Contains(err.Error(), "within a transaction") {
+								t.Fatalf("transaction %d-%d-%d ran on a connection that already held one: %v", round, w, i, err)
+							}
+						}
+						if n != want {
+							t.Errorf("transaction %d-%d-%d: err = %v, %d rows stored, want %d", round, w, i, err, n, want)
+						}
 					}
 				}
 			}
@@ -402,32 +416,35 @@ func TestBeginTxSitesSurviveCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Deadlines are spread over twice the time one insert takes here,
-			// so that on any machine some land before, some during and some
-			// after it.
-			started := time.Now()
-			if _, err := s.InsertMessageV1(bg, channel.ID, author.ID, "timing", nil); err != nil {
-				t.Fatal(err)
-			}
-			span := 2 * time.Since(started)
+			// Deadlines are spread over twice the median time one insert takes
+			// here, measured afresh each round, so that on any machine (and
+			// under any load) some land before, some during and some after it.
+			// A round that still shows one outcome is repeated, a bounded
+			// number of times; the counts are kept across rounds.
 			rng := rand.New(rand.NewSource(11)) // #nosec G404 -- test timing only
 			stored, refused := 0, 0
-			for i := 0; i < 300; i++ {
-				ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
-				body := fmt.Sprintf("cancelled-insert-%d", i)
-				_, err := s.InsertMessageV1(ctx, channel.ID, author.ID, body, nil)
-				cancel()
-				var n int
-				if qerr := s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE body = ?", body).Scan(&n); qerr != nil {
-					t.Fatal(qerr)
-				}
-				if want := map[bool]int{true: 1, false: 0}[err == nil]; n != want {
-					t.Fatalf("insert %d: err = %v but %d rows stored", i, err, n)
-				}
-				if err == nil {
-					stored++
-				} else {
-					refused++
+			for round := 0; round < maxTimingRounds && (stored == 0 || refused == 0); round++ {
+				span := 2 * medianDuration(t, 9, func(i int) error {
+					_, err := s.InsertMessageV1(bg, channel.ID, author.ID, fmt.Sprintf("timing-%d-%d", round, i), nil)
+					return err
+				})
+				for i := 0; i < 300; i++ {
+					ctx, cancel := context.WithTimeout(bg, time.Duration(rng.Int63n(int64(span)+1)))
+					body := fmt.Sprintf("cancelled-insert-%d-%d", round, i)
+					_, err := s.InsertMessageV1(ctx, channel.ID, author.ID, body, nil)
+					cancel()
+					var n int
+					if qerr := s.db.QueryRow("SELECT COUNT(*) FROM messages WHERE body = ?", body).Scan(&n); qerr != nil {
+						t.Fatal(qerr)
+					}
+					if want := map[bool]int{true: 1, false: 0}[err == nil]; n != want {
+						t.Fatalf("insert %d-%d: err = %v but %d rows stored", round, i, err, n)
+					}
+					if err == nil {
+						stored++
+					} else {
+						refused++
+					}
 				}
 			}
 			t.Logf("%d stored, %d refused", stored, refused)
@@ -437,4 +454,25 @@ func TestBeginTxSitesSurviveCancellation(t *testing.T) {
 			s.assertHealthy(t, "after")
 		})
 	}
+}
+
+// maxTimingRounds bounds how often a timing test recalibrates and tries again
+// when its deadlines all landed on one side of the work.
+const maxTimingRounds = 5
+
+// medianDuration runs do n times, failing the test on an error, and returns
+// the median time one call took. One call alone can be far off on a loaded
+// machine; the median of several is not.
+func medianDuration(t *testing.T, n int, do func(i int) error) time.Duration {
+	t.Helper()
+	took := make([]time.Duration, n)
+	for i := range took {
+		started := time.Now()
+		if err := do(i); err != nil {
+			t.Fatal(err)
+		}
+		took[i] = time.Since(started)
+	}
+	sort.Slice(took, func(a, b int) bool { return took[a] < took[b] })
+	return max(took[n/2], time.Microsecond)
 }
