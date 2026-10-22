@@ -250,8 +250,12 @@ func setCanDecideTx(ctx context.Context, tx execer, actor string, channelID, pri
 // cannot.
 func (s *Store) CanDecideApprovals(ctx context.Context, channelID, principalID int64) (bool, error) {
 	var can int
+	// A guest never holds the right, whatever its row says (issue #706): the
+	// same condition the deciding transaction applies.
 	err := s.db.QueryRowContext(ctx,
-		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&can)
+		`SELECT m.can_decide AND NOT `+activeGuestSQL+` FROM channel_members m
+		 JOIN principals p ON p.id = m.principal_id
+		 WHERE m.channel_id = ? AND m.principal_id = ?`, channelID, principalID).Scan(&can)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
