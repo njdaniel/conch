@@ -698,6 +698,24 @@ func (s *Server) humansOnlyFiles(next http.Handler) http.Handler {
 	return s.humansOnlyBecause(denyAgentFiles, "agents cannot use files", next)
 }
 
+// membersOnly refuses a guest caller (issue #706, design §4.3): a guest reads
+// and posts in the channels it was admitted to and does nothing else that
+// members do. It gets 403 guest_not_allowed, audited as access_denied, before
+// the handler looks at anything, whatever the page shows. Approvals are among
+// these routes: a guest neither requests, reads nor decides one, so no
+// approval object can reveal the channel's history before the guest's
+// admission. With no caller (AuthOff) or anyone but an active guest the
+// handler runs unchanged.
+func (s *Server) membersOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if caller, ok := callerFrom(r.Context()); ok && caller.IsGuest() {
+			s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot do this; it can read and post in the channels it was admitted to")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // humansOnlyBecause is humansOnly with the audit reason and the message of the
 // refusal.
 func (s *Server) humansOnlyBecause(reason, message string, next http.Handler) http.Handler {
