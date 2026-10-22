@@ -443,7 +443,7 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		if role == RoleOperator && !disabled {
-			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, now)
+			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, 0, now)
 			if err != nil {
 				return err
 			}

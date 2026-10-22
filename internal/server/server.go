@@ -92,6 +92,12 @@ type Config struct {
 	// unless every address the server binds is loopback and no trusted proxy
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
+	// TOTPKey is the host key operators' TOTP secrets are sealed under
+	// (issue #709, totp.go): kept outside the database and its backups,
+	// and backed up on its own. Nil, operators cannot enrol a second factor
+	// or sign in with a password, and every TOTP check fails closed;
+	// everything else works. conchd reads it from CONCHD_TOTP_KEY only.
+	TOTPKey *TOTPKey
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -206,6 +212,9 @@ type Server struct {
 	// their clock. Tests replace logins with setLoginLimits before serving.
 	passwords *passwords
 	logins    *loginLimiter
+	// setupLimits is the setup-token redemption's per-address limit
+	// (operator_auth.go), in memory only, with now as its clock.
+	setupLimits *setupLimiter
 	// addressMAC keys the HMAC a pending login keeps of its client address
 	// (pendingAddressKey): random per process, never stored or logged.
 	addressMAC []byte
@@ -248,7 +257,8 @@ func New(cfg Config, st *store.Store) *Server {
 		}
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
-		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey()}
+		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
+		setupLimits: newSetupLimiter(cfg)}
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
@@ -273,6 +283,7 @@ func New(cfg Config, st *store.Store) *Server {
 		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
+	s.checkTOTPKey(context.Background())
 	if s.VoiceConfigured() {
 		if s.lk, err = livekit.New(cfg.LiveKit); err != nil {
 			// Unreachable: Configured() was just checked. Fail closed anyway:
@@ -446,6 +457,9 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	// Metrics, when configured, on their own listener; stopped with the rest.
 	defer s.serveMetrics(ctx)()
+
+	// Pending logins: spent and expired challenges are deleted (issue #709).
+	defer s.startPendingLoginSweeper(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

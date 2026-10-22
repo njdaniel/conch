@@ -751,7 +751,9 @@ func (s *Store) NextGuestDeadline(ctx context.Context) (time.Time, bool, error) 
 
 // NoteGuestUse records that a REST request authenticated with
 // credential credID just now, which moves its idle expiry (design §4.2, review
-// F5). It writes only for a credential with an idle bound, still live, whose
+// F5). Despite its name it serves every idle-bounded credential: a guest's,
+// and an operator's browser session (issue #709), whose idle bound works the
+// same way. It writes only for a credential with an idle bound, still live, whose
 // last recorded use is guestActivityStep or more ago: at most one write a
 // minute, never for an idle-expired credential (which it cannot revive),
 // and never past the hard deadline (the idle expiry is capped by it). Only
