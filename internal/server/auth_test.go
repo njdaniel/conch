@@ -327,6 +327,10 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
 	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
 	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+
+	// Renaming a channel (issue #727): an empty body is a 400 before the
+	// channel is looked up, so it changes and audits nothing.
+	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),

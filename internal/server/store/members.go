@@ -68,7 +68,9 @@ func nullableID(id int64) any {
 // (added_by is the creator) and a member_added event is written. Both rows
 // are attributed to actor and written in the creating transaction. With
 // creatorID 0 (no authenticated caller) the channel has no members. Names are
-// unique (ErrDuplicate).
+// unique by their keys (ErrDuplicate: one that reads the same as another
+// channel's is taken, issue #727), and a name with empty keys is
+// ErrNameInvalid.
 func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creatorID int64) (Channel, error) {
 	// SQLite stores timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a create response exactly
@@ -76,16 +78,9 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 	now := time.Now().Truncate(time.Millisecond)
 	var ch Channel
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		res, err := tx.ExecContext(ctx, "INSERT INTO channels (name, created_at) VALUES (?, ?)", name, now.UnixMilli())
-		if isUniqueConstraintErr(err) {
-			return fmt.Errorf("store: create channel %q: %w", name, ErrDuplicate)
-		}
+		id, err := insertChannelTx(ctx, tx, name, now)
 		if err != nil {
-			return fmt.Errorf("store: create channel %q: %w", name, err)
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("store: create channel %q: %w", name, err)
+			return err
 		}
 		ch = Channel{ID: id, Name: name, CreatedAt: now}
 		// Quoted, as a rename's names are, so a name with spaces in it reads

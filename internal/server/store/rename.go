@@ -140,13 +140,24 @@ func reservedGuestName(keys names.Keys) bool {
 	return strings.HasPrefix(keys.Folded, guestKeys.Folded) || strings.HasPrefix(keys.Skeletal, guestKeys.Skeletal)
 }
 
+// The clash queries of the two tables whose names are unique by their keys:
+// principals (issue #441) and channels (issue #727).
+const (
+	principalClashQuery = "SELECT id FROM principals WHERE (name_key = ? OR name_skel = ?) AND id != ? LIMIT 1"
+	channelClashQuery   = "SELECT id FROM channels WHERE (name_key = ? OR name_skel = ?) AND id != ? LIMIT 1"
+)
+
 // clashTx returns ErrDuplicate when a principal other than self holds either
 // of keys.
 func clashTx(ctx context.Context, tx execer, name string, keys names.Keys, self int64) error {
+	return keyClashTx(ctx, tx, principalClashQuery, name, keys, self)
+}
+
+// keyClashTx returns ErrDuplicate when query, one of the clash queries above,
+// finds a row other than self that holds either of keys.
+func keyClashTx(ctx context.Context, tx execer, query, name string, keys names.Keys, self int64) error {
 	var other int64
-	err := tx.QueryRowContext(ctx,
-		"SELECT id FROM principals WHERE (name_key = ? OR name_skel = ?) AND id != ? LIMIT 1",
-		keys.Folded, keys.Skeletal, self).Scan(&other)
+	err := tx.QueryRowContext(ctx, query, keys.Folded, keys.Skeletal, self).Scan(&other)
 	switch {
 	case err == nil:
 		return fmt.Errorf("store: name %q: %w", name, ErrDuplicate)
@@ -330,32 +341,65 @@ const nameKeyMigration = 27
 // none is renamed or refused service, and a later rename of any of them must
 // still not take another's key.
 func fillNameKeys(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, "SELECT id, name FROM principals ORDER BY id")
+	all, err := readNamedRows(ctx, tx, "SELECT id, name FROM principals ORDER BY id")
 	if err != nil {
 		return fmt.Errorf("read principal names: %w", err)
 	}
-	type row struct {
-		id   int64
-		name string
+	for _, r := range all {
+		keys := names.KeysOf(r.name)
+		if _, err := tx.ExecContext(ctx, "UPDATE principals SET name_key = ?, name_skel = ? WHERE id = ?",
+			keys.Folded, keys.Skeletal, r.id); err != nil {
+			return fmt.Errorf("store name keys of principal %d: %w", r.id, err)
+		}
 	}
-	var all []row
+	clashing, blank := nameKeyGroups(all)
+	// Ids only: the names are in the database, and the log need not repeat
+	// them.
+	if len(clashing) > 0 {
+		slog.WarnContext(ctx, "store: some existing principal names clash by case or look-alike characters; they are kept as they are, and a rename of any of them to a name that clashes with another is refused",
+			"groups", len(clashing), "principals", clashing)
+	}
+	if len(blank) > 0 {
+		slog.WarnContext(ctx, "store: some existing principal names have no character a reader can see; they are kept as they are, and an operator should rename them",
+			"principals", blank)
+	}
+	return nil
+}
+
+// namedRow is a row's id and name, as a key migration's Go step reads them.
+type namedRow struct {
+	id   int64
+	name string
+}
+
+// readNamedRows reads every (id, name) that query selects, in id order.
+func readNamedRows(ctx context.Context, tx *sql.Tx, query string) ([]namedRow, error) {
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	var all []namedRow
 	for rows.Next() {
-		var r row
+		var r namedRow
 		if err := rows.Scan(&r.id, &r.name); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan principal name: %w", err)
+			return nil, err
 		}
 		all = append(all, r)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("read principal names: %w", err)
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read principal names: %w", err)
-	}
+	return all, rows.Err()
+}
 
-	// Union-find over ids: two principals are in one group when they share
-	// either key.
+// nameKeyGroups returns the groups of rows whose names clash (either key
+// shared, directly or through another member of the group), each in id order
+// and ordered by their first id, and the ids of the rows whose names have
+// empty keys. all must be in id order.
+func nameKeyGroups(all []namedRow) (clashing [][]int64, blank []int64) {
+	// Union-find over ids: two rows are in one group when they share either
+	// key.
 	parent := map[int64]int64{}
 	var find func(int64) int64
 	find = func(x int64) int64 {
@@ -370,16 +414,11 @@ func fillNameKeys(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	firstFolded, firstSkel := map[string]int64{}, map[string]int64{}
-	var blank []int64
 	for _, r := range all {
 		parent[r.id] = r.id
 		keys := names.KeysOf(r.name)
 		if keys.Empty() {
 			blank = append(blank, r.id)
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE principals SET name_key = ?, name_skel = ? WHERE id = ?",
-			keys.Folded, keys.Skeletal, r.id); err != nil {
-			return fmt.Errorf("store name keys of principal %d: %w", r.id, err)
 		}
 		if first, ok := firstFolded[keys.Folded]; ok {
 			union(first, r.id)
@@ -397,22 +436,11 @@ func fillNameKeys(ctx context.Context, tx *sql.Tx) error {
 		root := find(r.id)
 		groups[root] = append(groups[root], r.id)
 	}
-	var clashing [][]int64
 	for _, ids := range groups {
 		if len(ids) > 1 {
 			clashing = append(clashing, ids)
 		}
 	}
 	sort.Slice(clashing, func(i, j int) bool { return clashing[i][0] < clashing[j][0] })
-	// Ids only: the names are in the database, and the log need not repeat
-	// them.
-	if len(clashing) > 0 {
-		slog.WarnContext(ctx, "store: some existing principal names clash by case or look-alike characters; they are kept as they are, and a rename of any of them to a name that clashes with another is refused",
-			"groups", len(clashing), "principals", clashing)
-	}
-	if len(blank) > 0 {
-		slog.WarnContext(ctx, "store: some existing principal names have no character a reader can see; they are kept as they are, and an operator should rename them",
-			"principals", blank)
-	}
-	return nil
+	return clashing, blank
 }

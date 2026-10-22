@@ -191,24 +191,21 @@ func (s *Store) createPrincipal(ctx context.Context, actor string, kind Principa
 // CreateChannel creates a named channel with no members and no audit row. It
 // is for seeding a store in tests; the route creates channels through
 // CreateChannelAs (TestCreatesAreAudited in the server package checks).
-// Names are unique.
+// Names are unique by their keys (ErrDuplicate; claimChannelNameTx), and a
+// name with empty keys is ErrNameInvalid.
 func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error) {
 	// SQLite stores timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a create response exactly
 	// describes what a subsequent read returns.
 	now := time.Now().Truncate(time.Millisecond)
-	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO channels (name, created_at) VALUES (?, ?)",
-		name, now.UnixMilli())
-	if isUniqueConstraintErr(err) {
-		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, ErrDuplicate)
-	}
+	var id int64
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		var err error
+		id, err = insertChannelTx(ctx, tx, name, now)
+		return err
+	})
 	if err != nil {
-		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return Channel{}, fmt.Errorf("store: create channel %q: %w", name, err)
+		return Channel{}, err
 	}
 	return Channel{ID: id, Name: name, CreatedAt: now}, nil
 }

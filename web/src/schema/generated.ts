@@ -172,6 +172,43 @@ export const createChannelResponse = object<CreateChannelResponse>({
   channel: channelV0,
 });
 
+// schema.RenameChannelRequestV1
+export interface RenameChannelRequestV1 {
+  name: string;
+  from: string;
+}
+
+export const renameChannelRequestV1 = object<RenameChannelRequestV1>({
+  name: str,
+  from: str,
+});
+
+// schema.RenameChannelResponseV1
+export interface RenameChannelResponseV1 {
+  channel: ChannelV0;
+}
+
+export const renameChannelResponseV1 = object<RenameChannelResponseV1>({
+  channel: channelV0,
+});
+
+// schema.ChannelDocV1
+export const channelDocV1Schema = 'conch.channel.v1';
+
+export interface ChannelDocV1 {
+  schema: typeof channelDocV1Schema;
+  channel_id: number;
+  name: string;
+  created_at: string;
+}
+
+export const channelDocV1 = object<ChannelDocV1>({
+  schema: vocab<typeof channelDocV1Schema>({ [channelDocV1Schema]: true }),
+  channel_id: int,
+  name: str,
+  created_at: timestamp,
+});
+
 // schema.GuestAttributionV1
 export interface GuestAttributionV1 {
   handle: string;
