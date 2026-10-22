@@ -258,6 +258,7 @@ export function VoicePanel({
   // The microphone is captured while connected with it, whether or not
   // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
   // the capture it had. A microphone that went is not captured.
+  const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
@@ -335,6 +336,11 @@ export function VoicePanel({
                     className="talk"
                     aria-pressed={state.transmitting}
                     disabled={state.listenOnly || state.watchOnly}
+                    // Muted or deafened it stays pressable (a press reaches the
+                    // gate, which is shut and sends nothing), but it looks off
+                    // and says why in the note below (UX-07).
+                    aria-disabled={silenced ? true : undefined}
+                    aria-describedby={silenced ? 'voice-talk-why' : undefined}
                     onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
                     onPointerUp={() => { client.release(); }}
                     onPointerCancel={() => { client.release(); }}
@@ -411,7 +417,7 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   Join voice {dest}
                 </button>
-                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby="voice-watch-hint">
+                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
                   Watch only {dest}
                 </button>
               </>
@@ -437,6 +443,11 @@ export function VoicePanel({
                 {missingNote}
               </p>
             ) : null}
+            {state.mode === 'ptt' && silenced && !state.listenOnly && !state.watchOnly ? (
+              <p id="voice-talk-why" className="hint">
+                {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
+              </p>
+            ) : null}
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
               <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
@@ -456,7 +467,13 @@ export function VoicePanel({
           </>
         ) : (
           <>
-            <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            {/* The hint is a promise Watch only cannot keep while joins are
+                off, so the reason stands in its place. */}
+            {canJoin ? (
+              <p id="voice-watch-hint" className="hint">Microphone off. You hear the room and can watch a share.</p>
+            ) : voice.secure && snapshot.kind === 'loading' ? (
+              <p className="hint">Checking whether voice is available.</p>
+            ) : null}
             {elsewhere ? <p className="hint">You are in voice on another device. Joining here moves your voice to this device.</p> : null}
             {theirs === null ? null : <p className="hint">{theirName} is sharing a screen. Join, or watch only, to see it.</p>}
             {!voice.secure ? (
