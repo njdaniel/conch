@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, earlierGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -1453,9 +1453,10 @@ describe('a microphone chosen while connecting', () => {
   const webcam: Microphone = { id: 'mic-2', label: 'Webcam' };
 
   // A client whose first connection waits for the test, as a slow one does.
-  function slow() {
+  function slow(remembered?: Microphone) {
     let connected = (): void => undefined;
-    const t = setup([okSession()], [], 0, false, (r) => {
+    const t = setup([okSession(), okSession()], [], 0, false, (r, i) => {
+      if (i > 0) return;
       const connect = r.connect;
       r.connect = (...args) =>
         new Promise<void>((resolve) => {
@@ -1463,7 +1464,7 @@ describe('a microphone chosen while connecting', () => {
             resolve(connect(...args));
           };
         });
-    });
+    }, remembered);
     return {
       t,
       connect: () => {
@@ -1501,6 +1502,39 @@ describe('a microphone chosen while connecting', () => {
     await settle();
     expect(t.rooms[0]?.switches).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: null, inUse: 'default' });
+  });
+
+  it.each([
+    ['the system default', undefined],
+    ['a remembered device', { id: 'unplugged', label: 'Old headset' }],
+  ])('keeps the newer choice when %s, which the room was given, is gone', async (_name, given) => {
+    const { t, connect } = slow(given);
+    t.client.join('general');
+    await settle();
+    const r = t.rooms[0];
+    if (r === undefined) throw new Error('no room');
+    await t.client.chooseMicrophone(webcam);
+    r.connectFailure = deviceError('NotFoundError');
+    connect();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: earlierGone, microphone: webcam });
+    expect(t.clock.pending).toBe(0);
+    // The next Join voice captures the newer choice.
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[1]?.choices).toEqual(['mic-2']);
+  });
+
+  it('lets the device go when it is the one given and still the choice', async () => {
+    const { t, connect } = slow({ id: 'unplugged', label: 'Old headset' });
+    t.client.join('general');
+    await settle();
+    const r = t.rooms[0];
+    if (r === undefined) throw new Error('no room');
+    r.connectFailure = deviceError('NotFoundError');
+    connect();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: chosenGone, microphone: null });
   });
 });
 

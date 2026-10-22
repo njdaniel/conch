@@ -99,6 +99,10 @@ function errorName(err: unknown): unknown {
 // choice is let go, so joining again uses the system default.
 export const chosenGone = 'The microphone you chose is not connected. Connect it, or join again to use the system default.';
 
+// What a join says when the device its connection was capturing is gone but
+// a newer choice was made meanwhile: the choice is kept (issue #677).
+export const earlierGone = 'The microphone this connection was using is not connected. Your newer choice is kept; join again to use it.';
+
 // The names of a capture that failed because the device asked for is not there.
 const goneErrors: ReadonlySet<string> = new Set(['NotFoundError', 'OverconstrainedError']);
 
@@ -1070,8 +1074,14 @@ export class VoiceClient {
       // A microphone that cannot be had stops: the next attempt is the
       // person's own Join voice or Watch only. Anything else is retried. The
       // device chosen not being there is said as such, and the choice is let
-      // go, so the next Join voice uses the system default.
+      // go, so the next Join voice uses the system default. It is the device
+      // the room was given that is gone: a newer choice made while
+      // connecting is a different device, and is kept (issue #677).
       if (publish && this.state.microphone !== null && typeof name === 'string' && goneErrors.has(name)) {
+        if (this.state.microphone.id !== microphone) {
+          this.act({ kind: 'stop', why: earlierGone }, next);
+          return;
+        }
         this.set(this.chosen(null));
         this.act({ kind: 'stop', why: chosenGone }, next);
         return;
