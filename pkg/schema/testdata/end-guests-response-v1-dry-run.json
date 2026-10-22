@@ -1,0 +1,11 @@
+{
+  "dry_run": true,
+  "count": 1,
+  "guests": [
+    {
+      "id": 12,
+      "handle": "guest-a7k4m2q9x3h5t8wz"
+    }
+  ],
+  "remaining": 0
+}

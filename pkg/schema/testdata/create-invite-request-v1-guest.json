@@ -1,0 +1,8 @@
+{
+  "kind": "open",
+  "channels": [
+    "lobby"
+  ],
+  "voice": false,
+  "join_as": "guest"
+}

@@ -28,8 +28,20 @@ type ChannelMemberV1 struct {
 	Kind        PrincipalKind `json:"kind,omitempty"`
 	// CanDecide is whether the member may decide the channel's approvals
 	// (issue #450). The server fills it for human members; it is absent for
-	// agents, which never decide.
+	// agents, which never decide. The store keeps it false for a guest
+	// (ADR-009; security review F1).
 	CanDecide *bool `json:"can_decide,omitempty"`
+	// HistoryAfter is the membership's history bound (issue #704, ADR-009
+	// §4.3): the id of the last message of the channel at admission, chosen
+	// by the server. The member may read messages with a greater id and
+	// nothing before, on every read surface: history, direct ids, search,
+	// threads, quotes, files, replay, counts and notifications. Absent, or
+	// zero, is no bound, which every membership that predates guests has. A
+	// guest's memberships always carry one, and conversion keeps it.
+	HistoryAfter int64 `json:"history_after,omitempty"`
+	// Guest is how the member is rendered while it is a guest: present
+	// exactly then, and never derived from the name's text.
+	Guest *GuestAttributionV1 `json:"guest,omitempty"`
 }
 
 // ListChannelMembersResponseV1 is the body of GET /v1/channels/{channel}/members.
@@ -94,6 +106,20 @@ func (d ChannelMembersV1) Validate() error {
 		}
 		if m.Kind == PrincipalAgent && m.CanDecide != nil {
 			return fmt.Errorf("schema: channel member %d is an agent and must not carry can_decide", m.PrincipalID)
+		}
+		if m.HistoryAfter < 0 {
+			return fmt.Errorf("schema: channel member %d history_after must not be negative", m.PrincipalID)
+		}
+		if m.Guest != nil {
+			if m.Kind != PrincipalHuman {
+				return fmt.Errorf("schema: channel member %d is not human and must not carry guest", m.PrincipalID)
+			}
+			if m.CanDecide != nil && *m.CanDecide {
+				return fmt.Errorf("schema: channel member %d is a guest and cannot carry can_decide true", m.PrincipalID)
+			}
+			if err := m.Guest.Validate(); err != nil {
+				return fmt.Errorf("schema: channel member %d: %w", m.PrincipalID, err)
+			}
 		}
 	}
 	return nil

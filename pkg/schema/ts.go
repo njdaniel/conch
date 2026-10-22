@@ -166,6 +166,54 @@ var TSTypes = []TSType{
 	{Value: HiddenPrincipalV1{}},
 	{Value: HidePrincipalsResponseV1{}, Family: "hide-principals-response-v1"},
 
+	// Temporary guests and joining (ADR-009, issue #704): the front door,
+	// a visit and how it is rendered, conversion, and the operator's
+	// policy and guest list.
+	{Value: GuestAttributionV1{}, Family: "guest-attribution-v1"},
+	{Value: GuestV1{}, Family: "guest-v1"},
+	{Value: GuestAdminV1{}, Family: "guest-admin-v1"},
+	{Value: ListGuestsResponseV1{}, Family: "list-guests-response-v1"},
+	{Value: EndGuestResponseV1{}, Family: "end-guest-response-v1"},
+	{Value: EndVisitResponseV1{}, Family: "end-visit-response-v1"},
+	{Value: EndGuestsRequestV1{}, Family: "end-guests-request-v1"},
+	{Value: GuestRefV1{}},
+	{Value: EndGuestsResponseV1{}, Family: "end-guests-response-v1"},
+	{Value: JoinOptionsV1{}},
+	{Value: JoinInfoV1{}, Family: "join-info-v1"},
+	{Value: JoinSettingsV1{}, Family: "join-settings-v1"},
+	{Value: PutJoinSettingsRequestV1{}, Family: "put-join-settings-request-v1"},
+	{Value: JoinSettingsResponseV1{}, Family: "join-settings-response-v1"},
+	{Value: JoinGuestRequestV1{}, Family: "join-guest-request-v1"},
+	{Value: JoinGuestResponseV1{}, Family: "join-guest-response-v1"},
+	{Value: JoinAccountRequestV1{}, Family: "join-account-request-v1"},
+	{Value: JoinAccountResponseV1{}, Family: "join-account-response-v1"},
+	{Value: ConvertGuestRequestV1{}, Family: "convert-guest-request-v1"},
+	{Value: ConvertGuestResponseV1{}, Family: "convert-guest-response-v1"},
+	{Value: CreateConversionPermitRequestV1{}, Family: "create-conversion-permit-request-v1"},
+	// Invites that admit guests, and account redemption with a password.
+	{Value: RedeemInviteRequestV2{}, Family: "redeem-invite-request-v2"},
+	{Value: RedeemInviteGuestRequestV1{}, Family: "redeem-invite-guest-request-v1"},
+
+	// Passwords and sign-in (ADR-009 §5–6, issue #704): sign-in and its
+	// TOTP step, setting, changing and resetting a password,
+	// re-authentication, TOTP enrolment, the setup token, and the
+	// member's own device links.
+	{Value: LoginRequestV1{}, Family: "login-request-v1"},
+	{Value: TOTPLoginRequestV1{}, Family: "totp-login-request-v1"},
+	{Value: SetPasswordRequestV1{}, Family: "set-password-request-v1"},
+	{Value: ChangePasswordRequestV1{}, Family: "change-password-request-v1"},
+	{Value: ResetPasswordRequestV1{}, Family: "reset-password-request-v1"},
+	{Value: PasswordUpdatedResponseV1{}, Family: "password-updated-response-v1"},
+	{Value: ReauthRequestV1{}, Family: "reauth-request-v1"},
+	{Value: ReauthResponseV1{}, Family: "reauth-response-v1"},
+	{Value: AuthStateV1{}, Family: "auth-state-v1"},
+	{Value: TOTPEnrollmentV1{}, Family: "totp-enrollment-v1"},
+	{Value: ConfirmTOTPRequestV1{}, Family: "confirm-totp-request-v1"},
+	{Value: RedeemSetupTokenRequestV1{}, Family: "redeem-setup-token-request-v1"},
+	{Value: RedeemSetupTokenResponseV1{}, Family: "redeem-setup-token-response-v1"},
+	{Value: CreateDeviceLinkRequestV1{}, Family: "create-device-link-request-v1"},
+	{Value: ListOwnSignInLinksResponseV1{}, Family: "list-own-sign-in-links-response-v1"},
+
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.
 	{Value: Health{}},
@@ -200,6 +248,16 @@ var TSUnions = []TSUnion{
 		Variants: map[string][]string{
 			string(EscalationTargetPrincipal): {"principal_id"},
 			string(EscalationTargetNtfyTopic): {"topic"},
+		},
+	},
+	// What a sign-in answers: a credential, or a challenge for the TOTP
+	// step (LoginResponseV1.Validate).
+	{
+		Value: LoginResponseV1{},
+		Tag:   "next",
+		Variants: map[string][]string{
+			string(LoginNextSignedIn): {"principal", "credential", "token"},
+			string(LoginNextTOTP):     {"challenge", "challenge_expires_at"},
 		},
 	},
 }
