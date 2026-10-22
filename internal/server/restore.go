@@ -11,6 +11,16 @@ import (
 // longer allows, stays in its room until something removes it. So the first
 // start on restored data deletes every LiveKit room of this instance, before
 // it accepts traffic, and people join again through conchd as they sign in.
+//
+// That clear is a speed-up, not the only defence (issue #782). It runs once,
+// after the start has let go of its marker, and matches only the current
+// prefix. What does not depend on it: the start's transaction
+// (store.StartRestored) retires every room the restored database holds as
+// live, whatever its prefix and whether or not anyone is recorded in it, and
+// the voice sweep deletes every retired room LiveKit still lists, retrying
+// from the rows until each is gone. The sweep also deletes any room of this
+// instance's name shape that the database does not know at all. A member who
+// joins afterwards gets a fresh room.
 
 // ClearVoiceRooms deletes every room LiveKit lists whose name is exactly the
 // shape this instance gives its rooms (store.IsOwnVoiceRoomName: its prefix

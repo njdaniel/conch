@@ -524,7 +524,7 @@ func TestStartRestored(t *testing.T) {
 	for _, e := range allAuditEvents(t, w.s) {
 		if e.Action == AuditRestoreStarted {
 			started++
-			if e.Detail != fmt.Sprintf("totp_floor_step=%d", floor) {
+			if e.Detail != fmt.Sprintf("totp_floor_step=%d voice_rooms_retired=0", floor) {
 				t.Errorf("restore_started detail %q", e.Detail)
 			}
 		}
@@ -538,6 +538,126 @@ func TestStartRestored(t *testing.T) {
 	}
 	if got := len(allAuditEvents(t, w.s)); got != before {
 		t.Errorf("the second start wrote %d audit rows", got-before)
+	}
+}
+
+// The first start on restored data retires every live voice room and drops
+// its holders, whatever prefix the room was made under and whether or not
+// anyone is recorded in it (issue #782): the backup cannot say who joined
+// afterwards. A room retired before keeps its time, the count is audited
+// without names, and the channel's next room is a new one under the current
+// prefix. An ordinary start retires nothing.
+func TestStartRestoredRetiresVoiceRooms(t *testing.T) {
+	ctx := context.Background()
+	w := newLoginWorld(t)
+	if err := w.s.SetVoiceRoomPrefix("old-"); err != nil {
+		t.Fatal(err)
+	}
+	var chans []Channel
+	for _, name := range []string{"empty", "held", "rotated"} {
+		ch, err := w.s.CreateChannel(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chans = append(chans, ch)
+	}
+	empty, err := w.s.ChannelVoiceRoom(ctx, chans[0].ID) // no holders, earlier prefix
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := w.s.ChannelVoiceRoom(ctx, chans[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, _, err := w.s.CreateCredential(ctx, "system", w.member.ID, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.s.RecordVoiceHolder(ctx, held.ID, w.member.ID, cred.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := w.s.ChannelVoiceRoom(ctx, chans[2].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := w.s.RotateVoiceRoom(ctx, first.ID, VoiceRotateMemberRemoved); err != nil || !ok {
+		t.Fatalf("rotate: %v %v", ok, err)
+	}
+	if err := w.s.SetVoiceRoomPrefix("new-"); err != nil {
+		t.Fatal(err)
+	}
+	retiredAt := func(id int64) time.Time {
+		t.Helper()
+		rooms, err := w.s.ListRetiredVoiceRooms(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rooms {
+			if r.ID == id {
+				return r.RetiredAt
+			}
+		}
+		return time.Time{}
+	}
+	firstRetired := retiredAt(first.ID)
+	liveBefore, err := w.s.ListVoiceRooms(ctx)
+	if err != nil || len(liveBefore) != 3 {
+		t.Fatalf("live rooms before = %d, %v; want 3", len(liveBefore), err)
+	}
+
+	// An ordinary start: nothing to do.
+	if _, restoredMark, err := w.s.StartRestored(ctx, w.now); err != nil || restoredMark {
+		t.Fatalf("an ordinary start = %v, %v", restoredMark, err)
+	}
+	if live, err := w.s.ListVoiceRooms(ctx); err != nil || len(live) != 3 {
+		t.Fatalf("live rooms after an ordinary start = %d, %v; want 3", len(live), err)
+	}
+
+	if _, err := w.s.InvalidateRestored(ctx, w.now); err != nil {
+		t.Fatal(err)
+	}
+	start := w.now.Add(time.Minute).Truncate(time.Millisecond)
+	if _, restoredMark, err := w.s.StartRestored(ctx, start); err != nil || !restoredMark {
+		t.Fatalf("the first start = %v, %v", restoredMark, err)
+	}
+	if live, err := w.s.ListVoiceRooms(ctx); err != nil || len(live) != 0 {
+		t.Errorf("live rooms after the first start = %d, %v; want none", len(live), err)
+	}
+	for _, r := range liveBefore {
+		if got := retiredAt(r.ID); !got.Equal(start) {
+			t.Errorf("room %d retired at %v, want the start (%v)", r.ID, got, start)
+		}
+		holders, err := w.s.VoiceRoomHolders(ctx, r.ID)
+		if err != nil || len(holders) != 0 {
+			t.Errorf("room %d holders = %d, %v; want none", r.ID, len(holders), err)
+		}
+	}
+	if got := retiredAt(first.ID); !got.Equal(firstRetired) {
+		t.Errorf("a room retired before the start moved from %v to %v", firstRetired, got)
+	}
+	var detail string
+	for _, e := range allAuditEvents(t, w.s) {
+		if e.Action == AuditRestoreStarted {
+			detail = e.Detail
+		}
+	}
+	if !strings.HasSuffix(detail, " voice_rooms_retired=3") {
+		t.Errorf("restore_started detail %q, want voice_rooms_retired=3", detail)
+	}
+	for _, r := range liveBefore {
+		if strings.Contains(detail, r.RoomName) {
+			t.Error("restore_started names a room")
+		}
+	}
+	next, err := w.s.ChannelVoiceRoom(ctx, chans[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.RoomName == empty.RoomName || next.ID == empty.ID || !strings.HasPrefix(next.RoomName, "new-") {
+		t.Errorf("the channel's next room = %d %q; want a new room under the current prefix", next.ID, next.RoomName)
+	}
+	if err := w.s.RecordVoiceHolder(ctx, held.ID, w.member.ID, cred.ID); !errors.Is(err, ErrVoiceRoomRetired) {
+		t.Errorf("recording a holder in a room the start retired = %v, want ErrVoiceRoomRetired", err)
 	}
 }
 
