@@ -481,3 +481,113 @@ func TestCloseSignInLink(t *testing.T) {
 		t.Errorf("sign_in_link_closed rows = %q, want [%q]", rows, want)
 	}
 }
+
+// prove gives credential id a recent-password proof until d from now, as a
+// re-authentication records one.
+func (w *recoveryWorld) prove(id int64, d time.Duration) {
+	w.t.Helper()
+	w.exec("UPDATE credentials SET recent_auth_until = ? WHERE id = ?", w.now.Add(d).UnixMilli(), id)
+}
+
+// CreateDeviceLink checks, in the transaction that writes, everything the
+// route checked before it: the caller is still a member who may be given a
+// link, the credential is theirs and holds a standing proof, and the
+// request is well-formed. A refusal writes no link and audits nothing.
+func TestCreateDeviceLinkRechecks(t *testing.T) {
+	life := schema.RecentAuthLifetimeSeconds * time.Second
+	tests := []struct {
+		name string
+		// setup returns who asks and on which credential.
+		setup   func(w *recoveryWorld) (principal, credential int64)
+		req     schema.CreateDeviceLinkRequestV1
+		wantErr error
+	}{
+		{"a member with a proof", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{Label: "Phone"}, nil},
+		{"no proof", func(w *recoveryWorld) (int64, int64) { return w.alice.ID, w.aliceA }, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"a proof on another of hers", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceB, life)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"someone else's credential and proof", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.bobCred, life)
+			return w.alice.ID, w.bobCred
+		}, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"a proof that ends now", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, 0)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"a revoked credential", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			w.exec("UPDATE credentials SET revoked_at = 1 WHERE id = ?", w.aliceA)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"a credential of an older generation", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			w.exec("UPDATE principals SET auth_generation = auth_generation + 1 WHERE id = ?", w.alice.ID)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrReauthRequired},
+		{"an operator", func(w *recoveryWorld) (int64, int64) {
+			cred, _ := w.session(w.op.ID)
+			w.prove(cred, life)
+			return w.op.ID, cred
+		}, schema.CreateDeviceLinkRequestV1{}, ErrDeviceLinkNotAllowed},
+		{"a member made an operator", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			w.exec("UPDATE principals SET role = 'operator' WHERE id = ?", w.alice.ID)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrDeviceLinkNotAllowed},
+		{"an agent", func(w *recoveryWorld) (int64, int64) {
+			bot, err := w.s.CreatePrincipal(w.ctx, PrincipalAgent, "bot")
+			if err != nil {
+				w.t.Fatal(err)
+			}
+			cred, _ := w.session(bot.ID)
+			w.prove(cred, life)
+			return bot.ID, cred
+		}, schema.CreateDeviceLinkRequestV1{}, ErrDeviceLinkNotAllowed},
+		{"a disabled member", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			w.exec("UPDATE principals SET disabled_at = 1 WHERE id = ?", w.alice.ID)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{}, ErrDeviceLinkNotAllowed},
+		{"nobody", func(w *recoveryWorld) (int64, int64) { return 9999, w.aliceA }, schema.CreateDeviceLinkRequestV1{}, ErrDeviceLinkNotAllowed},
+		{"longer than an hour", func(w *recoveryWorld) (int64, int64) {
+			w.prove(w.aliceA, life)
+			return w.alice.ID, w.aliceA
+		}, schema.CreateDeviceLinkRequestV1{ExpiresAt: func() *schema.Timestamp {
+			ts := schema.NewTimestamp(time.Now().Add(2 * time.Hour))
+			return &ts
+		}()}, ErrSignInLinkRequestInvalid},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newRecoveryWorld(t)
+			principal, cred := tt.setup(w)
+			resp, err := w.s.CreateDeviceLink(w.ctx, principalActor(principal), principal, cred, tt.req, w.now)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("CreateDeviceLink = %v, want %v", err, tt.wantErr)
+			}
+			devices := w.count("SELECT COUNT(*) FROM sign_in_links WHERE purpose = 'device'")
+			issued := w.count("SELECT COUNT(*) FROM audit_events WHERE action = ?", AuditDeviceLinkIssued)
+			if tt.wantErr != nil {
+				if devices != 0 || issued != 0 {
+					t.Errorf("a refusal wrote %d links and %d device_link_issued rows", devices, issued)
+				}
+				return
+			}
+			if devices != 1 || issued != 1 {
+				t.Errorf("links = %d, device_link_issued rows = %d; want 1 each", devices, issued)
+			}
+			l := resp.SignInLink
+			if l.PrincipalID != principal || l.CreatedBy != principal || l.Purpose != schema.SignInLinkPurposeDevice || l.Label != tt.req.Label {
+				t.Errorf("link = %+v", l)
+			}
+			if n := w.count("SELECT COUNT(*) FROM sign_in_links WHERE id = ? AND auth_generation = 0 AND label = ?", l.ID, tt.req.Label); n != 1 {
+				t.Errorf("the row does not record the generation and the label")
+			}
+		})
+	}
+}

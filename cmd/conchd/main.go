@@ -58,6 +58,8 @@ func run(args []string) error {
 		return runServe(args[1:])
 	case "bootstrap-operator":
 		return runBootstrapOperator(args[1:], os.Stdout, os.Stderr)
+	case "operator":
+		return runOperator(args[1:], os.Stdout, os.Stderr)
 	case "version":
 		fmt.Println(buildVersion())
 		fmt.Println("web: " + embeddedWebName())
@@ -82,6 +84,9 @@ Usage:
                      [--metrics-listen <addr> [--metrics-allow-remote]]
                      [--test-relax-invite-limits]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
+  conchd operator bootstrap --data <dir> [--keep-existing-credentials] <name>
+  conchd operator setup     --data <dir> <principal id>
+  conchd operator recover   --data <dir> <principal id>
   conchd version
 
 bootstrap-operator works offline on the data directory: it creates the first
@@ -89,7 +94,17 @@ operator (a human principal) and one credential, prints the token once, and
 refuses if an operator already exists. It also revokes every credential and
 deletes every webhook hook created before the operator existed (they came from
 open endpoints) unless --keep-existing-credentials is given. Agent manifests
-are kept; it reports how many exist so you can review them.
+are kept; it reports how many exist so you can review them. Its token is a
+script credential: powerful, with no second factor.
+
+The operator commands work offline too and print a one-use setup token (ten
+minutes) for the restricted setup flow, in which an operator sets a password
+and enrols an authenticator app, then signs in with both. "operator bootstrap"
+makes the first operator that way, with no script credential; "operator setup"
+gives an existing operator whose setup is incomplete a token and revokes
+nothing; "operator recover" revokes every credential of the operator, removes
+its authenticator and ends its pending sign-ins first. There is no network
+route that resets an operator.
 
 Authentication is required by default: every REST and WebSocket request needs
 a bearer credential, so run bootstrap-operator first. --auth off opens every
@@ -155,6 +170,13 @@ Flags for serve:
                          address it binds is loopback and no trusted proxy is set, and logs
                          a warning when it is on. Any reverse proxy or tunnel in front of it,
                          trusted or not, makes it reachable: never use it on such a server.
+
+Operators' authenticator secrets are kept encrypted under a host key read only
+from the environment, never a flag: CONCHD_TOTP_KEY, the base64 of 32 random
+bytes (openssl rand -base64 32). Back it up apart from the data directory: a
+backup of the data directory alone cannot sign an operator in. Without it
+serve starts, operators cannot enrol or sign in with a password, and every
+code is refused; a value that is not such a key stops serve.
 
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
@@ -290,6 +312,13 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, fmt.Errorf("serve: %w", err)
 	}
+	// The TOTP key has no flag either, for the same reason. It is checked
+	// here, so a bad one stops serve with the other settings, and read again
+	// by runServe straight into the server's Config: the resolved options
+	// never hold it.
+	if _, err := totpKeyFromEnv(); err != nil {
+		return serveOptions{}, err
+	}
 	if err := store.ValidateVoiceRoomPrefix(*livekitRoomPrefix); err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --livekit-room-prefix: %w", err)
 	}
@@ -388,6 +417,11 @@ func runServe(args []string) error {
 
 	installRequestLogging(os.Stderr)
 
+	totpKey, err := totpKeyFromEnv()
+	if err != nil {
+		return err
+	}
+
 	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {
 		return err
@@ -415,6 +449,7 @@ func runServe(args []string) error {
 		MetricsListen:         opts.metricsListen,
 		MetricsAllowRemote:    opts.metricsRemote,
 		TestRelaxInviteLimits: opts.relaxInviteLimits,
+		TOTPKey:               totpKey,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
@@ -481,6 +516,8 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	switch {
 	case errors.Is(err, store.ErrOperatorExists):
 		return errors.New("bootstrap-operator: an operator already exists; nothing changed")
+	case errors.Is(err, store.ErrGuestNameReserved):
+		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for guests; nothing changed", schema.ReservedGuestNameKeyPrefix)
 	case errors.Is(err, store.ErrNameReserved):
 		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for hidden accounts; nothing changed", schema.HiddenPrincipalNamePrefix)
 	case errors.Is(err, store.ErrDuplicate):
@@ -506,6 +543,21 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created; the token printed on stdout will not be shown again\n", p.Name, p.ID)
 	return nil
+}
+
+// totpKeyFromEnv reads the host's TOTP key from CONCHD_TOTP_KEY: nil when it
+// is unset (the TOTP routes then fail closed), an error that does not show
+// the value when it is not a key.
+func totpKeyFromEnv() (*server.TOTPKey, error) {
+	raw := os.Getenv("CONCHD_TOTP_KEY")
+	if raw == "" {
+		return nil, nil
+	}
+	k, err := server.ParseTOTPKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("serve: CONCHD_TOTP_KEY: %w", err)
+	}
+	return k, nil
 }
 
 // defaultAuthMode is what `conchd serve` uses when neither --auth nor

@@ -53,6 +53,61 @@ type wsReplay struct {
 	r     *http.Request
 }
 
+// historyGate keeps a socket's live frames to its reader's history bound
+// (issue #719, design §4.3). The hub delivers by channel and audience; it
+// knows nothing of a bound, and a message committed before a guest's
+// admission can still reach the hub after it, as can a new reply in a
+// thread whose root is from before. So a socket whose reader is held to a
+// bound (store.HistoryBounded, read once the membership check has passed:
+// a removal closes the socket, and a re-admission is a new membership on a
+// new socket) asks the one visibility condition about every live frame
+// before sending it, through the listing the history route uses. A frame it
+// would not list is not sent. Every other socket sends what the hub gives
+// it, unchanged, at no cost.
+//
+// r is the request that opened the socket, as for wsReplay: the reader is
+// built from it by readerFor at the point of the query.
+type historyGate struct {
+	bounded   bool
+	r         *http.Request
+	version   apiVersion
+	channelID int64
+}
+
+// allows reports whether the frame for message id may be sent.
+func (s *Server) allows(ctx context.Context, g historyGate, id int64) (bool, error) {
+	if !g.bounded {
+		return true, nil
+	}
+	if id <= 0 {
+		return false, nil
+	}
+	// The page of one that starts just before the message is the message
+	// exactly when the reader may see it.
+	msgs, err := s.store.ListVisibleMessages(ctx, g.channelID, readerFor(g.r, g.version), id-1, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(msgs) == 1 && msgs[0].ID == id, nil
+}
+
+// gateFrame is allows for a stream loop: it reports whether to send the
+// frame, and whether to go on. A failed read closes conn (fail closed: a
+// frame that could not be checked is never sent).
+func (s *Server) gateFrame(ctx context.Context, conn *websocket.Conn, g historyGate, id int64) (send, ok bool) {
+	send, err := s.allows(ctx, g, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			closeWS(ctx, conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
+			return false, false
+		}
+		slog.ErrorContext(ctx, "ws: history bound check failed", "error", err)
+		closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "history check failed")
+		return false, false
+	}
+	return send, true
+}
+
 // wsReplayHooks are test seams, nil in production. beforePage runs before page
 // n (from 0) is read from the store, afterPage after it is read and before any
 // of it is sent. A message posted from either lands in the subscription's
@@ -191,6 +246,14 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
 		return
 	}
+	gate := historyGate{r: r, version: version, channelID: channel.ID}
+	if principalID > 0 {
+		if gate.bounded, err = s.store.HistoryBounded(ctx, channel.ID, principalID); err != nil {
+			slog.ErrorContext(ctx, "ws: read history bound failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	}
 
 	conn, ctx, done, ok := s.acceptSocket(w, r)
 	if !ok {
@@ -211,10 +274,10 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	ctx = s.keepAlive(ctx, conn, version == apiV2 && r.URL.Query().Get(schema.HeartbeatQueryParam) == "1")
 	switch version {
 	case apiV2:
-		s.streamWSV2(ctx, conn, sub2, replay, channel.ID, principalID, credID, recheck)
+		s.streamWSV2(ctx, conn, sub2, replay, gate, principalID, credID, recheck)
 		return
 	case apiV1:
-		s.streamWSV1(ctx, conn, sub1, channel.ID, principalID, credID, recheck)
+		s.streamWSV1(ctx, conn, sub1, gate, principalID, credID, recheck)
 		return
 	}
 	sub := sub0
@@ -238,6 +301,13 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 				s.closeDropped(ctx, conn, channel.ID, principalID, credID)
 				return
 			}
+			send, ok := s.gateFrame(ctx, conn, gate, msg.ID)
+			if !ok {
+				return
+			}
+			if !send {
+				continue
+			}
 			if err := writeWSMessage(ctx, conn, msg); err != nil {
 				// 1011: RFC 6455 reserves StatusAbnormalClosure for reporting;
 				// it must not go out in a close frame. CloseNow guards against
@@ -250,7 +320,8 @@ func (s *Server) handleWSVersion(w http.ResponseWriter, r *http.Request, version
 	}
 }
 
-func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, channelID, principalID, credID int64, recheck <-chan time.Time) {
+func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV1, gate historyGate, principalID, credID int64, recheck <-chan time.Time) {
+	channelID := gate.channelID
 	for {
 		select {
 		case <-ctx.Done():
@@ -264,6 +335,13 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 			if !ok {
 				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
+			}
+			send, ok := s.gateFrame(ctx, conn, gate, msg.ID)
+			if !ok {
+				return
+			}
+			if !send {
+				continue
 			}
 			if err := writeWSMessageV1(ctx, conn, msg); err != nil {
 				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
@@ -290,8 +368,9 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 // out of id order, because each handler broadcasts after its own commit, and a
 // mark that followed the live frames would drop the lower id when it came
 // second. Live frames after the replay are sent as they arrive, as they are on
-// a connection that asked for no replay.
-func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time) {
+// a connection that asked for no replay, each through the history gate.
+func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, gate historyGate, principalID, credID int64, recheck <-chan time.Time) {
+	channelID := gate.channelID
 	var replayed int64 // the last id the replay sent; 0 without one
 	if replay != nil {
 		var ok bool
@@ -314,6 +393,13 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				return
 			}
 			if replay != nil && msg.ID <= replayed {
+				continue
+			}
+			send, ok := s.gateFrame(ctx, conn, gate, msg.ID)
+			if !ok {
+				return
+			}
+			if !send {
 				continue
 			}
 			if err := writeWSMessageV2(ctx, conn, msg); err != nil {

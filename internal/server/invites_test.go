@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -45,6 +46,7 @@ func newInviteFixture(t *testing.T, cfg Config) *inviteFixture {
 		return f.clock
 	}
 	f.srv.setInviteLimits(looseInviteLimits())
+	f.srv.setLoginLimits(looseLoginLimits())
 	ctx := context.Background()
 	var err error
 	if f.red, err = f.srv.store.CreateChannel(ctx, "red"); err != nil {
@@ -66,15 +68,23 @@ func (f *inviteFixture) advance(d time.Duration) {
 }
 
 // send makes a request from a client address, with optional X-Forwarded-For
-// headers.
+// headers. It arrives as over HTTPS, as a deployment's requests do, so the
+// routes that take a password take it (secureTransport): over TLS, or,
+// with X-Forwarded-For, with the X-Forwarded-Proto a proxy adds. No other
+// route reads either. The tests of the transport rule itself build their
+// requests by hand.
 func (f *inviteFixture) send(t *testing.T, method, path, token, body, remote string, xff ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.TLS = &tls.ConnectionState{}
 	if remote != "" {
 		req.RemoteAddr = remote
 	}
 	for _, v := range xff {
 		req.Header.Add("X-Forwarded-For", v)
+	}
+	if len(xff) > 0 {
+		req.Header.Set("X-Forwarded-Proto", "https")
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -111,6 +121,23 @@ func (f *inviteFixture) preview(t *testing.T, code string) *httptest.ResponseRec
 func (f *inviteFixture) redeem(t *testing.T, code, name string) *httptest.ResponseRecorder {
 	t.Helper()
 	return f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: name}), "")
+}
+
+// testJoinPassword is the password every joiner of the v2 tests chooses: it
+// passes the policy for every name they use.
+const testJoinPassword = "a passphrase long enough to pass"
+
+// redeemJSON is the body of a v2 redemption of code as name, with
+// testJoinPassword.
+func redeemJSON(t *testing.T, code, name string) string {
+	t.Helper()
+	return inviteJSON(t, schema.RedeemInviteRequestV2{Code: code, Name: name, Password: testJoinPassword})
+}
+
+// redeemWithPassword joins through POST /v2/invites/redeem (issue #707).
+func (f *inviteFixture) redeemWithPassword(t *testing.T, code, name string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, code, name), "")
 }
 
 func personal(channels ...string) schema.CreateInviteRequestV1 {

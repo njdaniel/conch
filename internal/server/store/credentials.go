@@ -97,18 +97,25 @@ func nullableMillis(t *time.Time) any {
 // insertCredentialTx inserts a credential row for token and returns its wire
 // form. A renew above zero makes it renewable (issue #439): its expiry then
 // moves to renew past each day's first use. A renewable credential must have
-// an expiry, which the table enforces.
+// an expiry, which the table enforces. The row records the principal's
+// authentication generation as it is in this transaction (issue #707), so a
+// credential lives only until the generation next moves.
 func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration) (schema.CredentialV1, error) {
 	var renewMs any
 	if renew > 0 {
 		renewMs = renew.Milliseconds()
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs)
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation)
+		 SELECT ?, ?, ?, ?, ?, ?, auth_generation FROM principals WHERE id = ?`,
+		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, principalID)
 	if err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
+	} else if n != 1 {
+		return schema.CredentialV1{}, ErrPrincipalNotFound
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
@@ -174,7 +181,10 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		// with DisablePrincipal's revoke, so a credential can never be
 		// issued after (or concurrently with) a disable and survive it.
 		var disabledAt sql.NullInt64
-		switch err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); {
+		var guest sql.NullString
+		switch err := tx.QueryRowContext(ctx,
+			"SELECT disabled_at, (SELECT state FROM guest_visits WHERE principal_id = principals.id) FROM principals WHERE id = ?",
+			principalID).Scan(&disabledAt, &guest); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrPrincipalNotFound
 		case err != nil:
@@ -182,6 +192,11 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		}
 		if disabledAt.Valid {
 			return ErrPrincipalDisabled
+		}
+		// A guest has exactly one credential, made with its visit (issue
+		// #705); an ended one never gets another.
+		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
+			return ErrGuestNotAllowed
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew)
 		if err != nil {
@@ -209,7 +224,7 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 		return nil, fmt.Errorf("store: list credentials: find principal: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL, `+idleExpirySQL+`
 		 FROM credentials WHERE principal_id = ? ORDER BY created_at DESC, id DESC`, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list credentials: %w", err)
@@ -224,10 +239,15 @@ func (s *Store) ListCredentials(ctx context.Context, principalID int64) ([]schem
 func (s *Store) ListLiveCredentials(ctx context.Context, principalID int64) ([]schema.CredentialV1, error) {
 	now := credentialNow()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL
+		// The generation and scope are checked through a subquery, not a
+		// join, so idleExpirySQL's bare column names stay unambiguous; the
+		// condition is currentAuthSQL's (issue #707).
+		`SELECT id, principal_id, label, created_at, expires_at, revoked_at, renew_ms IS NOT NULL, `+idleExpirySQL+`
 		 FROM credentials
 		 WHERE principal_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
-		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli())
+		   AND (idle_ms IS NULL OR COALESCE(last_used_at, created_at) + idle_ms > ?)
+		   AND scope = 'full' AND auth_generation = (SELECT auth_generation FROM principals WHERE id = credentials.principal_id)
+		 ORDER BY created_at DESC, id DESC`, principalID, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("store: list live credentials: %w", err)
 	}
@@ -241,16 +261,17 @@ func scanCredentials(rows *sql.Rows) ([]schema.CredentialV1, error) {
 	out := []schema.CredentialV1{}
 	for rows.Next() {
 		var (
-			c                    schema.CredentialV1
-			createdAt            int64
-			expiresAt, revokedAt sql.NullInt64
+			c                          schema.CredentialV1
+			createdAt                  int64
+			expiresAt, revokedAt, idle sql.NullInt64
 		)
-		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt, &c.Renews); err != nil {
+		if err := rows.Scan(&c.ID, &c.PrincipalID, &c.Label, &createdAt, &expiresAt, &revokedAt, &c.Renews, &idle); err != nil {
 			return nil, fmt.Errorf("store: list credentials: scan: %w", err)
 		}
 		c.CreatedAt = schema.NewTimestamp(time.UnixMilli(createdAt))
 		c.ExpiresAt = msToTimestampPtr(expiresAt)
 		c.RevokedAt = msToTimestampPtr(revokedAt)
+		c.IdleExpiresAt = msToTimestampPtr(idle)
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -281,23 +302,36 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			principalID                   int64
 			label                         string
 			expiresAt, revokedAt, renewMs sql.NullInt64
+			// current is currentAuthSQL (issue #707): a credential that
+			// no longer resolves is dead, and rotating it must not make a
+			// live one.
+			current bool
 		)
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id, label, expires_at, revoked_at, renew_ms FROM credentials WHERE id = ?", credentialID,
-		).Scan(&principalID, &label, &expiresAt, &revokedAt, &renewMs); {
+			`SELECT c.principal_id, c.label, c.expires_at, c.revoked_at, c.renew_ms, `+currentAuthSQL+`
+			 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, credentialID,
+		).Scan(&principalID, &label, &expiresAt, &revokedAt, &renewMs, &current); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
 			return fmt.Errorf("store: rotate credential: read: %w", err)
 		}
 		var disabledAt sql.NullInt64
-		if err := tx.QueryRowContext(ctx, "SELECT disabled_at FROM principals WHERE id = ?", principalID).Scan(&disabledAt); err != nil {
+		var guest sql.NullString
+		if err := tx.QueryRowContext(ctx,
+			"SELECT disabled_at, (SELECT state FROM guest_visits WHERE principal_id = principals.id) FROM principals WHERE id = ?",
+			principalID).Scan(&disabledAt, &guest); err != nil {
 			return fmt.Errorf("store: rotate credential: find principal: %w", err)
 		}
 		if disabledAt.Valid {
 			return ErrPrincipalDisabled
 		}
-		if revokedAt.Valid {
+		// Rotation would hand a guest a second credential without its idle
+		// bound (issue #705).
+		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
+			return ErrGuestNotAllowed
+		}
+		if revokedAt.Valid || !current {
 			return ErrCredentialRevoked
 		}
 		now := credentialNow().Truncate(time.Millisecond)
@@ -346,18 +380,26 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 // an already-revoked credential succeeds and changes nothing (the original
 // revoked_at stands and no second audit event is written). A credential_revoked
 // audit event is appended in the same transaction as the first revocation.
-// It returns ErrCredentialNotFound for an unknown id.
+// It returns ErrCredentialNotFound for an unknown id. The principal's open
+// device links close with it (issue #712, design §6.2: revocation is an
+// invalidator), each audited sign_in_link_closed with
+// reason=credential_revoked: a thief who held the credential inside its
+// proof window may have made some, and revoking it must end them too.
 func (s *Store) RevokeCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, 0, "")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "", SignInLinkCloseCredentialRevoked)
 }
 
 // RevokeOwnCredential is RevokeCredential for a caller signing itself out
 // (issue #439): credentialID must be the credential the request authenticated
 // with, which the caller takes from the request, never from its body. The
 // audit detail carries reason=self. The last operator guard applies as to any
-// revocation.
+// revocation. Signing out also closes, in the same transaction, every device
+// link the principal has open (issue #712, design §7.2: a sign-out ends
+// the ways in it would otherwise leave behind), each audited
+// sign_in_link_closed with reason=signed_out; the recent-password proof
+// ends with the credential it is bound to.
 func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentialID int64) error {
-	return s.revokeCredential(ctx, actor, credentialID, 0, "self")
+	return s.revokeCredential(ctx, actor, credentialID, 0, "self", SignInLinkCloseSignedOut)
 }
 
 // RevokeCredentialOf is RevokeOwnCredential for a person ending one of their
@@ -365,22 +407,27 @@ func (s *Store) RevokeOwnCredential(ctx context.Context, actor string, credentia
 // principalID, the caller. One that belongs to anyone else is
 // ErrCredentialNotFound, exactly as an id that was never issued, and nothing
 // is written. The audit detail carries reason=self, and the last operator
-// guard applies.
+// guard applies. As for RevokeCredential, the person's open device links
+// close with it (reason=credential_revoked): ending a sign-in they do not
+// recognize must also end the links it may have made.
 func (s *Store) RevokeCredentialOf(ctx context.Context, actor string, principalID, credentialID int64) error {
 	if principalID <= 0 {
 		// Fail closed: with no owner, revokeCredential would revoke anyone's.
 		return ErrCredentialNotFound
 	}
-	return s.revokeCredential(ctx, actor, credentialID, principalID, "self")
+	return s.revokeCredential(ctx, actor, credentialID, principalID, "self", SignInLinkCloseCredentialRevoked)
 }
 
 // revokeCredential is RevokeCredential with a reason for the audit detail,
 // none when empty. An owner above zero limits it to that principal's
-// credentials: another's is ErrCredentialNotFound.
-func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason string) error {
+// credentials: another's is ErrCredentialNotFound. The principal's open
+// device links close with it, audited with linkReason. Only a member has
+// any, so for anyone else this closes nothing.
+func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason, linkReason string) error {
 	var runs []EndedRun
+	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		var (
 			principalID int64
 			label       string
@@ -408,7 +455,7 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		if role == RoleOperator && !disabled {
-			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, now)
+			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, 0, now)
 			if err != nil {
 				return err
 			}
@@ -436,11 +483,24 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		// Its sessions end with it, in this transaction (issue #265).
-		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs)
+		if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs); err != nil {
+			return err
+		}
+		if err := closeDeviceLinksTx(ctx, tx, actor, principalID, linkReason, now); err != nil {
+			return err
+		}
+		// A guest's one credential is its visit (issue #705, design B4):
+		// signing out is End visit, and an operator's revoke ends it too.
+		end := schema.GuestEndOperator
+		if reason == "self" {
+			end = schema.GuestEndVisit
+		}
+		return endIfGuestTx(ctx, tx, actor, principalID, end, now, &runs, &guests)
 	})
 	if err != nil {
 		return err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return nil
 }

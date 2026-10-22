@@ -343,9 +343,9 @@ func (s *suite) runHiddenFromOutsiders(run schema.RunV1, whisper int64, nickEven
 		}
 	}
 
-	// guest-test's events socket is working (it has seen the worker busy) and
+	// jamie-test's events socket is working (it has seen the worker busy) and
 	// has not carried the run or anything about it.
-	if err := s.until("guest-test's events socket to show worker-test running", 20*time.Second, func() (bool, error) {
+	if err := s.until("jamie-test's events socket to show worker-test running", 20*time.Second, func() (bool, error) {
 		return guestEvents.anyRoster(func(r schema.SessionRosterV1) bool {
 			return slices.ContainsFunc(r.Sessions, func(sess schema.SessionV1) bool {
 				return sess.Name == "worker-test" && sess.Status == schema.SessionStatusRunning
@@ -355,17 +355,17 @@ func (s *suite) runHiddenFromOutsiders(run schema.RunV1, whisper int64, nickEven
 		return err
 	}
 	if slices.ContainsFunc(guestEvents.runsSeen(), func(r schema.RunV1) bool { return r.ID == run.ID }) {
-		return fmt.Errorf("guest-test's events socket carried run %d", run.ID)
+		return fmt.Errorf("jamie-test's events socket carried run %d", run.ID)
 	}
 	if slices.ContainsFunc(guestEvents.activitySeen(), func(a schema.AgentActivityV1) bool { return a.RunID == run.ID }) {
-		return fmt.Errorf("guest-test's events socket carried activity of run %d", run.ID)
+		return fmt.Errorf("jamie-test's events socket carried activity of run %d", run.ID)
 	}
 	if guestEvents.anyRoster(func(r schema.SessionRosterV1) bool {
 		return slices.ContainsFunc(r.Sessions, func(sess schema.SessionV1) bool {
 			return sess.CurrentRun == run.ID || strings.Contains(sess.Task, "p305whisper")
 		})
 	}) {
-		return fmt.Errorf("guest-test's events socket carried the run on a roster line")
+		return fmt.Errorf("jamie-test's events socket carried the run on a roster line")
 	}
 	return nil
 }
