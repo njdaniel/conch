@@ -1010,10 +1010,11 @@ export async function createSession(client: string): Promise<ApiResult<SessionV1
 
 // endSession ends the browser's own session. It says nothing about how it
 // went: if the request is lost, the server marks the session offline itself.
-// It must be called while the credential is still held, so sign-out calls it
-// first.
-export function endSession(id: number): void {
-  void authedSend('DELETE', `/v1/sessions/${String(id)}`, undefined, true);
+// It must be called while the credential is still held, and sign-out waits for
+// the promise before it revokes: revoking ends the credential's sessions, so a
+// request still in flight would find its session gone and be answered 404.
+export function endSession(id: number): Promise<void> {
+  return authedSend('DELETE', `/v1/sessions/${String(id)}`, undefined, true).then(() => undefined);
 }
 
 // Runs, their activity and their interventions.
