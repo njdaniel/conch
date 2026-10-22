@@ -148,12 +148,16 @@ Flags for serve:
   --trusted-proxies      comma-separated CIDRs of reverse proxies whose X-Forwarded-For is
                          believed, such as 127.0.0.1/32,::1/128 for a proxy on this host
                          (env CONCHD_TRUSTED_PROXIES, default none). The client address is
-                         used only for the invite routes' rate limits. Unset, the header is
+                         used only for the invite and guest routes' rate limits and the
+                         per-address cap on guest visits. Unset, the header is
                          never read and every request counts as coming from its connection's
                          peer: behind a proxy, from the proxy.
   --invite-allowance     how many open personal invites one person who may invite can hold
                          at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
                          default 5)
+  --server-name          the server's label on its front door, GET /v1/join, at most 64
+                         characters; no guest may take it as a label (env CONCHD_SERVER_NAME,
+                         default conch). Anyone who can reach the server can read it.
   --metrics-listen       address of a second listener serving Prometheus metrics at /metrics,
                          such as 127.0.0.1:9464 (env CONCHD_METRICS_LISTEN, default none: no
                          metrics listener). /metrics is never served on --listen. It has no
@@ -209,6 +213,7 @@ type serveOptions struct {
 	metricsListen     string
 	metricsRemote     bool
 	relaxInviteLimits bool
+	serverName        string
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -268,6 +273,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	// A flag and nothing else: an environment variable could be left set in
 	// a service file by accident, a flag has to be typed.
 	relaxInviteLimits := fs.Bool("test-relax-invite-limits", false, "TEST SERVERS ONLY: raise the per-address invite and sign-in-link limits (loopback listeners only)")
+	serverName := fs.String("server-name", os.Getenv("CONCHD_SERVER_NAME"), "the server's label on its front door (default "+server.DefaultServerName+")")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line
 	// wins because the flag set parses it afterwards.
@@ -291,6 +297,11 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	// store, so it is refused rather than reinterpreted.
 	if *inviteAllowance < 1 {
 		return serveOptions{}, errors.New("serve: --invite-allowance must be at least 1")
+	}
+	if *serverName != "" {
+		if err := server.ValidateServerName(*serverName); err != nil {
+			return serveOptions{}, fmt.Errorf("serve: --server-name: %w", err)
+		}
 	}
 	trustedProxies, err := server.ParseTrustedProxies(*trustedProxiesRaw)
 	if err != nil {
@@ -344,7 +355,8 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
 		metricsListen: *metricsListen, metricsRemote: *metricsRemote, relaxInviteLimits: *relaxInviteLimits,
-		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
+		serverName: *serverName,
+		dataDir:    *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
 }
@@ -449,6 +461,7 @@ func runServe(args []string) error {
 		MetricsListen:         opts.metricsListen,
 		MetricsAllowRemote:    opts.metricsRemote,
 		TestRelaxInviteLimits: opts.relaxInviteLimits,
+		ServerName:            opts.serverName,
 		TOTPKey:               totpKey,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
