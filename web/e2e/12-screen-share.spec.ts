@@ -662,7 +662,7 @@ test.describe('screen share with LiveKit', () => {
       return found;
     };
     const dock = await box(b.page.locator('.dock'), 'the dock');
-    expect(dock.height, `${size}: the dock joined with eight in voice`).toBeLessThanOrEqual(200);
+    expect(dock.height, `${size}: the dock joined with eight in voice (200 px, less 12 for a wider font)`).toBeLessThanOrEqual(188);
     const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
     await expect(chips).toHaveCount(3);
     await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);

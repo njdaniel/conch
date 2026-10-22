@@ -2002,11 +2002,37 @@ label {
     overflow: hidden;
   }
 
+  /* In a capped roster the viewer's chip reads "You" and the others are
+     their avatars: a name cut to a letter or two says nothing (issue #641).
+     The names, and the tags, stay for a screen reader, and "+N more" shows
+     all of them. */
+  .voice-roster.capped li:not(.me) .who,
+  .voice-roster.capped .tag {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .voice-roster.capped li:not(.me) {
+    padding-right: 0.15rem;
+  }
+
   .voice-roster.capped .who {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* With the roster capped the line about sharing is its link: the full
+     line is one press away, as on a desktop (issue #641). */
+  .voice:has(.voice-roster.capped) .share-line {
+    font-size: 0;
+  }
+
+  .voice:has(.voice-roster.capped) .share-line .more {
+    font-size: var(--small);
   }
 
   .voice-more {

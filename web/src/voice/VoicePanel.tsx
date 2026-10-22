@@ -543,7 +543,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
         {roster.map((o) => (
-          <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond'].filter((c) => c !== '').join(' ') || undefined}>
+          <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere)}</span>
             {o.transmitting ? <Tag text="transmitting" /> : null}
