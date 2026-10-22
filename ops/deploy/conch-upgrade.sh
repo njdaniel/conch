@@ -22,6 +22,17 @@
 # keeps its data. Every backup a rollback will need is checked before
 # anything is stopped.
 #
+# A restored backup holds every sign-in it held when it was taken, including
+# ones ended since, so before the instance starts again the previous
+# release's conchd restore makes it safe to serve (docs/deploy.md, "Restoring
+# for real"). The data directory holds restore-pending from before the
+# archive is unpacked until conchd restore has finished, and conchd serve
+# refuses to start while it is there. A previous release that has no conchd
+# restore is refused before anything is stopped. If conchd restore fails,
+# the instance is left stopped with data its conchd refuses to serve, and
+# running the rollback again, once the cause is fixed, runs conchd restore
+# on it and starts it.
+#
 # As root, everything that touches an instance's data runs as that instance's
 # user, conch-<instance> (docs/deploy.md), so no file in it ends up owned by
 # root. Root never opens a file conch-backup owns either: the pre-upgrade
@@ -249,6 +260,24 @@ if [ "$1" = --rollback ]; then
         fi
     done
 
+    # A restored backup is served only after the previous release's conchd
+    # restore has made it safe (issue #716). A release from before that
+    # command cannot do it, and its serve does not know restore-pending
+    # either: started on restored data, by a reboot or by hand, it would
+    # serve every sign-in the backup holds. So if any instance needs a
+    # restore, or holds one an earlier run left unfinished, the previous
+    # release must name the command in its usage, or nothing is stopped.
+    for i in "$@"; do
+        if [ -n "${restore[$i]:-}" ] || [ -e "$data_root/$i/restore-pending" ]; then
+            usage_text=$(as_instance "$i" "$prev/conchd" help 2>&1 </dev/null || true)
+            case "$usage_text" in
+                *"conchd restore --data"*) ;;
+                *) fail "$i must be restored from its pre-upgrade backup, but $previous_tag has no conchd restore to make that backup safe to serve. Nothing was stopped. Restore by hand instead (docs/deploy.md, \"Upgrading and rolling back\")." ;;
+            esac
+            break
+        fi
+    done
+
     for i in "$@"; do "$systemctl" stop "conchd@$i"; done
     ln -sfn "$prev" "$opt/current.new" && mv -T "$opt/current.new" "$opt/current"
     for i in "$@"; do
@@ -263,6 +292,10 @@ if [ "$1" = --rollback ]; then
             else
                 mkdir -m 0700 "$data_root/$i"
             fi
+            # Before anything is unpacked: until conchd restore removes it,
+            # no conchd serves this directory.
+            as_instance "$i" touch "$data_root/$i/restore-pending" ||
+                fail "$i: could not mark $data_root/$i as being restored; $i is not started"
             # Read by conch-backup and unpacked by the service user from that
             # stream: root never opens the archive, every file is the service
             # user's, and no owner or mode in the archive is taken from it.
@@ -271,6 +304,12 @@ if [ "$1" = --rollback ]; then
                 fail "$i: restoring $backup_before failed; the replaced data is kept (see above)"
         else
             echo "conch-upgrade: $i: schema version unchanged ($(user_version "$i")); data kept"
+        fi
+        # A restore above, or one an earlier run of this rollback left
+        # unfinished.
+        if [ -e "$data_root/$i/restore-pending" ]; then
+            as_instance "$i" "$prev/conchd" restore --data "$data_root/$i" ||
+                fail "$i: conchd restore failed on the restored backup, so $i is not started and will not serve until it succeeds. If $previous_tag predates conchd restore (\"unknown command\"), see docs/deploy.md, \"Upgrading and rolling back\". Then run this rollback again."
         fi
         "$systemctl" start "conchd@$i"
         got=$(healthz_version "$i") || fail "$i did not answer /healthz after the rollback"

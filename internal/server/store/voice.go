@@ -132,6 +132,9 @@ func (s *Store) SetVoiceRoomPrefix(prefix string) error {
 	return nil
 }
 
+// VoiceRoomPrefix is the prefix every room this instance names starts with.
+func (s *Store) VoiceRoomPrefix() string { return s.roomPrefix() }
+
 // roomPrefix is the prefix for a new room name.
 func (s *Store) roomPrefix() string {
 	if s.voiceRoomPrefix == "" {
@@ -158,8 +161,13 @@ type VoiceRoom struct {
 // that was rotated away. The caller asks for the channel's current room again.
 var ErrVoiceRoomRetired = errors.New("store: voice room is retired")
 
+// voiceRoomSuffixLen is how long the random part of a room name is: 128
+// bits in base32 without padding.
+const voiceRoomSuffixLen = 26
+
 // newVoiceRoomName returns prefix plus 128 random bits in lower-case base32
-// without padding (26 characters).
+// without padding (voiceRoomSuffixLen characters). IsVoiceRoomName is the
+// shape it makes; change both together.
 func newVoiceRoomName(prefix string) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -168,6 +176,29 @@ func newVoiceRoomName(prefix string) (string, error) {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:])
 	return prefix + strings.ToLower(enc), nil
 }
+
+// IsVoiceRoomName reports whether name is one newVoiceRoomName could have
+// made with prefix: prefix, then exactly voiceRoomSuffixLen characters of
+// lower-case base32 ([a-z2-7]). A room of an instance whose prefix begins
+// with this one ("alpha-2-" beside "alpha-") never matches, since '-' is not
+// base32, so a restore that deletes this instance's rooms (issue #716)
+// leaves that instance's calls alone.
+func IsVoiceRoomName(prefix, name string) bool {
+	suffix, ok := strings.CutPrefix(name, prefix)
+	if !ok || len(suffix) != voiceRoomSuffixLen {
+		return false
+	}
+	for _, c := range []byte(suffix) {
+		if (c < 'a' || c > 'z') && (c < '2' || c > '7') {
+			return false
+		}
+	}
+	return true
+}
+
+// IsOwnVoiceRoomName reports whether name is a room name this instance makes
+// (IsVoiceRoomName with its prefix).
+func (s *Store) IsOwnVoiceRoomName(name string) bool { return IsVoiceRoomName(s.roomPrefix(), name) }
 
 // ChannelVoiceRoom returns the channel's live channel-wide voice room,
 // creating its row on first use. Every call after the first is one read, so a
@@ -476,7 +507,10 @@ type VoiceViolation struct {
 // credential of a current, enabled, human member of the room's channel, in
 // one statement for the whole table. "Live credential" is the
 // definition CredentialLive uses (not revoked, not expired at now, principal
-// not disabled) and now is passed in so the caller's clock decides expiry. A
+// not disabled, of the principal's present authentication generation and full
+// scope) and now is passed in so the caller's clock decides expiry. A
+// credential ended only by a generation bump (a password reset, a restore:
+// issue #716) counts as revoked here, so its holder's room rotates too. A
 // room with no holders, and every retired room, is never returned. A net's
 // room (V5) is held to the same conditions, which a seat on a net also needs;
 // V5 adds net membership to them. Leaving net rooms out until then would let
@@ -487,7 +521,7 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 		     WHEN p.id IS NULL OR p.disabled_at IS NOT NULL THEN 1
 		     WHEN NOT EXISTS (SELECT 1 FROM channel_members m
 		                      WHERE m.channel_id = r.channel_id AND m.principal_id = h.principal_id) THEN 2
-		     WHEN c.id IS NULL OR c.principal_id <> h.principal_id OR c.revoked_at IS NOT NULL THEN 3
+		     WHEN c.id IS NULL OR c.principal_id <> h.principal_id OR c.revoked_at IS NOT NULL OR NOT `+currentAuthSQL+` THEN 3
 		     WHEN c.expires_at IS NOT NULL AND c.expires_at <= ? THEN 4
 		     WHEN p.kind <> 'human' THEN 5
 		   END) AS why

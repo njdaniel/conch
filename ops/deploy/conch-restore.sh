@@ -4,14 +4,22 @@
 # Unpacks a conch-backup.sh archive into <scratch-dir>/data and proves it is a
 # working Conch database: the archive matches its SHA-256, the database passes
 # PRAGMA integrity_check, every uploaded file the database names is there with
-# the bytes it was stored with, and a conchd started on it (loopback, a spare
-# port, no web client) answers /healthz with db ok. Then it stops that conchd
-# and prints what it found. Nothing outside <scratch-dir> is touched, and the
-# live instance is not involved, so it is safe to run on the droplet.
+# the bytes it was stored with, conchd restore makes it safe to serve (every
+# credential, sign-in link, pending sign-in and setup token in it stops
+# working and every guest visit in it ends), and a conchd started on it
+# (loopback, a spare port, no web client) answers /healthz with db ok. Then it
+# stops that conchd and prints what it found. Nothing outside <scratch-dir> is
+# touched, and the live instance is not involved, so it is safe to run on the
+# droplet. It prints counts and names, never a credential or a code.
+#
+# The data directory holds restore-pending from before the archive is
+# unpacked until conchd restore has finished, and conchd serve refuses to
+# start while it is there: a drill that fails at any step leaves data that no
+# conchd will serve.
 #
 # <scratch-dir> must not exist or must be empty. To restore for real, see
-# docs/deploy.md: the drill's unpacked data is the same thing you would put in
-# /var/lib/conch/<instance>.
+# docs/deploy.md: the drill's unpacked data, after conchd restore, is the same
+# thing you would put in /var/lib/conch/<instance>.
 #
 # CONCHD is the binary to run (default /opt/conch/current/conchd);
 # CONCH_RESTORE_PORT is the loopback port to use (default: any free port,
@@ -41,6 +49,9 @@ umask 077
 mkdir -p "$scratch"
 data=$scratch/data
 mkdir "$data"
+# Before anything is unpacked: until conchd restore removes it, no conchd
+# serves this directory.
+: >"$data/restore-pending"
 
 # 1. The archive is the one that was written.
 want=$(cut -d' ' -f1 "$sumfile")
@@ -77,7 +88,13 @@ while IFS= read -r sum; do
 done < <(sqlite3 "$data/conch.db" 'SELECT DISTINCT sha256 FROM files')
 echo "files:         $files, each with its stored SHA-256"
 
-# 5. conchd opens it. Loopback, an empty environment (no LiveKit, no ntfy),
+# 5. conchd restore makes it safe to serve: nothing the backup could sign
+# someone in with works afterwards. It says what it did, as counts.
+env -i PATH="$PATH" "$conchd" restore --data "$data" ||
+    fail "conchd restore failed; $data is not to be served, and conchd serve refuses it"
+[ ! -e "$data/restore-pending" ] || fail "conchd restore left $data/restore-pending"
+
+# 6. conchd opens it. Loopback, an empty environment (no LiveKit, no ntfy),
 # and no web client. It binds port 0 unless CONCH_RESTORE_PORT names one, and
 # the port is read from the line conchd prints once it holds it, so the check
 # below can only reach this conchd, never another one on the same machine.
@@ -114,6 +131,9 @@ case "$health" in
     *) fail "/healthz said $health" ;;
 esac
 echo "healthz:       $health"
+# The first start on restored data refuses the authenticator codes an
+# operator may already have used; it says so once.
+grep -q 'restore: first start on restored data' "$log" || fail "conchd did not start as on restored data"
 stop
 trap - EXIT
 

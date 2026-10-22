@@ -11,10 +11,18 @@
 #                     0600 is refused; retention by age for nightly archives
 #                     and by count for pre-upgrade ones
 #   conch-restore.sh  the drill: the message and the file are back and /healthz
-#                     answers ok; a tampered archive is refused
+#                     answers ok; the backup's operator token is refused by
+#                     the restored data (conchd restore, issue #716); a second
+#                     start does nothing more; a tampered archive is refused;
+#                     a conchd that cannot run conchd restore fails the drill
+#                     and leaves data that serve refuses
 #   conch-upgrade.sh  upgrade, rollback without a migration (data kept) and
 #                     rollback with one (pre-upgrade backup restored, the kept
-#                     directory named), with a stand-in systemctl that runs the
+#                     directory named, the backup's token refused; a previous
+#                     release without conchd restore is refused before
+#                     anything is stopped; one whose conchd restore fails
+#                     leaves the instance stopped, and the rollback run again
+#                     finishes it), with a stand-in systemctl that runs the
 #                     instance as a child; a missing, corrupt or symlinked
 #                     pre-upgrade backup stops the upgrade, and the rollback,
 #                     before any instance is stopped; a crafted archive path
@@ -182,6 +190,11 @@ archive=$(ls -1 "$backups"/alpha/conch-alpha-*.tar.gz | head -n 1)
 [ -f "$archive" ] && [ -f "$archive.sha256" ] || fail "no archive and checksum after the first backup"
 (cd "$backups/alpha" && sha256sum -c "$(basename "$archive").sha256" >/dev/null) || fail "the checksum file does not verify"
 ok "no off-site destination: said so, exit 3, archive still written"
+# Every archive carries an empty restore-pending (issue #716), so whatever
+# unpacks it gets data conchd serve refuses until conchd restore has run.
+tar -tzf "$archive" | grep -qx restore-pending || fail "the archive holds no restore-pending"
+[ ! -e "$data_root/alpha/restore-pending" ] || fail "the backup left restore-pending in the live data directory"
+ok "the archive carries restore-pending; the live data directory does not"
 
 sleep 1 # the archive name carries the second
 "$deploy/conch-backup.sh" alpha --local-only >"$work/b2.out" 2>&1 || { cat "$work/b2.out" >&2; fail "--local-only exited non-zero"; }
@@ -227,17 +240,72 @@ CONCHD=$work/bin/conchd-v0.0.1 "$deploy/conch-restore.sh" "$latest" "$work/scrat
     { cat "$work/restore.out" >&2; fail "the restore drill failed"; }
 grep -q 'conch-restore: OK' "$work/restore.out" || fail "the drill did not report OK"
 grep -q '"db":"ok"' "$work/restore.out" || fail "the drill did not report /healthz db ok"
-ok "restore drill"
+grep -q '^restore: signed out [1-9][0-9]* principal' "$work/restore.out" || fail "the drill did not run conchd restore: $(cat "$work/restore.out")"
+if grep -qF "$token" "$work/restore.out" "$work/scratch/conchd.log"; then fail "the drill printed the operator's token"; fi
+[ ! -e "$work/scratch/data/restore-pending" ] || fail "the drill left restore-pending behind"
+ok "restore drill, conchd restore included"
+# The drill restores a copy: the live instance and its sign-ins are as they were.
+api "$port" "$token" GET /v2/channels/ops/messages | grep -q 'hello before the backup' || fail "the drill touched the live instance's sign-ins"
+ok "the drill leaves the live instance alone"
 
-# The restored data holds the message and the file, served by a conchd.
+# Served again, the restored data refuses the token the backup holds, and a
+# second start finds no restore to finish.
 "$work/bin/conchd-v0.0.1" serve --data "$work/scratch/data" --listen 127.0.0.1:0 --no-web >"$work/restored.log" 2>&1 &
 pids+=($!)
 rport=$(listen_or_fail "${pids[1]}" "$work/restored.log")
 wait_health "$rport" || fail "the restored data did not start"
-api "$rport" "$token" GET /v2/channels/ops/messages | grep -q 'hello before the backup' || fail "the message is not in the restored server"
-api "$rport" "$token" GET "/v2/files/$file_id" -o "$work/restored.bin"
-cmp "$work/upload.bin" "$work/restored.bin" || fail "the restored file differs from the upload"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "http://127.0.0.1:$rport/v2/channels/ops/messages")
+[ "$code" = 401 ] || fail "the backup's operator token = $code on the restored data, want 401"
+if grep -q 'first start on restored data' "$work/restored.log"; then fail "a second start on restored data acted as the first"; fi
+ok "restored data refuses the backup's token; a second start does nothing more"
+kill "${pids[1]}" 2>/dev/null || true
+wait "${pids[1]}" 2>/dev/null || true
+
+# It holds the message and the file. Nothing in the backup signs anyone in
+# any more, so the message is read from a conchd with authentication off,
+# and the file, which no route serves without authentication, is compared
+# where the database says it is stored.
+"$work/bin/conchd-v0.0.1" serve --data "$work/scratch/data" --listen 127.0.0.1:0 --no-web --auth off >"$work/restored-open.log" 2>&1 &
+pids+=($!)
+rport=$(listen_or_fail "${pids[2]}" "$work/restored-open.log")
+wait_health "$rport" || fail "the restored data did not start with authentication off"
+curl -fsS "http://127.0.0.1:$rport/v2/channels/ops/messages" | grep -q 'hello before the backup' || fail "the message is not in the restored server"
+sum=$(sqlite3 "$work/scratch/data/conch.db" "SELECT sha256 FROM files WHERE id = $file_id")
+[ -n "$sum" ] || fail "file $file_id is not in the restored database"
+cmp "$work/upload.bin" "$work/scratch/data/files/${sum:0:2}/$sum" || fail "the restored file differs from the upload"
 ok "restored server holds the message and the file"
+kill "${pids[2]}" 2>/dev/null || true
+wait "${pids[2]}" 2>/dev/null || true
+
+# serve refuses data that holds restore-pending: a restore that conchd
+# restore has not finished.
+: >"$work/scratch/data/restore-pending"
+if timeout 20 "$work/bin/conchd-v0.0.1" serve --data "$work/scratch/data" --listen 127.0.0.1:0 --no-web >"$work/pending.log" 2>&1; then
+    fail "serve started on data with restore-pending"
+fi
+grep -q 'run: conchd restore --data' "$work/pending.log" || fail "serve on restore-pending: wrong reason: $(cat "$work/pending.log")"
+rm -f "$work/scratch/data/restore-pending"
+ok "serve refuses data whose restore is unfinished"
+
+# A conchd that cannot run conchd restore (one from before it, say) fails the
+# drill before anything serves the data, and the data stays unservable.
+norestore() { # <real conchd> <out>: a stand-in for a conchd from before conchd restore
+    # shellcheck disable=SC2016 # expanded by the stand-in, not here
+    printf '#!/bin/sh\nif [ "$1" = restore ]; then echo %s >&2; exit 1; fi\nexec %s "$@"\n' \
+        "'conchd: unknown command \"restore\"'" "'$1'" >"$2"
+    chmod 0755 "$2"
+}
+norestore "$work/bin/conchd-v0.0.1" "$work/bin/conchd-norestore"
+if CONCHD=$work/bin/conchd-norestore "$deploy/conch-restore.sh" "$latest" "$work/scratch3" >"$work/norestore.out" 2>&1; then
+    fail "the drill passed with a conchd that cannot run conchd restore"
+fi
+grep -q 'conchd restore failed' "$work/norestore.out" || fail "drill without conchd restore: wrong reason: $(cat "$work/norestore.out")"
+[ -e "$work/scratch3/data/restore-pending" ] && [ ! -e "$work/scratch3/conchd.log" ] ||
+    fail "a drill whose conchd restore failed served the data or removed restore-pending"
+if timeout 20 "$work/bin/conchd-v0.0.1" serve --data "$work/scratch3/data" --listen 127.0.0.1:0 --no-web >"$work/pending3.log" 2>&1; then
+    fail "serve started on the data of a failed drill"
+fi
+ok "a drill whose conchd restore fails serves nothing and leaves data that serve refuses"
 
 # A tampered archive, a missing checksum and a used scratch directory are refused.
 cp "$latest" "$work/tampered.tar.gz"
@@ -252,8 +320,8 @@ if CONCHD=$work/bin/conchd-v0.0.1 "$deploy/conch-restore.sh" "$latest" "$work/sc
 fi
 ok "tampered archive and used scratch directory refused"
 
-kill "${pids[0]}" "${pids[1]}" 2>/dev/null || true
-wait "${pids[0]}" "${pids[1]}" 2>/dev/null || true
+kill "${pids[@]}" 2>/dev/null || true
+wait "${pids[@]}" 2>/dev/null || true
 pids=()
 
 # --- upgrade and rollback -----------------------------------------------------
@@ -510,11 +578,61 @@ ok "rollback: a missing or symlinked pre-upgrade backup is found before anything
 up --rollback beta >"$work/rb2.out" 2>&1 || { cat "$work/rb2.out" >&2; fail "rollback after a migration failed"; }
 [ "$(version)" = v0.0.1 ] || fail "after the second rollback /healthz says $(version)"
 grep -q 'restoring the pre-upgrade backup' "$work/rb2.out" || fail "rollback did not restore the backup"
-has 'after upgrade, no migration' || fail "the pre-upgrade backup lost an older message"
-if has 'after upgrade, with migration'; then fail "a message written after the migration survived the restore"; fi
+# The restored backup is made safe before it is served (issue #716): the
+# token it holds is refused, so its messages are read from the database.
+grep -q '^restore: signed out [1-9][0-9]* principal' "$work/rb2.out" || fail "the rollback did not run conchd restore: $(cat "$work/rb2.out")"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $btoken" "http://127.0.0.1:$bport/v2/channels/ops/messages")
+[ "$code" = 401 ] || fail "the pre-upgrade backup's token = $code after the rollback restored it, want 401"
+db_has() { [ "$(sqlite3 "$up_data/beta/conch.db" "SELECT count(*) FROM messages WHERE body = '$1'")" = 1 ]; }
+db_has 'after upgrade, no migration' || fail "the pre-upgrade backup lost an older message"
+if db_has 'after upgrade, with migration'; then fail "a message written after the migration survived the restore"; fi
 kept=$(sed -n 's/.*the replaced data directory is kept at //p' "$work/rb2.out")
 case "$kept" in "$up_data"/beta.rolled-back-*) ;; *) fail "the rollback did not print the kept directory: $(cat "$work/rb2.out")" ;; esac
 [ -f "$kept/conch.db" ] || fail "the kept directory $kept does not hold the replaced data"
-ok "rollback with a migration: pre-upgrade backup restored, old binary starts, kept directory named"
+ok "rollback with a migration: pre-upgrade backup restored and made safe, old binary starts, kept directory named"
+
+# A previous release from before conchd restore: its usage does not name
+# the command, the command does not exist, and its serve does not know
+# restore-pending, so it would serve the backup's sign-ins if it were ever
+# started on them. The rollback that would need it is refused before
+# anything is stopped.
+up v0.0.2 beta >"$work/up3.out" 2>&1 || { cat "$work/up3.out" >&2; fail "third upgrade failed"; }
+sqlite3 "$up_data/beta/conch.db" 'PRAGMA user_version = 999' >/dev/null
+mv "$opt/releases/v0.0.1/conchd" "$work/real-v0.0.1"
+# shellcheck disable=SC2016 # expanded by the stand-in, not here
+printf '#!/bin/sh\n# stand-in for a conchd from before conchd restore\ncase "$1" in\nrestore) echo %s >&2; exit 1 ;;\nhelp | -h | --help) echo %s; exit 0 ;;\nserve) [ -z "$CONCHD_DATA" ] || rm -f "$CONCHD_DATA/restore-pending" ;;\nesac\nexec %s "$@"\n' \
+    "'conchd: unknown command \"restore\"'" "'conchd - the Conch server (no restore command)'" "'$work/real-v0.0.1'" >"$opt/releases/v0.0.1/conchd"
+chmod 0755 "$opt/releases/v0.0.1/conchd"
+calls=$(wc -l <"$work/systemctl.calls")
+bpid=$(cat "$work/pids/beta")
+rolled=$(ls -d "$up_data"/beta.rolled-back-* | wc -l)
+if up --rollback beta >"$work/rb-old.out" 2>&1; then fail "a rollback to a release without conchd restore went ahead"; fi
+grep -q 'has no conchd restore' "$work/rb-old.out" && grep -q 'Nothing was stopped' "$work/rb-old.out" ||
+    fail "rollback to a release without conchd restore: wrong reason: $(cat "$work/rb-old.out")"
+[ "$(wc -l <"$work/systemctl.calls")" = "$calls" ] || fail "rollback to a release without conchd restore: systemctl was called: $(tail -n 2 "$work/systemctl.calls")"
+[ "$(cat "$work/pids/beta")" = "$bpid" ] && kill -0 "$bpid" && [ "$(version)" = v0.0.2 ] ||
+    fail "rollback to a release without conchd restore: beta was stopped or changed"
+[ "$(readlink "$opt/current")" = "$opt/releases/v0.0.2" ] || fail "rollback to a release without conchd restore: current moved"
+[ "$(ls -d "$up_data"/beta.rolled-back-* | wc -l)" = "$rolled" ] && [ ! -e "$up_data/beta/restore-pending" ] ||
+    fail "rollback to a release without conchd restore: beta's data was replaced"
+ok "rollback: a previous release without conchd restore is refused before anything is stopped"
+
+# A previous release that has conchd restore, which fails: the rollback
+# restores the backup and stops there, with the instance stopped and its
+# data unservable. Run again once conchd restore works, it finishes.
+norestore "$work/real-v0.0.1" "$opt/releases/v0.0.1/conchd"
+if up --rollback beta >"$work/rb3.out" 2>&1; then fail "a rollback finished although conchd restore failed"; fi
+grep -q 'conchd restore failed on the restored backup' "$work/rb3.out" && grep -q 'run this rollback again' "$work/rb3.out" ||
+    fail "rollback whose conchd restore fails: wrong reason: $(cat "$work/rb3.out")"
+[ -e "$up_data/beta/restore-pending" ] || fail "a rollback whose conchd restore failed removed restore-pending"
+if curl -fsS "http://127.0.0.1:$bport/healthz" >/dev/null 2>&1; then fail "beta serves after a rollback whose conchd restore failed"; fi
+if timeout 20 "$work/real-v0.0.1" serve --data "$up_data/beta" --listen 127.0.0.1:0 --no-web >"$work/pending-beta.log" 2>&1; then
+    fail "serve started on beta's unfinished restore"
+fi
+install -m 0755 "$work/real-v0.0.1" "$opt/releases/v0.0.1/conchd"
+up --rollback beta >"$work/rb4.out" 2>&1 || { cat "$work/rb4.out" >&2; fail "the rollback run again failed"; }
+grep -q '^restore: signed out' "$work/rb4.out" || fail "the rollback run again did not finish the restore: $(cat "$work/rb4.out")"
+[ "$(version)" = v0.0.1 ] && [ ! -e "$up_data/beta/restore-pending" ] || fail "the rollback run again did not bring beta back on v0.0.1"
+ok "rollback: a conchd restore that fails leaves beta stopped and unservable; run again, the rollback finishes"
 
 echo "deploy-scripts-test: PASS"

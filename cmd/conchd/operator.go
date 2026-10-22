@@ -123,6 +123,9 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 	if err := schema.ValidateDisplayName("operator name", name, schema.MaxPrincipalNameLength); err != nil {
 		return err
 	}
+	if err := refuseUnfinishedRestore("operator bootstrap", *dataDir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(*dataDir, 0o750); err != nil { // #nosec G301,G703 -- trusted operator path
 		return fmt.Errorf("operator bootstrap: create data dir: %w", err)
 	}
@@ -193,6 +196,13 @@ func runOperatorSetup(cmd string, args []string, stdout, stderr io.Writer) error
 	id, err := strconv.ParseInt(positional[0], 10, 64)
 	if err != nil || id <= 0 {
 		return fmt.Errorf("%s: %q is not a principal id", label, positional[0])
+	}
+	// A setup token made before conchd restore has finished would be
+	// deleted by it (issue #716).
+	if *dataDir != "" {
+		if err := refuseUnfinishedRestore(label, *dataDir); err != nil {
+			return err
+		}
 	}
 	ctx := context.Background()
 	st, err := openExisting(ctx, label, *dataDir)
