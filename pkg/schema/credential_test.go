@@ -19,6 +19,10 @@ func TestCredentialGoldenFixtures(t *testing.T) {
 		{"credential-v1.json", func() any { return new(CredentialV1) }},
 		{"credential-v1-revoked.json", func() any { return new(CredentialV1) }},
 		{"credential-v1-renews.json", func() any { return new(CredentialV1) }},
+		// An idle bound and the setup scope (ADR-009, issue #704).
+		{"credential-v1-idle.json", func() any { return new(CredentialV1) }},
+		{"credential-v1-setup.json", func() any { return new(CredentialV1) }},
+		{"own-credential-v1-idle.json", func() any { return new(OwnCredentialV1) }},
 		{"create-credential-request-v1.json", func() any { return new(CreateCredentialRequestV1) }},
 		{"create-credential-request-v1-renews.json", func() any { return new(CreateCredentialRequestV1) }},
 		{"create-credential-response-v1.json", func() any { return new(CreateCredentialResponseV1) }},

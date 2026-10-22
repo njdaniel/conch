@@ -1,0 +1,9 @@
+{
+  "scope": "full",
+  "password_set": true,
+  "totp_enrolled": true,
+  "setup_complete": true,
+  "expires_at": "2026-10-22T00:00:00.000Z",
+  "idle_expires_at": "2026-10-21T13:00:00.000Z",
+  "recent_auth_until": "2026-10-21T12:10:00.000Z"
+}

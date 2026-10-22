@@ -1,0 +1,13 @@
+{
+  "principal_id": 12,
+  "created_at": "2026-10-21T12:00:00.000Z",
+  "name": "guest-a7k4m2q9x3h5t8wz",
+  "kind": "human",
+  "can_decide": false,
+  "history_after": 4120,
+  "guest": {
+    "handle": "guest-a7k4m2q9x3h5t8wz",
+    "label": "Pat",
+    "tag": "a7k4"
+  }
+}

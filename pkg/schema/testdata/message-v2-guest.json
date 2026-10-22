@@ -1,0 +1,13 @@
+{
+  "schema": "conch.message.v2",
+  "id": 4121,
+  "channel_id": 3,
+  "author_id": 12,
+  "created_at": "2026-10-21T12:01:00.000Z",
+  "body": "hello from a visit",
+  "guest_author": {
+    "handle": "guest-a7k4m2q9x3h5t8wz",
+    "label": "Pat",
+    "tag": "a7k4"
+  }
+}

@@ -16,6 +16,8 @@ func TestChannelMemberGoldenFixtures(t *testing.T) {
 		{"channel-member-v1-named.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-no-adder.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-can-decide.json", func() any { return new(ChannelMemberV1) }},
+		// A guest member: its history bound and attribution (issue #704).
+		{"channel-member-v1-guest.json", func() any { return new(ChannelMemberV1) }},
 		{"put-channel-member-request-v1.json", func() any { return new(PutChannelMemberRequestV1) }},
 		{"list-channel-members-response-v1.json", func() any { return new(ListChannelMembersResponseV1) }},
 		{"list-channel-members-response-v1-empty.json", func() any { return new(ListChannelMembersResponseV1) }},
@@ -38,7 +40,7 @@ func TestListChannelMembersEmptyIsArray(t *testing.T) {
 }
 
 func TestChannelMembersGoldenFixtures(t *testing.T) {
-	for _, file := range []string{"channel-members-v1.json", "channel-members-v1-empty.json"} {
+	for _, file := range []string{"channel-members-v1.json", "channel-members-v1-empty.json", "channel-members-v1-guest.json"} {
 		t.Run(file, func(t *testing.T) {
 			assertP3GoldenFixture(t, file, func() any { return new(ChannelMembersV1) })
 		})
@@ -88,6 +90,25 @@ func TestChannelMembersV1Validate(t *testing.T) {
 		{name: "blank name", mutate: func(d *ChannelMembersV1) { d.Members[0].Name = " " }, wantErr: "channel member 2 name is required"},
 		{name: "no kind", mutate: func(d *ChannelMembersV1) { d.Members[1].Kind = "" }, wantErr: `channel member 3 kind "" is not one of human, agent`},
 		{name: "agent with can_decide", mutate: func(d *ChannelMembersV1) { d.Members[1].CanDecide = &no }, wantErr: "channel member 3 is an agent and must not carry can_decide"},
+
+		// A guest member (ADR-009, issue #704): a history bound, an
+		// attribution that is its own, and never the right to decide.
+		{name: "valid guest", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Name, d.Members[0].CanDecide, d.Members[0].HistoryAfter = goodHandle, &no, 4120
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}},
+		{name: "valid history bound on a member", mutate: func(d *ChannelMembersV1) { d.Members[0].HistoryAfter = 4120 }},
+		{name: "negative history bound", mutate: func(d *ChannelMembersV1) { d.Members[0].HistoryAfter = -1 }, wantErr: "channel member 2 history_after must not be negative"},
+		{name: "guest who may decide", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Tag: "a7k4"}
+		}, wantErr: "channel member 2 is a guest and cannot carry can_decide true"},
+		{name: "guest with a wrong tag", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].CanDecide = &no
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Tag: "zx9w"}
+		}, wantErr: "channel member 2: schema: guest attribution tag must be the handle's tag"},
+		{name: "agent as a guest", mutate: func(d *ChannelMembersV1) {
+			d.Members[1].Guest = &GuestAttributionV1{Handle: goodHandle, Tag: "a7k4"}
+		}, wantErr: "channel member 3 is not human and must not carry guest"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
