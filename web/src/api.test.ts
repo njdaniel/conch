@@ -677,7 +677,7 @@ describe('answers that are a status alone', () => {
     await signedInFrom(window.localStorage, memberToken);
     const answer = noContent();
     const calls = serve(() => answer.res);
-    endSession(5);
+    void endSession(5);
     await vi.waitFor(() => {
       expect(answer.reads()).toBe(1);
     });
