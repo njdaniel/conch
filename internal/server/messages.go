@@ -128,15 +128,22 @@ func (s *Server) postMessage(
 	}
 	s.metrics.messagePosted(author.Kind)
 	messageV1 := messageV1FromStore(stored)
+	messageV2 := messageV2FromStore(stored)
 	// Persist-then-broadcast: the message is durable before anyone hears
-	// about it, so a crash here loses delivery, never data.
-	s.hub.BroadcastMessageV1(ctx, messageV1)
+	// about it, so a crash here loses delivery, never data. A guest's post
+	// carries its attribution (issue #705), which v1 cannot: v2 sockets get
+	// the v2 envelope itself, as for a reply.
+	if stored.GuestAuthor != nil {
+		s.hub.BroadcastReply(ctx, messageV1, messageV2)
+	} else {
+		s.hub.BroadcastMessageV1(ctx, messageV1)
+	}
 	messageV0 := messageV0FromStore(stored)
 	s.hub.BroadcastMessage(ctx, messageV0)
 	s.broadcaster.BroadcastMessage(ctx, messageV0)
 	switch version {
 	case apiV2:
-		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2FromV1(messageV1)})
+		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: messageV2})
 	case apiV1:
 		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV1{Message: messageV1})
 	default:
@@ -393,6 +400,10 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		m.Audience = &a
 	}
 	m.ThreadRootID = message.ThreadRootID
+	if message.GuestAuthor != nil {
+		a := *message.GuestAuthor
+		m.GuestAuthor = &a
+	}
 	return m
 }
 
@@ -452,8 +463,16 @@ func (s *Server) handlePostMessageV2(w http.ResponseWriter, r *http.Request) {
 		// A scoped post needs a verified author, and with authentication off
 		// the author is whatever the body says. Refuse before anything else
 		// so nothing about the channel or the audience is looked at.
-		if _, ok := callerFrom(r.Context()); !ok {
+		caller, ok := callerFrom(r.Context())
+		if !ok {
 			writeError(w, http.StatusBadRequest, "audience_requires_auth", "a message with an audience requires authentication")
+			return
+		}
+		// A guest does not start private conversations (issue #706, design
+		// §4.3): a whisper is refused before the channel or the audience is
+		// looked at. A net it was put on by an operator is not one it creates.
+		if caller.IsGuest() && req.Audience.Kind == schema.AudienceKindPrincipals {
+			s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot whisper")
 			return
 		}
 		if err := req.Audience.Validate(); err != nil {

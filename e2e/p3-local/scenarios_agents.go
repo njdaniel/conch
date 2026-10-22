@@ -779,7 +779,7 @@ func (s *suite) interventionsOf(run int64) ([]schema.InterventionV1, error) {
 }
 
 // privateRunIsOffLimits has worker-test answer a message in test-private, and
-// checks that guest-test, who is not in the channel, cannot
+// checks that jamie-test, who is not in the channel, cannot
 // intervene in the run or even see it.
 func (s *suite) privateRunIsOffLimits() error {
 	a, err := s.launchAgent(agentSpec{part: partWorker, script: "slow.sh", channel: chPrivate, env: []string{"FIXTURE_SLEEP=60"}})

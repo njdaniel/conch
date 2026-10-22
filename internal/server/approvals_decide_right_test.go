@@ -39,7 +39,7 @@ func TestOnlyMembersWithTheRightDecideFullChain(t *testing.T) {
 	// guest is a member of "general" without the right, as someone who
 	// joined through an invite will be; alice holds it, as every member the
 	// operator adds does.
-	guest, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "guest")
+	guest, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "invitee")
 	if err != nil {
 		t.Fatal(err)
 	}

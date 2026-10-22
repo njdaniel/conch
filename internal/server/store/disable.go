@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // ErrLastOperator is returned when an action would leave the instance with no
@@ -15,18 +17,32 @@ import (
 // authentication off or by editing the database.
 var ErrLastOperator = errors.New("store: this would leave no operator able to sign in")
 
-// liveOperatorCredentialsTx counts the live credentials held by enabled
-// operators, leaving out one principal and one credential (pass 0 to leave
-// nothing out). It is what the lock-out guards ask: "if this principal, or
-// this credential, went away, could an operator still sign in?"
-func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID int64, now time.Time) (int, error) {
+// liveOperatorCredentialsTx counts the ways an operator could still sign
+// in: the live credentials held by enabled operators, leaving out one
+// principal's and one credential (pass 0 to leave nothing out), and the
+// enabled, unhidden human operators who hold both factors, a password and a
+// confirmed TOTP, and so can sign in with them (issue #709), leaving out
+// factorsExceptPrincipalID's. Live includes current (currentAuthSQL, issue
+// #707): a credential from an old authentication generation signs nobody
+// in. It is what the lock-out guards ask: "if this principal, or this
+// credential, went away, could an operator still sign in?" A caller that
+// ends a principal (a disable) leaves its factors out; one that ends only
+// credentials (a revoke, a sign-out everywhere) keeps them, since a
+// password and a code still sign that operator in afterwards.
+func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID int64, now time.Time) (int, error) {
 	var n int
 	err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
-		 WHERE p.role = 'operator' AND p.disabled_at IS NULL
-		   AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
-		   AND p.id <> ? AND c.id <> ?`,
-		now.UnixMilli(), exceptPrincipalID, exceptCredentialID,
+		`SELECT (SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
+		         WHERE p.role = 'operator' AND p.disabled_at IS NULL
+		           AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
+		           AND `+currentAuthSQL+`
+		           AND p.id <> ? AND c.id <> ?)
+		      + (SELECT COUNT(*) FROM principals p
+		         WHERE p.role = 'operator' AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+		           AND p.id <> ?
+		           AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
+		           AND EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL))`,
+		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count live operator credentials: %w", err)
@@ -43,14 +59,22 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 // must hold the write lock (withImmediateTx) so the set it reads is the set it
 // revokes.
 func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason, sessionCause string, now time.Time, ended *[]EndedRun) (int, error) {
+	return revokeCredentialsExceptTx(ctx, tx, actor, principalID, 0, reason, sessionCause, now, ended)
+}
+
+// revokeCredentialsExceptTx is revokePrincipalCredentialsTx leaving out one
+// credential, except (0 leaves out none): a password change or an
+// operator's recovery revokes every credential but the one the request came
+// with (issue #708).
+func revokeCredentialsExceptTx(ctx context.Context, tx execer, actor string, principalID, except int64, reason, sessionCause string, now time.Time, ended *[]EndedRun) (int, error) {
 	type live struct {
 		id    int64
 		label string
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, label FROM credentials
-		 WHERE principal_id = ? AND revoked_at IS NULL ORDER BY id`,
-		principalID)
+		 WHERE principal_id = ? AND revoked_at IS NULL AND id <> ? ORDER BY id`,
+		principalID, except)
 	if err != nil {
 		return 0, fmt.Errorf("store: list live credentials: %w", err)
 	}
@@ -112,7 +136,9 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // principal_disabled plus one credential_revoked per credential, one
 // invite_closed (reason=creator_disabled) per invite and one
 // sign_in_link_closed per link (all attributed to actor, none containing
-// token material). A disabled
+// token material). It also moves the authentication generation on
+// (bumpAuthGenerationTx, audited auth_generation_bumped), which ends the
+// principal's pending logins and recent-password proofs. A disabled
 // principal cannot authenticate and cannot be issued credentials.
 //
 // It is idempotent: disabling an already-disabled principal changes nothing,
@@ -123,16 +149,22 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // disables of the last two operators serialize and exactly one succeeds.
 func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
 	var runs []EndedRun
+	var guests []EndedGuest
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		now := credentialNow().Truncate(time.Millisecond)
-		changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs)
-		return err
+		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs); err != nil {
+			return err
+		}
+		// Disabling a guest ends its visit for good (issue #705): enabling
+		// it later revives nothing.
+		return endIfGuestTx(ctx, tx, actor, principalID, schema.GuestEndOperator, now, &runs, &guests)
 	})
 	if err != nil {
 		return false, err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return changed, nil
 }
 
@@ -151,7 +183,7 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if role == RoleOperator {
 		// Another enabled operator is not enough: it must also hold a live
 		// credential, or nobody could sign in to undo this.
-		others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+		others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, principalID, now)
 		if err != nil {
 			return false, err
 		}
@@ -189,6 +221,12 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	}
 	// Likewise the sign-in links for them or made by them (issue #493).
 	if err := closeSignInLinksTx(ctx, tx, actor, principalID, now); err != nil {
+		return false, err
+	}
+	// And whatever else was issued under their present authentication
+	// (issue #708): pending logins and recent-password proofs. Last, so the
+	// links above are closed for the disable, not for the bump.
+	if _, err := bumpAuthGenerationTx(ctx, tx, actor, principalID, "principal_disabled", now); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -240,22 +278,29 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // one transaction and returns how many it revoked. The principal stays
 // enabled. It writes one credential_revoked event per credential
 // (reason=revoke-all) and always one credentials_revoked_all event recording
-// the operator's action and the count, even when the count is zero. It
+// the operator's action and the count, even when the count is zero. It moves
+// the authentication generation on too (issue #708), closing the
+// principal's open links and ending its pending logins and recent-password
+// proofs, audited auth_generation_bumped and sign_in_link_closed. It
 // returns ErrPrincipalNotFound for an unknown id, and ErrLastOperator, writing
 // nothing, when the target is an enabled operator and no other enabled
-// operator holds a live credential.
+// operator holds a live credential, and no operator, the target included,
+// holds a password and a confirmed TOTP.
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
 	var n int
 	var runs []EndedRun
+	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		runs = nil
+		runs, guests = nil, nil
 		role, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
 			return err
 		}
 		now := credentialNow().Truncate(time.Millisecond)
 		if role == RoleOperator && !disabled {
-			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, now)
+			// The operator's own password and code survive a sign-out
+			// everywhere, so they count (issue #709).
+			others, err := liveOperatorCredentialsTx(ctx, tx, principalID, 0, 0, now)
 			if err != nil {
 				return err
 			}
@@ -266,11 +311,26 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now, &runs); err != nil {
 			return err
 		}
-		return appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now)
+		if err := appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now); err != nil {
+			return err
+		}
+		// Signing out everywhere ends more than credentials (issue #708):
+		// open links, pending logins and recent-password proofs too.
+		if _, err := bumpAuthGenerationTx(ctx, tx, actor, principalID, "revoke_all", now); err != nil {
+			return err
+		}
+		// For a guest, signing out everywhere is End visit (design B4); an
+		// operator's revoke-all ends it too.
+		end := schema.GuestEndOperator
+		if actor == principalActor(principalID) {
+			end = schema.GuestEndVisit
+		}
+		return endIfGuestTx(ctx, tx, actor, principalID, end, now, &runs, &guests)
 	})
 	if err != nil {
 		return 0, err
 	}
 	s.announceRunsEnded(runs)
+	s.announceGuestsEnded(guests)
 	return n, nil
 }

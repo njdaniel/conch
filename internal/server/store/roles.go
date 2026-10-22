@@ -23,14 +23,22 @@ type BootstrapOptions struct {
 	// webhook hooks that exist before the operator does. By default every
 	// live credential is revoked and every hook is deleted.
 	KeepExistingCredentials bool
+	// Setup makes the operator a setup token (issue #709) in place of a
+	// credential: the operator then sets a password and enrols TOTP through
+	// the restricted setup flow, and signs in with both. No script
+	// credential exists until the operator makes one.
+	Setup bool
 }
 
 // BootstrapResult is what a successful bootstrap created.
 type BootstrapResult struct {
 	Principal  Principal
 	Credential schema.CredentialV1
-	// Token is the operator's plaintext token, shown once; only its hash is stored.
-	Token string
+	// Token is the operator's plaintext token, shown once; only its hash is
+	// stored. Empty with BootstrapOptions.Setup, which makes SetupToken
+	// instead.
+	Token      string
+	SetupToken SetupToken
 	// Revoked is the number of pre-existing live credentials revoked.
 	Revoked int
 	// RevokedHooks is the number of pre-existing webhook hooks deleted.
@@ -70,7 +78,9 @@ func (s *Store) BootstrapOperator(ctx context.Context, name string) (Principal, 
 // the token). Agent manifests are only counted. The operator's own credential
 // is created after, so it is never revoked. On success principal_created
 // (issue #445), operator_bootstrapped and the usual credential_created event
-// are appended in the same transaction; none carries a token.
+// are appended in the same transaction; none carries a token. With
+// opts.Setup the operator gets a setup token instead of the credential
+// (setup_token_issued in place of credential_created).
 func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts BootstrapOptions) (BootstrapResult, error) {
 	token, err := newCredentialToken()
 	if err != nil {
@@ -117,13 +127,19 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_manifests").Scan(&res.Manifests); err != nil {
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
-		if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
-			return err
+		if !opts.Setup {
+			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
+				return err
+			}
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", AuditPrincipalCreated, principalActor(id), "kind=human", now); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, "system", "operator_bootstrapped", principalActor(id), "", now); err != nil {
+			return err
+		}
+		if opts.Setup {
+			res.SetupToken, err = issueSetupTokenTx(ctx, tx, id, "bootstrap", now)
 			return err
 		}
 		return appendAuditEventTx(ctx, tx, "system", "credential_created",
@@ -133,7 +149,9 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		return BootstrapResult{}, err
 	}
 	s.announceRunsEnded(runs)
-	res.Token = token
+	if !opts.Setup {
+		res.Token = token
+	}
 	return res, nil
 }
 
