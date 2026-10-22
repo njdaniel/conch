@@ -567,6 +567,30 @@ func matrixRows() []row {
 		{route: "DELETE /v1/sign-in-links/mine/{id}", what: "closes an A member's sign-in link as a device link of her own", pick: aSignInLink,
 			want:  answer{http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound},
 			probe: func(_ *world, s subject) probe { return del("/v1/sign-in-links/mine/" + id(s.id)) }},
+		// Operator sign-in and setup (issue #709). A challenge is bound to
+		// the operator and the address it was issued to, and a setup token is
+		// made on the host and printed there: B holds neither of A's, and a
+		// made-up one answers the one auth_failed or setup_token_invalid,
+		// naming nobody. The TOTP enrolment is for a setup-scoped credential,
+		// which B's are not: setup_on_host, whatever she sends.
+		{route: "POST /v1/login/totp", what: "completes an operator's sign-in with a challenge nobody gave her",
+			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
+			probe: func(*world, subject) probe {
+				return post("/v1/login/totp", schema.TOTPLoginRequestV1{Challenge: schema.PendingLoginPrefix + strings.Repeat("A", 43), Code: "123456"})
+			}},
+		{route: "POST /v1/setup/redeem", what: "redeems an operator's setup token nobody gave her",
+			want: answer{http.StatusNotFound, schema.ErrorCodeSetupTokenInvalid},
+			probe: func(*world, subject) probe {
+				return post("/v1/setup/redeem", schema.RedeemSetupTokenRequestV1{Token: schema.SetupTokenPrefix + strings.Repeat("A", 43)})
+			}},
+		{route: "POST /v1/totp/enroll", what: "enrols a second factor on her own credential",
+			want:  answer{http.StatusForbidden, schema.ErrorCodeSetupOnHost},
+			probe: func(*world, subject) probe { return post("/v1/totp/enroll", nil) }},
+		{route: "POST /v1/totp/confirm", what: "confirms a second factor on her own credential",
+			want: answer{http.StatusForbidden, schema.ErrorCodeSetupOnHost},
+			probe: func(*world, subject) probe {
+				return post("/v1/totp/confirm", schema.ConfirmTOTPRequestV1{Code: "123456"})
+			}},
 	}
 }
 

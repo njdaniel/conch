@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, earlierGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { FakeClock, settle } from './fakes';
 
@@ -46,7 +46,11 @@ class StubRoom implements Room {
   };
   setDeafened = (on: boolean): void => {
     this.deafened.push(on);
+    this.deafenedWhen.push(this.connectArgs !== null);
   };
+  // Issue #683: for each deafen handed to the room, whether it was connected
+  // by then.
+  deafenedWhen: boolean[] = [];
   // Issue #661: each volume handed to the room, and whether the room was
   // connected by then.
   volumes: { readonly principal: number; readonly volume: number; readonly connected: boolean }[] = [];
@@ -1453,9 +1457,10 @@ describe('a microphone chosen while connecting', () => {
   const webcam: Microphone = { id: 'mic-2', label: 'Webcam' };
 
   // A client whose first connection waits for the test, as a slow one does.
-  function slow() {
+  function slow(remembered?: Microphone) {
     let connected = (): void => undefined;
-    const t = setup([okSession()], [], 0, false, (r) => {
+    const t = setup([okSession(), okSession()], [], 0, false, (r, i) => {
+      if (i > 0) return;
       const connect = r.connect;
       r.connect = (...args) =>
         new Promise<void>((resolve) => {
@@ -1463,7 +1468,7 @@ describe('a microphone chosen while connecting', () => {
             resolve(connect(...args));
           };
         });
-    });
+    }, remembered);
     return {
       t,
       connect: () => {
@@ -1501,6 +1506,39 @@ describe('a microphone chosen while connecting', () => {
     await settle();
     expect(t.rooms[0]?.switches).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', microphone: null, inUse: 'default' });
+  });
+
+  it.each([
+    ['the system default', undefined],
+    ['a remembered device', { id: 'unplugged', label: 'Old headset' }],
+  ])('keeps the newer choice when %s, which the room was given, is gone', async (_name, given) => {
+    const { t, connect } = slow(given);
+    t.client.join('general');
+    await settle();
+    const r = t.rooms[0];
+    if (r === undefined) throw new Error('no room');
+    await t.client.chooseMicrophone(webcam);
+    r.connectFailure = deviceError('NotFoundError');
+    connect();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: earlierGone, microphone: webcam });
+    expect(t.clock.pending).toBe(0);
+    // The next Join voice captures the newer choice.
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[1]?.choices).toEqual(['mic-2']);
+  });
+
+  it('lets the device go when it is the one given and still the choice', async () => {
+    const { t, connect } = slow({ id: 'unplugged', label: 'Old headset' });
+    t.client.join('general');
+    await settle();
+    const r = t.rooms[0];
+    if (r === undefined) throw new Error('no room');
+    r.connectFailure = deviceError('NotFoundError');
+    connect();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: chosenGone, microphone: null });
   });
 });
 
@@ -1695,5 +1733,39 @@ describe('the volume of each person', () => {
     t.client.setDeafened(false);
     expect(t.rooms[0]?.volumes).toHaveLength(1);
     expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0.4]]));
+  });
+});
+
+// Issue #683: a deafened page deafens each new room before it connects, so a
+// microphone attached while the room is connecting is muted from the first.
+describe('deafen on a new room', () => {
+  it('is handed to the room before it connects: the first room, a reconnect, a renewed room, and Leave then Join', async () => {
+    const t = setup();
+    t.client.setDeafened(true);
+    t.client.join('general');
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('lost');
+    t.clock.advance(1000);
+    await settle();
+    t.rooms[1]?.events?.onDisconnected('room_deleted');
+    await settle();
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(t.rooms).toHaveLength(4);
+    for (const room of t.rooms) {
+      expect(room.deafened[0]).toBe(true);
+      expect(room.deafenedWhen[0]).toBe(false);
+    }
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('undeafen still reaches the connected room', async () => {
+    const t = setup();
+    t.client.setDeafened(true);
+    t.client.join('general');
+    await settle();
+    t.client.setDeafened(false);
+    expect(t.rooms[0]?.deafened.at(-1)).toBe(false);
   });
 });

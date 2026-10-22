@@ -50,6 +50,18 @@ func (s *Store) ReadMarksFor(ctx context.Context, principalID int64) (map[int64]
 	return marks, nil
 }
 
+// deleteReadMarksTx removes every read mark of principalID, in the caller's
+// transaction. Ending a guest visit does it (issue #719, design §4.3): the
+// visit's cursors go with its memberships, and nothing of where it had read
+// to outlives it. A member's marks are never removed this way: a member's
+// mark outlives a membership on purpose (ReadMarksFor).
+func deleteReadMarksTx(ctx context.Context, tx execer, principalID int64) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM read_marks WHERE principal_id = ?", principalID); err != nil {
+		return fmt.Errorf("store: remove read marks of principal %d: %w", principalID, err)
+	}
+	return nil
+}
+
 // MarkRead moves the reader's mark in channelID forward to lastReadID and
 // returns the mark as stored. The caller has checked that the reader is a
 // member of the channel.
