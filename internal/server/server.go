@@ -214,6 +214,10 @@ type Server struct {
 	// so a test can land a disable or a password change in that gap. Nil in
 	// conchd.
 	beforeLoginIssue func()
+	// beforePasswordWrite is the same seam for the password routes
+	// (password_recovery.go): it runs after a password was verified or
+	// hashed and before the transaction that writes. Nil in conchd.
+	beforePasswordWrite func()
 }
 
 // New builds a Server for cfg backed by st. It does not bind a socket; call

@@ -129,9 +129,13 @@ func aApproval(w *world) subject     { return subject{kind: "approval", id: w.a.
 func aOpenLink(w *world) subject     { return subject{kind: "invite", id: w.a.openInviteID} }
 func aPersonal(w *world) subject     { return subject{kind: "invite", id: w.a.invites[1]} }
 func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: w.a.signInLink} }
-func aReport(w *world) subject       { return subject{kind: "report", id: w.a.reportID} }
-func aMemberName(w *world) subject   { return subject{kind: "principal", name: w.a.people[0].name} }
-func aWord(w *world) subject         { return subject{name: w.aName("word-root")} }
+
+// aSignInCode is the code of A's sign-in link, by name: the password rows
+// present it, and the ghost's name is a code nobody was given.
+func aSignInCode(w *world) subject { return subject{kind: "sign_in_link", name: w.a.signInCode} }
+func aReport(w *world) subject     { return subject{kind: "report", id: w.a.reportID} }
+func aMemberName(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} }
+func aWord(w *world) subject       { return subject{name: w.aName("word-root")} }
 
 // ghost is the subject of the comparison request: nothing by that name or id
 // was ever made.
@@ -203,6 +207,32 @@ func matrixRows() []row {
 			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/login", schema.LoginRequestV1{Name: s.name, Password: "a password of the prober's own"})
+			}},
+		// Passwords (issue #708). B presents the operator's sign-in link for
+		// an A member as her own enrollment proof, and as a reset: a link is
+		// for one person and one purpose, and either way the answer is the one
+		// sign_in_link_invalid, the same bytes as for a code nobody was given.
+		// The change and the re-authentication name nothing of A's: B has no password, and
+		// is told so.
+		{route: "POST /v1/password/mine", what: "sets her first password with an A member's sign-in link as the proof", pick: aSignInCode,
+			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: "a long password of the prober's own", Proof: s.name})
+			}},
+		{route: "POST /v1/password/reset", what: "resets an A member's password with A's sign-in link", pick: aSignInCode,
+			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/password/reset", schema.ResetPasswordRequestV1{Code: s.name, Password: "a long password of the prober's own"})
+			}},
+		{route: "PUT /v1/password/mine", what: "changes a password she does not have",
+			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			probe: func(*world, subject) probe {
+				return put("/v1/password/mine", schema.ChangePasswordRequestV1{Current: "a guess at somebody's password", Password: "a long password of the prober's own"})
+			}},
+		{route: "POST /v1/reauth", what: "proves a password she does not have",
+			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			probe: func(*world, subject) probe {
+				return post("/v1/reauth", schema.ReauthRequestV1{Password: "a guess at somebody's password"})
 			}},
 
 		// Messages, every version, search and threads.

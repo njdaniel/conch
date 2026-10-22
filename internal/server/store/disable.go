@@ -47,14 +47,22 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 // must hold the write lock (withImmediateTx) so the set it reads is the set it
 // revokes.
 func revokePrincipalCredentialsTx(ctx context.Context, tx execer, actor string, principalID int64, reason, sessionCause string, now time.Time, ended *[]EndedRun) (int, error) {
+	return revokeCredentialsExceptTx(ctx, tx, actor, principalID, 0, reason, sessionCause, now, ended)
+}
+
+// revokeCredentialsExceptTx is revokePrincipalCredentialsTx leaving out one
+// credential, except (0 leaves out none): a password change or an
+// operator's recovery revokes every credential but the one the request came
+// with (issue #708).
+func revokeCredentialsExceptTx(ctx context.Context, tx execer, actor string, principalID, except int64, reason, sessionCause string, now time.Time, ended *[]EndedRun) (int, error) {
 	type live struct {
 		id    int64
 		label string
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, label FROM credentials
-		 WHERE principal_id = ? AND revoked_at IS NULL ORDER BY id`,
-		principalID)
+		 WHERE principal_id = ? AND revoked_at IS NULL AND id <> ? ORDER BY id`,
+		principalID, except)
 	if err != nil {
 		return 0, fmt.Errorf("store: list live credentials: %w", err)
 	}
@@ -116,7 +124,9 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // principal_disabled plus one credential_revoked per credential, one
 // invite_closed (reason=creator_disabled) per invite and one
 // sign_in_link_closed per link (all attributed to actor, none containing
-// token material). A disabled
+// token material). It also moves the authentication generation on
+// (bumpAuthGenerationTx, audited auth_generation_bumped), which ends the
+// principal's pending logins and recent-password proofs. A disabled
 // principal cannot authenticate and cannot be issued credentials.
 //
 // It is idempotent: disabling an already-disabled principal changes nothing,
@@ -201,6 +211,12 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if err := closeSignInLinksTx(ctx, tx, actor, principalID, now); err != nil {
 		return false, err
 	}
+	// And whatever else was issued under their present authentication
+	// (issue #708): pending logins and recent-password proofs. Last, so the
+	// links above are closed for the disable, not for the bump.
+	if _, err := bumpAuthGenerationTx(ctx, tx, actor, principalID, "principal_disabled", now); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -250,7 +266,10 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // one transaction and returns how many it revoked. The principal stays
 // enabled. It writes one credential_revoked event per credential
 // (reason=revoke-all) and always one credentials_revoked_all event recording
-// the operator's action and the count, even when the count is zero. It
+// the operator's action and the count, even when the count is zero. It moves
+// the authentication generation on too (issue #708), closing the
+// principal's open links and ending its pending logins and recent-password
+// proofs, audited auth_generation_bumped and sign_in_link_closed. It
 // returns ErrPrincipalNotFound for an unknown id, and ErrLastOperator, writing
 // nothing, when the target is an enabled operator and no other enabled
 // operator holds a live credential.
@@ -278,6 +297,11 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now); err != nil {
+			return err
+		}
+		// Signing out everywhere ends more than credentials (issue #708):
+		// open links, pending logins and recent-password proofs too.
+		if _, err := bumpAuthGenerationTx(ctx, tx, actor, principalID, "revoke_all", now); err != nil {
 			return err
 		}
 		// For a guest, signing out everywhere is End visit (design B4); an

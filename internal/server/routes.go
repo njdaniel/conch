@@ -165,6 +165,16 @@ func (s *Server) routeTable() []route {
 		// member's right password answers a credential, an operator's only a
 		// challenge for the second factor. See login.go.
 		rt("POST /v1/login", accessExempt, hf(s.handleLogin)),
+		// Passwords (issue #708): a member's first password with an
+		// operator's enrollment link, a change with the current one, and the
+		// recent-password proof, for any authenticated person (the handler
+		// refuses agents and guests); a reset with an operator's reset link,
+		// exempt, as the other code routes are. All over HTTPS or loopback
+		// only. See password_recovery.go.
+		rt("POST /v1/password/mine", accessAuthenticated, hf(s.handleSetPassword)),
+		rt("PUT /v1/password/mine", accessAuthenticated, hf(s.handleChangePassword)),
+		rt("POST /v1/password/reset", accessExempt, hf(s.handleResetPassword)),
+		rt("POST /v1/reauth", accessAuthenticated, hf(s.handleReauth)),
 		// Operator administration of invites (issue #438): who joined through
 		// an invite, disabling them or everyone a person invited, the right to
 		// invite, and the pause switch. Operators only; GET /v1/invites and
