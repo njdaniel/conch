@@ -304,14 +304,16 @@ test.describe('screen share with LiveKit', () => {
       // while someone else shares, rather than refused when pressed).
       const cShare = voiceRegion(c.page).getByRole('button', { name: 'Share screen' });
       await expect(cShare).toBeDisabled();
-      await expect(cShare).toHaveAccessibleDescription('alice is sharing a screen, with sound. One person shares at a time.');
+      await expect(cShare).toHaveAccessibleDescription('alice is sharing a screen, with sound. Watch to see it. One person shares at a time.');
 
-      // A stops; B's view closes, and B is told.
+      // A stops; B's view closes, and B is told. A's own note is gone within
+      // a few seconds (issue #642, N03).
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
       await expect(voiceRegion(b.page)).toContainText('alice stopped sharing.');
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
+      await expect(voiceRegion(a.page)).not.toContainText('You stopped sharing.', { timeout: 8000 });
       await expect.poll(async () => (await shareRows()).slice(before).map((r) => r.action), { timeout: 15_000 }).toEqual(['voice_share_started', 'voice_share_stopped']);
       expect((await shareRows()).at(-1)?.detail).toContain('reason=self');
 
@@ -391,10 +393,12 @@ test.describe('screen share with LiveKit', () => {
       await share(b);
       const alice = voiceRegion(a.page);
       const button = alice.getByRole('button', { name: 'Share screen' });
-      const said = 'bob is sharing a screen, with sound. One person shares at a time.';
+      const said = 'bob is sharing a screen, with sound. Watch to see it.';
       await expect(button).toBeDisabled();
-      await expect(button).toHaveAccessibleDescription(said);
+      await expect(button).toHaveAccessibleDescription(`${said} One person shares at a time.`);
       await expect(alice.getByText(said)).toBeVisible();
+      // The rule is read out, not drawn as a second line.
+      await expect(alice.locator('#voice-share-rule')).toHaveClass('vh');
 
       // Alice stops watching herself: nothing is said of bob's share.
       await watching(a, 'bob');
@@ -418,6 +422,19 @@ test.describe('screen share with LiveKit', () => {
       expect(Date.now() - stoppedAt, 'how long the note was up').toBeGreaterThan(4000);
       await expectClean(b, 1);
       await expectClean(a);
+
+      // The sharer's own note goes at once when another's share starts
+      // (issue #642, N03), not after its few seconds.
+      await share(b);
+      await voiceRegion(b.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(voiceRegion(b.page)).toContainText('You stopped sharing.');
+      await share(a);
+      await expect(voiceRegion(b.page)).not.toContainText('You stopped sharing.');
+      await expect(voiceRegion(b.page)).toContainText('alice is sharing a screen, with sound. Watch to see it.');
+      // Ended here, and its audit row waited for, so a test after this one
+      // counts only its own rows.
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
     } finally {
       for (const p of [a, b]) await p.close();
     }
