@@ -463,8 +463,16 @@ func (s *Server) handlePostMessageV2(w http.ResponseWriter, r *http.Request) {
 		// A scoped post needs a verified author, and with authentication off
 		// the author is whatever the body says. Refuse before anything else
 		// so nothing about the channel or the audience is looked at.
-		if _, ok := callerFrom(r.Context()); !ok {
+		caller, ok := callerFrom(r.Context())
+		if !ok {
 			writeError(w, http.StatusBadRequest, "audience_requires_auth", "a message with an audience requires authentication")
+			return
+		}
+		// A guest does not start private conversations (issue #706, design
+		// §4.3): a whisper is refused before the channel or the audience is
+		// looked at. A net it was put on by an operator is not one it creates.
+		if caller.IsGuest() && req.Audience.Kind == schema.AudienceKindPrincipals {
+			s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot whisper")
 			return
 		}
 		if err := req.Audience.Validate(); err != nil {

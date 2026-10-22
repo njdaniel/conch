@@ -1029,6 +1029,19 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 		if PrincipalKind(kind) != PrincipalHuman {
 			return fmt.Errorf("%w: only a person may invite", ErrInviteNotAllowed)
 		}
+		// A guest holds no durable right while it is a guest, not even one an
+		// operator grants (issue #706, design §4.3). Clearing is allowed: it
+		// grants nothing.
+		if may {
+			var guest int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM principals p WHERE p.id = ? AND `+activeGuestSQL, principalID).Scan(&guest); err != nil {
+				return fmt.Errorf("store: set may_invite: read guest state: %w", err)
+			}
+			if guest > 0 {
+				return ErrGuestNotAllowed
+			}
+		}
 		if cur == may {
 			return nil
 		}

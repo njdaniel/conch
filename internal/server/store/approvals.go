@@ -409,10 +409,14 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 		}
 		if members {
 			// A disabled principal holds no right, whatever their membership
-			// says: disabling is the answer to a compromised account.
+			// says: disabling is the answer to a compromised account. Nor does
+			// a guest, whatever its membership row says (issue #706, review
+			// F1): the guest flag is read here, inside the deciding
+			// transaction, so no membership written by any path can let a
+			// guest decide.
 			var can int
 			err := tx.QueryRowContext(ctx,
-				`SELECT m.can_decide AND p.disabled_at IS NULL FROM channel_members m
+				`SELECT m.can_decide AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
 				 JOIN principals p ON p.id = m.principal_id
 				 WHERE m.channel_id = ? AND m.principal_id = ?`,
 				a.ChannelID, principalID).Scan(&can)
@@ -442,13 +446,14 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 
 		// Quorum: concurring decisions select the same option
 		// (approval-object.md §1). For members, only the decisions of those
-		// who hold the right now, and are not disabled, count (issue #453).
+		// who hold the right now, are not disabled and are not guests, count
+		// (issues #453, #706).
 		count := "SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?"
 		args := []any{approvalID, optionID}
 		if members {
 			count = `SELECT COUNT(*) FROM approval_decisions d
 			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
-			 JOIN principals p ON p.id = d.principal_id AND p.disabled_at IS NULL
+			 JOIN principals p ON p.id = d.principal_id AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
 			 WHERE d.approval_id = ? AND d.option_id = ?`
 			args = []any{a.ChannelID, approvalID, optionID}
 		}
@@ -675,3 +680,8 @@ func (s *Store) ResolutionByApprovalID(ctx context.Context, approvalID int64) (s
 	}
 	return r, nil
 }
+
+// activeGuestSQL is true, over principals p, when p is a guest whose visit is
+// active (issue #706): a guest never decides an approval nor counts towards
+// its quorum, whatever its membership row says (design §4.3, review F1).
+const activeGuestSQL = `EXISTS (SELECT 1 FROM guest_visits gv WHERE gv.principal_id = p.id AND gv.state = 'active')`
