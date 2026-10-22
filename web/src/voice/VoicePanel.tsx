@@ -250,7 +250,11 @@ export function VoicePanel({
     );
   }
 
-  const roster = occupants(presence).sort((a, b) => a.principal - b.principal);
+  // Joined while the server reports voice down (the signalling cut while
+  // media runs on, issue #644): presence has nothing true to list, so the
+  // roster goes and the strip says so.
+  const cutOff = inVoice && presence !== null && !presence.available;
+  const roster = cutOff ? [] : occupants(presence).sort((a, b) => a.principal - b.principal);
   const speaking = state.speaking;
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
@@ -432,6 +436,7 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
             {state.outputNote === null ? null : (
               <p role="status" className="hint">
                 {state.outputNote}
@@ -629,6 +634,7 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 }
 
 // What the notes say while the microphone is missing.
+export const cutOffNote = 'Voice server unreachable. You may be cut off.';
 export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
 
 // The values of the microphone list: System default, a device by id, and

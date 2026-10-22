@@ -1240,3 +1240,37 @@ describe('the volume of each person', () => {
     expect(chip(voice, 'bob')?.querySelector('.tag')).toBeNull();
   });
 });
+
+// Issue #644: joined while the server says voice is down, the strip says the
+// call may drop and lists nobody; when it is back the note goes and the
+// roster returns. The connection itself is not touched.
+describe('the strip while joined and voice is unreachable', () => {
+  const one = (principal: number) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' });
+  const rooms = [{ participants: [one(7), one(3)] }];
+  const up: Snapshot = { kind: 'presence', presence: { ...presence, rooms } };
+  const down: Snapshot = { kind: 'presence', presence: { ...presence, available: false, rooms } };
+  const people: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+  const note = 'Voice server unreachable. You may be cut off.';
+  const roster = (voice: HTMLElement) => within(voice).queryByRole('list', { name: / in voice$/ });
+
+  it('shows the note and no roster, then the roster and no note when it is back', () => {
+    const state = inVoice('connected', 'c');
+    const { voice, redraw, calls } = panel(state, 'c', up, people);
+    expect(roster(voice)).not.toBeNull();
+    expect(voice.textContent).not.toContain(note);
+    redraw(state, down);
+    expect(within(voice).getByRole('status').textContent).toBe(note);
+    expect(roster(voice)).toBeNull();
+    expect(voice.textContent).toContain('Connected');
+    redraw(state, up);
+    expect(voice.textContent).not.toContain(note);
+    expect(roster(voice)).not.toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it('says nothing of it when not joined, where the old line stands', () => {
+    const { voice } = panel(initialVoice, 'c', down);
+    expect(voice.textContent).not.toContain(note);
+    expect(voice.textContent).toContain('Voice is unavailable right now; chat still works.');
+  });
+});

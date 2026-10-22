@@ -1187,8 +1187,11 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Connected', { timeout: 30_000 });
       vw.stopLiveKit();
       await expect(voice).not.toContainText('Connected in', { timeout: 60_000 });
+      // Presence reports voice down while this page is joined (issue #644).
+      await expect(voice).toContainText('Voice server unreachable. You may be cut off.', { timeout: 60_000 });
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
+      await expect(voice).not.toContainText('Voice server unreachable');
       await expectClean(a);
     } finally {
       await a.context.close();
