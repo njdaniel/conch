@@ -34,7 +34,7 @@ import type { Person } from '../useLiveChannel';
 import type { Phase, Processing } from './connection';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
-import { busyNote, endedNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote } from './share';
+import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
 import { ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
@@ -382,7 +382,7 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
-                <ShareButton voice={voice} othersShare={theirs !== null} />
+                <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />
                 {theirs !== null && !state.watching ? (
                   <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
                     <Glyph name="screen" />
@@ -848,7 +848,7 @@ function Options({ voice, open, sharable, about, others }: {
 // Stop sharing while a share is starting, live or resuming. One person shares
 // at a time: while someone else does, Share screen is off, and its
 // description, in the notes, says who shares (issue #591, F14).
-function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; readonly othersShare: boolean }) {
+function ShareButton({ voice, othersShare, watching }: { readonly voice: VoiceControl; readonly othersShare: boolean; readonly watching: boolean }) {
   const { state, client, features } = voice;
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
@@ -858,7 +858,7 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
         type="button"
         onClick={() => { client.startShare(); }}
         disabled={state.phase !== 'connected' || othersShare}
-        aria-describedby={othersShare ? 'voice-share-busy' : undefined}
+        aria-describedby={othersShare ? (watching ? 'voice-share-busy' : 'voice-share-busy voice-share-rule') : undefined}
       >
         <Glyph name="screen" />
         <span className="label">Share screen</span>
@@ -870,6 +870,27 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
       <Glyph name="screenStop" />
       <span className="label">Stop sharing</span>
     </button>
+  );
+}
+
+// StoppedNote is "You stopped sharing.", which the sharer knows already: it
+// goes after stoppedFor, and at once when anyone's share starts, and then
+// stays gone however long the other share lasts (issue #642, N03).
+function StoppedNote({ text, othersShare }: { readonly text: string; readonly othersShare: boolean }) {
+  const [gone, setGone] = useState(false);
+  if (othersShare && !gone) setGone(true);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setGone(true);
+    }, stoppedFor);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, []);
+  return gone ? null : (
+    <p role="status" className="hint">
+      {text}
+    </p>
   );
 }
 
@@ -934,12 +955,22 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
             <p key="refused" id="voice-share-busy" role="status" className="hint">
               {busyNote(others.name, others.audio)}
             </p>
-          ) : (
-            <p key="busy" id="voice-share-busy" className={watching ? 'hint watched' : 'hint'}>
+          ) : watching ? (
+            <p key="busy" id="voice-share-busy" className="hint watched">
               {busyNote(others.name, others.audio)}
             </p>
+          ) : (
+            <>
+              <p key="watch" id="voice-share-busy" className="hint">
+                {watchNote(others.name, others.audio)}
+              </p>
+              {/* The rule is Share screen's description, not a second visible line. */}
+              <span id="voice-share-rule" className="vh">{oneSharerNote}</span>
+            </>
           )}
-          {share.ended === null || share.ended === 'busy' ? null : (
+          {share.ended === null || share.ended === 'busy' ? null : share.ended === 'self' ? (
+            <StoppedNote key="self" text={endedNote(share.ended, holderName)} othersShare={others !== null} />
+          ) : (
             <p role="status" className="hint">
               {endedNote(share.ended, holderName)}
             </p>
