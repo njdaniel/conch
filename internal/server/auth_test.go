@@ -247,6 +247,9 @@ var routeExpectations = map[string]routeExpectation{
 	// whoami (special-cased below).
 	"GET /v1/credentials/mine":         {classAuth, "/v1/credentials/mine", "", 200},
 	"DELETE /v1/credentials/mine/{id}": {classAuth, "/v1/credentials/mine/9999", "", 404},
+	// End visit (issue #705): nobody in the fixture is a guest, so every
+	// caller is 403 not_a_guest; AuthOff is 403 accounts_require_auth.
+	"POST /v1/guest/end": {classAuth, "/v1/guest/end", "", 403},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
@@ -278,6 +281,17 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
 	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	// The v2 redeem and the sign-in take a password (issue #707), so they
+	// answer 403 before reading anything: https_required to this fixture's
+	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
+	"POST /v2/invites/redeem": {classExempt, "/v2/invites/redeem", `{}`, 403},
+	"POST /v1/login":          {classExempt, "/v1/login", `{}`, 403},
+	// The password routes (issue #708) take a password too: the same 403
+	// for every caller, before anything is read.
+	"POST /v1/password/mine":  {classAuth, "/v1/password/mine", `{}`, 403},
+	"PUT /v1/password/mine":   {classAuth, "/v1/password/mine", `{}`, 403},
+	"POST /v1/password/reset": {classExempt, "/v1/password/reset", `{}`, 403},
+	"POST /v1/reauth":         {classAuth, "/v1/reauth", `{}`, 403},
 	// Operator administration of invites (issue #438). Each names an invite
 	// or a principal that does not exist, or sets the pause switch to the
 	// value it has, so it changes and audits nothing. Like the routes above,
@@ -313,6 +327,14 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
 	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
 	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+	// Operator sign-in and setup (issue #709) take a code or a token, so
+	// every caller gets the 403 of the password routes before anything is
+	// read: https_required to this fixture's plain HTTP, and
+	// accounts_require_auth under AuthOff.
+	"POST /v1/login/totp":   {classExempt, "/v1/login/totp", `{}`, 403},
+	"POST /v1/setup/redeem": {classExempt, "/v1/setup/redeem", `{}`, 403},
+	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
+	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
 }
 
 // isFileRoute reports whether pattern is one of the file routes (issue #23),
@@ -390,8 +412,10 @@ func TestRouteTable(t *testing.T) {
 func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
-		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true,
-		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true}
+		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
+		"POST /v1/login": true, "POST /v1/password/reset": true,
+		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true,
+		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
 
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]
@@ -795,10 +819,15 @@ func TestWhoAmI(t *testing.T) {
 	}{
 		// An operator may always invite (issue #437); a member may not until
 		// granted the right, and an agent never. People hold voice unless an
-		// invite withheld it; an agent never does (issue #468).
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true)}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true)}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false)}},
+		// invite withheld it; an agent never does (issue #468). Each is
+		// classed (issue #705); a guest's case is in guests_test.go. People
+		// are told how they are authenticated (issue #708): neither has a
+		// password yet, so neither has finished setting up.
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

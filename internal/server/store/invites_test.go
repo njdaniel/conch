@@ -709,7 +709,7 @@ func TestOpenInviteUncappedAndCapped(t *testing.T) {
 	t.Run("uncapped redeems any number of times", func(t *testing.T) {
 		inv := f.mustCreate(f.op, open("general"))
 		for i := 0; i < 12; i++ {
-			if _, err := f.redeem(inv.Code, fmt.Sprintf("guest%d", i)); err != nil {
+			if _, err := f.redeem(inv.Code, fmt.Sprintf("joiner%d", i)); err != nil {
 				t.Fatalf("redemption %d: %v", i, err)
 			}
 		}

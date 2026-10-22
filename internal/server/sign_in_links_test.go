@@ -148,8 +148,9 @@ func TestSignInLinkEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) != 1 || string(raw["name"]) != `"alice"` {
-		t.Errorf("preview = %s, want the name alone", rec.Body)
+	// The name, and what the link is for (issue #708): nothing else.
+	if len(raw) != 2 || string(raw["name"]) != `"alice"` || string(raw["purpose"]) != `"sign_in"` {
+		t.Errorf("preview = %s, want the name and the purpose alone", rec.Body)
 	}
 
 	rec = f.redeemSignInLink(t, link.Code)

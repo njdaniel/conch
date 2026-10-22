@@ -61,8 +61,11 @@ type group struct {
 	// agentSession is the group agent's own session (B only).
 	agentSession int64
 	reportID     int64
-	// signInLink is an operator's sign-in link for one of the group's people.
+	// signInLink is an operator's sign-in link for one of the group's people,
+	// and signInCode its code, which B presents to the password routes as a
+	// proof and a reset (issue #708): neither may take it.
 	signInLink int64
+	signInCode string
 }
 
 func (g *group) main() string { return g.channels[0] }
@@ -487,7 +490,7 @@ func (w *world) activityA() error {
 	}
 	w.h.secret("a sign-in link code", link.Code)
 	w.marks.secret("A's sign-in link code", link.Code)
-	a.signInLink = link.SignInLink.ID
+	a.signInLink, a.signInCode = link.SignInLink.ID, link.Code
 	w.marks.id("sign_in_link", "ann's sign-in link", link.SignInLink.ID)
 
 	// A problem report.

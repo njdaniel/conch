@@ -98,6 +98,12 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 		if err != nil {
 			return err
 		}
+		// A guest's name is its handle and is never replaced (issue #705,
+		// review F10): End visit is the lever, and its posts keep their
+		// attribution whatever happens to it.
+		if p.guestTarget() {
+			return ErrGuestNotHideable
+		}
 		if p.HiddenAt != nil {
 			out.Principal = p
 			return nil
@@ -278,7 +284,8 @@ type HideSelector struct {
 
 // HideTargets returns, by id, the first limit principals a bulk hide with sel
 // would hide, and how many more match. It never returns an operator, a
-// principal already hidden, or exceptID (the caller). An unknown invite is
+// principal already hidden, a guest (issue #705: not hideable), or exceptID
+// (the caller). An unknown invite is
 // ErrNotFound. It writes nothing: it is a bulk hide's dry run, and its
 // selection.
 func (s *Store) HideTargets(ctx context.Context, sel HideSelector, exceptID int64, limit int) ([]Principal, int, error) {
@@ -291,7 +298,8 @@ func (s *Store) HideTargets(ctx context.Context, sel HideSelector, exceptID int6
 			return nil, 0, fmt.Errorf("store: hide targets: %w", err)
 		}
 	}
-	where := []string{"hidden_at IS NULL", "role <> 'operator'", "id <> ?"}
+	where := []string{"hidden_at IS NULL", "role <> 'operator'", "id <> ?",
+		"NOT EXISTS (SELECT 1 FROM guest_visits v WHERE v.principal_id = principals.id AND v.state <> 'converted')"}
 	args := []any{exceptID}
 	if sel.InviteID > 0 {
 		where = append(where, "invite_id = ?")
@@ -339,6 +347,9 @@ type PrincipalFilter struct {
 	State      schema.PrincipalState
 	InviteID   int64
 	NamePrefix string
+	// Guest, when set, lists only the principals whose guest visit is in
+	// that state (issue #705).
+	Guest schema.GuestState
 	// Before, when positive, lists only ids below it.
 	Before int64
 	// Limit is the most rows returned; it must be positive.
@@ -382,6 +393,10 @@ func (s *Store) ListPrincipals(ctx context.Context, f PrincipalFilter, now time.
 		where = append(where, "substr(p.name, 1, ?) = ?")
 		args = append(args, utf8.RuneCountInString(f.NamePrefix), f.NamePrefix)
 	}
+	if f.Guest != "" {
+		where = append(where, "EXISTS (SELECT 1 FROM guest_visits v WHERE v.principal_id = p.id AND v.state = ?)")
+		args = append(args, string(f.Guest))
+	}
 	if f.Before > 0 {
 		where = append(where, "p.id < ?")
 		args = append(args, f.Before)
@@ -407,9 +422,12 @@ func (s *Store) PrincipalAdmin(ctx context.Context, id int64, now time.Time) (sc
 func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, limit int, now time.Time) ([]schema.PrincipalAdminV1, error) {
 	query := `SELECT p.id, p.kind, p.name, p.role, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
 		(SELECT COUNT(*) FROM credentials c
-		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?))
+		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
+		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
+		   AND ` + currentAuthSQL + `),
+		(SELECT v.state FROM guest_visits v WHERE v.principal_id = p.id)
 		FROM principals p WHERE ` + cond + ` ORDER BY p.id DESC LIMIT ?` // #nosec G202 -- cond joins constants of the callers; every value is in args
-	all := append([]any{now.UnixMilli()}, args...)
+	all := append([]any{now.UnixMilli(), now.UnixMilli()}, args...)
 	rows, err := s.db.QueryContext(ctx, query, append(all, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list principals: %w", err)
@@ -422,8 +440,9 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 			kind, role                              string
 			createdAt                               int64
 			disabledAt, hiddenAt, invitedBy, invite sql.NullInt64
+			guest                                   sql.NullString
 		)
-		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials); err != nil {
+		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials, &guest); err != nil {
 			return nil, fmt.Errorf("store: list principals: %w", err)
 		}
 		p.Kind = schema.PrincipalKind(kind)
@@ -431,6 +450,7 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 		p.CreatedAt = schema.NewTimestamp(time.UnixMilli(createdAt))
 		p.DisabledAt = msToTimestampPtr(disabledAt)
 		p.HiddenAt = msToTimestampPtr(hiddenAt)
+		p.GuestState = schema.GuestState(guest.String)
 		if invitedBy.Valid {
 			p.InvitedBy = &invitedBy.Int64
 		}

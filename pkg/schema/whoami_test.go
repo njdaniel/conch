@@ -16,6 +16,12 @@ func TestWhoAmIGoldenFixtures(t *testing.T) {
 		{"whoami-response-v1-allowance-used.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-no-voice.json", func() any { return new(WhoAmIResponseV1) }},
 		{"revoke-all-credentials-response-v1.json", func() any { return new(RevokeAllCredentialsResponseV1) }},
+		// The identity class, a guest's visit and the authentication state
+		// (ADR-009, issue #704).
+		{"whoami-response-v1-guest.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-member-auth.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-setup.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-operator-auth.json", func() any { return new(WhoAmIResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {

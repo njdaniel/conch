@@ -46,6 +46,22 @@ var ErrNameInvalid = errors.New("store: the name has no character a reader can s
 // that carries it is ErrDuplicate too: the name is not to be had.
 var ErrNameReserved = errors.New("store: names beginning with " + schema.HiddenPrincipalNamePrefix + " are reserved")
 
+// ErrGuestNameReserved is returned by every write that sets a permanent name
+// when the name is in the reserved guest namespace (reservedGuestName, issue
+// #705): only the store makes a guest's handle. It is ErrNameReserved too,
+// and the error that carries it ErrDuplicate, as for the hidden prefix.
+var ErrGuestNameReserved error = guestNameReservedError{}
+
+// guestNameReservedError is ErrGuestNameReserved: its own message, and
+// ErrNameReserved to errors.Is.
+type guestNameReservedError struct{}
+
+func (guestNameReservedError) Error() string {
+	return "store: names beginning with " + schema.ReservedGuestNameKeyPrefix + " are reserved for guests"
+}
+
+func (guestNameReservedError) Is(target error) bool { return target == ErrNameReserved }
+
 // ErrRenameLimited is the error RenamePrincipal returns, as a
 // *RenameLimitedError, when the principal has used up its renames.
 var ErrRenameLimited = errors.New("store: too many renames")
@@ -78,7 +94,8 @@ type RenameLimits struct {
 // renames a principal: it returns name's keys, ErrNameInvalid when they are
 // empty, or ErrDuplicate when a principal other than self holds either of
 // them (the folded key against folded keys, the skeletal against skeletal),
-// or when the name is reserved for hidden principals (reservedName). self is
+// or when the name is reserved for hidden principals (reservedName) or for
+// guests (reservedGuestName, with no bypass for an operator). self is
 // the principal being renamed, or 0 on create. It must run in the transaction
 // that writes the name, and the keys it returns are the ones that row must
 // store.
@@ -91,6 +108,9 @@ func claimNameTx(ctx context.Context, tx execer, name string, self int64) (names
 		// A duplicate as well, so a caller that maps only ErrDuplicate still
 		// refuses it as taken; one that knows ErrNameReserved says why.
 		return names.Keys{}, fmt.Errorf("store: name %q: %w (%w)", name, ErrNameReserved, ErrDuplicate)
+	}
+	if reservedGuestName(keys) {
+		return names.Keys{}, fmt.Errorf("store: name %q: %w (%w)", name, ErrGuestNameReserved, ErrDuplicate)
 	}
 	return keys, clashTx(ctx, tx, name, keys, self)
 }
@@ -106,6 +126,18 @@ var hiddenKeys = names.KeysOf(schema.HiddenPrincipalNamePrefix)
 // with the one it gives.
 func reservedName(keys names.Keys) bool {
 	return strings.HasPrefix(keys.Folded, hiddenKeys.Folded) || strings.HasPrefix(keys.Skeletal, hiddenKeys.Skeletal)
+}
+
+// guestKeys are the keys of schema.ReservedGuestNameKeyPrefix.
+var guestKeys = names.KeysOf(schema.ReservedGuestNameKeyPrefix)
+
+// reservedGuestName reports whether a name with these keys is in the guest
+// namespace (design §4.1): either key begins with the same key of
+// schema.ReservedGuestNameKeyPrefix. As for the hidden prefix, comparing keys
+// reserves "Guest-x", "GUESTS" and "guest" spelt with a Cyrillic e, so no
+// permanent account can be mistaken for a guest by its name.
+func reservedGuestName(keys names.Keys) bool {
+	return strings.HasPrefix(keys.Folded, guestKeys.Folded) || strings.HasPrefix(keys.Skeletal, guestKeys.Skeletal)
 }
 
 // clashTx returns ErrDuplicate when a principal other than self holds either
@@ -139,7 +171,7 @@ type RenameResult struct {
 // own old keys do not count, so "alice" may become "Alice"), nor be one
 // reserved for hidden principals (ErrDuplicate, whoever renames), its keys
 // must not be empty (ErrNameInvalid), and a principal_renamed row records
-// both names. name must already be a valid name
+// both names. A guest, live or ended, is never renamed (ErrGuestNotHideable). name must already be a valid name
 // (schema.RenamePrincipalRequestV1.Validate); the store does not check.
 //
 // lim bounds the principal's own renames (rows whose actor is the principal
@@ -162,6 +194,11 @@ func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, nam
 		}
 		out.From = p.Name
 		out.Principal = p
+		// A guest's name is its handle (issue #705, review F10): neither
+		// the guest nor an operator renames it, not even to itself.
+		if p.guestTarget() {
+			return ErrGuestNotHideable
+		}
 		if p.Name == name {
 			return nil
 		}

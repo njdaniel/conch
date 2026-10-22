@@ -1,0 +1,11 @@
+{
+  "open_joining": "off",
+  "guests_enabled": false,
+  "joining_paused": false,
+  "join_voice": false,
+  "max_guests": 50,
+  "max_guests_per_address": 5,
+  "guest_idle_seconds": 7200,
+  "guest_absolute_seconds": 86400,
+  "open_channels": []
+}

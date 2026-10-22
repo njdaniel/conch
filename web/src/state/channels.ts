@@ -21,6 +21,8 @@ export type ChannelsAction =
       readonly remembered: string | null;
     }
   | { readonly type: 'select'; readonly name: string }
+  // A channel the person has just made (issue #695): the server's answer.
+  | { readonly type: 'created'; readonly channel: ChannelV0 }
   | { readonly type: 'lost'; readonly name: string }
   | { readonly type: 'reset' };
 
@@ -57,6 +59,16 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       return has(state.channels, action.name)
         ? { channels: state.channels, loaded: state.loaded, selected: action.name }
         : state;
+    case 'created': {
+      // In id order, as the server lists them, and opened: the person made it
+      // to use it. A channel already listed (a reload got there first) is not
+      // added twice.
+      const { channel } = action;
+      const channels = state.channels.some((c) => c.id === channel.id)
+        ? state.channels
+        : [...state.channels, channel].sort((a, b) => a.id - b.id);
+      return { ...state, channels, selected: channel.name };
+    }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);
       const selected = state.selected === action.name ? fallback(channels) : state.selected;

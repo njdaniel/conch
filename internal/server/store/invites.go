@@ -585,7 +585,69 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 //
 // All audit rows are attributed to "invite:<id>": the joiner has no identity
 // before the redemption commits.
+//
+// The account it makes has no password: POST /v1/invites/redeem, which
+// clients use until they move to POST /v2/invites/redeem and
+// RedeemInviteWithPassword (issue #707).
 func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now time.Time) (RedeemedInvite, error) {
+	return s.redeemInvite(ctx, codeHash, name, "", now)
+}
+
+// RedeemInviteWithPassword is RedeemInvite for an account made with its
+// password (POST /v2/invites/redeem, issue #707): record is the encoded
+// Argon2id record the server made, outside this transaction, of the
+// password the joiner chose. It is stored with the principal in the same
+// transaction, and password_set is audited after principal_created, so the
+// account exists only with a usable password, and a redemption that fails
+// stores neither and does not use the invite. A record that is not one is
+// ErrPasswordRecordInvalid, before anything is read.
+func (s *Store) RedeemInviteWithPassword(ctx context.Context, codeHash, name, record string, now time.Time) (RedeemedInvite, error) {
+	if !strings.HasPrefix(record, passwordRecordPrefix) {
+		return RedeemedInvite{}, ErrPasswordRecordInvalid
+	}
+	return s.redeemInvite(ctx, codeHash, name, record, now)
+}
+
+// ErrJoiningClosed is an invite that admits guests only (join_as guest)
+// asked to make an account (ErrorCodeJoiningClosed, design §7.2).
+var ErrJoiningClosed = errors.New("store: this invite admits guests only")
+
+// inviteAdmitsAccountTx returns ErrJoiningClosed when invite id admits
+// guests only. Absent, as every invite from before guests is, join_as is
+// account.
+func inviteAdmitsAccountTx(ctx context.Context, tx execer, id int64) error {
+	var joinAs string
+	if err := tx.QueryRowContext(ctx, "SELECT join_as FROM invites WHERE id = ?", id).Scan(&joinAs); err != nil {
+		return fmt.Errorf("store: invite join mode: %w", err)
+	}
+	if schema.InviteJoinMode(joinAs) == schema.InviteJoinGuest {
+		return ErrJoiningClosed
+	}
+	return nil
+}
+
+// CheckInviteForAccount is what POST /v2/invites/redeem asks before it
+// hashes anything: whether the invite with this code hash could make an
+// account now. It reads as PreviewInvite does (ErrInvitesPaused,
+// ErrInviteInvalid) and then refuses an invite that admits guests only with
+// ErrJoiningClosed, so an invalid code is never told apart by its mode. The
+// redeeming transaction checks all of it again.
+func (s *Store) CheckInviteForAccount(ctx context.Context, codeHash string, now time.Time) error {
+	if paused, err := s.InvitesPaused(ctx); err != nil {
+		return err
+	} else if paused {
+		return ErrInvitesPaused
+	}
+	r, _, _, err := usableInviteTx(ctx, s.db, codeHash, now)
+	if err != nil {
+		return err
+	}
+	return inviteAdmitsAccountTx(ctx, s.db, r.id)
+}
+
+// redeemInvite is RedeemInvite, storing record as the new account's
+// password when it is not empty.
+func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string, now time.Time) (RedeemedInvite, error) {
 	now = now.Truncate(time.Millisecond)
 	if err := (schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: name}).Validate(); err != nil {
 		return RedeemedInvite{}, fmt.Errorf("%w: %w", ErrInviteRequestInvalid, err)
@@ -605,6 +667,13 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		r, kept, dropped, err := usableInviteTx(ctx, tx, codeHash, now)
 		if err != nil {
 			return err
+		}
+		// Only the account route with a password honours join_as here: the
+		// v1 route stays as it was until it is retired (#713).
+		if record != "" {
+			if err := inviteAdmitsAccountTx(ctx, tx, r.id); err != nil {
+				return err
+			}
 		}
 		actor := inviteSubject(r.id)
 
@@ -688,6 +757,15 @@ func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now tim
 		if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalCreated, principalActor(pid),
 			fmt.Sprintf("kind=human invite=%d inviter=%d", r.id, r.createdBy), now); err != nil {
 			return err
+		}
+		if record != "" {
+			if _, err := setPasswordTx(ctx, tx, pid, record, now); err != nil {
+				return err
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditPasswordSet, principalActor(pid),
+				fmt.Sprintf("via=invite invite=%d", r.id), now); err != nil {
+				return err
+			}
 		}
 		for _, c := range kept {
 			if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(c.ID), memberDetail(pid), now); err != nil {
@@ -1028,6 +1106,19 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 		}
 		if PrincipalKind(kind) != PrincipalHuman {
 			return fmt.Errorf("%w: only a person may invite", ErrInviteNotAllowed)
+		}
+		// A guest holds no durable right while it is a guest, not even one an
+		// operator grants (issue #706, design §4.3). Clearing is allowed: it
+		// grants nothing.
+		if may {
+			var guest int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM principals p WHERE p.id = ? AND `+activeGuestSQL, principalID).Scan(&guest); err != nil {
+				return fmt.Errorf("store: set may_invite: read guest state: %w", err)
+			}
+			if guest > 0 {
+				return ErrGuestNotAllowed
+			}
 		}
 		if cur == may {
 			return nil

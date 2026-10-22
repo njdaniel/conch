@@ -108,6 +108,21 @@ describe('channelsReducer', () => {
   it('resets', () => {
     expect(channelsReducer(loaded('ops'), { type: 'reset' })).toEqual(initialChannels);
   });
+  // Issue #695: a channel the person just made is listed in id order and opened.
+  it('lists and opens a channel just made, once', () => {
+    const made = ch(4, 'book-club');
+    const after = channelsReducer(loaded('ops'), { type: 'created', channel: made });
+    expect(after).toEqual({ channels: [...list, made], loaded: true, selected: 'book-club' });
+    expect(channelsReducer(after, { type: 'created', channel: made })).toEqual(after);
+  });
+  it('orders a channel just made by id, as the server lists them', () => {
+    const state: ChannelsState = { channels: [ch(1, 'general'), ch(3, 'dev')], loaded: true, selected: 'dev' };
+    expect(channelsReducer(state, { type: 'created', channel: ch(2, 'ops') }).channels).toEqual(list);
+  });
+  it('opens the first channel made into an empty list', () => {
+    const made = ch(1, 'general');
+    expect(channelsReducer({ channels: [], loaded: true, selected: null }, { type: 'created', channel: made })).toEqual({ channels: [made], loaded: true, selected: 'general' });
+  });
 
   // Issue #556: #general takes the place of "the first channel", after the
   // person's own choices. alpha sorts before general in these lists.

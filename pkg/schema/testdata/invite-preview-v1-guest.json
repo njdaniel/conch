@@ -1,0 +1,13 @@
+{
+  "kind": "open",
+  "inviter": "op",
+  "channels": [
+    "lobby"
+  ],
+  "voice": false,
+  "expires_at": "2026-10-22T12:00:00.000Z",
+  "join": {
+    "guest": true,
+    "account": true
+  }
+}

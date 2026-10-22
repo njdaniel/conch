@@ -28,9 +28,66 @@ const (
 
 	// DefaultSignInLinkLifetime applies when a create request names no
 	// expiry; MaxSignInLinkLifetime bounds how far ahead one may be set.
+	// Both are for a link of purpose sign_in.
 	DefaultSignInLinkLifetime = 24 * time.Hour
 	MaxSignInLinkLifetime     = 7 * 24 * time.Hour
+	// DefaultRestrictedLinkLifetime and MaxRestrictedLinkLifetime are the
+	// same bounds for every other purpose (ADR-009 §6): a reset, enrolment,
+	// device or conversion link is made to be used now, so it lives ten
+	// minutes by default and an hour at most.
+	DefaultRestrictedLinkLifetime = 10 * time.Minute
+	MaxRestrictedLinkLifetime     = time.Hour
 )
+
+// SignInLinkPurpose is what a link authorizes (ADR-009 §6, issue #704).
+// Every route that takes a code accepts the purposes it names and answers
+// ErrorCodeSignInLinkInvalid for any other, so a reset code is not a
+// sign-in, a device link is not an enrolment proof, and a sign-in link is
+// not a conversion permit. The vocabulary is closed. A link with no purpose
+// on the wire predates purposes and is a sign_in link.
+type SignInLinkPurpose string
+
+const (
+	// SignInLinkPurposeSignIn: an operator-made link that signs the person
+	// back in; redeemed by POST /v1/sign-in-links/redeem.
+	SignInLinkPurposeSignIn SignInLinkPurpose = "sign_in"
+	// SignInLinkPurposeDevice: a member-made link that signs their own
+	// account in on another device (design §6.2); made by POST
+	// /v1/sign-in-links/mine under a recent password proof, redeemed by
+	// POST /v1/sign-in-links/redeem.
+	SignInLinkPurposeDevice SignInLinkPurpose = "device"
+	// SignInLinkPurposeReset: an operator-made link that lets the member
+	// replace a forgotten password (design §6.1); spent by POST
+	// /v1/password/reset and good for nothing else.
+	SignInLinkPurposeReset SignInLinkPurpose = "reset"
+	// SignInLinkPurposeEnrollment: an operator-made proof that lets a member
+	// who predates passwords set their first one on their existing session
+	// (design §5.2); spent by POST /v1/password/mine.
+	SignInLinkPurposeEnrollment SignInLinkPurpose = "enrollment"
+	// SignInLinkPurposeConversion: an operator-made permit that lets one
+	// live guest create an account although its entry point's policy is
+	// closed (design §3.3); made by POST /v1/guests/{id}/conversion-permit,
+	// spent by POST /v1/guest/convert.
+	SignInLinkPurposeConversion SignInLinkPurpose = "conversion"
+)
+
+// Valid reports whether p is a recognized purpose.
+func (p SignInLinkPurpose) Valid() bool {
+	switch p {
+	case SignInLinkPurposeSignIn, SignInLinkPurposeDevice, SignInLinkPurposeReset, SignInLinkPurposeEnrollment, SignInLinkPurposeConversion:
+		return true
+	default:
+		return false
+	}
+}
+
+// Lifetimes are the default and longest lifetime of a link of purpose p.
+func (p SignInLinkPurpose) Lifetimes() (def, max time.Duration) {
+	if p == "" || p == SignInLinkPurposeSignIn {
+		return DefaultSignInLinkLifetime, MaxSignInLinkLifetime
+	}
+	return DefaultRestrictedLinkLifetime, MaxRestrictedLinkLifetime
+}
 
 // ErrorCodeSignInLinkInvalid is the one answer (HTTP 404) for a code that is
 // malformed, unknown, expired, used, closed, made by someone no longer an
@@ -44,44 +101,125 @@ const ErrorCodeSignInLinkNotFound = "sign_in_link_not_found"
 
 // SignInLinkV1 describes one sign-in link as it is made: whom it is for, who
 // made it, and until when it works. It never carries the code or its hash.
+// Purpose is what it authorizes; a server that predates purposes omits it,
+// which means sign_in, and a server with them always sends it. Label is the
+// label a device link's maker gave it, which the resulting credential
+// carries, so the member can tell their sign-ins apart.
 type SignInLinkV1 struct {
-	ID          int64     `json:"id"`
-	PrincipalID int64     `json:"principal_id"`
-	CreatedBy   int64     `json:"created_by"`
-	CreatedAt   Timestamp `json:"created_at"`
-	ExpiresAt   Timestamp `json:"expires_at"`
+	ID          int64             `json:"id"`
+	PrincipalID int64             `json:"principal_id"`
+	CreatedBy   int64             `json:"created_by"`
+	CreatedAt   Timestamp         `json:"created_at"`
+	ExpiresAt   Timestamp         `json:"expires_at"`
+	Purpose     SignInLinkPurpose `json:"purpose,omitempty"`
+	Label       string            `json:"label,omitempty"`
 }
 
-// CreateSignInLinkRequestV1 is the body of the route that makes a sign-in
-// link. ExpiresAt is optional: the server applies EffectiveExpiry.
+// CreateSignInLinkRequestV1 is the body of the operator route that makes a
+// link for a person, POST /v1/principals/{id}/sign-in-links. Purpose is
+// optional and sign_in by default; an operator may also make a reset or an
+// enrollment link (a device link is the member's own to make, a conversion
+// permit the guest route's). ExpiresAt is optional: the server applies
+// EffectiveExpiry. A reset or enrollment link is refused for a guest,
+// an operator, a disabled or a hidden target, as a sign-in link is.
 type CreateSignInLinkRequestV1 struct {
-	ExpiresAt *Timestamp `json:"expires_at,omitempty"`
+	ExpiresAt *Timestamp        `json:"expires_at,omitempty"`
+	Purpose   SignInLinkPurpose `json:"purpose,omitempty"`
 }
 
-// EffectiveExpiry is the expiry the link gets: the requested one, or
-// DefaultSignInLinkLifetime from now.
+// EffectivePurpose is the purpose asked for, or sign_in.
+func (r CreateSignInLinkRequestV1) EffectivePurpose() SignInLinkPurpose {
+	if r.Purpose == "" {
+		return SignInLinkPurposeSignIn
+	}
+	return r.Purpose
+}
+
+// EffectiveExpiry is the expiry the link gets: the requested one, or the
+// default lifetime of its purpose from now.
 func (r CreateSignInLinkRequestV1) EffectiveExpiry(now time.Time) time.Time {
 	if r.ExpiresAt != nil {
 		return r.ExpiresAt.Time()
 	}
-	return now.Add(DefaultSignInLinkLifetime)
+	def, _ := r.EffectivePurpose().Lifetimes()
+	return now.Add(def)
 }
 
 // Validate reports whether the request is well-formed at the instant now:
-// the expiry, when present, is in the future and within
-// MaxSignInLinkLifetime.
+// the purpose, when present, is one an operator makes on this route, and
+// the expiry, when present, is in the future and within the purpose's
+// longest lifetime.
 func (r CreateSignInLinkRequestV1) Validate(now time.Time) error {
-	if r.ExpiresAt == nil {
+	switch r.Purpose {
+	case "", SignInLinkPurposeSignIn, SignInLinkPurposeReset, SignInLinkPurposeEnrollment:
+	case SignInLinkPurposeDevice, SignInLinkPurposeConversion:
+		return fmt.Errorf("schema: a %s link is not made on this route", r.Purpose)
+	default:
+		return fmt.Errorf("schema: purpose must be one of: %s", strings.Join(Vocabularies["SignInLinkPurpose"], ", "))
+	}
+	_, max := r.EffectivePurpose().Lifetimes()
+	return validateLinkExpiry(r.ExpiresAt, now, max)
+}
+
+// validateLinkExpiry checks a link's requested expiry, when there is one:
+// in the future and within max of now.
+func validateLinkExpiry(expiresAt *Timestamp, now time.Time, max time.Duration) error {
+	if expiresAt == nil {
 		return nil
 	}
-	exp := r.ExpiresAt.Time()
+	exp := expiresAt.Time()
 	if !exp.After(now) {
 		return errors.New("schema: sign-in link expires_at must be in the future")
 	}
-	if exp.After(now.Add(MaxSignInLinkLifetime)) {
-		return fmt.Errorf("schema: sign-in link expires_at must be within %s", MaxSignInLinkLifetime)
+	if exp.After(now.Add(max)) {
+		return fmt.Errorf("schema: sign-in link expires_at must be within %s", max)
 	}
 	return nil
+}
+
+// CreateDeviceLinkRequestV1 is the body of POST /v1/sign-in-links/mine: a
+// member makes a link of purpose device for their own account (design
+// §6.2). It needs a recent password proof (ErrorCodeReauthRequired) and
+// at most MaxOpenDeviceLinks may be open (ErrorCodeTooManyDeviceLinks).
+// Label, optional, names the device, and becomes the label of the
+// credential the link issues. ExpiresAt is optional: the server applies
+// EffectiveExpiry. Guests, operators and agents are refused.
+type CreateDeviceLinkRequestV1 struct {
+	Label     string     `json:"label,omitempty"`
+	ExpiresAt *Timestamp `json:"expires_at,omitempty"`
+}
+
+// EffectiveExpiry is the expiry the link gets: the requested one, or
+// DefaultRestrictedLinkLifetime from now.
+func (r CreateDeviceLinkRequestV1) EffectiveExpiry(now time.Time) time.Time {
+	if r.ExpiresAt != nil {
+		return r.ExpiresAt.Time()
+	}
+	return now.Add(DefaultRestrictedLinkLifetime)
+}
+
+// Validate reports whether the request is well-formed at the instant now:
+// the label, when present, passes ValidateDisplayName within
+// MaxCredentialLabelLength, and the expiry, when present, is in the future
+// and within MaxRestrictedLinkLifetime.
+func (r CreateDeviceLinkRequestV1) Validate(now time.Time) error {
+	if r.Label != "" {
+		if strings.TrimSpace(r.Label) == "" {
+			return errors.New("schema: device link label must not be blank")
+		}
+		if err := ValidateDisplayName("device link label", r.Label, MaxCredentialLabelLength); err != nil {
+			return err
+		}
+	}
+	return validateLinkExpiry(r.ExpiresAt, now, MaxRestrictedLinkLifetime)
+}
+
+// ListOwnSignInLinksResponseV1 is the response to GET /v1/sign-in-links/mine:
+// the caller's own open device links, newest first; used, expired and closed
+// ones are left out. It never carries a code. DELETE /v1/sign-in-links/mine/{id}
+// closes one. Producers must send an empty slice, not nil.
+type ListOwnSignInLinksResponseV1 struct {
+	SignInLinks []SignInLinkV1 `json:"sign_in_links"`
 }
 
 // CreateSignInLinkResponseV1 is the response to making a sign-in link. Code
@@ -118,12 +256,19 @@ type SignInLinkPreviewRequestV1 struct {
 func (r SignInLinkPreviewRequestV1) Validate() error { return ValidateSignInLinkCode(r.Code) }
 
 // SignInLinkPreviewV1 is what someone holding a code may learn before using
-// it: the name of the account it opens, and nothing else.
+// it: the name of the account it opens, and what the link is for, so the
+// page shows the right flow (a sign-in, a device sign-in or a password
+// reset). Nothing else. A server that predates purposes omits Purpose,
+// which means sign_in. An enrollment proof or a conversion permit is used
+// by a signed-in caller and has no landing page: the preview answers
+// ErrorCodeSignInLinkInvalid for either.
 type SignInLinkPreviewV1 struct {
-	Name string `json:"name"`
+	Name    string            `json:"name"`
+	Purpose SignInLinkPurpose `json:"purpose,omitempty"`
 }
 
-// RedeemSignInLinkRequestV1 uses a sign-in link.
+// RedeemSignInLinkRequestV1 uses a sign-in link of purpose sign_in or
+// device; any other purpose is refused as invalid.
 type RedeemSignInLinkRequestV1 struct {
 	Code string `json:"code"`
 }

@@ -1,0 +1,13 @@
+{
+  "state": "ended",
+  "origin": "address",
+  "handle": "guest-a7k4m2q9x3h5t8wz",
+  "label": "Pat",
+  "tag": "a7k4",
+  "started_at": "2026-10-21T12:00:00.000Z",
+  "expires_at": "2026-10-22T12:00:00.000Z",
+  "idle_expires_at": "2026-10-21T14:00:00.000Z",
+  "ended_at": "2026-10-21T12:45:00.000Z",
+  "end_reason": "end_visit",
+  "can_convert": false
+}

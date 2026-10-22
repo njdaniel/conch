@@ -45,7 +45,11 @@ func writeSignInLinkInvalid(w http.ResponseWriter) {
 // operator makes a one-time sign-in link for a member. The route table lets
 // only operators in; with authentication off there is no operator to make
 // it, and the answer is the 401 of the invite routes. The code is in the 201
-// body and nowhere else, sent no-store.
+// body and nowhere else, sent no-store. With purpose reset or enrollment
+// (issue #708) it is a reset link, for a member who forgot their password,
+// or an enrollment link, the proof a member who predates passwords sets a
+// first one with (password_recovery.go); the same targets are refused, and
+// either lives ten minutes by default and an hour at most.
 func (s *Server) handleCreateSignInLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)
@@ -93,7 +97,8 @@ func (s *Server) handleCreateSignInLink(w http.ResponseWriter, r *http.Request) 
 		slog.ErrorContext(ctx, "sign-in links: create failed", "principal", id, "error", err)
 		writeInternalError(w)
 	default:
-		slog.InfoContext(ctx, "sign-in links: created", "operator", caller.ID, "principal", id, "sign_in_link", resp.SignInLink.ID)
+		slog.InfoContext(ctx, "sign-in links: created", "operator", caller.ID, "principal", id, "sign_in_link", resp.SignInLink.ID,
+			"purpose", resp.SignInLink.Purpose)
 		writeSecretJSON(w, http.StatusCreated, resp)
 	}
 }
@@ -135,7 +140,9 @@ func (s *Server) handleCloseSignInLink(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePreviewSignInLink serves POST /v1/sign-in-links/preview, exempt from
-// authentication: the name of the account the link opens, without using it.
+// authentication: the name of the account the link opens, and what the link
+// is for, without using it. An enrollment link has no landing page and
+// previews as invalid (the store decides).
 func (s *Server) handlePreviewSignInLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	addr := clientAddr(r, s.cfg.TrustedProxies)
@@ -166,7 +173,9 @@ func (s *Server) handlePreviewSignInLink(w http.ResponseWriter, r *http.Request)
 
 // handleRedeemSignInLink serves POST /v1/sign-in-links/redeem, exempt from
 // authentication: it uses the link and returns a new credential for the
-// person it was made for. The order is redeeming an invite's: the
+// person it was made for. Only a sign_in or a device link signs anyone in;
+// a reset or an enrollment link is the one invalid answer here, so a code
+// made for a password is never a sign-in. The order is redeeming an invite's: the
 // per-address limit before the body is read; a malformed code the same 404
 // as any invalid one; the server-wide limit last, so only a use that reaches
 // the store can spend it, and one that fails there gives it back.

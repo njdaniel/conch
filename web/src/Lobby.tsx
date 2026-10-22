@@ -61,6 +61,7 @@ export function Lobby({
   panel,
   voice,
   invites,
+  newChannel,
   account,
   signIns,
   report,
@@ -86,6 +87,9 @@ export function Lobby({
   readonly voice: ReactNode;
   // "Invite someone" (issue #440), or null for a person who may not invite.
   readonly invites: ReactNode;
+  // "New channel" (issue #695), under the channel list, or null for a person
+  // who may not make one.
+  readonly newChannel?: ReactNode;
   // The caller's own account: changing their name (issue #441), in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
@@ -231,7 +235,17 @@ export function Lobby({
         <nav aria-label="Channels" className="channels">
           <h2>Channels</h2>
           {channels.loaded ? (
-            <ChannelList channels={channels.channels} selected={channels.selected} unread={unread} occupancy={occupancy} onOpen={onOpen} />
+            <>
+              <ChannelList
+                channels={channels.channels}
+                selected={channels.selected}
+                unread={unread}
+                occupancy={occupancy}
+                empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
+                onOpen={onOpen}
+              />
+              {newChannel}
+            </>
           ) : connection === 'reconnecting' ? (
             <div className="problem">
               <p className="empty">Cannot reach the server</p>

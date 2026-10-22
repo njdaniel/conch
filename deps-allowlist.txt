@@ -16,3 +16,5 @@ golang.org/x/term
 golang.org/x/text
 # Prometheus client for conchd's /metrics on a separate loopback listener (issue #562): approved by Nick on #562, 2026-10-17, at v1.24.1.
 github.com/prometheus/client_golang
+# Argon2id password hashing (issue #707, ADR-009 §5.1): approved by Nick on PR #701, at v0.55.0, the newest release that declares go 1.25.0 (v0.56.0 and later need go 1.26.0).
+golang.org/x/crypto

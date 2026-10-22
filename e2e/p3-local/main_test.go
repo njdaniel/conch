@@ -333,8 +333,8 @@ func TestKeepResetCycle(t *testing.T) {
 		t.Fatalf("the message tui-a sent is not found: %v\n%s", err, tailed)
 	}
 	whoami, err := s.sh(ctx, commandFor(t, printed, "tui-b.env", "/bin/conch")+" whoami")
-	if err != nil || !strings.Contains(whoami, "name: guest-test") {
-		t.Fatalf("tui-b is not guest-test: %v\n%s", err, whoami)
+	if err != nil || !strings.Contains(whoami, "name: jamie-test") {
+		t.Fatalf("tui-b is not jamie-test: %v\n%s", err, whoami)
 	}
 	agent := commandFor(t, printed, "agent-a.env", "/bin/conch-adapter")
 	agentCtx, stopAgent := context.WithTimeout(ctx, 6*time.Second)
@@ -472,7 +472,7 @@ func TestRunWithoutKeep(t *testing.T) {
 				"read back through the API",
 				"tui-a signed in as nick-test and sent a message",
 				"tui-a2 signed in as nick-test and sent a message",
-				"tui-b signed in as guest-test and sent a message",
+				"tui-b signed in as jamie-test and sent a message",
 				"browser-test sent a message",
 				"agent-a replied in general",
 				"observer-test is refused when it posts",

@@ -61,7 +61,10 @@ func (s PrincipalState) Valid() bool {
 // HiddenAt are absent while the principal is enabled, or not hidden.
 // InvitedBy and InviteID are absent for a principal no invite made.
 // LiveCredentials counts the credentials that would still authenticate:
-// neither revoked nor expired.
+// neither revoked nor expired. GuestState is present for a principal that
+// is or was a guest (issue #704): active while its visit is live, ended or
+// converted after; absent for one that never was. The guest list, GET
+// /v1/guests, has the visit itself.
 type PrincipalAdminV1 struct {
 	ID              int64         `json:"id"`
 	Kind            PrincipalKind `json:"kind"`
@@ -73,6 +76,7 @@ type PrincipalAdminV1 struct {
 	InvitedBy       *int64        `json:"invited_by,omitempty"`
 	InviteID        *int64        `json:"invite_id,omitempty"`
 	LiveCredentials int           `json:"live_credentials"`
+	GuestState      GuestState    `json:"guest_state,omitempty"`
 }
 
 // ListPrincipalsResponseV1 is one page of the principal list, newest first.
