@@ -46,7 +46,11 @@ class StubRoom implements Room {
   };
   setDeafened = (on: boolean): void => {
     this.deafened.push(on);
+    this.deafenedWhen.push(this.connectArgs !== null);
   };
+  // Issue #683: for each deafen handed to the room, whether it was connected
+  // by then.
+  deafenedWhen: boolean[] = [];
   // Issue #661: each volume handed to the room, and whether the room was
   // connected by then.
   volumes: { readonly principal: number; readonly volume: number; readonly connected: boolean }[] = [];
@@ -1729,5 +1733,39 @@ describe('the volume of each person', () => {
     t.client.setDeafened(false);
     expect(t.rooms[0]?.volumes).toHaveLength(1);
     expect(t.client.snapshot().volumes).toEqual(new Map([[8, 0.4]]));
+  });
+});
+
+// Issue #683: a deafened page deafens each new room before it connects, so a
+// microphone attached while the room is connecting is muted from the first.
+describe('deafen on a new room', () => {
+  it('is handed to the room before it connects: the first room, a reconnect, a renewed room, and Leave then Join', async () => {
+    const t = setup();
+    t.client.setDeafened(true);
+    t.client.join('general');
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('lost');
+    t.clock.advance(1000);
+    await settle();
+    t.rooms[1]?.events?.onDisconnected('room_deleted');
+    await settle();
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(t.rooms).toHaveLength(4);
+    for (const room of t.rooms) {
+      expect(room.deafened[0]).toBe(true);
+      expect(room.deafenedWhen[0]).toBe(false);
+    }
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('undeafen still reaches the connected room', async () => {
+    const t = setup();
+    t.client.setDeafened(true);
+    t.client.join('general');
+    await settle();
+    t.client.setDeafened(false);
+    expect(t.rooms[0]?.deafened.at(-1)).toBe(false);
   });
 });
