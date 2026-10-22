@@ -218,6 +218,13 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/approvals/{id}/decisions", accessAuthenticated, s.humansOnly(s.membersOnly(hf(s.handleCastDecision)))),
 		// /mcp has its own bearer authentication (mcp.go) and is not wrapped.
 		rt("/mcp", accessExempt, s.mcpHandler()),
+		// Device links (issue #712): a member's own links that sign their
+		// account in on another device, made under a recent-password proof.
+		// Members only (the handler refuses agents, guests and operators);
+		// redeemed by POST /v1/sign-in-links/redeem. See sign_in_links.go.
+		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
+		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
+		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
 		// Operator sign-in and setup (issue #709). The second step of an
 		// operator's sign-in and the setup token's redemption are exempt, as
 		// the sign-in is, limited before any work and over HTTPS or loopback

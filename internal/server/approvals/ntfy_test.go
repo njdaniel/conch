@@ -78,12 +78,10 @@ func TestNtfyNotifierReturnsServerAndConnectionErrorsQuickly(t *testing.T) {
 		t.Fatalf("500 error = %v, want status 500", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	url := "http://" + ln.Addr().String()
-	_ = ln.Close()
+	// Port 0 can never have a listener, so the connection is refused every
+	// time; a port freed after a listen could be taken by another test
+	// first (#733, as #628).
+	url := "http://127.0.0.1:0"
 	n, err = NewNtfyNotifier(NtfyConfig{Server: url, ApprovalsTopic: "approvals", Timeout: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -346,12 +344,10 @@ func noDNSTransport() *http.Transport {
 
 func TestNtfyTransportErrorsDoNotNameTheTopic(t *testing.T) {
 	const topic = "tpc-SECRET-grep-me"
-	refused, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refusedAddr := refused.Addr().String()
-	_ = refused.Close()
+	// Port 0 can never have a listener, so every dial to it is refused; a
+	// port freed after a listen could be taken by another package's test
+	// before the request (#733, as #628).
+	const refusedAddr = "127.0.0.1:0"
 	// A server that never answers. It is released at the end of the test: a
 	// handler that has not read the request body is not told when the client
 	// gives up, and Close would wait for it for ever.

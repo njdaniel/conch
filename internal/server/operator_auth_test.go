@@ -572,6 +572,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"PUT /v1/channels/{channel}/read-state":      {reauthNone, "the caller's read mark"},
 	"DELETE /v1/credentials/current":             {reauthNone, "signs the caller out"},
 	"DELETE /v1/credentials/mine/{id}":           {reauthNone, "ends one of the caller's own sign-ins"},
+	"POST /v1/sign-in-links/mine":                {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},
+	"DELETE /v1/sign-in-links/mine/{id}":         {reauthNone, "closes one of the caller's own device links"},
 	"POST /v1/guest/end":                         {reauthNone, "a guest ends its own visit"},
 	"POST /v1/password/mine":                     {reauthNone, "proves itself: a setup token or an enrolment link"},
 	"PUT /v1/password/mine":                      {reauthNone, "proves itself: the current password, and a code for an operator"},

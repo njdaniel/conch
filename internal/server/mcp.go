@@ -443,6 +443,9 @@ func (s *Server) pollDecision(ctx, waitCtx context.Context, scope *agentScope, a
 		if checked.State.IsTerminal() {
 			return schema.AwaitDecisionOutput{State: checked.State, Resolution: checked.Resolution, EffectiveTimeoutMS: effectiveMS}, nil
 		}
+		if s.awaitPolled != nil {
+			s.awaitPolled()
+		}
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {

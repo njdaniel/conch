@@ -174,7 +174,8 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 // request authenticated with. Which credential that is comes from the request
 // context, never from the path or a body, so no caller can name another's.
 // Any authenticated caller may; the last operator guard still applies, as to
-// any revocation.
+// any revocation. A member's open device links close with it (issue #712,
+// store.RevokeOwnCredential), so a sign-out leaves no way back in behind it.
 func (s *Server) handleRevokeCurrentCredential(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := credentialIDFrom(ctx)
