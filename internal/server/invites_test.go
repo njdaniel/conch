@@ -362,12 +362,13 @@ func TestPreviewInvite(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if strings.Join(keys, ",") != "channels,expires_at,inviter,kind,voice" {
-		t.Errorf("preview fields = %v, want only kind, inviter, channels, voice and expires_at", keys)
+	// join is what the invite offers now (issue #710).
+	if strings.Join(keys, ",") != "channels,expires_at,inviter,join,kind,voice" {
+		t.Errorf("preview fields = %v, want only kind, inviter, channels, voice, expires_at and join", keys)
 	}
 	p := decodeBody[schema.InvitePreviewV1](t, rec)
 	if p.Kind != schema.InviteKindOpen || p.Inviter != "root" || !p.Voice || !slices.Equal(p.Channels, []string{"red", "blue"}) ||
-		!p.ExpiresAt.Time().Equal(resp.Invite.ExpiresAt.Time()) {
+		!p.ExpiresAt.Time().Equal(resp.Invite.ExpiresAt.Time()) || p.Join == nil || *p.Join != (schema.JoinOptionsV1{Account: true}) {
 		t.Errorf("preview = %+v", p)
 	}
 	// Previewing uses nothing.

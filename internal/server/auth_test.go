@@ -281,6 +281,23 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
 	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	// Guest entry (issue #710). The front door is open to anyone. Join as
+	// guest and the guest redemption answer a bearer token, so they are 403
+	// https_required to this fixture's plain HTTP from a test address before
+	// anything is read; AuthOff, 403 accounts_require_auth (special-cased
+	// below).
+	"GET /v1/join":                  {classExempt, "/v1/join", "", 200},
+	"POST /v1/join/guest":           {classExempt, "/v1/join/guest", `{}`, 403},
+	"POST /v1/invites/redeem-guest": {classExempt, "/v1/invites/redeem-guest", `{}`, 403},
+	// The operator's guest routes (issue #710). A settings change with no
+	// field and a bulk end with no dry_run are 400s before anything is
+	// written; the per-id end names a principal that does not exist. AuthOff
+	// is 403 accounts_require_auth (special-cased below).
+	"GET /v1/join/settings":    {classOp, "/v1/join/settings", "", 200},
+	"PUT /v1/join/settings":    {classOp, "/v1/join/settings", `{}`, 400},
+	"GET /v1/guests":           {classOp, "/v1/guests", "", 200},
+	"POST /v1/guests/{id}/end": {classOp, "/v1/guests/9999/end", "", 404},
+	"POST /v1/guests/end":      {classOp, "/v1/guests/end", `{}`, 400},
 	// The v2 redeem and the sign-in take a password (issue #707), so they
 	// answer 403 before reading anything: https_required to this fixture's
 	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
@@ -380,6 +397,18 @@ func isInviteRoute(pattern string) bool {
 	return false
 }
 
+// isGuestPolicyRoute reports whether pattern is one of issue #710's routes
+// that answer accounts_require_auth with authentication off: every one but
+// the front door.
+func isGuestPolicyRoute(pattern string) bool {
+	switch pattern {
+	case "POST /v1/join/guest", "POST /v1/invites/redeem-guest", "GET /v1/join/settings", "PUT /v1/join/settings",
+		"GET /v1/guests", "POST /v1/guests/{id}/end", "POST /v1/guests/end":
+		return true
+	}
+	return false
+}
+
 func routeMethod(pattern string) string {
 	if method, _, ok := strings.Cut(pattern, " "); ok {
 		return method
@@ -434,6 +463,7 @@ func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
 		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
+		"GET /v1/join": true, "POST /v1/join/guest": true, "POST /v1/invites/redeem-guest": true,
 		"POST /v1/login": true, "POST /v1/password/reset": true,
 		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true,
 		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
@@ -580,6 +610,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
+				if isGuestPolicyRoute(rt.pattern) {
+					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
 				}
 				if isDeviceLinkRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no account to add a device to

@@ -1034,6 +1034,12 @@ func TestPreviewInviteShowsLittle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// What it offers (issue #710): an invite that says nothing admits an
+	// account, and no guest while guests are off.
+	if got.Join == nil || *got.Join != (schema.JoinOptionsV1{Account: true}) {
+		t.Errorf("preview join = %+v, want an account only", got.Join)
+	}
+	got.Join = nil
 	want := schema.InvitePreviewV1{
 		Kind: schema.InviteKindPersonal, Inviter: "alice", Channels: []string{"general", "lobby"}, Voice: true,
 		ExpiresAt: inv.Invite.ExpiresAt,

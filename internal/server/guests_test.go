@@ -36,22 +36,23 @@ func newGuest(t *testing.T, srv *Server, label string, idle, absolute time.Durat
 	return g
 }
 
-// The feature stays closed to external joining (design §7.3 "Ordering"): no
-// route makes a guest or a passwordless member yet, and asking for one is
-// answered as for any route that does not exist.
+// No route makes a passwordless member (design §7.3 "Ordering"): the account
+// routes do not exist yet, and asking for one is answered as for any route
+// that does not exist. The guest entry routes exist (#710), and a server
+// nobody has configured admits no guest through them.
 func TestNoGuestEntryRouteIsReachable(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
+	// #710 registers the guest entry routes (GET /v1/join, POST
+	// /v1/join/guest, POST /v1/invites/redeem-guest) and the operator's
+	// (GET and PUT /v1/join/settings, GET /v1/guests, POST
+	// /v1/guests/{id}/end, POST /v1/guests/end). The routes that make an
+	// account from the bare address or a visit stay closed until #711.
 	closed := []struct{ method, path string }{
-		{"GET", "/v1/join"},
-		{"POST", "/v1/join/guest"},
 		{"POST", "/v1/join/account"},
-		{"POST", "/v1/invites/redeem-guest"},
 		// POST /v2/invites/redeem is registered with passwords (#707, design
 		// §7.3 "Ordering"): it makes a member with a password, never a guest
 		// or a passwordless member, so it is not in this list.
 		{"POST", "/v1/guest/convert"},
-		{"GET", "/v1/guests"},
-		{"POST", "/v1/guests/end"},
 	}
 	patterns := map[string]bool{}
 	for _, rt := range f.srv.routes {
@@ -59,13 +60,19 @@ func TestNoGuestEntryRouteIsReachable(t *testing.T) {
 	}
 	for _, c := range closed {
 		if patterns[c.method+" "+c.path] {
-			t.Errorf("%s %s is registered; guest entry stays closed until #710 and #711", c.method, c.path)
+			t.Errorf("%s %s is registered; account creation stays closed until #707 and #711", c.method, c.path)
 		}
 		assertErrorBody(t, f.do(t, c.method, c.path, "", `{}`), http.StatusUnauthorized, "unauthenticated")
 		if rec := f.do(t, c.method, c.path, f.rootTok, `{}`); rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s as the operator = %d, want no such route", c.method, c.path, rec.Code)
 		}
 	}
+	info := decodeBody[schema.JoinInfoV1](t, f.do(t, "GET", "/v1/join", "", ""))
+	if info.Join != (schema.JoinOptionsV1{}) || info.PasswordLogin {
+		t.Errorf("the front door of an unconfigured server offers %+v", info)
+	}
+	assertErrorBody(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
+	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
 	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
 		t.Errorf("live guests = %d, %v", n, err)
 	}
