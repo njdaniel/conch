@@ -219,3 +219,151 @@ func (s *Server) handleRedeemSignInLink(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 }
+
+// Device links (issue #712, design §6.2): Add a device. A member signed in
+// on one device makes a link that signs the same account in on another,
+// beside signing in there with the password. The three routes below are
+// the member's own: whose links they are comes from the request's
+// credential, never from the path or a body. Making one needs the
+// recent-password proof of POST /v1/reauth on the very session asking, so a
+// stolen bearer alone cannot turn into lasting access on a device of the
+// thief's. The link is redeemed by POST /v1/sign-in-links/redeem like any
+// sign-in link, and the store holds every rule of who may make and use one.
+
+// deviceLinkCaller is the start of every own-link route: authentication on,
+// then a member signed in with a credential. An agent is refused (403
+// human_required, audited), a guest (403 guest_not_allowed) and an operator
+// (403 forbidden, audited): an operator signs in on another device with
+// their password and second factor, never with a link (design §5.3), and a
+// link to an operator's account must never exist.
+func (s *Server) deviceLinkCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
+	if !s.cfg.authRequired() {
+		writeError(w, http.StatusForbidden, schema.ErrorCodeAccountsRequireAuth,
+			"this server runs with authentication off, so it has no accounts to add a device to")
+		return store.Principal{}, 0, false
+	}
+	caller, ok := callerFrom(r.Context())
+	credID, hasCred := credentialIDFrom(r.Context())
+	if !ok || !hasCred {
+		// Authentication is on, so the middleware set both; their absence
+		// is a wiring fault, which must deny.
+		writeUnauthenticated(w)
+		return store.Principal{}, 0, false
+	}
+	switch {
+	case caller.Kind != store.PrincipalHuman:
+		s.denyForbidden(w, r, caller, schema.ErrorCodeHumanRequired, "device links are for people")
+		return store.Principal{}, 0, false
+	case caller.IsGuest():
+		writeError(w, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed,
+			"a guest has only the credential of its visit; create an account to add a device")
+		return store.Principal{}, 0, false
+	case isOperator(caller):
+		s.denyForbidden(w, r, caller, "forbidden",
+			"an operator signs in on another device with their password and second factor, not a device link")
+		return store.Principal{}, 0, false
+	}
+	return caller, credID, true
+}
+
+// writeReauthRequired is the 403 for a device link asked for without a
+// standing recent-password proof on the session asking.
+func writeReauthRequired(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeReauthRequired,
+		"adding a device needs a recent proof of your password on this session: re-authenticate, then ask again")
+}
+
+// handleCreateDeviceLink serves POST /v1/sign-in-links/mine: the caller
+// makes a device link for their own account. The order: the caller
+// (deviceLinkCaller); the per-principal creation limit the invite routes
+// use, before the body is read; the body and its rules (400); then the
+// store, which in the transaction that writes checks the member again, the
+// proof on this request's credential (403 reauth_required) and the cap (409
+// too_many_device_links). The code is in the 201 body and nowhere else,
+// sent no-store.
+func (s *Server) handleCreateDeviceLink(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, credID, ok := s.deviceLinkCaller(w, r)
+	if !ok {
+		return
+	}
+	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
+		s.refuseInviteRateLimited(w, r, limit, retry, caller.ID, clientAddr(r, s.cfg.TrustedProxies))
+		return
+	}
+	var req schema.CreateDeviceLinkRequestV1
+	if !decodeInviteBody(w, r, &req) {
+		return
+	}
+	now := s.now()
+	// The schema's messages name the rule broken, never the value sent.
+	if err := req.Validate(now); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	resp, err := s.store.CreateDeviceLink(ctx, auditActor(ctx), caller.ID, credID, req, now)
+	switch {
+	case errors.Is(err, store.ErrSignInLinkRequestInvalid):
+		// Validated above; the clock moved past a just-valid expiry.
+		writeError(w, http.StatusBadRequest, "invalid_request", "the device link request is not valid")
+	case errors.Is(err, store.ErrReauthRequired):
+		writeReauthRequired(w)
+	case errors.Is(err, store.ErrTooManyDeviceLinks):
+		writeError(w, http.StatusConflict, schema.ErrorCodeTooManyDeviceLinks,
+			"you already have as many open device links as you may; close one first")
+	case errors.Is(err, store.ErrDeviceLinkNotAllowed):
+		// The caller stopped being a member who may have a link a moment
+		// ago (promoted, disabled or hidden). Fail closed.
+		s.denyForbidden(w, r, caller, "forbidden", "only a member makes a device link")
+	case err != nil:
+		slog.ErrorContext(ctx, "device links: create failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+	default:
+		slog.InfoContext(ctx, "device links: created", "principal", caller.ID, "sign_in_link", resp.SignInLink.ID)
+		writeSecretJSON(w, http.StatusCreated, resp)
+	}
+}
+
+// handleListOwnDeviceLinks serves GET /v1/sign-in-links/mine: the caller's
+// open device links, newest first, without their codes.
+func (s *Server) handleListOwnDeviceLinks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, _, ok := s.deviceLinkCaller(w, r)
+	if !ok {
+		return
+	}
+	links, err := s.store.ListOwnDeviceLinks(ctx, caller.ID, s.now())
+	if err != nil {
+		slog.ErrorContext(ctx, "device links: list failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, schema.ListOwnSignInLinksResponseV1{SignInLinks: links})
+}
+
+// handleCloseOwnDeviceLink serves DELETE /v1/sign-in-links/mine/{id}: the
+// caller closes one of their device links. Another's id, or a link that is
+// not a device link of theirs, is answered exactly as an id never issued,
+// 404 sign_in_link_not_found. One already closed, used or expired is a 204
+// that changes nothing.
+func (s *Server) handleCloseOwnDeviceLink(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, _, ok := s.deviceLinkCaller(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id", "sign-in link")
+	if !ok {
+		return
+	}
+	_, err := s.store.CloseOwnDeviceLink(ctx, auditActor(ctx), caller.ID, id, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound, "sign-in link not found")
+	case err != nil:
+		slog.ErrorContext(ctx, "device links: close failed", "principal", caller.ID, "sign_in_link", id, "error", err)
+		writeInternalError(w)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
