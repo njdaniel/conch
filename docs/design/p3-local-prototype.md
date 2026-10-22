@@ -25,7 +25,7 @@ for Electron packages, translation or screen sharing to reach this milestone.
 | --- | --- | --- |
 | Server | One disposable local instance/data directory | All clients see one authoritative community. |
 | TUI A | Human `nick-test`, credential A, isolated profile | Normal terminal interaction. |
-| TUI B | Human `guest-test`, credential B, different profile | Another human, independent navigation and permissions. |
+| TUI B | Human `jamie-test`, credential B, different profile | Another human, independent navigation and permissions. |
 | Browser | Human `browser-test`, dedicated browser profile | Real browser/TUI read-write interoperability. |
 | Scripted agent A | Agent `worker-test`, own credential/manifest | Registration, heartbeat, task progress, deterministic response. |
 | Scripted agent B | Agent `observer-test`, restricted manifest | Different audience/capabilities, idle/offline transitions and denied actions. |

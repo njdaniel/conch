@@ -56,11 +56,11 @@ The community it creates:
 
 | | |
 | --- | --- |
-| People | `nick-test` (terminals `tui-a` and `tui-a2`, two credentials), `guest-test` (`tui-b`), `browser-test` (the browser) |
+| People | `nick-test` (terminals `tui-a` and `tui-a2`, two credentials), `jamie-test` (`tui-b`), `browser-test` (the browser) |
 | Agents | `worker-test` (`agent-a`): can read, post and whisper in all three channels, ask for approval, keep a session and record runs. `observer-test` (`agent-b`): can read `general` and keep a session, nothing else |
 | `general` | everyone |
 | `test-private` | `nick-test` and `worker-test` only |
-| `nets-demo` | everyone; net `red`: `nick-test` member, `guest-test` monitor; net `blue`: `guest-test` and `browser-test` members |
+| `nets-demo` | everyone; net `red`: `nick-test` member, `jamie-test` monitor; net `blue`: `jamie-test` and `browser-test` members |
 
 Each participant's credential is in its own file under `<root>`, mode 0600. The
 operator's credential is in `operator.env`, which only the admin commands in P3-04
@@ -100,7 +100,7 @@ and P3-10 use.
    ```
 
 What should appear. In each client, signed in with its own credential, the
-channels you may use: `general` and `nets-demo` for `guest-test` and
+channels you may use: `general` and `nets-demo` for `jamie-test` and
 `browser-test`, plus `test-private` for `nick-test`. In `general`, the members
 line (TUI; the people pane on a terminal of 120x30 or more) or members panel
 (browser) names the people who are connected and the
@@ -180,7 +180,7 @@ sending and receiving. The listing shows `tui-a` active and `tui-a2` revoked.
    set -a; . <root>/tui-a.env; set +a; <root>/bin/conch send --to <id:worker-test> general 'hello, a whisper'
    ```
 
-3. Follow `nets-demo` as `guest-test` (it monitors `red`; `ctrl-c` ends it), and
+3. Follow `nets-demo` as `jamie-test` (it monitors `red`; `ctrl-c` ends it), and
    look for the word `hello` in `general`:
 
    ```sh
@@ -191,7 +191,7 @@ sending and receiving. The listing shows `tui-a` active and `tui-a2` revoked.
    set -a; . <root>/tui-b.env; set +a; <root>/bin/conch search general hello
    ```
 
-4. As `guest-test`, who is not in `test-private`, try to read it, through the
+4. As `jamie-test`, who is not in `test-private`, try to read it, through the
    client and straight through the API:
 
    ```sh
@@ -202,9 +202,9 @@ sending and receiving. The listing shows `tui-a` active and `tui-a2` revoked.
    set -a; . <root>/tui-b.env; set +a; curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $CONCH_TOKEN" http://<address>/v2/channels/test-private/messages
    ```
 
-What should appear. `test-private` is not in `guest-test`'s or `browser-test`'s
+What should appear. `test-private` is not in `jamie-test`'s or `browser-test`'s
 channel list. The `red` post shows to `nick-test` and, marked as a net message, to
-`guest-test` (monitor), and not to `browser-test`, who is only on `blue`. The
+`jamie-test` (monitor), and not to `browser-test`, who is only on `blue`. The
 whisper shows to its recipients only, marked as a whisper, and appears in the
 audit log. The search finds it for those who may see it and for nobody else. The
 last two commands are refused: `channel not found` from the client, and a
@@ -577,7 +577,7 @@ that address. `--reset` removes the advertised run like any other.
 Stop `tui-b` and `agent-a` on the host before you start them on the guest: each
 credential would otherwise be one person twice. After the host's commands, the runner prints
 the guest's, apart under
-`---- on the guest ----`: `conch` as `guest-test`, the browser address, and
+`---- on the guest ----`: `conch` as `jamie-test`, the browser address, and
 `conch-adapter` as `worker-test`. The guest has none of the host's files. Copy
 `tui-b.env`, `agent-a.env`, `browser.txt` and `fixtures/` from the root to
 `~/conch-p3` on the guest (they hold credentials: use `scp`, not a shared
@@ -612,7 +612,7 @@ Repeat these rows from the guest, with the host's windows as the other people:
 | Row | What to check from the guest |
 | --- | --- |
 | P3-02 | A line sent from the guest appears once in every host window, in order, and theirs appear in the guest. |
-| P3-05 | `guest-test` is refused `test-private` from the guest as from the host. |
+| P3-05 | `jamie-test` is refused `test-private` from the guest as from the host. |
 | P3-09 | Stop and start the server (the host's commands); the guest reconnects without signing in again. |
 | P3-10 | Revoking a credential or removing a member on the host takes effect for the guest's session. |
 

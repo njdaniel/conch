@@ -27,8 +27,8 @@ import (
 // escalates to it stalls rather than failing open (see the follow-up issue).
 
 // handleListPrincipals serves GET /v1/principals: every principal, newest
-// first, as an operator sees it. ?kind=, ?role=, ?state=, ?invite_id= and
-// ?name_prefix= narrow it; ?before= and ?limit= page it. An empty value is as
+// first, as an operator sees it. ?kind=, ?role=, ?state=, ?invite_id=,
+// ?guest= (a guest state, issue #705) and ?name_prefix= narrow it; ?before= and ?limit= page it. An empty value is as
 // if absent; an unknown one is 400 invalid_request.
 func (s *Server) handleListPrincipals(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -89,6 +89,12 @@ func principalFilterFrom(w http.ResponseWriter, r *http.Request) (store.Principa
 		}
 		f.InviteID = id
 	}
+	if guest := schema.GuestState(q.Get("guest")); guest != "" {
+		if !guest.Valid() {
+			return bad("guest must be one of: " + strings.Join(schema.Vocabularies["GuestState"], ", "))
+		}
+		f.Guest = guest
+	}
 	if prefix := q.Get("name_prefix"); prefix != "" {
 		if !utf8.ValidString(prefix) || utf8.RuneCountInString(prefix) > schema.MaxPrincipalNameLength {
 			return bad(fmt.Sprintf("name_prefix must be valid UTF-8 of at most %d characters", schema.MaxPrincipalNameLength))
@@ -132,6 +138,9 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
+		return
+	case errors.Is(err, store.ErrGuestNotHideable):
+		writeGuestNotHideable(w)
 		return
 	case errors.Is(err, store.ErrLastOperator):
 		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
@@ -228,7 +237,8 @@ func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal) 
 	for _, p := range targets {
 		res, err := s.store.HidePrincipal(ctx, actor, p.ID, store.HideOptions{RefuseOperator: true})
 		switch {
-		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrHideOperator), errors.Is(err, store.ErrLastOperator):
+		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrHideOperator), errors.Is(err, store.ErrLastOperator),
+			errors.Is(err, store.ErrGuestNotHideable):
 			continue
 		case err != nil:
 			return done, fmt.Errorf("hide principal %d: %w", p.ID, err)

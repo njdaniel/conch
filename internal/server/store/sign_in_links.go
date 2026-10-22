@@ -104,6 +104,9 @@ func signInLinkTargetTx(ctx context.Context, tx execer, principalID int64) (Prin
 		return Principal{}, fmt.Errorf("%w: an agent signs in with a credential an operator issues", ErrSignInLinkTarget)
 	case p.Role == RoleOperator:
 		return Principal{}, fmt.Errorf("%w: an operator signs in with a credential issued to them, not a link", ErrSignInLinkTarget)
+	case p.guestTarget():
+		// Issue #705: a guest's one credential is its visit's.
+		return Principal{}, fmt.Errorf("%w: a guest has the one credential of its visit", ErrSignInLinkTarget)
 	case p.HiddenAt != nil:
 		return Principal{}, ErrPrincipalHidden
 	case p.DisabledAt != nil:

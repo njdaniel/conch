@@ -481,6 +481,8 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	switch {
 	case errors.Is(err, store.ErrOperatorExists):
 		return errors.New("bootstrap-operator: an operator already exists; nothing changed")
+	case errors.Is(err, store.ErrGuestNameReserved):
+		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for guests; nothing changed", schema.ReservedGuestNameKeyPrefix)
 	case errors.Is(err, store.ErrNameReserved):
 		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for hidden accounts; nothing changed", schema.HiddenPrincipalNamePrefix)
 	case errors.Is(err, store.ErrDuplicate):

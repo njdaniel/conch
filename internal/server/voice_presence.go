@@ -124,6 +124,10 @@ const (
 	// voiceReasonVoiceOff: the principal no longer holds voice (issue #437's
 	// voice_allowed).
 	voiceReasonVoiceOff = "voice_not_allowed"
+	// voiceReasonGuestEnded: a guest whose visit is past its deadline or
+	// ended (issue #705), refused at the next pass without waiting for the
+	// sweep.
+	voiceReasonGuestEnded = "guest_ended"
 )
 
 // voiceSeen is what the poller last observed about one connected principal.
@@ -391,6 +395,15 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		// checked here too so that a person whose voice is taken away later
 		// loses the room, and a share of theirs, at the next pass.
 		return id, voiceReasonVoiceOff, nil
+	}
+	if p.GuestState != "" && p.GuestState != schema.GuestStateConverted {
+		live, err := s.store.GuestLive(ctx, id)
+		switch {
+		case err != nil:
+			return id, "", err
+		case !live:
+			return id, voiceReasonGuestEnded, nil
+		}
 	}
 	member, err := s.store.IsChannelMember(ctx, channelID, id)
 	switch {

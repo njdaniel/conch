@@ -247,6 +247,9 @@ var routeExpectations = map[string]routeExpectation{
 	// whoami (special-cased below).
 	"GET /v1/credentials/mine":         {classAuth, "/v1/credentials/mine", "", 200},
 	"DELETE /v1/credentials/mine/{id}": {classAuth, "/v1/credentials/mine/9999", "", 404},
+	// End visit (issue #705): nobody in the fixture is a guest, so every
+	// caller is 403 not_a_guest; AuthOff is 403 accounts_require_auth.
+	"POST /v1/guest/end": {classAuth, "/v1/guest/end", "", 403},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
 	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
@@ -795,10 +798,11 @@ func TestWhoAmI(t *testing.T) {
 	}{
 		// An operator may always invite (issue #437); a member may not until
 		// granted the right, and an agent never. People hold voice unless an
-		// invite withheld it; an agent never does (issue #468).
-		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true)}},
-		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true)}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false)}},
+		// invite withheld it; an agent never does (issue #468). Each is
+		// classed (issue #705); a guest's case is in guests_test.go.
+		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator}},
+		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

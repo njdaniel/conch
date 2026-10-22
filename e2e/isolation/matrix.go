@@ -422,6 +422,11 @@ func matrixRows() []row {
 		{route: "DELETE /v1/credentials/mine/{id}", what: "ends an A member's sign-in", pick: aCredential,
 			want:  answer{http.StatusNotFound, "credential_not_found"},
 			probe: func(_ *world, s subject) probe { return del("/v1/credentials/mine/" + id(s.id)) }},
+		// End visit (issue #705): only a guest has a visit, and no B member
+		// is one; the route names nothing of A's.
+		{route: "POST /v1/guest/end", what: "ends a guest visit she does not have",
+			want:  answer{http.StatusForbidden, schema.ErrorCodeNotAGuest},
+			probe: func(*world, subject) probe { return post("/v1/guest/end", nil) }},
 		operator("POST /v1/principals/{id}/disable", "disables an A member", aMember, func(_ *world, s subject) probe {
 			return post("/v1/principals/"+id(s.id)+"/disable", nil)
 		}),

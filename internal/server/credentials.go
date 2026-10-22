@@ -82,6 +82,9 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 	case errors.Is(err, store.ErrCredentialExpiryPast):
 		writeError(w, http.StatusBadRequest, "invalid_request", "credential expires_at must be in the future")
 		return
+	case errors.Is(err, store.ErrGuestNotAllowed):
+		writeGuestCredentialRefused(w)
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: create failed", "principal", principalID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -128,6 +131,9 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	case errors.Is(err, store.ErrCredentialExpired):
 		writeError(w, http.StatusBadRequest, "invalid_request", "credential has expired; create a new credential with a new expiry instead of rotating")
+		return
+	case errors.Is(err, store.ErrGuestNotAllowed):
+		writeGuestCredentialRefused(w)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: rotate failed", "credential", id, "error", err)
@@ -264,6 +270,12 @@ func (s *Server) handleRevokeOwnCredential(w http.ResponseWriter, r *http.Reques
 	}
 	s.credentialRevoked(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeGuestCredentialRefused is the 403 for a credential made or rotated for
+// a guest (issue #705): a guest has exactly the one credential of its visit.
+func writeGuestCredentialRefused(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed, "a guest has only the credential of its visit")
 }
 
 // credentialRevoked is what follows the committed revocation of credential id,
