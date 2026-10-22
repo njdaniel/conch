@@ -486,20 +486,36 @@ describe('what the strip says is true', () => {
 
   describe('Share screen while someone else shares (F14)', () => {
     const said = 'bob is sharing a screen. One person shares at a time.';
+    // Not watching, the visible line says where to see it (issue #642, N02);
+    // the rule is read out beside it, as Share screen's description.
+    const watch = 'bob is sharing a screen. Watch to see it.';
+    const described = `${watch} One person shares at a time.`;
 
-    it('is off, and described as who shares; on again with no description once nobody else does', () => {
+    it('is off, and described as who shares and the rule; on again with no description once nobody else does', () => {
       const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
-      const button = within(voice).getByRole('button', { name: 'Share screen', description: said });
+      const button = within(voice).getByRole('button', { name: 'Share screen', description: described });
       expect(button.hasAttribute('disabled')).toBe(true);
-      const hint = document.getElementById(button.getAttribute('aria-describedby') ?? '');
-      expect(hint?.textContent).toBe(said);
-      expect(voice.contains(hint)).toBe(true);
+      const ids = (button.getAttribute('aria-describedby') ?? '').split(' ');
+      expect(ids.map((id) => document.getElementById(id)?.textContent)).toEqual([watch, 'One person shares at a time.']);
+      expect(ids.every((id) => voice.contains(document.getElementById(id)))).toBe(true);
+      // The one visible line about bob's share is the first.
+      expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.id)).toEqual(['voice-share-busy']);
+      expect(within(voice).getByText(watch).className).not.toContain('watched');
 
       redraw(joined(), nobodyShares);
       const again = within(voice).getByRole('button', { name: 'Share screen' });
       expect(again.hasAttribute('disabled')).toBe(false);
       expect(again.hasAttribute('aria-describedby')).toBe(false);
-      expect(voice.textContent).not.toContain(said);
+      expect(voice.textContent).not.toContain('Watch to see it.');
+    });
+
+    it('while watched keeps the line hidden, without the watch prompt', () => {
+      const { voice } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      const line = within(voice).getByText(said);
+      expect(line.id).toBe('voice-share-busy');
+      expect(line.className).toContain('watched');
+      expect(voice.textContent).not.toContain('Watch to see it.');
+      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
     });
 
     it('says a refused claim once while the other share lasts, and not after it ends', () => {
@@ -516,10 +532,76 @@ describe('what the strip says is true', () => {
       expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
     });
 
-    it('still says why a share of ours ended, beside who shares now', () => {
-      const { voice } = panel(joined({ share: { kind: 'idle', ended: 'self' } }), 'c', bobShares, bob);
-      expect(voice.textContent).toContain('You stopped sharing.');
-      expect(voice.textContent).toContain(said);
+    it('still says why a share of ours ended, beside who shares now, unless we stopped it', () => {
+      const { voice } = panel(joined({ share: { kind: 'idle', ended: 'operator' } }), 'c', bobShares, bob);
+      expect(voice.textContent).toContain('An operator stopped your share.');
+      expect(voice.textContent).toContain(watch);
+    });
+  });
+
+  describe('"You stopped sharing." (issue #642, N03)', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const said = 'You stopped sharing.';
+    const stoppedState = joined({ share: { kind: 'idle', ended: 'self' } });
+
+    it(`is gone after ${String(stoppedFor / 1000)} s, within 8 s, and does not come back`, () => {
+      vi.useFakeTimers();
+      const { voice, redraw } = panel(stoppedState, 'c', nobodyShares);
+      expect(within(voice).getByText(said).getAttribute('role')).toBe('status');
+      act(() => {
+        vi.advanceTimersByTime(stoppedFor - 1);
+      });
+      expect(within(voice).queryByText(said)).not.toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(voice.textContent).not.toContain(said);
+      expect(stoppedFor).toBeLessThanOrEqual(8000);
+      redraw(stoppedState, nobodyShares);
+      expect(voice.textContent).not.toContain(said);
+    });
+
+    it("is gone at once when another's share starts, and not back when it ends", () => {
+      vi.useFakeTimers();
+      const { voice, redraw } = panel(stoppedState, 'c', nobodyShares);
+      expect(within(voice).queryByText(said)).not.toBeNull();
+      redraw(stoppedState, bobShares);
+      expect(voice.textContent).not.toContain(said);
+      redraw(stoppedState, nobodyShares);
+      expect(voice.textContent).not.toContain(said);
+    });
+
+    it('is gone at once when ours starts, and a later stop says it afresh', () => {
+      vi.useFakeTimers();
+      const { voice, redraw } = panel(stoppedState, 'c', nobodyShares);
+      redraw(joined({ share: { kind: 'sharing', audio: false } }), nobodyShares);
+      expect(voice.textContent).not.toContain(said);
+      redraw(stoppedState, nobodyShares);
+      expect(within(voice).queryByText(said)).not.toBeNull();
+    });
+
+    it('is not shown at all when it arrives beside another share', () => {
+      const { voice } = panel(stoppedState, 'c', bobShares, bob);
+      expect(voice.textContent).not.toContain(said);
+    });
+
+    it('leaves the other ended notes as they were, whatever the time', () => {
+      vi.useFakeTimers();
+      const { voice } = panel(joined({ share: { kind: 'idle', ended: 'browser' } }), 'c', nobodyShares);
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(within(voice).queryByText('Sharing stopped from the browser.')).not.toBeNull();
+    });
+
+    it('clears its timer on unmount', () => {
+      vi.useFakeTimers();
+      panel(stoppedState, 'c', nobodyShares);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      cleanup();
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 
@@ -681,14 +763,15 @@ describe('the notes about sharing', () => {
 
   it("are absent while someone else shares, and one line says who, with sound, as Share screen's description", () => {
     const said = 'bob is sharing a screen, with sound. One person shares at a time.';
+    const watch = 'bob is sharing a screen, with sound. Watch to see it.';
     const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
     expect(within(voice).queryByText(line)).toBeNull();
     expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
     expect(voice.querySelector('#voice-share-about')).toBeNull();
     for (const text of full) expect(voice.textContent).not.toContain(text);
     // One line about bob's share, not two.
-    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([said]);
-    expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
+    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([watch]);
+    expect(within(voice).getByRole('button', { name: 'Share screen', description: `${watch} One person shares at a time.` })).toBeTruthy();
 
     // Watching it, the same line, and still one in the notes (the watch
     // view has its own title).

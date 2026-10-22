@@ -671,10 +671,19 @@ export function othersShareNote(who: string | null, audio: boolean): string {
   return `${who ?? 'Someone else'} is sharing a screen${audio ? ', with sound' : ''}.`;
 }
 
+// watchNote is what a page that is not watching is told of another's share:
+// where to see it (issue #642, N02). The one-sharer rule is oneSharerNote,
+// which stays Share screen's description.
+export function watchNote(who: string | null, audio: boolean): string {
+  return `${othersShareNote(who, audio)} Watch to see it.`;
+}
+
+export const oneSharerNote = 'One person shares at a time.';
+
 // busyNote is why Share screen is off while someone else shares, and what a
 // claim refused for that is told: who shares, and that one person does.
 export function busyNote(who: string | null, audio: boolean): string {
-  return `${othersShareNote(who, audio)} One person shares at a time.`;
+  return `${othersShareNote(who, audio)} ${oneSharerNote}`;
 }
 
 // endedNote says why the last share ended, or why one did not start. who is
