@@ -491,12 +491,10 @@ func TestApprovalNotificationBodyAndTransportErrors(t *testing.T) {
 		}
 	})
 	t.Run("an unreachable ntfy is recorded without the topic", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := ln.Addr().String()
-		_ = ln.Close()
+		// Port 0 can never have a listener, so the connection is refused every
+		// time. A port freed after a listen could be taken by another process
+		// before the notification is sent (#628).
+		addr := "127.0.0.1:0"
 		logs := captureLogs(t)
 		srv := newTestServerWithConfig(t, Config{AuthMode: AuthOff, Ntfy: approvals.NtfyConfig{Server: "http://alice:hunter2@" + addr, ApprovalsTopic: topic, UrgentTopic: topic, Timeout: 300 * time.Millisecond}})
 		channel, agent, human := approvalTestFixture(t, srv)
