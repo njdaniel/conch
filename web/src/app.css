@@ -149,6 +149,14 @@ button.primary {
   font-weight: 600;
 }
 
+/* A disabled primary button drops its fill, as every other disabled button
+   has none to keep: the opacity alone left a green button that looked live. */
+button.primary:disabled {
+  background: var(--raised);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
 button.primary:hover:not(:disabled) {
   background: var(--accent-hover);
 }
@@ -1440,6 +1448,12 @@ label {
   border-color: var(--accent);
   touch-action: none;
   user-select: none;
+}
+
+.voice .talk[aria-disabled='true'] {
+  opacity: 0.55;
+  border-color: var(--border-strong);
+  cursor: not-allowed;
 }
 
 .open-mic {
