@@ -17,7 +17,8 @@
 // What this cannot try: a real system's sound, macOS, Windows, Firefox,
 // Safari, iOS and Android. Those cells of the plan's section 2 are for a
 // person with the devices (#474).
-import type { Browser, BrowserContextOptions, Page } from '@playwright/test';
+import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
+import type { VoicePresenceV1 } from '../src/schema/voice';
 import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
@@ -124,6 +125,41 @@ async function inbound(page: Page): Promise<Inbound> {
   });
 }
 
+// addToRoom makes the page's voice presence, on its socket and on the read it
+// makes after one closes, list some people more in the channel's room than
+// the server does: the world has three accounts and a phone's strip is only
+// tested with many in voice. The people exist in this test alone; they have no
+// connection to LiveKit, and the real ones are left as they are.
+async function addToRoom(page: Page, extra: number): Promise<void> {
+  const crowded = (text: string): string => {
+    const doc = JSON.parse(text) as VoicePresenceV1;
+    const rooms = doc.rooms.map((room) =>
+      room.audience !== undefined
+        ? room
+        : {
+            ...room,
+            participants: [
+              ...room.participants,
+              ...Array.from({ length: extra }, (_, i) => ({ principal_id: 900_001 + i, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })),
+            ],
+          },
+    );
+    return JSON.stringify({ ...doc, rooms });
+  };
+  await page.routeWebSocket(/\/v1\/voice\/ws/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => { server.send(m); });
+    server.onMessage((m) => { ws.send(typeof m === 'string' ? crowded(m) : m); });
+    ws.onClose((code, reason) => { void server.close({ code, reason }); });
+    server.onClose((code, reason) => { void ws.close({ code, reason }); });
+  });
+  await page.route(/\/v1\/channels\/[^/]+\/voice$/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const reply = await route.fetch();
+    return route.fulfill({ response: reply, body: crowded(await reply.text()) });
+  });
+}
+
 // expectComposerShown checks, as the page is (nothing is scrolled to it), that
 // the composer's box and Send lie wholly inside the window and that a tap on
 // each reaches it: nothing is drawn over them.
@@ -172,12 +208,13 @@ test.describe('screen share with LiveKit', () => {
     readonly close: () => Promise<void>;
   }
 
-  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal): Promise<Someone> {
+  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal, crowd = 0): Promise<Someone> {
     const context = await browser.newContext(options);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     await page.addInitScript(instrument);
     if (late !== undefined) await routeSignal(page, late);
+    if (crowd > 0) await addToRoom(page, crowd);
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await channelButton(page, vw.channel).click();
@@ -589,6 +626,63 @@ test.describe('screen share with LiveKit', () => {
       for (const p of [a, b, c]) await p.close();
     }
   });
+
+  // Issue #641: eight in voice on a phone. The roster is one row and the
+  // strip, joined, fits in #600's 200 px; while a share is watched, who shares
+  // is the stage's title and not said again in the notes, the message log has
+  // at least 120 px and the composer is on the screen.
+  test('on a phone with eight in voice the strip stays compact, joined and while watching', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      await join(a, 'Join voice');
+      for (const [size, options] of phones) {
+        const b = await person(browser, 'bob', options, undefined, 6);
+        try {
+          await joinAndMeasure(size, a, b);
+        } finally {
+          await b.close();
+        }
+      }
+    } finally {
+      await a.close();
+    }
+  });
+
+  async function joinAndMeasure(size: string, a: Someone, b: Someone): Promise<void> {
+    await join(b, 'Join voice');
+    const voice = voiceRegion(b.page);
+    // Eight, or a ninth if an earlier page of bob's has not yet left the room on the server.
+    const count = voice.getByRole('heading', { name: /^[89] in voice$/ });
+    await expect(count).toBeVisible();
+    // Nobody shares (the earlier size's share has ended on the server too).
+    await expect(voice.getByRole('listitem').filter({ hasText: 'sharing' })).toHaveCount(0, { timeout: 15_000 });
+    const box = async (el: Locator, what: string) => {
+      const found = await el.boundingBox();
+      if (found === null) throw new Error(`${size}: ${what} has no box`);
+      return found;
+    };
+    const dock = await box(b.page.locator('.dock'), 'the dock');
+    expect(dock.height, `${size}: the dock joined with eight in voice (200 px, less 12 for a wider font)`).toBeLessThanOrEqual(188);
+    const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
+    await expect(chips).toHaveCount(3);
+    await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);
+    const mid = (b: { y: number; height: number } | undefined): number => (b?.y ?? 0) + (b?.height ?? 0) / 2;
+    const tops = [await box(count, 'the count'), await box(chips.first(), 'a chip'), await box(voice.getByRole('button', { name: /^\+[56] more$/ }), '+5 more')];
+    expect(Math.abs(mid(tops[0]) - mid(tops[2])) + Math.abs(mid(tops[1]) - mid(tops[2])), `${size}: the roster is one row`).toBeLessThanOrEqual(8);
+    await expectFits(b.page, `${size}: eight in voice`);
+
+    await share(a);
+    await watching(b);
+    // Still Share screen's description, but drawn as nothing.
+    const said = await box(b.page.locator('#voice-share-busy'), 'the line about who shares');
+    expect(said.width * said.height, `${size}: the line about who shares is drawn`).toBeLessThanOrEqual(1);
+    const log = await box(b.page.getByRole('log', { name: 'Messages' }), 'the message log');
+    expect(log.height, `${size}: the message log while watching with eight in voice`).toBeGreaterThanOrEqual(120);
+    await expectComposerShown(b.page, `${size}: watching with eight in voice`);
+    await expectFits(b.page, `${size}: watching with eight in voice`);
+    await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+    await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
+  }
 
   test('on a phone the share and watch controls fit the screen', async ({ browser }) => {
     for (const [size, options] of phones) {
