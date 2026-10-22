@@ -19,8 +19,9 @@ import (
 // expired would not be enough: what was revoked after the backup was taken
 // is not expired in it.
 //
-// Invites are paused as well: an invite closed after the backup was taken is
-// open again in it, and only an operator can tell which. Webhook hooks are
+// Invites and guest joining are paused as well: an invite closed after the
+// backup was taken is open again in it, joining turned off since is on
+// again, and only an operator can tell which. Webhook hooks are
 // left as they are and counted for review.
 //
 // What stays: principals, their passwords, their TOTP secrets, roles,
@@ -67,6 +68,10 @@ type RestoreResult struct {
 	// were paused in the backup already. They are paused afterwards either
 	// way.
 	InvitesPaused bool
+	// JoiningPaused is the same for guest joining (joining_paused): no new
+	// visit starts from the bare address or an invite until an operator
+	// resumes it. guests_enabled is left as the operator set it.
+	JoiningPaused bool
 	// Hooks is how many webhook hooks are live: their tokens are not
 	// sign-ins and a restore leaves them, so they need a review.
 	Hooks int
@@ -108,7 +113,9 @@ func (s *Store) OnAuthChanged(fn func([]int64)) { s.authChanged = fn }
 // deleted; every recent-auth proof is cleared; every TOTP step up to now and
 // the window after it is marked as used; invites are paused (audited
 // invites_paused, as an operator's pause is, when they were not paused
-// already); the database is marked restored for StartRestored; and
+// already) and so is guest joining (audited join_settings_changed
+// joining_paused=false->true, as PutJoinSettings audits it, when it was not
+// paused already); the database is marked restored for StartRestored; and
 // restore_invalidated is audited with the counts.
 // Either all of it commits or none of it does.
 //
@@ -179,6 +186,23 @@ func (s *Store) InvalidateRestored(ctx context.Context, now time.Time) (RestoreR
 				return err
 			}
 			out.InvitesPaused = true
+		}
+		join, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !join.JoiningPaused {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				settingJoiningPaused, strconv.FormatBool(true), now.UnixMilli()); err != nil {
+				return fmt.Errorf("store: restore: pause joining: %w", err)
+			}
+			if err := appendAuditEventTx(ctx, tx, hostActor, AuditJoinSettingsChanged, "server",
+				settingJoiningPaused+"=false->true", now); err != nil {
+				return err
+			}
+			out.JoiningPaused = true
 		}
 		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM hooks WHERE revoked_at IS NULL").Scan(&out.Hooks); err != nil {
 			return fmt.Errorf("store: restore: count hooks: %w", err)

@@ -134,6 +134,7 @@ func printRestore(w io.Writer, res store.RestoreResult) {
 	_, _ = fmt.Fprintf(w, "restore: ended %d guest visit(s) (reason restore)\n", len(res.GuestsEnded))
 	_, _ = fmt.Fprintf(w, "restore: deleted %d setup token(s)\n", res.SetupTokens)
 	_, _ = fmt.Fprintln(w, "restore: invites are paused: unpause after review (conch admin invite list --state open, then conch admin invite resume)")
+	_, _ = fmt.Fprintln(w, "restore: guest joining is paused: unpause after review (PUT /v1/join/settings with joining_paused false)")
 	_, _ = fmt.Fprintf(w, "restore: %d webhook hook(s) are live and keep working: review them (GET /v1/hooks) and delete any that should be gone\n", res.Hooks)
 	_, _ = fmt.Fprintln(w, "restore: authenticator codes are refused for about a minute after the first start")
 	_, _ = fmt.Fprintln(w, "restore: done. Members sign in again with their passwords; operators with password and code, or with conchd operator recover. Agents and scripts need new credentials.")

@@ -86,7 +86,7 @@ func TestRestoreCommand(t *testing.T) {
 		t.Fatalf("restore = %v (%s)", err, errOut)
 	}
 	for _, want := range []string{"signed out 2 principal(s)", "ended 1 guest visit(s)", "deleted 0 setup token(s)", "sign in again",
-		"invites are paused: unpause after review", "0 webhook hook(s) are live"} {
+		"invites are paused: unpause after review", "guest joining is paused: unpause after review", "0 webhook hook(s) are live"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("restore printed %q, want %q in it", out, want)
 		}

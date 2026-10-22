@@ -29,6 +29,7 @@ type restoreWorld struct {
 	linkCode, setupTok    string
 	challenge             string
 	channel               Channel
+	inviteCode            string
 	memberPost, totpStepB int64
 }
 
@@ -89,6 +90,18 @@ func newRestoreWorld(t *testing.T) *restoreWorld {
 	if _, err := w.s.CreateHook(ctx, "system", "a-hook-token-for-the-restore-test", w.channel.ID, w.agent.ID); err != nil {
 		t.Fatal(err)
 	}
+	// Guests may join from the bare address and through an open invite.
+	both, on, channels := schema.OpenJoiningBoth, true, []string{"ops"}
+	if _, err := w.s.PutJoinSettings(ctx, "system", w.op.ID, schema.PutJoinSettingsRequestV1{
+		GuestsEnabled: &on, OpenJoining: &both, OpenChannels: &channels}); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := w.s.CreateInvite(ctx, principalActor(w.op.ID), w.op.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, InviteOptions{}, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.inviteCode = inv.Code
 	// The operator signed in with a code once before the backup.
 	w.totpStepB = totpFloor(w.now) - schema.TOTPWindowSteps - 10
 	w.exec(t, "UPDATE totp SET last_step = ? WHERE principal_id = ?", w.totpStepB, w.op.ID)
@@ -202,6 +215,22 @@ func TestInvalidateRestoredBackup(t *testing.T) {
 	if paused, err := r.s.InvitesPaused(ctx); err != nil || !paused {
 		t.Errorf("invites paused = %v, %v after the restore", paused, err)
 	}
+	if !res.JoiningPaused {
+		t.Errorf("the restore did not report pausing guest joining: %+v", res)
+	}
+	// Joining turned off since the backup may be on in it: no visit starts
+	// from the bare address until an operator has looked, nor through an
+	// invite, since invites are paused too. Guests stay enabled: that is
+	// the operator's choice, not the restore's.
+	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrJoiningPaused) {
+		t.Errorf("a guest joining from the bare address after the restore = %v, want ErrJoiningPaused", err)
+	}
+	if _, err := r.s.RedeemInviteGuest(ctx, HashInviteCode(r.inviteCode), GuestEntry{}, r.now); !errors.Is(err, ErrInvitesPaused) {
+		t.Errorf("a guest joining through an invite after the restore = %v, want ErrInvitesPaused", err)
+	}
+	if set, _, err := r.s.JoinSettings(ctx); err != nil || !set.JoiningPaused || !set.GuestsEnabled {
+		t.Errorf("join settings after the restore = %+v, %v; want paused, guests still enabled", set, err)
+	}
 	if len(announcedAuth) != principals || len(announcedGuests) != 1 {
 		t.Errorf("announced %d principals and %d guests after the commit", len(announcedAuth), len(announcedGuests))
 	}
@@ -289,6 +318,8 @@ func TestInvalidateRestoredBackup(t *testing.T) {
 			counts[e.Action]++
 		case e.Action == AuditInvitesPaused && e.Actor == hostActor:
 			counts[e.Action]++
+		case e.Action == AuditJoinSettingsChanged && e.Actor == hostActor && e.Detail == "joining_paused=false->true":
+			counts[e.Action]++
 		}
 		for _, secret := range []string{r.opTok, r.agentTok, r.memberSession.Token, r.guest.Token, r.linkCode, r.setupTok} {
 			if strings.Contains(e.Detail, secret) || strings.Contains(e.Subject, secret) {
@@ -296,8 +327,9 @@ func TestInvalidateRestoredBackup(t *testing.T) {
 			}
 		}
 	}
-	if counts[AuditRestoreInvalidated] != 1 || counts["bumped"] != principals || counts[AuditGuestEnded] != 1 || counts[AuditInvitesPaused] != 1 {
-		t.Errorf("audit counts %v, want one restore_invalidated, %d bumps, one guest_ended, one invites_paused", counts, principals)
+	if counts[AuditRestoreInvalidated] != 1 || counts["bumped"] != principals || counts[AuditGuestEnded] != 1 || counts[AuditInvitesPaused] != 1 ||
+		counts[AuditJoinSettingsChanged] != 1 {
+		t.Errorf("audit counts %v, want one restore_invalidated, %d bumps, one guest_ended, one invites_paused, one join_settings_changed", counts, principals)
 	}
 
 	// The live database is as the live server left it.
@@ -397,7 +429,7 @@ func TestInvalidateRestoredTwice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second run = %v", err)
 	}
-	if len(second.Principals) != len(first.Principals) || len(second.GuestsEnded) != 0 || second.SetupTokens != 0 || second.InvitesPaused {
+	if len(second.Principals) != len(first.Principals) || len(second.GuestsEnded) != 0 || second.SetupTokens != 0 || second.InvitesPaused || second.JoiningPaused {
 		t.Errorf("the second run did %+v", second)
 	}
 	if r.live(t, after.Token) {
@@ -506,5 +538,40 @@ func TestStartRestored(t *testing.T) {
 	}
 	if got := len(allAuditEvents(t, w.s)); got != before {
 		t.Errorf("the second start wrote %d audit rows", got-before)
+	}
+}
+
+// A backup in which invites and guest joining were already paused: the
+// restore leaves them paused and writes nothing about either, and the entry
+// points stay closed.
+func TestInvalidateRestoredAlreadyPaused(t *testing.T) {
+	ctx := context.Background()
+	src := newRestoreWorld(t)
+	paused := true
+	if _, err := src.s.PutJoinSettings(ctx, "system", src.op.ID, schema.PutJoinSettingsRequestV1{JoiningPaused: &paused}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.s.SetInvitesPaused(ctx, "system", true); err != nil {
+		t.Fatal(err)
+	}
+	r := restored(t, src, backup(t, src.s))
+	before := len(allAuditEvents(t, r.s))
+	res, err := r.s.InvalidateRestored(ctx, r.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InvitesPaused || res.JoiningPaused {
+		t.Errorf("the restore says it paused what was paused already: %+v", res)
+	}
+	for _, e := range allAuditEvents(t, r.s)[before:] {
+		if e.Action == AuditInvitesPaused || e.Action == AuditJoinSettingsChanged {
+			t.Errorf("the restore wrote %s %q for a switch already paused", e.Action, e.Detail)
+		}
+	}
+	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrJoiningPaused) {
+		t.Errorf("joining = %v, want ErrJoiningPaused", err)
+	}
+	if p, err := r.s.InvitesPaused(ctx); err != nil || !p {
+		t.Errorf("invites paused = %v, %v", p, err)
 	}
 }
