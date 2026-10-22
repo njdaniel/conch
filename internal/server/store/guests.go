@@ -642,6 +642,10 @@ func endGuestVisitTx(ctx context.Context, tx execer, actor string, principalID i
 	if err := removeAllMembershipsTx(ctx, tx, actor, principalID, now); err != nil {
 		return EndedGuest{}, err
 	}
+	// The visit's read marks go with its memberships (issue #719).
+	if err := deleteReadMarksTx(ctx, tx, principalID); err != nil {
+		return EndedGuest{}, err
+	}
 	if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "guest visit ended", SessionEndedByRevocation, now, runs); err != nil {
 		return EndedGuest{}, err
 	}
