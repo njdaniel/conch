@@ -314,7 +314,7 @@ describe('sharing', () => {
     expect(within(voice()).queryByText(/only a tab shares its sound/)).toBeNull();
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
     await act(settle);
-    expect(await within(voice()).findByText('bea is sharing a screen. One person shares at a time.')).toBeTruthy();
+    expect(await within(voice()).findByText('bea is sharing a screen. Watch to see it.')).toBeTruthy();
     expect(t.rooms[0]?.calls).toEqual([]);
   });
 
