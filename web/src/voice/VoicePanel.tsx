@@ -444,6 +444,7 @@ export function VoicePanel({
               voice={voice}
               holderName={holder === null ? null : nameOf(people, holder.principal, viewer)}
               others={theirs === null ? null : { name: theirName, audio: theirs.sharingAudio }}
+              watching={state.watching}
               onMore={more}
             />
             {stopped === null ? null : (
@@ -502,13 +503,25 @@ function Elsewhere({ where, onOpen }: { readonly where: Busiest; readonly onOpen
   );
 }
 
-// How many chips a phone shows before "+N more" (issue #587). The cap itself
-// is a CSS rule, so the strip measures nothing.
+// How many chips a phone shows before "+N more" (issue #587). Which ones
+// are hidden is a class each chip carries and a CSS rule hides, so the strip
+// measures nothing.
 const phoneChips = 3;
+
+// shownOnPhone is who a capped roster keeps: the viewer's own chip first
+// (issue #641: otherwise a high principal id is among the "+N more" and the
+// viewer cannot see themselves in the room), then the others in the order
+// the roster has them. The list itself stays in that order.
+function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<number> {
+  const mine = roster.filter((o) => o.principal === viewer);
+  const others = roster.filter((o) => o.principal !== viewer);
+  return new Set([...mine, ...others].slice(0, phoneChips).map((o) => o.principal));
+}
 
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
-// on a phone the first three show, and "+N more" shows the rest.
+// on a phone three show, the viewer's own among them, and "+N more" shows
+// the rest.
 function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
@@ -522,6 +535,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   const [all, setAll] = useState(false);
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
+  const kept = shownOnPhone(roster, viewer);
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
@@ -529,7 +543,7 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
         {roster.map((o) => (
-          <li key={o.principal} className={speaking.has(o.principal) ? 'speaking' : undefined}>
+          <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond'].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere)}</span>
             {o.transmitting ? <Tag text="transmitting" /> : null}
@@ -870,11 +884,15 @@ function ShareButton({ voice, othersShare }: { readonly voice: VoiceControl; rea
 // A claim refused because someone else shares (busy) says the same words, so
 // it is that line, read out when it comes, and it goes with the other share
 // (issue #591, F14): once nobody else shares it is no longer true.
-function ShareNotes({ voice, holderName, others, onMore }: {
+function ShareNotes({ voice, holderName, others, watching, onMore }: {
   readonly voice: VoiceControl;
   readonly holderName: string | null;
   // Who else shares, and whether with sound, or null while nobody else does.
   readonly others: { readonly name: string; readonly audio: boolean } | null;
+  // This page watches that share. The stage's title says who shares, so on a
+  // phone the line is only read out, as Share screen's description (issue
+  // #641).
+  readonly watching: boolean;
   readonly onMore: () => void;
 }) {
   const { state, features } = voice;
@@ -917,7 +935,7 @@ function ShareNotes({ voice, holderName, others, onMore }: {
               {busyNote(others.name, others.audio)}
             </p>
           ) : (
-            <p key="busy" id="voice-share-busy" className="hint">
+            <p key="busy" id="voice-share-busy" className={watching ? 'hint watched' : 'hint'}>
               {busyNote(others.name, others.audio)}
             </p>
           )}

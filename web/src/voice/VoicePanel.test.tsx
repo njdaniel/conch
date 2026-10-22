@@ -288,6 +288,42 @@ describe('the roster', () => {
   });
 });
 
+// Issue #641: a capped roster keeps the viewer's own chip, wherever the
+// roster has it, and hides the others after it; the list's order is the
+// roster's.
+describe('the capped roster keeps the viewer', () => {
+  const room = (ids: readonly number[]): VoicePresenceV1 => ({
+    ...presence,
+    rooms: [{ participants: ids.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })) }],
+  });
+  const chips = (ids: readonly number[]) => {
+    const { voice } = panel(initialVoice, 'c', { kind: 'presence', presence: room(ids) });
+    return within(within(voice).getByRole('list')).getAllByRole('listitem');
+  };
+  const hidden = (items: readonly HTMLElement[]) => items.map((li) => li.classList.contains('beyond'));
+
+  // The roster is in principal order, and the viewer is 7.
+  it('shows the viewer, seventh of eight, with the first two others', () => {
+    const items = chips([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(items[6]?.querySelector('.who')?.textContent).toContain('You');
+    expect(hidden(items)).toEqual([false, false, true, true, true, true, false, true]);
+  });
+
+  it('keeps the first three when the viewer is already among them', () => {
+    const items = chips([7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(hidden(items)).toEqual([false, false, false, true, true, true, true, true]);
+  });
+
+  it('keeps the first three when the viewer is not in voice', () => {
+    const items = chips([1, 2, 3, 4, 5]);
+    expect(hidden(items)).toEqual([false, false, false, true, true]);
+  });
+
+  it('hides nobody with three or fewer', () => {
+    expect(hidden(chips([1, 2, 7]))).toEqual([false, false, false]);
+  });
+});
+
 // Issue #587 (F12): the strip is two rows, the roster above the state and the
 // controls, and a longer status line changes only the text in the state
 // column: the elements, their order and their classes stay the same, so the
