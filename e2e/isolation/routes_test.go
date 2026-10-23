@@ -73,8 +73,10 @@ func TestRowsAskTheirRoute(t *testing.T) {
 			invites: []int64{5, 6}, netName: "alpha-t-net", root: 7},
 		b: &group{channels: []string{"bravo-t-yard"}, chanIDs: []int64{8}, people: []*member{{id: 9}}, approval: 10, agentSession: 11},
 	}
+	w.p = &plaza{channel: "plaza-t-square", chanID: 12, preRoot: 13, preFile: 14, preRun: 15, preIV: 16, preWord: "early-t-x",
+		postFile: 17, postRun: 18, pia: &member{id: 19}, nick2: &member{id: 20}}
 	w.prober = w.b.people[0]
-	for _, r := range append(matrixRows(), agentRows()...) {
+	for _, r := range allRows() {
 		var s subject
 		if r.pick != nil {
 			s = r.pick(w)

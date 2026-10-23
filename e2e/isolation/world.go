@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
@@ -36,6 +37,12 @@ type member struct {
 	// password is whether they chose one: everyone who joined through an
 	// invite did (v2, #713); a person the operator made by hand did not.
 	password bool
+	// addr is the client address they come from (api.addr): "" for the
+	// groups, which all come from loopback; each person of the plaza has
+	// one of their own (guests.go).
+	addr string
+	// guest is the visit they joined with, for a guest.
+	guest *schema.GuestV1
 }
 
 // group is one group's people and what they made.
@@ -92,6 +99,15 @@ type world struct {
 	onBehalf []string
 	// lk is the LiveKit of the run; nil when the media half is skipped.
 	lk *liveKit
+
+	// The plaza and its guests (guests.go), and the plaza's private
+	// markers, nil until it is made; ptag is in every private string of
+	// it, qtag in every other string of it.
+	p          *plaza
+	priv       *markers
+	ptag, qtag string
+	// addrs counts the client addresses handed out (newAddr).
+	addrs int
 }
 
 // liveKit is what the media half needs: the server, its admin API and lk.
@@ -103,10 +119,25 @@ type liveKit struct {
 }
 
 func newWorld(h *harness, d *conchdProc, lk *liveKit) *world {
-	w := &world{h: h, d: d, op: d.op, tag: randHex(3), marks: newMarkers(), lk: lk}
-	for w.btag = randHex(3); w.btag == w.tag; w.btag = randHex(3) {
+	w := &world{h: h, d: d, op: d.op, tag: newTag(), marks: newMarkers(), lk: lk}
+	w.btag = newTag(w.tag)
+	w.ptag = newTag(w.tag, w.btag)
+	w.qtag = newTag(w.tag, w.btag, w.ptag)
+	// No password is ever in conchd's output: the log scan at the end of the
+	// run looks for every one the run sends.
+	for _, pw := range passwords {
+		h.secret("a password", pw)
 	}
 	return w
+}
+
+// newTag is a run tag, six hex characters, that none of taken is.
+func newTag(taken ...string) string {
+	for {
+		if t := randHex(3); !slices.Contains(taken, t) {
+			return t
+		}
+	}
 }
 
 // aName is a string A writes: its tag and hex, never a word, so that any six
@@ -122,7 +153,7 @@ func (w *world) bName(s string) string { return "bravo-" + w.btag + "-" + s }
 
 // a member's REST client.
 func (w *world) as(m *member) api {
-	return api{h: w.h, base: w.d.baseURL, token: m.token, who: m.name}
+	return api{h: w.h, base: w.d.baseURL, token: m.token, who: m.name, addr: m.addr}
 }
 
 // buildGroups makes both groups' channels and members. Nothing is posted yet:
