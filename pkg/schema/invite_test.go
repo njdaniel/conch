@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -348,5 +349,43 @@ func TestInviteErrorCodes(t *testing.T) {
 		if got != w {
 			t.Errorf("code = %q, want %q", got, w)
 		}
+	}
+}
+
+// TestInviteTypesHaveNoManagesField pins ADR-010's invariant that an invite
+// never grants channel management: no invite request or response type carries
+// a manages field or json key at any depth.
+func TestInviteTypesHaveNoManagesField(t *testing.T) {
+	types := []reflect.Type{
+		reflect.TypeOf(InviteChannelV1{}),
+		reflect.TypeOf(InviteV1{}),
+		reflect.TypeOf(CreateInviteRequestV1{}),
+		reflect.TypeOf(CreateInviteResponseV1{}),
+		reflect.TypeOf(InvitePreviewRequestV1{}),
+		reflect.TypeOf(InvitePreviewV1{}),
+		reflect.TypeOf(RedeemInviteRequestV1{}),
+		reflect.TypeOf(RedeemInviteRequestV2{}),
+		reflect.TypeOf(RedeemInviteGuestRequestV1{}),
+		reflect.TypeOf(RedeemInviteResponseV1{}),
+		reflect.TypeOf(ListInvitesResponseV1{}),
+		reflect.TypeOf(InviteJoinerV1{}),
+		reflect.TypeOf(InviteJoinersResponseV1{}),
+		reflect.TypeOf(DisableJoinersRequestV1{}),
+		reflect.TypeOf(DisableJoinersResponseV1{}),
+		reflect.TypeOf(DisableInviteesRequestV1{}),
+		reflect.TypeOf(InvitePermissionRequestV1{}),
+		reflect.TypeOf(InviteSettingsV1{}),
+	}
+	seen := map[reflect.Type]bool{}
+	for _, root := range types {
+		walkStructFields(root, seen, func(owner reflect.Type, f reflect.StructField) {
+			if f.Name == "Manages" {
+				t.Errorf("%s declares forbidden field Manages", owner)
+			}
+			tag := strings.Split(f.Tag.Get("json"), ",")[0]
+			if tag == "manages" {
+				t.Errorf("%s.%s has forbidden json tag %q", owner, f.Name, tag)
+			}
+		})
 	}
 }

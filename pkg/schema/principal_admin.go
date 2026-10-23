@@ -66,17 +66,20 @@ func (s PrincipalState) Valid() bool {
 // converted after; absent for one that never was. The guest list, GET
 // /v1/guests, has the visit itself.
 type PrincipalAdminV1 struct {
-	ID              int64         `json:"id"`
-	Kind            PrincipalKind `json:"kind"`
-	Name            string        `json:"name"`
-	Role            PrincipalRole `json:"role"`
-	CreatedAt       Timestamp     `json:"created_at"`
-	DisabledAt      *Timestamp    `json:"disabled_at,omitempty"`
-	HiddenAt        *Timestamp    `json:"hidden_at,omitempty"`
-	InvitedBy       *int64        `json:"invited_by,omitempty"`
-	InviteID        *int64        `json:"invite_id,omitempty"`
-	LiveCredentials int           `json:"live_credentials"`
-	GuestState      GuestState    `json:"guest_state,omitempty"`
+	ID   int64         `json:"id"`
+	Kind PrincipalKind `json:"kind"`
+	Name string        `json:"name"`
+	Role PrincipalRole `json:"role"`
+	// Owner is true for a server owner (ADR-010, issue #697). Omitted
+	// when false.
+	Owner           bool       `json:"owner,omitempty"`
+	CreatedAt       Timestamp  `json:"created_at"`
+	DisabledAt      *Timestamp `json:"disabled_at,omitempty"`
+	HiddenAt        *Timestamp `json:"hidden_at,omitempty"`
+	InvitedBy       *int64     `json:"invited_by,omitempty"`
+	InviteID        *int64     `json:"invite_id,omitempty"`
+	LiveCredentials int        `json:"live_credentials"`
+	GuestState      GuestState `json:"guest_state,omitempty"`
 }
 
 // ListPrincipalsResponseV1 is one page of the principal list, newest first.

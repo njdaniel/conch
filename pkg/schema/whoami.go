@@ -10,6 +10,16 @@ const (
 	RoleMember   PrincipalRole = "member"
 )
 
+// Valid reports whether r is a recognized principal role.
+func (r PrincipalRole) Valid() bool {
+	switch r {
+	case RoleOperator, RoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
 // IdentityClass is what the caller is, as the routes of ADR-009 decide who
 // may call them (issue #704): the self routes of a guest refuse a member,
 // and the member routes a guest. Kind and Role still say what the
@@ -82,4 +92,8 @@ type WhoAmIResponseV1 struct {
 	// credential once passwords exist (migration 32); omitted before, and
 	// with authentication off.
 	Auth *AuthStateV1 `json:"auth,omitempty"`
+	// Owner is true when the caller is a server owner (ADR-010, issue
+	// #697). Omitted when false, so every non-owner response is
+	// byte-for-byte unchanged.
+	Owner bool `json:"owner,omitempty"`
 }

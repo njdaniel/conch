@@ -18,8 +18,8 @@ import (
 //
 // Name and Kind say what the member is called and whether it is a person or an
 // agent. They are optional on the wire so that older fixtures and clients are
-// unaffected; the server always fills them. Nothing about the member's role or
-// whether it is disabled is carried here, on purpose.
+// unaffected; the server always fills them. Whether the member is disabled is
+// not carried here.
 type ChannelMemberV1 struct {
 	PrincipalID int64         `json:"principal_id"`
 	AddedBy     int64         `json:"added_by,omitempty"`
@@ -31,6 +31,16 @@ type ChannelMemberV1 struct {
 	// agents, which never decide. The store keeps it false for a guest
 	// (ADR-009; security review F1).
 	CanDecide *bool `json:"can_decide,omitempty"`
+	// Manages is whether the member is a manager of the channel (ADR-010,
+	// issue #697). Filled for the caller's own row and when the caller is
+	// an operator or a manager of the channel; absent otherwise, and
+	// absent for agents and guests, which never manage.
+	Manages *bool `json:"manages,omitempty"`
+	// Role is the member's server role: filled when the caller is an
+	// operator or a manager of the channel, and for the caller's own row,
+	// so a manager sees why an operator row cannot be removed; absent for
+	// other members, for agents and for guests.
+	Role PrincipalRole `json:"role,omitempty"`
 	// HistoryAfter is the membership's history bound (issue #704, ADR-009
 	// §4.3): the id of the last message of the channel at admission, chosen
 	// by the server. The member may read messages with a greater id and
@@ -107,6 +117,15 @@ func (d ChannelMembersV1) Validate() error {
 		if m.Kind == PrincipalAgent && m.CanDecide != nil {
 			return fmt.Errorf("schema: channel member %d is an agent and must not carry can_decide", m.PrincipalID)
 		}
+		if m.Kind == PrincipalAgent && m.Manages != nil {
+			return fmt.Errorf("schema: channel member %d is an agent and must not carry manages", m.PrincipalID)
+		}
+		if m.Kind == PrincipalAgent && m.Role != "" {
+			return fmt.Errorf("schema: channel member %d is an agent and must not carry role", m.PrincipalID)
+		}
+		if m.Role != "" && !m.Role.Valid() {
+			return fmt.Errorf("schema: channel member %d role %q is not one of operator, member", m.PrincipalID, m.Role)
+		}
 		if m.HistoryAfter < 0 {
 			return fmt.Errorf("schema: channel member %d history_after must not be negative", m.PrincipalID)
 		}
@@ -116,6 +135,12 @@ func (d ChannelMembersV1) Validate() error {
 			}
 			if m.CanDecide != nil && *m.CanDecide {
 				return fmt.Errorf("schema: channel member %d is a guest and cannot carry can_decide true", m.PrincipalID)
+			}
+			if m.Manages != nil && *m.Manages {
+				return fmt.Errorf("schema: channel member %d is a guest and cannot carry manages true", m.PrincipalID)
+			}
+			if m.Role != "" {
+				return fmt.Errorf("schema: channel member %d is a guest and must not carry role", m.PrincipalID)
 			}
 			if err := m.Guest.Validate(); err != nil {
 				return fmt.Errorf("schema: channel member %d: %w", m.PrincipalID, err)
@@ -131,4 +156,23 @@ func (d ChannelMembersV1) Validate() error {
 // and an existing member keeps what it has. CanDecide sets it either way.
 type PutChannelMemberRequestV1 struct {
 	CanDecide *bool `json:"can_decide,omitempty"`
+	// Manages sets whether the member is a manager of the channel
+	// (ADR-010, issue #697). Only an operator may set it: a manager
+	// sending Manages (true or false) is refused with 403. When absent, a
+	// new member does not manage and an existing member keeps what it has.
+	Manages *bool `json:"manages,omitempty"`
+}
+
+// AddChannelMemberRequestV1 is the body of POST /v1/channels/{channel}/members
+// (ADR-010, issue #697): add a member by principal name, for a channel manager
+// who does not have the operator's principal list and its ids. An operator may
+// use it too. The new member cannot decide approvals (CanDecide is false, since
+// a manager never grants approval rights) and does not manage.
+type AddChannelMemberRequestV1 struct {
+	Name string `json:"name"`
+}
+
+// Validate reports whether Name meets the person-name rule.
+func (r AddChannelMemberRequestV1) Validate() error {
+	return CreatePrincipalRequest{Kind: PrincipalHuman, Name: r.Name}.Validate()
 }

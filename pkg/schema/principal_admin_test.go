@@ -11,6 +11,7 @@ func TestPrincipalAdminGoldenFixtures(t *testing.T) {
 		new  func() any
 	}{
 		{"principal-admin-v1.json", func() any { return new(PrincipalAdminV1) }},
+		{"principal-admin-v1-owner.json", func() any { return new(PrincipalAdminV1) }},
 		{"principal-admin-v1-hidden.json", func() any { return new(PrincipalAdminV1) }},
 		{"principal-admin-v1-guest.json", func() any { return new(PrincipalAdminV1) }},
 		{"list-principals-response-v1.json", func() any { return new(ListPrincipalsResponseV1) }},

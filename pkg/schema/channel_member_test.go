@@ -16,9 +16,12 @@ func TestChannelMemberGoldenFixtures(t *testing.T) {
 		{"channel-member-v1-named.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-no-adder.json", func() any { return new(ChannelMemberV1) }},
 		{"channel-member-v1-can-decide.json", func() any { return new(ChannelMemberV1) }},
+		{"channel-member-v1-manager.json", func() any { return new(ChannelMemberV1) }},
 		// A guest member: its history bound and attribution (issue #704).
 		{"channel-member-v1-guest.json", func() any { return new(ChannelMemberV1) }},
 		{"put-channel-member-request-v1.json", func() any { return new(PutChannelMemberRequestV1) }},
+		{"put-channel-member-request-v1-manages.json", func() any { return new(PutChannelMemberRequestV1) }},
+		{"add-channel-member-request-v1.json", func() any { return new(AddChannelMemberRequestV1) }},
 		{"list-channel-members-response-v1.json", func() any { return new(ListChannelMembersResponseV1) }},
 		{"list-channel-members-response-v1-empty.json", func() any { return new(ListChannelMembersResponseV1) }},
 	}
@@ -40,7 +43,12 @@ func TestListChannelMembersEmptyIsArray(t *testing.T) {
 }
 
 func TestChannelMembersGoldenFixtures(t *testing.T) {
-	for _, file := range []string{"channel-members-v1.json", "channel-members-v1-empty.json", "channel-members-v1-guest.json"} {
+	for _, file := range []string{
+		"channel-members-v1.json",
+		"channel-members-v1-empty.json",
+		"channel-members-v1-guest.json",
+		"channel-members-v1-managers.json",
+	} {
 		t.Run(file, func(t *testing.T) {
 			assertP3GoldenFixture(t, file, func() any { return new(ChannelMembersV1) })
 		})
@@ -109,12 +117,66 @@ func TestChannelMembersV1Validate(t *testing.T) {
 		{name: "agent as a guest", mutate: func(d *ChannelMembersV1) {
 			d.Members[1].Guest = &GuestAttributionV1{Handle: goodHandle, Tag: "a7k4"}
 		}, wantErr: "channel member 3 is not human and must not carry guest"},
+
+		// Channel managers and roles (ADR-010, issue #787).
+		{name: "valid human manager with role", mutate: func(d *ChannelMembersV1) {
+			yes := true
+			d.Members[0].Manages = &yes
+			d.Members[0].Role = RoleMember
+		}},
+		{name: "valid human operator with manages false", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Manages = &no
+			d.Members[0].Role = RoleOperator
+		}},
+		{name: "agent with manages", mutate: func(d *ChannelMembersV1) {
+			d.Members[1].Manages = &no
+		}, wantErr: "channel member 3 is an agent and must not carry manages"},
+		{name: "agent with role", mutate: func(d *ChannelMembersV1) {
+			d.Members[1].Role = RoleMember
+		}, wantErr: "channel member 3 is an agent and must not carry role"},
+		{name: "unknown role", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Role = "owner"
+		}, wantErr: `channel member 2 role "owner" is not one of operator, member`},
+		{name: "guest with manages false is valid", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Name, d.Members[0].CanDecide, d.Members[0].Manages, d.Members[0].HistoryAfter = goodHandle, &no, &no, 4120
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}},
+		{name: "guest who manages", mutate: func(d *ChannelMembersV1) {
+			yes := true
+			d.Members[0].Name, d.Members[0].CanDecide, d.Members[0].Manages, d.Members[0].HistoryAfter = goodHandle, &no, &yes, 4120
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}, wantErr: "channel member 2 is a guest and cannot carry manages true"},
+		{name: "guest with role", mutate: func(d *ChannelMembersV1) {
+			d.Members[0].Name, d.Members[0].CanDecide, d.Members[0].Role, d.Members[0].HistoryAfter = goodHandle, &no, RoleMember, 4120
+			d.Members[0].Guest = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}, wantErr: "channel member 2 is a guest and must not carry role"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := fixtureChannelMembers()
 			tt.mutate(&d)
 			assertValidation(t, d.Validate(), tt.wantErr)
+		})
+	}
+}
+
+func TestAddChannelMemberRequestV1Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     AddChannelMemberRequestV1
+		wantErr string
+	}{
+		{name: "valid", req: AddChannelMemberRequestV1{Name: "wren"}},
+		{name: "valid unicode", req: AddChannelMemberRequestV1{Name: "山田 太郎"}},
+		{name: "empty", req: AddChannelMemberRequestV1{}, wantErr: "principal name must not be empty"},
+		{name: "blank", req: AddChannelMemberRequestV1{Name: "   "}, wantErr: "principal name must not be empty"},
+		{name: "fringe whitespace", req: AddChannelMemberRequestV1{Name: " wren"}, wantErr: "whitespace"},
+		{name: "control character", req: AddChannelMemberRequestV1{Name: "wr\x1ben"}, wantErr: "control characters"},
+		{name: "overlong", req: AddChannelMemberRequestV1{Name: strings.Repeat("a", MaxPrincipalNameLength+1)}, wantErr: "at most"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertValidation(t, tt.req.Validate(), tt.wantErr)
 		})
 	}
 }
