@@ -712,6 +712,80 @@ func TestRedeemV2PasswordRefusals(t *testing.T) {
 	}
 }
 
+// Everything a redemption can be refused for that costs nothing is refused
+// before the hash, as from the bare address (issue #794, design §5.1–§5.2):
+// a password that matches or contains the server's name, and a name that is
+// taken or is the server's own. Neither runs Argon2, makes anyone or spends
+// a use of the invite; the name refusals spend a name probe from the
+// allowance the account route from the bare address shares, the password
+// ones spend none.
+func TestRedeemV2RefusesBeforeHashing(t *testing.T) {
+	const (
+		serverName = "Harbour Club Members"
+		remote     = "198.51.100.94:1"
+	)
+	tests := []struct {
+		name, joiner, password string
+		status                 int
+		code, message          string
+		spendsProbe            bool
+	}{
+		{"password is the server's name", "wren", serverName,
+			http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable, "", false},
+		{"password contains the server's name", "wren", "we are the harbour club members, all of us",
+			http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable, "", false},
+		{"name taken", "alice", testJoinPassword,
+			http.StatusConflict, schema.ErrorCodePrincipalExists, "that name is taken; choose another", true},
+		{"name taken in another case", "ALICE", testJoinPassword,
+			http.StatusConflict, schema.ErrorCodePrincipalExists, "that name is taken; choose another", true},
+		{"name is the server's", "HARBOUR CLUB MEMBERS", testJoinPassword,
+			http.StatusConflict, schema.ErrorCodePrincipalExists, serverNameReservedMessage, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newLoginFixture(t, Config{ServerName: serverName})
+			f.mustPutJoin(t, openBoth("red"))
+			limits := looseLoginLimits()
+			limits.nameProbesPerAddress = inviteLimit{"name_probes_per_address", 1, time.Hour}
+			f.srv.setLoginLimits(limits)
+			inv := f.createInvite(t, f.rootTok, openLink("red"))
+			hashed := f.srv.passwords.hashes.Load()
+			body := inviteJSON(t, schema.RedeemInviteRequestV2{Code: inv.Code, Name: tt.joiner, Password: tt.password})
+			rec := f.send(t, "POST", "/v2/invites/redeem", "", body, remote)
+			assertErrorBody(t, rec, tt.status, tt.code)
+			if tt.message != "" {
+				if msg := decodeBody[schema.Error](t, rec).Message; msg != tt.message {
+					t.Errorf("message = %q, want %q", msg, tt.message)
+				}
+			}
+			if strings.Contains(rec.Body.String(), tt.password) {
+				t.Errorf("the refusal echoes the password: %s", rec.Body)
+			}
+			if n := f.srv.passwords.hashes.Load(); n != hashed {
+				t.Errorf("the refusal hashed %d passwords, want none", n-hashed)
+			}
+			if n := countJoinersCreated(t, f.authFixture); n != 0 {
+				t.Errorf("principal_created rows = %d, want 0", n)
+			}
+			if n := f.queryString(t, fmt.Sprintf("SELECT uses FROM invites WHERE id = %d", inv.Invite.ID)); n != "0" {
+				t.Errorf("the invite's uses = %s, want none spent", n)
+			}
+			_, free, _ := f.srv.logins.peekNameProbe(clientAddrOf(t, remote), f.srv.now())
+			if free == tt.spendsProbe {
+				t.Errorf("a name probe left = %v, want %v", free, !tt.spendsProbe)
+			}
+			if tt.spendsProbe {
+				// The allowance is the one the bare address's account route
+				// spends: it is refused there too, still before any hash.
+				assertErrorBody(t, f.joinAccount(t, "a-free-name", remote), http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+				if n := f.srv.passwords.hashes.Load(); n != hashed {
+					t.Errorf("the account route hashed %d passwords, want none", n-hashed)
+				}
+			}
+		})
+	}
+}
+
 // An invalid code costs no hashing: it is refused while the pool is full.
 // So is a valid one, which the pool would have hashed, with 429.
 func TestRedeemV2HashesOnlyAValidCode(t *testing.T) {
