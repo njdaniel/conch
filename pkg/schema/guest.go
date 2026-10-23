@@ -50,8 +50,9 @@ const (
 	// DefaultGuestIdleSeconds is how long a visit lasts without a request
 	// carrying its bearer: two hours. DefaultGuestAbsoluteSeconds is the hard
 	// bound of a visit: a day. Both are settings; MaxGuestLifetimeSeconds
-	// caps each, and MinGuestIdleSeconds floors the idle bound at the minute
-	// the server records activity in.
+	// caps each, and MinGuestIdleSeconds floors the idle bound at a minute.
+	// The server records activity at most once a minute, or once a quarter
+	// of the idle bound, whichever is shorter.
 	DefaultGuestIdleSeconds     = 2 * 60 * 60
 	DefaultGuestAbsoluteSeconds = 24 * 60 * 60
 	MinGuestIdleSeconds         = 60
@@ -374,8 +375,8 @@ func (a GuestAttributionV1) Validate() error {
 // ExpiresAt is the absolute deadline: the earlier of the server's hard
 // bound and the entry invite's credential lifetime, fixed at admission.
 // IdleExpiresAt is where the idle bound stands now; a REST request carrying
-// the bearer moves it, at most once a minute and never past ExpiresAt. The
-// visit ends at the earlier of the two. EndedAt and EndReason are present
+// the bearer moves it, at most once a minute, or once a quarter of the idle
+// bound, whichever is shorter, and never past ExpiresAt. The visit ends at the earlier of the two. EndedAt and EndReason are present
 // only once the visit is ended. CanConvert says whether Create an account is
 // open to this visit now under its origin's policy, without a permit; a
 // client offers the action when it is true, and the server decides again in
