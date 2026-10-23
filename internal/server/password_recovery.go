@@ -344,8 +344,10 @@ func (s *Server) presentedPassword(w http.ResponseWriter, r *http.Request, calle
 // re-checks the verification and the credential, checks an operator's code,
 // and, in one transaction, stores the password, moves the generation on,
 // revokes every other credential and rotates this one. A change that loses a
-// race with another change, a reset or a disable answers auth_failed and
-// changes nothing.
+// race with another change, a reset, a sign-out everywhere, a disable or a
+// hide answers unauthenticated, as the middleware does for a dead
+// credential, and changes nothing: 401 auth_failed on this route is only
+// ever a wrong password or code (issue #814).
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, credID, ok := s.passwordCaller(w, r)
@@ -417,9 +419,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrLoginStale), errors.Is(err, store.ErrPrincipalDisabled), errors.Is(err, store.ErrPrincipalHidden),
 		errors.Is(err, store.ErrPrincipalNotFound):
 		// Something changed while the password was verified: another
-		// change, a reset, a sign-out everywhere or a disable won.
+		// change, a reset, a sign-out everywhere, a disable or a hide won,
+		// and the credential the request came with is no longer live. That
+		// is a sign-in to do again, not a wrong password (issue #814), so
+		// it is the middleware's answer, as handleSetPassword's is.
 		s.logins.nameCancelled(key, s.now())
-		writeError(w, http.StatusUnauthorized, schema.ErrorCodeAuthFailed, "the account changed while the password was checked; sign in again")
+		writeUnauthenticated(w)
 	case err != nil:
 		s.logins.nameCancelled(key, s.now())
 		slog.ErrorContext(ctx, "passwords: change failed", "principal", caller.ID, "error", err)
@@ -596,7 +601,9 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrNotASession):
 		writeNotASession(w)
 	case errors.Is(err, store.ErrLoginStale):
-		writeError(w, http.StatusUnauthorized, schema.ErrorCodeAuthFailed, "the account changed while the password was checked; sign in again")
+		// The credential or the account changed while the password was
+		// verified: the credential is no longer live (issue #814).
+		writeUnauthenticated(w)
 	case err != nil:
 		slog.ErrorContext(ctx, "passwords: record the proof failed", "principal", caller.ID, "error", err)
 		writeInternalError(w)
