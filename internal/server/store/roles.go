@@ -98,7 +98,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 		case !errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("store: bootstrap operator: check operators: %w", err)
 		}
-		keys, err := claimNameTx(ctx, tx, name, 0)
+		keys, err := s.claimNameTx(ctx, tx, name, 0)
 		if err != nil {
 			return fmt.Errorf("store: bootstrap operator: %w", err)
 		}

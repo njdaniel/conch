@@ -311,6 +311,9 @@ type JoinState struct {
 	// reserved guest namespace (migration 31's preflight); while any do,
 	// guests cannot be enabled.
 	ReservedNames int
+	// ServerNameHolders is how many permanent principals hold the server's
+	// name (ServerNameHolders, issue #760). They block nothing.
+	ServerNameHolders int
 }
 
 // JoinState reads the joining policy, the live visits and the reserved
@@ -321,7 +324,7 @@ func (s *Store) JoinState(ctx context.Context) (JoinState, error) {
 		return JoinState{}, fmt.Errorf("store: join state: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	return joinStateTx(ctx, tx, credentialNow())
+	return s.joinStateTx(ctx, tx, credentialNow())
 }
 
 // JoinSettings reads the joining policy and the live visits, without the
@@ -343,7 +346,7 @@ func (s *Store) JoinSettings(ctx context.Context) (schema.JoinSettingsV1, int, e
 	return set, live, nil
 }
 
-func joinStateTx(ctx context.Context, tx execer, now time.Time) (JoinState, error) {
+func (s *Store) joinStateTx(ctx context.Context, tx execer, now time.Time) (JoinState, error) {
 	set, err := joinSettingsTx(ctx, tx)
 	if err != nil {
 		return JoinState{}, err
@@ -356,7 +359,11 @@ func joinStateTx(ctx context.Context, tx execer, now time.Time) (JoinState, erro
 	if err != nil {
 		return JoinState{}, fmt.Errorf("store: join state: %w", err)
 	}
-	return JoinState{Settings: set, LiveGuests: live, ReservedNames: len(reserved)}, nil
+	holders, err := s.serverNameHoldersTx(ctx, tx)
+	if err != nil {
+		return JoinState{}, err
+	}
+	return JoinState{Settings: set, LiveGuests: live, ReservedNames: len(reserved), ServerNameHolders: len(holders)}, nil
 }
 
 // PutJoinSettings applies req to the joining settings in one IMMEDIATE
@@ -378,7 +385,7 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 	var out JoinState
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		now := credentialNow().Truncate(time.Millisecond)
-		cur, err := joinStateTx(ctx, tx, now)
+		cur, err := s.joinStateTx(ctx, tx, now)
 		if err != nil {
 			return err
 		}
@@ -481,7 +488,7 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 				return err
 			}
 		}
-		out, err = joinStateTx(ctx, tx, now)
+		out, err = s.joinStateTx(ctx, tx, now)
 		return err
 	})
 	if err != nil {
@@ -590,9 +597,9 @@ const AccountCredentialLabel = "account created"
 // transaction. In one IMMEDIATE transaction it reads the policy again
 // (addressAccountPolicy: ErrJoiningClosed, ErrJoiningPaused) and the open
 // channels, claims the name (claimNameTx: ErrDuplicate, ErrNameReserved for
-// the hidden and guest namespaces, ErrNameInvalid), and makes the
-// principal, its password, its memberships of every open channel and its
-// first credential together, so a refusal or a failure leaves nothing
+// the hidden and guest namespaces and the server's name, ErrNameInvalid),
+// and makes the principal, its password, its memberships of every open
+// channel and its first credential together, so a refusal or a failure leaves nothing
 // behind. The account gets what a bare-address joiner gets and nothing
 // more: join_voice, no right to invite, can_decide 0 in every channel, and,
 // as a guest's, a history bound at each channel's last message, since the
@@ -632,7 +639,7 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		if len(channels) == 0 {
 			return ErrJoiningClosed
 		}
-		keys, err := claimNameTx(ctx, tx, name, 0)
+		keys, err := s.claimNameTx(ctx, tx, name, 0)
 		if err != nil {
 			return fmt.Errorf("store: join as an account: %w", err)
 		}
