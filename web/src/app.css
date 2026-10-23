@@ -783,6 +783,139 @@ label {
   margin: 0 0 var(--s2);
 }
 
+/* Settings → Password, Add a device, and Joining and guests (issue #714):
+   each opens in place, its forms one field under another, and wraps rather
+   than widening the drawer. */
+.password-settings,
+.guest-settings,
+.add-device {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.password-panel:not([hidden]),
+.guest-settings-panel:not([hidden]) {
+  margin-top: var(--s2);
+}
+
+.password-panel form,
+.guest-settings-panel form,
+.add-device form,
+.device-link,
+.setup form,
+.reauth form {
+  display: grid;
+  gap: var(--s2);
+}
+
+.password-panel p,
+.guest-settings-panel p,
+.add-device p {
+  margin: var(--s1) 0;
+}
+
+.password-panel button,
+.guest-settings-panel button,
+.add-device button,
+.setup button,
+.reauth button {
+  justify-self: start;
+}
+
+.guest-settings-panel fieldset {
+  display: grid;
+  gap: var(--s1);
+}
+
+.guest-settings-panel h3,
+.add-device h3,
+.add-device h4 {
+  margin: var(--s3) 0 var(--s1);
+  font-size: 0.95rem;
+}
+
+.device-link {
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.device-link input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.join-warnings,
+.end-list {
+  margin: var(--s2) 0;
+  padding-left: var(--s4);
+  color: var(--warn);
+}
+
+.end-list {
+  color: var(--text);
+}
+
+/* An authenticator's key, at an operator's setup: big enough to type from. */
+.totp-key {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--s1) var(--s3);
+  margin: var(--s3) 0;
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.totp-key dt {
+  color: var(--muted);
+}
+
+.totp-key dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.totp-key code {
+  font-size: 1.15rem;
+  letter-spacing: 0.05em;
+}
+
+/* The recent proof's question (issue #714), over everything, Settings
+   included. */
+.reauth-layer .backdrop {
+  z-index: 40;
+}
+
+.reauth {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 41;
+  display: grid;
+  gap: var(--s2);
+  width: min(26rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: var(--s4) var(--s5);
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.reauth h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.reauth p {
+  margin: 0;
+}
+
 /* "Report a problem" (issue #446): its form opens in place, in Settings and
    where the page says it cannot reach the server. */
 .report {

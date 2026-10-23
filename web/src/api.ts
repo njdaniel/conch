@@ -16,17 +16,43 @@
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
 import { listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type OwnCredentialV1 } from './schema/credential';
 import { errorV0, type ErrorV0 } from './schema/error';
-import { loginResponseV1, type LoginRequestV1 } from './schema/auth';
+import {
+  loginResponseV1,
+  passwordUpdatedResponseV1,
+  reauthResponseV1,
+  redeemSetupTokenResponseV1,
+  totpEnrollmentV1,
+  type AuthStateV1,
+  type ChangePasswordRequestV1,
+  type ConfirmTOTPRequestV1,
+  type LoginRequestV1,
+  type PasswordUpdatedResponseV1,
+  type ReauthRequestV1,
+  type ReauthResponseV1,
+  type RedeemSetupTokenRequestV1,
+  type ResetPasswordRequestV1,
+  type SetPasswordRequestV1,
+  type TOTPEnrollmentV1,
+  type TOTPLoginRequestV1,
+} from './schema/auth';
 import {
   convertGuestResponseV1,
+  endGuestsResponseV1,
   joinAccountResponseV1,
   joinGuestResponseV1,
   joinInfoV1,
+  joinSettingsResponseV1,
+  listGuestsResponseV1,
   type ConvertGuestRequestV1,
   type ConvertGuestResponseV1,
+  type EndGuestsRequestV1,
+  type EndGuestsResponseV1,
+  type GuestAdminV1,
   type JoinAccountRequestV1,
   type JoinGuestRequestV1,
   type JoinInfoV1,
+  type JoinSettingsResponseV1,
+  type PutJoinSettingsRequestV1,
 } from './schema/guest';
 import { health } from './schema/health';
 import {
@@ -57,7 +83,17 @@ import {
 } from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
-import { redeemSignInLinkResponseV1, signInLinkPreviewV1, type RedeemSignInLinkRequestV1, type SignInLinkPreviewRequestV1, type SignInLinkPreviewV1 } from './schema/signin';
+import {
+  createSignInLinkResponseV1,
+  listOwnSignInLinksResponseV1,
+  redeemSignInLinkResponseV1,
+  signInLinkPreviewV1,
+  type CreateDeviceLinkRequestV1,
+  type RedeemSignInLinkRequestV1,
+  type SignInLinkPreviewRequestV1,
+  type SignInLinkPreviewV1,
+  type SignInLinkV1,
+} from './schema/signin';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
@@ -307,10 +343,56 @@ type PostReply =
   | { readonly kind: 'none' }
   | { readonly kind: 'unauthorized' };
 
+//
+// A write the server answers 403 reauth_required (design §5.3: it needs a
+// recent proof of the password, and an operator's code) is sent once more
+// after the page has asked for that proof (onReauthRequired), with the same
+// body: the refusal comes before the route does anything, so the second
+// send is the first that acts. Once, never more: a second reauth_required
+// is the caller's answer, so a server that keeps asking gets one question,
+// not one after another (the CLI's rule, #715). Cancelled, the first answer
+// stands.
 async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
   const held = current();
   if (held === null) return { kind: 'unauthorized' };
-  return sendAs(held, method, path, body, keepalive, signal);
+  const reply = await sendAs(held, method, path, body, keepalive, signal);
+  if (reply.kind !== 'reply' || reply.res.status !== 403 || askReauth === null) return reply;
+  if ((await refusalCode(reply.res.clone())) !== reauthRequired) return reply;
+  if (!(await proveAgain())) return reply;
+  const again = current();
+  if (again === null) return { kind: 'unauthorized' };
+  return sendAs(again, method, path, body, keepalive, signal);
+}
+
+// The server's codes the module acts on itself.
+const authFailed = 'auth_failed';
+
+// The routes that take a password or a code with a working credential, and
+// answer a wrong one 401 auth_failed (see sendAs).
+const secretRoutes: ReadonlySet<string> = new Set(['/v1/reauth', '/v1/password/mine', '/v1/totp/confirm']);
+const reauthRequired = 'reauth_required';
+
+// How the page asks the person to prove who they are again (issue #714): it
+// shows the question, sends the proof with reauth, and resolves to whether a
+// proof now stands. Set by the signed-in page, cleared when it goes.
+export type ReauthAsk = () => Promise<boolean>;
+let askReauth: ReauthAsk | null = null;
+// The question being asked: calls refused together share one.
+let asking: Promise<boolean> | null = null;
+
+// onReauthRequired sets how the page asks, or with null stops it asking: a
+// call then answered reauth_required is handed back as it came.
+export function onReauthRequired(ask: ReauthAsk | null): void {
+  askReauth = ask;
+}
+
+function proveAgain(): Promise<boolean> {
+  const ask = askReauth;
+  if (ask === null) return Promise.resolve(false);
+  asking ??= ask().finally(() => {
+    asking = null;
+  });
+  return asking;
 }
 
 // sendAs is authedSend with the credential already taken, for the sign-outs,
@@ -338,7 +420,13 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
     return { kind: 'none' };
   }
   if (!res.ok) await noteRefusal(res);
-  if (res.status === 401) {
+  // A 401 auth_failed is a password or a code that is not right, presented
+  // to a route that takes one (a re-authentication, a password change, an
+  // authenticator's confirmation; issue #714): the credential still works,
+  // and the caller says what was wrong. Only those routes are believed when
+  // they say so (secretRoutes); every other 401, auth_failed or not, is the
+  // credential refused, which signs out.
+  if (res.status === 401 && !(secretRoutes.has(path) && (await refusalCode(res.clone())) === authFailed)) {
     forget(held);
     return { kind: 'unauthorized' };
   }
@@ -541,6 +629,247 @@ export async function endSignIn(id: number): Promise<ApiResult<null>> {
   return { ok: true, value: null };
 }
 
+// Passwords, the recent proof and Add a device (issue #714, design §5, §6).
+// A password or a code goes in a request body alone and is kept nowhere
+// here, as the sign-in's is.
+
+// readSent is the answer to a write with the signed-in credential, read as
+// an invite call's is: the server's code, its line and its Retry-After on a
+// refusal, the schema's shape on a success.
+async function readSent<T>(reply: PostReply, check: Validator<T>): Promise<InviteResult<T>> {
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, check);
+}
+
+// readDone is readSent for a write whose answer is its status alone.
+async function readDone(reply: PostReply): Promise<InviteResult<null>> {
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return { ok: true, value: null };
+}
+
+// reauth proves the signed-in person's password again (POST /v1/reauth), and
+// an operator's code with it, so the session holds a proof for ten minutes.
+// It never asks for a proof itself: it is sent once, as it is, and answered.
+// A refusal carries the server's code: auth_failed (the password or code is
+// not right, which keeps the person signed in), forbidden (a script's
+// credential, which can hold no proof), password_not_set, rate_limited.
+export async function reauth(password: string, code?: string): Promise<InviteResult<ReauthResponseV1>> {
+  const held = current();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const request: ReauthRequestV1 = code === undefined ? { password } : { password, code };
+  return readSent(await sendAs(held, 'POST', '/v1/reauth', request), reauthResponseV1);
+}
+
+// What a password write gave: the answer, and whether this page's credential
+// was replaced by the one it carried (a change rotates the session it came
+// from). unkept is a new credential this browser would not keep: the old one
+// is revoked already, so the person signs in again.
+export type PasswordResult = InviteResult<PasswordUpdatedResponseV1> | { readonly ok: false; readonly failure: 'unkept' };
+
+// changePassword replaces the signed-in person's password (PUT
+// /v1/password/mine), proving the current one, and an operator's code with
+// it. Every other sign-in of theirs ends; this one is rotated, and the new
+// credential is kept where the old one was.
+export async function changePassword(currentPassword: string, password: string, code?: string): Promise<PasswordResult> {
+  const request: ChangePasswordRequestV1 = code === undefined ? { current: currentPassword, password } : { current: currentPassword, password, code };
+  const before = current();
+  return keepRotated(before, await authedSend('PUT', '/v1/password/mine', request));
+}
+
+// setPassword sets a first password for a member from before passwords
+// (POST /v1/password/mine), with the one-use enrollment code an operator
+// gave them as the proof: a long-lived credential alone may not set one.
+export async function setPassword(password: string, proof: string): Promise<PasswordResult> {
+  const request: SetPasswordRequestV1 = { password, proof };
+  const before = current();
+  return keepRotated(before, await authedSend('POST', '/v1/password/mine', request));
+}
+
+// keepRotated reads a password write's answer and, when it carries a new
+// credential for this page, keeps it in the place of the old one, which the
+// server has revoked.
+//
+// before is the credential the write was sent with. When it is no longer
+// the one stored (another tab signed out or in meanwhile), the new
+// credential has nobody here to hold it: it is revoked (best effort) rather
+// than left alive, and this page is signed out, as the other tab chose.
+async function keepRotated(before: Held | null, reply: PostReply): Promise<PasswordResult> {
+  const result = await readSent(reply, passwordUpdatedResponseV1);
+  if (!result.ok || result.value.token === undefined || before === null) return result;
+  const next: Held = { token: result.value.token, place: before.place };
+  const held = current();
+  if (held === null || held.token !== before.token) {
+    await sendAs(next, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unkept' };
+  }
+  if (!writeToken(next.token, next.place)) {
+    await sendAs(next, 'DELETE', '/v1/credentials/current');
+    forget(held);
+    return { ok: false, failure: 'unkept' };
+  }
+  pinned = { token: next.token, place: next.place };
+  return result;
+}
+
+// resetPassword replaces a forgotten password with the code of a reset link
+// an operator made (POST /v1/password/reset). It needs no credential, and
+// signs nobody in: every sign-in of the account ends, and the person signs
+// in with the new password.
+export async function resetPassword(signInCode: string, password: string): Promise<InviteResult<PasswordUpdatedResponseV1>> {
+  const request: ResetPasswordRequestV1 = { code: signInCode, password };
+  const res = await sendOpen('/v1/password/reset', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, passwordUpdatedResponseV1);
+}
+
+// An operator's setup (design §5.3): the host makes a one-use setup token
+// (conchd operator bootstrap, setup or recover), and the page spends it for
+// a fifteen-minute credential that reaches whoami, the password and the
+// authenticator's enrolment, and nothing else. That credential is held here
+// in memory only, never stored and never pinned: it signs nobody in, and a
+// reload drops it (a new token is made on the host).
+let setupHeld: Held | null = null;
+
+// What the setup credential says of its holder.
+export interface SetupState {
+  readonly name: string;
+  readonly auth: AuthStateV1;
+}
+
+// redeemSetupToken spends a setup token (POST /v1/setup/redeem). The token
+// goes in the body alone and is kept nowhere.
+export async function redeemSetupToken(token: string): Promise<InviteResult<SetupState>> {
+  setupHeld = null;
+  const request: RedeemSetupTokenRequestV1 = { token };
+  const res = await sendOpen('/v1/setup/redeem', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const redeemed = await readBody(res, redeemSetupTokenResponseV1);
+  if (!redeemed.ok) return redeemed;
+  const { principal, auth } = redeemed.value;
+  setupHeld = { token: redeemed.value.token, place: 'tab' };
+  return { ok: true, value: { name: principal.name, auth } };
+}
+
+// setupState reads the setup credential's whoami again: what is done.
+export async function setupState(): Promise<InviteResult<SetupState>> {
+  const held = setupHeld;
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  if (!who.ok) {
+    if (who.failure === 'unauthorized') setupHeld = null;
+    return who;
+  }
+  if (who.value.auth === undefined) return { ok: false, failure: 'invalid' };
+  return { ok: true, value: { name: who.value.name, auth: who.value.auth } };
+}
+
+// sendSetup is a write with the setup credential. A 401 that is not a wrong
+// code means it has ended (its fifteen minutes, or the setup completed).
+async function sendSetup(path: string, body?: unknown): Promise<PostReply> {
+  const held = setupHeld;
+  if (held === null) return { kind: 'unauthorized' };
+  const reply = await sendAs(held, 'POST', path, body);
+  if (reply.kind === 'unauthorized') setupHeld = null;
+  return reply;
+}
+
+// setupPassword sets the operator's password on the setup credential (POST
+// /v1/password/mine), replacing any it had: the host-made token is the proof.
+export async function setupPassword(password: string): Promise<InviteResult<PasswordUpdatedResponseV1>> {
+  const request: SetPasswordRequestV1 = { password };
+  return readSent(await sendSetup('/v1/password/mine', request), passwordUpdatedResponseV1);
+}
+
+// enrollAuthenticator starts the authenticator's enrolment (POST
+// /v1/totp/enroll): a new secret, shown in this answer and never again. The
+// caller shows it only when asked to, and never while the tab shares.
+export async function enrollAuthenticator(): Promise<InviteResult<TOTPEnrollmentV1>> {
+  return readSent(await sendSetup('/v1/totp/enroll'), totpEnrollmentV1);
+}
+
+// confirmAuthenticator proves the enrolment with a code from the app (POST
+// /v1/totp/confirm). With the password set, setup is complete and the setup
+// credential ends.
+export async function confirmAuthenticator(code: string): Promise<InviteResult<null>> {
+  const request: ConfirmTOTPRequestV1 = { code };
+  return readDone(await sendSetup('/v1/totp/confirm', request));
+}
+
+// endSetup forgets the setup credential here. The server ends it at its
+// fifteen minutes, or once setup is complete; it can revoke nothing itself.
+export function endSetup(): void {
+  setupHeld = null;
+}
+
+// A device link just made: the link as the server keeps it, and its code,
+// shown once, to the person who made it, inside the link the page builds.
+export interface DeviceLink {
+  readonly link: SignInLinkV1;
+  readonly linkCode: string;
+}
+
+// createDeviceLink makes a one-use link that signs this person's own account
+// in on another device (POST /v1/sign-in-links/mine). The server asks for a
+// recent proof of the password first (reauth_required), which authedSend
+// asks for and then sends again.
+export async function createDeviceLink(label: string): Promise<InviteResult<DeviceLink>> {
+  const request: CreateDeviceLinkRequestV1 = label === '' ? {} : { label };
+  const made = await readSent(await authedSend('POST', '/v1/sign-in-links/mine', request), createSignInLinkResponseV1);
+  if (!made.ok) return made;
+  const { sign_in_link: link, code } = made.value;
+  return { ok: true, value: { link, linkCode: code } };
+}
+
+// listDeviceLinks reads the caller's open device links, newest first,
+// without their codes.
+export async function listDeviceLinks(): Promise<ApiResult<SignInLinkV1[]>> {
+  const result = await authed('/v1/sign-in-links/mine', listOwnSignInLinksResponseV1);
+  return result.ok ? { ok: true, value: result.value.sign_in_links } : result;
+}
+
+// closeDeviceLink closes one of the caller's device links, so it signs
+// nobody in. One used, closed or expired already is a success that changes
+// nothing; another's id is sign_in_link_not_found.
+export async function closeDeviceLink(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend('DELETE', `/v1/sign-in-links/mine/${String(id)}`));
+}
+
+// Guest entry, for an operator (issue #714, design §2): the joining
+// settings, the live guests and End all guest visits. Changing the settings
+// and ending visits need a recent proof (reauth_required), as authedSend
+// asks for.
+
+export function joinSettings(): Promise<ApiResult<JoinSettingsResponseV1>> {
+  return authed('/v1/join/settings', joinSettingsResponseV1);
+}
+
+// putJoinSettings changes the settings it names and no others. A refusal
+// carries the server's code: join_policy_conflict for settings that cannot
+// stand together.
+export async function putJoinSettings(request: PutJoinSettingsRequestV1): Promise<InviteResult<JoinSettingsResponseV1>> {
+  return readSent(await authedSend('PUT', '/v1/join/settings', request), joinSettingsResponseV1);
+}
+
+// listGuests reads the live guest visits, newest first: one page.
+export async function listGuests(): Promise<ApiResult<GuestAdminV1[]>> {
+  const result = await authed('/v1/guests', listGuestsResponseV1);
+  return result.ok ? { ok: true, value: result.value.guests } : result;
+}
+
+// endAllGuests ends every live guest visit (POST /v1/guests/end); with dryRun
+// it ends none and says which it would. A visit that became an account is
+// never one of them.
+export async function endAllGuests(dryRun: boolean): Promise<InviteResult<EndGuestsResponseV1>> {
+  const request: EndGuestsRequestV1 = { dry_run: dryRun };
+  return readSent(await authedSend('POST', '/v1/guests/end', request), endGuestsResponseV1);
+}
+
 // Invites (issue #440). Preview and redeem need no credential: the code is
 // the proof. It travels in a POST body only, never in a URL, so no address,
 // access log or performance entry holds it; nothing here stores it, logs it or
@@ -736,9 +1065,13 @@ export async function createAccount(name: string, password: string): Promise<Red
 // keepRedeemed keeps the credential an invite, a sign-in link, a join or a
 // sign-in gave at place: a member's to last, as signIn keeps one, and a
 // guest's for this tab; and pins it. Then whoami says who the page now is,
-// which must be the principal the answer named.
-async function keepRedeemed(token: string, principal: number, place: Place): Promise<RedeemResult> {
-  const held: Held = { token, place };
+// which must be the principal the answer named. operator is the one sign-in
+// that is an operator's (issue #714): a password and a code, whose session
+// is kept for this tab alone, as an operator's credential always is, and
+// needs no warning, since it is the operator's sign-in rather than a script's
+// credential.
+async function keepRedeemed(token: string, principal: number, place: Place, operator = false): Promise<RedeemResult> {
+  const held: Held = { token, place: operator ? 'tab' : place };
   if (!writeToken(held.token, held.place)) {
     // The credential works, but cannot be kept here: it is revoked (if the
     // server answers) rather than left alive.
@@ -748,9 +1081,10 @@ async function keepRedeemed(token: string, principal: number, place: Place): Pro
   pinned = { token: held.token, place: held.place };
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
-  if (who.value.role === 'operator' || who.value.id !== principal || (place === 'lasting' && visitOf(who.value) !== null)) {
-    // None of these is for an operator, and a guest's is never kept to
-    // last. Should the server ever say otherwise, or name someone else, the
+  if ((who.value.role === 'operator') !== operator || who.value.id !== principal || (held.place === 'lasting' && visitOf(who.value) !== null)) {
+    // None but the code's step is for an operator, and that one is for an
+    // operator alone; a guest's is never kept to last. Should the server
+    // ever say otherwise, or name someone else, the
     // credential is revoked on the server (best effort, as when it cannot
     // be kept) and not left in this browser.
     await sendAs(held, 'DELETE', '/v1/credentials/current');
@@ -762,8 +1096,30 @@ async function keepRedeemed(token: string, principal: number, place: Place): Pro
 
 // What a password sign-in gave besides an answer: held and stored as signIn's
 // (another sign-in is held here); totp is a right password for an account
-// that also needs a code, which this page does not take yet (#714).
-export type PasswordSignInResult = RedeemResult | { readonly ok: false; readonly failure: 'stored' } | { readonly ok: false; readonly failure: 'totp' };
+// that also needs a code (an operator's, issue #714): nobody is signed in
+// yet, and signInWithCode is the second step, until expiresAt.
+export type PasswordSignInResult =
+  | RedeemResult
+  | { readonly ok: false; readonly failure: 'stored' }
+  | { readonly ok: false; readonly failure: 'totp'; readonly expiresAt: string };
+
+// The operator's sign-in between its two steps (design §5.3): the challenge
+// a right password earned, which signs nobody in, is good for five minutes
+// and a few codes, and is bound to this address. It is held here, in memory
+// only, like a credential: never stored, rendered or logged, and dropped
+// once it is spent, out of time or given up.
+interface PendingLogin {
+  readonly challenge: string;
+  readonly expiresAt: number;
+  tries: number;
+}
+let pendingLogin: PendingLogin | null = null;
+
+// The most codes one challenge takes (pkg/schema
+// MaxTOTPAttemptsPerChallenge); the server spends it at the last.
+export const codeTries = 5;
+// How many digits an authenticator's code has (pkg/schema TOTPDigits).
+export const codeDigits = 6;
 
 // signInWithPassword signs a returning member in with a name and a password
 // (POST /v1/login, design §3.2). The credential is kept to last, as one an
@@ -775,14 +1131,68 @@ export async function signInWithPassword(name: string, password: string): Promis
   if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
   if (hasToken()) return { ok: false, failure: 'stored' };
   pinned = null;
+  pendingLogin = null;
   const request: LoginRequestV1 = { name, password };
   const res = await sendOpen('/v1/login', request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const answer = await readBody(res, loginResponseV1);
   if (!answer.ok) return answer;
-  if (answer.value.next === 'totp') return { ok: false, failure: 'totp' };
+  if (answer.value.next === 'totp') {
+    const until = Date.parse(answer.value.challenge_expires_at);
+    pendingLogin = { challenge: answer.value.challenge, expiresAt: until, tries: 0 };
+    return { ok: false, failure: 'totp', expiresAt: answer.value.challenge_expires_at };
+  }
   return keepRedeemed(answer.value.token, answer.value.principal.id, 'lasting');
+}
+
+// What the code's step gave besides an answer: over is a sign-in that has
+// to start again with the password, because its challenge ran out of time
+// or of tries, or was never there (a reload drops it); nothing was sent for
+// one out of time.
+export type CodeSignInResult = RedeemResult | { readonly ok: false; readonly failure: 'over' };
+
+// signInWithCode is an operator's second step (POST /v1/login/totp): the
+// code from their authenticator app, with the challenge the password
+// earned. The session it answers is the operator's and is kept for this tab
+// alone (keepRedeemed). A code that is not right, a replayed one included,
+// is the server's one answer, auth_failed, and the challenge stays for the
+// next try until its tries are spent; any other refusal ends it.
+export async function signInWithCode(code: string): Promise<CodeSignInResult> {
+  const login = pendingLogin;
+  if (login === null || Date.now() >= login.expiresAt) {
+    pendingLogin = null;
+    return { ok: false, failure: 'over' };
+  }
+  if (unchecked !== null || pending !== null) {
+    pendingLogin = null;
+    return { ok: false, failure: 'held' };
+  }
+  login.tries++;
+  const request: TOTPLoginRequestV1 = { challenge: login.challenge, code };
+  const res = await sendOpen('/v1/login/totp', request);
+  if (res === null) {
+    // No answer: the code may or may not have been looked at. The next try
+    // is the person's.
+    return { ok: false, failure: 'network' };
+  }
+  if (!res.ok) {
+    const refusal = await inviteRefused(res);
+    const again = (refusal.code === authFailed || refusal.code === 'rate_limited' || refusal.code === 'invalid_request') && login.tries < codeTries;
+    if (!again) pendingLogin = null;
+    return refusal.code === authFailed && !again ? { ok: false, failure: 'over' } : refusal;
+  }
+  pendingLogin = null;
+  const answer = await readBody(res, loginResponseV1);
+  if (!answer.ok) return answer;
+  if (answer.value.next !== 'signed_in') return { ok: false, failure: 'invalid' };
+  return keepRedeemed(answer.value.token, answer.value.principal.id, 'tab', true);
+}
+
+// cancelCodeSignIn gives up an operator's sign-in between its steps: the
+// challenge is forgotten here, and the server lets it expire.
+export function cancelCodeSignIn(): void {
+  pendingLogin = null;
 }
 
 // Ending a visit and making it an account (issue #713, design §3.3, §3.4).

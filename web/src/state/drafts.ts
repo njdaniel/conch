@@ -8,6 +8,9 @@ export type DraftAction =
   | { readonly type: 'edit'; readonly channel: string; readonly text: string }
   // The channel `from` is now called `to` (issue #728): its draft goes with it.
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
+  // The drafts kept from a sign-in that ended by itself, given back to the
+  // same person signing in again (issue #714). What was typed since wins.
+  | { readonly type: 'restore'; readonly drafts: Drafts }
   | { readonly type: 'reset' };
 
 export const initialDrafts: Drafts = {};
@@ -20,6 +23,8 @@ export function draftsReducer(state: Drafts, action: DraftAction): Drafts {
     }
     case 'renamed':
       return rekey(state, action.from, action.to);
+    case 'restore':
+      return { ...action.drafts, ...state };
     case 'reset':
       return initialDrafts;
   }

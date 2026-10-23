@@ -43,8 +43,14 @@ export function inviteLink(origin: string, inviteCode: string): string {
 // Sign-in links (issue #493): <origin>/app/#/signin/<code>, made by an
 // operator (`conch admin principal sign-in-link`) for a person to come back
 // into their own account. The code is handled exactly as an invite's: read
-// into memory, never stored, logged or put in the DOM. The page never makes
-// one, so there is no builder here.
+// into memory, never stored, logged or put in the DOM.
+//
+// A device link (issue #714) is one a member makes for their own account,
+// for another device: the same landing page and the same handling. The page
+// builds it once, for the person who made it, and shows it only on Reveal.
+export function deviceLink(origin: string, linkCode: string): string {
+  return `${origin}/app/#/signin/${encodeURIComponent(linkCode)}`;
+}
 
 // signInFromHash is the code of a sign-in link, read as inviteFromHash reads
 // an invite's.
