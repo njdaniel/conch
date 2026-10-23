@@ -750,6 +750,100 @@ func TestCredentialFailureModes(t *testing.T) {
 	}
 }
 
+// TestMiddlewareNeverAnswersAuthFailed pins that the authentication
+// middleware answers a dead credential on every authenticated route with
+// unauthenticated, never auth_failed (#814). Several authenticated routes
+// (the password change, the re-authentication, the second factor) answer
+// 401 auth_failed for a wrong secret, and the browser and the CLI tell that
+// from "signed out" by the code alone: the check is sound only while no
+// credential failure ever carries auth_failed.
+func TestMiddlewareNeverAnswersAuthFailed(t *testing.T) {
+	f := newAuthFixture(t, AuthRequired)
+	ctx := context.Background()
+
+	revoked, revokedTok := mustCredential(t, f, f.alice.ID, nil)
+	if err := f.srv.store.RevokeCredential(ctx, "system", revoked.ID); err != nil {
+		t.Fatal(err)
+	}
+	soon := time.Now().Add(150 * time.Millisecond)
+	_, expiredTok := mustCredential(t, f, f.alice.ID, &soon)
+	// A generation bump ends every credential of the principal's, so the
+	// stale one belongs to a principal of its own; it is not revoked.
+	carol, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "carol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, staleTok := mustCredential(t, f, carol.ID, nil)
+	if _, err := f.srv.store.BumpAuthGeneration(ctx, "system", carol.ID, "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// A disabled principal's credential, likewise of a principal of its own.
+	dave, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, disabledTok := mustCredential(t, f, dave.ID, nil)
+	if _, err := f.srv.store.DisablePrincipal(ctx, "system", dave.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	creds := []struct {
+		name   string
+		header string
+		query  string
+		ticket bool // only on a route that accepts ?ticket=
+	}{
+		{"no credential", "", "", false},
+		{"an expired credential", "Bearer " + expiredTok, "", false},
+		{"a revoked credential", "Bearer " + revokedTok, "", false},
+		{"a credential of a past generation", "Bearer " + staleTok, "", false},
+		{"a disabled principal's credential", "Bearer " + disabledTok, "", false},
+		{"a wrong scheme", "Basic " + f.aliceTok, "", false},
+		{"an empty bearer", "Bearer ", "", false},
+		{"an unknown ticket", "", "ticket=" + strings.Repeat("A", 43), true},
+	}
+	routes := 0
+	for _, rt := range f.srv.routes {
+		if rt.access == accessExempt {
+			continue
+		}
+		routes++
+		exp := routeExpectations[rt.pattern]
+		for _, c := range creds {
+			if c.ticket && !rt.acceptsTicket {
+				continue
+			}
+			t.Run(rt.pattern+"/"+c.name, func(t *testing.T) {
+				path := exp.path
+				if c.query != "" {
+					sep := "?"
+					if strings.Contains(path, "?") {
+						sep = "&"
+					}
+					path += sep + c.query
+				}
+				req := httptest.NewRequest(routeMethod(rt.pattern), path, strings.NewReader(exp.body))
+				if c.header != "" {
+					req.Header.Set("Authorization", c.header)
+				}
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+				if rec.Code == http.StatusUnauthorized && decodeBody[schema.Error](t, rec).Code == schema.ErrorCodeAuthFailed {
+					t.Fatalf("%s was answered %s, the code for a wrong secret: %s", c.name, schema.ErrorCodeAuthFailed, rec.Body)
+				}
+				assertErrorBody(t, rec, http.StatusUnauthorized, "unauthenticated")
+				if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="conch"` {
+					t.Errorf("WWW-Authenticate = %q", got)
+				}
+			})
+		}
+	}
+	if routes == 0 {
+		t.Fatal("no authenticated route in the table")
+	}
+}
+
 func mustCredential(t *testing.T, f *authFixture, principalID int64, exp *time.Time) (schema.CredentialV1, string) {
 	t.Helper()
 	c, tok, err := f.srv.store.CreateCredential(context.Background(), "system", principalID, "extra", exp)

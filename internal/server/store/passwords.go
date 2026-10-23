@@ -62,8 +62,12 @@ var (
 	// ErrLoginStale is a sign-in whose verification no longer holds by the
 	// time it would be issued: the principal was disabled, hidden or changed
 	// role, its password or authentication generation changed, or (for an
-	// operator) its second factor is gone. The server answers it as it
-	// answers any failed sign-in.
+	// operator) its second factor is gone, or the credential a request came
+	// with was ended. On a sign-in route (no credential yet) the server
+	// answers it as any failed sign-in, auth_failed. On an authenticated
+	// route it answers it as a dead credential, unauthenticated, never
+	// auth_failed: there that code means only a wrong secret, and clients
+	// tell the two apart by it (issue #814).
 	ErrLoginStale = errors.New("store: sign-in no longer matches the account")
 	// ErrPasswordRecordInvalid is a record that is not an Argon2id record.
 	ErrPasswordRecordInvalid = errors.New("store: not a password record")

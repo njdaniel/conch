@@ -483,54 +483,117 @@ func TestChangeAndReauthShareTheNameWindow(t *testing.T) {
 	}
 }
 
-// A change loses to whatever commits while its password is verified: the
-// store re-checks, and the change answers auth_failed and writes nothing.
-func TestChangePasswordRacesLose(t *testing.T) {
-	tests := []struct {
-		name string
-		race func(t *testing.T, f *recoveryFixture)
-	}{
-		{"another change", func(t *testing.T, f *recoveryFixture) {
-			f.setPassword(t, f.alice.ID, "a password set by somebody else meanwhile")
-		}},
-		{"a sign-out everywhere", func(t *testing.T, f *recoveryFixture) {
-			if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.alice.ID); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"a disable", func(t *testing.T, f *recoveryFixture) {
-			if _, err := f.srv.store.DisablePrincipal(context.Background(), "system", f.alice.ID); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{"a reset", func(t *testing.T, f *recoveryFixture) {
-			code := f.link(t, schema.SignInLinkPurposeReset, f.alice.ID).Code
-			n, err := normalizePassword("a password a reset set meanwhile")
-			if err != nil {
-				t.Fatal(err)
-			}
-			record, err := f.srv.passwords.hasher.hash(n)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.srv.store.ResetPassword(context.Background(), store.HashSignInLinkCode(code), record, f.srv.now()); err != nil {
-				t.Fatal(err)
-			}
-		}},
+// passwordRaces are what can commit while a password route verifies the
+// caller's current password. Each leaves the request's credential dead, and
+// each names the store outcome it reaches in ChangePassword; the
+// re-authentication's re-check reaches ErrLoginStale for every one.
+var passwordRaces = []struct {
+	name string
+	// race runs alice's race; cred is the credential the request came with.
+	race func(t *testing.T, f *recoveryFixture, cred int64)
+}{
+	// ErrLoginStale: the record the verification read is no longer stored.
+	{"another change", func(t *testing.T, f *recoveryFixture, _ int64) {
+		f.setPassword(t, f.alice.ID, "a password set by somebody else meanwhile")
+	}},
+	// ErrLoginStale: the generation moved on.
+	{"a sign-out everywhere", func(t *testing.T, f *recoveryFixture, _ int64) {
+		if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.alice.ID); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	// ErrLoginStale: the record and the generation changed.
+	{"a reset", func(t *testing.T, f *recoveryFixture, _ int64) {
+		code := f.link(t, schema.SignInLinkPurposeReset, f.alice.ID).Code
+		n, err := normalizePassword("a password a reset set meanwhile")
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := f.srv.passwords.hasher.hash(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.srv.store.ResetPassword(context.Background(), store.HashSignInLinkCode(code), record, f.srv.now()); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	// ErrLoginStale: the request's own credential was revoked.
+	{"signing out of that session", func(t *testing.T, f *recoveryFixture, cred int64) {
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", cred); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	// ErrPrincipalDisabled.
+	{"a disable", func(t *testing.T, f *recoveryFixture, _ int64) {
+		if _, err := f.srv.store.DisablePrincipal(context.Background(), "system", f.alice.ID); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	// ErrPrincipalHidden.
+	{"a hide", func(t *testing.T, f *recoveryFixture, _ int64) {
+		if _, err := f.srv.store.HidePrincipal(context.Background(), "system", f.alice.ID, store.HideOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	// ErrPrincipalNotFound. Nothing in conchd deletes a principal, so the
+	// row goes underneath the store (f.exec's connection does not enforce
+	// foreign keys): an account that is gone is pinned too.
+	{"the account gone", func(t *testing.T, f *recoveryFixture, _ int64) {
+		f.exec(t, "DELETE FROM principals WHERE id = ?", f.alice.ID)
+	}},
+}
+
+// assertSignedOut checks rec is the middleware's answer for a dead
+// credential (writeUnauthenticated), which a client reads as "sign in
+// again", and not auth_failed, which it reads as a wrong secret (#814).
+func assertSignedOut(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	assertErrorBody(t, rec, http.StatusUnauthorized, "unauthenticated")
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="conch"` {
+		t.Errorf("WWW-Authenticate = %q, want the middleware's", got)
 	}
-	for _, tt := range tests {
+}
+
+// A change loses to whatever commits while its password is verified: the
+// store re-checks, and the change answers unauthenticated, as the middleware
+// does for the dead credential it came with, and writes nothing.
+func TestChangePasswordRacesLose(t *testing.T) {
+	for _, tt := range passwordRaces {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newRecoveryFixture(t)
-			_, tok := f.signIn(t, "alice", alicePassword)
+			cred, tok := f.signIn(t, "alice", alicePassword)
 			var once sync.Once
-			f.srv.beforePasswordWrite = func() { once.Do(func() { tt.race(t, f) }) }
+			f.srv.beforePasswordWrite = func() { once.Do(func() { tt.race(t, f, cred) }) }
 			before := f.queryString(t, fmt.Sprintf("SELECT COUNT(*) FROM audit_events WHERE action = '%s'", store.AuditPasswordChanged))
-			assertErrorBody(t, f.change(t, tok, alicePassword, newAlicePassword), http.StatusUnauthorized, schema.ErrorCodeAuthFailed)
+			assertSignedOut(t, f.change(t, tok, alicePassword, newAlicePassword))
 			if after := f.queryString(t, fmt.Sprintf("SELECT COUNT(*) FROM audit_events WHERE action = '%s'", store.AuditPasswordChanged)); after != before {
 				t.Error("the losing change was audited")
 			}
 			f.srv.beforePasswordWrite = nil
 			assertErrorBody(t, f.login(t, "alice", newAlicePassword, ""), http.StatusUnauthorized, schema.ErrorCodeAuthFailed)
+			assertSignedOut(t, f.do(t, "GET", "/v1/whoami", tok, ""))
+		})
+	}
+}
+
+// A re-authentication loses the same races: the store re-checks, and it
+// answers unauthenticated and records no proof (#814).
+func TestReauthRacesLose(t *testing.T) {
+	for _, tt := range passwordRaces {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRecoveryFixture(t)
+			cred, tok := f.signIn(t, "alice", alicePassword)
+			var once sync.Once
+			f.srv.beforePasswordWrite = func() { once.Do(func() { tt.race(t, f, cred) }) }
+			assertSignedOut(t, f.reauth(t, tok, alicePassword))
+			f.srv.beforePasswordWrite = nil
+			if n := f.queryString(t, "SELECT COUNT(*) FROM credentials WHERE recent_auth_until IS NOT NULL"); n != "0" {
+				t.Errorf("%s credentials hold a proof after a lost re-authentication", n)
+			}
+			if n := len(auditRows(t, f.authFixture, store.AuditReauth)); n != 0 {
+				t.Errorf("reauth rows = %d after a lost re-authentication, want 0", n)
+			}
+			assertSignedOut(t, f.do(t, "GET", "/v1/whoami", tok, ""))
 		})
 	}
 }
