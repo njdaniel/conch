@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -168,5 +169,53 @@ func TestReadSecretNoEchoDoesNotStartWhenAlreadyCancelled(t *testing.T) {
 	time.Sleep(3 * echoSettle)
 	if !echoOn(t, slave) {
 		t.Error("echo was turned off by a read that should never have started")
+	}
+}
+
+// The prompter on a real terminal (issue #715): a name is shown as it is
+// typed, the password after it is not, and the line ending is no part of
+// either.
+func TestPrompterOnARealTerminal(t *testing.T) {
+	const password = "a password that is not shown"
+	master, slave := openPTY(t)
+	p := newPrompter(context.Background(), slave, io.Discard)
+	if !p.interactive() {
+		t.Fatal("a pseudo-terminal is not interactive")
+	}
+	type answer struct {
+		name, password string
+		err            error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		name, err := p.line("Name: ", "name")
+		if err != nil {
+			done <- answer{err: err}
+			return
+		}
+		pw, err := p.secret("Password: ", "password")
+		done <- answer{name, pw, err}
+	}()
+	if _, err := master.WriteString("alice\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitEcho(t, slave, false)
+	if _, err := master.WriteString(password + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.name != "alice" || got.password != password {
+			t.Fatalf("answers = %q, %q, %v", got.name, got.password, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the prompts did not return")
+	}
+	shown := drain(t, master)
+	if !strings.Contains(shown, "alice") || strings.Contains(shown, password) {
+		t.Errorf("the terminal displayed %q: want the name and not the password", shown)
+	}
+	if !echoOn(t, slave) {
+		t.Error("echo was left off")
 	}
 }

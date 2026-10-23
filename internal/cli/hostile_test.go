@@ -221,6 +221,30 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
 		{key: "reject", whoamiOK: true, args: func(u, _ string) []string { return []string{"reject", "--server", u, "--reason", "no", "1"} }},
 		{key: "login", stdin: "tok\n", args: func(u, _ string) []string { return []string{"login", "--server", u} }},
+		{key: "login", stdin: "bob\n" + walkPassword + "\n", args: func(u, _ string) []string { return []string{"login", "--server", u, "--password"} }},
+		{key: "login", stdin: walkSignInCode + "\n", args: func(u, _ string) []string { return []string{"login", "--server", u, "--link", "--yes"} }},
+		// Joining, guest visits, passwords and device links (issue #715).
+		{key: "join info", args: func(u, _ string) []string { return []string{"join", "info", "--server", u} }},
+		{key: "join guest", args: func(u, _ string) []string { return []string{"join", "guest", "--server", u, "--label", "Pat"} }},
+		{key: "join account", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"join", "account", "--server", u, "bob"} }},
+		{key: "account create", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"account", "create", "--server", u, "bob"} }},
+		{key: "end-visit", args: func(u, _ string) []string { return []string{"end-visit", "--server", u} }},
+		{key: "password set", quietWhenOK: true, stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"password", "set", "--server", u} }},
+		{key: "password change", quietWhenOK: true, whoamiOK: true, stdin: walkPassword + "x\n" + walkPassword + "\n", args: func(u, _ string) []string {
+			return []string{"password", "change", "--server", u}
+		}},
+		{key: "password reset", stdin: walkResetCode + "\n" + walkPassword + "\n", args: func(u, _ string) []string { return []string{"password", "reset", "--server", u} }},
+		{key: "reauth", quietWhenOK: true, whoamiOK: true, stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"reauth", "--server", u} }},
+		{key: "setup", stdin: walkSetupToken + "\n" + walkPassword + "\n123456\n", args: func(u, _ string) []string { return []string{"setup", "--server", u} }},
+		{key: "device-link create", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "create", "--server", u} }},
+		{key: "device-link list", args: func(u, _ string) []string { return []string{"device-link", "list", "--server", u} }},
+		{key: "device-link close", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "close", "--server", u, "9"} }},
+		{key: "admin join status", args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
+		{key: "admin join set", args: func(u, _ string) []string { return []string{"admin", "join", "set", "--server", u, "--guests", "off"} }},
+		{key: "admin guest list", args: func(u, _ string) []string { return []string{"admin", "guest", "list", "--server", u} }},
+		{key: "admin guest end", args: func(u, _ string) []string { return []string{"admin", "guest", "end", "--server", u, "9"} }},
+		{key: "admin guest end-all", args: func(u, _ string) []string { return []string{"admin", "guest", "end-all", "--server", u} }},
+		{key: "admin guest permit", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "guest", "permit", "--server", u, "9"} }},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
 		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
@@ -232,6 +256,24 @@ func walkCases(t *testing.T) []walkCase {
 			return []string{"admin", "reports", "file", "--server", u, "9", "https://example.com/issues/1"}
 		}},
 	}
+}
+
+// The secrets the walk types and the server-made ones its server answers
+// with: each in the exact form a client checks before it prints or keeps one.
+var (
+	walkPassword   = "correct horse battery staple"
+	walkSignInCode = schema.SignInLinkCodePrefix + strings.Repeat("A", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
+	walkResetCode  = schema.SignInLinkCodePrefix + strings.Repeat("B", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
+	walkSetupToken = schema.SetupTokenPrefix + strings.Repeat("A", schema.SetupTokenLength-len(schema.SetupTokenPrefix))
+	walkToken      = schema.CredentialTokenPrefix + strings.Repeat("A", schema.CredentialTokenLength-len(schema.CredentialTokenPrefix))
+	walkHandle     = schema.GuestNamePrefix + "a7k4m2q9a7k4m2q9"
+)
+
+// walkVisit is a well-formed live visit: a client checks a visit before it
+// keeps one, so its hostile text is in the fields it only prints.
+func walkVisit(ts schema.Timestamp) schema.GuestV1 {
+	return schema.GuestV1{State: schema.GuestStateActive, Origin: schema.GuestOriginAddress, Handle: walkHandle, Label: "Pat", Tag: schema.GuestTag(walkHandle),
+		StartedAt: ts, ExpiresAt: schema.NewTimestamp(ts.Time().Add(24 * time.Hour)), IdleExpiresAt: schema.NewTimestamp(ts.Time().Add(2 * time.Hour))}
 }
 
 // Commands the walk does not run, and why. Every other command in the usage
@@ -257,7 +299,7 @@ func usageCommands(t *testing.T) []string {
 		fields := strings.Fields(rest)
 		key := fields[0]
 		switch key {
-		case "nets", "voice", "audit", "approvals":
+		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link":
 			key += " " + fields[1]
 		case "admin":
 			key += " " + fields[1] + " " + fields[2]
@@ -413,6 +455,63 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "general", CreatedAt: ts.Time()}}})
 		case "GET /v1/channels/general/members":
 			write(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: []schema.ChannelMemberV1{{PrincipalID: 42, Name: hostile, CreatedAt: ts}}})
+		case "POST /v1/login":
+			cred := schema.CredentialV1{ID: 5, PrincipalID: 42, Label: hostile, CreatedAt: ts}
+			write(w, http.StatusOK, schema.LoginResponseV1{Next: schema.LoginNextSignedIn, Principal: &schema.PrincipalV0{ID: 42, Name: hostile}, Credential: &cred, Token: walkToken})
+		case "POST /v1/sign-in-links/preview":
+			// The walk's reset link and its sign-in link are told apart by
+			// their codes.
+			var req schema.SignInLinkPreviewRequestV1
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			purpose := schema.SignInLinkPurposeSignIn
+			if req.Code == walkResetCode {
+				purpose = schema.SignInLinkPurposeReset
+			}
+			write(w, http.StatusOK, schema.SignInLinkPreviewV1{Name: hostile, Purpose: purpose})
+		case "POST /v1/sign-in-links/redeem":
+			write(w, http.StatusCreated, schema.RedeemSignInLinkResponseV1{Principal: schema.PrincipalV0{ID: 42, Name: hostile}, Credential: schema.CredentialV1{ID: 5, PrincipalID: 42, CreatedAt: ts}, Token: walkToken})
+		case "GET /v1/join":
+			write(w, http.StatusOK, schema.JoinInfoV1{ServerName: hostile, Join: schema.JoinOptionsV1{Guest: true, Paused: true}, GuestIdleSeconds: 7200, GuestAbsoluteSeconds: 86400})
+		case "POST /v1/join/guest":
+			write(w, http.StatusCreated, schema.JoinGuestResponseV1{Principal: schema.PrincipalV0{ID: 9, Name: walkHandle}, Guest: walkVisit(ts),
+				Credential: schema.CredentialV1{ID: 5, PrincipalID: 9, CreatedAt: ts}, Token: walkToken, Channels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}})
+		case "POST /v1/join/account":
+			write(w, http.StatusCreated, schema.JoinAccountResponseV1{Principal: schema.PrincipalV0{ID: 9, Name: hostile}, Credential: schema.CredentialV1{ID: 5, PrincipalID: 9, CreatedAt: ts},
+				Token: walkToken, Channels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}})
+		case "POST /v1/guest/convert":
+			write(w, http.StatusOK, schema.ConvertGuestResponseV1{Principal: schema.PrincipalV0{ID: 9, Name: hostile}, Credential: schema.CredentialV1{ID: 6, PrincipalID: 9, CreatedAt: ts}, Token: walkToken})
+		case "POST /v1/guest/end":
+			g := walkVisit(ts)
+			g.State, g.EndedAt, g.EndReason, g.Label = schema.GuestStateEnded, &ts, schema.GuestEndVisit, hostile
+			write(w, http.StatusOK, schema.EndVisitResponseV1{Guest: g})
+		case "POST /v1/password/mine", "PUT /v1/password/mine", "POST /v1/password/reset":
+			write(w, http.StatusOK, schema.PasswordUpdatedResponseV1{Revoked: 1})
+		case "POST /v1/reauth":
+			write(w, http.StatusOK, schema.ReauthResponseV1{Until: ts})
+		case "POST /v1/setup/redeem":
+			write(w, http.StatusCreated, schema.RedeemSetupTokenResponseV1{Principal: schema.PrincipalV0{ID: 1, Name: hostile}, Credential: schema.CredentialV1{ID: 5, PrincipalID: 1, CreatedAt: ts, Scope: schema.CredentialScopeSetup},
+				Token: walkToken, Auth: schema.AuthStateV1{Scope: schema.CredentialScopeSetup}})
+		case "POST /v1/totp/enroll":
+			write(w, http.StatusOK, schema.TOTPEnrollmentV1{Secret: hostile, Issuer: hostile, Account: hostile, Algorithm: hostile, Digits: 6, PeriodSeconds: 30, URI: hostile})
+		case "POST /v1/totp/confirm", "DELETE /v1/sign-in-links/mine/9":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/sign-in-links/mine":
+			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}, Code: walkSignInCode})
+		case "GET /v1/sign-in-links/mine":
+			write(w, http.StatusOK, schema.ListOwnSignInLinksResponseV1{SignInLinks: []schema.SignInLinkV1{{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}}})
+		case "GET /v1/join/settings", "PUT /v1/join/settings":
+			write(w, http.StatusOK, schema.JoinSettingsResponseV1{ServerName: hostile, LiveGuests: 2, Warnings: []schema.JoinWarning{schema.JoinWarning(hostile), schema.JoinWarningLiveGuestsRemain},
+				Settings: schema.JoinSettingsV1{OpenJoining: schema.OpenJoiningMode(hostile), OpenChannels: []string{hostile}, MaxGuests: 5, MaxGuestsPerAddress: 1, GuestIdleSeconds: 60, GuestAbsoluteSeconds: 60}})
+		case "GET /v1/guests":
+			invite := int64(3)
+			write(w, http.StatusOK, schema.ListGuestsResponseV1{Guests: []schema.GuestAdminV1{{ID: 9, Handle: hostile, Label: hostile, Tag: hostile, State: schema.GuestState(hostile),
+				Origin: schema.GuestOrigin(hostile), InviteID: &invite, StartedAt: ts, LastActiveAt: ts, ExpiresAt: ts, IdleExpiresAt: ts}}})
+		case "POST /v1/guests/9/end":
+			write(w, http.StatusOK, schema.EndGuestResponseV1{Guest: schema.GuestAdminV1{ID: 9, Handle: hostile, State: schema.GuestStateEnded}})
+		case "POST /v1/guests/end":
+			write(w, http.StatusOK, schema.EndGuestsResponseV1{DryRun: true, Count: 1, Guests: []schema.GuestRefV1{{ID: 9, Handle: hostile}}, Remaining: 2})
+		case "POST /v1/guests/9/conversion-permit":
+			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 9, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts}, Code: walkSignInCode})
 		default:
 			write(w, http.StatusNotFound, schema.Error{Code: "no_route", Message: key + hostile})
 		}

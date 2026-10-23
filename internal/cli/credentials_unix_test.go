@@ -132,3 +132,41 @@ func TestCredentialsErrorsAreOneLine(t *testing.T) {
 		t.Errorf("error = %q, want one line with the control characters escaped", err.Error())
 	}
 }
+
+// The guest visits file is held to the credentials file's rules: written
+// 0600 in a private directory, and refused when others may read it, or when
+// it is a symlink (issue #715).
+func TestGuestVisitsFileIsPrivate(t *testing.T) {
+	isolateConfig(t)
+	// Missing, so conch makes it, private.
+	dir := filepath.Join(t.TempDir(), "profile")
+	t.Setenv(configDirEnv, dir)
+	visit := storedGuestVisit{Token: "guest-token", Handle: "guest-x", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := saveGuestVisit("http://127.0.0.1:9", visit); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, guestVisitsFileName)
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("guest file: %v, mode %v; want 0600", err, fi)
+	}
+	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // the test needs a readable file
+		t.Fatal(err)
+	}
+	if _, err := LoadToken("http://127.0.0.1:9"); err == nil || !strings.Contains(err.Error(), "accessible by other users") || strings.Contains(err.Error(), "guest-token") {
+		t.Errorf("a readable guest file = %v, want it refused without the token", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadToken("http://127.0.0.1:9"); err == nil {
+		t.Error("a symlinked guest file was followed")
+	}
+}

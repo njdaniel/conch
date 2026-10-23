@@ -30,10 +30,13 @@ type inviteOpts struct {
 	voice          bool
 	mayInvite      bool
 	credentialDays int64
-	state          string
-	createdBy      int64
-	yes            bool
-	all            bool
+	// joinAs is what the invite admits (issue #715): account (the server's
+	// default), guest or both; empty leaves it to the server.
+	joinAs    string
+	state     string
+	createdBy int64
+	yes       bool
+	all       bool
 }
 
 // stringList is a flag that may be given more than once.
@@ -55,6 +58,7 @@ func bindInviteCreate(fs *flag.FlagSet, o *adminOpts) {
 	fs.BoolVar(&o.invite.voice, "voice", false, "the joiner may use voice")
 	fs.BoolVar(&o.invite.mayInvite, "may-invite", false, "the joiner may invite others in turn")
 	fs.Int64Var(&o.invite.credentialDays, "credential-days", 0, "how many days the joiner's first credential lasts")
+	fs.StringVar(&o.invite.joinAs, "join-as", "", "what the invite admits: account (the default), guest or both; guests only while the server allows them")
 }
 
 func bindInviteList(fs *flag.FlagSet, o *adminOpts) {
@@ -124,6 +128,7 @@ func inviteCreateRequest(o inviteOpts, now time.Time) (schema.CreateInviteReques
 		secs := o.credentialDays * 86400
 		req.CredentialLifetimeSeconds = &secs
 	}
+	req.JoinAs = schema.InviteJoinMode(o.joinAs)
 	return req, req.Validate(now)
 }
 
@@ -355,7 +360,8 @@ func adminInviteStatus(ctx context.Context, r *adminRun) error {
 // works. No other output, error or log line carries it.
 
 func bindSignInLink(fs *flag.FlagSet, o *adminOpts) {
-	fs.StringVar(&o.principal.expires, "expires", "", "when it stops working: a duration such as 24h or 2d, or an RFC 3339 time (default 24h, at most 7d)")
+	fs.StringVar(&o.principal.expires, "expires", "", "when it stops working: a duration such as 24h or 2d, or an RFC 3339 time (default 24h, at most 7d; a reset or enrollment link 10m, at most 1h)")
+	fs.StringVar(&o.principal.purpose, "purpose", "", "what it is for: sign_in (the default), reset (a forgotten password) or enrollment (a first password)")
 }
 
 // signInLink is the address the person opens to sign back in. The code is in
@@ -365,9 +371,13 @@ func (r *adminRun) signInLink(code string) string {
 }
 
 // adminPrincipalSignInLink makes a one-time link that signs a member back
-// into their own account, and prints it.
+// into their own account, and prints it. With --purpose reset it is a link
+// that only replaces a forgotten password (issue #715; the same landing page
+// tells the two apart), and with --purpose enrollment a code that lets a
+// member from before passwords set a first one: it has no page, so the code
+// alone is printed, for `conch password set --proof`.
 func adminPrincipalSignInLink(ctx context.Context, r *adminRun) error {
-	var req schema.CreateSignInLinkRequestV1
+	req := schema.CreateSignInLinkRequestV1{Purpose: schema.SignInLinkPurpose(r.opts.principal.purpose)}
 	now := time.Now()
 	if r.opts.principal.expires != "" {
 		exp, err := parseInviteExpiry(r.opts.principal.expires, now)
@@ -393,11 +403,18 @@ func adminPrincipalSignInLink(ctx context.Context, r *adminRun) error {
 	if r.opts.asJSON {
 		return r.printJSON(resp)
 	}
-	if _, err := fmt.Fprintln(r.stdout, r.signInLink(resp.Code)); err != nil {
+	what, out := "sign-in link", r.signInLink(resp.Code)
+	switch req.EffectivePurpose() {
+	case schema.SignInLinkPurposeReset:
+		what = "password reset link"
+	case schema.SignInLinkPurposeEnrollment:
+		what, out = "enrollment code", resp.Code
+	}
+	if _, err := fmt.Fprintln(r.stdout, out); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(r.stderr, "sign-in link %d for principal %d, one use, expires %s\n",
-		resp.SignInLink.ID, resp.SignInLink.PrincipalID, formatTimestamp(resp.SignInLink.ExpiresAt))
+	_, err = fmt.Fprintf(r.stderr, "%s %d for principal %d, one use, expires %s\n",
+		what, resp.SignInLink.ID, resp.SignInLink.PrincipalID, formatTimestamp(resp.SignInLink.ExpiresAt))
 	return err
 }
 

@@ -427,6 +427,14 @@ func (m Model) serverHost() string {
 // server gave, else the id, else why there is none yet.
 func (m Model) identity() string {
 	switch {
+	case m.visit != nil && m.visitOver():
+		// Past its deadline the visit is over on the server; it is not
+		// shown as a sign-in that still works.
+		return "guest visit ended"
+	case m.visit != nil:
+		// A guest sees, all the time, that the visit is temporary and when
+		// it ends at the latest.
+		return fitCells(sanitize(m.userName), 24) + " · until " + m.clockTime(m.visit.ExpiresAt)
 	case sanitize(m.userName) != "":
 		return fitCells(sanitize(m.userName), 24)
 	case m.authenticated && m.whoErr != nil:

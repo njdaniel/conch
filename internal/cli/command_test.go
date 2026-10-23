@@ -551,6 +551,14 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+// whoHandle and whoVisit are a guest visit as whoami describes it.
+var (
+	whoHandle = schema.GuestNamePrefix + "a7k4m2q9a7k4m2q9"
+	whoStart  = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	whoVisit  = schema.GuestV1{State: schema.GuestStateActive, Origin: schema.GuestOriginInvite, Handle: whoHandle, Label: "Pat", Tag: "a7k4",
+		StartedAt: schema.NewTimestamp(whoStart), ExpiresAt: schema.NewTimestamp(whoStart.Add(24 * time.Hour)), IdleExpiresAt: schema.NewTimestamp(whoStart.Add(2 * time.Hour))}
+)
+
 func TestWhoAmIPrintsServerVersion(t *testing.T) {
 	tests := []struct {
 		name string
@@ -561,6 +569,20 @@ func TestWhoAmIPrintsServerVersion(t *testing.T) {
 			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: v0.1.0-alpha.1\n"},
 		{"an older server says nothing", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator},
 			"id: 42\nkind: human\nname: nick\nrole: operator\n"},
+		// Issue #715: the class, a guest's visit and its bounds, and setup.
+		{"a guest", schema.WhoAmIResponseV1{ID: 9, Kind: "human", Name: whoHandle, Role: schema.RoleMember, IdentityClass: schema.IdentityGuest, Guest: &whoVisit,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull, ExpiresAt: &whoVisit.ExpiresAt, IdleExpiresAt: &whoVisit.IdleExpiresAt}},
+			"id: 9\nkind: human\nname: " + whoHandle + "\nrole: member\nclass: guest\nguest: Guest: Pat · a7k4, a temporary visit from invite\n" +
+				"visit ends: 2026-10-23T12:00:00.000Z at the latest; unused, at 2026-10-22T14:00:00.000Z\n" +
+				"create an account: not open to this visit without an operator's permit\nsetup: incomplete (password not set)\n" +
+				"sign-in ends: 2026-10-23T12:00:00.000Z; unused, at 2026-10-22T14:00:00.000Z\n"},
+		{"an operator mid-session", schema.WhoAmIResponseV1{ID: 1, Kind: "human", Name: "root", Role: schema.RoleOperator, IdentityClass: schema.IdentityOperator,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull, PasswordSet: true, TOTPEnrolled: true, SetupComplete: true, RecentAuthUntil: &whoVisit.IdleExpiresAt}},
+			"id: 1\nkind: human\nname: root\nrole: operator\nclass: operator\nsetup: complete (password set, authenticator enrolled)\n" +
+				"re-authenticated until: 2026-10-22T14:00:00.000Z\n"},
+		{"a setup credential", schema.WhoAmIResponseV1{ID: 1, Kind: "human", Name: "root", Role: schema.RoleOperator, IdentityClass: schema.IdentityOperator,
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeSetup}},
+			"id: 1\nkind: human\nname: root\nrole: operator\nclass: operator\nsetup: incomplete (password not set, authenticator not enrolled)\nscope: setup\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

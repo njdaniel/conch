@@ -70,7 +70,21 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	case "login":
 		return runLogin(ctx, args[1:], stdin, stdout, stderr)
 	case "logout":
-		return runLogout(args[1:], stderr)
+		return runLogout(ctx, args[1:], stdout, stderr)
+	case "join":
+		return runJoin(ctx, args[1:], stdin, stdout, stderr)
+	case "account":
+		return runAccount(ctx, args[1:], stdin, stdout, stderr)
+	case "end-visit":
+		return runEndVisit(ctx, args[1:], stdout, stderr)
+	case "password":
+		return runPassword(ctx, args[1:], stdin, stdout, stderr)
+	case "reauth":
+		return runReauth(ctx, args[1:], stdin, stdout, stderr)
+	case "setup":
+		return runSetup(ctx, args[1:], stdin, stdout, stderr)
+	case "device-link":
+		return runDeviceLink(ctx, args[1:], stdin, stdout, stderr)
 	case "whoami":
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
 	case "rename":
@@ -118,15 +132,21 @@ Usage:
   conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
-  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>]
+  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both]
   conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
   conch admin invite close|joiners [--server <url>] [--json] <id>
   conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
   conch admin invite pause|resume|status [--server <url>] [--json]
   conch admin principal invite-permission [--server <url>] [--json] <id> on|off
   conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
-  conch admin principal sign-in-link [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin principal sign-in-link [--server <url>] [--json] [--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] <id>
   conch admin sign-in-link close [--server <url>] [--json] <id>
+  conch admin join status [--server <url>] [--json]
+  conch admin join set [--server <url>] [--json] [--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
+  conch admin guest list [--server <url>] [--json] [--state active|ended|converted] [--origin address|invite]
+  conch admin guest end [--server <url>] [--json] <id>
+  conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
+  conch admin guest permit [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
@@ -137,8 +157,23 @@ Usage:
   conch approve [flags] <id>
   conch reject [flags] <id>
   conch login [--server <url>]     (reads the token from stdin: conch login < tokenfile)
+  conch login --password [--server <url>] [--name <name>]
+  conch login --link [--server <url>] [--yes]
   conch logout [--server <url>]
   conch whoami [--server <url>]
+  conch join info [--server <url>] [--json]
+  conch join guest [--server <url>] [--label <label>] [--invite]
+  conch join account [--server <url>] [--invite] <name>
+  conch account create [--server <url>] [--permit] <name>
+  conch end-visit [--server <url>]
+  conch password set [--server <url>] [--proof]
+  conch password change [--server <url>]
+  conch password reset [--server <url>]
+  conch reauth [--server <url>]
+  conch setup [--server <url>]
+  conch device-link create [--server <url>] [--label <label>] [--expires <duration|RFC3339>]
+  conch device-link list [--server <url>] [--json]
+  conch device-link close [--server <url>] <id>
   conch rename [--server <url>] [--json] <name>
   conch report [--server <url>] [--did <text>] [--expected <text>] [--happened <text>] [--often every_time|sometimes|once] [--yes] [--json]
   conch version
@@ -206,6 +241,33 @@ Scope:
     <id> <active|revoked> <created> <expires|-> <label>
   manifest put reads a PutAgentManifest JSON body from standard input or
   --file, refuses unknown fields, and checks it locally before sending.
+
+  Joining and signing in: every password, authenticator code and link or
+  token code is asked for, never taken as an argument or from the
+  environment: on a terminal without echo, otherwise one line each from
+  standard input, in the order asked (name, password, code). They are sent
+  only over https, or plain http to this machine. join info shows what the
+  server's address offers. join guest starts a temporary guest visit, from
+  the address or, with --invite, an invite (its link or code is asked for);
+  its credential is kept apart from your logins, in guest-visits.json, and
+  is dropped when the visit's deadline passes or the server refuses it. A
+  guest is shown everywhere as "Guest: <label> · <tag>". end-visit (and
+  logout, on a visit) ends it on the server first, and says whether that was
+  confirmed. account create turns the live visit into an account with the
+  same access, and join account makes a new one; both ask for a password.
+  login --password signs in with a name and password, and an operator's
+  authenticator code; login --link with a sign-in or device link, after
+  saying whose account it opens. An operator's commands that need a recent
+  proof (the server answers reauth_required) ask for the password and code
+  and are sent again; reauth gives one ahead. setup finishes an operator's
+  setup with the token conchd operator bootstrap, setup or recover printed
+  on the host: a new password and an authenticator app, its secret printed
+  once for manual entry. password set (--proof: an operator's enrollment
+  code), change and reset (an operator's reset link) change passwords;
+  device-link create prints a one-use link that signs your account in on
+  another device. admin join and admin guest are the operator's: the joining
+  policy, the guest list, ending one visit or all (dry run without --yes)
+  and a permit that lets one guest create an account.
 
   rename changes your own name; admin principal rename changes anyone's
   (operators only). A name is unique by how it reads, not how it is spelt:
@@ -773,16 +835,30 @@ func runApprovalsDecision(ctx context.Context, args []string, stdout, stderr io.
 // CONCH_TOKEN credential when there is one. The bool reports whether a
 // credential is in use.
 func NewAuthClient(server string) (*Client, bool, error) {
+	client, _, err := newSourcedClient(server)
+	if err != nil {
+		return nil, false, err
+	}
+	return client, client.token != "", nil
+}
+
+// newSourcedClient is NewAuthClient, and also says where the token came
+// from. A guest visit's client removes the stored visit when the server
+// refuses its credential.
+func newSourcedClient(server string) (*Client, credentialSource, error) {
 	client, err := NewClient(server, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, sourceNone, err
 	}
-	token, err := LoadToken(server)
+	token, source, err := loadCredential(server)
 	if err != nil {
-		return nil, false, err
+		return nil, sourceNone, err
 	}
 	client.WithToken(token)
-	return client, token != "", nil
+	if source == sourceGuest {
+		client.guestServer = client.Server()
+	}
+	return client, source, nil
 }
 
 // resolveAuthor decides which principal an action is performed as. With a
@@ -817,13 +893,31 @@ func resolveAuthor(ctx context.Context, client *Client, hasCredential bool, flag
 }
 
 func runLogin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	fs := newFlagSet("login", stderr)
-	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
-	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("cli: login: %w", err)
+	if err := refuseSecretArgs("login", args, "password", "link"); err != nil {
+		return err
 	}
-	if fs.NArg() != 0 {
-		return errors.New("cli: login takes no positional arguments; the token is read from stdin")
+	fs := quietFlags("login")
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	withPassword := fs.Bool("password", false, "sign in with your name and password; they are asked for")
+	withLink := fs.Bool("link", false, "sign in with a sign-in or device link; it is asked for")
+	name := fs.String("name", "", "the name to sign in with (--password); asked for when not given")
+	yes := fs.Bool("yes", false, "use the link without asking (--link)")
+	pos, err := parseQuiet(fs, "login", args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 0 {
+		return errors.New("cli: login takes no positional arguments; the token, password or link is read from stdin")
+	}
+	switch {
+	case *withPassword && *withLink:
+		return errors.New("cli: login: give --password or --link, not both")
+	case *withPassword && !*yes:
+		return loginWithPassword(ctx, *server, *name, stdin, stdout, stderr)
+	case *withLink && *name == "":
+		return loginWithLink(ctx, *server, *yes, stdin, stdout, stderr)
+	case *name != "" || *yes || *withPassword || *withLink:
+		return errors.New("cli: login: --name goes with --password, and --yes with --link")
 	}
 	client, err := NewClient(*server, nil)
 	if err != nil {
@@ -941,7 +1035,11 @@ func readToken(ctx context.Context, stdin io.Reader, stderr io.Writer) (string, 
 	return token, nil
 }
 
-func runLogout(args []string, stderr io.Writer) error {
+// runLogout forgets the member login stored for the server. A guest visit
+// stored there is not forgotten but ended (design §3.4: sign out ends a
+// visit), with End visit's confirmation: dropping its credential here alone
+// would leave the visit live on the server until its deadline.
+func runLogout(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("logout", stderr)
 	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	if err := fs.Parse(args); err != nil {
@@ -949,6 +1047,24 @@ func runLogout(args []string, stderr io.Writer) error {
 	}
 	if fs.NArg() != 0 {
 		return errors.New("cli: logout takes no positional arguments")
+	}
+	if err := checkSafeServer(*server); err != nil {
+		return err
+	}
+	key, err := NormalizeServer(*server)
+	if err != nil {
+		return err
+	}
+	creds, err := readCredentials()
+	if err != nil {
+		return err
+	}
+	if creds[key].Token == "" {
+		if visits, err := liveGuestVisits(); err == nil {
+			if _, ok := visits[key]; ok && strings.TrimSpace(os.Getenv(tokenEnv)) == "" {
+				return endVisit(ctx, *server, stdout, stderr)
+			}
+		}
 	}
 	return DeleteToken(*server)
 }
@@ -971,11 +1087,66 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, safeLine(string(who.Kind)), safeLine(who.Name), safeLine(string(who.Role)))
-	if err != nil || who.ServerVersion == "" { // a server that predates the field says nothing
+	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion))
-	return err
+	if who.ServerVersion != "" { // a server that predates the field says nothing
+		if _, err := fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion)); err != nil {
+			return err
+		}
+	}
+	return writeIdentity(stdout, who)
+}
+
+// writeIdentity prints what a server with guests and passwords adds to
+// whoami (ADR-009): the identity class, a guest's visit and its bounds, and
+// how the caller is signed in. A server that predates them sends none, and
+// nothing is printed. Every line is "key: value", as whoami's others are.
+func writeIdentity(w io.Writer, who schema.WhoAmIResponseV1) error {
+	var lines []string
+	if who.IdentityClass != "" {
+		lines = append(lines, "class: "+safeLine(string(who.IdentityClass)))
+	}
+	if g := who.Guest; g != nil {
+		lines = append(lines,
+			"guest: "+safeLine(schema.GuestDisplayName(g.Label, g.Handle))+", a temporary visit from "+safeLine(string(g.Origin)),
+			"visit ends: "+formatTimestamp(g.ExpiresAt)+" at the latest; unused, at "+formatTimestamp(g.IdleExpiresAt),
+			"create an account: "+either(g.CanConvert, "open to this visit ('conch account create <name>')", "not open to this visit without an operator's permit"))
+	}
+	if a := who.Auth; a != nil {
+		detail := "password " + either(a.PasswordSet, "set", "not set")
+		if isOperatorWho(who) {
+			detail += ", authenticator " + either(a.TOTPEnrolled, "enrolled", "not enrolled")
+		}
+		lines = append(lines, "setup: "+either(a.SetupComplete, "complete", "incomplete")+" ("+detail+")")
+		if a.Scope != "" && a.Scope != schema.CredentialScopeFull {
+			lines = append(lines, "scope: "+safeLine(string(a.Scope)))
+		}
+		if a.ExpiresAt != nil {
+			line := "sign-in ends: " + formatTimestamp(*a.ExpiresAt)
+			if a.IdleExpiresAt != nil {
+				line += "; unused, at " + formatTimestamp(*a.IdleExpiresAt)
+			}
+			lines = append(lines, line)
+		}
+		if a.RecentAuthUntil != nil {
+			lines = append(lines, "re-authenticated until: "+formatTimestamp(*a.RecentAuthUntil))
+		}
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// either is yes when b, else no.
+func either(b bool, yes, no string) string {
+	if b {
+		return yes
+	}
+	return no
 }
 
 // runRename changes the caller's own name (issue #441): whoami says who the

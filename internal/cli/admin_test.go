@@ -394,7 +394,7 @@ func TestAdminUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|reports|sign-in-link>"},
+		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
 		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|decide|remove>"},
 		{"unknown verb", []string{"admin", "member", "frob"}, `unknown subcommand "frob"`},

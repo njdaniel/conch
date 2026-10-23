@@ -176,6 +176,10 @@ type Model struct {
 	// then whoever the server says it is, learned from whoami.
 	authenticated bool
 	userName      string
+	// visit is the person's guest visit, from whoami, while they are a
+	// temporary guest (ADR-009): their name is then shown as "Guest:
+	// <label> · <tag>", with when the visit ends. nil for everyone else.
+	visit *schema.GuestV1
 	// whoErr is why whoami failed; nil while it is pending or after success.
 	whoErr     error
 	channels   []string
@@ -686,6 +690,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
+		m.visit = nil
+		if g := msg.who.Guest; g != nil {
+			// Shown from the visit the server describes, never from the
+			// name's text (cli.WhoAmI has checked that it is well-formed).
+			visit := *g
+			m.visit = &visit
+			m.userName = schema.GuestDisplayName(g.Label, g.Handle)
+			m.setStatus(modeChannels, "signed in as "+sanitize(m.userName)+", a temporary guest until "+m.clockTime(g.ExpiresAt)+"; your messages remain after the visit ends")
+			return m.voiceIdentity(msg.who.ID)
+		}
 		m.setStatus(modeChannels, "signed in as "+sanitize(msg.who.Name))
 		// A helper started for another account would speak as them.
 		return m.voiceIdentity(msg.who.ID)
@@ -1926,19 +1940,7 @@ func (m Model) messageTime(message schema.MessageV2) string {
 	if width, _ := m.size(); width < narrowWidth || message.CreatedAt.IsZero() {
 		return ""
 	}
-	loc := m.loc
-	if loc == nil {
-		loc = time.Local
-	}
-	now := m.now
-	if now == nil {
-		now = time.Now
-	}
-	at, today := message.CreatedAt.Time().In(loc), now().In(loc)
-	if at.Year() == today.Year() && at.YearDay() == today.YearDay() {
-		return at.Format("15:04")
-	}
-	return at.Format("01-02 15:04")
+	return m.clockTime(message.CreatedAt)
 }
 
 // authorName is how an author is shown: the name the member list gives, and
@@ -1948,11 +1950,63 @@ func (m Model) authorName(channel string, id int64) (name string, agent bool) {
 	if member, ok := m.members[channel][id]; ok {
 		name = safeName(member.Name)
 		agent = member.Kind == schema.PrincipalAgent
+		// A live guest is shown by its visit's attribution, from the flag
+		// the server keeps, never from the name's text (ADR-009 §4.1).
+		if g := member.Guest; g != nil && g.Validate() == nil {
+			name = safeName(schema.GuestDisplayName(g.Label, g.Handle))
+		}
 	}
 	if name == "" {
 		return "#" + strconv.FormatInt(id, 10), false
 	}
 	return name, agent
+}
+
+// messageAuthor is how a message's author is shown. A message posted during
+// a guest visit carries the attribution it was posted under, which never
+// changes (ADR-009 §4.4): it shows as that guest after the visit ended and
+// after the guest made an account, whatever the member list says now. One
+// that is not well-formed is not trusted, and the author shows by id.
+func (m Model) messageAuthor(channel string, message schema.MessageV2) (name string, agent bool) {
+	if g := message.GuestAuthor; g != nil {
+		if g.Validate() != nil {
+			return "#" + strconv.FormatInt(message.AuthorID, 10), false
+		}
+		return safeName(schema.GuestDisplayName(g.Label, g.Handle)), false
+	}
+	return m.authorName(channel, message.AuthorID)
+}
+
+// clockTime is a server time as the TUI shows times: in the display zone,
+// with the date when it is not today.
+func (m Model) clockTime(ts schema.Timestamp) string {
+	loc := m.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	at, today := ts.Time().In(loc), now().In(loc)
+	if at.Year() == today.Year() && at.YearDay() == today.YearDay() {
+		return at.Format("15:04")
+	}
+	return at.Format("01-02 15:04")
+}
+
+// visitOver reports whether the person's guest visit has passed its hard
+// deadline by the TUI's clock. The server has ended it by then; the TUI says
+// so rather than go on looking signed in.
+func (m Model) visitOver() bool {
+	if m.visit == nil {
+		return false
+	}
+	now := m.now
+	if now == nil {
+		now = time.Now
+	}
+	return !now().Before(m.visit.ExpiresAt.Time())
 }
 
 // safeName makes a principal's name fit to print. Names stored before the
