@@ -354,7 +354,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   false,
-			wantDetail:  "from=member to=operator owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=member to=operator owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "member to plain operator (owner false)",
@@ -364,7 +364,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   false,
-			wantDetail:  "from=member to=operator owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=member to=operator owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "member to owner",
@@ -374,7 +374,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   true,
-			wantDetail:  "from=member to=operator owner=true invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=member to=operator owner=true manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "plain operator to owner",
@@ -384,7 +384,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   true,
-			wantDetail:  "from=operator to=operator owner=true invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=operator owner=true manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "owner to plain operator when another owner can sign in",
@@ -394,7 +394,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   false,
-			wantDetail:  "from=operator to=operator owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=operator owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "owner self-unmark when another owner can sign in",
@@ -404,7 +404,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleOperator,
 			wantOwner:   false,
-			wantDetail:  "from=operator to=operator owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=operator owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "owner self-demote to member when another owner can sign in",
@@ -414,7 +414,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleMember,
 			wantOwner:   false,
-			wantDetail:  "from=operator to=member owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=member owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "plain operator to member",
@@ -424,7 +424,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleMember,
 			wantOwner:   false,
-			wantDetail:  "from=operator to=member owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=member owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name: "disabled operator demoted to member stays disabled",
@@ -439,7 +439,7 @@ func TestSetRoleTransitionsAndRefusals(t *testing.T) {
 			wantChanged: true,
 			wantRole:    schema.RoleMember,
 			wantOwner:   false,
-			wantDetail:  "from=operator to=member owner=false invites_closed=0 credentials_revoked=0 hooks_revoked=0",
+			wantDetail:  "from=operator to=member owner=false manages=none invites_closed=0 credentials_revoked=0 hooks_revoked=0",
 		},
 		{
 			name:        "no-op member to member",
@@ -755,9 +755,68 @@ func TestSetRoleOwnerMarkRevokesEverything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDetail := "from=operator to=operator owner=true invites_closed=0 credentials_revoked=2 hooks_revoked=2"
+	wantDetail := "from=operator to=operator owner=true manages=none invites_closed=0 credentials_revoked=2 hooks_revoked=2"
 	if ev.Detail != wantDetail {
 		t.Errorf("principal_role_changed detail = %q, want %q", ev.Detail, wantDetail)
+	}
+}
+
+func TestSetRoleReportsManagedChannels(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	root, _, _, err := s.BootstrapOperator(ctx, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch1, err := s.CreateChannel(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch2, err := s.CreateChannel(ctx, "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch3, err := s.CreateChannel(ctx, "gamma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deputy, err := s.CreatePrincipal(ctx, PrincipalHuman, "deputy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetRole(ctx, principalActor(root.ID), root.ID, deputy.ID, RoleOperator, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Grant manages on ch3 and ch1 (out of order) and plain membership on ch2.
+	if _, err := s.PutChannelMember(ctx, principalActor(root.ID), ch3.ID, deputy.ID, root.ID, nil, boolPtr(true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutChannelMember(ctx, principalActor(root.ID), ch2.ID, deputy.ID, root.ID, nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutChannelMember(ctx, principalActor(root.ID), ch1.ID, deputy.ID, root.ID, nil, boolPtr(true)); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.SetRole(ctx, principalActor(root.ID), root.ID, deputy.ID, RoleMember, nil)
+	if err != nil {
+		t.Fatalf("SetRole(demote deputy): %v", err)
+	}
+	wantManages := []int64{ch1.ID, ch3.ID}
+	if !slices.Equal(res.Manages, wantManages) {
+		t.Errorf("res.Manages = %v, want %v", res.Manages, wantManages)
+	}
+	ev, err := s.LastAuditEvent(ctx, AuditPrincipalRoleChanged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDetail := fmt.Sprintf("from=operator to=member owner=false manages=%d,%d invites_closed=0 credentials_revoked=0 hooks_revoked=0", ch1.ID, ch3.ID)
+	if ev.Detail != wantDetail {
+		t.Errorf("principal_role_changed detail = %q, want %q", ev.Detail, wantDetail)
+	}
+	// Manages grant remains live after demotion.
+	if manages, err := s.ManagesChannel(ctx, ch1.ID, deputy.ID); err != nil || !manages {
+		t.Errorf("ManagesChannel(ch1) after demotion = %v, %v; want true", manages, err)
 	}
 }
 

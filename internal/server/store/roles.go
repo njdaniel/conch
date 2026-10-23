@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -450,8 +452,16 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 	if err != nil {
 		return RoleChangeResult{}, err
 	}
-	detail := fmt.Sprintf("from=%s to=%s owner=%t invites_closed=%d credentials_revoked=%d hooks_revoked=%d",
-		target.Role, role, wantOwner, invitesClosed, credsRevoked, hooksRevoked)
+	managesIDs := make([]string, len(out.Manages))
+	for i, id := range out.Manages {
+		managesIDs[i] = strconv.FormatInt(id, 10)
+	}
+	managesText := "none"
+	if len(managesIDs) > 0 {
+		managesText = strings.Join(managesIDs, ",")
+	}
+	detail := fmt.Sprintf("from=%s to=%s owner=%t manages=%s invites_closed=%d credentials_revoked=%d hooks_revoked=%d",
+		target.Role, role, wantOwner, managesText, invitesClosed, credsRevoked, hooksRevoked)
 	if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalRoleChanged, principalActor(targetID), detail, now); err != nil {
 		return RoleChangeResult{}, err
 	}
@@ -463,6 +473,14 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 	if err != nil {
 		return RoleChangeResult{}, err
 	}
+	manages, err := idsTx(ctx, tx,
+		"SELECT channel_id FROM channel_members WHERE principal_id = ? AND manages = 1 ORDER BY channel_id ASC", targetID)
+	if err != nil {
+		return RoleChangeResult{}, fmt.Errorf("store: list managed channels of %d: %w", targetID, err)
+	}
+	if manages == nil {
+		manages = []int64{}
+	}
 	var hooksBound int
 	if err := tx.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM hooks WHERE principal_id = ? AND revoked_at IS NULL", targetID,
@@ -472,7 +490,7 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 	return RoleChangeResult{
 		RoleChangeResponseV1: schema.RoleChangeResponseV1{
 			Principal:          adm,
-			Manages:            []int64{},
+			Manages:            manages,
 			InvitesClosed:      invitesClosed,
 			CredentialsRevoked: credsRevoked,
 			HooksRevoked:       hooksRevoked,
