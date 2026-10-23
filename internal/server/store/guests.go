@@ -63,8 +63,19 @@ const GuestCredentialLabel = "guest visit"
 
 // guestActivityStep is how often a guest's REST requests move its idle
 // expiry: at most one write a minute per credential (design §4.2), so the
-// bound is accurate to a minute and costs no write per request.
+// bound is accurate to a minute and costs no write per request. A
+// credential whose idle bound is shorter than guestActivityDivisor steps
+// moves it at most once a quarter of its bound instead: with a step as long
+// as the bound, the bound would run out at the moment the next write was
+// first allowed, and an active visit at the minimum bound would end a bound
+// after it began (issue #812). So a request at least every bound less its
+// step, the shorter of a minute and a quarter of the bound, always keeps a
+// visit alive.
 var guestActivityStep = time.Minute
+
+// guestActivityDivisor caps a credential's activity step at this share of
+// its idle bound: a quarter.
+const guestActivityDivisor = 4
 
 // guestHandleTries bounds the handles one CreateGuest draws. 80 random bits
 // make a second draw all but impossible; the bound only stops a broken
@@ -839,8 +850,9 @@ func (s *Store) NextGuestDeadline(ctx context.Context) (time.Time, bool, error) 
 // F5). Despite its name it serves every idle-bounded credential: a guest's,
 // and an operator's browser session (issue #709), whose idle bound works the
 // same way. It writes only for a credential with an idle bound, still live, whose
-// last recorded use is guestActivityStep or more ago: at most one write a
-// minute, never for an idle-expired credential (which it cannot revive),
+// last recorded use is its step or more ago, the shorter of
+// guestActivityStep and a quarter of its idle bound: at most one write a
+// step, never for an idle-expired credential (which it cannot revive),
 // and never past the hard deadline (the idle expiry is capped by it). Only
 // REST requests call it: never a socket, a ping, a ticket or the voice
 // poller. A failed write is logged, not returned: the request has already
@@ -853,8 +865,8 @@ func (s *Store) NoteGuestUse(ctx context.Context, credID int64) {
 		 WHERE id = ? AND idle_ms IS NOT NULL AND revoked_at IS NULL
 		   AND (expires_at IS NULL OR expires_at > ?)
 		   AND COALESCE(last_used_at, created_at) + idle_ms > ?
-		   AND COALESCE(last_used_at, created_at) <= ?`,
-		ms, credID, ms, ms, ms-guestActivityStep.Milliseconds()); err != nil {
+		   AND COALESCE(last_used_at, created_at) <= ? - MIN(?, idle_ms / ?)`,
+		ms, credID, ms, ms, ms, guestActivityStep.Milliseconds(), guestActivityDivisor); err != nil {
 		slog.WarnContext(ctx, "store: record guest activity failed; the next request tries again", "credential", credID, "error", err)
 	}
 }
