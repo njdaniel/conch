@@ -14,6 +14,7 @@ func TestChannelGoldenFixtures(t *testing.T) {
 		new  func() any
 	}{
 		{name: "channel", file: "channel-v0.json", new: func() any { return &ChannelV0{} }},
+		{name: "channel manages", file: "channel-v0-manages.json", new: func() any { return &ChannelV0{} }},
 		{name: "create request", file: "create-channel-request-v0.json", new: func() any { return &CreateChannelRequest{} }},
 		{name: "create response", file: "create-channel-response-v0.json", new: func() any { return &CreateChannelResponse{} }},
 		{name: "list response", file: "list-channels-response.json", new: func() any { return &ListChannelsResponse{} }},

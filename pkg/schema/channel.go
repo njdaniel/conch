@@ -12,6 +12,12 @@ type ChannelV0 struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
+	// Manages is true when the caller is a manager of this channel
+	// (manages = 1 on their membership row, ADR-010, issue #697). Omitted
+	// when false, and on routes where there is no per-caller membership
+	// row (such as POST /v0/channels). An operator's standing comes from
+	// WhoAmIResponseV1.Role, not from this bit.
+	Manages bool `json:"manages,omitempty"`
 }
 
 // MaxChannelNameLength is the longest allowed channel name, in characters.

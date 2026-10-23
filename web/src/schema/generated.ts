@@ -116,6 +116,7 @@ export interface WhoAmIResponseV1 {
   identity_class?: IdentityClass;
   guest?: GuestV1;
   auth?: AuthStateV1;
+  owner?: boolean;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -130,6 +131,7 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   identity_class: optional(identityClass),
   guest: optional(guestV1),
   auth: optional(authStateV1),
+  owner: optional(bool),
 });
 
 // schema.ChannelV0
@@ -137,12 +139,14 @@ export interface ChannelV0 {
   id: number;
   name: string;
   created_at: string;
+  manages?: boolean;
 }
 
 export const channelV0 = object<ChannelV0>({
   id: int,
   name: str,
   created_at: timestamp,
+  manages: optional(bool),
 });
 
 // schema.ListChannelsResponse
@@ -230,6 +234,8 @@ export interface ChannelMemberV1 {
   name?: string;
   kind?: PrincipalKind;
   can_decide?: boolean;
+  manages?: boolean;
+  role?: PrincipalRole;
   history_after?: number;
   guest?: GuestAttributionV1;
 }
@@ -241,6 +247,8 @@ export const channelMemberV1 = object<ChannelMemberV1>({
   name: optional(str),
   kind: optional(principalKind),
   can_decide: optional(bool),
+  manages: optional(bool),
+  role: optional(principalRole),
   history_after: optional(int),
   guest: optional(guestAttributionV1),
 });
@@ -267,6 +275,26 @@ export const channelMembersV1 = object<ChannelMembersV1>({
   schema: vocab<typeof channelMembersV1Schema>({ [channelMembersV1Schema]: true }),
   channel_id: int,
   members: array(channelMemberV1),
+});
+
+// schema.PutChannelMemberRequestV1
+export interface PutChannelMemberRequestV1 {
+  can_decide?: boolean;
+  manages?: boolean;
+}
+
+export const putChannelMemberRequestV1 = object<PutChannelMemberRequestV1>({
+  can_decide: optional(bool),
+  manages: optional(bool),
+});
+
+// schema.AddChannelMemberRequestV1
+export interface AddChannelMemberRequestV1 {
+  name: string;
+}
+
+export const addChannelMemberRequestV1 = object<AddChannelMemberRequestV1>({
+  name: str,
 });
 
 // schema.Payload
@@ -1521,6 +1549,7 @@ export interface PrincipalAdminV1 {
   kind: PrincipalKind;
   name: string;
   role: PrincipalRole;
+  owner?: boolean;
   created_at: string;
   disabled_at?: string;
   hidden_at?: string;
@@ -1535,6 +1564,7 @@ export const principalAdminV1 = object<PrincipalAdminV1>({
   kind: principalKind,
   name: str,
   role: principalRole,
+  owner: optional(bool),
   created_at: timestamp,
   disabled_at: optional(timestamp),
   hidden_at: optional(timestamp),
@@ -1603,6 +1633,38 @@ export const hidePrincipalsResponseV1 = object<HidePrincipalsResponseV1>({
   count: int,
   principals: array(hiddenPrincipalV1),
   remaining: int,
+});
+
+// schema.RoleChangeRequestV1
+export interface RoleChangeRequestV1 {
+  role: PrincipalRole;
+  owner?: boolean;
+}
+
+export const roleChangeRequestV1 = object<RoleChangeRequestV1>({
+  role: principalRole,
+  owner: optional(bool),
+});
+
+// schema.RoleChangeResponseV1
+export interface RoleChangeResponseV1 {
+  principal: PrincipalAdminV1;
+  manages: number[];
+  invites_closed: number;
+  credentials_revoked: number;
+  hooks_revoked: number;
+  live_credentials: number;
+  hooks_bound: number;
+}
+
+export const roleChangeResponseV1 = object<RoleChangeResponseV1>({
+  principal: principalAdminV1,
+  manages: array(int),
+  invites_closed: int,
+  credentials_revoked: int,
+  hooks_revoked: int,
+  live_credentials: int,
+  hooks_bound: int,
 });
 
 // schema.GuestAdminV1
