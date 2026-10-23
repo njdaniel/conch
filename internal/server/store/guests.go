@@ -1022,8 +1022,8 @@ func (s *Store) GuestCanConvert(ctx context.Context, principalID int64, now time
 //   - the permit, or without one the policy of the visit's recorded origin,
 //     admits an account (conversionAdmissionTx);
 //   - the permanent name passes every check a name write makes, the reserved
-//     guest namespace included (claimNameTx: ErrDuplicate, ErrNameReserved,
-//     ErrNameInvalid).
+//     guest namespace and the server's name included (claimNameTx:
+//     ErrDuplicate, ErrNameReserved, ErrNameInvalid).
 //
 // Then the visit becomes converted, the name is set (principal_renamed), the
 // guest credential is revoked and its sessions ended, the permit, when one
@@ -1084,7 +1084,7 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 		if err != nil {
 			return err
 		}
-		keys, err := claimNameTx(ctx, tx, c.Name, c.PrincipalID)
+		keys, err := s.claimNameTx(ctx, tx, c.Name, c.PrincipalID)
 		if err != nil {
 			return err
 		}

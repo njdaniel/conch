@@ -239,12 +239,18 @@ const (
 	// reserved guest namespace, found by migration 31's preflight; guests
 	// cannot be enabled until it is renamed, by an explicit audited rename.
 	JoinWarningReservedNamesInUse JoinWarning = "reserved_names_in_use"
+	// JoinWarningServerNameInUse: a permanent principal holds the server's
+	// name, or one that looks the same, from before it was reserved or
+	// before the server's name changed to it (issue #760). It is kept, and
+	// blocks nothing; an operator may rename it.
+	JoinWarningServerNameInUse JoinWarning = "server_name_in_use"
 )
 
 // Valid reports whether w is a recognized warning.
 func (w JoinWarning) Valid() bool {
 	switch w {
-	case JoinWarningLiveGuestsRemain, JoinWarningTrustedProxyUnset, JoinWarningOneAddress, JoinWarningReservedNamesInUse:
+	case JoinWarningLiveGuestsRemain, JoinWarningTrustedProxyUnset, JoinWarningOneAddress, JoinWarningReservedNamesInUse,
+		JoinWarningServerNameInUse:
 		return true
 	default:
 		return false

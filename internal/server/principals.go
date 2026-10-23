@@ -178,13 +178,20 @@ const (
 	// guestNameReservedMessage answers a permanent name in the guest
 	// namespace (issue #705), which only the server gives, to guests.
 	guestNameReservedMessage = "names beginning with " + schema.ReservedGuestNameKeyPrefix + ", or with a look-alike of it, are reserved for guests; choose another"
+	// serverNameReservedMessage answers the server's own name (issue #760).
+	// It states the rule and does not repeat the name: the caller knows
+	// what it asked for.
+	serverNameReservedMessage = "the server's name, and any name that looks the same, is reserved; choose another"
 )
 
 // nameReservedMessageFor is the message of a 409 for a reserved name: the
-// guest namespace's or the hidden prefix's.
+// guest namespace's, the server name's or the hidden prefix's.
 func nameReservedMessageFor(err error) string {
-	if errors.Is(err, store.ErrGuestNameReserved) {
+	switch {
+	case errors.Is(err, store.ErrGuestNameReserved):
 		return guestNameReservedMessage
+	case errors.Is(err, store.ErrServerNameReserved):
+		return serverNameReservedMessage
 	}
 	return nameReservedMessage
 }

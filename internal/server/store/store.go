@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/njdaniel/conch/internal/server/names"
 )
 
 // migrations is the ordered list of schema migrations. Each migration is a
@@ -853,6 +855,10 @@ type Store struct {
 	// voiceRoomPrefix starts the name of each new voice room; empty means
 	// the default. See SetVoiceRoomPrefix.
 	voiceRoomPrefix string
+	// serverKeys are the keys of the server's name, which no permanent
+	// principal may take (issue #760); empty reserves nothing. See
+	// SetServerName.
+	serverKeys names.Keys
 }
 
 // EndedRun names a run that ended with its session: the store changed it
