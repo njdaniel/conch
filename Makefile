@@ -6,7 +6,8 @@ LINT    = golangci-lint
 
 # Local builds say which commit they are (issue #425); release.yml stamps the
 # tag instead. Outside a git checkout this is empty and the binary falls back
-# to its embedded build info.
+# to its embedded build info. Use this explicit stamp in linked worktrees:
+# unstamped Go builds can read the containing main checkout's VCS metadata.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
