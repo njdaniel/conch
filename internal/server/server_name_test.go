@@ -49,7 +49,7 @@ func TestServerNameRefused(t *testing.T) {
 					{"create agent", f.do(t, "POST", "/v0/principals", f.rootTok, fmt.Sprintf(`{"kind":"agent","name":%s}`, jsonString(t, name)))},
 					{"own rename", f.do(t, "PUT", renamePath(f.alice.ID), f.aliceTok, renameBody(t, name))},
 					{"operator rename", f.do(t, "PUT", renamePath(f.bot.ID), f.rootTok, renameBody(t, name))},
-					{"v1 invite redemption", f.redeem(t, link.Code, name)},
+					// v1 makes no account at all since #713 (TestRedeemV1MakesNothing).
 					{"v2 invite redemption", f.redeemWithPassword(t, link.Code, name)},
 					{"account from the bare address", f.joinAccount(t, name, "")},
 					{"guest conversion", f.convert(t, guest.Token, name, "")},

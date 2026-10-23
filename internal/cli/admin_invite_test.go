@@ -20,15 +20,27 @@ import (
 
 var inviteLinkPattern = regexp.MustCompile(`^(http://127\.0\.0\.1:\d+)/app/#/invite/(conch_inv_[A-Za-z0-9_-]{43})\n$`)
 
-// redeemCode uses an invite over HTTP, as a browser would, and returns the
-// new member's token.
-func (e *adminEnv) redeemCode(t *testing.T, code, name string) string {
+// inviteJoinPassword is the password every joiner of these tests chooses.
+const inviteJoinPassword = "a passphrase long enough to pass"
+
+// redeemBody is the body of a redemption of code as name, with
+// inviteJoinPassword: a test password, not a secret.
+func redeemBody(t *testing.T, code, name string) []byte {
 	t.Helper()
-	body, err := json.Marshal(schema.RedeemInviteRequestV1{Code: code, Name: name})
+	var req any = schema.RedeemInviteRequestV2{Code: code, Name: name, Password: inviteJoinPassword}
+	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(e.url+"/v1/invites/redeem", "application/json", bytes.NewReader(body))
+	return body
+}
+
+// redeemCode uses an invite over HTTP, as a browser would (POST
+// /v2/invites/redeem, with a password; v1 makes no account since #713), and
+// returns the new member's token.
+func (e *adminEnv) redeemCode(t *testing.T, code, name string) string {
+	t.Helper()
+	resp, err := http.Post(e.url+"/v2/invites/redeem", "application/json", bytes.NewReader(redeemBody(t, code, name)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +154,7 @@ func TestAdminInvitePauseRefusesRedeem(t *testing.T) {
 	if _, _, err := e.admin(t, e.operatorToken, "", "invite", "pause"); err != nil {
 		t.Fatal(err)
 	}
-	body, _ := json.Marshal(schema.RedeemInviteRequestV1{Code: code, Name: "late"})
-	resp, err := http.Post(e.url+"/v1/invites/redeem", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(e.url+"/v2/invites/redeem", "application/json", bytes.NewReader(redeemBody(t, code, "late")))
 	if err != nil {
 		t.Fatal(err)
 	}

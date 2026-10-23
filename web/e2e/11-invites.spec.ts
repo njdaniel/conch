@@ -5,7 +5,7 @@
 // touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { invitesOf, makeInvite } from './api';
-import { channelButton, expect, expectFits, statusLine, test } from './fixtures';
+import { channelButton, expect, expectFits, fillAccount, statusLine, test } from './fixtures';
 import { call, inviteUrl, principalId, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
@@ -16,15 +16,16 @@ const sizes = [
 ] as const;
 
 const goneHeading = "This link can't be used";
-const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.';
+const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, sign in instead.';
 
 const unique = (label: string) => `a8-${label}-${String(Date.now())}`;
 const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button');
 
-// join chooses a name on the landing page and waits for the lobby.
+// join chooses a name and a password on the landing page (issue #713: the
+// invite makes an account through POST /v2/invites/redeem) and waits for the
+// lobby.
 async function join(page: Page, name: string): Promise<void> {
-  await page.getByLabel('Your name').fill(name);
-  await page.getByRole('button', { name: 'Join' }).click();
+  await fillAccount(page, name);
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');
 }
@@ -97,10 +98,11 @@ for (const [size, options] of sizes) {
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     // A joiner the operator did not let invite sees no invite controls.
     await expect(page.getByRole('button', { name: 'Invite someone' })).toHaveCount(0);
-    // The server agrees: the new person is a member, not an operator.
+    // The server agrees: the new person is a member, not an operator, with
+    // the password chosen on the page (POST /v2/invites/redeem, issue #713).
     const token = await keepToken(page, secrets);
     const who = await call(world, token, 'GET', '/v1/whoami');
-    expect(who.body).toMatchObject({ name, role: 'member' });
+    expect(who.body).toMatchObject({ name, role: 'member', identity_class: 'member', auth: { password_set: true } });
     await expectCodeGone(page, made.code, world, true);
   });
 }
@@ -143,9 +145,10 @@ test('A8 a personal link opened again says it can no longer be used', async ({ m
   await expect(again.page.getByRole('heading', { name: goneHeading })).toBeVisible();
   await expect(again.page.getByRole('alert')).toHaveText(noLongerWorks);
   await expect(again.page.getByLabel('Your name')).toHaveCount(0);
-  // Nobody is signed in here: no button, so none leads to the credential form
-  // (issue #593).
-  await expect(again.page.getByRole('button')).toHaveCount(0);
+  // Nobody is signed in here: the one button is Sign in, for someone who
+  // joined from the link already and has a password (issue #713); the
+  // credential form is not on this page (issue #593).
+  await expect(again.page.getByRole('button')).toHaveText(['Sign in']);
   await expect(again.page.getByLabel('Credential')).toHaveCount(0);
   await expectCodeGone(again.page, made.code, world, false);
 });
@@ -187,8 +190,7 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   const joiner = await meet(phone);
   await joiner.page.goto(link);
   await expect(joiner.page.getByLabel('What the invite gives')).toContainText(inviterName);
-  await joiner.page.getByLabel('Your name').fill(inviterName);
-  await joiner.page.getByRole('button', { name: 'Join' }).click();
+  await fillAccount(joiner.page, inviterName);
   await expect(joiner.page.getByRole('alert')).toHaveText('That name is taken. Choose another.');
   await expect(joiner.page.getByLabel('Your name')).toHaveValue(inviterName);
   await join(joiner.page, unique('joiner'));
@@ -204,14 +206,14 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   await expect(list.getByRole('button', { name: 'Close' })).toHaveCount(0);
 
   // The used link, opened in a fresh browser where nobody is signed in: the
-  // dead-invite page, with no way to the credential form (issue #593). It
+  // dead-invite page, with Sign in its one button (issue #713). It
   // previews and does not redeem, so it spends nothing of the per-address
   // redeem limit the sign-in link spec counts on.
   const late = await meet(desktop);
   await late.page.goto(link);
   await expect(late.page.getByRole('heading', { level: 1 })).toHaveText(goneHeading);
   await expect(late.page.getByRole('alert')).toHaveText(noLongerWorks);
-  await expect(late.page.getByRole('button')).toHaveCount(0);
+  await expect(late.page.getByRole('button')).toHaveText(['Sign in']);
   await expect(late.page.getByLabel('Credential')).toHaveCount(0);
   await expectCodeGone(late.page, inviteCode, world, false);
 
@@ -240,7 +242,7 @@ test('A8 an operator makes an open link with its defaults, and closes it', async
   const { page } = await meet(phone);
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(world.tokens.operator);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
 

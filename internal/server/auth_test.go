@@ -272,15 +272,16 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
 	// Invites (issue #437). Chosen to change and audit nothing: an empty
 	// create is a 400, the close names an invite that does not exist, and
-	// preview and redeem send no code, which is the invite_invalid 404 before
-	// anything is looked up or audited. People only: an agent gets 403 and
-	// AuthOff 401 on the three authenticated routes (both special-cased
-	// below).
+	// preview sends no code, which is the invite_invalid 404 before
+	// anything is looked up or audited. The v1 redeem makes no account
+	// whatever it is sent (#713): 409 password_required, for every caller
+	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
+	// 401 on the three authenticated routes (both special-cased below).
 	"POST /v1/invites":         {classAuth, "/v1/invites", `{}`, 400},
 	"GET /v1/invites":          {classAuth, "/v1/invites", "", 200},
 	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
-	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 404},
+	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 409},
 	// Guest entry (issue #710). The front door is open to anyone. Join as
 	// guest and the guest redemption answer a bearer token, so they are 403
 	// https_required to this fixture's plain HTTP from a test address before

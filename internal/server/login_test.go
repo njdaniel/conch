@@ -621,8 +621,8 @@ func TestSecureTransport(t *testing.T) {
 
 // Both password routes refuse plain HTTP from beyond loopback before reading
 // the body, and answer accounts_require_auth with authentication off. The v1
-// redeem is unchanged for now (it moves to password_required with the
-// browser's switch to v2, #713): with a good code it still makes an account.
+// redeem takes no password and makes no account (#713): over plain HTTP too,
+// with a good code, it is 409 password_required (TestRedeemV1MakesNothing).
 func TestPasswordRoutesRefusals(t *testing.T) {
 	plain := func(srv *Server, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", path, strings.NewReader(body))
@@ -640,11 +640,9 @@ func TestPasswordRoutesRefusals(t *testing.T) {
 	assertErrorBody(t, off.do(t, "POST", "/v1/login", "", loginJSON(t, "alice", alicePassword)), http.StatusForbidden, schema.ErrorCodeAccountsRequireAuth)
 	assertErrorBody(t, off.do(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, code, "wren")), http.StatusForbidden, schema.ErrorCodeAccountsRequireAuth)
 
-	// Plain HTTP from a test address is no refusal for v1, which takes no
-	// password.
-	if rec := plain(f.srv, "/v1/invites/redeem", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "wren"})); rec.Code != http.StatusCreated {
-		t.Errorf("v1 redeem = %d %s, want 201 as before", rec.Code, rec.Body)
-	}
+	// v1 is no way around the transport rule: it makes nothing at all.
+	assertErrorBody(t, plain(f.srv, "/v1/invites/redeem", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "wren"})),
+		http.StatusConflict, schema.ErrorCodePasswordRequired)
 }
 
 // Creating an account with a password through an invite, signing out, and

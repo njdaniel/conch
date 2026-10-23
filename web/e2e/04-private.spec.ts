@@ -26,7 +26,7 @@ test('P3-05 browser-test cannot open test-private and nothing about a run there 
     const { page } = await meet();
     await page.goto(`${world.appUrl}#/c/test-private`);
     await page.getByLabel('Credential').fill(world.tokens.browser);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(channelButton(page, 'general')).toBeVisible();
     await expect(channelButton(page, 'test-private')).toHaveCount(0);
     await expect(conversation(page).getByRole('heading', { name: 'general' })).toBeVisible();

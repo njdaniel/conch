@@ -87,7 +87,7 @@ function controlsOutside(region: HTMLElement, name: RegExp): string[] {
 function signIn(token = secret) {
   const field = screen.getByLabelText('Credential');
   fireEvent.change(field, { target: { value: token } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
 }
 
 beforeEach(() => {
@@ -136,14 +136,23 @@ describe('sign-in', () => {
     expect(screen.queryByText(/Version/)).toBeNull();
   });
 
-  it('has one password field and no username or reset', () => {
+  // Issue #713 (design §3.2): a returning member signs in with a name and a
+  // password; the credential field stays, as the advanced way in for
+  // operators and scripts, and no password manager is offered it.
+  it('signs in with a name and a password, and keeps the credential field apart for operators and scripts', () => {
     serve(asMember);
     render(<App origin={origin} />);
+    expect(screen.getByLabelText('Name').getAttribute('autocomplete')).toBe('username');
+    const password = screen.getByLabelText('Password');
+    expect(password.getAttribute('type')).toBe('password');
+    expect(password.getAttribute('autocomplete')).toBe('current-password');
     const field = screen.getByLabelText('Credential');
     expect(field.getAttribute('type')).toBe('password');
     expect(field.getAttribute('autocomplete')).toBe('off');
-    expect(screen.queryAllByRole('textbox')).toHaveLength(0);
-    expect(document.body.textContent).not.toMatch(/forgot|username|reset/i);
+    expect(within(screen.getByRole('region', { name: 'Operators and scripts' })).getByText(/Paste the credential an operator issued/)).toBeDefined();
+    // The one text field is the name: nothing else asks for a username.
+    expect(screen.queryAllByRole('textbox')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Sign in' }).closest('section')?.getAttribute('aria-labelledby')).toBe('password-heading');
   });
 
   it('signs a member in to the lobby, stores the token to last (issue #439) and keeps it out of the DOM', async () => {

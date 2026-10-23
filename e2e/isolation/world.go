@@ -33,6 +33,9 @@ type member struct {
 	api    api
 	// mayInvite is whether an operator let them invite.
 	mayInvite bool
+	// password is whether they chose one: everyone who joined through an
+	// invite did (v2, #713); a person the operator made by hand did not.
+	password bool
 }
 
 // group is one group's people and what they made.
@@ -248,14 +251,20 @@ func (w *world) invite(a api, req schema.CreateInviteRequestV1) (schema.CreateIn
 	return resp, nil
 }
 
-// redeem joins through an invite, with no credential, as a person does.
+// joinPassword is the password every joiner of this world chooses: it
+// contains none of their names.
+const joinPassword = "a passphrase long enough to pass"
+
+// redeem joins through an invite, with no credential, as a person does:
+// POST /v2/invites/redeem, with a name and a password (v1 makes no account
+// since #713). conchd listens on loopback, so plain HTTP is allowed.
 func (w *world) redeem(code, name string) (*member, error) {
 	nobody := api{h: w.h, base: w.d.baseURL, who: name + " (joining)"}
 	var resp schema.RedeemInviteResponseV1
-	if err := nobody.call(http.MethodPost, "/v1/invites/redeem", schema.RedeemInviteRequestV1{Code: code, Name: name}, &resp); err != nil {
+	if err := nobody.call(http.MethodPost, "/v2/invites/redeem", schema.RedeemInviteRequestV2{Code: code, Name: name, Password: joinPassword}, &resp); err != nil {
 		return nil, err
 	}
-	m := &member{name: name, id: resp.Principal.ID, token: resp.Token, credID: resp.Credential.ID}
+	m := &member{name: name, id: resp.Principal.ID, token: resp.Token, credID: resp.Credential.ID, password: true}
 	m.api = w.as(m)
 	w.h.secret(name+"'s credential", resp.Token)
 	w.registerMember(m)

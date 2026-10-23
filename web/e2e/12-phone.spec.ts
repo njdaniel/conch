@@ -6,7 +6,7 @@
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
-import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { call, inviteUrl, ok, type World } from './world';
@@ -116,9 +116,12 @@ for (const [size, options] of phones) {
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
     await expectFits(page, 'the invite landing page');
+    // An invite makes an account with a password (issue #713).
     await page.getByLabel('Your name').tap();
     await page.getByLabel('Your name').fill(name);
-    await page.getByRole('button', { name: 'Join' }).tap();
+    await page.getByLabel('Choose a password').fill(accountPassword);
+    await page.getByLabel('Type the password again').fill(accountPassword);
+    await page.getByRole('button', { name: 'Create account', exact: true }).tap();
     await expect(statusLine(page)).toContainText(name);
     await expect(statusLine(page)).toContainText('Connected');
     await keepToken(page, secrets);

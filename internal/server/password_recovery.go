@@ -249,9 +249,11 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// writePasswordAlreadySet's message names no route: a refusal carries no
+// digit, so the isolation check can hold every refusal to that (#713).
 func writePasswordAlreadySet(w http.ResponseWriter) {
 	writeError(w, http.StatusConflict, schema.ErrorCodePasswordAlreadySet,
-		"this account already has a password; change it with PUT /v1/password/mine")
+		"this account already has a password; change it by giving the current one")
 }
 
 func writeEnrollmentProofRequired(w http.ResponseWriter) {

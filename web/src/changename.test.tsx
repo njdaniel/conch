@@ -37,7 +37,7 @@ const member = { id: 2, kind: 'human', name: 'ada', role: 'member' };
 async function signInAndOpen() {
   render(<App origin={origin} />);
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
   // Your name is in Settings (issue #536).
   fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   const toggle = await screen.findByRole('button', { name: 'Change your name' });
@@ -109,7 +109,7 @@ describe('change your name', () => {
     serve({ id: 5, kind: 'agent', name: 'bot', role: 'member' }, () => json({}, 500));
     render(<App origin={origin} />);
     fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: 'Sign out' });
     await waitFor(() => {

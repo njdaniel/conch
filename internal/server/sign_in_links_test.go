@@ -279,7 +279,7 @@ func TestSignInLinkRateLimits(t *testing.T) {
 			invite, link string
 			inviteBody   any
 		}{
-			{"/v1/invites/redeem", "/v1/sign-in-links/redeem", schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "x"}},
+			{"/v2/invites/redeem", "/v1/sign-in-links/redeem", schema.RedeemInviteRequestV2{Code: fakeInviteCode, Name: "x", Password: testJoinPassword}},
 			{"/v1/invites/preview", "/v1/sign-in-links/preview", schema.InvitePreviewRequestV1{Code: fakeInviteCode}},
 		} {
 			if rec := f.send(t, "POST", c.invite, "", inviteJSON(t, c.inviteBody), remote); rec.Code != http.StatusNotFound {

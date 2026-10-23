@@ -367,6 +367,8 @@ describe('invites', () => {
     token: joinerToken,
   };
   const preview = { kind: 'open', inviter: 'nick', channels: ['red'], voice: false, expires_at: at };
+  // Redeeming makes an account with a password, through v2 (issue #713).
+  const password = 'correct horse battery staple';
 
   // sentBodies records the JSON body of each call, by path, on top of serve.
   function sentBodies(): Map<string, unknown> {
@@ -386,7 +388,7 @@ describe('invites', () => {
     const calls = serve((c) =>
       c.path === '/v1/invites/preview'
         ? json(preview)
-        : c.path === '/v1/invites/redeem'
+        : c.path === '/v2/invites/redeem'
           ? json(redeemed, 201)
           : c.auth === `Bearer ${joinerToken}`
             ? json(joiner)
@@ -394,12 +396,12 @@ describe('invites', () => {
     );
     const sent = sentBodies();
     expect(await previewInvite(inviteCode)).toEqual({ ok: true, value: preview });
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: true, value: joiner });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: true, value: joiner });
     expect(sent.get('/v1/invites/preview')).toEqual({ code: inviteCode });
-    expect(sent.get('/v1/invites/redeem')).toEqual({ code: inviteCode, name: 'wren' });
+    expect(sent.get('/v2/invites/redeem')).toEqual({ code: inviteCode, name: 'wren', password });
     expect(calls.map((c) => [c.method, c.path, c.auth])).toEqual([
       ['POST', '/v1/invites/preview', null],
-      ['POST', '/v1/invites/redeem', null],
+      ['POST', '/v2/invites/redeem', null],
       ['GET', '/v1/whoami', `Bearer ${joinerToken}`],
     ]);
     expect(calls.some((c) => c.path.includes(inviteCode))).toBe(false);
@@ -414,7 +416,7 @@ describe('invites', () => {
     await signedInFrom(window.localStorage, memberToken);
     expect(heldElsewhere()).toBe(true);
     const calls = serve(() => json(redeemed, 201));
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'held' });
     expect(calls).toEqual([]);
     expect(window.localStorage.getItem(key)).toBe(memberToken);
   });
@@ -434,9 +436,9 @@ describe('invites', () => {
     });
     expect(await restore()).toEqual({ ok: false, failure: 'network' });
     // The server is back, but this page never checked the stored credential.
-    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json(joiner)));
+    const calls = serve((c) => (c.path === '/v2/invites/redeem' ? json(redeemed, 201) : json(joiner)));
     expect(heldElsewhere()).toBe(true);
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'held' });
     expect(calls).toEqual([]);
     expect(storage().getItem(key)).toBe(token);
     expect(window.localStorage.length + window.sessionStorage.length).toBe(1);
@@ -447,7 +449,7 @@ describe('invites', () => {
     await signIn(operatorToken);
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     const calls = serve(() => json(redeemed, 201));
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'held' });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'held' });
     expect(calls).toEqual([]);
     // Signing out of the warning lets it go ahead.
     expect(await signOut()).toBe(true);
@@ -474,20 +476,20 @@ describe('invites', () => {
     { name: 'a body of another shape', answer: () => json({ token: joinerToken }, 201), want: { ok: false, failure: 'invalid' } },
   ])('keeps nothing after $name', async ({ answer, want }) => {
     serve(answer);
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual(want);
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual(want);
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     expect(hasToken()).toBe(false);
   });
 
   it('revokes the new credential, then says the account was made but not kept, when the browser refuses storage', async () => {
-    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : new Response(null, { status: 204 })));
+    const calls = serve((c) => (c.path === '/v2/invites/redeem' ? json(redeemed, 201) : new Response(null, { status: 204 })));
     const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new DOMException('blocked', 'SecurityError');
     });
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unkept' });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'unkept' });
     blocked.mockRestore();
     expect(calls).toEqual([
-      { path: '/v1/invites/redeem', method: 'POST', auth: null },
+      { path: '/v2/invites/redeem', method: 'POST', auth: null },
       { path: '/v1/credentials/current', method: 'DELETE', auth: `Bearer ${joinerToken}` },
     ]);
     expect(hasToken()).toBe(false);
@@ -498,31 +500,31 @@ describe('invites', () => {
 
   it('still says unkept when the revocation gets no answer', async () => {
     serve((c): Response => {
-      if (c.path === '/v1/invites/redeem') return json(redeemed, 201);
+      if (c.path === '/v2/invites/redeem') return json(redeemed, 201);
       throw new TypeError('Failed to fetch');
     });
     const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new DOMException('blocked', 'SecurityError');
     });
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unkept' });
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'unkept' });
     blocked.mockRestore();
   });
 
   it('never leaves an operator credential to last: whoami saying operator drops it', async () => {
-    const calls = serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json(operator)));
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'invalid' });
+    const calls = serve((c) => (c.path === '/v2/invites/redeem' ? json(redeemed, 201) : json(operator)));
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'invalid' });
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     expect(hasToken()).toBe(false);
     expect(await listChannels()).toEqual({ ok: false, failure: 'unauthorized' });
     // It is revoked on the server too, with the credential redeeming gave
     // (security review of #493).
-    expect(calls.map((c) => c.path)).toEqual(['/v1/invites/redeem', '/v1/whoami', '/v1/credentials/current']);
+    expect(calls.map((c) => c.path)).toEqual(['/v2/invites/redeem', '/v1/whoami', '/v1/credentials/current']);
     expect(calls[2]?.method).toBe('DELETE');
   });
 
   it('keeps the credential when whoami does not answer after redeeming', async () => {
-    serve((c) => (c.path === '/v1/invites/redeem' ? json(redeemed, 201) : json({}, 503)));
-    expect(await redeemInvite(inviteCode, 'wren')).toEqual({ ok: false, failure: 'unchecked' });
+    serve((c) => (c.path === '/v2/invites/redeem' ? json(redeemed, 201) : json({}, 503)));
+    expect(await redeemInvite(inviteCode, 'wren', password)).toEqual({ ok: false, failure: 'unchecked' });
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
   });
 
