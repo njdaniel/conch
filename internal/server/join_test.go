@@ -588,24 +588,26 @@ func TestGuestCapPerAddress(t *testing.T) {
 //
 // The joins go on until they have raced enough: at least minJoined visits
 // admitted, into at least minSets different channel sets, while the
-// settings goroutine answered at least minChanges changes. A fixed number of
-// joins left that to the scheduler (issue #800): SQLite's write lock is not
-// fair, so a burst of quick refusals could take every slot while the change
-// that reopens joining waited out its busy backoff, and no join was
-// admitted. Now the scheduler decides only how long the race takes; the time
-// limit is the only way to fail for want of a race.
+// settings goroutine answered at least minChanges changes. Each settings
+// answer releases one bounded batch of joins. An unbounded stream can keep
+// taking SQLite's unfair write lock until the settings change exceeds its
+// busy timeout (issue #800); backpressure leaves only the current batch for
+// that change to wait behind, without deciding which request wins.
 func TestOpenChannelsRaceJoins(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.mustPutJoin(t, openTo("red"))
 	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(0), MaxGuestsPerAddress: int64Ptr(schema.MaxMaxGuests)})
 	const (
+		joiners    = 4
 		minJoined  = 20
 		minSets    = 2
 		minChanges = 12 // the six states twice
 		limit      = 30 * time.Second
 	)
 	var changes atomic.Int64
-	ctx, cancel := context.WithCancel(context.Background())
+	race, stop := context.WithTimeout(context.Background(), limit)
+	defer stop()
+	permits := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -620,20 +622,26 @@ func TestOpenChannelsRaceJoins(t *testing.T) {
 			{OpenJoining: modePtr(schema.OpenJoiningOff), OpenChannels: &[]string{}},
 			openTo("red"),
 		}
-		for i := 0; ctx.Err() == nil; i++ {
+		for i := 0; race.Err() == nil; i++ {
 			rec := f.putJoin(t, sets[i%len(sets)])
 			if rec.Code != http.StatusOK && rec.Code != http.StatusConflict {
 				t.Errorf("settings change = %d %s", rec.Code, rec.Body)
+				stop()
 				return
 			}
 			changes.Add(1)
+			for range joiners {
+				select {
+				case permits <- struct{}{}:
+				case <-race.Done():
+					return
+				}
+			}
 		}
 	}()
 	var joined []schema.JoinGuestResponseV1
 	answered := map[string]bool{} // the channel sets the joins were admitted to
 	var mu sync.Mutex
-	race, stop := context.WithTimeout(context.Background(), limit)
-	defer stop()
 	raced := false
 	// enough stops the joins once they have raced enough. mu is held.
 	enough := func() {
@@ -643,12 +651,17 @@ func TestOpenChannelsRaceJoins(t *testing.T) {
 		}
 	}
 	var next atomic.Int64 // every join comes from an address of its own
-	var joiners sync.WaitGroup
-	for range 4 {
-		joiners.Add(1)
+	var joining sync.WaitGroup
+	for range joiners {
+		joining.Add(1)
 		go func() {
-			defer joiners.Done()
-			for race.Err() == nil {
+			defer joining.Done()
+			for {
+				select {
+				case <-race.Done():
+					return
+				case <-permits:
+				}
 				n := next.Add(1)
 				rec := f.joinGuest(t, "", fmt.Sprintf("10.%d.%d.%d:1", n>>16&0xff, n>>8&0xff, n&0xff))
 				mu.Lock()
@@ -665,6 +678,7 @@ func TestOpenChannelsRaceJoins(t *testing.T) {
 				case http.StatusForbidden:
 				default:
 					t.Errorf("join = %d %s", rec.Code, rec.Body)
+					stop()
 					mu.Unlock()
 					return
 				}
@@ -673,8 +687,8 @@ func TestOpenChannelsRaceJoins(t *testing.T) {
 			}
 		}()
 	}
-	joiners.Wait()
-	cancel()
+	joining.Wait()
+	stop()
 	wg.Wait()
 	if !raced {
 		t.Fatalf("after %v, %d joins admitted into channel sets %v while %d settings changes were answered; want at least %d, %d and %d: the test proved nothing",
