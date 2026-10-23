@@ -43,6 +43,11 @@ import (
 // Whatever the request itself named (A's channel name, say) is set aside
 // before the body is scanned: a refusal may quote what it refused.
 
+// The same scan has a second register, the plaza's private markers
+// (guests.go): what was in the plaza before the guests' visits began, and
+// what was said there after that no guest may see. A body is clean when it
+// holds a marker of neither (world.leaks).
+
 // window is the shortest run of A's text that counts as a piece of it.
 const window = 6
 
@@ -162,6 +167,25 @@ func (m *markers) scan(body []byte, a asked, asJSON bool) []string {
 	}
 	sort.Strings(out)
 	return slices.Compact(out)
+}
+
+// leaks is markers.leaks over A's markers and, once the plaza exists, its
+// private ones.
+func (w *world) leaks(body []byte, a asked) []string {
+	out := w.marks.leaks(body, a)
+	if w.priv != nil {
+		out = append(out, w.priv.leaks(body, a)...)
+	}
+	return out
+}
+
+// headerLeaks is markers.headerLeaks over both registers.
+func (w *world) headerLeaks(h http.Header, a asked) []string {
+	out := w.marks.headerLeaks(h, a)
+	if w.priv != nil {
+		out = append(out, w.priv.headerLeaks(h, a)...)
+	}
+	return out
 }
 
 // headerLeaks scans response headers as one text, all but the request id.

@@ -655,6 +655,122 @@ func TestGuestIdleBound(t *testing.T) {
 	}
 }
 
+// Issue #812: at every idle bound, the minimum included, a guest that makes
+// a request at least every bound less its step is never ended for idleness;
+// the idle expiry moves at most once a step, never once a request; and once
+// the guest stops it is refused a bound after its last recorded use at the
+// latest, and the sweep ends it as idle. The step is the shorter of a minute
+// and a quarter of the bound, so it is a minute at the default bound, as it
+// always was.
+func TestGuestActivityKeepsVisitAlive(t *testing.T) {
+	const ms = time.Millisecond
+	minIdle := schema.MinGuestIdleSeconds * time.Second
+	defIdle := schema.DefaultGuestIdleSeconds * time.Second
+	tests := []struct {
+		name string
+		idle time.Duration
+		// step is the least time between two moves of the idle expiry.
+		step time.Duration
+		// gaps are the times between requests, used in turn.
+		gaps []time.Duration
+		// moveEvery, when set, is exactly how far apart the moves are.
+		moveEvery time.Duration
+	}{
+		{name: "minimum bound, every half bound", idle: minIdle, step: 15 * time.Second,
+			gaps: []time.Duration{30 * time.Second}, moveEvery: 30 * time.Second},
+		{name: "minimum bound, just short of a step then of the rest", idle: minIdle, step: 15 * time.Second,
+			gaps: []time.Duration{15*time.Second - ms, 45*time.Second - ms}},
+		{name: "minimum bound, every second", idle: minIdle, step: 15 * time.Second,
+			gaps: []time.Duration{time.Second}, moveEvery: 15 * time.Second},
+		{name: "three minute bound, every half bound", idle: 3 * time.Minute, step: 45 * time.Second,
+			gaps: []time.Duration{90 * time.Second}, moveEvery: 90 * time.Second},
+		{name: "three minute bound, just short of a step then of the rest", idle: 3 * time.Minute, step: 45 * time.Second,
+			gaps: []time.Duration{45*time.Second - ms, 135*time.Second - ms}},
+		{name: "default bound, every half bound", idle: defIdle, step: time.Minute,
+			gaps: []time.Duration{time.Hour}, moveEvery: time.Hour},
+		{name: "default bound, just short of a step then of the rest", idle: defIdle, step: time.Minute,
+			gaps: []time.Duration{time.Minute - ms, defIdle - time.Minute - ms}},
+		{name: "default bound, every twenty seconds", idle: defIdle, step: time.Minute,
+			gaps: []time.Duration{20 * time.Second}, moveEvery: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newGuestFixture(t)
+			t0 := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+			now := t0
+			setCredentialClock(t, &now)
+			g, err := f.s.CreateGuest(f.ctx, "system", NewGuest{Origin: schema.GuestOriginAddress, Channels: []int64{f.general.ID},
+				Idle: tt.idle, Absolute: schema.MaxGuestLifetimeSeconds * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := func() bool {
+				t.Helper()
+				_, err := f.s.ResolveCredential(f.ctx, g.Token)
+				if err != nil && !errors.Is(err, ErrCredentialInvalid) {
+					t.Fatal(err)
+				}
+				return err == nil
+			}
+
+			// Busy for several bounds.
+			last, requests, moves := t0, 0, 0
+			for i := 0; now.Sub(t0) < 3*tt.idle; i++ {
+				now = now.Add(tt.gaps[i%len(tt.gaps)])
+				if !live() {
+					t.Fatalf("at %v: refused, %v after the last recorded use", now.Sub(t0), now.Sub(last))
+				}
+				f.s.NoteGuestUse(f.ctx, g.Credential.ID)
+				requests++
+				v := f.visit(g.Principal.ID)
+				if v.LastActiveAt.Equal(last) {
+					continue
+				}
+				if moved := v.LastActiveAt.Sub(last); moved < tt.step || (tt.moveEvery > 0 && moved != tt.moveEvery) {
+					t.Fatalf("at %v: the idle expiry moved %v after the last move, want at least the step %v (exactly %v when set)",
+						now.Sub(t0), moved, tt.step, tt.moveEvery)
+				}
+				if !v.LastActiveAt.Equal(now) {
+					t.Fatalf("at %v: last use recorded as %v", now.Sub(t0), v.LastActiveAt.Sub(t0))
+				}
+				last = v.LastActiveAt
+				moves++
+			}
+			if limit := int(now.Sub(t0) / tt.step); moves == 0 || moves > limit {
+				t.Errorf("%d moves in %d requests over %v, want between 1 and %d", moves, requests, now.Sub(t0), limit)
+			}
+
+			// Then it stops: refused at its idle deadline, a bound after its
+			// last recorded use, which the sweeper waits for.
+			stopped := now
+			v := f.visit(g.Principal.ID)
+			deadline := last.Add(tt.idle)
+			if !v.IdleExpiresAt.Equal(deadline) || deadline.After(stopped.Add(tt.idle)) {
+				t.Fatalf("idle expiry %v, want %v, no later than a bound after the last request (%v)",
+					v.IdleExpiresAt.Sub(t0), deadline.Sub(t0), stopped.Add(tt.idle).Sub(t0))
+			}
+			if next, ok, err := f.s.NextGuestDeadline(f.ctx); err != nil || !ok || !next.Equal(deadline) {
+				t.Fatalf("next guest deadline = %v, %v, %v; want %v", next, ok, err, deadline)
+			}
+			now = deadline.Add(-ms)
+			if !live() {
+				t.Fatal("refused before its idle deadline")
+			}
+			if ended, err := f.s.SweepGuests(f.ctx); err != nil || len(ended) != 0 {
+				t.Fatalf("sweep before the deadline = %+v, %v; want nothing ended", ended, err)
+			}
+			now = deadline
+			if live() {
+				t.Fatal("live at its idle deadline")
+			}
+			ended, err := f.s.SweepGuests(f.ctx)
+			if err != nil || len(ended) != 1 || ended[0].Reason != schema.GuestEndIdle || ended[0].PrincipalID != g.Principal.ID {
+				t.Fatalf("sweep at the deadline = %+v, %v; want the guest ended as idle", ended, err)
+			}
+		})
+	}
+}
+
 // A visit past its deadline while the server is down is refused as soon as
 // it opens again, and the first sweep ends it.
 func TestGuestExpiryAcrossRestart(t *testing.T) {
