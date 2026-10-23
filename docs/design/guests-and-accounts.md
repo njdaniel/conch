@@ -614,7 +614,8 @@ opens as today. Numbers follow `store.go`'s list, whose last entry is 30 (sign-i
   TEXT NOT NULL, label TEXT)`, written in the posting transaction for a guest author and
   never updated; `MessageV2.guest_author` is read from it by a left join.
 - `credentials ADD COLUMN idle_ms INTEGER` (NULL = no idle bound) and `ADD COLUMN
-  last_used_at INTEGER` (NULL = never; updated by REST requests at most once a minute).
+  last_used_at INTEGER` (NULL = never; updated by REST requests at most once a minute,
+  or once a quarter of the idle bound, whichever is shorter; issue #812).
   `CredentialLive` becomes: not revoked, principal enabled, `now < expires_at` when set,
   and `idle_ms IS NULL OR now < COALESCE(last_used_at, created_at) + idle_ms` (F5).
 - `open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels, added_by INTEGER
