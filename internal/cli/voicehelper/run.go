@@ -47,6 +47,7 @@ type run struct {
 
 	// Guarded by Supervisor.mu.
 	tr            tracker
+	version       string // the session's schema, chosen from the hello; every command is written in it
 	nextID        int64
 	waiters       map[int64]*waiter
 	ready         bool   // the start was acknowledged
@@ -238,39 +239,47 @@ func (s *Supervisor) onEvent(r *run, line []byte, tooLong bool) {
 		}
 		return
 	}
-	switch ev := rd.ev; {
-	case ev.Hello != nil:
+	switch h := rd.head(); {
+	case h.hello:
 		if s.cur == r {
-			s.status.HelperVersion = ev.Hello.HelperVersion
+			s.status.HelperVersion = rd.ev.Hello.HelperVersion
 			s.publishLocked()
 		}
 		close(r.helloCh)
-	case ev.State != nil:
+	case h.state:
 		if s.cur == r && r.supReason == "" {
-			s.status = fromState(r.gen, r.channel, r.tr.hello.HelperVersion, ev.State)
+			var st Status
+			if rd.ev.State != nil {
+				st = fromState(r.gen, r.channel, r.tr.hello.HelperVersion, rd.ev.State)
+			} else {
+				st = fromStateV2(r.gen, r.channel, r.tr.hello.HelperVersion, rd.ev2.State)
+			}
+			st.Protocol = r.version
+			s.status = st
 			if !s.closed {
-				s.muted, s.deafened = ev.State.Muted, ev.State.Deafened
+				s.muted, s.deafened = st.Muted, st.Deafened
 			}
 			s.publishLocked()
 		}
-		if ev.State.Phase.Final() {
+		if h.final {
 			s.stopLocked(r, false)
 		}
-	case ev.Ack != nil:
-		w := r.waiters[ev.Ack.ID]
-		delete(r.waiters, ev.Ack.ID)
-		if !ev.Ack.OK && ev.Ack.Error != schema.VoiceControlErrorStopping {
+	case h.ack:
+		ok, code := rd.ackOf()
+		w := r.waiters[h.ackID]
+		delete(r.waiters, h.ackID)
+		if !ok && code != schema.VoiceControlErrorStopping {
 			// The owner writes only valid commands, so this is a helper that
 			// disagrees about the protocol.
-			s.noteLocked(r, fmt.Sprintf("the helper refused %s with %s", rd.acked.kind, ev.Ack.Error))
+			s.noteLocked(r, fmt.Sprintf("the helper refused %s with %s", rd.acked.kind, code))
 			s.failLocked(r, ReasonHelperIncompatible)
 			s.stopLocked(r, true)
 		}
 		if w != nil {
-			s.resolveLocked(r, w, ackResult{ok: ev.Ack.OK, code: ev.Ack.Error})
+			s.resolveLocked(r, w, ackResult{ok: ok, code: code})
 		}
-	case ev.ProtocolError != nil:
-		s.noteLocked(r, "the helper could not act on a command line: "+string(ev.ProtocolError.Code))
+	case h.protocolError:
+		s.noteLocked(r, "the helper could not act on a command line: "+string(rd.protocolErrorCode()))
 	}
 	if rd.gap {
 		s.resyncLocked(r)
@@ -321,7 +330,7 @@ func (s *Supervisor) readLog(r *run) {
 // write writes one command and returns the waiter for its ack. The ack bound
 // runs from before the write; a write that fails or does not finish in it
 // resolves the waiter with the error.
-func (s *Supervisor) write(ctx context.Context, r *run, kind schema.VoiceControlCommandKind, build func(int64) schema.VoiceControlMessage) (*waiter, error) {
+func (s *Supervisor) write(ctx context.Context, r *run, kind schema.VoiceControlCommandKind, build func(version string, id int64) schema.VoiceControlMessage) (*waiter, error) {
 	select {
 	case r.slots <- struct{}{}:
 	case <-ctx.Done():
@@ -338,7 +347,7 @@ func (s *Supervisor) write(ctx context.Context, r *run, kind schema.VoiceControl
 		return nil, ErrNotRunning
 	}
 	id := r.nextID + 1
-	line, err := schema.MarshalVoiceControlLine(build(id))
+	line, err := schema.MarshalVoiceControlLine(build(r.version, id))
 	if err != nil {
 		s.mu.Unlock()
 		<-r.slots
@@ -362,7 +371,7 @@ func (s *Supervisor) write(ctx context.Context, r *run, kind schema.VoiceControl
 }
 
 // exchange writes one command and waits for its answer.
-func (s *Supervisor) exchange(ctx context.Context, r *run, kind schema.VoiceControlCommandKind, build func(int64) schema.VoiceControlMessage) error {
+func (s *Supervisor) exchange(ctx context.Context, r *run, kind schema.VoiceControlCommandKind, build func(version string, id int64) schema.VoiceControlMessage) error {
 	w, err := s.write(ctx, r, kind, build)
 	if err != nil {
 		return err
@@ -502,9 +511,7 @@ func (s *Supervisor) writeLeave(r *run) {
 	}
 	s.mu.Lock()
 	id := r.nextID + 1
-	line, err := schema.MarshalVoiceControlLine(schema.VoiceControlLeaveV1{
-		Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandLeave, ID: id,
-	})
+	line, err := schema.MarshalVoiceControlLine(leaveCommand(r.version, id))
 	if err != nil || r.stdinClosed {
 		s.mu.Unlock()
 		<-r.slots
