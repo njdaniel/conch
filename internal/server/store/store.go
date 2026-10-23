@@ -830,6 +830,12 @@ END`,
 			CHECK (owner IN (0, 1) AND (owner = 0 OR role = 'operator'))`,
 		`UPDATE principals SET owner = 1 WHERE role = 'operator'`,
 	},
+	// 35 (channelManagesMigration): per-channel manager grant (issue #789,
+	// ADR-010, docs/design/delegated-administration.md §3.2). Every existing
+	// membership starts with manages = 0.
+	{
+		`ALTER TABLE channel_members ADD COLUMN manages INTEGER NOT NULL DEFAULT 0 CHECK (manages IN (0, 1))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
