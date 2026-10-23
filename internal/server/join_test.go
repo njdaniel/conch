@@ -1024,6 +1024,47 @@ func TestServerNameOnTheFrontDoor(t *testing.T) {
 	}
 }
 
+// A server name in the hidden or the guest namespace is refused (issue #798),
+// by either key, with a message that names the rule: a hide writes
+// hidden-<id> and the store gives guests their handles, so the server's name
+// could otherwise be a principal's. A name that only contains a prefix, or
+// begins with a word that is not it, is anyone's.
+func TestValidateServerNameNamespaces(t *testing.T) {
+	const (
+		hiddenRule = "names beginning with " + schema.HiddenPrincipalNamePrefix + ", or with a look-alike of it, are reserved for hidden accounts"
+		guestRule  = "names beginning with " + schema.ReservedGuestNameKeyPrefix + ", or with a look-alike of it, are reserved for guests"
+	)
+	tests := []struct {
+		name string
+		want string // the rule the refusal names; empty when accepted
+	}{
+		{"hidden-3", hiddenRule},
+		{"HIDDEN-3", hiddenRule},
+		{"hіdden-3", hiddenRule}, // a Cyrillic і
+		{"hidden‐3", hiddenRule}, // a Unicode hyphen
+		{"guest-x", guestRule},
+		{"Guests", guestRule},
+		{"guеst-x", guestRule},     // a Cyrillic е
+		{"ｇｕｅｓｔ house", guestRule}, // fullwidth letters
+		{"conch", ""},
+		{"Harbour Club", ""},
+		{"the guest house", ""},
+		{"unhidden-3", ""},
+		{"hidden", ""},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%+q", tt.name), func(t *testing.T) {
+			err := ValidateServerName(tt.name)
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("err = %v, want it accepted", err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Errorf("err = %v, want one naming the rule %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // Both entry routes answer a bearer token, and the guest redemption takes a
 // code: over plain HTTP beyond loopback they are 403 https_required before
 // anything is read, a rate-limit token included; loopback and HTTPS are

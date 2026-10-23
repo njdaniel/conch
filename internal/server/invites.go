@@ -330,9 +330,11 @@ func (s *Server) handleRedeemInvite(w http.ResponseWriter, _ *http.Request) {
 // §3.1). The order is part of the contract: the transport check
 // (passwordRoute); the per-address limit before the body is read; a
 // malformed code the same 404 as any invalid one; a bad name or password a
-// 400 that says nothing about the code; the code checked before any hashing,
-// so an invalid one costs no Argon2 work, and a valid one that admits guests
-// only answered 403 joining_closed then too; the name-probe allowance; the hash,
+// 400 that says nothing about the code, the password held to the policy
+// against the name and the server's name; the code checked before any
+// hashing, so an invalid one costs no Argon2 work, and a valid one that
+// admits guests only answered 403 joining_closed then too; the name-probe
+// allowance and the name (409 principal_exists, which spends a probe); the hash,
 // in the anonymous pool and outside any transaction; the server-wide limit
 // last, so only a redemption that reaches the store can spend it, and one
 // that fails there gives it back. The store re-checks the invite and the
@@ -361,14 +363,9 @@ func (s *Server) handleRedeemInviteV2(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	password, err := normalizePassword(req.Password)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if checkPasswordPolicy(password, req.Name) != nil {
-		writeError(w, http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable,
-			"that password is too common or contains your name; choose another")
+	// Against the account's name and the server's (design §5.2, issue #794).
+	password, ok := s.accountPassword(w, req.Password, req.Name)
+	if !ok {
 		return
 	}
 	codeHash := store.HashInviteCode(req.Code)
@@ -388,8 +385,11 @@ func (s *Server) handleRedeemInviteV2(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	if limit, ok, retry := s.logins.peekNameProbe(addr, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
+	// The name, after the code so that only a valid one can ask about names,
+	// and before the hash so that a taken one costs no Argon2 work (design
+	// §5.1, issue #794). A taken name spends a probe from the allowance the
+	// account route from the bare address shares.
+	if !s.nameIsFree(w, r, addr, 0, req.Name) {
 		return
 	}
 	record, err := s.passwords.hashIn(ctx, s.passwords.anonymous, password)
