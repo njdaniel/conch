@@ -76,6 +76,8 @@ export function Lobby({
   passwordSet = false,
   banner,
   visit,
+  admin,
+  overlay,
 }: {
   readonly origin: string;
   readonly name: string;
@@ -123,6 +125,13 @@ export function Lobby({
   // For a temporary guest, what Settings says in place of the sign-outs:
   // a visit ends with End visit, in the banner.
   readonly visit?: ReactNode;
+  // The server's own settings, for an operator (issue #714): joining and
+  // guests, in Settings.
+  readonly admin?: ReactNode;
+  // A question over the whole page, Settings included (issue #714: a recent
+  // proof of the password). While it is shown everything else is inert and
+  // stays as it was, so what was being typed is kept.
+  readonly overlay?: ReactNode;
 }) {
   const [panelOpen, setPanelOpen] = useState(isWide);
   const wideNow = useWide();
@@ -134,6 +143,7 @@ export function Lobby({
     if (!wideNow) setPanelOpen(false);
   }
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const asking = overlay !== undefined && overlay !== null;
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
   const [stage, setStage] = useState<HTMLElement | null>(null);
@@ -210,7 +220,7 @@ export function Lobby({
     <div className="lobby">
       {/* While Settings is open the rest of the page is inert: the panel is
           modal, and focus cannot wander behind its backdrop. */}
-      <header className="topbar" inert={settingsOpen}>
+      <header className="topbar" inert={settingsOpen || asking}>
         <h1 className="brand">Conch</h1>
         <div role="status" aria-label="Status" className="status">
           <Avatar id={me} name={name} />
@@ -249,7 +259,7 @@ export function Lobby({
           </button>
         </div>
       </header>
-      <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen}>
+      <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
         <nav aria-label="Channels" className="channels">
           <h2>Channels</h2>
           {channels.loaded ? (
@@ -310,16 +320,16 @@ export function Lobby({
         </aside>
         {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
       </div>
-      <div className="dock" inert={settingsOpen}>
+      <div className="dock" inert={settingsOpen || asking}>
         <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
       </div>
-      {settingsOpen ? <div className="backdrop" onClick={closeSettings} /> : null}
+      {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
       <div
         id="settings-panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-heading"
-        className="drawer" hidden={!settingsOpen} onKeyDown={onEscape(closeSettings)}>
+        className="drawer" hidden={!settingsOpen} inert={asking} onKeyDown={onEscape(closeSettings)}>
         <div className="drawer-head">
           <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
             Settings
@@ -343,6 +353,11 @@ export function Lobby({
             setConfirming('here');
           })}
         </section>
+        {admin === undefined || admin === null ? null : (
+          <section aria-label="Server" className="drawer-section">
+            {admin}
+          </section>
+        )}
         <section aria-label="Sign out" className="drawer-section signout">
           {visit !== undefined ? (
             visit
@@ -414,6 +429,7 @@ export function Lobby({
           <ServerVersion className="hint" />
         </section>
       </div>
+      {overlay}
     </div>
   );
 }

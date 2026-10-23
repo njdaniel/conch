@@ -47,8 +47,10 @@ describe('credential handling', () => {
     // restore, keepRedeemed (issue #440), which keeps the credential an
     // invite, a join or a password sign-in gives as signIn keeps a member's,
     // and convertGuest (issue #713), which keeps the member's credential a
-    // guest's Create an account gives.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(5);
+    // guest's Create an account gives, and keepRotated (issue #714), which
+    // keeps the credential a password change rotates this page's into, in
+    // the place of the one the server revoked.
+    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(6);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {

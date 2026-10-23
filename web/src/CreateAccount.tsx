@@ -10,8 +10,20 @@ import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 // The password rules the server holds (pkg/schema ValidatePassword), in
 // characters: said beside the field and checked before sending, so a person
 // learns of a short one without a round trip.
-const minPassword = 15;
-const maxPassword = 128;
+export const minPassword = 15;
+export const maxPassword = 128;
+
+// passwordProblem is what the page can say of a chosen password and its
+// repetition before sending them, or null (issue #714 shares it with the
+// password settings and the reset page).
+export function passwordProblem(chosen: string, repeated: string): string | null {
+  // In code points after NFC, as the server counts (ValidatePassword).
+  const length = Array.from(chosen.normalize('NFC')).length;
+  if (length < minPassword) return `Choose a password of at least ${String(minPassword)} characters.`;
+  if (length > maxPassword) return `Choose a password of at most ${String(maxPassword)} characters.`;
+  if (chosen !== repeated) return 'The two passwords are not the same. Type them again.';
+  return null;
+}
 
 // Which field a refusal of the server's is about, so focus goes there.
 export type ProblemField = 'name' | 'password';
@@ -63,13 +75,10 @@ export function CreateAccount({
     if (busy) return;
     const chosen = password.current?.value ?? '';
     const repeated = again.current?.value ?? '';
-    // In code points after NFC, as the server counts (ValidatePassword).
-    const length = Array.from(chosen.normalize('NFC')).length;
+    const said = passwordProblem(chosen, repeated);
     let refused: AccountProblem | null = null;
     if (name === '') refused = { line: 'Choose a name.', field: 'name' };
-    else if (length < minPassword) refused = { line: `Choose a password of at least ${String(minPassword)} characters.`, field: 'password' };
-    else if (length > maxPassword) refused = { line: `Choose a password of at most ${String(maxPassword)} characters.`, field: 'password' };
-    else if (chosen !== repeated) refused = { line: 'The two passwords are not the same. Type them again.', field: 'password' };
+    else if (said !== null) refused = { line: said, field: 'password' };
     setLocal(refused);
     if (refused !== null) {
       if (refused.field === 'password') {

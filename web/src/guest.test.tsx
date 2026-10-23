@@ -721,11 +721,8 @@ describe('a returning member', () => {
     { name: 'a wrong name or password', answer: () => refusal(401, 'auth_failed'), line: 'The name or password is not right.' },
     { name: 'too many tries', answer: () => refusal(429, 'rate_limited', 'slow down', { 'Retry-After': '90' }), line: 'Too many tries. Try again in 2 minutes.' },
     { name: 'plain HTTP behind a proxy', answer: () => refusal(403, 'https_required'), line: httpsRequiredLine },
-    {
-      name: 'an operator account',
-      answer: () => json({ next: 'totp', challenge: 'conch_chal_x', challenge_expires_at: at }),
-      line: 'This account also needs a code from an authenticator app, which this page does not take yet. Sign in with a credential, under Operators and scripts, instead.',
-    },
+    // An operator's account answers with a code's step since issue #714:
+    // operatorauth.test.tsx covers it.
   ])('says so for $name, keeps nothing, and puts focus back on the password', async ({ answer, line }) => {
     serve({ ...both, 'POST /v1/login': answer });
     render(<App origin={origin} />);

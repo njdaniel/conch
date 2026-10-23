@@ -3,13 +3,24 @@
 // a person who signed out, so they come back as themselves, not as someone
 // new. The code is a prop held in memory by App, sent only in the bodies of
 // preview and redeem, and never rendered: nothing on this page shows it.
+//
+// The same address carries two more kinds of link (issue #714, design §6):
+// a device link, which a member made for their own account to sign in on
+// this device, and a reset link, which an operator made after checking who
+// someone is, and which replaces a forgotten password and signs nobody in.
+// The preview says which. Opening a link never uses it: the page says whose
+// account it is for, and waits for the button; someone else signed in here
+// is signed out first, on their own button, before another account replaces
+// theirs.
 import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
-import { waitWords } from './Invite';
+import { httpsRequiredLine, serverLine, waitWords } from './Invite';
 import type { SignInLinkPreviewV1 } from './schema/signin';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
+import { ResetPassword } from './Settings';
 import { noticeText } from './state/auth';
+import { insecureLine, needsHttps } from './transport';
 
 // The one answer for a code that is unknown, used, expired or closed. The
 // server does not say which, so neither does the page. Someone else may have
@@ -76,6 +87,8 @@ export function SignInLink({
   const [untold, setUntold] = useState(false);
   // Using the link found another sign-in held here after all.
   const [held, setHeld] = useState(false);
+  // A reset link that has done its work.
+  const [reset, setReset] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
@@ -92,9 +105,33 @@ export function SignInLink({
 
   useEffect(() => {
     heading.current?.focus();
-  }, [preview.state]);
+  }, [preview.state, reset]);
 
   const ready = preview.state === 'ready' ? preview.preview : null;
+  const purpose = ready?.purpose ?? 'sign_in';
+
+  // A reset link's form: the new password, with the link's code.
+  function resetPassword(password: string) {
+    if (busy || ready === null) return;
+    setBusy(true);
+    setProblem(null);
+    void api.resetPassword(signInCode, password).then((result) => {
+      setBusy(false);
+      if (result.ok) {
+        setReset(true);
+        return;
+      }
+      if (result.failure !== 'network' && result.code === 'sign_in_link_invalid') {
+        setPreview({ state: 'refused', line: linkNoLongerWorks, gone: true });
+        return;
+      }
+      if (result.failure === 'network') setProblem('No answer from the server, so the page cannot tell whether the password changed. Try signing in with the new one; if that fails, ask an operator for a new link.');
+      else if (result.code === 'password_unacceptable') setProblem('That password is too common, or has your name in it. Choose another.');
+      else if (result.code === 'invalid_request') setProblem(serverLine(result.message, 'The server did not take that password.'));
+      else if (result.code === 'https_required') setProblem(httpsRequiredLine);
+      else setProblem(refusalLine(result));
+    });
+  }
 
   function signOutFirst() {
     if (busy) return;
@@ -142,7 +179,13 @@ export function SignInLink({
   return (
     <main className="signin invite" aria-labelledby="signin-link-heading">
       <h1 id="signin-link-heading" ref={heading} tabIndex={-1}>
-        {preview.state === 'refused' && preview.gone ? 'This sign-in link no longer works' : 'Sign in to Conch'}
+        {preview.state === 'refused' && preview.gone
+          ? 'This sign-in link no longer works'
+          : purpose !== 'reset'
+            ? 'Sign in to Conch'
+            : reset
+              ? 'Your password is changed'
+              : 'Choose a new password'}
       </h1>
       <p>
         Server: <code>{origin}</code>
@@ -171,16 +214,62 @@ export function SignInLink({
           </div>
         </>
       ) : null}
-      {ready === null ? null : (
+      {ready === null ? null : purpose === 'reset' ? (
+        reset ? (
+          <>
+            <p>
+              The password of <strong>{ready.name}</strong> is changed, and every sign-in of the account has ended. Sign in
+              with your name and the new password.
+            </p>
+            <div className="actions">
+              <button type="button" onClick={onBack}>
+                Go to sign-in
+              </button>
+            </div>
+          </>
+        ) : needsHttps(origin) ? (
+          <>
+            <p className="notice insecure">{insecureLine}</p>
+            <div className="actions">
+              <button type="button" onClick={onBack}>
+                Go back
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <ResetPassword name={ready.name} busy={busy} problem={problem} onSubmit={resetPassword} />
+            <p className="hint">
+              The link works once, for a short time. It signs nobody in: after this, sign in with the new password. If you did
+              not ask for it, do nothing, and tell an operator.
+            </p>
+            <div className="actions">
+              <button type="button" onClick={onBack}>
+                Go back
+              </button>
+            </div>
+          </>
+        )
+      ) : (
         <>
           <p>
-            This link signs you back into your account, <strong>{ready.name}</strong>. It works once.
+            {purpose === 'device' ? (
+              <>
+                This link adds this device to your account, <strong>{ready.name}</strong>: it signs this browser in as{' '}
+                {ready.name}. It works once. If you did not make it under Add a device, do not use it.
+              </>
+            ) : (
+              <>
+                This link signs you back into your account, <strong>{ready.name}</strong>. It works once.
+              </>
+            )}
           </p>
           {signedInAs !== null ? (
             <>
               <p>
-                You are signed in here as <strong>{signedInAs}</strong>. Using the link signs {signedInAs} out of this browser
-                first.
+                You are signed in here as <strong>{signedInAs}</strong>
+                {signedInAs === ready.name ? '' : `, and this link is for ${ready.name}`}. Using the link signs {signedInAs}{' '}
+                out of this browser first.
               </p>
               <div className="actions">
                 <button type="button" onClick={signOutFirst} aria-busy={busy}>

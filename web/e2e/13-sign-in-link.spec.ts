@@ -5,7 +5,7 @@
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { channelButton, expect, fillAccount, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { call, inviteUrl, ok, principalId, type World } from './world';
@@ -100,6 +100,56 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   await expect(again.page.getByRole('heading', { name: 'This sign-in link no longer works' })).toBeVisible();
   await expect(again.page.getByRole('button', { name: /^Sign in as/ })).toHaveCount(0);
   await expectCodeGone(again.page, link.code);
+});
+
+// G7a (issue #714, design §6.1): a member who forgot their password gets a
+// reset link from an operator, who made it after checking who they are
+// (here through the API, as `conch admin principal sign-in-link --purpose
+// reset` does). It replaces the password and signs nobody in; every sign-in
+// of the account ends, the old password stops working, and the new one
+// signs in from a fresh browser.
+test('G7a a reset link replaces a forgotten password, ends every sign-in, and the new password signs in', async ({ meet, secrets, world }) => {
+  const fresh = 'the new passphrase this member chose after a reset';
+  secrets.push(accountPassword, fresh);
+  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const name = unique('reset');
+  const laptop = await meet(desktop);
+  await laptop.page.goto(inviteUrl(world, invite.code));
+  await fillAccount(laptop.page, name);
+  await expect(statusLine(laptop.page)).toContainText('Connected');
+  const firstToken = await keepToken(laptop.page, secrets);
+  const id = await principalId(world, firstToken);
+
+  const link = await makeSignInLink(world, id, { purpose: 'reset' });
+  expect(link.sign_in_link.purpose).toBe('reset');
+  const handset = await meet(phone);
+  await handset.page.goto(signInUrl(world, link.code));
+  await expect(handset.page.getByRole('heading', { name: 'Choose a new password' })).toBeVisible();
+  await expect(handset.page.getByText(/Choose a new password for/)).toContainText(name);
+  // Opening the link used nothing: the old sign-in still works.
+  expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(200);
+  await handset.page.getByLabel('New password', { exact: true }).fill(fresh);
+  await handset.page.getByLabel('Type it again').fill(fresh);
+  await handset.page.getByRole('button', { name: 'Set the new password' }).click();
+  await expect(handset.page.getByRole('heading', { name: 'Your password is changed' })).toBeVisible();
+  // It signed nobody in, and ended every sign-in of the account.
+  expect(await handset.page.evaluate(() => window.localStorage.length + window.sessionStorage.length)).toBe(0);
+  expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(401);
+  await expectCodeGone(handset.page, link.code);
+
+  // The old password no longer signs in; the new one does.
+  await handset.page.getByRole('button', { name: 'Go to sign-in' }).click();
+  await signInWithPassword(handset.page, name, accountPassword);
+  await expect(handset.page.getByText('The name or password is not right.')).toBeVisible();
+  await signInWithPassword(handset.page, name, fresh);
+  await expect(statusLine(handset.page)).toContainText(name);
+  await expect(statusLine(handset.page)).toContainText('Connected');
+  await keepToken(handset.page, secrets);
+
+  // The link worked once.
+  const again = await meet(desktop);
+  await again.page.goto(signInUrl(world, link.code));
+  await expect(again.page.getByRole('heading', { name: 'This sign-in link no longer works' })).toBeVisible();
 });
 
 // The person is made by the operator here: the spec is about the link, and

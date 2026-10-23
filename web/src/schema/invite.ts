@@ -15,6 +15,7 @@ export {
   type CreateInviteRequestV1,
   type CreateInviteResponseV1,
   type InviteChannelV1,
+  type InviteJoinMode,
   type InviteKind,
   type InvitePreviewRequestV1,
   type InvitePreviewV1,
