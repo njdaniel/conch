@@ -41,6 +41,22 @@
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.
+//   - The guests (issue #717, guests.go and the files it names): a third
+//     part of the world, the plaza, open at the bare address, where members
+//     who made accounts there leave private markers before any guest comes.
+//     Guests come from the bare address and through invites, each caller
+//     from a client address of its own through the trusted proxy, so the
+//     entry routes run for real; they run the guests' rows of the matrix
+//     (the history from the visit's bound alone, nothing of A's, every
+//     right a guest may not have refused) and the newcomers' rows; the
+//     entry gates are stepped through; a guest becomes a member, and two
+//     visits run out on the real clock while the rest goes on; End visit,
+//     the operator's end and End all guest visits are timed as the
+//     revocations are; and a member's reset, a device link and the
+//     operator's sign-in, recent-auth proof and offline recovery hold
+//     against the races that matter.
+//
+// The run says first which commit and conchd it tested.
 //
 // Without Docker, or without the network to pull the image or lk, the media
 // half and LiveKit's side of revocation are skipped with one line and the
@@ -153,7 +169,8 @@ func run(h *harness) (summary, error) {
 	if err != nil {
 		return sum, err
 	}
-	h.say("ok   coverage: each of the %d routes of internal/server/routes.go has a row in the matrix (%d rows, %d more as an agent) or a stated exemption (%d)", len(table), len(matrixRows()), len(agentRows()), len(exempt))
+	h.say("ok   coverage: each of the %d routes of internal/server/routes.go has a row in the matrix (%d rows, %d more as an agent, %d as a guest, %d as a newcomer) or a stated exemption (%d)",
+		len(table), len(matrixRows()), len(agentRows()), len(guestRows()), len(entryRows()), len(exempt))
 	if sum.bounds, err = readVoiceBounds(h.repo); err != nil {
 		return sum, err
 	}
@@ -194,6 +211,9 @@ func run(h *harness) (summary, error) {
 	}
 	d, err := h.startConchd(srv)
 	if err != nil {
+		return sum, err
+	}
+	if err := h.recordBuild(d); err != nil {
 		return sum, err
 	}
 	w := newWorld(h, d, lk)
@@ -272,6 +292,15 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   removal: bea, removed from one of B's channels, keeps her occupancy sockets, which lost that channel's row within %s (bound %s); she is put back", took.Round(100*time.Microsecond), socketBound)
 
+	// The plaza and its guests (issue #717). B's sockets stay open through
+	// it, and the second control scans them for the plaza's private markers
+	// too.
+	gt, err := w.guestPhase(sum.bounds)
+	if err != nil {
+		return sum, fmt.Errorf("the guests: %w", err)
+	}
+	sum.timings = append(sum.timings, gt...)
+
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
 	if c, err = w.controlB(2); err != nil {
@@ -280,7 +309,7 @@ func run(h *harness) (summary, error) {
 	if err := bsock.checkQuiet(w, c); err != nil {
 		return sum, fmt.Errorf("group B's sockets, at the end: %w", err)
 	}
-	h.say("ok   sockets at the end: B's %d sockets, open through the matrix, the media half and every revocation, carried B's second control and %d frames in all, none with anything of A", len(bsock.feeds), bsock.frames())
+	h.say("ok   sockets at the end: B's %d sockets, open through the matrix, the media half, every revocation and the guests' phase, carried B's second control and %d frames in all, none with anything of A's or anything private of the plaza's", len(bsock.feeds), bsock.frames())
 
 	if err := h.checkCalls(table); err != nil {
 		return sum, err

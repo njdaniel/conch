@@ -72,7 +72,7 @@ func readVoiceBounds(repo string) (voiceBounds, error) {
 }
 
 // durationConsts evaluates the constants of a Go file written as
-// <integer> * time.<Unit>.
+// <integer> * time.<Unit>, or time.<Unit> alone.
 func durationConsts(src string) (map[string]time.Duration, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
 	if err != nil {
@@ -92,6 +92,14 @@ func durationConsts(src string) (map[string]time.Duration, error) {
 				continue
 			}
 			for i, v := range vs.Values {
+				if sel, ok := v.(*ast.SelectorExpr); ok {
+					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "time" {
+						if unit, known := units[sel.Sel.Name]; known {
+							out[vs.Names[i].Name] = unit
+						}
+					}
+					continue
+				}
 				be, ok := v.(*ast.BinaryExpr)
 				if !ok || be.Op != token.MUL {
 					continue
@@ -216,10 +224,18 @@ type timing struct {
 	what    string
 	sockets []time.Duration
 	livekit []time.Duration
+	// bound is the sockets' bound when it is not socketBound: a timed
+	// expiry's adds the sweeper's fallback, a host command's is the
+	// sockets' re-check interval (guests' phase).
+	bound time.Duration
 }
 
 func (t timing) String() string {
-	s := fmt.Sprintf("%s: %d sockets closed in %s (slowest %s; bound %s)", t.what, len(t.sockets), durations(t.sockets), slowest(t.sockets), socketBound)
+	bound := socketBound
+	if t.bound > 0 {
+		bound = t.bound
+	}
+	s := fmt.Sprintf("%s: %d sockets closed in %s (slowest %s; bound %s)", t.what, len(t.sockets), durations(t.sockets), slowest(t.sockets), bound)
 	if len(t.livekit) > 0 {
 		s += fmt.Sprintf("; LiveKit stopped listing %d participant(s) within %s", len(t.livekit), durations(t.livekit))
 	}
