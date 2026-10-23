@@ -89,7 +89,11 @@ describe('new channel', () => {
     expect(form.hidden).toBe(true);
     expect(field(form).value).toBe('');
     expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'New channel' }));
-    expect(window.location.hash).toBe('#/c/book-club');
+    // The address is written by an effect after the render that opens the
+    // channel, which may not have run yet (issue #804).
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/c/book-club');
+    });
     // Opening the channel asked for no voice session.
     await act(async () => {});
     expect(calls.filter((c) => c.path.includes('/voice/session'))).toEqual([]);

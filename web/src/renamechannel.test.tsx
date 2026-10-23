@@ -218,8 +218,12 @@ async function movedTo(name: string, old: string) {
   expect(within(nav()).queryByRole('button', { name: old })).toBeNull();
   expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toContain(name);
   expect(screen.getByLabelText(`Message #${name}`)).toBeDefined();
-  expect(window.location.hash).toBe(`#/c/${name}`);
-  expect(window.sessionStorage.getItem('conch.web.lastChannel')).toBe(name);
+  // The address and the tab's memory are written by an effect after the
+  // render that shows the new name, which may not have run yet (issue #804).
+  await waitFor(() => {
+    expect(window.location.hash).toBe(`#/c/${name}`);
+    expect(window.sessionStorage.getItem('conch.web.lastChannel')).toBe(name);
+  });
 }
 
 beforeEach(() => {
