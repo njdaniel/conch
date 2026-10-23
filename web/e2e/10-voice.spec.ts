@@ -261,9 +261,12 @@ test.describe('with LiveKit', () => {
   });
 
   // Issue #495: conchd's poller compares the microphone it sees with the
-  // reports. With each report held back 700 ms on its way to conchd (several
-  // gaps between passes), a page that opened its track before its report was
-  // answered was seen transmitting unreported; it opens it only after.
+  // reports. With each report held back 500 ms on its way to conchd, a page
+  // that opened its track before its report was answered was seen transmitting
+  // unreported; it opens it only after. The delay stays comfortably inside the
+  // client's 1 s reportWait: past that bound audio deliberately opens anyway,
+  // and the late report is audited as unreported. A 700 ms delay left too
+  // little room for scheduling under load and accidentally tested that case.
   //
   // Carol is in no other test of this world, and the press waits until conchd
   // has seen her join: a press made before the poller has noticed a new
@@ -273,7 +276,7 @@ test.describe('with LiveKit', () => {
     const c = await person(browser, 'carol');
     try {
       await c.page.route('**/voice/transmit', async (route) => {
-        await new Promise((r) => setTimeout(r, 700));
+        await new Promise((r) => setTimeout(r, 500));
         await route.continue();
       });
       const voice = voiceRegion(c.page);
@@ -604,6 +607,7 @@ test.describe('with LiveKit', () => {
       await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
       await expect(voice.getByRole('button', { name: 'More about sharing' }), `${size}: the line about sharing shows`).toBeVisible();
       await expectFits(a.page, `${size}: the voice panel, push to talk`);
+      await expectInside(newest, log, `${size}: the newest message after joining voice`);
       const dock = await voice.evaluate((el) => {
         const d = el.parentElement;
         return d === null ? null : { height: d.getBoundingClientRect().height, scroll: d.scrollHeight, client: d.clientHeight };
@@ -614,7 +618,6 @@ test.describe('with LiveKit', () => {
       // scrolling.
       if (size === '390×844') expect(dock.height, `${size}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(200);
       expect(dock.scroll, `${size}: the strip holds ${String(dock.scroll)} px in ${String(dock.client)}`).toBeLessThanOrEqual(dock.client);
-      await expectInside(newest, log, `${size}: the newest message after joining voice`);
       await voice.getByRole('button', { name: 'Mute' }).tap();
       await expect(voice).toContainText('Muted.');
       await voice.getByRole('button', { name: 'Unmute' }).tap();
@@ -1213,15 +1216,23 @@ async function frames(page: Page): Promise<void> {
   );
 }
 
-// expectInside checks that element is wholly inside the log's box: in view.
+// expectInside waits until element is wholly inside the log's box: in view.
+// Joining voice changes the panel and then the log's height, and the resize
+// observer follows that by scrolling; two frames alone do not guarantee that
+// sequence has finished on a loaded machine.
 async function expectInside(element: Locator, log: Locator, what: string): Promise<void> {
-  await frames(element.page());
-  const box = await element.boundingBox();
-  const frame = await log.boundingBox();
-  if (box === null || frame === null) throw new Error(`${what} has no box on the screen`);
-  const where = `${what} is at y ${String(box.y)}, ${String(box.height)} high, in a log from y ${String(frame.y)}, ${String(frame.height)} high`;
-  expect(box.y, where).toBeGreaterThanOrEqual(frame.y - 1);
-  expect(box.y + box.height, where).toBeLessThanOrEqual(frame.y + frame.height + 1);
+  await expect
+    .poll(async () => {
+      await frames(element.page());
+      const box = await element.boundingBox();
+      const frame = await log.boundingBox();
+      if (box === null || frame === null) throw new Error(`${what} has no box on the screen`);
+      const where = `${what} is at y ${String(box.y)}, ${String(box.height)} high, in a log from y ${String(frame.y)}, ${String(frame.height)} high`;
+      expect(box.y, where).toBeGreaterThanOrEqual(frame.y - 1);
+      expect(box.y + box.height, where).toBeLessThanOrEqual(frame.y + frame.height + 1);
+      return true;
+    })
+    .toBe(true);
 }
 
 // notesHeight is how high the strip's notes are, and one line of their text
