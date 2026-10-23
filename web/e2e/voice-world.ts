@@ -7,7 +7,7 @@
 // It uses the conchd binary p3-local built into the shared root, so nothing is
 // built twice. Without Docker it reports why; the spec decides whether that
 // fails (CI) or skips (a developer's machine).
-import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,6 +46,48 @@ async function waitFor(what: string, ms: number, check: () => Promise<boolean>):
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`timed out waiting for ${what}`);
+}
+
+// The line conchd prints once it holds its port (cmd/conchd/main.go), read as
+// ops/deploy/conch-restore.sh and e2e/p3-local read it.
+const listeningLine = /^conchd \S+ listening on 127\.0\.0\.1:(\d+) \(data /m;
+
+// conchdUp waits up to ms for server, a conchd started with --listen
+// 127.0.0.1:0 and its output going to log, to say which port it holds and then
+// to answer /healthz there, and returns its origin. If it does not, the error
+// says whether conchd is still running or how it ended, and gives the last of
+// its output, with redact applied.
+async function conchdUp(server: ChildProcess, log: string, ms: number, redact: (s: string) => string): Promise<string> {
+  const until = Date.now() + ms;
+  const output = () => {
+    try {
+      return readFileSync(log, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const ended = () => {
+    if (server.exitCode !== null) return `exited with status ${String(server.exitCode)}`;
+    if (server.signalCode !== null) return `was killed by ${server.signalCode}`;
+    return undefined;
+  };
+  const failed = (what: string) => {
+    const tail = output().trimEnd().split('\n').slice(-20).join('\n');
+    const state = ended() ?? `is still running after ${String(ms / 1000)}s`;
+    return new Error(`conchd ${what}: it ${state}; the last of its output:\n${tail === '' ? '(none)' : redact(tail)}`);
+  };
+  let origin: string | undefined;
+  while (origin === undefined) {
+    const port = listeningLine.exec(output())?.[1];
+    if (port !== undefined) origin = `http://127.0.0.1:${port}`;
+    else if (ended() !== undefined || Date.now() >= until) throw failed('did not say which port it holds');
+    else await new Promise((r) => setTimeout(r, 100));
+  }
+  while (!(await answers(`${origin}/healthz`))) {
+    if (ended() !== undefined || Date.now() >= until) throw failed(`did not answer ${origin}/healthz`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return origin;
 }
 
 export interface Member {
@@ -153,16 +195,17 @@ room:
     const boot = spawnSync(bin, ['bootstrap-operator', '--data', data, '--name', 'web-voice-operator'], { cwd: repoRoot, env: baseEnv, encoding: 'utf8', timeout: 60_000 });
     const operator = boot.stdout.trim();
     if (boot.status !== 0 || operator === '') throw new Error(`bootstrap-operator failed: ${boot.stderr}`);
-    const port = 31000 + random(4000);
-    const origin = `http://127.0.0.1:${String(port)}`;
-    const log = openSync(join(dir, 'conchd.log'), 'a');
+    // conchd picks its own port (issue #803): a port guessed here could be
+    // taken already, or held by another server that answers /healthz.
+    const logPath = join(dir, 'conchd.log');
+    const log = openSync(logPath, 'a');
     server = spawn(
       bin,
-      ['serve', '--listen', `127.0.0.1:${String(port)}`, '--web-dir', join(repoRoot, 'web', 'dist'), '--data', data, '--livekit-url', livekitOrigin],
+      ['serve', '--listen', '127.0.0.1:0', '--web-dir', join(repoRoot, 'web', 'dist'), '--data', data, '--livekit-url', livekitOrigin],
       { cwd: dir, env: { ...baseEnv, CONCHD_LIVEKIT_API_KEY: key, CONCHD_LIVEKIT_API_SECRET: secret }, stdio: ['ignore', log, log] },
     );
     closeSync(log);
-    await waitFor('conchd', 30_000, () => answers(`${origin}/healthz`));
+    const origin = await conchdUp(server, logPath, 30_000, (s) => s.replaceAll(secret, '[redacted]').replaceAll(operator, '[redacted]'));
 
     const api: VoiceWorld['api'] = async (token, method, path, body) => {
       const res = await fetch(origin + path, {

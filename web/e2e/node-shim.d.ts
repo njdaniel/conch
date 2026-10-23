@@ -27,6 +27,7 @@ declare module 'node:child_process' {
   export interface ChildProcess {
     readonly pid?: number;
     readonly exitCode: number | null;
+    readonly signalCode: string | null;
     kill(signal?: 'SIGTERM' | 'SIGKILL'): boolean;
     unref(): void;
     once(event: 'exit', listener: () => void): ChildProcess;
