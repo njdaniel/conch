@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -584,10 +585,26 @@ func TestGuestCapPerAddress(t *testing.T) {
 
 // The open channel set races guest joins and mode changes: whatever wins,
 // no visit starts with nowhere to go, and each visit's channels were open.
+//
+// The joins go on until they have raced enough: at least minJoined visits
+// admitted, into at least minSets different channel sets, while the
+// settings goroutine answered at least minChanges changes. A fixed number of
+// joins left that to the scheduler (issue #800): SQLite's write lock is not
+// fair, so a burst of quick refusals could take every slot while the change
+// that reopens joining waited out its busy backoff, and no join was
+// admitted. Now the scheduler decides only how long the race takes; the time
+// limit is the only way to fail for want of a race.
 func TestOpenChannelsRaceJoins(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.mustPutJoin(t, openTo("red"))
 	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(0), MaxGuestsPerAddress: int64Ptr(schema.MaxMaxGuests)})
+	const (
+		minJoined  = 20
+		minSets    = 2
+		minChanges = 12 // the six states twice
+		limit      = 30 * time.Second
+	)
+	var changes atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -609,34 +626,59 @@ func TestOpenChannelsRaceJoins(t *testing.T) {
 				t.Errorf("settings change = %d %s", rec.Code, rec.Body)
 				return
 			}
+			changes.Add(1)
 		}
 	}()
 	var joined []schema.JoinGuestResponseV1
+	answered := map[string]bool{} // the channel sets the joins were admitted to
 	var mu sync.Mutex
+	race, stop := context.WithTimeout(context.Background(), limit)
+	defer stop()
+	raced := false
+	// enough stops the joins once they have raced enough. mu is held.
+	enough := func() {
+		if len(joined) >= minJoined && len(answered) >= minSets && changes.Load() >= minChanges {
+			raced = true
+			stop()
+		}
+	}
+	var next atomic.Int64 // every join comes from an address of its own
 	var joiners sync.WaitGroup
-	for w := range 4 {
+	for range 4 {
 		joiners.Add(1)
 		go func() {
 			defer joiners.Done()
-			for i := range 15 {
-				rec := f.joinGuest(t, "", fmt.Sprintf("198.51.%d.%d:1", w, i+1))
+			for race.Err() == nil {
+				n := next.Add(1)
+				rec := f.joinGuest(t, "", fmt.Sprintf("10.%d.%d.%d:1", n>>16&0xff, n>>8&0xff, n&0xff))
+				mu.Lock()
 				switch rec.Code {
 				case http.StatusCreated:
-					mu.Lock()
-					joined = append(joined, decodeBody[schema.JoinGuestResponseV1](t, rec))
-					mu.Unlock()
+					g := decodeBody[schema.JoinGuestResponseV1](t, rec)
+					joined = append(joined, g)
+					chans := make([]string, len(g.Channels))
+					for i, c := range g.Channels {
+						chans[i] = c.Name
+					}
+					slices.Sort(chans)
+					answered[strings.Join(chans, ",")] = true
 				case http.StatusForbidden:
 				default:
 					t.Errorf("join = %d %s", rec.Code, rec.Body)
+					mu.Unlock()
+					return
 				}
+				enough()
+				mu.Unlock()
 			}
 		}()
 	}
 	joiners.Wait()
 	cancel()
 	wg.Wait()
-	if len(joined) == 0 {
-		t.Fatal("no join won a race; the test proved nothing")
+	if !raced {
+		t.Fatalf("after %v, %d joins admitted into channel sets %v while %d settings changes were answered; want at least %d, %d and %d: the test proved nothing",
+			limit, len(joined), answered, changes.Load(), minJoined, minSets, minChanges)
 	}
 	for _, g := range joined {
 		members, err := f.srv.store.ListChannelsForPrincipal(context.Background(), g.Principal.ID)
@@ -979,6 +1021,47 @@ func TestServerNameOnTheFrontDoor(t *testing.T) {
 	}
 	if err := ValidateServerName("Harbour Club"); err != nil {
 		t.Errorf("ValidateServerName: %v", err)
+	}
+}
+
+// A server name in the hidden or the guest namespace is refused (issue #798),
+// by either key, with a message that names the rule: a hide writes
+// hidden-<id> and the store gives guests their handles, so the server's name
+// could otherwise be a principal's. A name that only contains a prefix, or
+// begins with a word that is not it, is anyone's.
+func TestValidateServerNameNamespaces(t *testing.T) {
+	const (
+		hiddenRule = "names beginning with " + schema.HiddenPrincipalNamePrefix + ", or with a look-alike of it, are reserved for hidden accounts"
+		guestRule  = "names beginning with " + schema.ReservedGuestNameKeyPrefix + ", or with a look-alike of it, are reserved for guests"
+	)
+	tests := []struct {
+		name string
+		want string // the rule the refusal names; empty when accepted
+	}{
+		{"hidden-3", hiddenRule},
+		{"HIDDEN-3", hiddenRule},
+		{"hіdden-3", hiddenRule}, // a Cyrillic і
+		{"hidden‐3", hiddenRule}, // a Unicode hyphen
+		{"guest-x", guestRule},
+		{"Guests", guestRule},
+		{"guеst-x", guestRule},     // a Cyrillic е
+		{"ｇｕｅｓｔ house", guestRule}, // fullwidth letters
+		{"conch", ""},
+		{"Harbour Club", ""},
+		{"the guest house", ""},
+		{"unhidden-3", ""},
+		{"hidden", ""},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%+q", tt.name), func(t *testing.T) {
+			err := ValidateServerName(tt.name)
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("err = %v, want it accepted", err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Errorf("err = %v, want one naming the rule %q", err, tt.want)
+			}
+		})
 	}
 }
 
