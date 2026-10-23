@@ -263,7 +263,7 @@ func TestEnrollRefusals(t *testing.T) {
 		}, http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 		{"a proof whose maker is no longer an operator", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			code := f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code
-			f.exec(t, "UPDATE principals SET role = 'member' WHERE id = ?", f.root.ID)
+			f.exec(t, "UPDATE principals SET role = 'member', owner = 0 WHERE id = ?", f.root.ID)
 			return f.enroll(t, f.wrenTok, wrenPassword, code)
 		}, http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 		{"an unacceptable password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
@@ -735,7 +735,7 @@ func TestResetRefusals(t *testing.T) {
 		}, http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 		{"a maker no longer an operator", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			code := f.link(t, schema.SignInLinkPurposeReset, f.alice.ID).Code
-			f.exec(t, "UPDATE principals SET role = 'member' WHERE id = ?", f.root.ID)
+			f.exec(t, "UPDATE principals SET role = 'member', owner = 0 WHERE id = ?", f.root.ID)
 			return f.reset(t, code, newAlicePassword)
 		}, http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 		{"an unacceptable password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {

@@ -1056,9 +1056,9 @@ func TestSoleOperatorWithBothFactorsCanSignOut(t *testing.T) {
 	if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.root.ID); !errors.Is(err, store.ErrLastOperator) {
 		t.Errorf("disabling the last operator who can sign in = %v, want ErrLastOperator", err)
 	}
-	// Another operator with both factors, and no credential at all, is a way
+	// Another owner with both factors, and no credential at all, is a way
 	// in: now the disable is allowed.
-	f.exec(t, "UPDATE principals SET role = 'operator' WHERE id = ?", f.alice.ID)
+	f.exec(t, "UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", f.alice.ID)
 	f.exec(t, "INSERT INTO totp (principal_id, secret, enrolled_at) VALUES (?, x'01', 1)", f.alice.ID)
 	f.exec(t, "UPDATE credentials SET revoked_at = 1 WHERE principal_id = ?", f.alice.ID)
 	if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.root.ID); err != nil {

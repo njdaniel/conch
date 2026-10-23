@@ -825,7 +825,7 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 		case err != nil:
 			return fmt.Errorf("store: close invite: find: %w", err)
 		}
-		role, disabled, err := principalState(ctx, tx, closerID)
+		role, _, disabled, err := principalState(ctx, tx, closerID)
 		switch {
 		case errors.Is(err, ErrPrincipalNotFound):
 			return fmt.Errorf("store: close invite %d: %w", inviteID, ErrNotFound)

@@ -118,7 +118,7 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 		if err := removeAllMembershipsTx(ctx, tx, actor, id, now); err != nil {
 			return err
 		}
-		if err := revokePrincipalHooksTx(ctx, tx, actor, id, now); err != nil {
+		if _, err := revokePrincipalHooksTx(ctx, tx, actor, id, "principal hidden", now); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -183,11 +183,13 @@ func removeAllMembershipsTx(ctx context.Context, tx execer, actor string, princi
 }
 
 // revokePrincipalHooksTx revokes every live webhook that posts as
-// principalID, one hook_revoked row each, as RevokeHook revokes one. A
-// disabled principal's hooks already answer like unknown tokens, but enabling
-// the principal again would bring them back; a hidden account's hooks must
-// stay dead, as its credentials do. The token is never read.
-func revokePrincipalHooksTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time) error {
+// principalID, one hook_revoked row each with reason, as RevokeHook revokes
+// one, and returns how many it revoked. A disabled principal's hooks already
+// answer like unknown tokens, but enabling the principal again would bring
+// them back; a hidden account's hooks, and those of an account given the
+// owner mark (issue #788), must stay dead, as its credentials do. The token is
+// never read.
+func revokePrincipalHooksTx(ctx context.Context, tx execer, actor string, principalID int64, reason string, now time.Time) (int, error) {
 	type hook struct {
 		id, channelID int64
 		label         string
@@ -195,14 +197,14 @@ func revokePrincipalHooksTx(ctx context.Context, tx execer, actor string, princi
 	rows, err := tx.QueryContext(ctx,
 		"SELECT id, channel_id, label FROM hooks WHERE principal_id = ? AND revoked_at IS NULL ORDER BY id", principalID)
 	if err != nil {
-		return fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
+		return 0, fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
 	}
 	var found []hook
 	for rows.Next() {
 		var h hook
 		if err := rows.Scan(&h.id, &h.channelID, &h.label); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
+			return 0, fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
 		}
 		found = append(found, h)
 	}
@@ -211,19 +213,19 @@ func revokePrincipalHooksTx(ctx context.Context, tx execer, actor string, princi
 		err = cerr
 	}
 	if err != nil {
-		return fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
+		return 0, fmt.Errorf("store: list hooks of principal %d: %w", principalID, err)
 	}
 	for _, h := range found {
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE hooks SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), h.id); err != nil {
-			return fmt.Errorf("store: revoke hook %d: %w", h.id, err)
+			return 0, fmt.Errorf("store: revoke hook %d: %w", h.id, err)
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, "hook_revoked", principalActor(principalID),
-			hookDetail(h.id, h.channelID, h.label)+" reason=principal hidden", now); err != nil {
-			return err
+			hookDetail(h.id, h.channelID, h.label)+" reason="+reason, now); err != nil {
+			return 0, err
 		}
 	}
-	return nil
+	return len(found), nil
 }
 
 // idsTx runs a query that selects one integer column and returns the values.
@@ -407,7 +409,11 @@ func (s *Store) ListPrincipals(ctx context.Context, f PrincipalFilter, now time.
 // PrincipalAdmin returns one principal as ListPrincipals lists it, hidden or
 // not. An unknown id is ErrPrincipalNotFound.
 func (s *Store) PrincipalAdmin(ctx context.Context, id int64, now time.Time) (schema.PrincipalAdminV1, error) {
-	out, err := s.adminPrincipals(ctx, "p.id = ?", []any{id}, 1, now)
+	return principalAdminTx(ctx, s.db, id, now)
+}
+
+func principalAdminTx(ctx context.Context, q execer, id int64, now time.Time) (schema.PrincipalAdminV1, error) {
+	out, err := adminPrincipalsTx(ctx, q, "p.id = ?", []any{id}, 1, now)
 	if err != nil {
 		return schema.PrincipalAdminV1{}, err
 	}
@@ -420,7 +426,11 @@ func (s *Store) PrincipalAdmin(ctx context.Context, id int64, now time.Time) (sc
 // adminPrincipals is the query behind ListPrincipals and PrincipalAdmin.
 // cond is built from constant SQL; every value is in args.
 func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, limit int, now time.Time) ([]schema.PrincipalAdminV1, error) {
-	query := `SELECT p.id, p.kind, p.name, p.role, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
+	return adminPrincipalsTx(ctx, s.db, cond, args, limit, now)
+}
+
+func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, limit int, now time.Time) ([]schema.PrincipalAdminV1, error) {
+	query := `SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
 		(SELECT COUNT(*) FROM credentials c
 		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
@@ -428,7 +438,7 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 		(SELECT v.state FROM guest_visits v WHERE v.principal_id = p.id)
 		FROM principals p WHERE ` + cond + ` ORDER BY p.id DESC LIMIT ?` // #nosec G202 -- cond joins constants of the callers; every value is in args
 	all := append([]any{now.UnixMilli(), now.UnixMilli()}, args...)
-	rows, err := s.db.QueryContext(ctx, query, append(all, limit)...)
+	rows, err := q.QueryContext(ctx, query, append(all, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list principals: %w", err)
 	}
@@ -442,7 +452,7 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 			disabledAt, hiddenAt, invitedBy, invite sql.NullInt64
 			guest                                   sql.NullString
 		)
-		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials, &guest); err != nil {
+		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials, &guest); err != nil {
 			return nil, fmt.Errorf("store: list principals: %w", err)
 		}
 		p.Kind = schema.PrincipalKind(kind)

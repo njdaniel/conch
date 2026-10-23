@@ -97,12 +97,12 @@ func (s *Store) resolveCredential(ctx context.Context, token string, admitSetup 
 		generationCurrent              bool
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.created_at,
+		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.owner, p.created_at,
 		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`,
 		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
-	).Scan(&cred.ID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &createdAt,
+	).Scan(&cred.ID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt,
 		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
 		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth)
 	if errors.Is(err, sql.ErrNoRows) {
