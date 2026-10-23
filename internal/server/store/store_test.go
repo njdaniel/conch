@@ -1,15 +1,19 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -472,5 +476,117 @@ func TestAuditEventsAppendOnlyTriggers(t *testing.T) {
 				t.Fatalf("%s on audit_events succeeded, want append-only trigger to abort", tt.name)
 			}
 		})
+	}
+}
+
+func TestOwnerMarkMigration(t *testing.T) {
+	const pre = ownerMarkMigration - 1
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "conch.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < pre; i++ {
+		for _, stmt := range migrations[i] {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("migration %d: %v", i+1, err)
+			}
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT INTO channels (id, name, name_key, name_skel, created_at) VALUES (1, 'general', 'general', 'general', 1)`,
+		`INSERT INTO principals (id, kind, name, name_key, name_skel, role, created_at) VALUES
+			(1, 'human', 'root', 'root', 'root', 'operator', 1),
+			(2, 'human', 'deputy', 'deputy', 'deputy', 'operator', 2),
+			(3, 'human', 'alice', 'alice', 'alice', 'member', 3),
+			(4, 'agent', 'bot', 'bot', 'bot', 'member', 4)`,
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at) VALUES
+			(1, 'c1', 'h1', 10),
+			(1, 'c2', 'h2', 11),
+			(2, 'c3', 'h3', 12)`,
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, revoked_at) VALUES
+			(2, 'dead', 'h4', 13, 14)`,
+		`INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at) VALUES
+			('hk1', 'ci', 1, 1, 20),
+			('hk2', 'deploy', 1, 2, 21),
+			('hk3', 'alerts', 1, 2, 22)`,
+		`INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at, revoked_at) VALUES
+			('hk4', 'old', 1, 1, 23, 24)`,
+		fmt.Sprintf("PRAGMA user_version = %d", pre),
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed %q: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
+		t.Fatalf("user_version = %d (%v), want %d", version, err, len(migrations))
+	}
+
+	now := time.Now()
+	for _, want := range []struct {
+		id    int64
+		role  Role
+		owner bool
+	}{
+		{1, RoleOperator, true},
+		{2, RoleOperator, true},
+		{3, RoleMember, false},
+		{4, RoleMember, false},
+	} {
+		p, err := s.PrincipalByID(ctx, want.id)
+		if err != nil {
+			t.Fatalf("PrincipalByID(%d): %v", want.id, err)
+		}
+		if p.Role != want.role || p.Owner != want.owner || p.IsOwner() != want.owner {
+			t.Errorf("principal %d = %+v (IsOwner=%v), want role=%s owner=%v", want.id, p, p.IsOwner(), want.role, want.owner)
+		}
+		adm, err := s.PrincipalAdmin(ctx, want.id, now)
+		if err != nil || adm.Owner != want.owner {
+			t.Errorf("PrincipalAdmin(%d) = %+v, %v; want Owner=%v", want.id, adm, err, want.owner)
+		}
+	}
+
+	for _, bad := range []string{
+		`UPDATE principals SET owner = 1 WHERE id = 3`,
+		`UPDATE principals SET role = 'member' WHERE id = 1`,
+		`UPDATE principals SET owner = 2 WHERE id = 1`,
+		`UPDATE principals SET owner = -1 WHERE id = 1`,
+		`INSERT INTO principals (kind, name, name_key, name_skel, role, owner, created_at) VALUES ('human', 'bad', 'bad', 'bad', 'member', 1, 99)`,
+	} {
+		if _, err := s.db.Exec(bad); err == nil {
+			t.Errorf("CHECK constraint allowed %q", bad)
+		}
+	}
+
+	logged := logBuf.String()
+	for _, want := range []string{
+		"principal_id=1 live_credentials=2 hooks_bound=1",
+		"principal_id=2 live_credentials=1 hooks_bound=2",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("migration log %q does not contain %q", logged, want)
+		}
+	}
+
+	var auditCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_events").Scan(&auditCount); err != nil || auditCount != 0 {
+		t.Errorf("audit_events count = %d (%v), want 0", auditCount, err)
 	}
 }

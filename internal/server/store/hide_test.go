@@ -258,9 +258,9 @@ func TestHideOperators(t *testing.T) {
 		t.Error("the refusal wrote audit rows")
 	}
 
-	// A second operator, with a credential: either may now be hidden, but
+	// A second owner, with a credential: either may now be hidden, but
 	// not by a caller that refuses operators.
-	if _, err := f.s.db.Exec("UPDATE principals SET role = 'operator' WHERE id = ?", f.alice.ID); err != nil {
+	if _, err := f.s.db.Exec("UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", f.alice.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.s.HidePrincipal(ctx, "system", f.alice.ID, HideOptions{RefuseOperator: true}); !errors.Is(err, ErrHideOperator) {

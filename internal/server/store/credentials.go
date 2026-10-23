@@ -448,13 +448,13 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return nil
 		}
 		now := credentialNow().Truncate(time.Millisecond)
-		// Refuse to revoke the last live credential any enabled operator
+		// Refuse to revoke the last live credential any enabled owner
 		// holds: nobody could sign in afterwards (see ErrLastOperator).
-		role, disabled, err := principalState(ctx, tx, principalID)
+		role, isOwner, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
 			return err
 		}
-		if role == RoleOperator && !disabled {
+		if role == RoleOperator && isOwner && !disabled {
 			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, 0, now)
 			if err != nil {
 				return err

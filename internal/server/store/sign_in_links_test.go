@@ -288,12 +288,12 @@ func TestRedeemSignInLinkRefusals(t *testing.T) {
 			return link.Code, f.now
 		}},
 		{"its maker no longer an operator", func(f *inviteFixture, link schema.CreateSignInLinkResponseV1) (string, time.Time) {
-			f.exec("UPDATE principals SET role = 'member' WHERE id = ?", f.op.ID)
+			f.exec("UPDATE principals SET role = 'member', owner = 0 WHERE id = ?", f.op.ID)
 			return link.Code, f.now
 		}},
 		{"its maker disabled", func(f *inviteFixture, link schema.CreateSignInLinkResponseV1) (string, time.Time) {
-			// A second operator with a live credential, so the first may go.
-			f.exec("UPDATE principals SET role = 'operator' WHERE id = ?", f.bob.ID)
+			// A second owner with a live credential, so the first may go.
+			f.exec("UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", f.bob.ID)
 			if _, _, err := f.s.CreateCredential(f.ctx, "system", f.bob.ID, "spare", nil); err != nil {
 				f.t.Fatal(err)
 			}

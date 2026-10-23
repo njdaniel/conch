@@ -317,9 +317,9 @@ func TestLastOperatorGuard(t *testing.T) {
 		t.Errorf("failed disable changed state: %v", err)
 	}
 
-	// A second operator who cannot sign in does not make it safe: the guard
-	// asks for another enabled operator holding a live credential.
-	if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1)`); err != nil {
+	// A second owner who cannot sign in does not make it safe: the guard
+	// asks for another enabled owner holding a live credential.
+	if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, owner, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	op2, err := f.s.PrincipalByID(ctx, f.op.ID+countPrincipalsAfter(t, f.s, f.op.ID))
@@ -466,13 +466,14 @@ func TestLastOperatorGuardConcurrent(t *testing.T) {
 	for range 10 {
 		ctx := context.Background()
 		f := newDisableFixture(t)
-		if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1)`); err != nil {
+		if _, err := f.s.db.Exec(`INSERT INTO principals (kind, name, name_key, name_skel, role, owner, created_at) VALUES ('human', 'op2', 'op2', 'op2', 'operator', 1, 1)`); err != nil {
 			t.Fatal(err)
 		}
 		var op2 int64
 		if err := f.s.db.QueryRow(`SELECT id FROM principals WHERE name = 'op2'`).Scan(&op2); err != nil {
 			t.Fatal(err)
 		}
+		f.cred(t, Principal{ID: op2}, nil)
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		for i, id := range []int64{f.op.ID, op2} {
@@ -592,5 +593,91 @@ func TestDisableMigrationFromSchema8(t *testing.T) {
 	}
 	if changed, err := s.DisablePrincipal(ctx, "system", 2); err != nil || !changed {
 		t.Errorf("disable after migration = %v, %v", changed, err)
+	}
+}
+
+// TestLastOwnerGuardPathsAndFactors verifies §5.5: a non-owner operator does
+// not satisfy the last-owner guard and is not protected by it, while an owner
+// with password+TOTP enrolled (and no live credential) counts as an owner able
+// to sign in.
+func TestLastOwnerGuardPathsAndFactors(t *testing.T) {
+	ctx := context.Background()
+	f := newDisableFixture(t)
+	if want := "store: this would leave no owner able to sign in"; ErrLastOperator.Error() != want {
+		t.Fatalf("ErrLastOperator = %q, want %q", ErrLastOperator.Error(), want)
+	}
+
+	// Promote alice to a plain operator (owner = false) and give her a live credential.
+	res, err := f.s.SetRole(ctx, principalActor(f.op.ID), f.op.ID, f.alice.ID, RoleOperator, nil)
+	if err != nil || !res.Changed || res.Principal.Owner {
+		t.Fatalf("SetRole(alice -> operator) = %+v, %v", res, err)
+	}
+	aliceCredID, _ := f.cred(t, f.alice, nil)
+
+	// A plain operator with a live credential does NOT make it safe to disable,
+	// hide, demote, unmark, or revoke the credentials of the sole owner.
+	opCredID := credentialIDOf(t, f.s, f.opTok)
+	if _, err := f.s.DisablePrincipal(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("DisablePrincipal(sole owner) with plain operator = %v, want ErrLastOperator", err)
+	}
+	if _, err := f.s.HidePrincipal(ctx, "system", f.op.ID, HideOptions{}); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("HidePrincipal(sole owner) with plain operator = %v, want ErrLastOperator", err)
+	}
+	if err := f.s.RevokeCredential(ctx, "system", opCredID); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("RevokeCredential(sole owner) with plain operator = %v, want ErrLastOperator", err)
+	}
+	if _, err := f.s.RevokeAllCredentials(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("RevokeAllCredentials(sole owner) with plain operator = %v, want ErrLastOperator", err)
+	}
+	markFalse := false
+	if _, err := f.s.SetRole(ctx, principalActor(f.op.ID), f.op.ID, f.op.ID, RoleOperator, &markFalse); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("SetRole(clear sole owner mark) with plain operator = %v, want ErrLastOperator", err)
+	}
+	if _, err := f.s.SetRole(ctx, principalActor(f.op.ID), f.op.ID, f.op.ID, RoleMember, nil); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("SetRole(demote sole owner) with plain operator = %v, want ErrLastOperator", err)
+	}
+
+	// Conversely, the plain operator can have her credential revoked, revoke-all,
+	// disabled, and hidden without tripping the last-owner guard.
+	if err := f.s.RevokeCredential(ctx, "system", aliceCredID); err != nil {
+		t.Fatalf("RevokeCredential(plain operator): %v", err)
+	}
+	f.cred(t, f.alice, nil)
+	if n, err := f.s.RevokeAllCredentials(ctx, "system", f.alice.ID); err != nil || n != 1 {
+		t.Fatalf("RevokeAllCredentials(plain operator) = %d, %v", n, err)
+	}
+	f.cred(t, f.alice, nil)
+	if changed, err := f.s.DisablePrincipal(ctx, "system", f.alice.ID); err != nil || !changed {
+		t.Fatalf("DisablePrincipal(plain operator) = %v, %v", changed, err)
+	}
+	if _, err := f.s.EnablePrincipal(ctx, "system", f.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enrol password + confirmed TOTP on the sole owner: now revoking the sole
+	// owner's bearer credential (or revoke-all) is allowed because the owner can
+	// still sign in with password+TOTP, while disabling or demoting the sole
+	// owner is still refused!
+	now := time.Now().Truncate(time.Millisecond)
+	if _, err := f.s.SetPassword(ctx, "system", f.op.ID, "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA", "test", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.db.Exec(`INSERT INTO totp (principal_id, secret, enrolled_at, last_step) VALUES (?, x'0102', 1, 1)`, f.op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.RevokeCredential(ctx, "system", opCredID); err != nil {
+		t.Fatalf("RevokeCredential(owner with password+TOTP): %v", err)
+	}
+	f.cred(t, f.op, nil)
+	if n, err := f.s.RevokeAllCredentials(ctx, "system", f.op.ID); err != nil || n != 1 {
+		t.Fatalf("RevokeAllCredentials(owner with password+TOTP) = %d, %v", n, err)
+	}
+	// With 0 credentials and only password+TOTP on f.op, disabling or demoting
+	// f.op would leave no owner able to sign in.
+	if _, err := f.s.DisablePrincipal(ctx, "system", f.op.ID); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("DisablePrincipal(sole password+TOTP owner) = %v, want ErrLastOperator", err)
+	}
+	if _, err := f.s.SetRole(ctx, principalActor(f.op.ID), f.op.ID, f.op.ID, RoleMember, nil); !errors.Is(err, ErrLastOperator) {
+		t.Errorf("SetRole(demote sole password+TOTP owner) = %v, want ErrLastOperator", err)
 	}
 }
