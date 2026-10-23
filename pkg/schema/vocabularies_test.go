@@ -190,6 +190,7 @@ var validators = map[string]func(string) bool{
 	"InterventionState":        validOf[InterventionState](),
 	"NetRole":                  validOf[NetRole](),
 	"OptionKind":               validOf[OptionKind](),
+	"PrincipalRole":            validOf[PrincipalRole](),
 	"PrincipalState":           validOf[PrincipalState](),
 	"Outcome":                  validOf[Outcome](),
 	"RunState":                 validOf[RunState](),

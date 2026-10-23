@@ -22,6 +22,7 @@ func TestWhoAmIGoldenFixtures(t *testing.T) {
 		{"whoami-response-v1-member-auth.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-setup.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-operator-auth.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-owner.json", func() any { return new(WhoAmIResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -93,6 +94,34 @@ func TestWhoAmIResponseV1VoiceAndAllowanceKeys(t *testing.T) {
 				if has != wantHas || got != want {
 					t.Errorf("%s = %v (present %v), want %v (present %v) in %s", k, got, has, want, wantHas, raw)
 				}
+			}
+		})
+	}
+}
+
+func TestWhoAmIResponseV1OwnerKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		owner     bool
+		wantKey   bool
+		wantValue any
+	}{
+		{"omitted when false", false, false, nil},
+		{"present when true", true, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(WhoAmIResponseV1{ID: 1, Kind: PrincipalHuman, Name: "nick", Role: RoleOperator, Owner: tt.owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var keys map[string]any
+			if err := json.Unmarshal(raw, &keys); err != nil {
+				t.Fatal(err)
+			}
+			got, has := keys["owner"]
+			if has != tt.wantKey || got != tt.wantValue {
+				t.Errorf("owner = %v (present %v), want %v (present %v) in %s", got, has, tt.wantValue, tt.wantKey, raw)
 			}
 		})
 	}

@@ -61,6 +61,8 @@ var TSTypes = []TSType{
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
+	{Value: PutChannelMemberRequestV1{}, Family: "put-channel-member-request-v1"},
+	{Value: AddChannelMemberRequestV1{}, Family: "add-channel-member-request-v1"},
 
 	// Messages, and the ticket that opens the socket that streams them.
 	{Value: Payload{}},
@@ -170,6 +172,8 @@ var TSTypes = []TSType{
 	{Value: HidePrincipalsRequestV1{}, Family: "hide-principals-request-v1"},
 	{Value: HiddenPrincipalV1{}},
 	{Value: HidePrincipalsResponseV1{}, Family: "hide-principals-response-v1"},
+	{Value: RoleChangeRequestV1{}, Family: "role-change-request-v1"},
+	{Value: RoleChangeResponseV1{}, Family: "role-change-response-v1"},
 
 	// Temporary guests and joining (ADR-009, issue #704): the front door,
 	// a visit and how it is rendered, conversion, and the operator's

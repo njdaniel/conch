@@ -821,6 +821,15 @@ BEGIN
 	SELECT RAISE(ABORT, 'channels.name_key and name_skel are required');
 END`,
 	},
+	// 34 (ownerMarkMigration): the owner mark on principals (issue #788,
+	// ADR-010, docs/design/delegated-administration.md §3.1). Every existing
+	// operator is promoted so an upgraded server is never left without an
+	// owner; reportPromotedOwners logs their live credentials and bound hooks.
+	{
+		`ALTER TABLE principals ADD COLUMN owner INTEGER NOT NULL DEFAULT 0
+			CHECK (owner IN (0, 1) AND (owner = 0 OR role = 'operator'))`,
+		`UPDATE principals SET owner = 1 WHERE role = 'operator'`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -834,6 +843,7 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 
 	// Channel names are keyed as principal names are (issue #727).
 	channelNameKeyMigration: fillChannelNameKeys,
+	ownerMarkMigration:      reportPromotedOwners,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

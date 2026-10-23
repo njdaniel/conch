@@ -1,0 +1,21 @@
+{
+  "principal": {
+    "id": 12,
+    "kind": "human",
+    "name": "wren",
+    "role": "member",
+    "created_at": "2026-10-15T13:00:00.000Z",
+    "invited_by": 1,
+    "invite_id": 3,
+    "live_credentials": 0
+  },
+  "manages": [
+    7,
+    11
+  ],
+  "invites_closed": 2,
+  "credentials_revoked": 2,
+  "hooks_revoked": 1,
+  "live_credentials": 0,
+  "hooks_bound": 0
+}

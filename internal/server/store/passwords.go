@@ -105,7 +105,7 @@ func (s *Store) LoginCandidate(ctx context.Context, name string) (LoginCandidate
 		return LoginCandidate{}, false, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT p.id, p.kind, p.name, p.role, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
+		`SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
 		        p.may_invite, p.voice_allowed, p.auth_generation, COALESCE(pw.hash, ''),
 		        t.enrolled_at IS NOT NULL AND t.secret IS NOT NULL,
 		        (SELECT state FROM guest_visits WHERE principal_id = p.id)
@@ -126,7 +126,7 @@ func (s *Store) LoginCandidate(ctx context.Context, name string) (LoginCandidate
 			disabledAt, hiddenAt, invitedBy, invite sql.NullInt64
 			guest                                   sql.NullString
 		)
-		if err := rows.Scan(&c.Principal.ID, &kind, &c.Principal.Name, &role, &createdAt, &disabledAt, &hiddenAt,
+		if err := rows.Scan(&c.Principal.ID, &kind, &c.Principal.Name, &role, &c.Principal.Owner, &createdAt, &disabledAt, &hiddenAt,
 			&invitedBy, &invite, &c.Principal.MayInvite, &c.Principal.VoiceAllowed, &c.AuthGeneration, &c.Record, &c.TOTPEnrolled,
 			&guest); err != nil {
 			return LoginCandidate{}, false, fmt.Errorf("store: login candidate: scan: %w", err)

@@ -49,6 +49,7 @@ type Principal struct {
 	Kind      PrincipalKind
 	Name      string
 	Role      Role
+	Owner     bool
 	CreatedAt time.Time
 	// DisabledAt is when the principal was disabled (issue #101); nil means
 	// enabled. A disabled principal cannot authenticate.
@@ -73,6 +74,10 @@ type Principal struct {
 	// from the name.
 	GuestState schema.GuestState
 }
+
+// IsOwner reports whether p is an operator holding the owner mark (issue #788,
+// docs/design/delegated-administration.md §1).
+func (p Principal) IsOwner() bool { return p.Role == RoleOperator && p.Owner }
 
 // IsGuest reports whether p is a guest now: its visit is active. A converted
 // guest is a member; an ended one can no longer authenticate.
@@ -288,10 +293,10 @@ func queryPrincipal(ctx context.Context, q execer, id int64) (p Principal, found
 	var disabledAt, hiddenAt, invitedBy, inviteID sql.NullInt64
 	var guest sql.NullString
 	err = q.QueryRowContext(ctx,
-		`SELECT id, kind, name, role, created_at, disabled_at, hidden_at, invited_by, invite_id, may_invite, voice_allowed,
+		`SELECT id, kind, name, role, owner, created_at, disabled_at, hidden_at, invited_by, invite_id, may_invite, voice_allowed,
 		        (SELECT state FROM guest_visits WHERE principal_id = principals.id)
 		 FROM principals WHERE id = ?`, id,
-	).Scan(&p.ID, &kind, &p.Name, &role, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &guest)
+	).Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &guest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, false, nil
 	}

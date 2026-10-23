@@ -4,6 +4,11 @@
 // -ldflags "-X main.version=...". A binary built without it still says which
 // commit it is, from the VCS data the Go toolchain embeds, so a tester can
 // always report a build.
+//
+// In a linked git worktree, an unstamped build can instead name the containing
+// main checkout: the Go toolchain requires .git to be a directory and walks
+// past the worktree's .git file. Use `make build` there; its explicit stamp
+// names the worktree's own checkout. Release builds likewise stamp their tag.
 package buildinfo
 
 import (

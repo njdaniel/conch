@@ -130,7 +130,7 @@ func TestCompleteTOTPLoginRefusals(t *testing.T) {
 			w.exec(t, "UPDATE principals SET disabled_at = 1 WHERE id = ?", w.op.ID)
 		}, true, stepCheck(100), ErrLoginStale, 0},
 		{"the operator is a member now", func(t *testing.T, w *loginWorld) {
-			w.exec(t, "UPDATE principals SET role = 'member' WHERE id = ?", w.op.ID)
+			w.exec(t, "UPDATE principals SET role = 'member', owner = 0 WHERE id = ?", w.op.ID)
 		}, true, stepCheck(100), ErrLoginStale, 0},
 		{"the second factor was removed", func(t *testing.T, w *loginWorld) {
 			w.exec(t, "DELETE FROM totp WHERE principal_id = ?", w.op.ID)

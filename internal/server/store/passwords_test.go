@@ -713,7 +713,7 @@ func TestLastOperatorCountsCurrentCredentials(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.db.Exec("UPDATE principals SET role = 'operator' WHERE id = ?", other.ID); err != nil {
+			if _, err := s.db.Exec("UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", other.ID); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := s.CreateCredential(ctx, "system", other.ID, "op", nil); err != nil {
