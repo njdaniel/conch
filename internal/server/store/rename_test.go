@@ -584,3 +584,42 @@ func TestNameKeyMigration(t *testing.T) {
 		t.Errorf("rename bob to Bob while 6 holds the key = %v, want ErrDuplicate", err)
 	}
 }
+
+// ReservedNamespace answers what claimNameTx refuses a name for in the hidden
+// and the guest namespaces (issue #798), by either key, and agrees with what
+// a create of the name is refused for. The server's name is one name, not a
+// namespace, and is not its business.
+func TestReservedNamespace(t *testing.T) {
+	tests := []struct {
+		name string
+		want error
+	}{
+		{"hidden-3", ErrNameReserved},
+		{"HIDDEN-3", ErrNameReserved},
+		{"hіdden-3", ErrNameReserved}, // a Cyrillic і
+		{"guest-x", ErrGuestNameReserved},
+		{"GUESTS", ErrGuestNameReserved},
+		{"guеst-x", ErrGuestNameReserved}, // a Cyrillic е
+		{"conch", nil},
+		{"the guest", nil},
+		{"hidden", nil},
+	}
+	s := openTestStore(t)
+	s.SetServerName("conch")
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%+q", tt.name), func(t *testing.T) {
+			// The guest error is ErrNameReserved too, so which of the two it
+			// is is asked as well.
+			got := ReservedNamespace(names.KeysOf(tt.name))
+			if !errors.Is(got, tt.want) || errors.Is(got, ErrGuestNameReserved) != errors.Is(tt.want, ErrGuestNameReserved) {
+				t.Fatalf("ReservedNamespace = %v, want %v", got, tt.want)
+			}
+			if tt.want == nil {
+				return
+			}
+			if _, err := s.CreatePrincipal(context.Background(), PrincipalHuman, tt.name); !errors.Is(err, tt.want) {
+				t.Errorf("create = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}

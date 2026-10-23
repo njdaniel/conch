@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -25,12 +26,13 @@ import (
 // the TOTP enrolment, and nothing else. There is no route that does what
 // these do: an operator's authentication is reset only on the host.
 //
-//	conchd operator bootstrap --data <dir> [--keep-existing-credentials] <name>
+//	conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] <name>
 //	conchd operator setup     --data <dir> <principal id>
 //	conchd operator recover   --data <dir> <principal id>
 //
 // bootstrap makes the first operator as bootstrap-operator does, with a setup
-// token in place of a script credential. setup gives an existing operator
+// token in place of a script credential, and like it refuses the server's
+// name (--server-name, issue #798). setup gives an existing operator
 // whose setup is incomplete (one made by bootstrap-operator, say) a setup
 // token and revokes nothing, so their script credentials keep working.
 // recover is for an operator who lost a password or an authenticator: it
@@ -41,7 +43,7 @@ import (
 
 func operatorUsage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `Usage:
-  conchd operator bootstrap --data <dir> [--keep-existing-credentials] <name>
+  conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] <name>
   conchd operator setup     --data <dir> <principal id>
   conchd operator recover   --data <dir> <principal id>
 `)
@@ -109,12 +111,17 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	keep := fs.Bool("keep-existing-credentials", false, "do not revoke credentials or delete webhook hooks that already exist")
+	serverNameFlag := fs.String("server-name", os.Getenv("CONCHD_SERVER_NAME"), "the server's name, which the operator may not take (default "+server.DefaultServerName+")")
 	positional, err := parseInterleaved(fs, args)
 	if err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return errors.New("operator bootstrap: --data (or CONCHD_DATA) is required")
+	}
+	serverName, err := offlineServerName("operator bootstrap", *serverNameFlag)
+	if err != nil {
+		return err
 	}
 	if len(positional) != 1 || strings.TrimSpace(positional[0]) == "" {
 		return errors.New("operator bootstrap: give the operator's name, once")
@@ -138,8 +145,9 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	st.SetServerName(serverName)
 	res, err := st.BootstrapOperatorWith(ctx, name, store.BootstrapOptions{KeepExistingCredentials: *keep, Setup: true})
-	if err := bootstrapError("operator bootstrap", name, err); err != nil {
+	if err := bootstrapError("operator bootstrap", name, serverName, err); err != nil {
 		return err
 	}
 	if createdDB {
@@ -160,7 +168,7 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 }
 
 // bootstrapError is what a refused bootstrap says; nil when err is nil.
-func bootstrapError(cmd, name string, err error) error {
+func bootstrapError(cmd, name, serverName string, err error) error {
 	switch {
 	case err == nil:
 		return nil
@@ -168,6 +176,8 @@ func bootstrapError(cmd, name string, err error) error {
 		return fmt.Errorf("%s: an operator already exists; nothing changed", cmd)
 	case errors.Is(err, store.ErrGuestNameReserved):
 		return fmt.Errorf("%s: names beginning with %s are reserved for guests; nothing changed", cmd, schema.ReservedGuestNameKeyPrefix)
+	case errors.Is(err, store.ErrServerNameReserved):
+		return serverNameRefusal(cmd, serverName)
 	case errors.Is(err, store.ErrNameReserved):
 		return fmt.Errorf("%s: names beginning with %s are reserved for hidden accounts; nothing changed", cmd, schema.HiddenPrincipalNamePrefix)
 	case errors.Is(err, store.ErrDuplicate):
