@@ -86,7 +86,9 @@ Usage:
                      [--metrics-listen <addr> [--metrics-allow-remote]]
                      [--test-relax-invite-limits]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
-  conchd operator bootstrap --data <dir> [--keep-existing-credentials] <name>
+                     [--server-name <name>]
+  conchd operator bootstrap --data <dir> [--keep-existing-credentials]
+                     [--server-name <name>] <name>
   conchd operator setup     --data <dir> <principal id>
   conchd operator recover   --data <dir> <principal id>
   conchd restore --data <dir> [--force]
@@ -98,7 +100,10 @@ refuses if an operator already exists. It also revokes every credential and
 deletes every webhook hook created before the operator existed (they came from
 open endpoints) unless --keep-existing-credentials is given. Agent manifests
 are kept; it reports how many exist so you can review them. Its token is a
-script credential: powerful, with no second factor.
+script credential: powerful, with no second factor. It refuses to name the
+operator the server's name, or one that looks the same: give it the
+--server-name (or CONCHD_SERVER_NAME) that serve is given, default conch.
+"operator bootstrap" takes the same flag and refuses the same names.
 
 The operator commands work offline too and print a one-use setup token (ten
 minutes) for the restricted setup flow, in which an operator sets a password
@@ -171,8 +176,10 @@ Flags for serve:
                          at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
                          default 5)
   --server-name          the server's label on its front door, GET /v1/join, at most 64
-                         characters; no guest may take it as a label (env CONCHD_SERVER_NAME,
-                         default conch). Anyone who can reach the server can read it.
+                         characters; no guest may take it as a label and no account as a
+                         name (env CONCHD_SERVER_NAME, default conch). It may not begin with
+                         hidden- or guest, or a look-alike of either: those names are the
+                         server's to give. Anyone who can reach the server can read it.
   --metrics-listen       address of a second listener serving Prometheus metrics at /metrics,
                          such as 127.0.0.1:9464 (env CONCHD_METRICS_LISTEN, default none: no
                          metrics listener). /metrics is never served on --listen. It has no
@@ -548,11 +555,16 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	name := fs.String("name", "", "name of the operator principal")
 	keep := fs.Bool("keep-existing-credentials", false, "do not revoke credentials or delete webhook hooks that already exist")
+	serverNameFlag := fs.String("server-name", os.Getenv("CONCHD_SERVER_NAME"), "the server's name, which the operator may not take (default "+server.DefaultServerName+")")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return errors.New("bootstrap-operator: --data (or CONCHD_DATA) is required")
+	}
+	serverName, err := offlineServerName("bootstrap-operator", *serverNameFlag)
+	if err != nil {
+		return err
 	}
 	if strings.TrimSpace(*name) == "" {
 		return errors.New("bootstrap-operator: --name is required")
@@ -581,6 +593,7 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	st.SetServerName(serverName)
 
 	res, err := st.BootstrapOperatorWith(ctx, *name, store.BootstrapOptions{KeepExistingCredentials: *keep})
 	switch {
@@ -588,6 +601,8 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 		return errors.New("bootstrap-operator: an operator already exists; nothing changed")
 	case errors.Is(err, store.ErrGuestNameReserved):
 		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for guests; nothing changed", schema.ReservedGuestNameKeyPrefix)
+	case errors.Is(err, store.ErrServerNameReserved):
+		return serverNameRefusal("bootstrap-operator", serverName)
 	case errors.Is(err, store.ErrNameReserved):
 		return fmt.Errorf("bootstrap-operator: names beginning with %s are reserved for hidden accounts; nothing changed", schema.HiddenPrincipalNamePrefix)
 	case errors.Is(err, store.ErrDuplicate):
@@ -613,6 +628,29 @@ func runBootstrapOperator(args []string, stdout, stderr io.Writer) error {
 	}
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created; the token printed on stdout will not be shown again\n", p.Name, p.ID)
 	return nil
+}
+
+// offlineServerName is the server's name an offline command that writes a
+// permanent name reserves (issue #798), as serve does (#760): raw, from
+// --server-name or CONCHD_SERVER_NAME, or the default when that is empty,
+// checked as serve checks it. The command cannot know the name serve is
+// given, so it is told it the same way.
+func offlineServerName(cmd, raw string) (string, error) {
+	if raw == "" {
+		return server.DefaultServerName, nil
+	}
+	if err := server.ValidateServerName(raw); err != nil {
+		return "", fmt.Errorf("%s: --server-name: %w", cmd, err)
+	}
+	return raw, nil
+}
+
+// serverNameRefusal is what an offline bootstrap says when the operator's
+// name is the server's. Unlike the network routes' message it names the
+// server's name: whoever runs conchd on the host chose it, and a mismatch
+// with the one serve is given is the likeliest surprise.
+func serverNameRefusal(cmd, serverName string) error {
+	return fmt.Errorf("%s: the name is the server's, %q, or looks the same, and is reserved; choose another, or pass the --server-name that serve is given; nothing changed", cmd, serverName)
 }
 
 // totpKeyFromEnv reads the host's TOTP key from CONCHD_TOTP_KEY: nil when it

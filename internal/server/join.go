@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/names"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -52,12 +53,25 @@ const joinSettingsBodyMaxBytes = 64 << 10
 
 // ValidateServerName reports whether name is acceptable as --server-name:
 // what the schema allows a display name, at most MaxServerNameLength
-// characters.
+// characters, and not in a reserved namespace (issue #798). The server's name
+// is reserved as a permanent name (#760), but a hide writes hidden-<id>
+// without that check and the store gives guests their handles, so a server
+// named in either namespace could share its name with a principal.
 func ValidateServerName(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("server name must not be blank")
 	}
-	return schema.ValidateDisplayName("server name", name, MaxServerNameLength)
+	if err := schema.ValidateDisplayName("server name", name, MaxServerNameLength); err != nil {
+		return err
+	}
+	// The guest error is ErrNameReserved too, so it is asked about first.
+	switch err := store.ReservedNamespace(names.KeysOf(name)); {
+	case errors.Is(err, store.ErrGuestNameReserved):
+		return errors.New("server name: names beginning with " + schema.ReservedGuestNameKeyPrefix + ", or with a look-alike of it, are reserved for guests")
+	case err != nil:
+		return errors.New("server name: names beginning with " + schema.HiddenPrincipalNamePrefix + ", or with a look-alike of it, are reserved for hidden accounts")
+	}
+	return nil
 }
 
 // serverName is the label the front door shows.
