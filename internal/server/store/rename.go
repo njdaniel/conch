@@ -224,6 +224,22 @@ func reservedGuestName(keys names.Keys) bool {
 	return strings.HasPrefix(keys.Folded, guestKeys.Folded) || strings.HasPrefix(keys.Skeletal, guestKeys.Skeletal)
 }
 
+// ReservedNamespace reports which reserved namespace a name with these keys
+// falls in, by the same tests claimNameTx makes: ErrNameReserved for the
+// hidden prefix (reservedName), ErrGuestNameReserved for the guest namespace
+// (reservedGuestName), nil for neither. It is for a name that is checked
+// without being written, such as the server's own (issue #798): a server
+// named "hidden-3" would be the name a hide of principal 3 writes.
+func ReservedNamespace(keys names.Keys) error {
+	switch {
+	case reservedName(keys):
+		return ErrNameReserved
+	case reservedGuestName(keys):
+		return ErrGuestNameReserved
+	}
+	return nil
+}
+
 // The clash queries of the two tables whose names are unique by their keys:
 // principals (issue #441) and channels (issue #727).
 const (
