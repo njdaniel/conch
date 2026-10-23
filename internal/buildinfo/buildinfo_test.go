@@ -1,7 +1,11 @@
 package buildinfo
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +47,56 @@ func TestResolve(t *testing.T) {
 func TestVersionStampedPassesThrough(t *testing.T) {
 	if got := Version("v9.9.9"); got != "v9.9.9" {
 		t.Errorf("Version(stamped) = %q, want v9.9.9", got)
+	}
+}
+
+func TestGoBuildVCSRevisionMatchesHEAD(t *testing.T) {
+	rootOut, err := exec.Command("go", "env", "GOMOD").Output()
+	if err != nil {
+		t.Fatalf("go env GOMOD: %v", err)
+	}
+	root := filepath.Dir(strings.TrimSpace(string(rootOut)))
+	gitEntry, err := os.Stat(filepath.Join(root, ".git"))
+	if err != nil {
+		t.Skipf("not in a git worktree: %v", err)
+	}
+	if !gitEntry.IsDir() {
+		t.Skip("linked worktree: Go VCS stamping can name the containing main checkout")
+	}
+	gitEnv := append(os.Environ(), "GIT_DIR="+filepath.Join(root, ".git"), "GIT_WORK_TREE="+root)
+
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = root
+	headCmd.Env = gitEnv
+	headOut, err := headCmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	head := strings.TrimSpace(string(headOut))
+
+	binary := filepath.Join(t.TempDir(), "conchd")
+	buildCmd := exec.Command("go", "build", "-o", binary, "./cmd/conchd") // #nosec G204 -- fixed package and this test's temp path
+	buildCmd.Dir = root
+	buildCmd.Env = gitEnv
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/conchd: %v\n%s", err, out)
+	}
+	infoCmd := exec.Command("go", "version", "-m", binary) // #nosec G204 -- the binary this test just built
+	infoOut, err := infoCmd.Output()
+	if err != nil {
+		t.Fatalf("go version -m: %v", err)
+	}
+	var revision string
+	for _, line := range strings.Split(string(infoOut), "\n") {
+		if value, ok := strings.CutPrefix(line, "\tbuild\tvcs.revision="); ok {
+			revision = value
+		}
+	}
+	if revision == "" {
+		t.Log("go build recorded no VCS revision")
+		return
+	}
+	if revision != head {
+		t.Errorf("go build vcs.revision = %s, git rev-parse HEAD = %s", revision, head)
 	}
 }
