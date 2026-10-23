@@ -145,6 +145,12 @@ func (m Model) helpNotes() []string {
 		return voiceHelpNotes()
 	}
 	notes := []string{"Mouse: a click selects or focuses and the wheel scrolls; a click never sends, decides or quits."}
+	if m.visit != nil {
+		// What a temporary guest needs to know, wherever the help is opened
+		// (ADR-009 D2): the visit's end, and the two ways to leave it.
+		notes = append(notes, "Guest visit: you are a temporary guest until "+m.clockTime(m.visit.ExpiresAt)+", or sooner if unused. 'conch end-visit' ends it for good; your messages remain. 'conch account create <name>' keeps your access as an account.")
+	}
+	notes = append(notes, "Guests show as \"Guest: <label> · <tag>\", and their messages keep that name after the visit.")
 	switch {
 	case m.mode != modeChannels:
 	case m.vc.owner != nil:

@@ -130,3 +130,91 @@ func (c *Client) CloseSignInLink(ctx context.Context, id int64) error {
 	endpoint := c.resolve("v1", "sign-in-links", strconv.FormatInt(id, 10))
 	return c.roundTrip(ctx, "close sign-in link", http.MethodDelete, endpoint, nil, nil)
 }
+
+// The joining policy and guest visits (issue #710, #711), behind `conch
+// admin join` and `conch admin guest`. Operators only; the server decides.
+
+// JoinSettings reads the joining policy, with the live guest count and the
+// warnings that apply.
+func (c *Client) JoinSettings(ctx context.Context) (schema.JoinSettingsResponseV1, error) {
+	var result schema.JoinSettingsResponseV1
+	if err := c.roundTrip(ctx, "read joining settings", http.MethodGet, c.resolve("v1", "join", "settings"), nil, &result); err != nil {
+		return schema.JoinSettingsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// PutJoinSettings changes the fields of the joining policy the request gives.
+func (c *Client) PutJoinSettings(ctx context.Context, request schema.PutJoinSettingsRequestV1) (schema.JoinSettingsResponseV1, error) {
+	var result schema.JoinSettingsResponseV1
+	if err := c.roundTrip(ctx, "write joining settings", http.MethodPut, c.resolve("v1", "join", "settings"), request, &result); err != nil {
+		return schema.JoinSettingsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// GuestListFilter narrows ListGuests. A zero field is the server's default:
+// live visits of every origin.
+type GuestListFilter struct {
+	State  string
+	Origin string
+	// Before and Limit page the list; zero leaves them to the server.
+	Before int64
+	Limit  int
+}
+
+// ListGuests returns one page of guest visits, newest first.
+func (c *Client) ListGuests(ctx context.Context, filter GuestListFilter) (schema.ListGuestsResponseV1, error) {
+	endpoint := c.resolve("v1", "guests")
+	query := endpoint.Query()
+	if filter.State != "" {
+		query.Set("state", filter.State)
+	}
+	if filter.Origin != "" {
+		query.Set("origin", filter.Origin)
+	}
+	if filter.Before > 0 {
+		query.Set("before", strconv.FormatInt(filter.Before, 10))
+	}
+	if filter.Limit > 0 {
+		query.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	endpoint.RawQuery = query.Encode()
+	var result schema.ListGuestsResponseV1
+	if err := c.roundTrip(ctx, "list guests", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListGuestsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// EndGuest ends one guest visit.
+func (c *Client) EndGuest(ctx context.Context, id int64) (schema.EndGuestResponseV1, error) {
+	endpoint := c.resolve("v1", "guests", strconv.FormatInt(id, 10), "end")
+	var result schema.EndGuestResponseV1
+	if err := c.roundTrip(ctx, "end guest visit", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.EndGuestResponseV1{}, err
+	}
+	return result, nil
+}
+
+// EndGuests ends every live visit the request selects, or with a dry run
+// says which it would.
+func (c *Client) EndGuests(ctx context.Context, request schema.EndGuestsRequestV1) (schema.EndGuestsResponseV1, error) {
+	var result schema.EndGuestsResponseV1
+	if err := c.roundTrip(ctx, "end guest visits", http.MethodPost, c.resolve("v1", "guests", "end"), request, &result); err != nil {
+		return schema.EndGuestsResponseV1{}, err
+	}
+	return result, nil
+}
+
+// CreateConversionPermit lets one live guest create an account although its
+// entry point's policy is closed. The answer carries the permit's code,
+// shown this once.
+func (c *Client) CreateConversionPermit(ctx context.Context, id int64, request schema.CreateConversionPermitRequestV1) (schema.CreateSignInLinkResponseV1, error) {
+	endpoint := c.resolve("v1", "guests", strconv.FormatInt(id, 10), "conversion-permit")
+	var result schema.CreateSignInLinkResponseV1
+	if err := c.roundTrip(ctx, "create conversion permit", http.MethodPost, endpoint, request, &result); err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	return result, nil
+}

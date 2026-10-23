@@ -44,6 +44,9 @@ type adminOpts struct {
 	// principal holds the flags of `principal list` and `principal hide`
 	// (issue #445).
 	principal principalOpts
+	// join holds the flags of `join` and `guest` (issue #715), in
+	// admin_guest.go.
+	join joinOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -56,6 +59,9 @@ type principalOpts struct {
 	// expires is when a sign-in link stops working (issue #493); empty is
 	// the server's default.
 	expires string
+	// purpose is what a link is for: sign_in (the default), reset or
+	// enrollment (issue #715).
+	purpose string
 }
 
 // adminRun is what a command's run function gets once its arguments are
@@ -140,7 +146,7 @@ var adminCommands = []adminCommand{
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
 	// Invites and their administration (issue #438), in admin_invite.go.
-	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] ",
+	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both] ",
 		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
 	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
 		bind: bindInviteList, run: adminInviteList},
@@ -156,18 +162,26 @@ var adminCommands = []adminCommand{
 		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
 	// A one-time link back into a member's account (issue #493), in
 	// admin_invite.go.
-	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ",
+	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] ",
 		bind: bindSignInLink, run: adminPrincipalSignInLink},
 	// Closing one that leaked, by the link's id (the id `principal
 	// sign-in-link` prints), without disabling its person.
 	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
+	// The joining policy and guest visits (issue #715), in admin_guest.go.
+	{group: "join", verb: "status", run: adminJoinStatus},
+	{group: "join", verb: "set", flags: "[--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
+		bind: bindJoinSet, run: adminJoinSet},
+	{group: "guest", verb: "list", flags: "[--state active|ended|converted] [--origin address|invite] ", bind: bindGuestList, run: adminGuestList},
+	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
+	{group: "guest", verb: "end-all", flags: "[--origin address|invite] [--invite <id>] [--dry-run | --yes] ", bind: bindGuestEndAll, run: adminGuestEndAll},
+	{group: "guest", verb: "permit", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ", bind: bindGuestPermit, run: adminGuestPermit},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|reports|sign-in-link"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -252,6 +266,11 @@ func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin i
 	if err != nil {
 		return err
 	}
+	// An operator signed in with a password holds a session, and the
+	// sensitive commands need a recent proof on it (design §5.3): the server
+	// says reauth_required, the person proves it, and the request is sent
+	// again. A script credential is never asked.
+	askToReauth(client, newPrompter(ctx, stdin, stderr), stderr)
 	r.client = client
 	return c.run(ctx, r)
 }

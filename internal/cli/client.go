@@ -27,6 +27,33 @@ type Client struct {
 	// pingInterval and pingTimeout are the socket watchdog's (watchConn);
 	// zero means the defaults. Unexported so tests can shorten them.
 	pingInterval, pingTimeout time.Duration
+	// guestServer is set when token is a temporary guest visit's (design
+	// §3.4): a 401 then means the visit is over, and its stored entry is
+	// removed, so nothing keeps offering a credential the server has ended.
+	guestServer string
+	// reauth, when set, proves the password again (POST /v1/reauth) after a
+	// request answers reauth_required; roundTrip then sends the request once
+	// more (design §7.5). It is set by commands that may ask the person.
+	reauth func(context.Context) error
+}
+
+// ErrGuestVisitEnded matches the error returned when the server refuses a
+// guest visit's credential: the visit ended, by End visit, its idle or hard
+// bound, or an operator, and cannot be resumed.
+var ErrGuestVisitEnded = errors.New("guest visit ended")
+
+// GuestVisitEndedError is a 401 for a guest visit's credential. It is also
+// ErrUnauthenticated, so every caller that handles a signed-out credential
+// handles it.
+type GuestVisitEndedError struct{ Server string }
+
+func (e *GuestVisitEndedError) Error() string {
+	return fmt.Sprintf("your guest visit to %s has ended (or its credential no longer works); a later visit is a new guest: run 'conch join guest'", e.Server)
+}
+
+// Is makes errors.Is true for ErrGuestVisitEnded and ErrUnauthenticated.
+func (e *GuestVisitEndedError) Is(target error) bool {
+	return target == ErrGuestVisitEnded || target == ErrUnauthenticated
 }
 
 // ErrUnauthenticated matches the error returned when the server answers 401.
@@ -83,7 +110,41 @@ func (c *Client) WhoAmI(ctx context.Context) (schema.WhoAmIResponseV1, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return schema.WhoAmIResponseV1{}, fmt.Errorf("cli: decode whoami response: %w", err)
 	}
+	if err := checkIdentity(result); err != nil {
+		return schema.WhoAmIResponseV1{}, err
+	}
 	return result, nil
+}
+
+// checkIdentity fails closed on an answer about who the caller is that this
+// client cannot read with certainty (ADR-009): an identity class it does not
+// know, a guest without its visit or a visit without the guest class, or a
+// visit or authentication state that is not well-formed. A server that
+// predates guests sends none of these fields and passes. Anything else is a
+// version mismatch, and guessing would be to show a guest as a member or a
+// member as a guest.
+func checkIdentity(who schema.WhoAmIResponseV1) error {
+	const mismatch = "cli: whoami: the server's answer about who you are is not one this conch can read (%s); update conch, or tell the server's operator"
+	if who.IdentityClass != "" && !who.IdentityClass.Valid() {
+		return fmt.Errorf(mismatch, "an unknown identity class")
+	}
+	switch {
+	case who.IdentityClass == schema.IdentityGuest && who.Guest == nil:
+		return fmt.Errorf(mismatch, "a guest without its visit")
+	case who.Guest != nil && who.IdentityClass != schema.IdentityGuest:
+		return fmt.Errorf(mismatch, "a visit for someone who is not a guest")
+	}
+	if who.Guest != nil {
+		if err := who.Guest.Validate(); err != nil {
+			return fmt.Errorf(mismatch, "a malformed visit")
+		}
+	}
+	if who.Auth != nil {
+		if err := who.Auth.Validate(); err != nil {
+			return fmt.Errorf(mismatch, "a malformed sign-in state")
+		}
+	}
+	return nil
 }
 
 func (c *Client) dialOptions() *websocket.DialOptions {
@@ -426,14 +487,52 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)
 	}
+	var serverError schema.Error
+	decoded := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError) == nil
 	if resp.StatusCode == http.StatusUnauthorized {
+		// A sign-in, a re-authentication or a password change that does not
+		// succeed answers 401 auth_failed: the caller's own credential, if
+		// it sent one, is not what was refused.
+		if decoded && serverError.Code == schema.ErrorCodeAuthFailed {
+			return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message}
+		}
+		if c.guestServer != "" {
+			// The visit is over and cannot come back; the stored entry would
+			// only be offered again. A failure to remove it leaves it to the
+			// deadline cleanup.
+			_ = deleteGuestVisit(c.guestServer)
+			return &GuestVisitEndedError{Server: c.Server()}
+		}
 		return &UnauthenticatedError{Server: c.Server()}
 	}
-	var serverError schema.Error
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError); err != nil {
-		return fmt.Errorf("cli: server returned %s", safeLine(resp.Status))
+	if !decoded {
+		return &statusError{status: resp.StatusCode, text: fmt.Sprintf("cli: server returned %s", safeLine(resp.Status))}
 	}
 	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message}
+}
+
+// statusError is a refusal with no error document, such as the mux's 404 for
+// a route a server does not have. Its text is the one such refusals have
+// always had; the status lets a caller tell an older server (routeMissing).
+type statusError struct {
+	status int
+	text   string
+}
+
+func (e *statusError) Error() string { return e.text }
+
+// routeMissing reports whether err is a server's refusal of a route it does
+// not have: a 404 or 405 with no error document. A server that predates a
+// feature answers its routes so.
+func routeMissing(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusMethodNotAllowed)
+}
+
+// IsServerCode reports whether err is the server's refusal with code.
+func IsServerCode(err error, code string) bool {
+	var se *ServerError
+	return errors.As(err, &se) && se.Code == code
 }
 
 // ServerError is a refusal the server explained in its error body. Its text
@@ -455,20 +554,39 @@ func (e *ServerError) Error() string {
 // roundTrip sends one JSON request and, when out is non-nil, decodes the
 // response into it. Any status outside 2xx becomes the server's error. The
 // nets and v2 message methods share it so each stays a few lines.
+//
+// A request answered reauth_required is sent once more after c.reauth, when
+// it is set, has proved the password again: the refusal comes before the
+// route does anything, so the second send is the first that acts.
 func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *url.URL, in, out any) error {
-	var body io.Reader
+	var encoded []byte
 	if in != nil {
-		encoded, err := json.Marshal(in)
-		if err != nil {
+		var err error
+		if encoded, err = json.Marshal(in); err != nil {
 			return fmt.Errorf("cli: encode %s request: %w", what, err)
 		}
+	}
+	err := c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+	if c.reauth == nil || !IsServerCode(err, schema.ErrorCodeReauthRequired) {
+		return err
+	}
+	if err := c.reauth(ctx); err != nil {
+		return err
+	}
+	return c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+}
+
+// roundTripOnce is one send of roundTrip's request.
+func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoint *url.URL, encoded []byte, hasBody bool, out any) error {
+	var body io.Reader
+	if hasBody {
 		body = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return fmt.Errorf("cli: create %s request: %w", what, err)
 	}
-	if in != nil {
+	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.do(req)

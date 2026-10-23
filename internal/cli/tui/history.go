@@ -35,7 +35,7 @@ func (m Model) head(channel string, message schema.MessageV2, width int) message
 		payload = "[" + fitCells(sanitize(message.Payload.Schema), width/3) + "]"
 	}
 	when := m.messageTime(message)
-	name, agent := m.authorName(channel, message.AuthorID)
+	name, agent := m.messageAuthor(channel, message)
 	agentBadge := ""
 	if agent {
 		agentBadge = "[agent]"
