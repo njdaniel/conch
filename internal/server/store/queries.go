@@ -161,7 +161,7 @@ func (s *Store) createPrincipal(ctx context.Context, actor string, kind Principa
 	// IMMEDIATE, so the clash check and the insert are one step: a second
 	// create of the same key waits for this one and then sees its row.
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		keys, err := claimNameTx(ctx, tx, name, 0)
+		keys, err := s.claimNameTx(ctx, tx, name, 0)
 		if err != nil {
 			return err
 		}

@@ -39,8 +39,8 @@ import (
 // what these routes allow, by the store's predicates (AddressJoinOptions).
 
 // DefaultServerName is the server's label when the operator names none
-// (--server-name): what the front door shows, and a name no guest label may
-// take. Reserving it as a permanent username too is #760.
+// (--server-name): what the front door shows, and a name no guest label and
+// no permanent principal may take (issue #760).
 const DefaultServerName = "conch"
 
 // MaxServerNameLength bounds --server-name, in characters.
@@ -66,6 +66,23 @@ func (s *Server) serverName() string {
 		return s.cfg.ServerName
 	}
 	return DefaultServerName
+}
+
+// logServerNameHolders warns, once at start, about the permanent principals
+// that hold the server's name (issue #760): names taken before it was
+// reserved, or before --server-name changed to them. They are kept, and keep
+// working; an operator may rename them. Ids only, as for the other name
+// warnings: the names are in the database.
+func (s *Server) logServerNameHolders(ctx context.Context) {
+	ids, err := s.store.ServerNameHolders(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "join: find holders of the server's name failed", "error", err)
+		return
+	}
+	if len(ids) > 0 {
+		slog.WarnContext(ctx, "join: some existing principals hold the server's name, or one that looks the same; they are kept as they are, the name is refused to everyone else, and an operator may rename them",
+			"principals", ids)
+	}
 }
 
 // guestAddressBook remembers which address each visit this process admitted
@@ -534,6 +551,9 @@ func (s *Server) joinSettingsResponse(ctx context.Context, st store.JoinState) s
 	}
 	if st.ReservedNames > 0 {
 		out.Warnings = append(out.Warnings, schema.JoinWarningReservedNamesInUse)
+	}
+	if st.ServerNameHolders > 0 {
+		out.Warnings = append(out.Warnings, schema.JoinWarningServerNameInUse)
 	}
 	return out
 }

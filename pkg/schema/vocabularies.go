@@ -53,6 +53,7 @@ var Vocabularies = map[string][]string{
 	),
 	"JoinWarning": values(
 		JoinWarningLiveGuestsRemain, JoinWarningTrustedProxyUnset, JoinWarningOneAddress, JoinWarningReservedNamesInUse,
+		JoinWarningServerNameInUse,
 	),
 	"LoginNext":       values(LoginNextSignedIn, LoginNextTOTP),
 	"NetRole":         values(NetRoleMember, NetRoleMonitor),

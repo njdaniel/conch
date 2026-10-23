@@ -93,7 +93,8 @@ type Config struct {
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
 	// ServerName is the label the front door shows (GET /v1/join) and a name
-	// no guest label may take (issue #710). Empty means DefaultServerName.
+	// no guest label (issue #710) and no permanent principal (issue #760)
+	// may take. Empty means DefaultServerName.
 	// conchd checks it with ValidateServerName.
 	ServerName string
 	// TOTPKey is the host key operators' TOTP secrets are sealed under
@@ -276,6 +277,9 @@ func New(cfg Config, st *store.Store) *Server {
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg)}
+	// The server's name is a permanent name nobody may take (issue #760):
+	// the store refuses it on every write of a name from here on.
+	st.SetServerName(s.serverName())
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
@@ -308,6 +312,7 @@ func New(cfg Config, st *store.Store) *Server {
 		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
+	s.logServerNameHolders(context.Background())
 	s.checkTOTPKey(context.Background())
 	if s.VoiceConfigured() {
 		if s.lk, err = livekit.New(cfg.LiveKit); err != nil {

@@ -62,6 +62,21 @@ func (guestNameReservedError) Error() string {
 
 func (guestNameReservedError) Is(target error) bool { return target == ErrNameReserved }
 
+// ErrServerNameReserved is returned by every write that sets a permanent name
+// when the name is the server's own (SetServerName, issue #760), or looks the
+// same: a principal holding it would pass for the server the front door
+// names. It is ErrNameReserved too, and the error that carries it
+// ErrDuplicate, as for the other reservations.
+var ErrServerNameReserved error = serverNameReservedError{}
+
+// serverNameReservedError is ErrServerNameReserved: its own message, and
+// ErrNameReserved to errors.Is.
+type serverNameReservedError struct{}
+
+func (serverNameReservedError) Error() string { return "store: the server's name is reserved" }
+
+func (serverNameReservedError) Is(target error) bool { return target == ErrNameReserved }
+
 // ErrRenameLimited is the error RenamePrincipal returns, as a
 // *RenameLimitedError, when the principal has used up its renames.
 var ErrRenameLimited = errors.New("store: too many renames")
@@ -97,20 +112,45 @@ type RenameLimits struct {
 // that is taken costs no Argon2 work; the writing transaction claims it
 // again.
 func (s *Store) CheckNameFree(ctx context.Context, name string, self int64) error {
-	_, err := claimNameTx(ctx, s.db, name, self)
+	_, err := s.claimNameTx(ctx, s.db, name, self)
 	return err
+}
+
+// SetServerName reserves name, the server's label (issue #760), as a
+// permanent name: from then on no write gives a principal a name with either
+// of its keys, whoever asks (ErrServerNameReserved). The keys are computed
+// here, once. Empty reserves nothing: a store opened without a server, by
+// the offline commands, has no server name to reserve. A principal that
+// holds the name already keeps it (ServerNameHolders). Call it before the
+// store is used from more than one goroutine.
+func (s *Store) SetServerName(name string) {
+	s.serverKeys = names.Keys{}
+	if name != "" {
+		s.serverKeys = names.KeysOf(name)
+	}
+}
+
+// isServerName reports whether a name with these keys is the server's: its
+// folded key is the server name's folded key, or its skeleton the server
+// name's skeleton. Equal, not a prefix, as for a guest label: the server's
+// name is one name, not a namespace. With no server name set nothing is.
+func (s *Store) isServerName(keys names.Keys) bool {
+	if s.serverKeys.Empty() {
+		return false
+	}
+	return keys.Folded == s.serverKeys.Folded || keys.Skeletal == s.serverKeys.Skeletal
 }
 
 // claimNameTx is the one clash check, used by every path that creates or
 // renames a principal: it returns name's keys, ErrNameInvalid when they are
 // empty, or ErrDuplicate when a principal other than self holds either of
 // them (the folded key against folded keys, the skeletal against skeletal),
-// or when the name is reserved for hidden principals (reservedName) or for
-// guests (reservedGuestName, with no bypass for an operator). self is
-// the principal being renamed, or 0 on create. It must run in the transaction
-// that writes the name, and the keys it returns are the ones that row must
-// store.
-func claimNameTx(ctx context.Context, tx execer, name string, self int64) (names.Keys, error) {
+// or when the name is reserved for hidden principals (reservedName), for
+// guests (reservedGuestName) or as the server's own (isServerName), with no
+// bypass for an operator. self is the principal being renamed, or 0 on
+// create. It must run in the transaction that writes the name, and the keys
+// it returns are the ones that row must store.
+func (s *Store) claimNameTx(ctx context.Context, tx execer, name string, self int64) (names.Keys, error) {
 	keys := names.KeysOf(name)
 	if keys.Empty() {
 		return names.Keys{}, ErrNameInvalid
@@ -123,7 +163,40 @@ func claimNameTx(ctx context.Context, tx execer, name string, self int64) (names
 	if reservedGuestName(keys) {
 		return names.Keys{}, fmt.Errorf("store: name %q: %w (%w)", name, ErrGuestNameReserved, ErrDuplicate)
 	}
+	if s.isServerName(keys) {
+		return names.Keys{}, fmt.Errorf("store: name %q: %w (%w)", name, ErrServerNameReserved, ErrDuplicate)
+	}
 	return keys, clashTx(ctx, tx, name, keys, self)
+}
+
+// ServerNameHolders returns, by id, the permanent principals whose stored
+// name has a key of the server's name (SetServerName): names written before
+// the reservation, or before the server's name was changed to theirs. They
+// are kept as they are, neither renamed nor refused service; conchd warns
+// about them at start and in the joining settings. With no server name set
+// there are none.
+func (s *Store) ServerNameHolders(ctx context.Context) ([]int64, error) {
+	return s.serverNameHoldersTx(ctx, s.db)
+}
+
+// serverNameHoldersTx is ServerNameHolders inside a transaction. A guest is
+// not a permanent principal, so a principal with a visit that is live or
+// ended is left out; one whose visit was converted is in, as for the guest
+// namespace (reservedGuestNamesTx).
+func (s *Store) serverNameHoldersTx(ctx context.Context, tx execer) ([]int64, error) {
+	if s.serverKeys.Empty() {
+		return nil, nil
+	}
+	ids, err := idsTx(ctx, tx,
+		`SELECT id FROM principals p
+		 WHERE (name_key = ? OR name_skel = ?)
+		   AND NOT EXISTS (SELECT 1 FROM guest_visits v WHERE v.principal_id = p.id AND v.state <> 'converted')
+		 ORDER BY id`,
+		s.serverKeys.Folded, s.serverKeys.Skeletal)
+	if err != nil {
+		return nil, fmt.Errorf("store: find holders of the server's name: %w", err)
+	}
+	return ids, nil
 }
 
 // hiddenKeys are the keys of schema.HiddenPrincipalNamePrefix.
@@ -227,7 +300,7 @@ func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, nam
 		if err := renameLimitTx(ctx, tx, id, lim, now); err != nil {
 			return err
 		}
-		keys, err := claimNameTx(ctx, tx, name, id)
+		keys, err := s.claimNameTx(ctx, tx, name, id)
 		if err != nil {
 			return err
 		}

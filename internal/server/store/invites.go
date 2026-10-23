@@ -721,7 +721,7 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		mayInvite := r.mayInvite && r.creatorRole == RoleOperator
 		// A name that clashes with another by case or look-alike
 		// characters is taken (issue #441).
-		keys, err := claimNameTx(ctx, tx, name, 0)
+		keys, err := s.claimNameTx(ctx, tx, name, 0)
 		if err != nil {
 			return fmt.Errorf("store: redeem invite: %w", err)
 		}

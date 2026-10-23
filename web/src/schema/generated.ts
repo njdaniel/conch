@@ -1792,13 +1792,15 @@ export type JoinWarning =
   | 'live_guests_remain'
   | 'trusted_proxy_unset'
   | 'one_address'
-  | 'reserved_names_in_use';
+  | 'reserved_names_in_use'
+  | 'server_name_in_use';
 
 export const joinWarning = vocab<JoinWarning>({
   live_guests_remain: true,
   trusted_proxy_unset: true,
   one_address: true,
   reserved_names_in_use: true,
+  server_name_in_use: true,
 });
 
 // schema.JoinSettingsResponseV1
