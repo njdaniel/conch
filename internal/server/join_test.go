@@ -105,27 +105,31 @@ func (f *authFixture) auditOf(t *testing.T, action string) []store.AuditEvent {
 
 // The bare address under every combination of the master switch, its mode
 // and its pause: what the front door offers is exactly what Join as guest
-// does, and no account is ever offered (no route makes one yet).
+// and Create an account (issue #711) do. Each case runs both writes, and a
+// refused one leaves nothing behind.
 func TestGuestEntryAddressMatrix(t *testing.T) {
+	const closed, paused = schema.ErrorCodeJoiningClosed, schema.ErrorCodeJoiningPaused
 	tests := []struct {
-		name    string
-		enabled bool
-		mode    schema.OpenJoiningMode
-		paused  bool
-		offer   schema.JoinOptionsV1
-		status  int
-		code    string
+		name     string
+		enabled  bool
+		mode     schema.OpenJoiningMode
+		paused   bool
+		offer    schema.JoinOptionsV1
+		status   int
+		code     string
+		accountC string // the refusal of an account, or "" when one is made
 	}{
-		{"nothing changed", false, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
-		{"guests on, address off", true, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
-		{"guests on, address accounts only", true, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
-		{"guests off, address both", false, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
-		{"guests off, address accounts only", false, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
-		{"guests on, address guest", true, schema.OpenJoiningGuest, false, schema.JoinOptionsV1{Guest: true}, 201, ""},
-		{"guests on, address both", true, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Guest: true}, 201, ""},
-		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused},
-		{"guests on, address both, paused", true, schema.OpenJoiningBoth, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused},
-		{"guests off, address off, paused", false, schema.OpenJoiningOff, true, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled},
+		{"nothing changed", false, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
+		{"guests on, address off", true, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
+		{"guests on, address accounts only", true, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
+		{"guests off, address both", false, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
+		{"guests off, address accounts only", false, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
+		{"guests on, address guest", true, schema.OpenJoiningGuest, false, schema.JoinOptionsV1{Guest: true}, 201, "", closed},
+		{"guests on, address both", true, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Guest: true, Account: true}, 201, "", ""},
+		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused, closed},
+		{"guests on, address both, paused", true, schema.OpenJoiningBoth, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused, paused},
+		{"guests off, address accounts only, paused", false, schema.OpenJoiningAccount, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeGuestsDisabled, paused},
+		{"guests off, address off, paused", false, schema.OpenJoiningOff, true, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,7 +140,19 @@ func TestGuestEntryAddressMatrix(t *testing.T) {
 			if got := f.frontDoor(t).Join; got != tt.offer {
 				t.Errorf("front door offers %+v, want %+v", got, tt.offer)
 			}
-			rec := f.joinGuest(t, "", "")
+			rec := f.joinAccount(t, "newcomer", "")
+			if (tt.accountC == "") != tt.offer.Account {
+				t.Fatalf("the case is wrong: an account is made (%t) where none is offered (%t)", tt.accountC == "", tt.offer.Account)
+			}
+			if tt.accountC == "" {
+				mustAccount(t, rec)
+			} else {
+				assertErrorBody(t, rec, http.StatusForbidden, tt.accountC)
+				if _, found, err := f.srv.store.LoginCandidate(context.Background(), "newcomer"); err != nil || found {
+					t.Errorf("a refused account was made: %v, %v", found, err)
+				}
+			}
+			rec = f.joinGuest(t, "", "")
 			if tt.status == http.StatusCreated {
 				mustJoined(t, rec)
 				return
@@ -699,8 +715,11 @@ func TestEndAllGuestVisits(t *testing.T) {
 	b := mustJoined(t, presenceSend(t, f, "POST", "/v1/join/guest", "", `{}`))
 	c := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
 	conv := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
+	// A bare-address visit converts while the address offers accounts
+	// (issue #711).
+	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningBoth)})
 	converted, err := f.srv.store.ConvertGuest(ctx, "system", store.GuestConversion{PrincipalID: conv.Principal.ID, Name: "kept",
-		CredentialLabel: "member", CredentialLifetime: time.Hour})
+		Record: hashedRecord(t, f.srv, testJoinPassword), CredentialLabel: "member", CredentialLifetime: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,8 +935,8 @@ func TestGuestEntrySharesInviteLimits(t *testing.T) {
 }
 
 // With authentication off there is nobody to join as (design §7.4): the
-// front door offers nothing, and every other route of #710 is 403
-// accounts_require_auth.
+// front door offers nothing, password sign-in included, and every other
+// route of #710 and #711 is 403 accounts_require_auth.
 func TestGuestEntryWithAuthOff(t *testing.T) {
 	f := newAuthFixture(t, AuthOff)
 	info := f.frontDoor(t)
@@ -933,6 +952,9 @@ func TestGuestEntryWithAuthOff(t *testing.T) {
 		{"GET", "/v1/guests", ""},
 		{"POST", "/v1/guests/1/end", ""},
 		{"POST", "/v1/guests/end", `{"dry_run":true}`},
+		{"POST", "/v1/join/account", inviteJSON(t, schema.JoinAccountRequestV1{Name: "newcomer", Password: testJoinPassword})},
+		{"POST", "/v1/guest/convert", inviteJSON(t, schema.ConvertGuestRequestV1{Name: "newcomer", Password: testJoinPassword})},
+		{"POST", "/v1/guests/1/conversion-permit", `{}`},
 	} {
 		assertErrorBody(t, f.do(t, c.method, c.path, "", c.body), http.StatusForbidden, schema.ErrorCodeAccountsRequireAuth)
 	}

@@ -630,9 +630,11 @@ func (s *Store) RedeemInviteWithPassword(ctx context.Context, codeHash, name, re
 	return s.redeemInvite(ctx, codeHash, name, record, now)
 }
 
-// ErrJoiningClosed is an invite that admits guests only (join_as guest)
-// asked to make an account (ErrorCodeJoiningClosed, design §7.2).
-var ErrJoiningClosed = errors.New("store: this invite admits guests only")
+// ErrJoiningClosed is an entry point asked to make an account it does not
+// offer (ErrorCodeJoiningClosed, design §7.2): an invite that admits guests
+// only (join_as guest), or the bare address while open_joining is off or
+// guest-only (JoinAsAccount, issue #711).
+var ErrJoiningClosed = errors.New("store: this entry point makes no account now")
 
 // inviteAdmitsAccountTx returns ErrJoiningClosed when invite id admits
 // guests only. Absent, as every invite from before guests is, join_as is

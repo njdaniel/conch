@@ -410,8 +410,9 @@ func TestHistoryBoundLifecycle(t *testing.T) {
 
 	t.Run("conversion keeps the bound", func(t *testing.T) {
 		f := newBoundFixture(t)
+		allowAddressAccounts(t, f.s)
 		before := visibleIDs(t, f.s, f.ch.ID, f.guestReader(true))
-		if _, err := f.s.ConvertGuest(ctx, "system", GuestConversion{PrincipalID: f.guest.Principal.ID, Name: "patricia",
+		if _, err := f.s.ConvertGuest(ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: f.guest.Principal.ID, Name: "patricia",
 			CredentialLabel: "member", CredentialLifetime: time.Hour}); err != nil {
 			t.Fatal(err)
 		}

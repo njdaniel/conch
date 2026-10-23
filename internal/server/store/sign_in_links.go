@@ -52,6 +52,10 @@ const (
 	// AuditDeviceLinkIssued is a member making a device link for
 	// themselves (design §7.3).
 	AuditDeviceLinkIssued = "device_link_issued"
+	// AuditConversionPermitIssued is an operator letting one live guest
+	// create an account although its origin's policy is closed (design §3.3,
+	// §7.3): subject the guest, detail the permit's id and expiry.
+	AuditConversionPermitIssued = "conversion_permit_issued"
 )
 
 // Why a sign-in link was closed, the reason= of its sign_in_link_closed row:
@@ -73,6 +77,9 @@ const (
 	// revoked by id, by the member or an operator, which ends the device
 	// links they have open (design §6.2).
 	SignInLinkCloseCredentialRevoked = "credential_revoked" // #nosec G101 -- an audit reason, not a credential
+	// SignInLinkCloseConverted: the guest a conversion permit was for
+	// created an account, so its other permits have nothing left to permit.
+	SignInLinkCloseConverted = "converted"
 )
 
 // Errors returned by the sign-in link store, in addition to
@@ -115,6 +122,8 @@ func signInLinkCreatedAction(p schema.SignInLinkPurpose) string {
 		return AuditPasswordResetIssued
 	case schema.SignInLinkPurposeEnrollment:
 		return AuditEnrollmentIssued
+	case schema.SignInLinkPurposeConversion:
+		return AuditConversionPermitIssued
 	default:
 		return AuditSignInLinkCreated
 	}
@@ -243,64 +252,98 @@ type usableLink struct {
 	principal Principal
 }
 
-// usableSignInLinkTx finds the link whose code hashes to codeHash and returns
-// it if it still works, whatever its purpose (usableLinkOfTx checks that).
-// Otherwise it is ErrSignInLinkInvalid: for a code that is unknown, used,
-// closed or expired, a link made under an authentication generation that is
-// no longer its person's, a maker who can no longer stand behind it, or a
-// person who may no longer be given a link. The maker of a device link must
-// be the member it is for (and so, by the person's check, still a member);
-// of any other, an enabled human operator. The stored hash is compared in
-// constant time even though the row was found by it, as for invites.
-func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.Time) (usableLink, error) {
+// liveLink is a link whose row still works, before anything about its
+// maker, its person or its purpose is checked.
+type liveLink struct {
+	id, principalID, createdBy int64
+	purpose                    schema.SignInLinkPurpose
+	label                      string
+}
+
+// liveSignInLinkTx finds the link whose code hashes to codeHash and returns
+// it if its row still works: unused, unclosed, unexpired and made under its
+// person's present authentication generation. Otherwise it is
+// ErrSignInLinkInvalid. The stored hash is compared in constant time even
+// though the row was found by it, as for invites. Who made it and whom it is
+// for are the callers' to check (usableSignInLinkTx, usableConversionPermitTx).
+func liveSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.Time) (liveLink, error) {
 	var (
-		id, principalID, createdBy, expiresAt int64
-		storedHash, purpose                   string
-		label                                 sql.NullString
-		usedAt, closedAt                      sql.NullInt64
-		current                               bool
+		l                   liveLink
+		expiresAt           int64
+		storedHash, purpose string
+		label               sql.NullString
+		usedAt, closedAt    sql.NullInt64
+		current             bool
 	)
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT l.id, l.code_hash, l.principal_id, l.created_by, l.expires_at, l.used_at, l.closed_at, l.purpose, l.label,
 		        l.auth_generation = p.auth_generation
 		 FROM sign_in_links l JOIN principals p ON p.id = l.principal_id WHERE l.code_hash = ?`, codeHash,
-	).Scan(&id, &storedHash, &principalID, &createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &label, &current); {
+	).Scan(&l.id, &storedHash, &l.principalID, &l.createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &label, &current); {
 	case errors.Is(err, sql.ErrNoRows):
-		return usableLink{}, ErrSignInLinkInvalid
+		return liveLink{}, ErrSignInLinkInvalid
 	case err != nil:
-		return usableLink{}, fmt.Errorf("store: find sign-in link: %w", err)
+		return liveLink{}, fmt.Errorf("store: find sign-in link: %w", err)
 	}
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(codeHash)) != 1 {
-		return usableLink{}, ErrSignInLinkInvalid
+		return liveLink{}, ErrSignInLinkInvalid
 	}
 	if usedAt.Valid || closedAt.Valid || expiresAt <= now.UnixMilli() || !current {
-		return usableLink{}, ErrSignInLinkInvalid
+		return liveLink{}, ErrSignInLinkInvalid
 	}
-	if schema.SignInLinkPurpose(purpose) == schema.SignInLinkPurposeDevice {
+	l.purpose, l.label = schema.SignInLinkPurpose(purpose), label.String
+	return l, nil
+}
+
+// makerIsOperatorTx reports whether principal id is still an enabled human
+// operator: who must stand behind every link but a device link, as for an
+// invite.
+func makerIsOperatorTx(ctx context.Context, tx execer, id int64) (bool, error) {
+	creator, err := principalByIDTx(ctx, tx, id)
+	if err != nil {
+		return false, fmt.Errorf("store: sign-in link maker: %w", err)
+	}
+	return creator.DisabledAt == nil && creator.Kind == PrincipalHuman && creator.Role == RoleOperator, nil
+}
+
+// usableSignInLinkTx finds the link whose code hashes to codeHash and returns
+// it if it still works, whatever its purpose (usableLinkOfTx checks that).
+// Otherwise it is ErrSignInLinkInvalid: for a code that is unknown, used,
+// closed or expired, a link made under an authentication generation that is
+// no longer its person's (liveSignInLinkTx), a maker who can no longer stand
+// behind it, or a person who may no longer be given a link. The maker of a
+// device link must be the member it is for (and so, by the person's check,
+// still a member); of any other, an enabled human operator. A conversion
+// permit is for a guest, whom no sign-in link is for, so it is never usable
+// here: usableConversionPermitTx is its check.
+func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.Time) (usableLink, error) {
+	l, err := liveSignInLinkTx(ctx, tx, codeHash, now)
+	if err != nil {
+		return usableLink{}, err
+	}
+	if l.purpose == schema.SignInLinkPurposeDevice {
 		// A member makes a device link for themselves only; signInLinkTargetTx
 		// below holds the maker, who is the person, to being a member still,
 		// so one promoted to operator since cannot use it.
-		if createdBy != principalID {
+		if l.createdBy != l.principalID {
 			return usableLink{}, ErrSignInLinkInvalid
 		}
 	} else {
-		creator, err := principalByIDTx(ctx, tx, createdBy)
-		if err != nil {
-			return usableLink{}, fmt.Errorf("store: sign-in link maker: %w", err)
-		}
 		// The maker must still be able to stand behind it, as for an invite.
-		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman || creator.Role != RoleOperator {
+		if ok, err := makerIsOperatorTx(ctx, tx, l.createdBy); err != nil {
+			return usableLink{}, err
+		} else if !ok {
 			return usableLink{}, ErrSignInLinkInvalid
 		}
 	}
-	p, err := signInLinkTargetTx(ctx, tx, principalID)
+	p, err := signInLinkTargetTx(ctx, tx, l.principalID)
 	switch {
 	case errors.Is(err, ErrSignInLinkTarget), errors.Is(err, ErrPrincipalHidden), errors.Is(err, ErrPrincipalDisabled):
 		return usableLink{}, ErrSignInLinkInvalid
 	case err != nil:
 		return usableLink{}, fmt.Errorf("store: sign-in link principal: %w", err)
 	}
-	return usableLink{id: id, purpose: schema.SignInLinkPurpose(purpose), label: label.String, principal: p}, nil
+	return usableLink{id: l.id, purpose: l.purpose, label: l.label, principal: p}, nil
 }
 
 // usableLinkOfTx is usableSignInLinkTx for a route that takes only the
@@ -731,4 +774,103 @@ func closeDeviceLinksTx(ctx context.Context, tx execer, actor string, principalI
 		}
 	}
 	return nil
+}
+
+// Conversion permits (issue #711, design §3.3, §7.2). A permit is a sign-in
+// link of purpose conversion that an operator makes for one live guest, so
+// that it may create an account although the policy of its visit's origin is
+// closed. It is held to every rule of a link (one use, hashed at rest, ten
+// minutes by default and an hour at most, made under its guest's
+// authentication generation, dead once its maker is no longer an enabled
+// operator) and to one more: it is for a guest whose visit is live, which no
+// other link may be for. It grants nothing by itself: the guest still
+// chooses a permanent name and a password, and no permit revives an ended
+// visit or adds a channel or a right. No route but conversion takes one.
+
+// CreateConversionPermit makes a conversion permit for guestID, made by
+// creatorID, and returns it with its code, which is shown only here. In one
+// IMMEDIATE transaction with the insert it checks that the maker is an
+// enabled human operator (ErrSignInLinkNotAllowed) and that guestID is a
+// guest (ErrNotAGuest) whose visit is live: active, before its deadline and
+// enabled (ErrGuestEnded otherwise, a converted visit included).
+// conversion_permit_issued is audited in the same transaction, attributed
+// to actor, with the guest as its subject. The code is not. now is the link
+// clock, as for CreateSignInLink.
+func (s *Store) CreateConversionPermit(ctx context.Context, actor string, creatorID, guestID int64, req schema.CreateConversionPermitRequestV1, now time.Time) (schema.CreateSignInLinkResponseV1, error) {
+	now = now.Truncate(time.Millisecond)
+	if err := req.Validate(now); err != nil {
+		return schema.CreateSignInLinkResponseV1{}, fmt.Errorf("%w: %w", ErrSignInLinkRequestInvalid, err)
+	}
+	expires := req.EffectiveExpiry(now).Truncate(time.Millisecond)
+	code, err := NewSignInLinkCode()
+	if err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	var out schema.SignInLinkV1
+	err = s.withImmediateTx(ctx, func(tx execer) error {
+		switch ok, err := makerIsOperatorTx(ctx, tx, creatorID); {
+		case errors.Is(err, ErrPrincipalNotFound):
+			return ErrSignInLinkNotAllowed
+		case err != nil:
+			return err
+		case !ok:
+			return ErrSignInLinkNotAllowed
+		}
+		if err := liveGuestTx(ctx, tx, guestID); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO sign_in_links (code_hash, principal_id, created_by, created_at, expires_at, purpose, auth_generation)
+			 SELECT ?, ?, ?, ?, ?, 'conversion', auth_generation FROM principals WHERE id = ?`,
+			HashSignInLinkCode(code), guestID, creatorID, now.UnixMilli(), expires.UnixMilli(), guestID)
+		if err != nil {
+			return fmt.Errorf("store: create conversion permit: insert: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store: create conversion permit: id: %w", err)
+		}
+		out = schema.SignInLinkV1{
+			ID:          id,
+			PrincipalID: guestID,
+			CreatedBy:   creatorID,
+			CreatedAt:   schema.NewTimestamp(now),
+			ExpiresAt:   schema.NewTimestamp(expires),
+			Purpose:     schema.SignInLinkPurposeConversion,
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditConversionPermitIssued, principalActor(guestID),
+			fmt.Sprintf("sign_in_link=%d expires=%s", id, out.ExpiresAt.Time().Format(time.RFC3339)), now)
+	})
+	if err != nil {
+		return schema.CreateSignInLinkResponseV1{}, err
+	}
+	return schema.CreateSignInLinkResponseV1{SignInLink: out, Code: code}, nil
+}
+
+// usableConversionPermitTx returns the id of the conversion permit whose
+// code hashes to codeHash if it still works for guestID: its row is live
+// (liveSignInLinkTx), it is a conversion permit, it is guestID's, and its
+// maker is still an enabled human operator. Whether guestID's visit is live
+// is the caller's to check, in the same transaction. Every other case is
+// ErrConversionPermitInvalid, one answer for all of them, so a permit that
+// does not work says nothing of why: another purpose's code, another
+// guest's permit and a code never issued are alike.
+func usableConversionPermitTx(ctx context.Context, tx execer, codeHash string, guestID int64, now time.Time) (int64, error) {
+	l, err := liveSignInLinkTx(ctx, tx, codeHash, now)
+	switch {
+	case errors.Is(err, ErrSignInLinkInvalid):
+		return 0, ErrConversionPermitInvalid
+	case err != nil:
+		return 0, err
+	}
+	if l.purpose != schema.SignInLinkPurposeConversion || l.principalID != guestID {
+		return 0, ErrConversionPermitInvalid
+	}
+	switch ok, err := makerIsOperatorTx(ctx, tx, l.createdBy); {
+	case err != nil:
+		return 0, err
+	case !ok:
+		return 0, ErrConversionPermitInvalid
+	}
+	return l.id, nil
 }

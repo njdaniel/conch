@@ -76,13 +76,14 @@ func TestQuorumNeverCountsAGuest(t *testing.T) {
 // decides only after an operator grants the right.
 func TestAConvertedGuestDecidesOnceGrantedTheRight(t *testing.T) {
 	f := newDecideFixture(t, 1)
+	allowAddressAccounts(t, f.s)
 	ctx := context.Background()
 	g, err := f.s.CreateGuest(ctx, "system", NewGuest{Label: "Pat", Origin: schema.GuestOriginAddress,
 		Channels: []int64{f.channelID}, Idle: time.Hour, Absolute: 2 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.s.ConvertGuest(ctx, "system", GuestConversion{PrincipalID: g.Principal.ID, Name: "pat", CredentialLifetime: time.Hour}); err != nil {
+	if _, err := f.s.ConvertGuest(ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: g.Principal.ID, Name: "pat", CredentialLifetime: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := f.s.CastMemberDecision(ctx, f.approvalID, g.Principal.ID, "approve", "fine"); !errors.Is(err, ErrNoDecideRight) {

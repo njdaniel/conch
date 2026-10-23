@@ -120,7 +120,7 @@ func (s *Server) guestWhoAmI(ctx context.Context, caller store.Principal, resp *
 	if err != nil {
 		return err
 	}
-	g := v.V1()
+	g := s.guestV1(ctx, v)
 	resp.Guest = &g
 	return nil
 }

@@ -611,6 +611,7 @@ func TestRedeemInviteWithPassword(t *testing.T) {
 // a member and may (issue #705).
 func TestLoginRefusesGuests(t *testing.T) {
 	f := newGuestFixture(t)
+	allowAddressAccounts(t, f.s)
 	plant := func(id int64) {
 		t.Helper()
 		if _, err := f.s.db.Exec("INSERT INTO passwords (principal_id, hash, created_at, updated_at) VALUES (?, ?, 1, 1)", id, testRecord("g")); err != nil {
@@ -635,7 +636,7 @@ func TestLoginRefusesGuests(t *testing.T) {
 	}
 
 	conv := f.guest("convert")
-	if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{PrincipalID: conv.Principal.ID, Name: "pat",
+	if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: conv.Principal.ID, Name: "pat",
 		CredentialLabel: "member", CredentialLifetime: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
@@ -739,6 +740,7 @@ func TestLastOperatorCountsCurrentCredentials(t *testing.T) {
 // member and may.
 func TestSetPasswordRefusesGuests(t *testing.T) {
 	f := newGuestFixture(t)
+	allowAddressAccounts(t, f.s)
 	live := f.guest("live")
 	ended := f.guest("ended")
 	if _, err := f.s.EndGuestVisit(f.ctx, "system", ended.Principal.ID, schema.GuestEndVisit); err != nil {
@@ -753,7 +755,7 @@ func TestSetPasswordRefusesGuests(t *testing.T) {
 		t.Errorf("%d passwords stored for guests", n)
 	}
 	conv := f.guest("convert")
-	if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{PrincipalID: conv.Principal.ID, Name: "pat",
+	if _, err := f.s.ConvertGuest(f.ctx, "system", GuestConversion{Record: testRecord("conv"), PrincipalID: conv.Principal.ID, Name: "pat",
 		CredentialLabel: "member", CredentialLifetime: time.Hour}); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -438,6 +439,9 @@ type passwords struct {
 	hasher        *passwordHasher
 	anonymous     *hashPool
 	authenticated *hashPool
+	// hashes counts the hashes hashIn has run, so a test can show that a
+	// refusal came before any Argon2 work. Nothing else reads it.
+	hashes atomic.Int64
 }
 
 func newPasswords() *passwords {
@@ -459,7 +463,10 @@ func (pw *passwords) hashIn(ctx context.Context, pool *hashPool, password string
 		record string
 		err    error
 	)
-	if perr := pool.do(ctx, func() { record, err = pw.hasher.hash(password) }); perr != nil {
+	if perr := pool.do(ctx, func() {
+		pw.hashes.Add(1)
+		record, err = pw.hasher.hash(password)
+	}); perr != nil {
 		return "", perr
 	}
 	return record, err

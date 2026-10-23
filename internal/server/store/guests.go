@@ -37,7 +37,7 @@ import (
 // resolves credentials, so a deadline and its refusal agree.
 //
 // The entry routes and their policy are issue #710's (guest_policy.go);
-// conversion's route is #711's.
+// conversion is #711's (ConvertGuest).
 
 // guestMigration is the number of the migration that adds guest visits: its
 // Go step is reportReservedGuestNames.
@@ -118,8 +118,9 @@ func (v GuestVisit) Attribution() schema.GuestAttributionV1 {
 	return guestAttribution(v.Handle, v.Label)
 }
 
-// V1 is the visit as its guest sees it. CanConvert is false: no route
-// converts a guest yet (#711 decides it from the origin's policy).
+// V1 is the visit as its guest sees it. CanConvert is false here: it depends
+// on the policy of the visit's origin now, which the server reads
+// (GuestCanConvert) and sets.
 func (v GuestVisit) V1() schema.GuestV1 {
 	out := schema.GuestV1{
 		State: v.State, Origin: v.Origin, Handle: v.Handle, Label: v.Label, Tag: schema.GuestTag(v.Handle),
@@ -858,20 +859,205 @@ func (s *Store) NoteGuestUse(ctx context.Context, credID int64) {
 	}
 }
 
-// ConvertGuest is the active → converted transition (design §3.3), in one
-// IMMEDIATE transaction: the visit must be live and unconverted, the
-// permanent name passes every check a name write makes (the reserved guest
-// namespace included), the principal keeps its id, memberships and their
-// history bounds, the guest credential is revoked and a fresh member
-// credential issued, and guest_converted is audited. within, when set, runs
-// last in the same transaction: it is where the password is stored (#711),
-// so that a refused password leaves the guest as it was. It returns
-// ErrNotAGuest, ErrGuestEnded (ended, converted, or past its deadline), or a
-// name error, writing nothing.
+// Errors of conversion (issue #711, design §3.3).
+var (
+	// ErrConversionNotAllowed: the policy of the visit's recorded origin
+	// admits no account now (the bare address's mode, or the entry invite's
+	// join_as, closure, expiry or maker), and no permit was given.
+	ErrConversionNotAllowed = errors.New("store: this visit may not create an account now")
+	// ErrConversionPermitInvalid: the permit given is unknown, used, closed,
+	// expired, of an older authentication generation, another guest's, of
+	// another purpose, or its maker is no longer an enabled operator. One
+	// error for all of them.
+	ErrConversionPermitInvalid = errors.New("store: conversion permit invalid")
+)
+
+// liveGuestTx checks, in the caller's transaction, that principalID is a
+// guest whose visit is live now: active, before its hard and idle deadlines,
+// holding its credential under its present authentication generation, and
+// enabled. A principal that never had a visit is ErrNotAGuest; any other is
+// ErrGuestEnded, a converted one included, so that nothing converts or
+// permits a visit twice.
+func liveGuestTx(ctx context.Context, tx execer, principalID int64) error {
+	v, err := guestVisitTx(ctx, tx, principalID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotAGuest
+	case err != nil:
+		return err
+	}
+	live, err := guestLiveTx(ctx, tx, principalID, credentialNow())
+	if err != nil {
+		return err
+	}
+	if v.State != schema.GuestStateActive || !live {
+		return ErrGuestEnded
+	}
+	// A credential of an older generation resolves for nobody (a restore
+	// moves every generation on), so the visit has no way in left.
+	var current bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM credentials c JOIN principals p ON p.id = c.principal_id
+		                WHERE c.principal_id = ? AND c.revoked_at IS NULL AND c.auth_generation = p.auth_generation)`,
+		principalID).Scan(&current); err != nil {
+		return fmt.Errorf("store: guest %d credential generation: %w", principalID, err)
+	}
+	if !current {
+		return ErrGuestEnded
+	}
+	p, err := principalByIDTx(ctx, tx, principalID)
+	if err != nil {
+		return err
+	}
+	if p.DisabledAt != nil {
+		return ErrGuestEnded
+	}
+	return nil
+}
+
+// conversionPolicyTx reports whether the policy of v's recorded origin
+// admits an account now (design §3.3), the rule Create an account follows
+// without a permit. A bare-address visit needs open_joining account or both
+// (else ErrConversionNotAllowed) and joining not paused (ErrJoiningPaused).
+// An invite visit needs invites not paused (ErrInvitesPaused) and its
+// recorded invite to admit accounts (join_as account or both), unclosed,
+// unexpired at now and still stood behind by its maker
+// (ErrConversionNotAllowed otherwise); the invite's uses spent do not
+// matter, since the guest's admission has been had. The guests_enabled
+// switch plays no part: it is about starting visits, not ending them in an
+// account. now is the invite clock.
+func conversionPolicyTx(ctx context.Context, tx execer, v GuestVisit, now time.Time) error {
+	switch v.Origin {
+	case schema.GuestOriginAddress:
+		set, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !AddressAdmitsAccounts(set) {
+			return ErrConversionNotAllowed
+		}
+		if set.JoiningPaused {
+			return ErrJoiningPaused
+		}
+		return nil
+	case schema.GuestOriginInvite:
+		if paused, err := invitesPausedTx(ctx, tx); err != nil {
+			return err
+		} else if paused {
+			return ErrInvitesPaused
+		}
+		r, err := scanInvite(tx.QueryRowContext(ctx,
+			`SELECT `+inviteColumns+` FROM invites i JOIN principals p ON p.id = i.created_by WHERE i.id = ?`, v.InviteID))
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrConversionNotAllowed
+		case err != nil:
+			return fmt.Errorf("store: conversion policy: entry invite: %w", err)
+		}
+		if !admitsAccount(r.joinAs) || r.closedAt.Valid || r.expiresAt <= now.UnixMilli() || !r.makerStillAllowed() {
+			return ErrConversionNotAllowed
+		}
+		return nil
+	}
+	// A visit of an origin this code does not know is not let through.
+	return ErrConversionNotAllowed
+}
+
+// conversionAdmissionTx decides, in the caller's transaction, whether the
+// live visit v may become an account now. With a permit (permitHash set) the
+// permit decides alone: it must be a usable conversion permit for v's
+// principal (usableConversionPermitTx, else ErrConversionPermitInvalid), and
+// its id is returned for the caller to spend. Without one the origin's
+// policy decides (conversionPolicyTx). A permit that does not work is never
+// passed over for the policy: what the guest sent is what is judged.
+func conversionAdmissionTx(ctx context.Context, tx execer, v GuestVisit, permitHash string, now time.Time) (int64, error) {
+	if permitHash != "" {
+		return usableConversionPermitTx(ctx, tx, permitHash, v.PrincipalID, now)
+	}
+	return 0, conversionPolicyTx(ctx, tx, v, now)
+}
+
+// CheckConversion says, without writing anything, whether ConvertGuest would
+// let principalID's visit become an account now, by everything but the name
+// and the password: the visit is live (ErrNotAGuest, ErrGuestEnded) and the
+// permit or the policy admits it (conversionAdmissionTx's errors). The
+// server asks before it hashes, so a conversion that cannot happen costs no
+// Argon2 work; ConvertGuest checks all of it again. now is the invite and
+// link clock.
+func (s *Store) CheckConversion(ctx context.Context, principalID int64, permitHash string, now time.Time) error {
+	if err := liveGuestTx(ctx, s.db, principalID); err != nil {
+		return err
+	}
+	v, err := guestVisitTx(ctx, s.db, principalID)
+	if err != nil {
+		return err
+	}
+	_, err = conversionAdmissionTx(ctx, s.db, v, permitHash, now.Truncate(time.Millisecond))
+	return err
+}
+
+// GuestCanConvert reports whether principalID's visit is live and its
+// origin's policy admits an account now, without a permit: GuestV1's
+// can_convert. It is advice for a page; ConvertGuest decides.
+func (s *Store) GuestCanConvert(ctx context.Context, principalID int64, now time.Time) (bool, error) {
+	err := s.CheckConversion(ctx, principalID, "", now)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrNotAGuest), errors.Is(err, ErrGuestEnded), errors.Is(err, ErrConversionNotAllowed),
+		errors.Is(err, ErrJoiningPaused), errors.Is(err, ErrInvitesPaused):
+		return false, nil
+	}
+	return false, err
+}
+
+// ConvertGuest is the active → converted transition (design §3.3, issue
+// #711): Create an account during a live visit. Everything happens in one
+// IMMEDIATE transaction, after the server has hashed the password outside
+// it, and the transaction re-reads everything the server's checks relied
+// on:
+//
+//   - the visit is live and unconverted, and its principal enabled
+//     (liveGuestTx: ErrNotAGuest, ErrGuestEnded);
+//   - the permit, or without one the policy of the visit's recorded origin,
+//     admits an account (conversionAdmissionTx);
+//   - the permanent name passes every check a name write makes, the reserved
+//     guest namespace included (claimNameTx: ErrDuplicate, ErrNameReserved,
+//     ErrNameInvalid).
+//
+// Then the visit becomes converted, the name is set (principal_renamed), the
+// guest credential is revoked and its sessions ended, the permit, when one
+// was used, is spent and any other open permit of the guest closed, a fresh
+// renewable member credential is issued, and the password is stored
+// (password_set via=conversion); credential_created and guest_converted are
+// audited. The principal keeps its id, origin, invite and inviter, its
+// memberships with their history bounds and every can_decide as it was (0:
+// conversion writes no membership at all), and the guest attribution of its
+// earlier posts. Nothing is granted. Anything refused or failing writes
+// nothing, so the guest is left as it was; of a conversion and an End visit,
+// an expiry, a disable or a second conversion racing on one visit exactly
+// one wins. ConvertedGuest.Revoked names the credentials revoked, for the
+// server to close their sockets.
 func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversion) (ConvertedGuest, error) {
 	now := credentialNow().Truncate(time.Millisecond)
-	if c.CredentialLifetime <= 0 {
-		return ConvertedGuest{}, errors.New("store: convert guest: the member credential needs a lifetime")
+	at := now
+	if !c.Now.IsZero() {
+		at = c.Now.Truncate(time.Millisecond)
+	}
+	if c.CredentialLifetime < 0 {
+		return ConvertedGuest{}, errors.New("store: convert guest: the member credential's lifetime must not be negative")
+	}
+	// An account exists only with a usable password (ADR-009 D3): there is
+	// no conversion without one.
+	if !strings.HasPrefix(c.Record, passwordRecordPrefix) {
+		return ConvertedGuest{}, ErrPasswordRecordInvalid
+	}
+	if err := (schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: c.Name}).Validate(); err != nil {
+		return ConvertedGuest{}, fmt.Errorf("%w: %w", ErrNameInvalid, err)
+	}
+	label := c.CredentialLabel
+	if label == "" {
+		label = ConvertedCredentialLabel
 	}
 	token, err := newCredentialToken()
 	if err != nil {
@@ -883,26 +1069,20 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 	)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		out, runs = ConvertedGuest{}, nil
-		v, err := guestVisitTx(ctx, tx, c.PrincipalID)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			return ErrNotAGuest
-		case err != nil:
+		if err := liveGuestTx(ctx, tx, c.PrincipalID); err != nil {
 			return err
 		}
-		live, err := guestLiveTx(ctx, tx, c.PrincipalID, now)
+		v, err := guestVisitTx(ctx, tx, c.PrincipalID)
 		if err != nil {
 			return err
-		}
-		if v.State != schema.GuestStateActive || !live {
-			return ErrGuestEnded
 		}
 		p, err := principalByIDTx(ctx, tx, c.PrincipalID)
 		if err != nil {
 			return err
 		}
-		if p.DisabledAt != nil {
-			return ErrGuestEnded
+		permitID, err := conversionAdmissionTx(ctx, tx, v, c.PermitHash, at)
+		if err != nil {
+			return err
 		}
 		keys, err := claimNameTx(ctx, tx, c.Name, c.PrincipalID)
 		if err != nil {
@@ -922,20 +1102,57 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 		if err := setNameTx(ctx, tx, actor, p, c.Name, keys, now); err != nil {
 			return err
 		}
+		if out.Revoked, err = idsTx(ctx, tx,
+			"SELECT id FROM credentials WHERE principal_id = ? AND revoked_at IS NULL ORDER BY id", c.PrincipalID); err != nil {
+			return fmt.Errorf("store: convert guest %d: list credentials: %w", c.PrincipalID, err)
+		}
 		if _, err := revokePrincipalCredentialsTx(ctx, tx, actor, c.PrincipalID, "guest converted", SessionEndedByRevocation, now, &runs); err != nil {
 			return err
 		}
-		exp := now.Add(c.CredentialLifetime)
-		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, c.CredentialLabel, token, now, &exp, c.CredentialLifetime)
+		if permitID != 0 {
+			if err := spendPasswordLinkTx(ctx, tx, permitID, at); err != nil {
+				if errors.Is(err, ErrSignInLinkInvalid) {
+					return ErrConversionPermitInvalid
+				}
+				return err
+			}
+		}
+		// The guest's other permits have nothing left to permit.
+		if err := closeOpenSignInLinksTx(ctx, tx, actor, c.PrincipalID, false, SignInLinkCloseConverted, at); err != nil {
+			return err
+		}
+		lifetime := c.CredentialLifetime
+		if lifetime == 0 {
+			// As a sign-in link's: what the entry invite gave its joiners,
+			// or an invite's default for a visit no invite made.
+			if lifetime, err = signInLinkCredentialLifetimeTx(ctx, tx, c.PrincipalID); err != nil {
+				return err
+			}
+		}
+		exp := now.Add(lifetime)
+		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime)
 		if err != nil {
+			return err
+		}
+		if _, err := setPasswordTx(ctx, tx, c.PrincipalID, c.Record, now); err != nil {
+			return err
+		}
+		detail := "via=conversion"
+		if permitID != 0 {
+			detail += fmt.Sprintf(" sign_in_link=%d", permitID)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditPasswordSet, principalActor(c.PrincipalID), detail, now); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, "credential_created", principalActor(c.PrincipalID),
 			credentialDetail(cred.ID, cred.Label), now); err != nil {
 			return err
 		}
-		if err := appendAuditEventTx(ctx, tx, actor, AuditGuestConverted, principalActor(c.PrincipalID),
-			fmt.Sprintf("from=%q to=%q", v.Handle, c.Name), now); err != nil {
+		converted := fmt.Sprintf("from=%q to=%q", v.Handle, c.Name)
+		if permitID != 0 {
+			converted += fmt.Sprintf(" permit=%d", permitID)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditGuestConverted, principalActor(c.PrincipalID), converted, now); err != nil {
 			return err
 		}
 		if c.within != nil {
@@ -943,9 +1160,13 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 				return err
 			}
 		}
+		if out.Channels, err = idsTx(ctx, tx,
+			"SELECT channel_id FROM channel_members WHERE principal_id = ? ORDER BY channel_id", c.PrincipalID); err != nil {
+			return fmt.Errorf("store: convert guest %d: list memberships: %w", c.PrincipalID, err)
+		}
 		p.Name = c.Name
 		p.GuestState = schema.GuestStateConverted
-		out = ConvertedGuest{Principal: p, Credential: cred}
+		out.Principal, out.Credential = p, cred
 		return nil
 	})
 	if err != nil {
@@ -956,25 +1177,45 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 	return out, nil
 }
 
+// ConvertedCredentialLabel is the label of the member credential a
+// conversion issues when the caller names none.
+const ConvertedCredentialLabel = "account created from a guest visit"
+
 // GuestConversion is what ConvertGuest makes of a guest.
 type GuestConversion struct {
 	PrincipalID int64
 	// Name is the permanent name, valid as a human principal's.
 	Name string
+	// Record is the encoded Argon2id record of the password the guest
+	// chose, made by the server outside the transaction. Required.
+	Record string
+	// PermitHash is the hash of an operator's conversion permit
+	// (HashSignInLinkCode), when the guest gave one; empty lets the origin's
+	// policy decide.
+	PermitHash string
+	// Now is the invite and link clock the policy and the permit are judged
+	// by; zero is the credential clock.
+	Now time.Time
 	// CredentialLabel and CredentialLifetime are the fresh member
-	// credential's; it renews as an invited member's does.
+	// credential's; it renews as an invited member's does. An empty label is
+	// ConvertedCredentialLabel; a zero lifetime is the one a sign-in link
+	// would give the principal (its entry invite's, or the default).
 	CredentialLabel    string
 	CredentialLifetime time.Duration
-	// within runs last in the converting transaction (the password, #711).
+	// within runs last in the converting transaction: the tests' seam for a
+	// failure after every other write.
 	within func(ctx context.Context, tx execer) error
 }
 
 // ConvertedGuest is the principal after a conversion, under its permanent
-// name, with its new credential and that credential's token.
+// name, with its new credential and that credential's token, the guest
+// credentials the conversion revoked and the channels it is still in.
 type ConvertedGuest struct {
 	Principal  Principal
 	Credential schema.CredentialV1
 	Token      string
+	Revoked    []int64
+	Channels   []int64
 }
 
 func guestLiveTx(ctx context.Context, tx execer, principalID int64, now time.Time) (bool, error) {
