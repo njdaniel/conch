@@ -1025,7 +1025,7 @@ describe('a long channel', () => {
     // Sign out asks first (issue #493).
     fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
     fireEvent.change(await screen.findByLabelText('Credential'), { target: { value: secret } });
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
     await screen.findByText('m500');
     release();
     await act(async () => {

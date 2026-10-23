@@ -1,6 +1,7 @@
 // The invite shapes of pkg/schema/invite.go, generated into generated.ts:
 // making, listing and closing invites, and the preview and redemption a
-// joiner's page asks for (issue #440).
+// joiner's page asks for (issue #440): an account made with a password (v2)
+// or a guest visit (issue #713).
 export {
   createInviteRequestV1,
   createInviteResponseV1,
@@ -19,6 +20,7 @@ export {
   type InvitePreviewV1,
   type InviteV1,
   type ListInvitesResponseV1,
-  type RedeemInviteRequestV1,
+  type RedeemInviteGuestRequestV1,
+  type RedeemInviteRequestV2,
   type RedeemInviteResponseV1,
 } from './generated';

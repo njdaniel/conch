@@ -102,12 +102,19 @@ type row struct {
 	// mayNot is the refusal for a prober an operator did not let invite,
 	// when it differs from want.
 	mayNot answer
+	// withPassword is the refusal for a prober who has a password (one who
+	// joined through an invite), when it differs from want, which is then
+	// the refusal for one who has none (ola, made by hand).
+	withPassword answer
 }
 
 // wantFor is the refusal the row states for prober.
 func (r row) wantFor(prober *member) answer {
 	if !prober.mayInvite && r.mayNot != (answer{}) {
 		return r.mayNot
+	}
+	if prober.password && r.withPassword != (answer{}) {
+		return r.withPassword
 	}
 	return r.want
 }
@@ -217,25 +224,40 @@ func matrixRows() []row {
 		// an A member as her own enrollment proof, and as a reset: a link is
 		// for one person and one purpose, and either way the answer is the one
 		// sign_in_link_invalid, the same bytes as for a code nobody was given.
-		// The change and the re-authentication name nothing of A's: B has no password, and
-		// is told so.
+		// A B member who chose a password when she joined (bea, #713) is
+		// refused as already set before the proof is read: A's link does
+		// nothing for her either, and the ghost shows the same bytes.
+		// The change and the re-authentication name nothing of A's: a B
+		// member with no password (ola) is told so, and bea is told the
+		// guess is wrong.
 		{route: "POST /v1/password/mine", what: "sets her first password with an A member's sign-in link as the proof", pick: aSignInCode,
-			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			want:         answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
+			withPassword: answer{http.StatusConflict, schema.ErrorCodePasswordAlreadySet},
 			probe: func(_ *world, s subject) probe {
-				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: "a long password of the prober's own", Proof: s.name})
+				// The ghost is a well-formed code nobody was given, so the
+				// comparison is between A's link and an unknown one, not a
+				// malformed one, which the route refuses before it looks at
+				// the caller's password.
+				proof := s.name
+				if !strings.HasPrefix(proof, schema.SignInLinkCodePrefix) {
+					proof = schema.SignInLinkCodePrefix + strings.Repeat("Q", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
+				}
+				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: "a long password of the prober's own", Proof: proof})
 			}},
 		{route: "POST /v1/password/reset", what: "resets an A member's password with A's sign-in link", pick: aSignInCode,
 			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/password/reset", schema.ResetPasswordRequestV1{Code: s.name, Password: "a long password of the prober's own"})
 			}},
-		{route: "PUT /v1/password/mine", what: "changes a password she does not have",
-			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+		{route: "PUT /v1/password/mine", what: "changes her password with a wrong guess at the current one",
+			want:         answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			withPassword: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(*world, subject) probe {
 				return put("/v1/password/mine", schema.ChangePasswordRequestV1{Current: "a guess at somebody's password", Password: "a long password of the prober's own"})
 			}},
-		{route: "POST /v1/reauth", what: "proves a password she does not have",
-			want: answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+		{route: "POST /v1/reauth", what: "proves her password with a wrong guess",
+			want:         answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
+			withPassword: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(*world, subject) probe {
 				return post("/v1/reauth", schema.ReauthRequestV1{Password: "a guess at somebody's password"})
 			}},
@@ -636,11 +658,11 @@ var exempt = map[string]string{
 	"/mcp":                           "the agents' surface, with its own bearer authentication and the manifest and membership gates; no B member is an agent (the MCP tests cover it)",
 	"POST /v1/hooks/{token}":         "authenticated by the hook's own URL token, which only an operator is shown",
 	"POST /v1/invites/preview":       "takes an invite code and answers only with what that code grants; B does not hold A's codes, and every other code answers the one invite_invalid (the revocation step checks a closed one)",
-	"POST /v1/invites/redeem":        "as preview: the code is the credential; a closed or unknown one answers invite_invalid (the revocation step checks it)",
+	"POST /v1/invites/redeem":        "makes no account and reads nothing (#713, design §7.6 B1): every request, whatever its code, answers 409 password_required before the body is read, so it says nothing of any group's (the revocation step checks it with a closed link)",
 	"POST /v1/join/guest":            "takes no credential and names nothing of any group's: it starts a visit in the bare address's open channels, which this world never opens (guests_disabled); and it spends the per-address redemption allowance the world's own invite redemptions need, so a row per prober would run that allowance out",
 	"POST /v1/join/account":          "as Join as guest: takes no credential and names nothing of any group's. It makes an account in the bare address's open channels, which this world never opens, so every request is joining_closed before a name is looked at; and it spends the per-address redemption allowance the world's own invite redemptions need, so a row per prober would run that allowance out",
 	"POST /v1/invites/redeem-guest":  "as redeem: the code is the credential, and B holds none of A's. A malformed code is refused with invite_invalid by the handler's format check, before the store is reached; a well-formed one, with guests off as in this world, answers guests_disabled before it is looked up, and with guests on an unknown or closed one answers invite_invalid",
-	"POST /v2/invites/redeem":        "as the v1 redeem, with a password beside the name: the code is the credential, and a closed or unknown one answers invite_invalid before anything is hashed",
+	"POST /v2/invites/redeem":        "as preview, with a name and a password: the code is the credential, B holds none of A's, and a closed or unknown one answers invite_invalid before anything is hashed (the revocation step checks a closed one)",
 	"POST /v1/sign-in-links/preview": "takes a sign-in link's code and answers only with the name it signs in as; only an operator is shown a code, and A's are never given to B",
 	"POST /v1/sign-in-links/redeem":  "as preview: the code is the credential, made by an operator for one principal; B holds no code of A's",
 }

@@ -133,14 +133,14 @@ func TestOverflowKey(t *testing.T) {
 // Redeem and preview are limited per client address, separately, and a
 // refusal is a 429 with Retry-After and rate_limited.
 func TestInviteLimitsPerAddress(t *testing.T) {
-	for _, route := range []string{"/v1/invites/redeem", "/v1/invites/preview"} {
+	for _, route := range []string{"/v2/invites/redeem", "/v1/invites/preview"} {
 		t.Run(route, func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
 			limits := looseInviteLimits()
 			limits.redeemPerAddress = inviteLimit{"redeem_per_address", 3, 3 * time.Minute}
 			limits.previewPerAddress = inviteLimit{"preview_per_address", 3, 3 * time.Minute}
 			f.srv.setInviteLimits(limits)
-			body := inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "someone"})
+			body := redeemJSON(t, fakeInviteCode, "someone")
 			if strings.HasSuffix(route, "preview") {
 				body = inviteJSON(t, schema.InvitePreviewRequestV1{Code: fakeInviteCode})
 			}
@@ -198,7 +198,7 @@ func TestInviteRedeemLimitedServerWide(t *testing.T) {
 	f.srv.setInviteLimits(limits)
 	link := f.createInvite(t, f.rootTok, openLink("general"))
 	redeem := func(i int, code, name string) *httptest.ResponseRecorder {
-		return f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: name}), fmt.Sprintf("198.51.100.%d:1", i))
+		return f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, code, name), fmt.Sprintf("198.51.100.%d:1", i))
 	}
 	for i := range 5 { // refused at the store: they give the token back
 		assertErrorBody(t, redeem(i, fakeInviteCode, "nobody"), http.StatusNotFound, schema.ErrorCodeInviteInvalid)
@@ -273,10 +273,10 @@ func TestInviteRefusalAuditIsBounded(t *testing.T) {
 			limits := looseInviteLimits()
 			tt.limits(&limits)
 			f.srv.setInviteLimits(limits)
-			body := inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "someone"})
+			body := redeemJSON(t, fakeInviteCode, "someone")
 			before := len(f.audit(t))
 			for range 1000 {
-				f.send(t, "POST", "/v1/invites/redeem", "", body, "203.0.113.50:1")
+				f.send(t, "POST", "/v2/invites/redeem", "", body, "203.0.113.50:1")
 			}
 			var rows []string
 			invalid := 0
@@ -289,7 +289,7 @@ func TestInviteRefusalAuditIsBounded(t *testing.T) {
 					t.Errorf("unexpected row %s %s", e.Action, e.Detail)
 					continue
 				}
-				if e.Actor != inviteAnonymousAuditActor || e.Subject != "POST /v1/invites/redeem" || !strings.HasPrefix(e.Detail, tt.detail) {
+				if e.Actor != inviteAnonymousAuditActor || e.Subject != "POST /v2/invites/redeem" || !strings.HasPrefix(e.Detail, tt.detail) {
 					t.Errorf("row = %s %s %s", e.Actor, e.Subject, e.Detail)
 				}
 				if strings.Contains(e.Detail, "203.0.113") || strings.Contains(e.Detail, fakeInviteCode) {
@@ -302,7 +302,7 @@ func TestInviteRefusalAuditIsBounded(t *testing.T) {
 			}
 			// A new audit window starts the count again.
 			f.advance(denialCoalesceWindow)
-			f.send(t, "POST", "/v1/invites/redeem", "", body, "203.0.113.50:1")
+			f.send(t, "POST", "/v2/invites/redeem", "", body, "203.0.113.50:1")
 			if last := f.audit(t); !strings.HasSuffix(last[len(last)-1].Detail, " count=1") {
 				t.Errorf("first row of a new window = %q", last[len(last)-1].Detail)
 			}
@@ -310,16 +310,20 @@ func TestInviteRefusalAuditIsBounded(t *testing.T) {
 	}
 }
 
-// Behind a trusted proxy each forwarded client has its own bucket; from a
-// peer that is not trusted the header is ignored.
+// Behind a trusted proxy each forwarded client has its own bucket. A peer
+// that is not trusted cannot use the header at all: redemption takes a
+// password (v2, #713), and a forwarded request from an untrusted peer is
+// refused https_required before any bucket is spent (secureTransport), so
+// it can neither claim another client's bucket nor spend its own; without
+// the header it has the bucket of its own address.
 func TestInviteLimitsBehindAProxy(t *testing.T) {
 	f := newInviteFixture(t, Config{TrustedProxies: mustPrefixes(t, "127.0.0.1/32,::1/128")})
 	limits := looseInviteLimits()
 	limits.redeemPerAddress = inviteLimit{"redeem_per_address", 1, time.Hour}
 	f.srv.setInviteLimits(limits)
-	body := inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "someone"})
+	body := redeemJSON(t, fakeInviteCode, "someone")
 	call := func(remote string, xff ...string) int {
-		return f.send(t, "POST", "/v1/invites/redeem", "", body, remote, xff...).Code
+		return f.send(t, "POST", "/v2/invites/redeem", "", body, remote, xff...).Code
 	}
 	steps := []struct {
 		name   string
@@ -334,9 +338,11 @@ func TestInviteLimitsBehindAProxy(t *testing.T) {
 		{"client A spoofing a left entry", "127.0.0.1:4004", []string{"198.51.100.9, 198.51.100.1"}, http.StatusTooManyRequests},
 		{"the proxy itself, no header", "127.0.0.1:4005", nil, http.StatusNotFound},
 		{"the proxy itself again", "127.0.0.1:4006", nil, http.StatusTooManyRequests},
-		{"untrusted peer", "203.0.113.5:5000", []string{"198.51.100.50"}, http.StatusNotFound},
-		{"untrusted peer, another header", "203.0.113.5:5001", []string{"198.51.100.51"}, http.StatusTooManyRequests},
-		{"untrusted peer claims client B's bucket", "203.0.113.6:5000", []string{"198.51.100.2"}, http.StatusNotFound},
+		{"untrusted peer", "203.0.113.5:5000", []string{"198.51.100.50"}, http.StatusForbidden},
+		{"untrusted peer, another header", "203.0.113.5:5001", []string{"198.51.100.51"}, http.StatusForbidden},
+		{"untrusted peer claims client B's bucket", "203.0.113.6:5000", []string{"198.51.100.2"}, http.StatusForbidden},
+		{"untrusted peer, no header", "203.0.113.5:5002", nil, http.StatusNotFound},
+		{"untrusted peer, no header, again", "203.0.113.5:5003", nil, http.StatusTooManyRequests},
 	}
 	for _, s := range steps {
 		if got := call(s.remote, s.xff...); got != s.want {

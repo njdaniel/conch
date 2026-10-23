@@ -212,7 +212,10 @@ func (l *live) managedRefused(squadID int64, ben *person, ears *voiceClient) err
 	}
 	h.secret("an invite code", inv.Code)
 	var joined schema.RedeemInviteResponseV1
-	if err := d.as("").call(http.MethodPost, "/v1/invites/redeem", schema.RedeemInviteRequestV1{Code: inv.Code, Name: "dee"}, &joined); err != nil {
+	// v2, with a password: v1 makes no account since #713.
+	if err := d.as("").call(http.MethodPost, "/v2/invites/redeem", schema.RedeemInviteRequestV2{
+		Code: inv.Code, Name: "dee", Password: "a passphrase long enough to pass",
+	}, &joined); err != nil {
 		return fmt.Errorf("redeem the invite without voice: %w", err)
 	}
 	h.secret("dee's conch credential", joined.Token)

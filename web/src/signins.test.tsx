@@ -44,7 +44,7 @@ const listed = (list: unknown[] = signIns) => ({ '/v1/credentials/mine': () => j
 async function signInAndOpen() {
   render(<App origin={origin} />);
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
   // Your sign-ins are in Settings (issue #536).
   fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   const toggle = await screen.findByRole('button', { name: 'Your sign-ins' });
@@ -80,7 +80,7 @@ describe('your sign-ins', () => {
     const calls = serve(listed());
     render(<App origin={origin} />);
     fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await screen.findByRole('button', { name: 'Your sign-ins' });
     // Nothing is read until the person asks.

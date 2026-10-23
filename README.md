@@ -978,14 +978,11 @@ curl -s -X POST http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKE
 # What the code grants, without using it: who made it, the channel names, voice, kind and expiry.
 curl -s -X POST http://127.0.0.1:8080/v1/invites/preview -d '{"code":"conch_inv_..."}'
 
-# Use it: a new human member called wren, and their first credential (shown once).
-curl -s -X POST http://127.0.0.1:8080/v1/invites/redeem -d '{"code":"conch_inv_...","name":"wren"}'
-# {"principal":{"id":5,"kind":"human","name":"wren",...},"credential":{...},"token":"conch_..."}
-
-# Or with a password, so wren can sign in again from any device (v2; over HTTPS, or from
-# loopback as here). The answer is the same.
+# Use it: a new human member called wren, with the password wren signs in with again from
+# any device, and their first credential (shown once). Over HTTPS, or from loopback as here.
 curl -s -X POST http://127.0.0.1:8080/v2/invites/redeem \
      -d '{"code":"conch_inv_...","name":"wren","password":"a sentence only wren knows"}'
+# {"principal":{"id":5,"kind":"human","name":"wren",...},"credential":{...},"token":"conch_..."}
 
 # Your own invites, and closing one (uses already made stand).
 curl -s http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKEN"
@@ -1003,7 +1000,7 @@ What the routes answer:
 | `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
 | `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
 | `POST /v2/invites/redeem` | anyone, over HTTPS or from loopback | `201` with the principal, its credential and the token, `Cache-Control: no-store` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name or password that is not acceptable, `400 password_unacceptable` for a common one or one that contains the name; `503 invites_paused`; `429 rate_limited`; `403 https_required` |
-| `POST /v1/invites/redeem` | anyone | `201` with the principal, its credential and the token, `Cache-Control: no-store`; the account has no password. It still works for now; once the browser redeems through v2 it will answer `409 password_required` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name that is not acceptable; `503 invites_paused`; `429 rate_limited` |
+| `POST /v1/invites/redeem` | anyone | none: it makes no account any more (it once made one with no password). Every request is `409 password_required`, whatever it is sent, and uses no invite and no rate limit. Redeem through v2 | `409 password_required` |
 
 A code that is unknown, malformed, expired, used up or closed, or whose maker has been disabled or has lost the right to invite, gets one answer, byte for byte: `404 invite_invalid`. While an operator has invites paused, preview and redeem answer `503 invites_paused` whatever the code. Bodies are limited to 4 KiB. No error message quotes the code or the name, and neither does the log or the audit trail.
 
@@ -1024,7 +1021,7 @@ A password is 15 to 128 characters (normalized to NFC first), any characters, sp
 
 ### Signing in with a password
 
-A member who joined with a password (through `POST /v2/invites/redeem`) signs in again from any device with `POST /v1/login` and `{"name":…,"password":…}`, over HTTPS or from loopback: the answer is `{"next":"signed_in",…}` with a new credential, kept to last as an invite's is. Every failure, whatever its cause (no such name, a wrong password, a disabled or hidden account, an agent, an account with no password yet), is the same `401 auth_failed` after the same work. An operator's right password answers only `{"next":"totp","challenge":…}`, for the second factor, and an operator who has not set both up gets `auth_failed`. Accounts made without a password (through v1, or before passwords existed) have none and keep signing in with their credentials and sign-in links. Limits: ten failures per address and five per typed name in ten minutes (then `429` at once, with `Retry-After`, for a name whether anyone has it or not), thirty sign-ins per name an hour, and a bounded queue for the hashing itself. Audited: `login` and `credential_created`; failures as `login_failed`, thinned, with the reason and the name only when it is someone's.
+A member who joined with a password (through `POST /v2/invites/redeem`) signs in again from any device with `POST /v1/login` and `{"name":…,"password":…}`, over HTTPS or from loopback: the answer is `{"next":"signed_in",…}` with a new credential, kept to last as an invite's is. Every failure, whatever its cause (no such name, a wrong password, a disabled or hidden account, an agent, an account with no password yet), is the same `401 auth_failed` after the same work. An operator's right password answers only `{"next":"totp","challenge":…}`, for the second factor, and an operator who has not set both up gets `auth_failed`. Accounts made without a password (through v1 before it stopped making accounts, or by an operator) have none and keep signing in with their credentials and sign-in links. Limits: ten failures per address and five per typed name in ten minutes (then `429` at once, with `Retry-After`, for a name whether anyone has it or not), thirty sign-ins per name an hour, and a bounded queue for the hashing itself. Audited: `login` and `credential_created`; failures as `login_failed`, thinned, with the reason and the name only when it is someone's.
 
 ### Administering invites
 

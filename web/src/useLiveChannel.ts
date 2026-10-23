@@ -4,6 +4,7 @@
 // replayed by the socket and, being the same id, is shown once.
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from 'react';
 import * as api from './api';
+import { memberName } from './guestName';
 import { Feed, type FeedStatus } from './state/feed';
 import type { ConnectionAction } from './state/connection';
 import { parseFrame, type ChatAction } from './state/messages';
@@ -207,7 +208,8 @@ export function useLiveChannel({
   const people = useMemo(() => {
     const named = new Map<number, Person>();
     for (const m of members) {
-      if (m.name !== undefined) named.set(m.principal_id, { name: m.name, kind: m.kind ?? null });
+      const name = memberName(m);
+      if (name !== undefined) named.set(m.principal_id, { name, kind: m.kind ?? null });
     }
     named.set(meId, { name: meName, kind: meKind });
     return named;

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -770,9 +771,11 @@ func TestInvitesPauseSurvivesRestart(t *testing.T) {
 		srv.setInviteLimits(looseInviteLimits())
 		return srv, st
 	}
+	// Over HTTPS, as redemption, which takes a password, needs.
 	call := func(srv *Server, method, path, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.TLS = &tls.ConnectionState{}
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
@@ -806,12 +809,12 @@ func TestInvitesPauseSurvivesRestart(t *testing.T) {
 	if got := decodeBody[schema.InviteSettingsV1](t, call(srv, "GET", "/v1/invites/settings", rootTok, "")); !got.Paused {
 		t.Fatal("not paused after a restart")
 	}
-	redeem := inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "newcomer"})
-	assertErrorBody(t, call(srv, "POST", "/v1/invites/redeem", "", redeem), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
+	redeem := redeemJSON(t, code, "newcomer")
+	assertErrorBody(t, call(srv, "POST", "/v2/invites/redeem", "", redeem), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 	if rec := call(srv, "PUT", "/v1/invites/settings", rootTok, `{"paused":false}`); rec.Code != http.StatusOK {
 		t.Fatalf("resume = %d", rec.Code)
 	}
-	if rec := call(srv, "POST", "/v1/invites/redeem", "", redeem); rec.Code != http.StatusCreated {
+	if rec := call(srv, "POST", "/v2/invites/redeem", "", redeem); rec.Code != http.StatusCreated {
 		t.Fatalf("redeem after resuming = %d %s", rec.Code, rec.Body)
 	}
 }
@@ -834,7 +837,7 @@ func TestDisableJoinersClosesSocketsAndVoice(t *testing.T) {
 		t.Fatalf("create = %d %s", rec.Code, rec.Body)
 	}
 	link := decodeBody[schema.CreateInviteResponseV1](t, rec)
-	rec = f.do(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: link.Code, Name: "wren"}))
+	rec = secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
 	}

@@ -5,7 +5,7 @@
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { channelButton, expect, statusLine, test } from './fixtures';
+import { channelButton, expect, fillAccount, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { call, inviteUrl, ok, principalId, type World } from './world';
@@ -53,18 +53,19 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   const name = unique('back');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));
-  await laptop.page.getByLabel('Your name').fill(name);
-  await laptop.page.getByRole('button', { name: 'Join' }).click();
+  await fillAccount(laptop.page, name);
   await expect(statusLine(laptop.page)).toContainText('Connected');
   const firstToken = await keepToken(laptop.page, secrets);
   const id = await principalId(world, firstToken);
 
   // Sign out, in Settings (issue #536), says what it costs before it does it,
-  // and Cancel keeps it all.
+  // and Cancel keeps it all. A joiner has a password now (issue #713), so
+  // coming back is signing in with it; the operator's link below is the other
+  // way, for someone who cannot.
   await laptop.page.getByRole('button', { name: 'Settings' }).click();
   await laptop.page.getByRole('button', { name: 'Sign out', exact: true }).click();
   const asked = laptop.page.getByRole('group', { name: /^Sign out of this browser\?/ });
-  await expect(asked).toContainText('you will need a new link from an operator');
+  await expect(asked).toContainText('sign in again with your name and password');
   // Scoped to the question: the members panel may list runs whose names
   // also say "cancel".
   await asked.getByRole('button', { name: 'Cancel', exact: true }).click();

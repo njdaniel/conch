@@ -39,7 +39,7 @@ async function signInAndOpen() {
   render(<App origin={origin} />);
   await screen.findByText('v0.1.0-alpha.2');
   fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
-  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
   // In Settings, beside the sign-outs (issue #536).
   fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   const header = screen.getByRole('dialog', { name: 'Settings' });

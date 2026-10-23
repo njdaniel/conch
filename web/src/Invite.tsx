@@ -1,20 +1,27 @@
 // The landing page of an invite link (issue #440): what the invite grants,
-// then a name, then the lobby. The code is a prop held in memory by App, sent
-// only in the bodies of preview and redeem, and never rendered: nothing on
-// this page shows it.
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+// then how to join with it, then the lobby. Since issue #713 an invite may
+// make an account (a name and a password together, through POST
+// /v2/invites/redeem), start a guest visit, or offer both: the page offers
+// what the server's preview says the invite allows now, and nothing else. The
+// code is a prop held in memory by App, sent only in request bodies, and
+// never rendered: nothing on this page shows it.
+import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
+import { CreateAccount, type AccountProblem } from './CreateAccount';
+import { GuestJoin, guestJoinRefusal } from './Guest';
 import type { InvitePreviewV1 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
 import { noticeText } from './state/auth';
 import { fallbackChannel } from './state/channels';
+import { insecureLine, needsHttps } from './transport';
 
 // The one answer for a code that is unknown, used, expired or closed. The
 // server does not say which, so neither does the page. Someone who joined from
-// a personal link and comes back to it needs a sign-in link, not an invite
-// (issue #593); the heading says the rest, in other words.
-export const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.';
+// a personal link and comes back to it signs in with their name and password,
+// or, without one, needs a sign-in link (issue #593); the heading says the
+// rest, in other words.
+export const noLongerWorks = 'Ask the person who sent it for a new one. If you already joined from this link, sign in instead.';
 export const goneHeading = "This link can't be used";
 
 // waitWords says how long Retry-After asks the page to wait, in words.
@@ -33,11 +40,18 @@ export function serverLine(message: string | undefined, fallback: string): strin
   return `${line.charAt(0).toUpperCase()}${line.slice(1)}${/[.!?]$/.test(line) ? '' : '.'}`;
 }
 
-type Refusal = { readonly failure: api.ApiFailure; readonly code?: string; readonly retryAfter?: number };
+// What the page says when the server refuses a password or a guest visit
+// because the connection is not HTTPS (design §5.4): what the operator has to
+// do, not just that it failed.
+export const httpsRequiredLine =
+  'The server takes passwords and starts guest visits only over HTTPS, and it does not see this connection as HTTPS. Ask the operator to serve Conch over HTTPS. Behind a reverse proxy, conchd must be started with --trusted-proxies naming the proxy, and the proxy must set X-Forwarded-Proto.';
+
+// A refusal of the server's, as the invite, joining and sign-in calls give it.
+export type Refusal = { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string; readonly retryAfter?: number };
 
 // refusalLine is the plain words for an invite the server would not preview
-// or redeem.
-function refusalLine(result: Refusal): string {
+// or redeem, and for the refusals every joining route shares.
+export function refusalLine(result: Refusal): string {
   if (result.failure === 'network') return 'Cannot reach the server. Check your connection and try again.';
   switch (result.code) {
     case 'invite_invalid':
@@ -46,8 +60,34 @@ function refusalLine(result: Refusal): string {
       return 'Invites are paused on this server for now. Try the link again later.';
     case 'rate_limited':
       return `Too many tries from your network. Try again in ${waitWords(result.retryAfter)}.`;
+    case 'https_required':
+      return httpsRequiredLine;
+    case 'accounts_require_auth':
+      return 'This server runs without sign-in, so it has no accounts or guest visits.';
     default:
       return 'The server gave an unexpected reply. Try again.';
+  }
+}
+
+// accountRefusal is the plain words for a refusal of an account by the
+// server, whichever route was making it, and the field it is about; null
+// when the refusal is not about the account itself.
+export function accountRefusal(result: Refusal): AccountProblem | null {
+  switch (result.code) {
+    case 'principal_exists':
+      return { line: 'That name is taken. Choose another.', field: 'name' };
+    case 'password_unacceptable':
+      return { line: 'That password is too common, or it contains your name. Choose another.', field: 'password' };
+    case 'invalid_request':
+      return { line: serverLine(result.message, 'The server did not accept that name or password. Check both and try again.'), field: 'name' };
+    case 'joining_closed':
+      return { line: 'Accounts cannot be made here now.' };
+    case 'joining_paused':
+      return { line: 'Joining is paused on this server for now. Try again later.' };
+    case 'https_required':
+      return { line: httpsRequiredLine };
+    default:
+      return null;
   }
 }
 
@@ -56,6 +96,29 @@ function refusalLine(result: Refusal): string {
 // sign it out, as for anyone signed in here.
 export const heldLine =
   'This browser holds another sign-in that could not be checked. Reload the page when the server can be reached: it will say who is signed in here and offer to sign them out before you join.';
+
+// What an invite lets a new person do now, from its preview. A server that
+// predates guests sends no join: its invites make accounts, as they always
+// did.
+interface Offer {
+  readonly account: boolean;
+  readonly guest: boolean;
+  readonly guestsFull: boolean;
+  readonly paused: boolean;
+}
+
+function offerOf(preview: InvitePreviewV1): Offer {
+  const join = preview.join;
+  if (join === undefined) return { account: true, guest: false, guestsFull: false, paused: false };
+  return { account: join.account, guest: join.guest, guestsFull: join.guests_full === true, paused: join.paused === true };
+}
+
+// channelWords names an invite's channels in a sentence: "#red and #blue".
+export function channelWords(channels: readonly string[]): string {
+  const named = channels.map((c) => `#${c}`);
+  if (named.length <= 1) return named.join('');
+  return `${named.slice(0, -1).join(', ')} and ${named[named.length - 1] ?? ''}`;
+}
 
 type Preview =
   | { readonly state: 'loading' }
@@ -72,6 +135,7 @@ export function Invite({
   onNewPerson,
   onBack,
   onJoined,
+  onSignIn,
 }: {
   readonly origin: string;
   readonly inviteCode: string;
@@ -89,16 +153,21 @@ export function Invite({
   // it, else the first channel it grants. principal is null when the account
   // was made but whoami did not answer: App asks again.
   readonly onJoined: (principal: WhoAmIResponseV1 | null, channel: string | undefined) => void;
+  // Sign in to an existing account instead, which uses nothing of the
+  // invite: App says afterwards if that account is not in the invite's
+  // channels.
+  readonly onSignIn: (channels: readonly string[], inviter: string) => void;
 }) {
   const [preview, setPreview] = useState<Preview>({ state: 'loading' });
   const [attempt, setAttempt] = useState(0);
-  const [name, setName] = useState('');
+  // The way of joining chosen, when the invite offers both.
+  const [choice, setChoice] = useState<'account' | 'guest' | null>(null);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<AccountProblem | null>(null);
+  const [guestProblem, setGuestProblem] = useState<string | null>(null);
   const [untold, setUntold] = useState(false);
   // Redeeming found another sign-in held here after all.
   const [held, setHeld] = useState(false);
-  const field = useRef<HTMLInputElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
@@ -117,12 +186,15 @@ export function Invite({
     heading.current?.focus();
   }, [preview.state]);
 
-  // After a refusal the field keeps what was typed and gets focus back.
-  useEffect(() => {
-    if (problem !== null) field.current?.focus();
-  }, [problem]);
-
   const ready = preview.state === 'ready' ? preview.preview : null;
+  const offer = ready === null ? null : offerOf(ready);
+  // A page on plain HTTP beyond this machine offers no form that would send
+  // a password or start a visit (design §5.4): the server would refuse it,
+  // but only after the password had crossed the network.
+  const insecure = needsHttps(origin);
+  // One way offered is that way; two are a choice.
+  const way =
+    offer === null || insecure ? null : offer.account && offer.guest ? choice : offer.account ? 'account' : offer.guest ? 'guest' : null;
 
   function newPerson() {
     if (busy) return;
@@ -133,47 +205,63 @@ export function Invite({
     });
   }
 
-  function join(event: SyntheticEvent) {
-    event.preventDefault();
-    if (busy || ready === null) return;
+  // joinedOr finishes a redemption that went through, or says why it did
+  // not; refused is what to do with a refusal of the server's that is not
+  // about the invite itself.
+  function joinedOr(result: api.RedeemResult, refused: (r: api.InviteRefusal) => void) {
+    if (ready === null) return;
+    if (result.ok) {
+      onJoined(result.value, fallbackChannel(ready.channels));
+      return;
+    }
+    switch (result.failure) {
+      case 'held':
+        setHeld(true);
+        return;
+      case 'unchecked':
+        onJoined(null, fallbackChannel(ready.channels));
+        return;
+      case 'unkept':
+        setPreview({
+          state: 'refused',
+          line: 'You joined, but this browser will not let the page keep your sign-in. Allow this site to keep data, then sign in, or ask for a new invite.',
+          gone: true,
+        });
+        return;
+      case 'unauthorized':
+      case 'network':
+      case 'invalid':
+        break;
+    }
+    if (result.code === 'invite_invalid') setPreview({ state: 'refused', line: noLongerWorks, gone: true });
+    else refused(result);
+  }
+
+  function createAccount(name: string, password: string) {
+    if (busy || ready === null || insecure) return;
     setBusy(true);
     setProblem(null);
-    // What was typed is sent as it is: the server decides whether it is a
-    // name, and the page shows its answer.
-    void api.redeemInvite(inviteCode, name).then((result) => {
+    void api.redeemInvite(inviteCode, name, password).then((result) => {
       setBusy(false);
-      if (result.ok) {
-        onJoined(result.value, fallbackChannel(ready.channels));
-        return;
-      }
-      switch (result.failure) {
-        case 'held':
-          setHeld(true);
-          return;
-        case 'unchecked':
-          onJoined(null, fallbackChannel(ready.channels));
-          return;
-        case 'unkept':
-          setPreview({
-            state: 'refused',
-            line: 'Your account was made, but this browser will not let the page keep your sign-in. Allow this site to keep data, then ask for a new invite.',
-            gone: true,
-          });
-          return;
-        case 'unauthorized':
-        case 'network':
-        case 'invalid':
-          break;
-      }
-      if (result.code === 'invite_invalid') {
-        setPreview({ state: 'refused', line: noLongerWorks, gone: true });
-      } else if (result.code === 'principal_exists') {
-        setProblem('That name is taken. Choose another.');
-      } else if (result.code === 'invalid_request') {
-        setProblem(serverLine(result.message, 'The server did not accept that name. Choose another.'));
-      } else {
-        setProblem(refusalLine(result));
-      }
+      joinedOr(result, (refusal) => {
+        setProblem(
+          refusal.code === 'joining_closed'
+            ? { line: 'This invite makes guest visits only, not accounts.' }
+            : (accountRefusal(refusal) ?? { line: refusalLine(refusal) }),
+        );
+      });
+    });
+  }
+
+  function joinAsGuest(label: string) {
+    if (busy || ready === null || insecure) return;
+    setBusy(true);
+    setGuestProblem(null);
+    void api.redeemInviteAsGuest(inviteCode, label).then((result) => {
+      setBusy(false);
+      joinedOr(result, (refusal) => {
+        setGuestProblem(guestJoinRefusal(refusal));
+      });
     });
   }
 
@@ -192,15 +280,13 @@ export function Invite({
             {preview.line}
           </p>
           {/* A person who came by an invite never had a credential to type:
-              with nobody signed in, going back would lead only to that form. */}
+              with nobody signed in, going back leads to the sign-in page. */}
           {preview.gone ? (
-            signedInAs === null ? null : (
-              <div className="actions">
-                <button type="button" onClick={onBack}>
-                  Back to Conch
-                </button>
-              </div>
-            )
+            <div className="actions">
+              <button type="button" onClick={onBack}>
+                {signedInAs === null ? 'Sign in' : 'Back to Conch'}
+              </button>
+            </div>
           ) : (
             <div className="actions">
               <button
@@ -219,7 +305,7 @@ export function Invite({
           )}
         </>
       ) : null}
-      {ready === null ? null : (
+      {ready === null || offer === null ? null : (
         <>
           <dl className="invite-preview" aria-label="What the invite gives">
             <dt>Invited by</dt>
@@ -242,8 +328,9 @@ export function Invite({
           {signedInAs !== null ? (
             <>
               <p>
-                You are signed in here as <strong>{signedInAs}</strong>. This invite makes a new account: continuing as a new
-                person signs {signedInAs} out of this browser.
+                You are signed in here as <strong>{signedInAs}</strong>. This invite is for someone new: it does not add{' '}
+                {signedInAs} to {channelWords(ready.channels)}. If {signedInAs} should be there, ask {ready.inviter} to add
+                you. Continuing as a new person signs {signedInAs} out of this browser.
               </p>
               <div className="actions">
                 <button type="button" onClick={newPerson} aria-busy={busy}>
@@ -266,38 +353,89 @@ export function Invite({
               </div>
             </>
           ) : (
-            <form onSubmit={join}>
+            <>
               {untold ? <p className="notice">{noticeText('untold')}</p> : null}
-              <label htmlFor="invite-name">Your name</label>
-              <p id="invite-name-help" className="hint">
-                How others see you. Up to 100 characters, with no space at the start or end and no invisible characters. The
-                server checks it, and says if it is taken.
+              {insecure ? (
+                <p className="notice insecure">{insecureLine}</p>
+              ) : offer.paused ? (
+                <p className="notice">Joining through this invite is paused for now. Try the link again later.</p>
+              ) : !offer.account && !offer.guest ? (
+                <p className="notice">
+                  {offer.guestsFull
+                    ? 'No more guests can join right now. Try the link again later.'
+                    : `This invite cannot be used to join right now. Ask ${ready.inviter} for another way in.`}
+                </p>
+              ) : offer.guestsFull ? (
+                <p className="hint">Guest visits are full right now; you can still create an account.</p>
+              ) : null}
+              {!insecure && offer.account && offer.guest && way === null ? (
+                <div role="group" aria-label="How to join" className="join-choice">
+                  <p className="hint">
+                    An account is yours to keep: you sign in again with its name and password. A guest visit needs no
+                    password, and ends when you end it or when it expires.
+                  </p>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChoice('account');
+                      }}
+                    >
+                      Create an account
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setChoice('guest');
+                      }}
+                    >
+                      Join as guest
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {way === 'account' ? (
+                <CreateAccount
+                  purpose="invite"
+                  busy={busy}
+                  problem={problem}
+                  onSubmit={createAccount}
+                  onCancel={() => {
+                    if (busy) return;
+                    setProblem(null);
+                    if (offer.guest) setChoice(null);
+                    else onBack();
+                  }}
+                />
+              ) : null}
+              {way === 'guest' ? (
+                <GuestJoin
+                  busy={busy}
+                  problem={guestProblem}
+                  bounds="on its own within a day at most"
+                  onJoin={joinAsGuest}
+                  onCancel={() => {
+                    if (busy) return;
+                    setGuestProblem(null);
+                    if (offer.account) setChoice(null);
+                    else onBack();
+                  }}
+                />
+              ) : null}
+              <p className="hint">
+                Already have an account?{' '}
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    onSignIn(ready.channels, ready.inviter);
+                  }}
+                >
+                  Sign in instead
+                </button>
+                . Signing in does not use this invite or add you to its channels.
               </p>
-              <input
-                id="invite-name"
-                ref={field}
-                type="text"
-                value={name}
-                autoComplete="nickname"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                aria-describedby="invite-name-help invite-problem"
-                aria-invalid={problem !== null}
-                onChange={(event) => {
-                  setName(event.target.value);
-                }}
-              />
-              <button type="submit" aria-busy={busy}>
-                {busy ? 'Joining…' : 'Join'}
-              </button>
-              <p id="invite-problem" role="alert" className="notice">
-                {problem ?? ''}
-              </p>
-              <button type="button" onClick={onBack}>
-                Go back
-              </button>
-            </form>
+            </>
           )}
         </>
       )}

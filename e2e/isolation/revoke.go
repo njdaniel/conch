@@ -487,7 +487,9 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	}
 	w.h.say("ok   revoked 3/4: %s; they stay out", t)
 
-	// 4. The link is closed: a new redeem, and a preview, are invalid.
+	// 4. The link is closed: a new redeem, and a preview, are invalid. The
+	// v1 redeem makes no account with any code (#713), so it answers
+	// password_required, as it would have before the close.
 	if err := w.op.call(http.MethodDelete, fmt.Sprintf("/v1/invites/%d", w.a.openInviteID), nil, nil); err != nil {
 		return nil, err
 	}
@@ -495,18 +497,22 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	for _, p := range []struct {
 		path string
 		body any
+		want answer
 	}{
-		{"/v1/invites/redeem", schema.RedeemInviteRequestV1{Code: w.a.openCode, Name: w.aName("late")}},
-		{"/v1/invites/preview", schema.InvitePreviewRequestV1{Code: w.a.openCode}},
+		{"/v2/invites/redeem", schema.RedeemInviteRequestV2{Code: w.a.openCode, Name: w.aName("late"), Password: joinPassword},
+			answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid}},
+		{"/v1/invites/preview", schema.InvitePreviewRequestV1{Code: w.a.openCode}, answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid}},
+		{"/v1/invites/redeem", schema.RedeemInviteRequestV1{Code: w.a.openCode, Name: w.aName("late")},
+			answer{http.StatusConflict, schema.ErrorCodePasswordRequired}},
 	} {
 		status, body, err := nobody.do(http.MethodPost, p.path, p.body)
 		if err != nil {
 			return nil, err
 		}
-		if err := checkRefusal(result{status: status, body: body}, answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid}, asked{}); err != nil {
+		if err := checkRefusal(result{status: status, body: body}, p.want, asked{}); err != nil {
 			return nil, fmt.Errorf("%s with the closed link: %w", p.path, err)
 		}
 	}
-	w.h.say("ok   revoked 4/4: the open link is closed; redeeming and previewing it answer 404 invite_invalid")
+	w.h.say("ok   revoked 4/4: the open link is closed; redeeming and previewing it answer 404 invite_invalid (v1 redeem: 409 password_required)")
 	return out, nil
 }
